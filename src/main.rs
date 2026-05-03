@@ -1,0 +1,739 @@
+// main.rs --- Pmacs editor entry point.
+
+//! Pmacs binary entry point.
+//!
+//! Parses command-line arguments and dispatches to [`pmacs::editor::run`].
+//!
+//! # Command-line surface
+//!
+//! ```text
+//! pmacs [-nw|--no-window] [--help] [--version] [FILE]
+//! ```
+//!
+//! * `FILE` (positional, optional): file to open. Without one, the editor
+//!   opens an empty `*scratch*` buffer.
+//! * `-nw` / `--no-window`: select the terminal (TUI) frontend explicitly.
+//!   This is the *only* frontend pmacs ships in v0.1, so the flag is
+//!   currently a no-op marker — but it's parsed and recorded now so that
+//!   when a GUI frontend lands in M4 ("The Service Layer"), `pmacs` with
+//!   no flags will default to the GUI and `pmacs -nw` will keep launching
+//!   the TUI exactly as it does today. This mirrors GNU Emacs's
+//!   `emacs -nw` and Doom's behavior, and lets users wire `pmacs -nw` into
+//!   `EDITOR=` / git hooks today without their config breaking when the
+//!   GUI ships.
+//! * `--help` / `-h`, `--version` / `-V`: standard.
+//!
+//! Anything else is a usage error and exits 2.
+//!
+//! # Frontend selection (planning note for M4)
+//!
+//! When the GUI lands, the entry-point split looks like this:
+//!
+//! ```ignore
+//! match selected_frontend(&args) {
+//!     Frontend::Tui => editor::run_tui(file),
+//!     Frontend::Gui => editor::run_gui(file),
+//! }
+//! ```
+//!
+//! Selection precedence (high to low):
+//!  1. Explicit `-nw` / `--no-window` → TUI.
+//!  2. Explicit `--gui` (future) → GUI.
+//!  3. `PMACS_FRONTEND=tui|gui` env var.
+//!  4. `$DISPLAY` / `$WAYLAND_DISPLAY` present and a GUI build was linked
+//!     in → GUI; otherwise → TUI.
+//!  5. Fallback: TUI.
+//!
+//! `editor::run` stays as the canonical TUI entry point. The split
+//! happens in `main`, not deeper, so the rest of the codebase stays
+//! frontend-agnostic at the [`pmacs::frontend`] trait surface.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use pmacs::protocol::{AttachTarget, AttachTargetError};
+
+const USAGE: &str = "\
+usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
+       pmacs --daemon [--socket NAME|PATH]
+       pmacs --attach [--socket NAME|PATH]
+       pmacs --attach <target>
+       pmacs --daemon-attach [--socket NAME|PATH]
+
+  -nw, --no-window   select the TUI frontend explicitly
+                     (currently the only frontend; reserved for the
+                     M4 GUI rollout, where `pmacs` will default to
+                     the GUI and `-nw` will keep launching the TUI)
+  --daemon           run as a foreground daemon listening on a Unix
+                     socket; supervised by the user (systemd, tmux,
+                     `nohup &`, etc.)
+  --attach           connect to a running daemon as a frontend; F12
+                     detaches without killing the daemon. With a
+                     positional <target>, attach over the named
+                     transport instead of the local socket.
+  --daemon-attach    far-side bridge: connect to the local daemon
+                     and forward bytes between stdin/stdout and the
+                     socket. Used by remote transports (SSH, etc.);
+                     does not take over the terminal.
+  --socket NAME|PATH bare name → <runtime>/pmacs/NAME.sock; absolute
+                     or relative path → used as-is. Default: `default`.
+  -h, --help         print this message and exit
+  -V, --version      print the version and exit
+
+attach <target> shorthand:
+  pmacs --attach mac-studio              ssh to host mac-studio
+  pmacs --attach user@host               ssh as user
+  pmacs --attach ssh:user@host/research  ssh, target instance `research`
+  pmacs --attach local:/tmp/foo.sock     explicit local socket path
+  pmacs --attach tls:host:port#cert.pem  TLS (parses; activation in v0.2)
+
+A bare hostname is interpreted as `ssh:<host>`. Use `local:` or
+`--socket` for local-socket attaches.
+";
+
+/// Frontend the user asked for. Only `Tui` is implemented in v0.1;
+/// `GuiAuto` records "the user did not force TUI" so future builds
+/// can dispatch to a GUI frontend without touching the parsing layer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FrontendChoice {
+    /// Explicit `-nw` / `--no-window`. Always TUI.
+    Tui,
+    /// Default. v0.1: TUI. M4+: TUI when no display is available, GUI otherwise.
+    Auto,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CliArgs {
+    mode: Mode,
+}
+
+/// Top-level dispatch mode chosen by the CLI flags.
+#[derive(Debug, PartialEq, Eq)]
+enum Mode {
+    /// Plain `pmacs` (or with `-nw` / a file): run a fresh in-process
+    /// TUI. The default for v0.1 — no daemon-attach magic.
+    Local {
+        file: Option<PathBuf>,
+        frontend: FrontendChoice,
+    },
+    /// `pmacs --daemon [--socket ...]`: run a foreground daemon on a
+    /// Unix socket, supervised by the user.
+    Daemon { socket: Option<String> },
+    /// `pmacs --attach [...]`: connect to a daemon and pump the
+    /// local terminal. The form depends on whether the user gave a
+    /// positional `<target>` or relied on `--socket NAME` / the
+    /// default local socket.
+    Attach(AttachMode),
+    /// `pmacs --daemon-attach [--socket ...]`: byte-bridge stdin/stdout
+    /// to the local daemon. The far-side mode used by SSH and other
+    /// remote transports — does not take over the terminal.
+    DaemonAttach { socket: Option<String> },
+}
+
+/// Sub-form of [`Mode::Attach`].
+///
+/// `LocalSocket` defers path resolution to dispatch time so
+/// `parse_args` stays pure of `$XDG_RUNTIME_DIR`. `Target` carries
+/// an already-parsed [`AttachTarget`] for the positional form.
+#[derive(Debug, PartialEq, Eq)]
+enum AttachMode {
+    /// `--attach [--socket NAME|PATH]` — local-socket form. The
+    /// `Option<String>` matches the previous `Mode::Attach { socket }`
+    /// shape; resolution to a `PathBuf` happens at dispatch.
+    LocalSocket(Option<String>),
+    /// `--attach <target>` — positional form. The bare-hostname
+    /// shorthand has already been applied (a positional without a
+    /// kind prefix becomes an `ssh:` target before parse).
+    Target(AttachTarget),
+}
+
+#[derive(Debug)]
+enum CliResult {
+    Run(CliArgs),
+    Help,
+    Version,
+    Error(String),
+}
+
+/// Build the [`AttachMode`] for a given `(positional, socket)` pair.
+///
+/// Returns `Err(msg)` if the combination is invalid (positional +
+/// `--socket`, non-UTF-8 positional, or unparseable target). The
+/// caller wraps `Ok(mode)` in `CliResult::Run` and `Err(msg)` in
+/// `CliResult::Error`.
+fn build_attach_mode(file: Option<PathBuf>, socket: Option<String>) -> Result<AttachMode, String> {
+    let Some(positional) = file else {
+        return Ok(AttachMode::LocalSocket(socket));
+    };
+    if socket.is_some() {
+        return Err("--attach <target> and --socket cannot be combined".into());
+    }
+    let target_str = positional
+        .to_str()
+        .ok_or_else(|| "attach <target> must be valid UTF-8".to_string())?
+        .to_string();
+    parse_attach_target_with_shorthand(&target_str)
+        .map(AttachMode::Target)
+        .map_err(|e| format!("invalid attach target {target_str:?}: {e}"))
+}
+
+/// Parse an `--attach <target>` positional, applying the
+/// bare-hostname → `ssh:` shorthand.
+///
+/// The general [`AttachTarget::parse`] grammar requires a kind
+/// prefix (`ssh:`, `local:`, `tls:`, `custom:`), but the spec calls
+/// for `pmacs --attach mac-studio` to default to SSH. This helper
+/// inserts the prefix when the input has no `:` at all. Inputs that
+/// already contain a colon are passed through to the strict parser
+/// unchanged, so `local:/tmp/x.sock`, `ssh:user@host/name`, etc.
+/// continue to work.
+///
+/// IPv6 literals like `[::1]` are not supported as bare hostnames
+/// — the strict parser would reject them anyway. v0.1 SSH config
+/// aliases and IPv4 / DNS hostnames are the supported shapes.
+fn parse_attach_target_with_shorthand(s: &str) -> Result<AttachTarget, AttachTargetError> {
+    if s.contains(':') {
+        AttachTarget::parse(s)
+    } else {
+        AttachTarget::parse(&format!("ssh:{s}"))
+    }
+}
+
+fn parse_args(args: &[String]) -> CliResult {
+    let mut file: Option<PathBuf> = None;
+    let mut frontend = FrontendChoice::Auto;
+    let mut daemon = false;
+    let mut attach = false;
+    let mut daemon_attach = false;
+    let mut socket: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-nw" | "--no-window" => frontend = FrontendChoice::Tui,
+            "--daemon" => daemon = true,
+            "--attach" => attach = true,
+            "--daemon-attach" => daemon_attach = true,
+            "--socket" => match iter.next() {
+                Some(s) => socket = Some(s.clone()),
+                None => return CliResult::Error("--socket requires a value".into()),
+            },
+            "-h" | "--help" => return CliResult::Help,
+            "-V" | "--version" => return CliResult::Version,
+            "--" => {
+                // Treat the rest as positional, even if they look like flags.
+                if let Some(p) = iter.next() {
+                    if file.is_some() {
+                        return CliResult::Error("multiple files not yet supported".into());
+                    }
+                    file = Some(PathBuf::from(p));
+                }
+                if iter.next().is_some() {
+                    return CliResult::Error("multiple files not yet supported".into());
+                }
+            }
+            flag if flag.starts_with('-') => {
+                return CliResult::Error(format!("unknown option: {flag}"));
+            }
+            path => {
+                if file.is_some() {
+                    return CliResult::Error("multiple files not yet supported".into());
+                }
+                file = Some(PathBuf::from(path));
+            }
+        }
+    }
+    let mode_flags = u8::from(daemon) + u8::from(attach) + u8::from(daemon_attach);
+    if mode_flags > 1 {
+        return CliResult::Error(
+            "--daemon, --attach, and --daemon-attach are mutually exclusive".into(),
+        );
+    }
+    if daemon {
+        if file.is_some() {
+            return CliResult::Error("--daemon does not take a file argument".into());
+        }
+        if frontend == FrontendChoice::Tui {
+            return CliResult::Error("--daemon and --no-window are mutually exclusive".into());
+        }
+        return CliResult::Run(CliArgs {
+            mode: Mode::Daemon { socket },
+        });
+    }
+    if attach {
+        return match build_attach_mode(file, socket) {
+            Ok(mode) => CliResult::Run(CliArgs {
+                mode: Mode::Attach(mode),
+            }),
+            Err(msg) => CliResult::Error(msg),
+        };
+    }
+    if daemon_attach {
+        if file.is_some() {
+            return CliResult::Error("--daemon-attach does not take a file argument".into());
+        }
+        if frontend == FrontendChoice::Tui {
+            return CliResult::Error(
+                "--daemon-attach and --no-window are mutually exclusive".into(),
+            );
+        }
+        return CliResult::Run(CliArgs {
+            mode: Mode::DaemonAttach { socket },
+        });
+    }
+    CliResult::Run(CliArgs {
+        mode: Mode::Local { file, frontend },
+    })
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match parse_args(&args) {
+        CliResult::Help => {
+            print!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        CliResult::Version => {
+            println!("pmacs {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        CliResult::Error(msg) => {
+            eprintln!("pmacs: {msg}");
+            eprint!("{USAGE}");
+            ExitCode::from(2)
+        }
+        CliResult::Run(parsed) => match parsed.mode {
+            // FrontendChoice::Auto and ::Tui both run the TUI in v0.1.
+            // The match is structured this way deliberately so that
+            // when a GUI frontend lands the second arm becomes
+            // `editor::run_gui(file)` without touching parsing.
+            Mode::Local {
+                file,
+                frontend: FrontendChoice::Tui | FrontendChoice::Auto,
+            } => match pmacs::editor::run(file) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("pmacs: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            Mode::Daemon { socket } => {
+                let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
+                // The user-provided NAME (no slashes) becomes the
+                // instance's `instance_name` for display in
+                // `Hello.instance_identity`. Absolute / relative paths
+                // don't have a natural name; treat as None.
+                let instance_name = match socket {
+                    Some(s) if !s.contains('/') => Some(s),
+                    _ => None,
+                };
+                match pmacs::daemon::run_daemon(socket_path, instance_name) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("pmacs: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            Mode::Attach(AttachMode::LocalSocket(socket)) => {
+                let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
+                match pmacs::attach::run_attach(socket_path) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("pmacs: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            Mode::Attach(AttachMode::Target(target)) => {
+                use pmacs::attach_dispatch::{AttachDispatch, dispatch_attach};
+                match dispatch_attach(Some(target)) {
+                    AttachDispatch::RunAttachLocalSocket(path) => {
+                        match pmacs::attach::run_attach(path) {
+                            Ok(()) => ExitCode::SUCCESS,
+                            Err(e) => {
+                                eprintln!("pmacs: {e}");
+                                ExitCode::FAILURE
+                            }
+                        }
+                    }
+                    AttachDispatch::RunAttachSsh(ssh_target) => {
+                        match pmacs::attach::run_attach_ssh(ssh_target) {
+                            Ok(()) => ExitCode::SUCCESS,
+                            Err(e) => {
+                                eprintln!("pmacs: {e}");
+                                ExitCode::FAILURE
+                            }
+                        }
+                    }
+                    d @ AttachDispatch::DeferredInV01 { .. } => {
+                        eprintln!(
+                            "pmacs: {}",
+                            d.deferred_message()
+                                .expect("DeferredInV01 always has a message"),
+                        );
+                        ExitCode::FAILURE
+                    }
+                    AttachDispatch::RunLocal => {
+                        // RunLocal is the None-target case from
+                        // post-init dispatcher; CLI always supplies
+                        // Some(target) here.
+                        unreachable!("CLI dispatch always provides Some(target)")
+                    }
+                }
+            }
+            Mode::DaemonAttach { socket } => {
+                let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
+                match pmacs::daemon_attach::run_daemon_attach(socket_path) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("pmacs: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(slice: &[&str]) -> Vec<String> {
+        slice.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn local_mode(parsed: CliArgs) -> (Option<PathBuf>, FrontendChoice) {
+        match parsed.mode {
+            Mode::Local { file, frontend } => (file, frontend),
+            other => panic!("expected Local mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_args_runs_with_no_file_in_auto_frontend() {
+        match parse_args(&args(&[])) {
+            CliResult::Run(p) => {
+                let (file, frontend) = local_mode(p);
+                assert!(file.is_none());
+                assert_eq!(frontend, FrontendChoice::Auto);
+            }
+            other => panic!("expected Run; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nw_flag_selects_tui() {
+        for flag in &["-nw", "--no-window"] {
+            match parse_args(&args(&[flag])) {
+                CliResult::Run(p) => {
+                    let (_, frontend) = local_mode(p);
+                    assert_eq!(frontend, FrontendChoice::Tui);
+                }
+                other => panic!("expected Run; got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn nw_flag_with_file_works_in_either_order() {
+        for line in &[vec!["-nw", "README.md"], vec!["README.md", "-nw"]] {
+            match parse_args(&args(line)) {
+                CliResult::Run(p) => {
+                    let (file, frontend) = local_mode(p);
+                    assert_eq!(frontend, FrontendChoice::Tui);
+                    assert_eq!(file, Some(PathBuf::from("README.md")));
+                }
+                other => panic!("expected Run for {line:?}; got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_flag_errors() {
+        match parse_args(&args(&["--bogus"])) {
+            CliResult::Error(m) => assert!(m.contains("--bogus")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_short_and_long() {
+        for f in &["-h", "--help"] {
+            assert!(matches!(parse_args(&args(&[f])), CliResult::Help));
+        }
+    }
+
+    #[test]
+    fn version_short_and_long() {
+        for f in &["-V", "--version"] {
+            assert!(matches!(parse_args(&args(&[f])), CliResult::Version));
+        }
+    }
+
+    #[test]
+    fn double_dash_treats_following_arg_as_path() {
+        match parse_args(&args(&["--", "-nw"])) {
+            CliResult::Run(p) => {
+                let (file, frontend) = local_mode(p);
+                // Without `--`, `-nw` would have been the flag; with
+                // `--` it's a literal filename.
+                assert_eq!(file, Some(PathBuf::from("-nw")));
+                assert_eq!(frontend, FrontendChoice::Auto);
+            }
+            other => panic!("expected Run; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiple_files_rejected() {
+        match parse_args(&args(&["a.txt", "b.txt"])) {
+            CliResult::Error(m) => assert!(m.contains("multiple")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_flag_selects_daemon_mode_with_no_socket() {
+        match parse_args(&args(&["--daemon"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::Daemon { socket },
+            }) => assert!(socket.is_none()),
+            other => panic!("expected Daemon; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_with_socket_name() {
+        match parse_args(&args(&["--daemon", "--socket", "research"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::Daemon { socket },
+            }) => assert_eq!(socket, Some("research".into())),
+            other => panic!("expected Daemon with socket; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_with_absolute_socket_path() {
+        match parse_args(&args(&["--daemon", "--socket", "/tmp/foo.sock"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::Daemon { socket },
+            }) => assert_eq!(socket, Some("/tmp/foo.sock".into())),
+            other => panic!("expected Daemon; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_rejects_file_argument() {
+        match parse_args(&args(&["--daemon", "README.md"])) {
+            CliResult::Error(m) => assert!(m.contains("file")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_rejects_nw_flag() {
+        // `--daemon` and `-nw` make no sense together: daemon has no
+        // controlling terminal to render into.
+        match parse_args(&args(&["--daemon", "-nw"])) {
+            CliResult::Error(m) => assert!(m.contains("mutually")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn socket_without_value_errors() {
+        match parse_args(&args(&["--socket"])) {
+            CliResult::Error(m) => assert!(m.contains("--socket")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_flag_selects_attach_mode_with_no_socket() {
+        match parse_args(&args(&["--attach"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::Attach(AttachMode::LocalSocket(socket)),
+            }) => assert!(socket.is_none()),
+            other => panic!("expected Attach(LocalSocket); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_with_socket_name() {
+        match parse_args(&args(&["--attach", "--socket", "research"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::Attach(AttachMode::LocalSocket(socket)),
+            }) => assert_eq!(socket, Some("research".into())),
+            other => panic!("expected Attach(LocalSocket); got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // M5.7d — --attach <target> positional form
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn attach_with_bare_hostname_is_ssh_shorthand() {
+        match parse_args(&args(&["--attach", "mac-studio"])) {
+            CliResult::Run(CliArgs {
+                mode:
+                    Mode::Attach(AttachMode::Target(AttachTarget::Ssh {
+                        host,
+                        user,
+                        instance_name,
+                    })),
+            }) => {
+                assert_eq!(host, "mac-studio");
+                assert!(user.is_none());
+                assert!(instance_name.is_none());
+            }
+            other => panic!("expected Attach(Target(Ssh)); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_with_user_at_host_is_ssh_with_user() {
+        match parse_args(&args(&["--attach", "alice@workstation"])) {
+            CliResult::Run(CliArgs {
+                mode:
+                    Mode::Attach(AttachMode::Target(AttachTarget::Ssh {
+                        host,
+                        user,
+                        instance_name,
+                    })),
+            }) => {
+                assert_eq!(host, "workstation");
+                assert_eq!(user, Some("alice".into()));
+                assert!(instance_name.is_none());
+            }
+            other => panic!("expected Attach(Target(Ssh)); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_with_explicit_ssh_kind_carries_instance_name() {
+        match parse_args(&args(&["--attach", "ssh:bob@workstation/research"])) {
+            CliResult::Run(CliArgs {
+                mode:
+                    Mode::Attach(AttachMode::Target(AttachTarget::Ssh {
+                        host,
+                        user,
+                        instance_name,
+                    })),
+            }) => {
+                assert_eq!(host, "workstation");
+                assert_eq!(user, Some("bob".into()));
+                assert_eq!(instance_name, Some("research".into()));
+            }
+            other => panic!("expected Attach(Target(Ssh)); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_with_local_kind_is_local_socket_path() {
+        match parse_args(&args(&["--attach", "local:/tmp/foo.sock"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::Attach(AttachMode::Target(AttachTarget::LocalSocket(p))),
+            }) => assert_eq!(p, PathBuf::from("/tmp/foo.sock")),
+            other => panic!("expected Attach(Target(LocalSocket)); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_target_and_socket_flag_are_mutually_exclusive() {
+        match parse_args(&args(&["--attach", "mac-studio", "--socket", "research"])) {
+            CliResult::Error(m) => assert!(
+                m.contains("--attach <target>") && m.contains("--socket"),
+                "expected mutual-exclusion error, got: {m}",
+            ),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_with_unknown_kind_yields_parse_error() {
+        match parse_args(&args(&["--attach", "telnet:host:23"])) {
+            CliResult::Error(m) => assert!(
+                m.contains("invalid attach target") && m.contains("telnet"),
+                "expected target-parse error, got: {m}",
+            ),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_with_malformed_tls_yields_parse_error() {
+        // tls: requires `endpoint#cert.pem`; missing `#` is a parse
+        // error from AttachTarget::parse.
+        match parse_args(&args(&["--attach", "tls:host:9999"])) {
+            CliResult::Error(m) => assert!(
+                m.contains("invalid attach target"),
+                "expected target-parse error, got: {m}",
+            ),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_and_attach_mutually_exclusive() {
+        match parse_args(&args(&["--daemon", "--attach"])) {
+            CliResult::Error(m) => assert!(m.contains("mutually")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_attach_flag_selects_daemon_attach_mode_with_no_socket() {
+        match parse_args(&args(&["--daemon-attach"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::DaemonAttach { socket },
+            }) => assert!(socket.is_none()),
+            other => panic!("expected DaemonAttach; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_attach_with_socket_name() {
+        match parse_args(&args(&["--daemon-attach", "--socket", "research"])) {
+            CliResult::Run(CliArgs {
+                mode: Mode::DaemonAttach { socket },
+            }) => assert_eq!(socket, Some("research".into())),
+            other => panic!("expected DaemonAttach; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_attach_rejects_file_argument() {
+        match parse_args(&args(&["--daemon-attach", "README.md"])) {
+            CliResult::Error(m) => assert!(m.contains("file")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_attach_and_no_window_mutually_exclusive() {
+        match parse_args(&args(&["--daemon-attach", "-nw"])) {
+            CliResult::Error(m) => assert!(m.contains("mutually")),
+            other => panic!("expected Error; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_attach_excludes_daemon_and_attach() {
+        for combo in &[
+            vec!["--daemon", "--daemon-attach"],
+            vec!["--attach", "--daemon-attach"],
+            vec!["--daemon", "--attach", "--daemon-attach"],
+        ] {
+            let v: Vec<String> = combo.iter().map(|s| (*s).to_string()).collect();
+            match parse_args(&v) {
+                CliResult::Error(m) => assert!(
+                    m.contains("mutually exclusive"),
+                    "combo {combo:?} expected mutually-exclusive error, got: {m}",
+                ),
+                other => panic!("combo {combo:?}: expected Error; got {other:?}"),
+            }
+        }
+    }
+}

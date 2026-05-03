@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Lint (${{ matrix.lua }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # mlua's Lua-flavor features are mutually exclusive, so we can't
+        # use --all-features. Run clippy under each supported flavor.
+        lua: [luajit, lua54]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --no-default-features --features ${{ matrix.lua }} -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }} / ${{ matrix.lua }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        lua: [luajit, lua54]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --no-default-features --features ${{ matrix.lua }}
+      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}
+      - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
+
+  acceptance:
+    name: M1 Acceptance Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: perf, memory, and 30s fuzz gates
+        run: cargo test --release --test acceptance -- --ignored --nocapture
+
+  m4-perf-gates:
+    name: M4 Perf Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: tree-sitter parse + highlight latency budgets
+        run: cargo test --release --test m4_acceptance -- --ignored --nocapture
+
+  # m5-perf-gates: luajit-only by design.
+  # The keystroke-to-render gate measures protocol-path latency (Unix
+  # socket frontend ↔ daemon RTT plus the daemon's keymap-dispatch /
+  # buffer-mutate / repaint pipeline). Lua flavor is irrelevant — the
+  # measured path doesn't enter the Lua VM. Matrixing over flavors
+  # doubles CI cost without adding signal. If a future perf gate
+  # measures Lua-touching code paths (command dispatch via Lua,
+  # hook invocation), revisit then.
+  m5-perf-gates:
+    name: M5 Perf Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: keystroke-to-render p99 over loopback LocalSocket
+        run: cargo test --release --test m5_perf_acceptance -- --ignored --nocapture
+
+  # m6-perf-gates: luajit-only by design. The M6.6/M6.7 gates measure
+  # rope-append throughput, RSS ceiling, cancel-response latency,
+  # scrollback navigation latency, and scrollback search latency —
+  # none of which exercise the Lua VM's hot path differently across
+  # flavors. Same reasoning as m5-perf-gates above.
+  #
+  # --test-threads=1 is required: the M6.6 RSS-ceiling gate samples
+  # process-wide /proc/self/status, and concurrent ingest / scrollback
+  # populate from sibling tests inflate that reading. Serializing
+  # gives each test a clean baseline. The wall-clock cost of serial
+  # execution (~5 minutes) is acceptable for a perf-gates job that
+  # only runs on push/PR.
+  m6-perf-gates:
+    name: M6 Perf Gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: ingest rate, RSS ceiling, cancel p99, navigation p99, search p99
+        run: cargo test --release --test m6_perf_acceptance -- --ignored --nocapture --test-threads=1

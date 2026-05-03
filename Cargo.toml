@@ -1,0 +1,125 @@
+[package]
+name = "pmacs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Parallel Emacs --- a Rust-cored, Lua-scripted editor in the Emacs tradition"
+license = "MIT OR Apache-2.0"
+authors = ["Pmacs contributors"]
+readme = "README.md"
+repository = "https://git.levineuwirth.org/neuwirth/pmacs"
+homepage = "https://levineuwirth.org/essays/pmacs"
+documentation = "https://docs.rs/pmacs"
+keywords = ["editor", "emacs", "tui"]
+categories = ["text-editors"]
+
+[lib]
+name = "pmacs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pmacs"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Allows: pedantic lints that fight readable code.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+multiple_crate_versions = "allow"
+
+[features]
+# Pick exactly one Lua flavor at build time. v0.1 default is LuaJIT
+# (spec §3 Checkpoint 6); lua54 is a buildable fallback for environments
+# without LuaJIT support (e.g. some CI hosts, big-endian machines).
+default = ["luajit"]
+luajit = ["mlua/luajit", "mlua/vendored"]
+lua54 = ["mlua/lua54", "mlua/vendored"]
+
+[dependencies]
+crossterm = "0.28"
+thiserror = "2"
+unicode-width = "0.2"
+# Work-stealing deque, MPMC channels, and parking primitives for the
+# M3 worker pool (spec §6.3). The umbrella crate re-exports
+# `crossbeam_deque`, `crossbeam_channel`, and `crossbeam_utils`.
+crossbeam = "0.8"
+# Wire format for the M3 message bus (spec §5.2). `serde` derives the
+# trait, `rmp-serde` is the MessagePack codec the spec calls out by
+# name; in-process and out-of-process workers must look identical to
+# Lua, which means even the in-process bus encodes through MessagePack.
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+# Wire format for the M5 frontend ↔ instance protocol (T M5.5b).
+# Length-prefix framing wraps postcard-encoded payloads. Chosen for
+# compactness on the cell-stream traffic (60 Hz cell deltas dominate
+# the wire) and for its no-std future-option (a thin attach client or
+# embedded REPL bridge can use the same parser). Schema evolution is
+# handled by an explicit version handshake (`PROTOCOL_VERSION`); see
+# `src/protocol.rs::Hello`. The worker-protocol encoding (§5.5 spec)
+# remains MessagePack via `rmp-serde`; different subsystems with
+# different requirements (compactness vs schema evolution).
+postcard = { version = "1", features = ["use-std"] }
+# Signal handling for the M5.5 daemon (T M5.5e). Provides a safe
+# wrapper for installing handlers that set an AtomicBool flag, which
+# our accept loop polls between iterations. Used for SIGTERM/SIGINT
+# (graceful shutdown) and SIGPIPE/SIGHUP (no-op handlers so writes
+# return EPIPE rather than killing the process).
+signal-hook = "0.3"
+# mlua is feature-gated; the `default-features = false` here lets the
+# top-level features above pick the Lua flavor without conflict.
+mlua = { version = "0.10", default-features = false }
+# Tree-sitter incremental-parser core (T M4.1). The bundled grammars
+# below (T M4.2) sit on top of this crate.
+tree-sitter = "0.26"
+# Bundled grammars (T M4.2). Detection is by file extension; loading
+# is lazy --- the C-side language object isn't materialized until the
+# first buffer of that language opens. Adding a new grammar requires
+# only a new dependency line here plus one entry in
+# `crate::syntax::BUILTIN_LANGUAGES`.
+tree-sitter-rust = "0.24"
+tree-sitter-lua = "0.5"
+# T M4.4 process supervisor: signal sending without `unsafe`. Keep
+# the feature surface tight to keep build time low (no syscalls
+# beyond `kill(2)` for v0.1).
+nix = { version = "0.29", default-features = false, features = ["signal", "user", "fs", "term"] }
+# T M4.4 PTY mode: portable abstraction over openpty / fork+exec
+# with controlling-tty wiring. The crate uses internal `unsafe`
+# but exposes a fully safe API; pmacs's own `unsafe_code = "forbid"`
+# rule still holds.
+portable-pty = "0.9"
+# T M4.5 LSP wire format: JSON-RPC 2.0 bodies inside Content-Length
+# framing. Used only on LSP and similar protocols that require JSON
+# specifically; in-process workers continue to use MessagePack
+# (spec §5.2). `preserve_order` is off --- LSP doesn't require it
+# and the default `BTreeMap` keeps allocation low.
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+strip = "debuginfo"
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

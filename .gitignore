@@ -1,0 +1,19 @@
+/target
+/Cargo.lock.bak
+*.swp
+*.swo
+.DS_Store
+
+# Editor scratch
+/.idea
+/.vscode
+
+# Internal-only working documents (not part of the public v0.1 surface).
+# Public contributions begin at 1.0; until then these stay local.
+/spec/
+/TRANSITION.md
+/TRANSITION-M5.md
+/SPIKE-M5.md
+/MANUAL-TEST-CHECKLIST.md
+/tests/INDEX.md
+/.claude/
