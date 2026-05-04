@@ -702,11 +702,6 @@ impl Buffer {
                         MarkGravity::Right => new_end,
                     }
                 }
-            } else if pos < end {
-                match mark.gravity {
-                    MarkGravity::Left => start,
-                    MarkGravity::Right => new_end,
-                }
             } else {
                 match mark.gravity {
                     MarkGravity::Left => start,

@@ -104,13 +104,71 @@ fn xdg_data_root() -> Result<PathBuf, InstallError> {
 // InstallSpec
 // ---------------------------------------------------------------------------
 
-/// A normalized install request: where to fetch and what version to pick.
+/// What the user pinned the install to. Mutually exclusive on the
+/// Lua side: a spec table may carry exactly one of `version`,
+/// `branch`, or `commit`.
+///
+/// # Why three kinds
+///
+/// - [`Self::Version`] is the default, recommended path: the
+///   installer picks the highest semver tag matching the constraint
+///   and validates the manifest's declared version against the same
+///   constraint. Lockfile reproduction (M7.6) records the resolved
+///   commit so a later install at the same constraint yields the
+///   same revision.
+/// - [`Self::Branch`] follows a moving target. Each install
+///   re-resolves the branch's HEAD; the install is *not*
+///   reproducible across time. Useful for development against an
+///   upstream's `main` or for a private package whose semver
+///   discipline is not yet established.
+/// - [`Self::Commit`] freezes the install at a specific revision.
+///   Useful for pinning to a known-good state before the upstream
+///   has tagged a release, or for reproducing a colleague's
+///   environment exactly without semver drift.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum InstallPin {
+    /// Highest semver tag satisfying the constraint.
+    Version(VersionReq),
+    /// HEAD of the named branch at install time.
+    Branch(String),
+    /// Specific commit (full or partial SHA; the fetcher accepts
+    /// either via `git rev-parse`).
+    Commit(String),
+}
+
+impl InstallPin {
+    /// Stable string discriminator used at the Lua boundary
+    /// (`installed_package_to_lua`) and in error messages.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Version(_) => "version",
+            Self::Branch(_) => "branch",
+            Self::Commit(_) => "commit",
+        }
+    }
+
+    /// User-supplied value as a string: the constraint for
+    /// [`Self::Version`], the branch name for [`Self::Branch`], the
+    /// SHA for [`Self::Commit`].
+    #[must_use]
+    pub fn value(&self) -> String {
+        match self {
+            Self::Version(req) => req.to_string(),
+            Self::Branch(b) => b.clone(),
+            Self::Commit(c) => c.clone(),
+        }
+    }
+}
+
+/// A normalized install request: where to fetch and how to pin the
+/// revision.
 #[derive(Debug, Clone)]
 pub struct InstallSpec {
     /// Address (resolved via `Address::parse`).
     pub address: Address,
-    /// Semver constraint to match against the upstream's tags.
-    pub version: VersionReq,
+    /// What the user pinned the install to. See [`InstallPin`].
+    pub pin: InstallPin,
 }
 
 impl InstallSpec {
@@ -126,6 +184,14 @@ impl InstallSpec {
     /// has no `@` separator and [`InstallError::Address`] /
     /// [`InstallError::InvalidVersionReq`] for the underlying parse
     /// failures.
+    ///
+    /// The shorthand string form is **version-pin only**. Branch and
+    /// commit pins must use the Lua table form
+    /// (`{ "addr", branch = "..." }` / `{ "addr", commit = "..." }`)
+    /// because there is no concise sigil that disambiguates a
+    /// branch/commit value from a semver constraint without
+    /// surprising users (`@main` could be a branch named "main" or
+    /// a malformed semver --- ambiguous).
     pub fn parse_shorthand(s: &str) -> Result<Self, InstallError> {
         let (addr, ver) =
             s.rsplit_once('@')
@@ -142,7 +208,10 @@ impl InstallSpec {
             value: ver.to_string(),
             cause: e.to_string(),
         })?;
-        Ok(Self { address, version })
+        Ok(Self {
+            address,
+            pin: InstallPin::Version(version),
+        })
     }
 }
 
@@ -159,12 +228,26 @@ pub struct InstalledPackage {
     pub install_path: PathBuf,
     /// 40-char commit hash of the installed snapshot.
     pub commit: String,
-    /// The tag that was matched (e.g., `v1.0.0` or `1.0.0`).
+    /// A descriptor of what was installed:
+    /// - For [`InstallPin::Version`]: the matched tag, e.g. `"v1.0.0"`.
+    /// - For [`InstallPin::Branch`]: `"branch:<name>"`.
+    /// - For [`InstallPin::Commit`]: `"commit:<short-sha>"`.
+    ///
+    /// Always non-empty so Lua callers can use it as a stable
+    /// "what got installed" label without nil-checking.
     pub tag: String,
-    /// The semver value parsed from `tag` (canonical numeric form).
+    /// Semver version of the installed snapshot. For
+    /// [`InstallPin::Version`] this is the version parsed from the
+    /// matched tag; for [`InstallPin::Branch`] / [`InstallPin::Commit`]
+    /// it falls back to `manifest.version` (the package's declared
+    /// version at the resolved revision).
     pub version: Version,
     /// The install scope this package was installed under.
     pub scope: InstallScope,
+    /// What the user originally pinned this install to. Useful for
+    /// lockfile generation (M7.6) and for surfacing to the Lua
+    /// `installed()` snapshot.
+    pub pin: InstallPin,
 }
 
 impl InstalledPackage {
@@ -243,33 +326,54 @@ impl Installer {
     }
 
     /// Install one package. See module docs for the step-by-step flow.
+    #[allow(clippy::too_many_lines)]
     pub fn install(&self, spec: &InstallSpec) -> Result<InstalledPackage, InstallError> {
         let url = spec.address.to_git_url();
         let bare = self.fetcher.fetch(&url).map_err(InstallError::Fetch)?;
 
-        // 2. Pick best matching tag.
-        let tags = self.fetcher.list_tags(&bare).map_err(InstallError::Fetch)?;
-        let chosen =
-            best_match(&tags, &spec.version).ok_or_else(|| InstallError::NoMatchingVersion {
-                address: url.clone(),
-                req: spec.version.to_string(),
-                available: tags.clone(),
-            })?;
+        // Resolve the user's pin to a concrete (commit, tag-descriptor)
+        // pair. The descriptor is what we display to users in the
+        // `tag` field of the resulting `InstalledPackage`.
+        let (commit, tag_descriptor) = match &spec.pin {
+            InstallPin::Version(req) => {
+                let tags = self.fetcher.list_tags(&bare).map_err(InstallError::Fetch)?;
+                let chosen =
+                    best_match(&tags, req).ok_or_else(|| InstallError::NoMatchingVersion {
+                        address: url.clone(),
+                        req: req.to_string(),
+                        available: tags.clone(),
+                    })?;
+                let commit = self
+                    .fetcher
+                    .resolve(&bare, &RefSpec::Tag(chosen.tag.clone()))
+                    .map_err(InstallError::Fetch)?;
+                (commit, chosen.tag)
+            }
+            InstallPin::Branch(name) => {
+                let commit = self
+                    .fetcher
+                    .resolve(&bare, &RefSpec::Branch(name.clone()))
+                    .map_err(InstallError::Fetch)?;
+                (commit, format!("branch:{name}"))
+            }
+            InstallPin::Commit(sha) => {
+                let commit = self
+                    .fetcher
+                    .resolve(&bare, &RefSpec::Commit(sha.clone()))
+                    .map_err(InstallError::Fetch)?;
+                let short = commit.get(..7).unwrap_or(commit.as_str()).to_string();
+                (commit, format!("commit:{short}"))
+            }
+        };
 
-        // 3. Resolve to commit.
-        let commit = self
-            .fetcher
-            .resolve(&bare, &RefSpec::Tag(chosen.tag.clone()))
-            .map_err(InstallError::Fetch)?;
-
-        // 4. Read manifest at this commit so we know the install dir name.
+        // Read the manifest at this commit so we know the install dir name.
         let manifest_bytes = self
             .fetcher
             .show_blob(&bare, &commit, "pmacs.toml")
             .map_err(|e| match e {
                 FetchError::GitInvocation { stderr, .. } => InstallError::ManifestMissing {
                     address: url.clone(),
-                    tag: chosen.tag.clone(),
+                    tag: tag_descriptor.clone(),
                     cause: stderr,
                 },
                 other => InstallError::Fetch(other),
@@ -277,42 +381,43 @@ impl Installer {
         let manifest_str =
             std::str::from_utf8(&manifest_bytes).map_err(|_| InstallError::ManifestNotUtf8 {
                 address: url.clone(),
-                tag: chosen.tag.clone(),
+                tag: tag_descriptor.clone(),
             })?;
         let manifest = PackageManifest::from_toml(manifest_str).map_err(InstallError::Manifest)?;
 
         // Refuse to install a package whose `pmacs_required` constraint
-        // does not match the running pmacs version. The manifest field
-        // is a hard contract, not advisory: if a package declares
-        // `pmacs_required = ">=2.0.0"` and we're 1.x, the package is
-        // free to call APIs we do not yet expose, and the failure
-        // would manifest as a runtime Lua traceback rather than a
-        // typed install-time error.
+        // does not match the running pmacs version. Applies to every
+        // pin kind: a package's declared API requirements are
+        // independent of how the user pinned the revision.
         let running_pmacs = running_pmacs_version();
         if !manifest.pmacs_required.matches(&running_pmacs) {
             return Err(InstallError::PmacsVersionIncompatible {
                 address: url.clone(),
-                tag: chosen.tag.clone(),
+                tag: tag_descriptor.clone(),
                 required: manifest.pmacs_required.to_string(),
                 running: running_pmacs.to_string(),
             });
         }
 
-        // Sanity: the manifest's `version` should equal the resolved tag.
-        // We don't reject mismatches (some upstreams version-tag asymmetrically),
-        // but we do require it to satisfy the requested constraint. The tag
-        // already satisfies the constraint (we chose it that way), so the
-        // strict check is on the manifest.
-        if !spec.version.matches(&manifest.version) {
-            return Err(InstallError::ManifestVersionMismatch {
-                address: url.clone(),
-                tag: chosen.tag.clone(),
-                manifest_version: manifest.version.to_string(),
-                req: spec.version.to_string(),
-            });
+        // For version pins only: cross-check that the manifest's
+        // declared version satisfies the constraint. The matched tag
+        // already satisfies it (we chose it that way); the strict
+        // check is on the manifest, which catches packages whose tag
+        // and pmacs.toml version disagree. Branch and commit pins
+        // skip this check --- the user explicitly asked for that
+        // revision regardless of what the manifest says.
+        if let InstallPin::Version(req) = &spec.pin {
+            if !req.matches(&manifest.version) {
+                return Err(InstallError::ManifestVersionMismatch {
+                    address: url.clone(),
+                    tag: tag_descriptor.clone(),
+                    manifest_version: manifest.version.to_string(),
+                    req: req.to_string(),
+                });
+            }
         }
 
-        // 5. Archive + extract.
+        // Archive + extract.
         let install_root = self.install_root()?;
         let basename = package_basename(manifest.name.as_str());
         let install_path = install_root.join(basename);
@@ -326,12 +431,13 @@ impl Installer {
             match existing {
                 Some(prev) if prev == commit => {
                     return Ok(InstalledPackage {
+                        version: manifest.version.clone(),
                         manifest,
                         install_path,
                         commit,
-                        tag: chosen.tag,
-                        version: chosen.version,
+                        tag: tag_descriptor,
                         scope: self.scope.clone(),
+                        pin: spec.pin.clone(),
                     });
                 }
                 _ => {
@@ -361,12 +467,13 @@ impl Installer {
         write_install_marker(&install_path, &commit)?;
 
         Ok(InstalledPackage {
+            version: manifest.version.clone(),
             manifest,
             install_path,
             commit,
-            tag: chosen.tag,
-            version: chosen.version,
+            tag: tag_descriptor,
             scope: self.scope.clone(),
+            pin: spec.pin.clone(),
         })
     }
 }
@@ -782,7 +889,10 @@ exports = ["samplepkg"]
     fn shorthand_parses_github_address_with_caret_constraint() {
         let s = InstallSpec::parse_shorthand("github:user/repo@^1.0.0").unwrap();
         assert!(matches!(s.address, Address::Github { .. }));
-        assert_eq!(s.version.to_string(), "^1.0.0");
+        match &s.pin {
+            InstallPin::Version(req) => assert_eq!(req.to_string(), "^1.0.0"),
+            other => panic!("expected Version pin, got {other:?}"),
+        }
     }
 
     #[test]
@@ -790,7 +900,10 @@ exports = ["samplepkg"]
         // SSH shorthand: `git:git@host:path`. The `@` in `git@host`
         // must not be confused with the version separator.
         let s = InstallSpec::parse_shorthand("git:git@host:path/repo.git@=1.2.3").unwrap();
-        assert_eq!(s.version.to_string(), "=1.2.3");
+        match &s.pin {
+            InstallPin::Version(req) => assert_eq!(req.to_string(), "=1.2.3"),
+            other => panic!("expected Version pin, got {other:?}"),
+        }
         if let Address::Url(u) = s.address {
             assert_eq!(u, "git@host:path/repo.git");
         } else {
@@ -876,7 +989,7 @@ exports = ["samplepkg"]
 
         let spec = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse("^1.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse("^1.0").unwrap()),
         };
         let installed = installer.install(&spec).unwrap();
 
@@ -918,7 +1031,7 @@ exports = ["samplepkg"]
 
         let spec = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse("=1.0.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse("=1.0.0").unwrap()),
         };
         let installed = installer.install(&spec).unwrap();
         assert_eq!(installed.tag, "v1.0.0");
@@ -933,7 +1046,7 @@ exports = ["samplepkg"]
 
         let spec = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse(">=2.0.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse(">=2.0.0").unwrap()),
         };
         let err = installer.install(&spec).unwrap_err();
         match err {
@@ -953,7 +1066,7 @@ exports = ["samplepkg"]
 
         let spec = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse("=1.0.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse("=1.0.0").unwrap()),
         };
         let first = installer.install(&spec).unwrap();
         // Drop a sentinel; idempotent re-install should not blow it away.
@@ -976,14 +1089,14 @@ exports = ["samplepkg"]
         // First install at 1.0.0.
         let spec_v1 = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse("=1.0.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse("=1.0.0").unwrap()),
         };
         installer.install(&spec_v1).unwrap();
 
         // Second install at 1.1.0 to the same install path: refuse.
         let spec_v2 = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse("=1.1.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse("=1.1.0").unwrap()),
         };
         let err = installer.install(&spec_v2).unwrap_err();
         assert!(matches!(err, InstallError::AlreadyInstalled { .. }));
@@ -1057,7 +1170,7 @@ exports = ["samplepkg"]
 
         let spec = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse("^1.0.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse("^1.0.0").unwrap()),
         };
 
         match installer.install(&spec).unwrap_err() {
@@ -1086,7 +1199,7 @@ exports = ["samplepkg"]
 
         let spec = InstallSpec {
             address: Address::Url(file_url(&bare)),
-            version: VersionReq::parse("^1.0.0").unwrap(),
+            pin: InstallPin::Version(VersionReq::parse("^1.0.0").unwrap()),
         };
         installer
             .install(&spec)

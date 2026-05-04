@@ -18,5 +18,7 @@ pub mod manifest;
 
 pub use address::{Address, AddressError};
 pub use fetcher::{FetchError, Fetcher, RefSpec};
-pub use installer::{InstallError, InstallScope, InstallSpec, InstalledPackage, Installer};
+pub use installer::{
+    InstallError, InstallPin, InstallScope, InstallSpec, InstalledPackage, Installer,
+};
 pub use manifest::{DependencySpec, ManifestError, PackageManifest, PackageName};

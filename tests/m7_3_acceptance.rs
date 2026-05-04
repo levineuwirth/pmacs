@@ -40,11 +40,7 @@ use tempfile::TempDir;
 /// (relative to the package root) with the supplied Lua body.
 /// Returns `(tempdir, bare_path)` --- the tempdir owns both the work
 /// tree and the bare clone.
-fn make_package_with_entry(
-    name: &str,
-    entry_path: &str,
-    entry_body: &str,
-) -> (TempDir, PathBuf) {
+fn make_package_with_entry(name: &str, entry_path: &str, entry_body: &str) -> (TempDir, PathBuf) {
     let td = tempfile::tempdir().expect("tempdir");
     let work = td.path().join("work");
     let bare = td.path().join("upstream.git");
@@ -594,4 +590,251 @@ fn searcher_misses_for_unknown_name_with_pmacs_specific_message() {
         msg.contains("no installed pmacs package"),
         "error must mention the pmacs searcher's contribution: {msg}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Reviewer-flagged item 11: branch/commit install pins.
+// ---------------------------------------------------------------------------
+//
+// The fetcher already supports `RefSpec::Branch` and `RefSpec::Commit`;
+// item 11 is the Lua-surface plumbing that exposes those resolutions
+// to user init.lua. The acceptance shape: a spec table with
+// `branch = "..."` or `commit = "..."` (instead of `version = "..."`)
+// installs that exact revision. The two are mutually exclusive --- a
+// table with both must error.
+
+/// Build a sample-package bare repo with two tagged versions plus a
+/// `feature` branch carrying a third commit. Returns
+/// `(tempdir, bare_path, feature_branch_commit_sha)`. Every field
+/// caller may need to verify a branch/commit pin came out of the
+/// install path correctly.
+fn make_branched_sample_package(name: &str) -> (TempDir, PathBuf, String) {
+    let td = tempfile::tempdir().expect("tempdir");
+    let work = td.path().join("work");
+    let bare = td.path().join("upstream.git");
+
+    run_git(&[
+        OsStr::new("init"),
+        OsStr::new("--initial-branch=main"),
+        work.as_os_str(),
+    ]);
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("config"),
+        OsStr::new("user.email"),
+        OsStr::new("test@example.com"),
+    ]);
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("config"),
+        OsStr::new("user.name"),
+        OsStr::new("Tester"),
+    ]);
+
+    // First tagged release on `main`.
+    write_manifest(&work, name, "1.0.0");
+    std::fs::write(work.join("init.lua"), b"return { from = 'main@v1.0.0' }\n")
+        .expect("write init");
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("add"),
+        OsStr::new("."),
+    ]);
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("commit"),
+        OsStr::new("-m"),
+        OsStr::new("v1.0.0"),
+    ]);
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("tag"),
+        OsStr::new("v1.0.0"),
+    ]);
+
+    // Branch off `main` and commit a different init.lua. The branch
+    // remains untagged --- only a branch ref points at it.
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("checkout"),
+        OsStr::new("-b"),
+        OsStr::new("feature"),
+    ]);
+    std::fs::write(
+        work.join("init.lua"),
+        b"return { from = 'feature-branch' }\n",
+    )
+    .expect("write feature init");
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("add"),
+        OsStr::new("."),
+    ]);
+    run_git(&[
+        OsStr::new("-C"),
+        work.as_os_str(),
+        OsStr::new("commit"),
+        OsStr::new("-m"),
+        OsStr::new("feature work"),
+    ]);
+    let feature_sha = git_rev_parse_head(&work);
+
+    // Bare clone after both refs exist.
+    run_git(&[
+        OsStr::new("clone"),
+        OsStr::new("--bare"),
+        work.as_os_str(),
+        bare.as_os_str(),
+    ]);
+
+    (td, bare, feature_sha)
+}
+
+fn write_manifest(work: &Path, name: &str, version: &str) {
+    let manifest = format!(
+        "name = \"{name}\"\n\
+         version = \"{version}\"\n\
+         summary = \"acceptance fixture\"\n\
+         pmacs_required = \">= 0.1.0\"\n\
+         entry = \"init.lua\"\n\
+         exports = [\"{name}\"]\n"
+    );
+    std::fs::write(work.join("pmacs.toml"), manifest).expect("write pmacs.toml");
+}
+
+fn git_rev_parse_head(work: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(work)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .output()
+        .expect("git rev-parse spawn");
+    assert!(out.status.success(), "git rev-parse failed");
+    String::from_utf8(out.stdout)
+        .expect("rev-parse stdout utf8")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn install_with_branch_pin_uses_branch_head() {
+    let (_pkg_td, bare, _feature_sha) = make_branched_sample_package("samplepkg");
+    let url = file_url(&bare);
+    let (mut host, _cache, _user_root) = host_with_overrides();
+
+    let script = format!(
+        r#"
+        local installed = pmacs.packages.install {{
+            "git:{url}",
+            branch = "feature",
+        }}
+        assert(installed.pin.kind == "branch",
+            "pin.kind must be branch, got " .. tostring(installed.pin.kind))
+        assert(installed.pin.value == "feature",
+            "pin.value must echo the branch name, got " .. tostring(installed.pin.value))
+        assert(installed.tag == "branch:feature",
+            "tag descriptor must be branch:feature, got " .. tostring(installed.tag))
+        local mod = require("samplepkg")
+        assert(mod.from == "feature-branch",
+            "module body must come from the feature branch's init.lua, got " .. tostring(mod.from))
+    "#
+    );
+    host.eval(Some("test"), &script).unwrap_or_else(|e| {
+        panic!("branch pin install failed: {e}");
+    });
+}
+
+#[test]
+fn install_with_commit_pin_uses_exact_revision() {
+    let (_pkg_td, bare, feature_sha) = make_branched_sample_package("samplepkg");
+    let url = file_url(&bare);
+    let (mut host, _cache, _user_root) = host_with_overrides();
+
+    let script = format!(
+        r#"
+        local installed = pmacs.packages.install {{
+            "git:{url}",
+            commit = "{feature_sha}",
+        }}
+        assert(installed.pin.kind == "commit",
+            "pin.kind must be commit, got " .. tostring(installed.pin.kind))
+        assert(installed.pin.value == "{feature_sha}",
+            "pin.value must echo the SHA, got " .. tostring(installed.pin.value))
+        assert(installed.commit == "{feature_sha}",
+            "resolved commit must equal the pinned SHA, got " .. tostring(installed.commit))
+        assert(installed.tag:sub(1, 7) == "commit:",
+            "tag descriptor must start with commit:, got " .. tostring(installed.tag))
+        local mod = require("samplepkg")
+        assert(mod.from == "feature-branch",
+            "module body must come from the pinned commit, got " .. tostring(mod.from))
+    "#
+    );
+    host.eval(Some("test"), &script).unwrap_or_else(|e| {
+        panic!("commit pin install failed: {e}");
+    });
+}
+
+#[test]
+fn install_with_conflicting_pins_errors_with_field_list() {
+    // Specifying more than one pin is ambiguous (which one wins?).
+    // The error must name every conflicting field so the user can
+    // see which to keep without re-reading the docs.
+    let (_pkg_td, bare, _) = make_branched_sample_package("samplepkg");
+    let url = file_url(&bare);
+    let (mut host, _cache, _user_root) = host_with_overrides();
+
+    let script = format!(
+        r#"
+        pmacs.packages.install {{
+            "git:{url}",
+            version = "^1.0.0",
+            branch = "feature",
+        }}
+    "#
+    );
+    let err = host
+        .eval(Some("test"), &script)
+        .expect_err("conflicting pins must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("version") && msg.contains("branch"),
+        "error must name both conflicting fields: {msg}"
+    );
+    assert!(
+        msg.contains("exactly one"),
+        "error must explain the mutual-exclusion rule: {msg}"
+    );
+}
+
+#[test]
+fn install_with_default_version_pin_when_no_pin_field_supplied() {
+    // The reviewer's wording: existing default is `version = "*"`.
+    // This test pins that contract: a spec table with no
+    // version/branch/commit field defaults to "any tag".
+    let (_pkg_td, bare) = make_sample_package("samplepkg");
+    let url = file_url(&bare);
+    let (mut host, _cache, _user_root) = host_with_overrides();
+
+    let script = format!(
+        r#"
+        local installed = pmacs.packages.install {{ "git:{url}" }}
+        assert(installed.pin.kind == "version",
+            "default pin must be a version pin, got " .. tostring(installed.pin.kind))
+        assert(installed.pin.value == "*",
+            "default constraint must be `*`, got " .. tostring(installed.pin.value))
+    "#
+    );
+    host.eval(Some("test"), &script).unwrap_or_else(|e| {
+        panic!("default-pin install failed: {e}");
+    });
 }

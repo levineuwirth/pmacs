@@ -29,12 +29,16 @@
 //! later release will make it configurable.
 
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -210,7 +214,8 @@ impl From<TransportError> for AttachError {
 ///
 /// Each transport builds its own `AttachIo` from the primitives it has
 /// available. The local-socket transport (M5.5g) clones a `UnixStream`
-/// three ways and uses `shutdown(Read)` for the kick. The SSH
+/// three ways and uses a kick-aware reader plus socket shutdown for
+/// the kick. The SSH
 /// transport (M5.7e) takes a child process's `stdout` and `stdin`
 /// halves and uses `SIGTERM` to the child for the kick.
 pub(crate) struct AttachIo {
@@ -229,10 +234,9 @@ pub(crate) struct AttachIo {
     /// The reader thread is presumed to be blocked on a read; this
     /// wakes it.
     ///
-    /// Implementations may be destructive (SSH transport `SIGTERM`s
-    /// the child) or non-destructive (local-socket transport calls
-    /// `shutdown(Read)`). Callers do not distinguish — by the time
-    /// the kick runs, the pump has already decided to exit.
+    /// Implementations may be destructive. Callers do not distinguish
+    /// — by the time the kick runs, the pump has already decided to
+    /// exit.
     pub kick: Box<dyn FnOnce() + Send>,
 }
 
@@ -318,19 +322,81 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
 
 /// Build an [`AttachIo`] for a connected `UnixStream`.
 ///
-/// The kick clones a third handle for `shutdown(Read)`. Cloning may
+/// The kick sets a shared flag and clones a third handle for
+/// `shutdown(Both)`. Cloning may
 /// fail (rare — the kernel is out of file descriptors), in which
 /// case the caller propagates the error before raw mode engages.
 fn build_local_socket_io(stream: UnixStream) -> Result<AttachIo, std::io::Error> {
     let reader = stream.try_clone()?;
+    reader.set_nonblocking(true)?;
     let kick_handle = stream.try_clone()?;
+    let kicked = Arc::new(AtomicBool::new(false));
+    let reader_kicked = Arc::clone(&kicked);
     Ok(AttachIo {
-        reader: Box::new(reader),
+        reader: Box::new(KickAwareUnixReader {
+            stream: reader,
+            kicked: reader_kicked,
+        }),
         writer: Box::new(stream),
         kick: Box::new(move || {
-            let _ = kick_handle.shutdown(Shutdown::Read);
+            kicked.store(true, Ordering::SeqCst);
+            let _ = kick_handle.shutdown(Shutdown::Both);
         }),
     })
+}
+
+/// Non-blocking poll-based reader with a kick flag.
+///
+/// # Wake semantics
+///
+/// This reader has two cooperating wake paths, only one of which is
+/// load-bearing:
+///
+/// 1. **Atomic flag (correctness):** the reader runs a non-blocking
+///    poll loop with a 10ms sleep between iterations. After the kick
+///    sets `kicked`, the next loop iteration observes it and returns
+///    `Ok(0)`. Worst-case wake latency is one poll cycle (~10ms).
+///    This path is platform-independent and is the mechanism the
+///    caller relies on for correctness.
+///
+/// 2. **`shutdown(Both)` on a sibling clone (best-effort speedup):**
+///    if the reader happens to be inside `self.stream.read()` when
+///    the kick fires, and the platform honors cross-clone shutdown
+///    wakes, the read returns `Ok(0)` immediately and the loop
+///    skips its sleep. This path is **not** load-bearing — Unix
+///    socket cross-clone shutdown semantics are not portably
+///    guaranteed, and any wake it provides is a bonus on top of
+///    path 1.
+///
+/// In other words: the atomic flag wakes the reader; the shutdown
+/// just shaves up to ~10ms off the wake when the platform plays
+/// along. Tests asserting wake bounds should treat the budget as
+/// "≤ one poll cycle plus scheduler jitter," not as a measure of
+/// shutdown latency.
+struct KickAwareUnixReader {
+    stream: UnixStream,
+    kicked: Arc<AtomicBool>,
+}
+
+impl Read for KickAwareUnixReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.stream.read(buf) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if self.kicked.load(Ordering::SeqCst) {
+                        return Ok(0);
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+    }
 }
 
 fn build_capabilities() -> FrontendCapabilities {
@@ -487,7 +553,7 @@ pub(crate) fn run_attach_pair(
     //    reader needs `kick` to wake.
     //
     // 2. `kick()` — wake the reader thread, by any means necessary
-    //    (per the kick contract). For local-socket: `shutdown(Read)`.
+    //    (per the kick contract). For local-socket: `shutdown(Both)`.
     //    For SSH: a watchdog that SIGTERMs the child if the EOF
     //    cascade hasn't reached the reader within the watchdog's
     //    grace period.
@@ -1350,6 +1416,27 @@ mod tests {
         }
     }
 
+    /// Test-only `Read` wrapper that flips an `AtomicBool` whenever
+    /// its inner reader is called. Used to synchronize the test
+    /// against "the reader thread has entered its read call" without
+    /// resorting to wall-clock sleeps.
+    ///
+    /// External wrapper by design: production types stay free of
+    /// test-only hooks. The signal fires on every `read` call (not
+    /// just the first); the test only cares about observing it
+    /// transition once, so cheap repeated stores are harmless.
+    struct EnteredReadSignaler<R: Read> {
+        inner: R,
+        entered: Arc<AtomicBool>,
+    }
+
+    impl<R: Read> Read for EnteredReadSignaler<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.entered.store(true, Ordering::Release);
+            self.inner.read(buf)
+        }
+    }
+
     /// Build an `AttachIo` with a kick that increments `counter`.
     fn pipe_io_with_counting_kick(socket: UnixStream, counter: Arc<AtomicUsize>) -> AttachIo {
         let reader = socket.try_clone().expect("try_clone reader");
@@ -1459,7 +1546,34 @@ mod tests {
     }
 
     #[test]
-    fn kick_wakes_blocked_reader_within_one_second() {
+    fn kick_wakes_blocked_reader() {
+        // What this test asserts: after `kick()` fires, the reader
+        // thread terminates. That is, the kick mechanism wakes a
+        // reader that would otherwise wait on the socket forever.
+        //
+        // What this test does NOT assert: a specific wake latency.
+        // The 5s join bound is intentionally generous so that CI
+        // scheduler jitter (heavily loaded VM hosts can stall threads
+        // for hundreds of ms cumulatively) does not turn a correctness
+        // test into a flake. The steady-state wake budget per
+        // `KickAwareUnixReader`'s contract is ~10ms (one poll cycle),
+        // but observing that bound under timing pressure is not what
+        // this test is for. **Do not tighten the 5s bound back toward
+        // 1s on the grounds that 5s is much larger than the
+        // steady-state budget** — the steady-state budget is not what
+        // is being tested. A real bug (kick mechanism is broken, the
+        // reader runs forever) hits this bound; CI jitter does not
+        // come close.
+        //
+        // Synchronization: rather than guessing how long the reader
+        // thread takes to start with `thread::sleep`, the test wraps
+        // the reader in an `EnteredReadSignaler` that flips an
+        // `AtomicBool` when the inner reader is first called. The
+        // test spins on that flag (bounded) so kick fires only once
+        // we know the reader is actively reading from the socket.
+        // No wall-clock guesses; no test-only paths in production
+        // types.
+
         // Hold the daemon side so the kick is the only thing that can
         // wake the reader. If we let the daemon side close, the reader
         // sees EOF naturally and we'd be testing nothing.
@@ -1471,11 +1585,25 @@ mod tests {
             kick,
         } = io;
 
-        let (tx, _rx) = mpsc::channel::<InstanceMessage>();
-        let reader_handle = thread::spawn(move || run_reader(reader, tx));
+        let entered = Arc::new(AtomicBool::new(false));
+        let signaling_reader: Box<dyn Read + Send> = Box::new(EnteredReadSignaler {
+            inner: reader,
+            entered: Arc::clone(&entered),
+        });
 
-        // Let the reader actually start blocking on its read.
-        thread::sleep(Duration::from_millis(50));
+        let (tx, _rx) = mpsc::channel::<InstanceMessage>();
+        let reader_handle = thread::spawn(move || run_reader(signaling_reader, tx));
+
+        // Wait for the reader to enter its read call. Bounded so a
+        // never-spawning reader fails the test instead of hanging.
+        let entry_deadline = Instant::now() + Duration::from_secs(1);
+        while !entered.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < entry_deadline,
+                "reader thread did not enter its read call within 1s",
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
 
         kick();
 
@@ -1487,8 +1615,8 @@ mod tests {
             let _ = done_tx.send(());
         });
         done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("reader thread must exit within 1s after kick");
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reader thread must exit within 5s after kick");
     }
 
     #[test]

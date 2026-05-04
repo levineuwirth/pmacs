@@ -19,11 +19,46 @@ pmacs.packages.install {
 }
 ```
 
-The shorthand string form is also accepted:
+The shorthand string form is also accepted (version pins only):
 
 ```lua
 pmacs.packages.install "github:owner/repo@^1.0.0"
 ```
+
+### Pin kinds: `version`, `branch`, `commit`
+
+Each install pins exactly one revision. The spec table chooses the
+pin via one of three mutually-exclusive fields:
+
+```lua
+-- Highest semver tag matching the constraint. Recommended default.
+pmacs.packages.install { "github:owner/repo", version = "^1.0.0" }
+
+-- HEAD of the named branch at install time. Not reproducible across
+-- time --- the upstream's branch HEAD moves --- so use sparingly.
+pmacs.packages.install { "github:owner/repo", branch = "main" }
+
+-- Exact commit. Reproducible: the same SHA always installs the same
+-- snapshot. Useful for pinning to a known-good state before the
+-- upstream has tagged a release.
+pmacs.packages.install { "github:owner/repo", commit = "abc1234" }
+```
+
+Mutual exclusion is enforced: a spec table with two of these fields
+errors with a "must specify exactly one" message naming every
+conflicting field. With none of the three, the pin defaults to
+`version = "*"` (any tag).
+
+The shorthand string form (`"address@^1.0"`) is **version-pin only**.
+Branch and commit pins must use the table form because there is no
+unambiguous sigil that distinguishes a branch named "main" from a
+malformed semver constraint without surprising users.
+
+For version pins, pmacs additionally cross-checks that the
+manifest's `version` field at the matched tag satisfies the user's
+constraint, catching upstreams whose tag and `pmacs.toml` disagree.
+Branch and commit pins skip that check (the user explicitly asked
+for that revision regardless of what the manifest says).
 
 ## `pmacs.packages.install_project { ... }` — project scope
 
@@ -105,12 +140,77 @@ field, since it has no implicit project context.
 The change will be relaxation, not breakage: code that explicitly
 passes `project_root` keeps working unchanged.
 
+## How `require` resolution works
+
+pmacs uses Lua's standard require machinery, augmented at install
+time:
+
+1. **Path-based search.** Each install prepends
+   `<install_root>/?.lua;<install_root>/?/init.lua` to
+   `package.path`. Packages with the conventional layout
+   (`<basename>.lua` or `<basename>/init.lua`) resolve via this
+   path with no further machinery — exactly as a hand-written Lua
+   project would.
+
+2. **Custom searcher.** When the path-based search misses (e.g.
+   the manifest declares `entry = "main.lua"` or `entry =
+   "lib/foo.lua"`), a custom searcher pmacs registered in
+   `package.searchers` (Lua 5.4) / `package.loaders` (LuaJIT and
+   Lua 5.1) consults the install roster, finds the matching
+   package by basename, and returns a loader for the exact entry
+   path declared in the manifest.
+
+The searcher iterates the roster in install order, most-recent
+first, so a project-scope install of a basename overrides a prior
+user-scope install of the same basename — mirroring the
+"newer-installs-prepend-to-path" semantics of the path-based
+search.
+
+When `require` cannot find a name through any searcher, the
+combined error message names every searcher's contribution; the
+custom searcher's contribution looks like:
+
+```
+no installed pmacs package named 'whatever'
+```
+
+so a user with a typo can spot it without digging into pmacs's
+internals.
+
 ## `pmacs.packages.installed()`
 
 Returns an array of records describing every package installed
 during the current init pass. Each record has the same shape as
-`install`'s return value (`name`, `version`, `commit`,
-`install_path`, `entry`, `scope`, `summary`).
+`install`'s return value:
+
+```lua
+{
+    name = "samplepkg",            -- manifest's name
+    version = "1.0.0",             -- manifest's declared version
+    tag = "v1.0.0",                -- resolution descriptor (see below)
+    commit = "abc...",             -- full SHA of the installed snapshot
+    install_path = "...",
+    entry = "...",
+    scope = "user",                -- or "project"
+    summary = "...",
+    pin = {                        -- structured user request
+        kind = "version",          -- or "branch" or "commit"
+        value = "^1.0.0",          -- echoes the spec field exactly
+    },
+}
+```
+
+The `tag` field is a stable, non-empty descriptor:
+
+- For version pins: the matched tag (`"v1.2.3"`).
+- For branch pins: `"branch:<name>"`.
+- For commit pins: `"commit:<short-sha>"`.
+
+The `pin` table is the source of truth for "what did the user
+request." The flat fields (`tag`, `version`, `commit`) record the
+resolution. They differ for branch/commit pins, where the resolved
+commit is what got installed but the user's request was the branch
+name or SHA prefix.
 
 ## `pmacs.packages.update(...)`
 

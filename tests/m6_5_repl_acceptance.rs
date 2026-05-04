@@ -30,8 +30,12 @@
 //!   marker is `"\n[<basename(argv[0])> exited with code N]\n"`.
 
 use pmacs::editor::EditorState;
+use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+static PUMP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Locate a shell binary for tests that require one. Returns the
 /// resolved path or `None` if the shell is neither at `PMACS_TEST_<NAME>`
@@ -80,6 +84,7 @@ fn run(chunk: &str) {
 /// `poll_until` pattern but routes through `tick_processes` so the M6.5
 /// after-tick contract is exercised end-to-end.
 fn run_with_pump(setup_chunk: &str, predicate_chunk: &str, timeout_ms: u64) {
+    let _guard = PUMP_TEST_LOCK.lock().expect("pump test lock");
     let mut editor = EditorState::new();
     editor
         .lua_host
@@ -328,7 +333,6 @@ fn m6_5_exit_marker_uses_basename_with_leading_newline() {
 /// running-state (process must have started before we type) and then
 /// on history matching the expected output.
 fn run_shell_smoke_test(shell_path: &std::path::Path, argv_extra: &[&str]) {
-    use std::fmt::Write as _;
     let mut argv_lua = String::new();
     write!(&mut argv_lua, r#""{}""#, shell_path.display()).unwrap();
     for a in argv_extra {

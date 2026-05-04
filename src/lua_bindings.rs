@@ -59,7 +59,8 @@ use crate::hook::{Hook, HookRegistry};
 use crate::key::{display_sequence, parse_sequence};
 use crate::keymap_stack::KeymapStack;
 use crate::packages::{
-    Address, Fetcher, InstallError, InstallScope, InstallSpec, InstalledPackage, Installer,
+    Address, Fetcher, InstallError, InstallPin, InstallScope, InstallSpec, InstalledPackage,
+    Installer,
 };
 use crate::protocol::{AttachTarget, AttachmentHandle, InstanceIdentity};
 use crate::rope::Range;
@@ -625,6 +626,21 @@ pub enum BindingError {
          positional address at [1] or an `address` field"
     )]
     InstallSpecMissingAddress,
+
+    /// A `pmacs.packages.install{...}` spec table specified more than
+    /// one of `version`, `branch`, `commit`. Each install must pin
+    /// exactly one revision; combining pin kinds is ambiguous (which
+    /// one wins?). The error message names every conflicting field
+    /// the spec actually carried.
+    #[error(
+        "pmacs.packages.install: spec must specify exactly one of \
+         `version`, `branch`, or `commit`; got: {fields}"
+    )]
+    InstallSpecConflictingPins {
+        /// Comma-separated list of the offending field names, in
+        /// the order they appeared on the table.
+        fields: String,
+    },
 
     /// `install_project` was called without an explicit
     /// `project_root` field. The CWD-fallback was removed because at
@@ -1744,6 +1760,7 @@ fn install_instance_show_binding(lua: &Lua, registry: &SharedRegistry) -> mlua::
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<Table> {
     let buffer = lua.create_table()?;
 
@@ -1873,7 +1890,7 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     let handle = StyleOverlayHandleLua {
                         spans: Arc::clone(&spans),
                     };
-                    attach_style_overlay_to_visible_windows(lua, id.0, spans);
+                    attach_style_overlay_to_visible_windows(lua, id.0, &spans);
                     Ok(handle)
                 },
             )?,
@@ -1885,7 +1902,7 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
             "attach_style_overlay",
             lua.create_function(
                 move |lua, (id, handle): (BufferIdLua, StyleOverlayHandleLua)| {
-                    attach_style_overlay_to_visible_windows(lua, id.0, Arc::clone(&handle.spans));
+                    attach_style_overlay_to_visible_windows(lua, id.0, &handle.spans);
                     Ok(())
                 },
             )?,
@@ -1912,7 +1929,7 @@ fn parse_mark_gravity(opts: Option<&Table>) -> mlua::Result<MarkGravity> {
 fn attach_style_overlay_to_visible_windows(
     lua: &Lua,
     buffer_id: BufferId,
-    spans: crate::overlay::SharedBufferStyleSpans,
+    spans: &crate::overlay::SharedBufferStyleSpans,
 ) {
     let Some(core) = lua.app_data_ref::<SharedCore>() else {
         return;
@@ -1921,7 +1938,7 @@ fn attach_style_overlay_to_visible_windows(
     for win in core.windows.values_mut() {
         if win.buffer_id == buffer_id {
             win.push_overlay(Box::new(crate::overlay::BufferStyleOverlay::new(
-                Arc::clone(&spans),
+                Arc::clone(spans),
             )));
         }
     }
@@ -2055,7 +2072,7 @@ fn install_packages_module(lua: &Lua) -> mlua::Result<Table> {
 }
 
 /// Register a custom searcher in `package.searchers` (Lua 5.4) /
-/// `package.loaders` (Lua 5.1, LuaJIT) that consults the
+/// `package.loaders` (Lua 5.1, `LuaJIT`) that consults the
 /// [`InstalledPackages`] roster at require time.
 ///
 /// # Why
@@ -2089,7 +2106,7 @@ fn install_packages_module(lua: &Lua) -> mlua::Result<Table> {
 ///
 /// # 5.1 vs 5.4 names
 ///
-/// Lua 5.1 / LuaJIT exposes the searcher list as `package.loaders`;
+/// Lua 5.1 / `LuaJIT` exposes the searcher list as `package.loaders`;
 /// Lua 5.2+ renamed it to `package.searchers`. Both are tables of
 /// functions with the same callback shape. We probe `searchers`
 /// first and fall back to `loaders` so the same code works under
@@ -2101,51 +2118,44 @@ fn register_package_searcher(lua: &Lua) -> mlua::Result<()> {
         None => package.get::<Table>("loaders")?,
     };
 
-    let searcher = lua.create_function(
-        |lua, name: String| -> mlua::Result<mlua::Value> {
-            let Some(slot) = lua.app_data_ref::<InstalledPackages>() else {
-                // Slot uninstalled (shouldn't happen under
-                // production wiring, but a defensive nil keeps
-                // require working under unusual test setups).
-                return Ok(mlua::Value::Nil);
-            };
-            let snapshot = slot.snapshot();
-            // Most-recent-first: a project-scope install of a
-            // basename overrides a prior user-scope install.
-            for pkg in snapshot.iter().rev() {
-                if pkg.install_basename() != name {
-                    continue;
-                }
-                let entry = pkg.entry_path();
-                let bytes = match std::fs::read(&entry) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        // Searcher convention: a non-function return
-                        // is treated as "not found, here's why" and
-                        // appended to the require error message.
-                        let s = lua.create_string(&format!(
-                            "\n\tinstalled pmacs package '{name}' \
-                             entry `{}` could not be read: {e}",
-                            entry.display()
-                        ))?;
-                        return Ok(mlua::Value::String(s));
-                    }
-                };
-                let chunk_name = format!("@{}", entry.display());
-                let func = lua
-                    .load(&bytes)
-                    .set_name(&chunk_name)
-                    .into_function()?;
-                return Ok(mlua::Value::Function(func));
+    let searcher = lua.create_function(|lua, name: String| -> mlua::Result<mlua::Value> {
+        let Some(slot) = lua.app_data_ref::<InstalledPackages>() else {
+            // Slot uninstalled (shouldn't happen under
+            // production wiring, but a defensive nil keeps
+            // require working under unusual test setups).
+            return Ok(mlua::Value::Nil);
+        };
+        let snapshot = slot.snapshot();
+        // Most-recent-first: a project-scope install of a
+        // basename overrides a prior user-scope install.
+        for pkg in snapshot.iter().rev() {
+            if pkg.install_basename() != name {
+                continue;
             }
-            // No installed package matches. Return a string so Lua
-            // appends our reason to the aggregate require error.
-            let s = lua.create_string(&format!(
-                "\n\tno installed pmacs package named '{name}'"
-            ))?;
-            Ok(mlua::Value::String(s))
-        },
-    )?;
+            let entry = pkg.entry_path();
+            let bytes = match std::fs::read(&entry) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Searcher convention: a non-function return
+                    // is treated as "not found, here's why" and
+                    // appended to the require error message.
+                    let s = lua.create_string(format!(
+                        "\n\tinstalled pmacs package '{name}' \
+                             entry `{}` could not be read: {e}",
+                        entry.display()
+                    ))?;
+                    return Ok(mlua::Value::String(s));
+                }
+            };
+            let chunk_name = format!("@{}", entry.display());
+            let func = lua.load(&bytes).set_name(&chunk_name).into_function()?;
+            return Ok(mlua::Value::Function(func));
+        }
+        // No installed package matches. Return a string so Lua
+        // appends our reason to the aggregate require error.
+        let s = lua.create_string(format!("\n\tno installed pmacs package named '{name}'"))?;
+        Ok(mlua::Value::String(s))
+    })?;
 
     // Append to the searcher list. Lua tables are 1-indexed; the
     // new searcher runs after every existing searcher (preload,
@@ -2184,23 +2194,66 @@ fn parse_lua_install_spec(value: &Value) -> mlua::Result<InstallSpec> {
                     }
                 },
             };
-            let version_str: String = t
-                .get::<String>("version")
-                .unwrap_or_else(|_| "*".to_string());
             let address = Address::parse(&address_str)
                 .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Address(e))))?;
-            let version = semver::VersionReq::parse(&version_str).map_err(|e| {
-                mlua::Error::external(BindingError::from(InstallError::InvalidVersionReq {
-                    value: version_str,
-                    cause: e.to_string(),
-                }))
-            })?;
-            Ok(InstallSpec { address, version })
+            let pin = parse_install_pin(t)?;
+            Ok(InstallSpec { address, pin })
         }
         other => Err(mlua::Error::external(BindingError::InstallSpecWrongType {
             got: other.type_name().to_string(),
         })),
     }
+}
+
+/// Parse the pin fields from a `pmacs.packages.install{...}` table.
+///
+/// A spec table may carry exactly one of:
+/// - `version = "<semver constraint>"` (e.g. `"^1.0.0"`, `"=2.3.4"`).
+/// - `branch = "<branch name>"` (e.g. `"main"`).
+/// - `commit = "<sha>"` (full or partial; the fetcher accepts either).
+///
+/// If none are present the pin defaults to `version = "*"` (any
+/// tag). If two or more are present the parse fails with
+/// [`BindingError::InstallSpecConflictingPins`] naming every field
+/// that conflicted.
+fn parse_install_pin(t: &Table) -> mlua::Result<InstallPin> {
+    let version: Option<String> = t.get::<Option<String>>("version").unwrap_or(None);
+    let branch: Option<String> = t.get::<Option<String>>("branch").unwrap_or(None);
+    let commit: Option<String> = t.get::<Option<String>>("commit").unwrap_or(None);
+    let mut present: Vec<&'static str> = Vec::new();
+    let version = version.filter(|s| !s.is_empty());
+    let branch = branch.filter(|s| !s.is_empty());
+    let commit = commit.filter(|s| !s.is_empty());
+    if version.is_some() {
+        present.push("version");
+    }
+    if branch.is_some() {
+        present.push("branch");
+    }
+    if commit.is_some() {
+        present.push("commit");
+    }
+    if present.len() > 1 {
+        return Err(mlua::Error::external(
+            BindingError::InstallSpecConflictingPins {
+                fields: present.join(", "),
+            },
+        ));
+    }
+    if let Some(b) = branch {
+        return Ok(InstallPin::Branch(b));
+    }
+    if let Some(c) = commit {
+        return Ok(InstallPin::Commit(c));
+    }
+    let value = version.unwrap_or_else(|| "*".to_string());
+    let req = semver::VersionReq::parse(&value).map_err(|e| {
+        mlua::Error::external(BindingError::from(InstallError::InvalidVersionReq {
+            value,
+            cause: e.to_string(),
+        }))
+    })?;
+    Ok(InstallPin::Version(req))
 }
 
 /// Read the required `project_root = "..."` field from the table form
@@ -2374,6 +2427,15 @@ fn installed_package_to_lua(lua: &Lua, pkg: &InstalledPackage) -> mlua::Result<T
         },
     )?;
     t.set("summary", pkg.manifest.summary.as_str())?;
+    // Structured pin info: `{ kind = "version"|"branch"|"commit", value = <user-supplied string> }`.
+    // Existing flat fields (`tag`, `version`, `commit`) remain
+    // populated for backward-compatible introspection; the `pin`
+    // table is the source of truth for "what did the user request",
+    // distinct from "what got resolved".
+    let pin_table = lua.create_table_with_capacity(0, 2)?;
+    pin_table.set("kind", pkg.pin.kind())?;
+    pin_table.set("value", pkg.pin.value())?;
+    t.set("pin", pin_table)?;
     Ok(t)
 }
 
