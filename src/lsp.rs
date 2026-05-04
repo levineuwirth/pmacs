@@ -1088,6 +1088,15 @@ impl LspManager {
             ProcessEventKind::Stderr(bytes) => {
                 self.push_event(sid, ev.at, LspEventKind::Stderr(bytes));
             }
+            ProcessEventKind::Ansi(_) => {
+                self.push_event(
+                    sid,
+                    ev.at,
+                    LspEventKind::ProtocolError {
+                        message: "supervisor emitted ANSI events for pipe-mode LSP process".into(),
+                    },
+                );
+            }
             ProcessEventKind::Exited { code } => {
                 self.on_exit(sid, ev.at, format!("exit code {code}"), code == 0);
             }

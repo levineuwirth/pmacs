@@ -45,6 +45,53 @@ Release-only perf gates (M5 keystroke-to-render, M6 ingest/RSS/cancel
 and scrollback navigation/search) are `#[ignore]`'d during normal
 test runs and exercised in CI under dedicated jobs.
 
+## Runtime requirements
+
+The pmacs binary depends on a small set of POSIX command-line tools
+at runtime. The dependency exists because the project enforces
+`#![forbid(unsafe_code)]` everywhere, including in tests; calls that
+would otherwise need `unsafe` (PTY raw-mode setup, signal name
+translation) are routed through trampolines that exec these tools.
+
+- **`/bin/sh`** (POSIX shell). Used for the PTY raw-mode trampoline:
+  `/bin/sh -c 'stty raw -echo </dev/tty 2>/dev/null; exec "$@"' --`
+  configures the controlling TTY's line discipline before exec'ing
+  the actual subprocess. Required by the REPL package and any other
+  caller that spawns a process in raw PTY mode.
+- **`stty`** (coreutils). The line-discipline configurator invoked
+  by the trampoline above.
+- **`coreutils`** more broadly. The M6 process-supervisor tests
+  spawn `cat`, `yes`, and `which`; absent these the test suite (not
+  the editor itself) degrades. `which` is also used by the M6.5
+  shell-locator helper to find `bash` / `zsh` / `fish` for
+  per-shell integration tests. The M7.2 fetcher's timeout test
+  uses `sleep`.
+- **`git`** (added in M7.2). Required for any package operation:
+  the package fetcher shells out to `git` to clone, fetch, and
+  resolve refs, with a deterministic environment
+  (`GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_NOSYSTEM=1`, `LC_ALL=C`,
+  inherited `GIT_*` variables stripped). Authentication for
+  private repositories rides the user's existing git configuration
+  (credential helpers, SSH agent), so packagers do not need a
+  separate auth story. Pre-M7 builds without package operations
+  do not need git.
+- **`tar`** (added in M7.3). Required for `pmacs.packages.install`:
+  the installer materializes a snapshot via `git archive --format=tar`
+  piped into `tar -x -C <dest>`, which keeps the on-disk install
+  directory self-contained (no `.git` linkage back to the bare
+  cache, no working-tree state). GNU tar and bsdtar both work.
+  Pre-M7 builds and any path that doesn't call
+  `pmacs.packages.install{...}` do not need tar.
+
+Distribution packagers should ensure these are runtime dependencies
+of the pmacs package. On a typical Linux distribution, busybox or
+GNU coreutils plus a shell of any kind satisfies the requirement; on
+macOS the system shell and `/usr/bin/stty` are both standard.
+
+The Lua VM (LuaJIT or Lua 5.4) is statically vendored via `mlua`'s
+`vendored` feature, so there is no external Lua dependency at
+runtime.
+
 ## What v0.1 ships with
 
 - **Editor core.** Persistent rope with O(log N) edits and snapshots;

@@ -41,8 +41,13 @@
 //! mapping out keeps overlays cheap and stateless. A future
 //! buffer-coord overlay would compose on top of these the same way.
 
+use std::sync::{Arc, Mutex};
+
+use unicode_width::UnicodeWidthChar;
+
 use crate::buffer::Buffer;
 use crate::cell::{Cell, CellCoord, CellGrid, Style};
+use crate::rope::Edit;
 use crate::view::{View, Viewport};
 
 // ---------------------------------------------------------------------------
@@ -149,6 +154,196 @@ pub fn merge_styles(base: Style, overlay: Style) -> Style {
             overlay.underline
         },
         reverse: base.reverse || overlay.reverse,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BufferStyleOverlay
+// ---------------------------------------------------------------------------
+
+/// A style annotation expressed in buffer byte coordinates.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BufferStyleSpan {
+    /// First byte covered by the style.
+    pub start: u64,
+    /// Byte one past the styled range.
+    pub end: u64,
+    /// Style to merge over the base text.
+    pub style: Style,
+}
+
+/// Shared span store used by Lua handles and render overlays.
+pub type SharedBufferStyleSpans = Arc<Mutex<Vec<BufferStyleSpan>>>;
+
+/// View that renders buffer-byte style annotations.
+///
+/// Unlike [`StyleSpanOverlay`], this overlay stores byte ranges rather
+/// than viewport cell ranges. That is the right shape for stream
+/// consumers such as the REPL: ANSI SGR applies to bytes as they land
+/// in the rope, and render maps the surviving ranges into visible cells.
+#[derive(Clone, Debug)]
+pub struct BufferStyleOverlay {
+    spans: SharedBufferStyleSpans,
+}
+
+impl BufferStyleOverlay {
+    /// Construct an overlay backed by `spans`.
+    #[must_use]
+    pub fn new(spans: SharedBufferStyleSpans) -> Self {
+        Self { spans }
+    }
+}
+
+impl View for BufferStyleOverlay {
+    fn on_edit(&mut self, _buf: &Buffer, edit: &Edit) -> Result<(), crate::buffer::BufferError> {
+        let old_start = edit.range.start;
+        let old_end = edit.range.end;
+        let old_len = old_end - old_start;
+        let new_len = edit.inserted_len;
+        let mut spans = self.spans.lock().expect("style spans mutex poisoned");
+        let mut adjusted = Vec::with_capacity(spans.len());
+        for mut span in spans.drain(..) {
+            if span.end <= old_start {
+                adjusted.push(span);
+            } else if span.start >= old_end {
+                span.start = shift_pos(span.start, old_end, old_len, new_len);
+                span.end = shift_pos(span.end, old_end, old_len, new_len);
+                adjusted.push(span);
+            }
+            // Overlapping spans are dropped. REPL style spans are append-only
+            // and scrollback truncation deletes whole old blocks, so a
+            // conservative drop is simpler and avoids half-styled fragments.
+        }
+        *spans = adjusted;
+        Ok(())
+    }
+
+    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+        let spans = self
+            .spans
+            .lock()
+            .expect("style spans mutex poisoned")
+            .clone();
+        if spans.is_empty() {
+            return;
+        }
+        let line_offsets = compute_line_offsets(buf);
+        if line_offsets.is_empty() {
+            return;
+        }
+        let start_line = line_at_offset(&line_offsets, viewport.buffer_start);
+        for span in spans {
+            render_buffer_style_span(buf, &line_offsets, start_line, viewport, cells, span);
+        }
+    }
+}
+
+fn shift_pos(pos: u64, old_end: u64, old_len: u64, new_len: u64) -> u64 {
+    if new_len >= old_len {
+        pos + (new_len - old_len)
+    } else {
+        pos.saturating_sub(old_end)
+            .saturating_add(old_end - (old_len - new_len))
+    }
+}
+
+fn compute_line_offsets(buf: &Buffer) -> Vec<u64> {
+    let mut offsets = vec![0];
+    let rope = buf.snapshot_rope();
+    let mut pos = 0;
+    let len = rope.len();
+    for chunk in rope.chunks(0, len) {
+        for (i, b) in chunk.iter().enumerate() {
+            if *b == b'\n' {
+                offsets.push(pos + i as u64 + 1);
+            }
+        }
+        pos += chunk.len() as u64;
+    }
+    offsets
+}
+
+fn line_at_offset(line_offsets: &[u64], offset: u64) -> usize {
+    match line_offsets.binary_search(&offset) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    }
+}
+
+fn line_end(buf: &Buffer, line_offsets: &[u64], line: usize) -> u64 {
+    let start = line_offsets[line];
+    let raw_end = line_offsets.get(line + 1).copied().unwrap_or(buf.len());
+    if line + 1 < line_offsets.len() && raw_end > start {
+        raw_end - 1
+    } else {
+        raw_end
+    }
+}
+
+fn display_col_for_range(buf: &Buffer, start: u64, end: u64) -> u32 {
+    if end <= start {
+        return 0;
+    }
+    let mut bytes = vec![0u8; (end - start) as usize];
+    buf.snapshot_rope().slice(start, end, &mut bytes);
+    while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
+        bytes.pop();
+    }
+    let Ok(s) = std::str::from_utf8(&bytes) else {
+        return 0;
+    };
+    let mut col = 0;
+    for ch in s.chars() {
+        let width = if ch == '\t' {
+            8 - (col % 8)
+        } else {
+            UnicodeWidthChar::width(ch).unwrap_or(0) as u32
+        };
+        col += width;
+    }
+    col
+}
+
+fn render_buffer_style_span(
+    buf: &Buffer,
+    line_offsets: &[u64],
+    start_line: usize,
+    viewport: Viewport,
+    cells: &mut CellGrid<'_>,
+    span: BufferStyleSpan,
+) {
+    if span.start >= span.end {
+        return;
+    }
+    let first_line = line_at_offset(line_offsets, span.start);
+    let last_line = line_at_offset(line_offsets, span.end.saturating_sub(1));
+    for line in first_line..=last_line {
+        if line < start_line {
+            continue;
+        }
+        let row_offset = (line - start_line) as u32;
+        if row_offset >= viewport.cell_size.rows {
+            break;
+        }
+        let line_start = line_offsets[line];
+        let line_end = line_end(buf, line_offsets, line);
+        let style_start = span.start.max(line_start).min(line_end);
+        let style_end = span.end.min(line_end);
+        if style_start >= style_end {
+            continue;
+        }
+        let start_col = display_col_for_range(buf, line_start, style_start);
+        let end_col = display_col_for_range(buf, line_start, style_end);
+        let start_col = start_col.min(viewport.cell_size.cols);
+        let end_col = end_col.min(viewport.cell_size.cols);
+        for col in start_col..end_col {
+            let coord = CellCoord::new(
+                viewport.cell_origin.row + row_offset,
+                viewport.cell_origin.col + col,
+            );
+            let cell = cells.at(coord);
+            cell.style = merge_styles(cell.style, span.style);
+        }
     }
 }
 

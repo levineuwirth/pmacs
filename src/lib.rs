@@ -62,6 +62,7 @@ pub mod lua_bindings;
 pub mod message_bus;
 pub mod minibuffer;
 pub mod overlay;
+pub mod packages;
 pub mod process;
 pub mod project;
 pub mod project_index;

@@ -182,8 +182,20 @@ impl Frontend {
         // literal `/` with CONTROL instead of the byte-roulette legacy
         // protocols produce. Terminals that don't ignore the CSI; we
         // push the flag anyway so the Pop on teardown is balanced.
-        let kitty_flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+        //
+        // We deliberately do NOT push `REPORT_ALL_KEYS_AS_ESCAPE_CODES`.
+        // That flag tells the terminal to send every key (including
+        // printable letters) as a CSI sequence carrying the unshifted
+        // base key plus modifier bits, e.g. `Shift+a` arrives as
+        // `Char('a') + SHIFT` rather than `Char('A')`. Pmacs has no
+        // keyboard-layout knowledge to translate `9 + SHIFT` into `(`
+        // on a US layout (or `É` on a French layout, etc.); the
+        // terminal does. Letting the terminal apply layout-aware shift
+        // translation is correct; receiving the post-shift character
+        // is what every typing-driven path (self-insert, minibuffer,
+        // search) expects. `DISAMBIGUATE_ESCAPE_CODES` alone still
+        // gives us the C-i/Tab and C-m/Enter disambiguation we want.
+        let kitty_flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
         if queue!(me.out, PushKeyboardEnhancementFlags(kitty_flags)).is_ok() {
             me.keyboard_enhancement = true;
         }

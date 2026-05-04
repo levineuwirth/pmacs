@@ -44,6 +44,47 @@ cmd { name = "buffer.delete-backward", description = "Delete the codepoint befor
       fn = function() ed.backspace() end }
 cmd { name = "buffer.delete-forward",  description = "Delete the codepoint at the cursor.",
       fn = function() ed.delete_forward() end }
+cmd { name = "buffer.delete-word-backward",
+      description = "Delete from the cursor back to the start of the previous word.",
+      fn = function() ed.delete_word_backward() end }
+cmd { name = "buffer.delete-word-forward",
+      description = "Delete from the cursor forward to the end of the next word.",
+      fn = function() ed.delete_word_forward() end }
+
+-- Selection-extending motion (CUA-style Shift+motion). Each select-*
+-- command anchors at the current cursor (if no region is already
+-- active) and then performs the underlying motion. Plain motion
+-- commands are unchanged: they preserve existing selections.
+local function ensure_anchor()
+  if ed.region() == nil then
+    ed.begin_selection(ed.cursor())
+  end
+end
+
+cmd { name = "cursor.select-left",
+      description = "Extend selection by one codepoint left.",
+      fn = function() ensure_anchor(); ed.move_left() end }
+cmd { name = "cursor.select-right",
+      description = "Extend selection by one codepoint right.",
+      fn = function() ensure_anchor(); ed.move_right() end }
+cmd { name = "cursor.select-up",
+      description = "Extend selection upward by one line.",
+      fn = function() ensure_anchor(); ed.move_up() end }
+cmd { name = "cursor.select-down",
+      description = "Extend selection downward by one line.",
+      fn = function() ensure_anchor(); ed.move_down() end }
+cmd { name = "cursor.select-word-left",
+      description = "Extend selection by one word left.",
+      fn = function() ensure_anchor(); ed.move_word_left() end }
+cmd { name = "cursor.select-word-right",
+      description = "Extend selection by one word right.",
+      fn = function() ensure_anchor(); ed.move_word_right() end }
+cmd { name = "cursor.select-line-start",
+      description = "Extend selection to start of line.",
+      fn = function() ensure_anchor(); ed.move_line_start() end }
+cmd { name = "cursor.select-line-end",
+      description = "Extend selection to end of line.",
+      fn = function() ensure_anchor(); ed.move_line_end() end }
 cmd { name = "buffer.newline",         description = "Insert a newline at the cursor.",
       fn = function() ed.insert_char(10) end }
 cmd { name = "buffer.tab",             description = "Insert a tab at the cursor.",

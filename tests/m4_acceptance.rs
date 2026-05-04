@@ -3283,3 +3283,88 @@ fn m4_12_default_bundle_after_load_robust_to_missing_server() {
         .unwrap();
     let _ = saw_error;
 }
+
+// ---------------------------------------------------------------------------
+// Reviewer-flagged item 2: pmacs.project.set_search_boundary
+// ---------------------------------------------------------------------------
+//
+// End-to-end acceptance for the search-boundary clamp on the Lua
+// surface. The Rust-side semantics are unit-tested in
+// `src/project.rs::tests::search_boundary_*`; these tests cover the
+// Lua function-call surface and the round-trip through the
+// `pmacs.project.detect` binding.
+
+#[test]
+fn project_set_search_boundary_clamps_lua_detect_call() {
+    use pmacs::editor::EditorState;
+
+    // Stage an outer .git that detection would normally find, plus
+    // a workspace dir under it with a file but no marker.
+    let outer = tempfile::tempdir().expect("outer");
+    std::fs::create_dir_all(outer.path().join(".git")).expect("outer .git");
+    let workspace = outer.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("workspace/src");
+    let f = workspace.join("src/main.rs");
+    std::fs::write(&f, b"").expect("touch file");
+
+    let state = EditorState::new();
+    let lua = state.lua_host.lua();
+    let workspace_str = workspace.display().to_string();
+    let f_str = f.display().to_string();
+
+    let (without_boundary, with_boundary): (Option<String>, Option<String>) = lua
+        .load(format!(
+            "
+            -- Without a boundary, detect walks up to the outer .git.
+            local before = pmacs.project.detect('{f_str}')
+            -- Clamp the walk to the workspace dir; the outer marker is now invisible.
+            pmacs.project.set_search_boundary('{workspace_str}')
+            local after = pmacs.project.detect('{f_str}')
+            return before and before.kind or nil, after and after.kind or nil
+            "
+        ))
+        .eval()
+        .expect("detect sequence");
+    assert_eq!(
+        without_boundary.as_deref(),
+        Some("git"),
+        "without the boundary, the outer .git is detected"
+    );
+    assert!(
+        with_boundary.is_none(),
+        "with the boundary clamping at the workspace dir, the outer marker is invisible: {with_boundary:?}"
+    );
+}
+
+#[test]
+fn project_search_boundary_round_trips_via_lua() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let dir_str = dir.path().display().to_string();
+    let state = EditorState::new();
+    let lua = state.lua_host.lua();
+
+    let (initial, after_set, after_clear): (Option<String>, Option<String>, Option<String>) = lua
+        .load(format!(
+            "
+            local before = pmacs.project.search_boundary()
+            pmacs.project.set_search_boundary('{dir_str}')
+            local after = pmacs.project.search_boundary()
+            pmacs.project.set_search_boundary(nil)
+            local cleared = pmacs.project.search_boundary()
+            return before, after, cleared
+            "
+        ))
+        .eval()
+        .expect("round trip");
+    assert!(initial.is_none(), "default boundary is nil");
+    assert!(
+        after_set.is_some(),
+        "set_search_boundary(path) must surface as a non-nil read"
+    );
+    assert!(
+        after_clear.is_none(),
+        "set_search_boundary(nil) must clear back to nil"
+    );
+}

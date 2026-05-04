@@ -38,9 +38,61 @@
 //! when overlays touch only the cells they declare (see
 //! `composition_overhead_under_ten_percent` in `editor.rs`).
 
-use crate::buffer::{Buffer, BufferError, EditOp};
+use crate::buffer::{Buffer, BufferError, BufferId, EditOp};
 use crate::cell::{CellCoord, CellGrid, CellSize};
 use crate::rope::{Edit, Position};
+
+// ---------------------------------------------------------------------------
+// InterceptContext (T M7.4)
+// ---------------------------------------------------------------------------
+
+/// Snapshot of the buffer's identity and shape, passed to
+/// [`View::intercept_edit`] in lieu of a `&Buffer` reference.
+///
+/// # Why a snapshot, not a `&Buffer`
+///
+/// Pre-M7.4, `intercept_edit` received `&Buffer`. The Lua-bindings
+/// layer held the registry's `RefCell::borrow_mut` for the full
+/// duration of the call, so an intercept body that re-entered
+/// `pmacs.buffer.X` synchronously hit a recursive-borrow error
+/// (`BindingError::Reentrant`); the M6.10 audit fix surfaced this as
+/// a typed error rather than a panic but did not enable the re-entry.
+///
+/// M7.4 splits the edit flow into three phases. Phase 2 runs the
+/// intercept chain with the registry borrow released, so an intercept
+/// body may call back into `pmacs.buffer.X` on any buffer. The cost:
+/// the intercept can no longer hold a `&Buffer` (the buffer might be
+/// mutated by the re-entrant call). Instead, we hand it an
+/// `InterceptContext` snapshot taken at the start of the edit; the
+/// fields cover every read the intercept needs (`buf_id` for routing,
+/// `buf_len` for clamping positions, `buf_name` for diagnostic
+/// messages, `revision` for "did this snapshot drift?" checks).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterceptContext {
+    /// The buffer's identifier. Stable across the edit.
+    pub buf_id: BufferId,
+    /// Buffer length in bytes at the moment the snapshot was taken.
+    pub buf_len: u64,
+    /// Buffer name at the moment the snapshot was taken.
+    pub buf_name: String,
+    /// Buffer revision at the moment the snapshot was taken. Useful
+    /// for re-entrant cross-buffer edits to detect whether the parent
+    /// buffer was mutated during their lifetime.
+    pub revision: u64,
+}
+
+impl InterceptContext {
+    /// Build a context snapshot from a buffer reference.
+    #[must_use]
+    pub fn snapshot(buf: &Buffer) -> Self {
+        Self {
+            buf_id: buf.id(),
+            buf_len: buf.len(),
+            buf_name: buf.name().to_string(),
+            revision: buf.revision(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Coordinates
@@ -115,10 +167,17 @@ pub trait View {
     /// view that translates filename edits into rename operations).
     /// Returning an error rejects the edit.
     ///
+    /// The view receives a [`InterceptContext`] snapshot of the
+    /// buffer's identity and shape at the moment the edit began
+    /// (T M7.4). Intercept bodies needing live state on another
+    /// buffer can re-enter `pmacs.buffer.X` (or the in-process
+    /// equivalent); the registry borrow is released for the duration
+    /// of this call.
+    ///
     /// Default: pass through.
     fn intercept_edit<'a>(
         &mut self,
-        _buf: &Buffer,
+        _ctx: &InterceptContext,
         op: EditOp<'a>,
     ) -> Result<EditOp<'a>, BufferError> {
         Ok(op)

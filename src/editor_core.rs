@@ -662,6 +662,59 @@ impl EditorCore {
         }
     }
 
+    /// Delete from the cursor backward to the start of the previous
+    /// word. The CUA-style `Ctrl+Backspace`. No-op at start-of-buffer.
+    /// Mirrors [`Self::backspace`] but the deleted range is the gap
+    /// between the cursor and where [`Self::move_word_left`] would
+    /// land.
+    pub fn delete_word_backward(&mut self) {
+        self.active_window_mut().goal_col = None;
+        let cursor = self.active_window().cursor;
+        if cursor == 0 {
+            return;
+        }
+        let new = {
+            let id = self.active_buffer_id();
+            let reg = self.registry.borrow();
+            let Ok(buffer) = reg.get(id) else { return };
+            backward_word(buffer, cursor)
+        };
+        if new == cursor {
+            return;
+        }
+        let range = Range::new(new, cursor);
+        if let Err(e) = self.apply_active_edit(EditOp::Delete { range }) {
+            self.status = format!("delete failed: {e}");
+            return;
+        }
+        self.active_window_mut().cursor = new;
+    }
+
+    /// Delete from the cursor forward to the end of the next word. The
+    /// CUA-style `Ctrl+Delete`. No-op at end-of-buffer. Mirrors
+    /// [`Self::delete_forward`] over the gap from the cursor to where
+    /// [`Self::move_word_right`] would land.
+    pub fn delete_word_forward(&mut self) {
+        self.active_window_mut().goal_col = None;
+        let cursor = self.active_window().cursor;
+        let id = self.active_buffer_id();
+        let new = {
+            let reg = self.registry.borrow();
+            let Ok(buffer) = reg.get(id) else { return };
+            if cursor >= buffer.len() {
+                return;
+            }
+            forward_word(buffer, cursor)
+        };
+        if new == cursor {
+            return;
+        }
+        let range = Range::new(cursor, new);
+        if let Err(e) = self.apply_active_edit(EditOp::Delete { range }) {
+            self.status = format!("delete failed: {e}");
+        }
+    }
+
     /// Undo the most recent edit on the active buffer; clamp the
     /// active window's cursor to the new length and notify all
     /// windows on this buffer.
@@ -1208,6 +1261,47 @@ mod tests {
         s.active_window_mut().cursor = 3;
         s.delete_forward();
         assert_eq!(s.active_buffer_len(), 3);
+    }
+
+    #[test]
+    fn delete_word_backward_removes_previous_word_to_cursor() {
+        // Cursor sits at end-of-buffer; deletes back through "world".
+        let mut s = from_bytes(b"hello world");
+        s.active_window_mut().cursor = 11;
+        s.delete_word_backward();
+        // `backward_word` lands at the start of the word ("world"
+        // begins at byte 6), so we delete bytes 6..11.
+        assert_eq!(s.cursor(), 6);
+        assert_eq!(s.active_buffer_len(), 6);
+    }
+
+    #[test]
+    fn delete_word_backward_at_start_of_buffer_is_noop() {
+        let mut s = from_bytes(b"hello");
+        s.active_window_mut().cursor = 0;
+        s.delete_word_backward();
+        assert_eq!(s.cursor(), 0);
+        assert_eq!(s.active_buffer_len(), 5);
+    }
+
+    #[test]
+    fn delete_word_forward_removes_next_word_from_cursor() {
+        let mut s = from_bytes(b"hello world");
+        s.active_window_mut().cursor = 0;
+        s.delete_word_forward();
+        // `forward_word` lands at the end of the first word (byte 5);
+        // delete bytes 0..5. Cursor stays where it was.
+        assert_eq!(s.cursor(), 0);
+        assert_eq!(s.active_buffer_len(), 6);
+    }
+
+    #[test]
+    fn delete_word_forward_at_end_of_buffer_is_noop() {
+        let mut s = from_bytes(b"hello");
+        s.active_window_mut().cursor = 5;
+        s.delete_word_forward();
+        assert_eq!(s.cursor(), 5);
+        assert_eq!(s.active_buffer_len(), 5);
     }
 
     #[test]

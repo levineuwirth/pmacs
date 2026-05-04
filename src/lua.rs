@@ -33,8 +33,9 @@ pub const ERRORS_BUFFER_NAME: &str = "*errors*";
 use crate::command::CommandRegistry;
 use crate::keymap_stack::KeymapStack;
 use crate::lua_bindings::{
-    self, CurrentAttachmentSlot, InitCompleteFlag, LocalInstanceInfo, RequestedAttach,
-    SharedCommandRegistry, SharedCore, SharedHookRegistry, SharedKeymapStack, SharedRegistry,
+    self, CurrentAttachmentSlot, InitCompleteFlag, LocalInstanceInfo, PackageInstallOverride,
+    RequestedAttach, SharedCommandRegistry, SharedCore, SharedHookRegistry, SharedKeymapStack,
+    SharedRegistry,
 };
 use crate::protocol::{AttachTarget, AttachmentHandle, InstanceIdentity};
 
@@ -274,6 +275,17 @@ impl LuaHost {
     /// `source` is an optional label (file path, chunk name) used in
     /// diagnostics; Lua reports it back in stack traces.
     pub fn eval(&mut self, source: Option<&str>, chunk: &str) -> mlua::Result<Value> {
+        // Push the source label into the per-Lua app-data slot so
+        // bindings that need the chunk's location (e.g.,
+        // `pmacs.packages.install_project`'s relative-path
+        // resolution) can read it back. This is the only way to
+        // recover chunk source from a Rust callback in pmacs, since
+        // the Lua state is built without the `debug` library
+        // (`forbid(unsafe_code)` rules out `Lua::unsafe_new`).
+        self.lua
+            .set_app_data(crate::lua_bindings::CurrentEvalSource(
+                source.map(str::to_owned),
+            ));
         let mut loader = self.lua.load(chunk);
         if let Some(name) = source {
             loader = loader.set_name(name);
@@ -436,6 +448,17 @@ impl LuaHost {
         self.lua
             .app_data_ref::<CurrentAttachmentSlot>()
             .and_then(|s| s.get())
+    }
+
+    /// Install a [`PackageInstallOverride`] so subsequent
+    /// `pmacs.packages.install{...}` calls redirect their cache and
+    /// install roots away from `$XDG_*` defaults.
+    ///
+    /// Production code does not call this. Tests use it because the
+    /// project's `forbid(unsafe_code)` rules out `std::env::set_var`
+    /// (which has been `unsafe` since Rust 2024).
+    pub fn set_package_install_override(&self, override_: PackageInstallOverride) {
+        self.lua.set_app_data(override_);
     }
 
     /// Override the instance name reported by `pmacs.instance.identity()`

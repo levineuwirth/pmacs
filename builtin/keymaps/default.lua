@@ -52,6 +52,40 @@ bind("C-d", "buffer.delete-forward")
 bind("RET", "buffer.newline")
 bind("TAB", "buffer.tab")
 
+-- CUA-style word-level deletion (the same shortcuts users expect from
+-- IDEs, browsers, terminals on Linux/Windows). C-BS deletes back to
+-- the start of the previous word; C-DEL deletes forward through the
+-- next word. Emacs's classic M-BS and M-d remain bound below.
+--
+-- Why we also bind C-h: most terminals (anything not implementing the
+-- kitty keyboard protocol) cannot disambiguate Ctrl+Backspace from
+-- Ctrl+H — both legacy paths produce byte 0x08, which crossterm
+-- surfaces as `Char('h') + CONTROL`. Binding C-h to the same command
+-- makes the shortcut work on legacy terminals too. C-h was free
+-- (pmacs does not use it as a help prefix); users wanting Emacs's
+-- help-prefix can override.
+bind("C-BS",  "buffer.delete-word-backward")
+bind("C-h",   "buffer.delete-word-backward")
+bind("C-DEL", "buffer.delete-word-forward")
+bind("M-BS",  "buffer.delete-word-backward")
+bind("M-d",   "buffer.delete-word-forward")
+
+-- CUA-style Shift+motion selection. Each Shift+arrow extends a
+-- selection from the cursor (anchoring at the current position if no
+-- region is yet active). Ctrl+Shift+Left/Right extend by whole words;
+-- Shift+Home/End extend to line edges. Plain motion (without Shift)
+-- is unchanged --- it preserves any existing selection rather than
+-- dropping it (Emacs-flavored default; users who want strict-CUA
+-- "drop-on-plain-motion" can rebind their motion commands).
+bind("S-<left>",   "cursor.select-left")
+bind("S-<right>",  "cursor.select-right")
+bind("S-<up>",     "cursor.select-up")
+bind("S-<down>",   "cursor.select-down")
+bind("S-<home>",   "cursor.select-line-start")
+bind("S-<end>",    "cursor.select-line-end")
+bind("C-S-<left>",  "cursor.select-word-left")
+bind("C-S-<right>", "cursor.select-word-right")
+
 -- Undo / redo ----------------------------------------------------------------
 --
 -- Multiple undo bindings exist because terminals translate Ctrl+/

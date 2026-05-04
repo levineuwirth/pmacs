@@ -201,6 +201,28 @@ pub fn default_markers() -> Vec<ProjectMarker> {
 /// search begins at its parent.
 #[must_use]
 pub fn detect_project(start: &Path, markers: &[ProjectMarker]) -> Option<(PathBuf, ProjectKind)> {
+    walk_for_marker(start, markers, None)
+}
+
+/// Like [`detect_project`], but halts the upward walk after examining
+/// `stop_root`. Used by tests so a stray marker in a temp-dir's
+/// ancestor (e.g. a developer's `/tmp/.git`) can't leak into a
+/// fixture that lives below it. The walk still examines `stop_root`
+/// itself; only its parent and beyond are skipped.
+#[must_use]
+pub fn detect_project_within(
+    start: &Path,
+    markers: &[ProjectMarker],
+    stop_root: &Path,
+) -> Option<(PathBuf, ProjectKind)> {
+    walk_for_marker(start, markers, Some(stop_root))
+}
+
+fn walk_for_marker(
+    start: &Path,
+    markers: &[ProjectMarker],
+    stop_root: Option<&Path>,
+) -> Option<(PathBuf, ProjectKind)> {
     let start_dir: &Path = if start.is_file() {
         start.parent().unwrap_or(start)
     } else {
@@ -209,6 +231,11 @@ pub fn detect_project(start: &Path, markers: &[ProjectMarker]) -> Option<(PathBu
     for ancestor in start_dir.ancestors() {
         if let Some(kind) = match_marker(ancestor, markers) {
             return Some((ancestor.to_path_buf(), kind));
+        }
+        if let Some(stop) = stop_root {
+            if ancestor == stop {
+                break;
+            }
         }
     }
     None
@@ -259,6 +286,16 @@ pub struct Workspace {
     by_root: HashMap<PathBuf, ProjectId>,
     active: Option<ProjectId>,
     markers: Vec<ProjectMarker>,
+    /// Optional clamp on [`Self::detect`]'s upward marker walk.
+    /// When `None` (the default), detection walks ancestors all the
+    /// way to the filesystem root (matching `git rev-parse
+    /// --show-toplevel` semantics). When `Some(boundary)`, the walk
+    /// halts after examining `boundary`; ancestors above `boundary`
+    /// are not consulted.
+    ///
+    /// Stored canonicalized so the symlinked-workspace case behaves
+    /// predictably (see [`Self::set_search_boundary`]).
+    search_boundary: Option<PathBuf>,
 }
 
 impl Default for Workspace {
@@ -268,7 +305,8 @@ impl Default for Workspace {
 }
 
 impl Workspace {
-    /// Empty workspace with the [`default_markers`] rule set.
+    /// Empty workspace with the [`default_markers`] rule set and no
+    /// search boundary (detection walks to filesystem root).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -276,6 +314,7 @@ impl Workspace {
             by_root: HashMap::new(),
             active: None,
             markers: default_markers(),
+            search_boundary: None,
         }
     }
 
@@ -291,11 +330,54 @@ impl Workspace {
         &self.markers
     }
 
-    /// Detect the project root for `file_path`. Convenience wrapper
-    /// around [`detect_project`] using the workspace's marker rules.
+    /// Set (or clear) the upward-walk boundary for [`Self::detect`].
+    ///
+    /// `Some(path)` clamps detection so it never examines ancestors
+    /// above `path`. `None` restores the default walk-to-filesystem-root
+    /// behavior. Use case: a user whose code lives under `~/code` can
+    /// set `search_boundary = "~/code"` in `init.lua` so a stray
+    /// marker higher up the tree (e.g. `/tmp/.git`, an orphaned `.git`
+    /// in `~`) cannot capture unrelated files.
+    ///
+    /// # Symlink handling
+    ///
+    /// The boundary is canonicalized at set time, and start paths are
+    /// canonicalized at detect time, so a search starting from a
+    /// symlinked path that resolves under the boundary still respects
+    /// the boundary. If `path` does not exist on disk we store it
+    /// as-is; later detection then compares against the literal value
+    /// (which matches the upstream behavior of
+    /// [`canonicalize_or_passthrough`]).
+    ///
+    /// # Inclusivity
+    ///
+    /// The boundary is *inclusive*: a marker located at the boundary
+    /// path itself is found; only strict ancestors of the boundary
+    /// are skipped. Set the boundary to the directory that *contains*
+    /// your projects, not to one level above.
+    pub fn set_search_boundary(&mut self, path: Option<PathBuf>) {
+        self.search_boundary = path.map(|p| canonicalize_or_passthrough(&p));
+    }
+
+    /// Read-only view of the configured search boundary.
+    #[must_use]
+    pub fn search_boundary(&self) -> Option<&Path> {
+        self.search_boundary.as_deref()
+    }
+
+    /// Detect the project root for `file_path`, honoring the
+    /// workspace's [`Self::set_search_boundary`] clamp if any.
+    ///
+    /// `file_path` is canonicalized before the walk if possible so
+    /// that boundary comparison works correctly under symlinks (e.g.,
+    /// `/tmp/sandbox/foo` symlinked to `/home/user/code/foo`).
     #[must_use]
     pub fn detect(&self, file_path: &Path) -> Option<(PathBuf, ProjectKind)> {
-        detect_project(file_path, &self.markers)
+        let canonical = canonicalize_or_passthrough(file_path);
+        match self.search_boundary.as_deref() {
+            Some(boundary) => detect_project_within(&canonical, &self.markers, boundary),
+            None => detect_project(&canonical, &self.markers),
+        }
     }
 
     /// Open a project at `root`. Idempotent: if a project for the
@@ -508,10 +590,15 @@ mod tests {
 
     #[test]
     fn detect_returns_none_with_no_markers() {
+        // Bound the walk at the tempdir so a marker in a real
+        // ancestor (a developer's `/tmp/.git`, a CI runner's repo
+        // root above the test fixture, etc.) can't masquerade as a
+        // hit. Production callers walk to the filesystem root; the
+        // bound is a test-only correctness aid.
         let dir = tempfile::tempdir().expect("tempdir");
         let f = dir.path().join("a/b.rs");
         touch(&f);
-        assert!(detect_project(&f, &default_markers()).is_none());
+        assert!(detect_project_within(&f, &default_markers(), dir.path()).is_none());
     }
 
     #[test]
@@ -611,7 +698,133 @@ mod tests {
             kind: ProjectKind::Git,
             is_directory: true,
         }]);
-        // No git → no detection.
+        // No git → no detection. Bound the walk at the tempdir so
+        // that a `.git` in any real ancestor cannot satisfy the
+        // (now sole) git marker; we are testing that `set_markers`
+        // chose the marker set, not what lives above the test.
+        assert!(detect_project_within(&f, ws.markers(), root).is_none());
+    }
+
+    // ----------------------------------------------------------------------
+    // Reviewer-flagged item 2: search-boundary clamp on detection.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn search_boundary_default_is_none() {
+        let ws = Workspace::new();
+        assert!(ws.search_boundary().is_none());
+    }
+
+    #[test]
+    fn search_boundary_clamps_walk_above_boundary() {
+        // Stage a fake "outer marker" above the boundary (the reviewer's
+        // /tmp/.git case). Without the boundary, `detect` would walk up
+        // to the outer marker. With it, the walk halts at the
+        // boundary directory and returns None.
+        let outer = tempfile::tempdir().expect("outer");
+        // The outer dir gets a git marker.
+        mkdir(&outer.path().join(".git"));
+        // The "boundary" directory is a child of outer; the file
+        // lives below the boundary.
+        let boundary = outer.path().join("workspace");
+        let f = boundary.join("src/main.rs");
+        touch(&f);
+
+        let mut ws = Workspace::new();
+        // Without the boundary, detect walks up and finds the outer
+        // marker.
+        assert!(
+            ws.detect(&f).is_some(),
+            "sanity: outer .git is detectable without the boundary"
+        );
+
+        ws.set_search_boundary(Some(boundary.clone()));
+        // With the boundary set to the workspace dir, the outer marker
+        // is above the boundary and thus invisible.
+        assert!(
+            ws.detect(&f).is_none(),
+            "with boundary at {boundary:?}, the outer marker must be excluded"
+        );
+    }
+
+    #[test]
+    fn search_boundary_is_inclusive_examines_boundary_itself() {
+        // The boundary semantics: the boundary path *itself* is
+        // examined for markers; only strict ancestors are skipped.
+        // Documented inclusivity: "set boundary to the directory
+        // containing your projects, not one level above."
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        touch(&root.join("Cargo.toml"));
+        let f = root.join("src/lib.rs");
+        touch(&f);
+
+        let mut ws = Workspace::new();
+        ws.set_search_boundary(Some(root.to_path_buf()));
+        let detected = ws.detect(&f).expect("marker at the boundary must match");
+        // Path equality after canonicalization (macOS /tmp → /private/tmp).
+        assert_eq!(
+            detected.0.canonicalize().expect("canon found"),
+            root.canonicalize().expect("canon root")
+        );
+    }
+
+    #[test]
+    fn search_boundary_clearable_back_to_none() {
+        let outer = tempfile::tempdir().expect("outer");
+        mkdir(&outer.path().join(".git"));
+        let boundary = outer.path().join("workspace");
+        let f = boundary.join("src/main.rs");
+        touch(&f);
+
+        let mut ws = Workspace::new();
+        ws.set_search_boundary(Some(boundary.clone()));
         assert!(ws.detect(&f).is_none());
+        ws.set_search_boundary(None);
+        assert!(
+            ws.detect(&f).is_some(),
+            "clearing the boundary must restore the unbounded walk"
+        );
+    }
+
+    #[test]
+    fn search_boundary_resolves_under_symlinked_start() {
+        // The symlinked-workspace case: corporate /home mounts and
+        // user-organized symlink farms put the file path under a
+        // symlink that resolves into the boundary. The walk
+        // canonicalizes both the start path and the boundary, so the
+        // boundary applies after symlink resolution.
+        //
+        // Skip on platforms / sandboxes that disallow symlink
+        // creation. Symlinks under tempfile dirs are normally allowed,
+        // but a paranoid sandbox may reject EPERM.
+        let real_dir = tempfile::tempdir().expect("real");
+        let real = real_dir.path().to_path_buf();
+        touch(&real.join("Cargo.toml"));
+        let real_file = real.join("src/lib.rs");
+        touch(&real_file);
+
+        let link_dir = tempfile::tempdir().expect("link");
+        let link = link_dir.path().join("via-link");
+        if let Err(e) = std::os::unix::fs::symlink(&real, &link) {
+            eprintln!("test skipped: symlink {link:?} → {real:?} failed: {e}");
+            return;
+        }
+
+        let linked_file = link.join("src/lib.rs");
+
+        let mut ws = Workspace::new();
+        ws.set_search_boundary(Some(real.clone()));
+        // Walking via the symlinked path: after canonicalization both
+        // the start and the boundary live under `real`. The marker at
+        // `real/Cargo.toml` is at the boundary and is examined.
+        let (found, kind) = ws
+            .detect(&linked_file)
+            .expect("symlinked walk must still find the marker at the boundary");
+        assert_eq!(kind, ProjectKind::Rust);
+        assert_eq!(
+            found.canonicalize().expect("canon"),
+            real.canonicalize().expect("canon real")
+        );
     }
 }

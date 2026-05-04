@@ -44,12 +44,12 @@ use std::rc::Rc;
 use mlua::{FromLua, Function, Lua, Table, UserData, UserDataMethods, Value, Variadic};
 use thiserror::Error;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::async_runtime::{
     AsyncRuntime, GrepMatch, GrepSpec, JobOutcome, JobResult, SharedAsyncRuntime, StreamPayload,
 };
-use crate::buffer::{BufferId, EditOp};
+use crate::buffer::{BufferId, EditOp, MarkGravity, MarkId};
 use crate::buffer_registry::BufferRegistry;
 use crate::cell::{Color, Style, UnderlineStyle};
 use crate::command::{Command, CommandError, CommandRegistry, SourceLocation};
@@ -58,6 +58,9 @@ use crate::highlight::{SyntaxHighlightView, Theme};
 use crate::hook::{Hook, HookRegistry};
 use crate::key::{display_sequence, parse_sequence};
 use crate::keymap_stack::KeymapStack;
+use crate::packages::{
+    Address, Fetcher, InstallError, InstallScope, InstallSpec, InstalledPackage, Installer,
+};
 use crate::protocol::{AttachTarget, AttachmentHandle, InstanceIdentity};
 use crate::rope::Range;
 use crate::syntax::{self, ParseTreeBundle, ParseView, ParseViewHandle, SharedSyntaxRegistry};
@@ -279,6 +282,100 @@ impl Default for LocalInstanceInfo {
     }
 }
 
+/// In-memory roster of packages installed during the init phase.
+///
+/// Populated by `pmacs.packages.install{...}` and `install_project{...}`
+/// (T M7.3). Read by `pmacs.packages.installed()` for introspection
+/// and by the future M7.6 lockfile writer to enumerate the resolved
+/// set. Single-threaded `Rc<RefCell<...>>` per the boundary's
+/// main-thread invariant.
+#[derive(Debug, Clone, Default)]
+pub struct InstalledPackages(Rc<RefCell<Vec<InstalledPackage>>>);
+
+impl InstalledPackages {
+    /// Construct an empty roster.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a successful install. Order matches install order; that
+    /// matters for diagnostics ("which install errored?") more than
+    /// for resolution.
+    pub fn record(&self, pkg: InstalledPackage) {
+        self.0.borrow_mut().push(pkg);
+    }
+
+    /// Snapshot the current roster for read-only consumers.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<InstalledPackage> {
+        self.0.borrow().clone()
+    }
+}
+
+/// Source label of the currently-evaluating chunk, populated by
+/// [`crate::lua::LuaHost::eval`] before each evaluation.
+///
+/// The label follows Lua's `@<path>` convention for file-loaded
+/// chunks (see [`crate::config::load_user_config_at`]); the
+/// install-API binding strips the `@` and takes the parent
+/// directory to resolve relative `project_root` values in
+/// `pmacs.packages.install_project`. Without this slot we'd be
+/// unable to recover the chunk source from a Rust callback because
+/// pmacs's Lua state intentionally omits the `debug` library
+/// (`forbid(unsafe_code)` rules out `Lua::unsafe_new`, and
+/// `debug.getinfo` is not available in the safe stdlib subset).
+///
+/// Single-slot state, no stack: nested `eval` calls overwrite the
+/// outer chunk's source for the duration of the inner call. v0.1
+/// has no nested-eval flow that consults this slot, so the
+/// simplification is sound.
+#[derive(Debug, Clone, Default)]
+pub struct CurrentEvalSource(pub Option<String>);
+
+/// Override hook for the `pmacs.packages.install{...}` machinery.
+///
+/// In production this slot is empty: `install` builds a [`Fetcher`]
+/// rooted at `$XDG_CACHE_HOME/pmacs/git/` and an [`InstallScope::User`]
+/// rooted at `$XDG_DATA_HOME/pmacs/packages/`. Tests cannot mutate
+/// `XDG_CACHE_HOME` / `XDG_DATA_HOME` because `std::env::set_var` is
+/// `unsafe` since Rust 2024 and the project forbids unsafe; instead
+/// they install a [`PackageInstallOverride`] with explicit paths.
+///
+/// Set via [`crate::lua::LuaHost::set_package_install_override`]; read
+/// by [`do_install`].
+#[derive(Debug, Clone, Default)]
+pub struct PackageInstallOverride {
+    /// Override the bare-mirror cache dir. Defaults to
+    /// `$XDG_CACHE_HOME/pmacs/git/` when absent.
+    pub cache_dir: Option<std::path::PathBuf>,
+    /// Override the user-scope install root. Defaults to
+    /// `$XDG_DATA_HOME/pmacs/packages/` when absent.
+    pub user_install_root: Option<std::path::PathBuf>,
+}
+
+impl PackageInstallOverride {
+    /// Empty override (production default behavior).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the cache-dir override. Builder-style.
+    #[must_use]
+    pub fn with_cache_dir(mut self, p: std::path::PathBuf) -> Self {
+        self.cache_dir = Some(p);
+        self
+    }
+
+    /// Set the user-install-root override. Builder-style.
+    #[must_use]
+    pub fn with_user_install_root(mut self, p: std::path::PathBuf) -> Self {
+        self.user_install_root = Some(p);
+        self
+    }
+}
+
 /// Short-circuit a binding when the init phase has completed.
 ///
 /// Lifecycle-affecting Lua APIs (currently just `pmacs.attach`; M5.6d+)
@@ -331,6 +428,15 @@ pub enum BindingError {
         /// The offending ID, preserved for callers that want to report
         /// it (most commonly via `tostring(err)`).
         id: BufferId,
+    },
+
+    /// A Lua mark handle refers to a mark that has already been removed.
+    #[error("stale mark handle: mark {mark:?} no longer exists on buffer {buffer:?}")]
+    StaleMark {
+        /// Buffer that originally owned the mark.
+        buffer: BufferId,
+        /// Removed mark ID.
+        mark: MarkId,
     },
 
     /// A position argument was negative; positions are byte offsets and
@@ -495,6 +601,64 @@ pub enum BindingError {
         prior: String,
     },
 
+    /// The Lua state is missing its [`InstalledPackages`] roster.
+    /// Programming error, not user input.
+    #[error("Lua app data missing: InstalledPackages roster was not installed on this Lua state")]
+    NoInstalledPackagesSlot,
+
+    /// `pmacs.packages.install{...}` was passed something that wasn't
+    /// a string (shorthand) or a table (kwargs).
+    #[error(
+        "pmacs.packages.install: spec must be a string \
+         (e.g. \"github:user/repo@^1.0.0\") or a table \
+         (e.g. {{ \"github:user/repo\", version = \"^1.0.0\" }}); got {got}"
+    )]
+    InstallSpecWrongType {
+        /// The Lua type of the offending value.
+        got: String,
+    },
+
+    /// A `pmacs.packages.install{...}` table form omitted the address
+    /// (no positional `[1]` and no `address = "..."` kwarg).
+    #[error(
+        "pmacs.packages.install: spec table must contain either a \
+         positional address at [1] or an `address` field"
+    )]
+    InstallSpecMissingAddress,
+
+    /// `install_project` was called without an explicit
+    /// `project_root` field. The CWD-fallback was removed because at
+    /// init time CWD is whatever directory the user happened to
+    /// invoke pmacs from --- almost never a meaningful project
+    /// root. The message names two concrete patterns for filling in
+    /// a value, so users hitting this in a CI log or stack trace
+    /// can fix it without context.
+    #[error(
+        "pmacs.packages.install_project requires an explicit \
+         `project_root` field. \
+         Pass `project_root = \"/path/to/your/project\"` (often \
+         `os.getenv(\"PMACS_PROJECT\")` or a path relative to the \
+         directory containing your init.lua)."
+    )]
+    InstallProjectMissingProjectRoot,
+
+    /// The package install layer surfaced a typed error. The display
+    /// chain reproduces the inner [`InstallError`]'s message verbatim,
+    /// so callers see e.g. "no tag for X satisfies ^1.0".
+    #[error("{0}")]
+    PackageInstall(#[from] InstallError),
+
+    /// Stub for `pmacs.packages.update(...)` which is implemented in
+    /// T M7.6. Per the project's "stub posture" convention, we accept
+    /// the call shape (so v0.1 init.lua's that try it get a clean
+    /// error) and fail with the milestone target named.
+    #[error(
+        "pmacs.packages.update is implemented in M7.6 (lockfile + \
+         resolver). v0.1 / current builds: re-run `pmacs.packages.install` \
+         with the new constraint to upgrade in place."
+    )]
+    PackagesUpdateUnsupported,
+
     /// A Lua intercept returned a table that was missing one of the
     /// required position/range fields. The intercept contract requires
     /// the returned table to carry the same fields as the input
@@ -528,6 +692,27 @@ pub enum BindingError {
         /// The kind Lua tried to return.
         to: String,
     },
+
+    /// The buffer registry is already borrowed --- typically because a
+    /// `pmacs.buffer.X` call was made from inside a buffer intercept
+    /// callback. Intercepts run while the registry is locked so the
+    /// edit can be applied atomically; calling back into
+    /// `pmacs.buffer.X` from the intercept body would deadlock. We
+    /// detect the recursive borrow attempt and surface a typed error
+    /// instead of letting `RefCell::borrow_mut` panic.
+    ///
+    /// The structural fix (let intercepts re-enter the buffer API
+    /// safely) is tracked as a deferred audit task; until then,
+    /// intercept bodies must operate only on the `op` parameter and
+    /// any state captured in their closure --- not call back through
+    /// the public surface synchronously.
+    #[error(
+        "buffer registry already borrowed (likely a re-entrant call from \
+         inside a buffer intercept); intercepts cannot call pmacs.buffer.X \
+         synchronously --- defer the work to a hook or callback that runs \
+         after the edit completes"
+    )]
+    Reentrant,
 }
 
 // ---------------------------------------------------------------------------
@@ -610,27 +795,23 @@ fn add_query_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
 
 fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
     methods.add_method("insert", |lua, this, (pos, bytes): (i64, mlua::String)| {
-        let edit = with_registry_mut(lua, |r| {
-            let buf = resolve_mut(r, this.0)?;
-            let pos = u64_from_lua(pos)?;
-            let payload = bytes.as_bytes();
-            buf.apply_edit(EditOp::Insert {
+        let pos = u64_from_lua(pos)?;
+        let payload = bytes.as_bytes();
+        let edit = run_managed_edit(
+            lua,
+            this.0,
+            EditOp::Insert {
                 pos,
                 bytes: &payload,
-            })
-            .map_err(mlua::Error::external)
-        })?;
+            },
+        )?;
         notify_buffer_edit_to_windows(lua, this.0, &edit);
         Ok(())
     });
 
     methods.add_method("delete", |lua, this, (start, end): (i64, i64)| {
-        let edit = with_registry_mut(lua, |r| {
-            let range = checked_range(start, end)?;
-            resolve_mut(r, this.0)?
-                .apply_edit(EditOp::Delete { range })
-                .map_err(mlua::Error::external)
-        })?;
+        let range = checked_range(start, end)?;
+        let edit = run_managed_edit(lua, this.0, EditOp::Delete { range })?;
         notify_buffer_edit_to_windows(lua, this.0, &edit);
         Ok(())
     });
@@ -638,20 +819,75 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
     methods.add_method(
         "replace",
         |lua, this, (start, end, bytes): (i64, i64, mlua::String)| {
-            let edit = with_registry_mut(lua, |r| {
-                let range = checked_range(start, end)?;
-                let payload = bytes.as_bytes();
-                resolve_mut(r, this.0)?
-                    .apply_edit(EditOp::Replace {
-                        range,
-                        bytes: &payload,
-                    })
-                    .map_err(mlua::Error::external)
-            })?;
+            let range = checked_range(start, end)?;
+            let payload = bytes.as_bytes();
+            let edit = run_managed_edit(
+                lua,
+                this.0,
+                EditOp::Replace {
+                    range,
+                    bytes: &payload,
+                },
+            )?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
             Ok(())
         },
     );
+}
+
+/// Three-phase edit flow that lets intercepts re-enter `pmacs.buffer.X`
+/// safely (T M7.4).
+///
+/// Phase 1: borrow the registry, mark the buffer mid-edit
+/// (`begin_edit`), take its views out, snapshot the
+/// [`InterceptContext`], drop the borrow.
+///
+/// Phase 2: run the intercept chain against the snapshot context,
+/// without holding the registry borrow. An intercept body that calls
+/// back into `pmacs.buffer.X` on a different buffer succeeds
+/// transparently; on the same buffer it hits the `editing_in_progress`
+/// gate and returns `BufferError::ConcurrentEdit`.
+///
+/// Phase 3: re-borrow, restore the views (preserving any new views
+/// added during phase 2), clear the mid-edit flag, and run
+/// `apply_edit_skip_intercepts` --- which performs the rope edit, the
+/// undo bookkeeping, the revision bump, and the `on_edit` broadcast.
+fn run_managed_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<crate::rope::Edit> {
+    // Phase 1: borrow, begin_edit, take views, snapshot context.
+    let (mut views, ctx) = with_registry_mut(lua, |r| {
+        let buf = resolve_mut(r, id)?;
+        buf.begin_edit().map_err(mlua::Error::external)?;
+        let ctx = crate::view::InterceptContext::snapshot(buf);
+        let views = buf.take_views();
+        Ok((views, ctx))
+    })?;
+
+    // Phase 2: run intercepts. Registry borrow is released, so the
+    // intercept body may re-enter `pmacs.buffer.X`. The bytes
+    // referenced by `op` are owned by the caller's `mlua::String`,
+    // which lives across the whole call --- the borrow stays valid.
+    let intercept_result: Result<EditOp<'_>, crate::buffer::BufferError> = (|| {
+        let mut current = op;
+        for (_, view) in &mut views {
+            current = view.intercept_edit(&ctx, current)?;
+        }
+        Ok(current)
+    })();
+
+    // Phase 3: re-borrow, restore views, clear mid-edit flag, apply.
+    // We restore views and clear the flag even on intercept error,
+    // so the buffer is left in a usable state.
+    with_registry_mut(lua, |r| {
+        let buf = resolve_mut(r, id)?;
+        buf.restore_views(views);
+        buf.end_edit();
+        match intercept_result {
+            Ok(final_op) => buf
+                .apply_edit_skip_intercepts(final_op)
+                .map_err(mlua::Error::external),
+            Err(e) => Err(mlua::Error::external(e)),
+        }
+    })
 }
 
 fn add_history_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
@@ -811,7 +1047,7 @@ struct LuaInterceptView {
 impl crate::view::View for LuaInterceptView {
     fn intercept_edit<'a>(
         &mut self,
-        _buf: &crate::buffer::Buffer,
+        _ctx: &crate::view::InterceptContext,
         op: EditOp<'a>,
     ) -> Result<EditOp<'a>, crate::buffer::BufferError> {
         let input = build_intercept_input(&self.lua, &op).map_err(|e| {
@@ -943,6 +1179,89 @@ pub struct InterceptHandleLua {
     view: crate::buffer::ViewId,
 }
 
+#[derive(Clone)]
+/// Lua handle for a shared buffer-byte style overlay.
+pub struct StyleOverlayHandleLua {
+    /// Shared style spans rendered by every attached overlay view.
+    spans: crate::overlay::SharedBufferStyleSpans,
+}
+
+impl FromLua for StyleOverlayHandleLua {
+    fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+        match value {
+            Value::UserData(ud) => Ok(ud.borrow::<Self>()?.clone()),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "StyleOverlayHandleLua".to_string(),
+                message: Some(
+                    "expected a style overlay handle (returned by pmacs.buffer.add_style_overlay)"
+                        .to_string(),
+                ),
+            }),
+        }
+    }
+}
+
+impl UserData for StyleOverlayHandleLua {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method(
+            "add",
+            |_, this, (start, end, style): (i64, i64, Table)| -> mlua::Result<()> {
+                let start = u64_from_lua(start)?;
+                let end = u64_from_lua(end)?;
+                if start > end {
+                    return Err(mlua::Error::external(BindingError::InvalidRange {
+                        start,
+                        end,
+                    }));
+                }
+                if start == end {
+                    return Ok(());
+                }
+                this.spans
+                    .lock()
+                    .expect("style overlay mutex poisoned")
+                    .push(crate::overlay::BufferStyleSpan {
+                        start,
+                        end,
+                        style: lua_to_style(&style)?,
+                    });
+                Ok(())
+            },
+        );
+
+        methods.add_method("clear", |_, this, ()| {
+            this.spans
+                .lock()
+                .expect("style overlay mutex poisoned")
+                .clear();
+            Ok(())
+        });
+
+        methods.add_method("clear_before", |_, this, pos: i64| -> mlua::Result<()> {
+            let pos = u64_from_lua(pos)?;
+            this.spans
+                .lock()
+                .expect("style overlay mutex poisoned")
+                .retain(|span| span.end > pos);
+            Ok(())
+        });
+
+        methods.add_method("spans", |lua, this, ()| {
+            let spans = this.spans.lock().expect("style overlay mutex poisoned");
+            let out = lua.create_table_with_capacity(spans.len(), 0)?;
+            for (i, span) in spans.iter().enumerate() {
+                let row = lua.create_table_with_capacity(0, 3)?;
+                row.set("start", i64::try_from(span.start).unwrap_or(i64::MAX))?;
+                row.set("end", i64::try_from(span.end).unwrap_or(i64::MAX))?;
+                row.set("style", style_to_lua(lua, span.style)?)?;
+                out.set(i + 1, row)?;
+            }
+            Ok(out)
+        });
+    }
+}
+
 impl FromLua for InterceptHandleLua {
     fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
         match value {
@@ -966,6 +1285,86 @@ impl UserData for InterceptHandleLua {
                 "InterceptHandle({:?},{:?})",
                 this.buffer, this.view
             ))
+        });
+    }
+}
+
+/// Userdata handle for a buffer-owned mark.
+#[derive(Copy, Clone)]
+pub struct MarkHandleLua {
+    buffer: BufferId,
+    mark: MarkId,
+}
+
+impl FromLua for MarkHandleLua {
+    fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+        match value {
+            Value::UserData(ud) => Ok(*ud.borrow::<Self>()?),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "MarkHandleLua".to_string(),
+                message: Some(
+                    "expected a mark handle (returned by pmacs.buffer.mark_create)".to_string(),
+                ),
+            }),
+        }
+    }
+}
+
+impl UserData for MarkHandleLua {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("get", |lua, this, ()| {
+            with_registry(lua, |r| {
+                let buf = resolve(r, this.buffer)?;
+                let pos = buf.mark_pos(this.mark).ok_or_else(|| {
+                    mlua::Error::external(BindingError::StaleMark {
+                        buffer: this.buffer,
+                        mark: this.mark,
+                    })
+                })?;
+                Ok(i64_clamp(pos))
+            })
+        });
+
+        methods.add_method("pos", |lua, this, ()| {
+            with_registry(lua, |r| {
+                let buf = resolve(r, this.buffer)?;
+                let pos = buf.mark_pos(this.mark).ok_or_else(|| {
+                    mlua::Error::external(BindingError::StaleMark {
+                        buffer: this.buffer,
+                        mark: this.mark,
+                    })
+                })?;
+                Ok(i64_clamp(pos))
+            })
+        });
+
+        methods.add_method("set", |lua, this, pos: i64| {
+            let pos = u64_from_lua(pos)?;
+            with_registry_mut(lua, |r| {
+                let buf = resolve_mut(r, this.buffer)?;
+                let ok = buf
+                    .set_mark(this.mark, pos)
+                    .map_err(mlua::Error::external)?;
+                if !ok {
+                    return Err(mlua::Error::external(BindingError::StaleMark {
+                        buffer: this.buffer,
+                        mark: this.mark,
+                    }));
+                }
+                Ok(())
+            })
+        });
+
+        methods.add_method("remove", |lua, this, ()| {
+            with_registry_mut(lua, |r| {
+                let buf = resolve_mut(r, this.buffer)?;
+                Ok(buf.remove_mark(this.mark))
+            })
+        });
+
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("MarkHandle({:?},{:?})", this.buffer, this.mark))
         });
     }
 }
@@ -1000,6 +1399,7 @@ pub fn install(
     lua.set_app_data(RequestedAttach::new());
     lua.set_app_data(CurrentAttachmentSlot::new());
     lua.set_app_data(LocalInstanceInfo::new());
+    lua.set_app_data(InstalledPackages::new());
 
     let pmacs = lua.create_table()?;
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
@@ -1033,6 +1433,7 @@ pub fn install(
     )?;
     pmacs.set("instance", install_instance_module(lua, registry)?)?;
     pmacs.set("ansi", install_ansi_module(lua)?)?;
+    pmacs.set("packages", install_packages_module(lua)?)?;
     lua.globals().set("pmacs", pmacs)?;
     Ok(())
 }
@@ -1396,6 +1797,25 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
         )?;
     }
 
+    {
+        let reg = registry.clone();
+        buffer.set(
+            "mark_create",
+            lua.create_function(
+                move |_, (id, pos, opts): (BufferIdLua, i64, Option<Table>)| {
+                    let gravity = parse_mark_gravity(opts.as_ref())?;
+                    let pos = u64_from_lua(pos)?;
+                    let mut r = reg.borrow_mut();
+                    let buf = resolve_mut(&mut r, id.0)?;
+                    let mark = buf
+                        .create_mark(pos, gravity)
+                        .map_err(mlua::Error::external)?;
+                    Ok(MarkHandleLua { buffer: id.0, mark })
+                },
+            )?,
+        )?;
+    }
+
     // M6.4: chained intercept registration. The view chain in
     // `crate::buffer::Buffer` is the underlying primitive; each
     // registered Lua function becomes a `LuaInterceptView` attached
@@ -1444,7 +1864,67 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
         )?;
     }
 
+    {
+        buffer.set(
+            "add_style_overlay",
+            lua.create_function(
+                move |lua, id: BufferIdLua| -> mlua::Result<StyleOverlayHandleLua> {
+                    let spans = Arc::new(Mutex::new(Vec::new()));
+                    let handle = StyleOverlayHandleLua {
+                        spans: Arc::clone(&spans),
+                    };
+                    attach_style_overlay_to_visible_windows(lua, id.0, spans);
+                    Ok(handle)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        buffer.set(
+            "attach_style_overlay",
+            lua.create_function(
+                move |lua, (id, handle): (BufferIdLua, StyleOverlayHandleLua)| {
+                    attach_style_overlay_to_visible_windows(lua, id.0, Arc::clone(&handle.spans));
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
+
     Ok(buffer)
+}
+
+fn parse_mark_gravity(opts: Option<&Table>) -> mlua::Result<MarkGravity> {
+    let Some(opts) = opts else {
+        return Ok(MarkGravity::Right);
+    };
+    let gravity = opts.get::<Option<String>>("gravity")?;
+    match gravity.as_deref().unwrap_or("right") {
+        "left" => Ok(MarkGravity::Left),
+        "right" => Ok(MarkGravity::Right),
+        other => Err(mlua::Error::external(format!(
+            "pmacs.buffer.mark_create: opts.gravity must be \"left\" or \"right\"; got {other:?}"
+        ))),
+    }
+}
+
+fn attach_style_overlay_to_visible_windows(
+    lua: &Lua,
+    buffer_id: BufferId,
+    spans: crate::overlay::SharedBufferStyleSpans,
+) {
+    let Some(core) = lua.app_data_ref::<SharedCore>() else {
+        return;
+    };
+    let mut core = core.borrow_mut();
+    for win in core.windows.values_mut() {
+        if win.buffer_id == buffer_id {
+            win.push_overlay(Box::new(crate::overlay::BufferStyleOverlay::new(
+                Arc::clone(&spans),
+            )));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1498,6 +1978,405 @@ fn install_ansi_module(lua: &Lua) -> mlua::Result<Table> {
     Ok(ansi)
 }
 
+// ---------------------------------------------------------------------------
+// pmacs.packages module (T M7.3)
+// ---------------------------------------------------------------------------
+
+/// Build the `pmacs.packages.*` table.
+///
+/// Surface:
+///
+/// - `pmacs.packages.install(spec)` --- install to user-config root
+///   (`$XDG_DATA_HOME/pmacs/packages/`).
+/// - `pmacs.packages.install_project(spec)` --- install to the project
+///   root (`<cwd>/.pmacs/packages/`, override with `project_root` in
+///   the spec).
+/// - `pmacs.packages.installed()` --- snapshot of packages that
+///   completed install during the init phase.
+/// - `pmacs.packages.update(...)` --- M7.6 stub; currently errors
+///   pointing at the workaround (re-running install with a new
+///   constraint).
+///
+/// Both install variants are init-time-only via [`require_init_phase`];
+/// mid-session calls produce [`BindingError::InitOnlyApi`] naming
+/// the equivalent CLI flag (none yet --- restart with an updated
+/// init.lua). Each install is synchronous: errors raise back at the
+/// call site so the offending init.lua line is named in the traceback.
+fn install_packages_module(lua: &Lua) -> mlua::Result<Table> {
+    let packages = lua.create_table()?;
+
+    packages.set(
+        "install",
+        lua.create_function(|lua, spec: Value| -> mlua::Result<Table> {
+            require_init_phase(lua, "pmacs.packages.install")?;
+            let install_spec = parse_lua_install_spec(&spec)?;
+            do_install(lua, &install_spec, &InstallScope::User)
+        })?,
+    )?;
+
+    packages.set(
+        "install_project",
+        lua.create_function(|lua, spec: Value| -> mlua::Result<Table> {
+            require_init_phase(lua, "pmacs.packages.install_project")?;
+            let install_spec = parse_lua_install_spec(&spec)?;
+            // Allow `project_root = "..."` override in the table form.
+            let project_root = install_spec_project_root(lua, &spec)?;
+            do_install(lua, &install_spec, &InstallScope::Project { project_root })
+        })?,
+    )?;
+
+    packages.set(
+        "installed",
+        lua.create_function(|lua, ()| -> mlua::Result<Table> {
+            let slot = lua
+                .app_data_ref::<InstalledPackages>()
+                .ok_or_else(|| mlua::Error::external(BindingError::NoInstalledPackagesSlot))?;
+            let snapshot = slot.snapshot();
+            let t = lua.create_table()?;
+            for (i, pkg) in snapshot.iter().enumerate() {
+                t.set(i + 1, installed_package_to_lua(lua, pkg)?)?;
+            }
+            Ok(t)
+        })?,
+    )?;
+
+    packages.set(
+        "update",
+        lua.create_function(|_, _args: Variadic<Value>| -> mlua::Result<()> {
+            Err(mlua::Error::external(
+                BindingError::PackagesUpdateUnsupported,
+            ))
+        })?,
+    )?;
+
+    register_package_searcher(lua)?;
+
+    Ok(packages)
+}
+
+/// Register a custom searcher in `package.searchers` (Lua 5.4) /
+/// `package.loaders` (Lua 5.1, LuaJIT) that consults the
+/// [`InstalledPackages`] roster at require time.
+///
+/// # Why
+///
+/// `prepend_package_path` (the existing mechanism) only handles the
+/// standard Lua layout: `<install_root>/<basename>.lua` or
+/// `<install_root>/<basename>/init.lua`. A package whose manifest
+/// declares e.g. `entry = "main.lua"` or `entry = "lib/foo.lua"`
+/// has its entry file at a path the standard `?.lua;?/init.lua`
+/// pattern does not match, and `require("<basename>")` would fail
+/// even though the install completed. The custom searcher closes
+/// that gap by mapping `require("<basename>")` directly to the
+/// manifest's declared entry path.
+///
+/// # Precedence
+///
+/// The searcher is appended to the searchers/loaders list, after
+/// the path-based searcher. Standard layouts (`init.lua` etc.)
+/// continue to load via the path mechanism; the custom searcher
+/// only kicks in when the path search misses. This keeps
+/// drop-in-compatible packages on the well-trodden path and avoids
+/// a behavior change for anyone using the conventional layout.
+///
+/// Within the searcher, the [`InstalledPackages`] roster is iterated
+/// in *reverse* so the most recently installed package wins on a
+/// basename collision. Combined with `init.lua`'s typical pattern
+/// (user install first, then project install), this makes
+/// project-scope installs override user-scope installs of the same
+/// basename --- mirroring `prepend_package_path`'s "newer
+/// installations prepend to package.path" semantics.
+///
+/// # 5.1 vs 5.4 names
+///
+/// Lua 5.1 / LuaJIT exposes the searcher list as `package.loaders`;
+/// Lua 5.2+ renamed it to `package.searchers`. Both are tables of
+/// functions with the same callback shape. We probe `searchers`
+/// first and fall back to `loaders` so the same code works under
+/// both feature flags.
+fn register_package_searcher(lua: &Lua) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    let searchers: Table = match package.get::<Option<Table>>("searchers")? {
+        Some(t) => t,
+        None => package.get::<Table>("loaders")?,
+    };
+
+    let searcher = lua.create_function(
+        |lua, name: String| -> mlua::Result<mlua::Value> {
+            let Some(slot) = lua.app_data_ref::<InstalledPackages>() else {
+                // Slot uninstalled (shouldn't happen under
+                // production wiring, but a defensive nil keeps
+                // require working under unusual test setups).
+                return Ok(mlua::Value::Nil);
+            };
+            let snapshot = slot.snapshot();
+            // Most-recent-first: a project-scope install of a
+            // basename overrides a prior user-scope install.
+            for pkg in snapshot.iter().rev() {
+                if pkg.install_basename() != name {
+                    continue;
+                }
+                let entry = pkg.entry_path();
+                let bytes = match std::fs::read(&entry) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        // Searcher convention: a non-function return
+                        // is treated as "not found, here's why" and
+                        // appended to the require error message.
+                        let s = lua.create_string(&format!(
+                            "\n\tinstalled pmacs package '{name}' \
+                             entry `{}` could not be read: {e}",
+                            entry.display()
+                        ))?;
+                        return Ok(mlua::Value::String(s));
+                    }
+                };
+                let chunk_name = format!("@{}", entry.display());
+                let func = lua
+                    .load(&bytes)
+                    .set_name(&chunk_name)
+                    .into_function()?;
+                return Ok(mlua::Value::Function(func));
+            }
+            // No installed package matches. Return a string so Lua
+            // appends our reason to the aggregate require error.
+            let s = lua.create_string(&format!(
+                "\n\tno installed pmacs package named '{name}'"
+            ))?;
+            Ok(mlua::Value::String(s))
+        },
+    )?;
+
+    // Append to the searcher list. Lua tables are 1-indexed; the
+    // new searcher runs after every existing searcher (preload,
+    // path-based, etc.), so standard layouts are unaffected.
+    let len = searchers.raw_len();
+    searchers.set(len + 1, searcher)?;
+    Ok(())
+}
+
+/// Parse the Lua-side `install(...)` argument into an [`InstallSpec`].
+///
+/// Two accepted forms:
+///
+/// - **Shorthand string**: `"github:user/repo@^1.0.0"`. Split on the
+///   last `@` (so SSH-style addresses like `git:git@host:path@=1.2.3`
+///   parse as expected).
+/// - **Table**: `{ "github:user/repo", version = "^1.0.0" }`. The
+///   address may also be passed as `address = "..."`. The `version`
+///   field defaults to `"*"` if omitted (any tag).
+fn parse_lua_install_spec(value: &Value) -> mlua::Result<InstallSpec> {
+    match value {
+        Value::String(s) => {
+            let s = s.to_string_lossy();
+            InstallSpec::parse_shorthand(&s)
+                .map_err(|e| mlua::Error::external(BindingError::from(e)))
+        }
+        Value::Table(t) => {
+            let address_str: String = match t.get::<String>(1) {
+                Ok(s) => s,
+                Err(_) => match t.get::<String>("address") {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return Err(mlua::Error::external(
+                            BindingError::InstallSpecMissingAddress,
+                        ));
+                    }
+                },
+            };
+            let version_str: String = t
+                .get::<String>("version")
+                .unwrap_or_else(|_| "*".to_string());
+            let address = Address::parse(&address_str)
+                .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Address(e))))?;
+            let version = semver::VersionReq::parse(&version_str).map_err(|e| {
+                mlua::Error::external(BindingError::from(InstallError::InvalidVersionReq {
+                    value: version_str,
+                    cause: e.to_string(),
+                }))
+            })?;
+            Ok(InstallSpec { address, version })
+        }
+        other => Err(mlua::Error::external(BindingError::InstallSpecWrongType {
+            got: other.type_name().to_string(),
+        })),
+    }
+}
+
+/// Read the required `project_root = "..."` field from the table form
+/// of `install_project`'s spec.
+///
+/// Absolute paths are returned as-is. Relative paths are resolved
+/// against the directory of the currently-evaluating chunk
+/// (typically the user's `init.lua`) --- *not* against
+/// `std::env::current_dir()`. The init-script's directory is stable
+/// across invocations; CWD is whatever shell directory the user
+/// happened to start pmacs from and is rarely the right anchor.
+///
+/// Returns [`BindingError::InstallProjectMissingProjectRoot`] when
+/// the field is absent or the spec was given as a shorthand string.
+/// Pre-v0.1.0 the fallback was `current_dir()`; that surprise was
+/// removed because CWD-at-startup is almost never the user's project
+/// root in any meaningful sense (see reviewer item 10).
+///
+/// # How the chunk directory is recovered
+///
+/// pmacs's Lua state is built with `Lua::new()`, which loads the
+/// safe stdlib subset and intentionally omits `debug` (the project
+/// forbids `unsafe_code`, so `Lua::unsafe_new` is not an option).
+/// Without `debug.getinfo` we cannot walk Lua's call stack at
+/// runtime. Instead, [`crate::lua::LuaHost::eval`] writes the
+/// chunk's source label into a [`CurrentEvalSource`] app-data
+/// slot before evaluating; this function reads it. The label
+/// follows Lua's `@<path>` convention for file-loaded chunks (see
+/// [`crate::config::load_user_config_at`]), so stripping the `@`
+/// and taking the parent directory is well-defined.
+///
+/// # Forward-planning note
+///
+/// When project-local `init.lua` lands (post-v0.1; tracked
+/// separately in the milestone plan), this function should consult
+/// a thread-local "current project root" set by the project loader
+/// before falling through to the missing-field error. Until that
+/// machinery exists, `project_root` is unconditionally required;
+/// the global init.lua path is the only init.lua path, and there
+/// is no implicit "current project" to draw on.
+fn install_spec_project_root(lua: &Lua, value: &Value) -> mlua::Result<std::path::PathBuf> {
+    let field = match value {
+        Value::Table(t) => t.get::<String>("project_root").ok(),
+        _ => None,
+    };
+    let raw = match field {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Err(mlua::Error::external(
+                BindingError::InstallProjectMissingProjectRoot,
+            ));
+        }
+    };
+    let candidate = std::path::PathBuf::from(&raw);
+    if candidate.is_absolute() {
+        return Ok(candidate);
+    }
+    if let Some(chunk_dir) = current_eval_dir(lua) {
+        return Ok(chunk_dir.join(&candidate));
+    }
+    // Fallback for evaluations without a file-shaped source label
+    // (string-loaded test chunks, REPL one-liners, the M-x
+    // command-line evaluator): the relative path is taken as-is.
+    // The user's value is non-empty so they explicitly opted in;
+    // this branch matches the pre-v0.1 CWD interpretation.
+    Ok(candidate)
+}
+
+/// Read the parent directory of the currently-evaluating chunk's
+/// source label, if any. Returns `None` when no source has been
+/// pushed (e.g., the call stack came in via a non-`eval` entry
+/// point), or when the source label is not in `@<path>` shape.
+///
+/// The slot is populated by [`crate::lua::LuaHost::eval`] before
+/// it runs the chunk; see the docstring on
+/// [`install_spec_project_root`] for why we use this rather than
+/// `debug.getinfo`.
+fn current_eval_dir(lua: &Lua) -> Option<std::path::PathBuf> {
+    let slot = lua.app_data_ref::<CurrentEvalSource>()?;
+    let label = slot.0.as_deref()?;
+    let path_str = label.strip_prefix('@')?;
+    let path = std::path::PathBuf::from(path_str);
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    Some(parent.to_path_buf())
+}
+
+/// Run the install end-to-end: build a fetcher rooted at
+/// `$XDG_CACHE_HOME/pmacs/git/`, run [`Installer::install`], extend
+/// `package.path` so the entry module is requireable, and record the
+/// result in the [`InstalledPackages`] roster.
+///
+/// A [`PackageInstallOverride`] in app data, if present, redirects the
+/// fetcher's cache dir and the user-scope install root. Tests use this
+/// instead of mutating `XDG_*` env vars (which would require `unsafe`).
+fn do_install(lua: &Lua, spec: &InstallSpec, scope: &InstallScope) -> mlua::Result<Table> {
+    let override_data = lua.app_data_ref::<PackageInstallOverride>();
+    let cache_override = override_data.as_ref().and_then(|o| o.cache_dir.clone());
+    let user_root_override = override_data
+        .as_ref()
+        .and_then(|o| o.user_install_root.clone());
+
+    let fetcher = match cache_override {
+        Some(dir) => Fetcher::with_cache_dir(dir),
+        None => Fetcher::from_xdg()
+            .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
+    };
+    let mut installer = Installer::new(fetcher, scope.clone());
+    if let (InstallScope::User, Some(root)) = (scope, user_root_override) {
+        installer = installer.with_install_root_override(root);
+    }
+    let installed = installer
+        .install(spec)
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+
+    // Extend package.path so the package's entry module is requireable.
+    if let Some(parent) = installed.install_path.parent() {
+        prepend_package_path(lua, parent)?;
+    }
+
+    // Record in the in-memory roster.
+    let slot = lua
+        .app_data_ref::<InstalledPackages>()
+        .ok_or_else(|| mlua::Error::external(BindingError::NoInstalledPackagesSlot))?;
+    slot.record(installed.clone());
+
+    installed_package_to_lua(lua, &installed)
+}
+
+/// Idempotently prepend `<root>/?.lua;<root>/?/init.lua` to
+/// `package.path`. The standard Lua require pattern: a package with
+/// `entry = "init.lua"` installed at `<root>/<basename>/init.lua`
+/// becomes findable as `require("<basename>")`.
+fn prepend_package_path(lua: &Lua, root: &std::path::Path) -> mlua::Result<()> {
+    let package_global = lua.globals().get::<Table>("package")?;
+    let current_path: String = package_global.get::<String>("path").unwrap_or_default();
+    let root_str = root.display().to_string();
+    let new_entries = format!("{root_str}/?.lua;{root_str}/?/init.lua");
+    if current_path
+        .split(';')
+        .any(|seg| seg == format!("{root_str}/?.lua") || seg == format!("{root_str}/?/init.lua"))
+    {
+        return Ok(());
+    }
+    let combined = if current_path.is_empty() {
+        new_entries
+    } else {
+        format!("{new_entries};{current_path}")
+    };
+    package_global.set("path", combined)?;
+    Ok(())
+}
+
+/// Translate an [`InstalledPackage`] into the Lua-facing record
+/// returned by `pmacs.packages.install` and `pmacs.packages.installed`.
+fn installed_package_to_lua(lua: &Lua, pkg: &InstalledPackage) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("name", pkg.manifest.name.as_str())?;
+    t.set("version", pkg.version.to_string())?;
+    t.set("tag", pkg.tag.as_str())?;
+    t.set("commit", pkg.commit.as_str())?;
+    t.set("install_path", pkg.install_path.display().to_string())?;
+    t.set("entry", pkg.entry_path().display().to_string())?;
+    t.set(
+        "scope",
+        match &pkg.scope {
+            InstallScope::User => "user",
+            InstallScope::Project { .. } => "project",
+        },
+    )?;
+    t.set("summary", pkg.manifest.summary.as_str())?;
+    Ok(t)
+}
+
 /// Translate a single [`crate::ansi::AnsiEvent`] into a Lua table.
 ///
 /// The `kind` field is the discriminator; per-variant fields follow
@@ -1506,6 +2385,7 @@ fn install_ansi_module(lua: &Lua) -> mlua::Result<Table> {
 /// - `text`:  `{ kind="text", text=<string> }`
 /// - `set_style`: `{ kind="set_style", style=<style table> }`
 /// - `carriage_return` / `backspace` / `erase_to_eol` / `erase_line` /
+///   `prompt_start` / `prompt_end` / `command_start` / `output_start` /
 ///   `bracketed_paste_begin` / `bracketed_paste_end` /
 ///   `alt_screen_enter` / `alt_screen_exit`: `{ kind=<name> }` only
 /// - `set_title`: `{ kind="set_title", title=<string> }`
@@ -1536,6 +2416,18 @@ fn event_to_lua_table(lua: &Lua, ev: &crate::ansi::AnsiEvent) -> mlua::Result<Ta
         AnsiEvent::SetTitle(title) => {
             t.set("kind", "set_title")?;
             t.set("title", title.as_str())?;
+        }
+        AnsiEvent::PromptStart => {
+            t.set("kind", "prompt_start")?;
+        }
+        AnsiEvent::PromptEnd => {
+            t.set("kind", "prompt_end")?;
+        }
+        AnsiEvent::CommandStart => {
+            t.set("kind", "command_start")?;
+        }
+        AnsiEvent::OutputStart => {
+            t.set("kind", "output_start")?;
         }
         AnsiEvent::BracketedPasteBegin => {
             t.set("kind", "bracketed_paste_begin")?;
@@ -3535,6 +4427,11 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         Some(s) => parse_restart(&s)?,
         None => RestartPolicy::Never,
     };
+    let ansi_events = table
+        .get::<Option<bool>>("ansi")
+        .ok()
+        .flatten()
+        .unwrap_or(false);
     Ok(ProcessSpec {
         label,
         command,
@@ -3543,6 +4440,7 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         env,
         mode,
         restart,
+        ansi_events,
     })
 }
 
@@ -3596,6 +4494,14 @@ fn event_to_lua(lua: &Lua, ev: &ProcessEvent) -> mlua::Result<Table> {
         ProcessEventKind::Stderr(bytes) => {
             t.set("kind", "stderr")?;
             t.set("bytes", lua.create_string(bytes)?)?;
+        }
+        ProcessEventKind::Ansi(events) => {
+            t.set("kind", "ansi")?;
+            let out = lua.create_table_with_capacity(events.len(), 0)?;
+            for (i, event) in events.iter().enumerate() {
+                out.set(i + 1, event_to_lua_table(lua, event)?)?;
+            }
+            t.set("events", out)?;
         }
         ProcessEventKind::Exited { code } => {
             t.set("kind", "exited")?;
@@ -5372,6 +6278,51 @@ pub fn install_project(
     }
 
     {
+        // pmacs.project.set_search_boundary(path | nil)
+        //
+        // Clamp the upward marker walk performed by `detect`. With
+        // `nil` (the default), detection walks ancestors all the way
+        // to the filesystem root, matching `git rev-parse
+        // --show-toplevel` semantics. Setting a path clamps the walk
+        // so ancestors above that path are not consulted, which lets
+        // a user with a stray marker high in the tree (e.g.,
+        // `/tmp/.git`, an orphaned `.git` in `~`) bound detection to
+        // their project home (e.g., `~/code`).
+        //
+        // Function-call form (not assignable property) so the
+        // side-effect of changing detection behavior is visible at
+        // the call site, matching the convention of `pmacs.attach`,
+        // `pmacs.packages.install`, etc.
+        let ws = workspace.clone();
+        m.set(
+            "set_search_boundary",
+            lua.create_function(move |_, path: Option<String>| {
+                let p = path.map(std::path::PathBuf::from);
+                ws.borrow_mut().set_search_boundary(p);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        // pmacs.project.search_boundary() → string | nil
+        //
+        // Read back the current boundary as a path string, or `nil`
+        // when no boundary is set. Returns the canonicalized form
+        // (the boundary is canonicalized at set time).
+        let ws = workspace.clone();
+        m.set(
+            "search_boundary",
+            lua.create_function(move |_, ()| -> mlua::Result<Option<String>> {
+                Ok(ws
+                    .borrow()
+                    .search_boundary()
+                    .map(|p| p.display().to_string()))
+            })?,
+        )?;
+    }
+
+    {
         // open(root [, kind, name]) → ProjectId. If `kind` is omitted,
         // detection runs on `root` itself; if no marker matches, a
         // Custom("generic") kind is used so the call still succeeds.
@@ -6609,6 +7560,20 @@ fn install_editing(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         "delete_forward",
         EditorCore::delete_forward,
     )?;
+    register(
+        editor,
+        lua,
+        core,
+        "delete_word_backward",
+        EditorCore::delete_word_backward,
+    )?;
+    register(
+        editor,
+        lua,
+        core,
+        "delete_word_forward",
+        EditorCore::delete_word_forward,
+    )?;
     {
         let cc = core.clone();
         editor.set(
@@ -6750,6 +7715,22 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             "clear_selection",
             lua.create_function(move |_, ()| {
                 cc.borrow_mut().clear_selection();
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // Anchor a selection at the given byte offset. Subsequent
+        // motion implicitly extends the selected region from the
+        // anchor to the new cursor position. Used by the
+        // `cursor.select-*` commands wired in the default keymap to
+        // implement CUA-style Shift+motion selection.
+        let cc = core.clone();
+        editor.set(
+            "begin_selection",
+            lua.create_function(move |_, anchor: i64| {
+                let anchor = u64::try_from(anchor).map_err(mlua::Error::external)?;
+                cc.borrow_mut().begin_selection(anchor);
                 Ok(())
             })?,
         )?;
@@ -7225,7 +8206,13 @@ fn with_registry<R>(
     let app = lua
         .app_data_ref::<SharedRegistry>()
         .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
-    let r = app.borrow();
+    // try_borrow rather than borrow: a `with_registry_mut` higher in
+    // the call stack (typically a buffer-mutation Lua method whose
+    // intercept chain re-entered into Lua) would otherwise panic on
+    // recursive borrow. Surface a typed error instead.
+    let r = app
+        .try_borrow()
+        .map_err(|_| mlua::Error::external(BindingError::Reentrant))?;
     f(&r)
 }
 
@@ -7236,7 +8223,12 @@ fn with_registry_mut<R>(
     let app = lua
         .app_data_ref::<SharedRegistry>()
         .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
-    let mut r = app.borrow_mut();
+    // try_borrow_mut rather than borrow_mut: see with_registry for
+    // the intercept-reentry rationale. A re-entrant call returns a
+    // typed `BindingError::Reentrant` rather than panicking.
+    let mut r = app
+        .try_borrow_mut()
+        .map_err(|_| mlua::Error::external(BindingError::Reentrant))?;
     f(&mut r)
 }
 
@@ -7557,6 +8549,156 @@ mod tests {
     }
 
     #[test]
+    fn intercept_can_reenter_other_buffer_for_read() {
+        // M7.4 acceptance: an intercept on buffer A that calls
+        // `B:slice(...)` (a different buffer) succeeds. Pre-M7.4 this
+        // panicked or returned BindingError::Reentrant.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let observed: String = lua
+            .load(
+                r#"
+                local a = pmacs.buffer.from_bytes("a", "AAA")
+                local b = pmacs.buffer.from_bytes("b", "BBBBB")
+                local seen = ""
+                pmacs.buffer.add_intercept(a, function(_op)
+                    -- Read-only re-entry on a different buffer.
+                    seen = b:slice(0, b:len())
+                    return nil
+                end)
+                a:insert(0, "x")
+                return seen
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(observed, "BBBBB");
+    }
+
+    #[test]
+    fn intercept_can_reenter_other_buffer_for_write() {
+        // M7.4 acceptance: an intercept on buffer A that calls
+        // `B:insert(...)` succeeds; the edit on B applies before the
+        // original edit on A completes (this test reads B back from
+        // outside the intercept after `a:insert` returns).
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let result: String = lua
+            .load(
+                r#"
+                local a = pmacs.buffer.create("a")
+                local b = pmacs.buffer.create("b")
+                pmacs.buffer.add_intercept(a, function(_op)
+                    b:insert(0, "from-a-intercept")
+                    return nil
+                end)
+                a:insert(0, "x")
+                -- B should reflect the write the intercept performed,
+                -- and A should reflect its own (unintercepted) insert.
+                return b:slice(0, b:len()) .. "|" .. a:slice(0, a:len())
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(result, "from-a-intercept|x");
+    }
+
+    #[test]
+    fn intercept_same_buffer_reentry_returns_concurrent_edit() {
+        // M7.4 acceptance: an intercept on buffer A that calls
+        // `A:insert(...)` (the same buffer) returns
+        // BufferError::ConcurrentEdit, not a panic, not silent
+        // corruption.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let msg: String = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.create("scratch")
+                pmacs.buffer.add_intercept(id, function(_op)
+                    -- Same-buffer re-entry --- gated by editing_in_progress.
+                    id:insert(0, "should not work")
+                    return nil
+                end)
+                local ok, err = pcall(function() id:insert(0, "x") end)
+                assert(not ok, "same-buffer re-entry must surface as error")
+                return tostring(err)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(
+            msg.contains("already being edited")
+                || msg.contains("ConcurrentEdit")
+                || msg.contains("re-entrant"),
+            "expected ConcurrentEdit error message; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn intercept_same_buffer_remove_returns_concurrent_edit() {
+        // Reviewer-flagged sibling of the M7.4 same-buffer re-entry
+        // case: `pmacs.buffer.remove(A)` from inside an intercept on
+        // `A` would otherwise drop the buffer mid-edit. The registry
+        // gates removal on `editing_in_progress` and returns a typed
+        // concurrent-edit error, leaving the buffer in place.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let msg: String = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.create("doomed")
+                pmacs.buffer.add_intercept(id, function(_op)
+                    -- Removing the buffer that is currently mid-edit
+                    -- must surface as a typed error, not drop it.
+                    pmacs.buffer.remove(id)
+                    return nil
+                end)
+                local ok, err = pcall(function() id:insert(0, "x") end)
+                assert(not ok, "remove during own intercept must error")
+                -- Buffer must still resolve afterwards: the gate left
+                -- it in place.
+                assert(id:len() == 0, "buffer must still be live")
+                return tostring(err)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(
+            msg.contains("already being edited") || msg.contains("ConcurrentEdit"),
+            "expected ConcurrentEdit-style error; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cross_buffer_remove_from_intercept_succeeds() {
+        // Cross-buffer remove from inside an intercept is allowed:
+        // the gate is per-buffer, not global. A's intercept removing
+        // B is the legitimate path for "tear down an auxiliary
+        // scratch buffer when the primary edit completes".
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let still_present_after: bool = lua
+            .load(
+                r#"
+                local a = pmacs.buffer.create("a")
+                local b = pmacs.buffer.create("b")
+                pmacs.buffer.add_intercept(a, function(_op)
+                    pmacs.buffer.remove(b)
+                    return nil
+                end)
+                a:insert(0, "x")
+                -- Look for `b` in the live list: must be gone.
+                for _, id in ipairs(pmacs.buffer.list()) do
+                    if id == b then return true end
+                end
+                return false
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(
+            !still_present_after,
+            "cross-buffer remove from intercept should drop the target buffer"
+        );
+    }
+
+    #[test]
     fn m6_4_intercept_transform_overrides_position() {
         // An intercept may transform an insert by returning a table
         // with a different `pos`. The bytes pass through unchanged
@@ -7747,6 +8889,27 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn m6_4_buffer_marks_follow_lua_edits_with_gravity() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        lua.load(
+            r#"
+            local id = pmacs.buffer.from_bytes("scratch", "abcd")
+            local left = pmacs.buffer.mark_create(id, 2, { gravity = "left" })
+            local right = pmacs.buffer.mark_create(id, 2, { gravity = "right" })
+            id:insert(2, "XX")
+            assert(left:get() == 2, "left mark moved to " .. left:get())
+            assert(right:get() == 4, "right mark moved to " .. right:get())
+            right:set(1)
+            assert(right:pos() == 1, "set/pos roundtrip")
+            assert(right:remove(), "first remove succeeds")
+            assert(not right:remove(), "second remove reports false")
+            "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
     // -----------------------------------------------------------------
     // T M6.4: pmacs.ansi parser exposure
     // -----------------------------------------------------------------
@@ -7862,6 +9025,23 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(title, "hello");
+    }
+
+    #[test]
+    fn m6_4_ansi_parser_emits_prompt_marker_events_for_osc_133() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let result: String = lua
+            .load(
+                r#"
+                local p = pmacs.ansi.parser()
+                local events = p:feed("\27]133;A\7$ \27]133;B\7")
+                assert(#events == 3, "expected prompt_start/text/prompt_end")
+                return events[1].kind .. "|" .. events[2].kind .. "|" .. events[3].kind
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(result, "prompt_start|text|prompt_end");
     }
 
     #[test]

@@ -60,6 +60,8 @@ use crossbeam::channel::{self, Receiver, Sender};
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
 
+use crate::ansi::{AnsiEvent, AnsiParser};
+
 // ---------------------------------------------------------------------------
 // Identity and configuration
 // ---------------------------------------------------------------------------
@@ -194,6 +196,10 @@ pub struct ProcessSpec {
     pub mode: ProcessMode,
     /// What to do on termination.
     pub restart: RestartPolicy,
+    /// Parse PTY output on a worker and emit structured ANSI events
+    /// instead of raw stdout bytes. Opt-in so LSP and other byte-stream
+    /// consumers keep their existing stdout/stderr contract.
+    pub ansi_events: bool,
 }
 
 impl ProcessSpec {
@@ -209,6 +215,7 @@ impl ProcessSpec {
             env: Vec::new(),
             mode: ProcessMode::Pipes,
             restart: RestartPolicy::Never,
+            ansi_events: false,
         }
     }
 }
@@ -314,6 +321,10 @@ pub enum ProcessEventKind {
     /// never emit `Stderr` (the pty merges output streams); they
     /// emit only `Stdout`.
     Stderr(Vec<u8>),
+    /// Structured ANSI events decoded from a PTY byte stream on the
+    /// parser worker. Only emitted when [`ProcessSpec::ansi_events`]
+    /// is true.
+    Ansi(Vec<AnsiEvent>),
     /// Child exited cleanly.
     Exited {
         /// Exit code.
@@ -362,11 +373,23 @@ pub const PTY_READ_CEILING_BYTES: usize = 1 << 20;
 /// chunks and a 1 MiB ceiling, this is 128 slots.
 const BYTE_CHUNK_CHANNEL_CAP: usize = PTY_READ_CEILING_BYTES / BYTE_CHUNK_SIZE;
 
+/// In-flight structured-event ceiling between ANSI parser worker and
+/// main-thread supervisor drain. The spec names this as 256 KiB; with
+/// 8 KiB read chunks this is 32 parser batches in flight.
+pub const ANSI_EVENT_CEILING_BYTES: usize = 256 * 1024;
+const ANSI_EVENT_CHANNEL_CAP: usize = ANSI_EVENT_CEILING_BYTES / BYTE_CHUNK_SIZE;
+
 /// How long a reader thread waits in a bounded `send` before polling
 /// its cancel flag. 50 ms is long enough that healthy steady-state
 /// flow doesn't burn cycles re-checking, short enough that a
 /// shutting-down supervisor sees readers exit promptly.
 const READER_SEND_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Bounded grace window used when a child has exited but its reader /
+/// parser worker may still have already-read bytes in flight. This is
+/// not process termination grace; it is only the final output flush
+/// before the runtime handles are dropped.
+const EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Supervisor
@@ -410,11 +433,10 @@ struct RuntimeHandles {
     /// [`RuntimeHandles`] so a generation's worker threads don't
     /// outlive the supervisor.
     readers: Vec<JoinHandle<()>>,
-    /// Bounded byte channel from reader threads to the supervisor.
-    /// Sized at [`BYTE_CHUNK_CHANNEL_CAP`] slots so in-flight bytes
-    /// are capped at [`PTY_READ_CEILING_BYTES`]. T M6.2 / spec
-    /// §sec:repl-streaming.
-    byte_rx: Receiver<ByteChunk>,
+    /// Bounded output channel drained by the supervisor. Raw processes
+    /// expose bytes directly; ANSI-enabled PTY processes expose parser
+    /// batches from the worker stage.
+    output_rx: RuntimeOutputRx,
     /// Cancel flag observed by reader threads when their bounded
     /// `send` blocks. Set on generation end / supervisor drop so a
     /// reader stuck in `send` (consumer fell behind) wakes promptly
@@ -440,6 +462,13 @@ impl Drop for RuntimeHandles {
 /// kind (stdout vs stderr; PTY-mode generations only ever emit
 /// `Stdout`). Lives on the per-generation bounded byte channel.
 type ByteChunk = (ReaderKind, Vec<u8>);
+
+type AnsiBatch = Vec<AnsiEvent>;
+
+enum RuntimeOutputRx {
+    Bytes(Receiver<ByteChunk>),
+    Ansi(Receiver<AnsiBatch>),
+}
 
 /// Discriminated wrapper over a pipe-mode `std::process::Child` and
 /// a pty-mode portable-pty pair. The variants share `try_wait` /
@@ -758,38 +787,25 @@ impl ProcessSupervisor {
     /// most one `Stdout` and one `Stderr` event into pending. Called
     /// from `tick()`. No-op if the process has no live runtime.
     fn drain_byte_channel(&mut self, id: ProcessId) {
-        let Some(proc) = self.processes.get(&id) else {
-            return;
-        };
-        let Some(rt) = proc.runtime.as_ref() else {
-            return;
-        };
-        let mut stdout_buf: Vec<u8> = Vec::new();
-        let mut stderr_buf: Vec<u8> = Vec::new();
-        while let Ok((kind, mut bytes)) = rt.byte_rx.try_recv() {
-            match kind {
-                ReaderKind::Stdout => stdout_buf.append(&mut bytes),
-                ReaderKind::Stderr => stderr_buf.append(&mut bytes),
+        let drained = {
+            let Some(proc) = self.processes.get(&id) else {
+                return;
+            };
+            let Some(rt) = proc.runtime.as_ref() else {
+                return;
+            };
+            match &rt.output_rx {
+                RuntimeOutputRx::Bytes(byte_rx) => drain_raw_output(byte_rx),
+                RuntimeOutputRx::Ansi(ansi_rx) => drain_ansi_output(ansi_rx),
             }
-        }
-        if stdout_buf.is_empty() && stderr_buf.is_empty() {
+        };
+        if drained.is_empty() {
             return;
         }
         let now = Instant::now();
         let queue = self.pending.entry(id).or_default();
-        if !stdout_buf.is_empty() {
-            queue.push(ProcessEvent {
-                id,
-                kind: ProcessEventKind::Stdout(stdout_buf),
-                at: now,
-            });
-        }
-        if !stderr_buf.is_empty() {
-            queue.push(ProcessEvent {
-                id,
-                kind: ProcessEventKind::Stderr(stderr_buf),
-                at: now,
-            });
+        for kind in drained {
+            queue.push(ProcessEvent { id, kind, at: now });
         }
     }
 
@@ -811,12 +827,14 @@ impl ProcessSupervisor {
             Ok(None) => {}
             Ok(Some(TermStatus::Exited(code))) => {
                 let now = Instant::now();
+                let final_output = final_drain_runtime(runtime);
                 proc.state = ProcessState::Terminated(Termination::Exited {
                     code,
                     started,
                     ended: now,
                 });
                 proc.runtime = None;
+                append_process_events(&mut self.pending, id, final_output, now);
                 self.pending.entry(id).or_default().push(ProcessEvent {
                     id,
                     kind: ProcessEventKind::Exited { code },
@@ -825,12 +843,14 @@ impl ProcessSupervisor {
             }
             Ok(Some(TermStatus::Signaled(signal))) => {
                 let now = Instant::now();
+                let final_output = final_drain_runtime(runtime);
                 proc.state = ProcessState::Terminated(Termination::Signaled {
                     signal: signal.clone(),
                     started,
                     ended: now,
                 });
                 proc.runtime = None;
+                append_process_events(&mut self.pending, id, final_output, now);
                 self.pending.entry(id).or_default().push(ProcessEvent {
                     id,
                     kind: ProcessEventKind::Signaled { signal },
@@ -839,11 +859,13 @@ impl ProcessSupervisor {
             }
             Err(e) => {
                 let now = Instant::now();
+                let final_output = final_drain_runtime(runtime);
                 proc.state = ProcessState::Terminated(Termination::Crashed {
                     error: e.clone(),
                     ended: now,
                 });
                 proc.runtime = None;
+                append_process_events(&mut self.pending, id, final_output, now);
                 self.pending.entry(id).or_default().push(ProcessEvent {
                     id,
                     kind: ProcessEventKind::Crashed { error: e },
@@ -1037,6 +1059,9 @@ impl Drop for ProcessSupervisor {
 /// `events_tx`; reader threads emit only byte chunks onto the
 /// per-generation bounded byte channel. T M6.2.
 fn build_runtime(spec: &ProcessSpec, id: ProcessId) -> Result<RuntimeHandles, String> {
+    if spec.ansi_events && matches!(spec.mode, ProcessMode::Pipes) {
+        return Err("process spawn: ansi=true requires pty mode; pipe-mode consumers receive raw stdout/stderr bytes".to_owned());
+    }
     match spec.mode {
         ProcessMode::Pipes => build_pipes_runtime(spec, id),
         ProcessMode::Pty { rows, cols, mode } => build_pty_runtime(spec, id, rows, cols, mode),
@@ -1089,7 +1114,7 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
         stdin,
         pid,
         readers,
-        byte_rx,
+        output_rx: RuntimeOutputRx::Bytes(byte_rx),
         cancel,
     })
 }
@@ -1154,12 +1179,19 @@ fn build_pty_runtime(
         .map_err(|e| format!("pty reader: {e}"))?;
     let (byte_tx, byte_rx) = channel::bounded::<ByteChunk>(BYTE_CHUNK_CHANNEL_CAP);
     let cancel = Arc::new(AtomicBool::new(false));
-    let readers = vec![spawn_reader(
+    let mut readers = vec![spawn_reader(
         byte_tx,
         Arc::clone(&cancel),
         reader,
         ReaderKind::Stdout,
     )];
+    let output_rx = if spec.ansi_events {
+        let (ansi_tx, ansi_rx) = channel::bounded::<AnsiBatch>(ANSI_EVENT_CHANNEL_CAP);
+        readers.push(spawn_ansi_parser(byte_rx, ansi_tx, Arc::clone(&cancel)));
+        RuntimeOutputRx::Ansi(ansi_rx)
+    } else {
+        RuntimeOutputRx::Bytes(byte_rx)
+    };
     Ok(RuntimeHandles {
         child: ChildHandle::Pty {
             child: Arc::new(Mutex::new(into_send_sync_child(child))),
@@ -1168,7 +1200,7 @@ fn build_pty_runtime(
         stdin: Some(writer),
         pid,
         readers,
-        byte_rx,
+        output_rx,
         cancel,
     })
 }
@@ -1322,6 +1354,122 @@ fn spawn_reader<R: Read + Send + 'static>(
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => return,
+            }
+        }
+    })
+}
+
+fn drain_raw_output(byte_rx: &Receiver<ByteChunk>) -> Vec<ProcessEventKind> {
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut stderr_buf: Vec<u8> = Vec::new();
+    while let Ok((kind, mut bytes)) = byte_rx.try_recv() {
+        match kind {
+            ReaderKind::Stdout => stdout_buf.append(&mut bytes),
+            ReaderKind::Stderr => stderr_buf.append(&mut bytes),
+        }
+    }
+    let mut out = Vec::with_capacity(2);
+    if !stdout_buf.is_empty() {
+        out.push(ProcessEventKind::Stdout(stdout_buf));
+    }
+    if !stderr_buf.is_empty() {
+        out.push(ProcessEventKind::Stderr(stderr_buf));
+    }
+    out
+}
+
+fn drain_ansi_output(ansi_rx: &Receiver<AnsiBatch>) -> Vec<ProcessEventKind> {
+    let mut events: Vec<AnsiEvent> = Vec::new();
+    while let Ok(mut batch) = ansi_rx.try_recv() {
+        events.append(&mut batch);
+    }
+    if events.is_empty() {
+        Vec::new()
+    } else {
+        vec![ProcessEventKind::Ansi(events)]
+    }
+}
+
+fn drain_runtime_output(rt: &RuntimeHandles) -> Vec<ProcessEventKind> {
+    match &rt.output_rx {
+        RuntimeOutputRx::Bytes(byte_rx) => drain_raw_output(byte_rx),
+        RuntimeOutputRx::Ansi(ansi_rx) => drain_ansi_output(ansi_rx),
+    }
+}
+
+fn final_drain_runtime(rt: &RuntimeHandles) -> Vec<ProcessEventKind> {
+    let deadline = Instant::now() + EXIT_OUTPUT_DRAIN_TIMEOUT;
+    let mut out = Vec::new();
+    loop {
+        let drained = drain_runtime_output(rt);
+        let drained_any = !drained.is_empty();
+        out.extend(drained);
+        if rt.readers.iter().all(std::thread::JoinHandle::is_finished) && !drained_any {
+            return out;
+        }
+        if Instant::now() >= deadline {
+            return out;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn append_process_events(
+    pending: &mut HashMap<ProcessId, Vec<ProcessEvent>>,
+    id: ProcessId,
+    kinds: Vec<ProcessEventKind>,
+    at: Instant,
+) {
+    if kinds.is_empty() {
+        return;
+    }
+    let queue = pending.entry(id).or_default();
+    for kind in kinds {
+        queue.push(ProcessEvent { id, kind, at });
+    }
+}
+
+/// Spawn the ANSI parser worker for an ANSI-enabled PTY generation.
+///
+/// The reader thread remains responsible for the 1 MiB PTY-read ceiling.
+/// This stage consumes those chunks, maintains parser state across chunk
+/// boundaries, and forwards structured events through a second bounded
+/// channel whose capacity represents the spec's 256 KiB parser→main
+/// ceiling.
+fn spawn_ansi_parser(
+    byte_rx: Receiver<ByteChunk>,
+    ansi_tx: Sender<AnsiBatch>,
+    cancel: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut parser = AnsiParser::new();
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let (kind, bytes) = match byte_rx.recv_timeout(READER_SEND_POLL_INTERVAL) {
+                Ok(chunk) => chunk,
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => return,
+            };
+            if !matches!(kind, ReaderKind::Stdout) {
+                continue;
+            }
+            let mut events = parser.feed(&bytes);
+            if events.is_empty() {
+                continue;
+            }
+            loop {
+                match ansi_tx.send_timeout(events, READER_SEND_POLL_INTERVAL) {
+                    Ok(()) => break,
+                    Err(crossbeam::channel::SendTimeoutError::Timeout(rejected)) => {
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        events = rejected;
+                    }
+                    Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => return,
+                }
             }
         }
     })
@@ -1688,7 +1836,10 @@ mod tests {
         sup.processes
             .get(&id)
             .and_then(|p| p.runtime.as_ref())
-            .map_or(0, |rt| rt.byte_rx.len())
+            .map_or(0, |rt| match &rt.output_rx {
+                RuntimeOutputRx::Bytes(rx) => rx.len(),
+                RuntimeOutputRx::Ansi(_) => 0,
+            })
     }
 
     /// T M6.2 acceptance bullet 1: the per-generation byte channel
@@ -1829,6 +1980,69 @@ mod tests {
             "too many stdout events ({stdout_event_count}); coalescing \
              not engaged --- expected O(ticks), not O(reads)"
         );
+    }
+
+    #[test]
+    fn m6_2_ansi_enabled_pty_emits_structured_events() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("ansi-stream", "/bin/sh");
+        spec.args = vec!["-c".into(), "printf '\\033[31mhi\\033[0m\\n'".into()];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        spec.ansi_events = true;
+        let id = sup.spawn(spec).expect("spawn ansi pty");
+        let evs = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        assert!(
+            evs.iter()
+                .all(|e| !matches!(e.kind, ProcessEventKind::Stdout(_))),
+            "ansi-enabled PTY should not surface raw stdout events: {evs:?}"
+        );
+        let mut saw_red = false;
+        let mut saw_text = false;
+        for ev in evs {
+            if let ProcessEventKind::Ansi(events) = ev.kind {
+                for event in events {
+                    match event {
+                        AnsiEvent::SetStyle(style)
+                            if style.fg == crate::cell::Color::Indexed(1) =>
+                        {
+                            saw_red = true;
+                        }
+                        AnsiEvent::Text(text) if text.contains("hi") => {
+                            saw_text = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(saw_red, "expected structured red SetStyle event");
+        assert!(saw_text, "expected structured text event");
+    }
+
+    #[test]
+    fn m6_2_ansi_parser_worker_exits_when_reader_channel_closes() {
+        let (byte_tx, byte_rx) = channel::bounded::<ByteChunk>(1);
+        let (ansi_tx, _ansi_rx) = channel::bounded::<AnsiBatch>(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = spawn_ansi_parser(byte_rx, ansi_tx, Arc::clone(&cancel));
+        drop(byte_tx);
+
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline && !handle.is_finished() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !handle.is_finished() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        assert!(
+            handle.is_finished(),
+            "ANSI parser worker should exit once the byte reader channel closes"
+        );
+        handle.join().expect("parser worker join");
     }
 
     /// T M6.2 acceptance bullet 2: stream cancellation propagates to

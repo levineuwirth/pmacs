@@ -142,6 +142,54 @@ fn m6_4_set_prompt_replaces_prompt_region() {
     "#);
 }
 
+#[test]
+fn m6_4_region_boundaries_are_mark_backed_across_input_edits() {
+    run(r#"
+        local h = pmacs.repl.create({ name = "*test*" })
+        h:append_output("history\n")
+        h:set_prompt("$ ")
+        local buf = h:buffer_id()
+        local prompt_before = h:prompt_end()
+
+        -- User edits at the input boundary must not drag the prompt
+        -- boundary forward. This is the failure mode byte-offset
+        -- mirrors hid before real marks existed.
+        buf:insert(prompt_before, "abc")
+        assert(h:prompt_end() == prompt_before,
+               "prompt_end moved across input insert")
+        assert(h:input_text() == "abc", "input text after insert")
+
+        h:append_output("more\n")
+        assert(h:input_text() == "abc",
+               "input preserved after output before prompt")
+        local history = buf:slice(0, h:history_end())
+        assert(history == "history\nmore\n",
+               "history after append: " .. history)
+    "#);
+}
+
+#[test]
+fn m6_4_osc_133_prompt_markers_route_text_to_prompt_region() {
+    run(r#"
+        local h = pmacs.repl.create({ name = "*test*" })
+        h:append_output("\27]133;A\7$ \27]133;B\7")
+        local buf = h:buffer_id()
+
+        assert(h:history_end() == 0,
+               "prompt marker text must not enter history")
+        assert(buf:slice(h:history_end(), h:prompt_end()) == "$ ",
+               "prompt region should hold shell prompt")
+
+        buf:insert(h:prompt_end(), "typed")
+        h:append_output("out\n")
+        assert(buf:slice(0, h:history_end()) == "out\n",
+               "later output should enter history")
+        assert(buf:slice(h:history_end(), h:prompt_end()) == "$ ",
+               "prompt remains prompt after history output")
+        assert(h:input_text() == "typed", "input preserved")
+    "#);
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance bullet 3: read-only enforcement
 // ---------------------------------------------------------------------------
@@ -288,6 +336,38 @@ fn m6_4_ansi_styled_output_routes_to_history_only() {
                .. content .. "'")
         assert(not content:find("\27"),
                "rope must not contain ESC bytes")
+        local spans = h:style_spans()
+        assert(#spans == 1, "expected one red style span, got " .. #spans)
+        assert(spans[1].start == 0 and spans[1]["end"] == 5,
+               "red span should cover hello, got [" .. spans[1].start ..
+               "," .. spans[1]["end"] .. ")")
+        assert(spans[1].style.fg == 1,
+               "red span should carry palette fg=1")
+    "#);
+}
+
+#[test]
+fn m6_4_line_level_ansi_updates_history_in_place() {
+    run(r#"
+        local h = pmacs.repl.create({ name = "*test*" })
+        h:append_output("progress 10%")
+        h:append_output("\rprogress 20%\27[K")
+        local content = h:buffer_id():slice(0, h:buffer_id():len())
+        assert(content == "progress 20%",
+               "CR overwrite + erase-to-EOL should update in place: '" ..
+               content .. "'")
+
+        h:append_output("\r\27[2Kdone\n")
+        content = h:buffer_id():slice(0, h:buffer_id():len())
+        assert(content == "done\n",
+               "erase-line should clear current line before rewrite: '" ..
+               content .. "'")
+
+        h:append_output("abc\bZ")
+        content = h:buffer_id():slice(0, h:buffer_id():len())
+        assert(content == "done\nabZ",
+               "backspace should rewind within current line: '" ..
+               content .. "'")
     "#);
 }
 

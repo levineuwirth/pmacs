@@ -495,7 +495,10 @@ impl EditorState {
         // command which mutates the core).
         let mut args = mlua::MultiValue::new();
         args.push_back(mlua::Value::String(
-            self.lua_host.lua().create_string(&contents).unwrap(),
+            self.lua_host
+                .lua()
+                .create_string(&contents)
+                .expect("Lua VM out of memory while building minibuffer callback args"),
         ));
         if let Err(e) = on_accept.call::<mlua::MultiValue>(args) {
             self.core.borrow_mut().status = format!(
@@ -618,7 +621,10 @@ impl EditorState {
             core.windows[&win_id].text_view.display_to_pos(buf, target)
         };
         if let Some(p) = pos {
-            let aw = core.windows.get_mut(&win_id).unwrap();
+            let aw = core
+                .windows
+                .get_mut(&win_id)
+                .expect("invariant: win_id passed in must be a live window in core.windows");
             aw.cursor = p;
             aw.goal_col = None;
         }
@@ -674,7 +680,10 @@ impl EditorState {
                     .or_else(|| aw.text_view.line_offset(target_row_usize))
             })
         };
-        let aw = core.windows.get_mut(&win_id).unwrap();
+        let aw = core
+            .windows
+            .get_mut(&win_id)
+            .expect("invariant: win_id passed in must be a live window in core.windows");
         aw.view_top = new_top;
         if let Some(p) = new_cursor {
             aw.cursor = p;
@@ -915,7 +924,10 @@ pub fn paint_frame(
         let reg = registry.borrow();
         let buf_id = core.active_buffer_id();
         if let Ok(buf) = reg.get(buf_id) {
-            let aw = core.windows.get_mut(&active).unwrap();
+            let aw = core
+                .windows
+                .get_mut(&active)
+                .expect("invariant: core.active is always a live window in core.windows");
             let cursor_row = aw
                 .text_view
                 .pos_to_display(buf, aw.cursor)

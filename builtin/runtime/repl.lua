@@ -4,26 +4,15 @@
 -- intercept that enforces read-only / truncate-to-input policy.
 -- Spec: §sec:repl-view.
 --
--- # Region tracking: byte offsets, not (yet) marks
+-- # Region tracking: marks
 --
--- The spec says "regions are tracked as marks (M2 primitive)". M2's
--- mark primitive doesn't yet exist; M6.4 tracks region boundaries as
--- byte offsets stored on the handle (`_history_end`, `_prompt_end`).
--- This works correctly because:
---
---   * intercept_edit runs *before* the rope mutates. The package
---     either pre-decides positions (its own write paths) or vetoes
---     (in intercept). It does not need to react to a post-mutation
---     event to keep the offsets consistent.
---   * User-driven edits in the input region (pos >= prompt_end) do
---     not move history_end or prompt_end. So the handle's offsets
---     only need updates from inside the package's own write paths
---     (append_output, set_prompt, submit) --- never from user edits.
---
--- This is sufficient for M6.4. When real marks land (M2 future
--- work), the indirection becomes a one-line replacement: the offsets
--- get backed by mark handles instead of plain integers, and the
--- existing call sites work unchanged.
+-- The history/prompt boundaries are backed by core buffer marks.
+-- `_history_end` and `_prompt_end` remain as compatibility mirrors
+-- for tests and package introspection, but the authoritative positions
+-- are `_history_end_mark` and `_prompt_end_mark`. This matters for
+-- process prompts: user edits in the input region must not accidentally
+-- move the prompt boundary, while package output inserted before the
+-- prompt must move both boundaries with the rope.
 --
 -- # Self-write bypass
 --
@@ -130,6 +119,8 @@ local function new_handle(buffer_id)
   return setmetatable({
     _buf = buffer_id,
     _parser = pmacs.ansi.parser(),
+    _history_end_mark = pmacs.buffer.mark_create(buffer_id, 0, { gravity = "left" }),
+    _prompt_end_mark = pmacs.buffer.mark_create(buffer_id, 0, { gravity = "left" }),
     _history_end = 0,
     _prompt_end = 0,
     -- Latest SetStyle observed. M6.4 doesn't render this anywhere
@@ -139,6 +130,9 @@ local function new_handle(buffer_id)
     _current_style = nil,
     _alt_screen = false,
     _title = nil,
+    _output_pos = 0,
+    _capture = "history",
+    _style_overlay = nil,
     _self_write = false,
     _intercept_handle = nil,
     -- Scrollback block index (M6.7). The first block is degenerate
@@ -154,6 +148,33 @@ local function new_handle(buffer_id)
   }, Handle)
 end
 
+local function sync_marks(h)
+  h._history_end = h._history_end_mark:get()
+  h._prompt_end = h._prompt_end_mark:get()
+end
+
+local function history_end(h)
+  local pos = h._history_end_mark:get()
+  h._history_end = pos
+  return pos
+end
+
+local function prompt_end(h)
+  local pos = h._prompt_end_mark:get()
+  h._prompt_end = pos
+  return pos
+end
+
+local function set_history_end(h, pos)
+  h._history_end_mark:set(pos)
+  h._history_end = pos
+end
+
+local function set_prompt_end(h, pos)
+  h._prompt_end_mark:set(pos)
+  h._prompt_end = pos
+end
+
 -- ---------------------------------------------------------------------
 -- Construction / teardown
 -- ---------------------------------------------------------------------
@@ -166,6 +187,9 @@ function repl.create(opts)
   h._intercept_handle = pmacs.buffer.add_intercept(buf, function(op)
     return repl._intercept(h, op)
   end)
+  if pmacs.buffer.add_style_overlay then
+    h._style_overlay = pmacs.buffer.add_style_overlay(buf)
+  end
   return h
 end
 
@@ -199,6 +223,24 @@ local function basename(s)
   return (s:gsub("^.*/", ""))
 end
 
+local function copy_env(env)
+  local out = {}
+  if env then
+    for k, v in pairs(env) do out[k] = v end
+  end
+  return out
+end
+
+local function shell_prompt_marker_env(argv, base_env)
+  local shell = basename(argv[1])
+  if shell ~= "bash" and shell ~= "zsh" then
+    return base_env
+  end
+  local env = copy_env(base_env)
+  env.PS1 = "\27]133;A\7$ \27]133;B\7"
+  return env
+end
+
 function repl.spawn(opts)
   opts = opts or {}
   local argv = validate_argv(opts.argv)
@@ -220,9 +262,14 @@ function repl.spawn(opts)
     command = argv[1],
     args = args,
     pty = { rows = rows, cols = cols, mode = "raw" },
+    ansi = true,
   }
   if opts.cwd then spec.cwd = opts.cwd end
-  if opts.env then spec.env = opts.env end
+  local env = opts.env
+  if opts.prompt_markers ~= false then
+    env = shell_prompt_marker_env(argv, env)
+  end
+  if env then spec.env = env end
 
   local proc_id = pmacs.process.spawn(spec)
   h._proc_id = proc_id
@@ -235,6 +282,9 @@ function repl.spawn(opts)
   -- `pmacs.workers.show()` (see commands/default.lua:532).
   if pmacs.window and pmacs.window.switch_buffer then
     pcall(pmacs.window.switch_buffer, h._buf)
+  end
+  if pmacs.buffer.attach_style_overlay and h._style_overlay then
+    pcall(pmacs.buffer.attach_style_overlay, h._buf, h._style_overlay)
   end
 
   -- Buffer-scoped bindings. RET submits the input region to the
@@ -295,11 +345,11 @@ function Handle:buffer_id()
 end
 
 function Handle:history_end()
-  return self._history_end
+  return history_end(self)
 end
 
 function Handle:prompt_end()
-  return self._prompt_end
+  return prompt_end(self)
 end
 
 function Handle:title()
@@ -307,11 +357,16 @@ function Handle:title()
 end
 
 function Handle:input_text()
-  return self._buf:slice(self._prompt_end, self._buf:len())
+  return self._buf:slice(prompt_end(self), self._buf:len())
 end
 
 function Handle:alt_screen_active()
   return self._alt_screen
+end
+
+function Handle:style_spans()
+  if not self._style_overlay then return {} end
+  return self._style_overlay:spans()
 end
 
 -- ---------------------------------------------------------------------
@@ -325,11 +380,18 @@ end
 -- suppression at the parser level (so Text events between markers
 -- never reach us).
 function Handle:append_output(bytes)
-  local events = self._parser:feed(bytes)
+  self:append_events(self._parser:feed(bytes))
+end
+
+function Handle:append_events(events)
   for _, ev in ipairs(events) do
     local kind = ev.kind
     if kind == "text" then
-      self:_emit_history(ev.text)
+      if self._capture == "prompt" then
+        self:_emit_prompt(ev.text)
+      else
+        self:_emit_history(ev.text)
+      end
     elseif kind == "set_style" then
       self._current_style = ev.style
     elseif kind == "alt_screen_enter" then
@@ -338,12 +400,28 @@ function Handle:append_output(bytes)
       self._alt_screen = false
     elseif kind == "set_title" then
       self._title = ev.title
-    -- carriage_return, backspace, erase_to_eol, erase_line,
-    -- bracketed_paste_*: parsed-and-acknowledged in M6.4. Their
-    -- semantic effects (CR rewinds input cursor, erase rewrites
-    -- in-place output, etc.) are M6.5+ refinements where they
-    -- meet a real shell. M6.4's "synthetic stream" tests don't
-    -- exercise them.
+    elseif kind == "prompt_start" then
+      self:_begin_prompt_capture()
+    elseif kind == "prompt_end" then
+      self:_end_prompt_capture()
+    elseif kind == "command_start" or kind == "output_start" then
+      self:_begin_command_output()
+    elseif kind == "carriage_return" then
+      self._output_pos = self:_current_line_start()
+    elseif kind == "backspace" then
+      local line_start = self:_current_line_start()
+      if self._output_pos > line_start then
+        self._output_pos = self._output_pos - 1
+      end
+    elseif kind == "erase_to_eol" then
+      self:_delete_history_range(self._output_pos, self:_current_line_end())
+    elseif kind == "erase_line" then
+      local line_start = self:_current_line_start()
+      local line_end = self:_current_line_end()
+      self:_delete_history_range(line_start, line_end)
+      self._output_pos = line_start
+    -- bracketed_paste_* markers are delimiters only; process-emitted
+    -- contents are ordinary text events between them.
     end
   end
 end
@@ -352,10 +430,13 @@ end
 -- untouched; the input region is preserved (it sits past prompt_end).
 function Handle:set_prompt(text)
   text = text or ""
+  local h_end = history_end(self)
+  local p_end = prompt_end(self)
   with_self_write(self, function()
-    self._buf:replace(self._history_end, self._prompt_end, text)
+    self._buf:replace(h_end, p_end, text)
   end)
-  self._prompt_end = self._history_end + #text
+  set_prompt_end(self, history_end(self) + #text)
+  sync_marks(self)
 end
 
 -- Pop the input region's text. Returns the popped string. Does NOT
@@ -368,12 +449,14 @@ end
 -- start_byte invariant.
 function Handle:submit()
   local text = self:input_text()
+  local p_end = prompt_end(self)
   with_self_write(self, function()
-    self._buf:delete(self._prompt_end, self._buf:len())
+    self._buf:delete(p_end, self._buf:len())
   end)
   local last = self._blocks[#self._blocks]
-  if self._history_end > last.start_byte then
-    self._blocks[#self._blocks + 1] = { start_byte = self._history_end }
+  local h_end = history_end(self)
+  if h_end > last.start_byte then
+    self._blocks[#self._blocks + 1] = { start_byte = h_end }
   end
   return text
 end
@@ -384,15 +467,129 @@ end
 
 function Handle:_emit_history(text)
   if #text == 0 then return end
+  local h_end = history_end(self)
+  local pos = self._output_pos or h_end
+  if pos > h_end then pos = h_end end
+  local overwrite_len = math.min(#text, h_end - pos)
+  local insert_len = #text - overwrite_len
   with_self_write(self, function()
-    self._buf:insert(self._history_end, text)
+    if overwrite_len > 0 then
+      self._buf:replace(pos, pos + overwrite_len, text:sub(1, overwrite_len))
+    end
+    if insert_len > 0 then
+      self._buf:insert(pos + overwrite_len, text:sub(overwrite_len + 1))
+    end
   end)
-  local n = #text
-  self._history_end = self._history_end + n
-  self._prompt_end = self._prompt_end + n
+  if insert_len > 0 then
+    self:_adjust_blocks_after_edit(pos + overwrite_len, 0, insert_len)
+  end
+  sync_marks(self)
+  set_history_end(self, h_end + insert_len)
+  if prompt_end(self) < history_end(self) then
+    set_prompt_end(self, history_end(self))
+  end
+  self._output_pos = pos + #text
+  self:_add_style_span(pos, pos + #text)
   -- M6.7: mark the handle for the next tick's truncation check.
   -- Per-byte work beyond this assignment regresses the M6.6 100 MB/s
   -- ingest gate; line counting is deferred to _maybe_truncate.
+  self._dirty_since_last_tick = true
+end
+
+function Handle:_begin_prompt_capture()
+  self._capture = "prompt"
+  self:set_prompt("")
+end
+
+function Handle:_emit_prompt(text)
+  if #text == 0 then return end
+  local p_end = prompt_end(self)
+  with_self_write(self, function()
+    self._buf:insert(p_end, text)
+  end)
+  set_prompt_end(self, p_end + #text)
+  self:_add_style_span(p_end, p_end + #text)
+end
+
+function Handle:_end_prompt_capture()
+  self._capture = "history"
+  self._output_pos = history_end(self)
+  sync_marks(self)
+end
+
+function Handle:_begin_command_output()
+  self._capture = "history"
+  self:set_prompt("")
+  self._output_pos = history_end(self)
+end
+
+local function style_is_default(style)
+  if not style then return true end
+  return style.fg == "default"
+     and style.bg == "default"
+     and not style.bold
+     and not style.italic
+     and style.underline == "none"
+     and not style.reverse
+end
+
+function Handle:_add_style_span(start_pos, end_pos)
+  if not self._style_overlay then return end
+  if start_pos >= end_pos then return end
+  if style_is_default(self._current_style) then return end
+  self._style_overlay:add(start_pos, end_pos, self._current_style)
+end
+
+function Handle:_adjust_blocks_after_edit(start_pos, old_len, new_len)
+  local delta = new_len - old_len
+  if delta == 0 then return end
+  for i = 1, #self._blocks do
+    local b = self._blocks[i]
+    if b.start_byte > start_pos then
+      b.start_byte = b.start_byte + delta
+      if b.start_byte < start_pos then b.start_byte = start_pos end
+    end
+  end
+end
+
+function Handle:_current_line_start()
+  local h_end = history_end(self)
+  local pos = self._output_pos or h_end
+  if pos > h_end then pos = h_end end
+  local prefix = self._buf:slice(0, pos)
+  local start = 0
+  local search = 1
+  while true do
+    local idx = prefix:find("\n", search, true)
+    if not idx then return start end
+    start = idx
+    search = idx + 1
+  end
+end
+
+function Handle:_current_line_end()
+  local h_end = history_end(self)
+  local pos = self._output_pos or h_end
+  if pos > h_end then pos = h_end end
+  local suffix = self._buf:slice(pos, h_end)
+  local idx = suffix:find("\n", 1, true)
+  if idx then return pos + idx - 1 end
+  return h_end
+end
+
+function Handle:_delete_history_range(start_pos, end_pos)
+  if end_pos <= start_pos then return end
+  with_self_write(self, function()
+    self._buf:delete(start_pos, end_pos)
+  end)
+  local removed = end_pos - start_pos
+  sync_marks(self)
+  if self._output_pos > end_pos then
+    self._output_pos = self._output_pos - removed
+  elseif self._output_pos > start_pos then
+    self._output_pos = start_pos
+  end
+  self:_adjust_blocks_after_edit(start_pos, removed, 0)
   self._dirty_since_last_tick = true
 end
 
@@ -420,7 +617,7 @@ end
 -- (16 MiB / 10000 lines), and skipped entirely by the byte-only
 -- shortcut in within_limits.
 local function history_lines(h)
-  return count_newlines(h._buf:slice(0, h._history_end))
+  return count_newlines(h._buf:slice(0, history_end(h)))
 end
 
 -- Both invariants in one predicate, with a fast path that avoids the
@@ -431,8 +628,9 @@ end
 -- pay for the line scan.
 local function within_limits(h)
   local cfg = repl.config
-  if h._history_end > cfg.scrollback_bytes then return false end
-  if h._history_end <= cfg.scrollback_lines then return true end
+  local h_end = history_end(h)
+  if h_end > cfg.scrollback_bytes then return false end
+  if h_end <= cfg.scrollback_lines then return true end
   return history_lines(h) <= cfg.scrollback_lines
 end
 
@@ -449,8 +647,8 @@ local function drop_oldest_block(h)
   with_self_write(h, function()
     h._buf:delete(first.start_byte, second.start_byte)
   end)
-  h._history_end = h._history_end - removed_bytes
-  h._prompt_end = h._prompt_end - removed_bytes
+  sync_marks(h)
+  h._output_pos = math.max(0, (h._output_pos or history_end(h)) - removed_bytes)
   table.remove(h._blocks, 1)
   for i = 1, #h._blocks do
     h._blocks[i].start_byte = h._blocks[i].start_byte - removed_bytes
@@ -489,7 +687,7 @@ function repl._intercept(h, op)
   if h._self_write then
     return nil
   end
-  local prompt_end = h._prompt_end
+  local prompt_end = prompt_end(h)
   if op.kind == "insert" then
     if op.pos < prompt_end then
       error("REPL: history/prompt region is read-only (insert at "
@@ -547,6 +745,8 @@ local function drain_handle(h)
       -- they do (regression / pipe-mode use), routing them through
       -- append_output preserves user output rather than dropping it.
       h:append_output(ev.bytes)
+    elseif kind == "ansi" then
+      h:append_events(ev.events)
     elseif kind == "exited" or kind == "signaled" or kind == "crashed" then
       h:_on_exit(ev)
     end
@@ -672,9 +872,9 @@ pmacs.command.define {
 -- delete-char-forward when the input region is non-empty so users
 -- never see C-d as broken. Empty case writes \x04 (EOT); raw-mode
 -- shells with a line editor interpret that as end-of-input. Non-empty
--- case delegates to the existing pmacs.editor.delete_forward primitive
--- (which the M6.4 intercept policy guards: deletes inside the input
--- region pass through, deletes into prompt/history are rejected).
+-- case deletes through the REPL buffer at the cursor when it is inside
+-- the input region, falling back to the input start if the editor
+-- cursor is stale/outside the region.
 pmacs.command.define {
   name = "pmacs.repl.send-eof-current",
   description = "Close stdin on empty input region; delete-char-forward otherwise.",
@@ -685,7 +885,11 @@ pmacs.command.define {
     if h:input_text() == "" then
       pmacs.process.write_stdin(h._proc_id, "\x04")
     else
-      pmacs.editor.delete_forward()
+      local start = h:prompt_end()
+      local len = h._buf:len()
+      local pos = pmacs.editor.cursor()
+      if pos < start or pos >= len then pos = start end
+      if pos < len then h._buf:delete(pos, pos + 1) end
     end
   end,
 }

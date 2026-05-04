@@ -106,6 +106,14 @@ portable-pty = "0.9"
 # (spec §5.2). `preserve_order` is off --- LSP doesn't require it
 # and the default `BTreeMap` keeps allocation low.
 serde_json = "1"
+# T M7.1 package manifest format (spec §sec:packages-future): TOML at
+# the package's root (`pmacs.toml`). Read at install time, not at every
+# load.
+toml = "0.8"
+# T M7.1 semantic versioning for `version` and `pmacs_required` fields.
+# `serde` feature gives us localized parse errors during deserialization
+# (rejected at parse time, not at install time).
+semver = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 proptest = "1"

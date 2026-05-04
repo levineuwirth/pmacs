@@ -29,7 +29,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::rope::{Edit, Position, Range, Rope, RopeError};
-use crate::view::View;
+use crate::view::{InterceptContext, View};
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -73,6 +73,37 @@ impl ViewId {
     pub const fn raw(self) -> u64 {
         self.0
     }
+}
+
+/// Opaque, per-buffer identifier for a position mark.
+///
+/// Marks are owned by a [`Buffer`] and move through edits according to
+/// their gravity. They are intentionally not process-global: a
+/// `MarkId(0)` from one buffer has no meaning in another buffer.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct MarkId(u64);
+
+impl MarkId {
+    /// Inspect the raw value. Useful for logging and FFI.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// Which side of an insertion/replacement a mark sticks to.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum MarkGravity {
+    /// Stay before bytes inserted exactly at the mark.
+    Left,
+    /// Move after bytes inserted exactly at the mark.
+    Right,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Mark {
+    pos: Position,
+    gravity: MarkGravity,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,10 +187,24 @@ pub struct Buffer {
     views: Vec<(ViewId, Box<dyn View>)>,
     /// Per-buffer counter for [`ViewId`] allocation.
     next_view_id: u64,
+    /// Buffer-relative marks. Kept as a small vector because current
+    /// consumers create a handful per buffer; if this grows into
+    /// thousands, this can become an indexed table without changing
+    /// the public API.
+    marks: Vec<(MarkId, Mark)>,
+    /// Per-buffer counter for [`MarkId`] allocation.
+    next_mark_id: u64,
     /// Undo stack. Most recent entry on top.
     undo: Vec<UndoEntry>,
     /// Redo stack. Cleared by any forward edit.
     redo: Vec<UndoEntry>,
+    /// True while an edit is in flight on this buffer (T M7.4).
+    /// Set by [`Buffer::begin_edit`], cleared by [`Buffer::end_edit`].
+    /// A re-entrant `apply_edit` / `apply_edit_skip_intercepts` while
+    /// the flag is set returns [`BufferError::ConcurrentEdit`] rather
+    /// than mutating the rope mid-intercept; cross-buffer re-entry
+    /// is unaffected.
+    editing_in_progress: bool,
 }
 
 impl Buffer {
@@ -193,8 +238,11 @@ impl Buffer {
             revision: 0,
             views: Vec::new(),
             next_view_id: 0,
+            marks: Vec::new(),
+            next_mark_id: 0,
             undo: Vec::new(),
             redo: Vec::new(),
+            editing_in_progress: false,
         }
     }
 
@@ -290,6 +338,126 @@ impl Buffer {
         Some(self.views.remove(idx).1)
     }
 
+    /// Create a mark at byte position `pos`.
+    ///
+    /// The position must be inside the current buffer (`pos <= len`).
+    /// The returned ID is scoped to this buffer.
+    pub fn create_mark(
+        &mut self,
+        pos: Position,
+        gravity: MarkGravity,
+    ) -> Result<MarkId, BufferError> {
+        if pos > self.len() {
+            return Err(BufferError::Rope(RopeError::OutOfBounds {
+                pos,
+                len: self.len(),
+            }));
+        }
+        let id = MarkId(self.next_mark_id);
+        self.next_mark_id += 1;
+        self.marks.push((id, Mark { pos, gravity }));
+        Ok(id)
+    }
+
+    /// Current byte position of a mark, or `None` if it has been removed.
+    #[must_use]
+    pub fn mark_pos(&self, id: MarkId) -> Option<Position> {
+        self.marks
+            .iter()
+            .find_map(|(mark_id, mark)| (*mark_id == id).then_some(mark.pos))
+    }
+
+    /// Move an existing mark to `pos`.
+    ///
+    /// Returns `Ok(false)` for an unknown mark ID. Out-of-bounds
+    /// positions are errors and leave the mark unchanged.
+    pub fn set_mark(&mut self, id: MarkId, pos: Position) -> Result<bool, BufferError> {
+        if pos > self.len() {
+            return Err(BufferError::Rope(RopeError::OutOfBounds {
+                pos,
+                len: self.len(),
+            }));
+        }
+        let Some((_, mark)) = self.marks.iter_mut().find(|(mark_id, _)| *mark_id == id) else {
+            return Ok(false);
+        };
+        mark.pos = pos;
+        Ok(true)
+    }
+
+    /// Remove a mark. Returns `true` if the mark existed.
+    pub fn remove_mark(&mut self, id: MarkId) -> bool {
+        let Some(idx) = self.marks.iter().position(|(mark_id, _)| *mark_id == id) else {
+            return false;
+        };
+        self.marks.remove(idx);
+        true
+    }
+
+    /// Take all attached views out of the buffer, returning ownership
+    /// to the caller (T M7.4).
+    ///
+    /// Pair with [`Buffer::restore_views`]. While the views are taken
+    /// out, the buffer's view list is empty: `attach_view` calls
+    /// during this window land in the empty list and will be
+    /// preserved by `restore_views`.
+    ///
+    /// Used by the Lua bindings to run the intercept chain with the
+    /// registry borrow released, so an intercept body may safely
+    /// re-enter the buffer API on any buffer (including this one,
+    /// modulo the `editing_in_progress` gate).
+    pub fn take_views(&mut self) -> Vec<(ViewId, Box<dyn View>)> {
+        std::mem::take(&mut self.views)
+    }
+
+    /// Restore previously-taken views.
+    ///
+    /// Views attached during the take/restore window are preserved
+    /// and ordered after the restored set. Use case: a Lua intercept
+    /// body on buffer A calls `pmacs.buffer.add_intercept(A, ...)` to
+    /// install another intercept; the new view should sit after the
+    /// existing chain so the existing chain still runs first on
+    /// future edits.
+    pub fn restore_views(&mut self, mut original: Vec<(ViewId, Box<dyn View>)>) {
+        let new_additions = std::mem::take(&mut self.views);
+        original.extend(new_additions);
+        self.views = original;
+    }
+
+    /// Mark the buffer as mid-edit (T M7.4). Pairs with [`Buffer::end_edit`].
+    ///
+    /// Returns [`BufferError::ConcurrentEdit`] if a previous
+    /// `begin_edit` is unmatched. The Lua bindings call this at the
+    /// start of the three-phase edit flow so that a re-entrant Lua
+    /// call into the same buffer's `apply_edit` /
+    /// `apply_edit_skip_intercepts` surfaces a typed error rather
+    /// than silently corrupting state.
+    pub fn begin_edit(&mut self) -> Result<(), BufferError> {
+        if self.editing_in_progress {
+            return Err(BufferError::ConcurrentEdit {
+                id: self.id,
+                name: self.name.clone(),
+            });
+        }
+        self.editing_in_progress = true;
+        Ok(())
+    }
+
+    /// Clear the mid-edit flag set by [`Buffer::begin_edit`].
+    /// Idempotent. Lua bindings call this at the end of the edit
+    /// flow, before the final `apply_edit_skip_intercepts`.
+    pub fn end_edit(&mut self) {
+        self.editing_in_progress = false;
+    }
+
+    /// Whether the buffer is currently mid-edit (T M7.4).
+    /// Useful for diagnostic tooling; the in-process flow's
+    /// re-entrancy check happens inside `apply_edit` itself.
+    #[must_use]
+    pub fn editing_in_progress(&self) -> bool {
+        self.editing_in_progress
+    }
+
     /// Apply an edit.
     ///
     /// Walks the intercept-edit chain in attach order; applies the
@@ -300,8 +468,24 @@ impl Buffer {
     /// On error the buffer is left in its pre-edit state and the undo
     /// stack is unchanged.
     ///
+    /// # Re-entrancy (T M7.4)
+    ///
+    /// In-process Rust callers run intercepts under the same `&mut Buffer`
+    /// borrow that owns the apply --- no re-entry path exists, so the
+    /// `editing_in_progress` flag is not set by this method (it is set
+    /// only by [`Buffer::begin_edit`], which the Lua bindings use to gate
+    /// same-buffer re-entry). A caller that does `b.apply_edit(...)`
+    /// while another `apply_edit` is on the stack for the same `b`
+    /// would already fail at `&mut` aliasing in safe Rust.
+    ///
     /// Threading: main thread only.
     pub fn apply_edit(&mut self, op: EditOp<'_>) -> Result<Edit, BufferError> {
+        if self.editing_in_progress {
+            return Err(BufferError::ConcurrentEdit {
+                id: self.id,
+                name: self.name.clone(),
+            });
+        }
         // Take views out so the loop body can borrow `&self` while iterating.
         // The buffer is left view-less only for the duration of this call;
         // panics during it would leave an empty view list (acceptable: views
@@ -313,6 +497,29 @@ impl Buffer {
         result
     }
 
+    /// Apply an edit, skipping the intercept chain.
+    ///
+    /// Used by the Lua bindings (T M7.4) after they have run intercepts
+    /// out-of-band with the registry borrow released. Behaves like
+    /// [`Buffer::apply_edit`] from "rope edit" onward: rope mutation,
+    /// undo bookkeeping, modified flag, revision bump, and `on_edit`
+    /// broadcast all happen here.
+    ///
+    /// In-process Rust callers should use [`Buffer::apply_edit`]
+    /// instead --- this primitive exists for the case where the
+    /// caller has already evaluated the intercept chain and has the
+    /// final [`EditOp`] in hand.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "by-value mirrors apply_edit's signature; the Lua bindings build a fresh EditOp per call"
+    )]
+    pub fn apply_edit_skip_intercepts(&mut self, op: EditOp<'_>) -> Result<Edit, BufferError> {
+        let mut views = std::mem::take(&mut self.views);
+        let result = self.run_rope_edit_and_broadcast(&mut views, &op);
+        self.views = views;
+        result
+    }
+
     fn apply_edit_inner(
         &mut self,
         views: &mut [(ViewId, Box<dyn View>)],
@@ -320,12 +527,22 @@ impl Buffer {
     ) -> Result<Edit, BufferError> {
         // Stage 1: intercept chain.
         let mut current = op;
+        let ctx = InterceptContext::snapshot(self);
         for (_, view) in views.iter_mut() {
-            current = view.intercept_edit(self, current)?;
+            current = view.intercept_edit(&ctx, current)?;
         }
 
+        // Stages 2-4: rope edit + state update + broadcast.
+        self.run_rope_edit_and_broadcast(views, &current)
+    }
+
+    fn run_rope_edit_and_broadcast(
+        &mut self,
+        views: &mut [(ViewId, Box<dyn View>)],
+        current: &EditOp<'_>,
+    ) -> Result<Edit, BufferError> {
         // Stage 2: rope edit.
-        let edit = match &current {
+        let edit = match current {
             EditOp::Insert { pos, bytes } => self.rope.insert(*pos, bytes)?,
             EditOp::Delete { range } => self.rope.delete(range.start, range.end)?,
             EditOp::Replace { range, bytes } => self.rope.replace(range.start, range.end, bytes)?,
@@ -350,6 +567,7 @@ impl Buffer {
         let pre_range = edit.range;
         let inserted_len = edit.inserted_len;
         let old_rope = std::mem::replace(&mut self.rope, edit.new_rope.clone());
+        self.adjust_marks_for_edit(pre_range, inserted_len);
         self.undo.push(UndoEntry {
             rope: old_rope,
             edit: EditDescription {
@@ -391,6 +609,7 @@ impl Buffer {
 
         let new_rope = entry.rope.clone();
         let old_rope = std::mem::replace(&mut self.rope, new_rope.clone());
+        self.adjust_marks_for_edit(inverse_pre_range, inverse_inserted_len);
         self.redo.push(UndoEntry {
             rope: old_rope,
             edit: EditDescription {
@@ -428,6 +647,7 @@ impl Buffer {
 
         let new_rope = entry.rope.clone();
         let old_rope = std::mem::replace(&mut self.rope, new_rope.clone());
+        self.adjust_marks_for_edit(inverse_pre_range, inverse_inserted_len);
         self.undo.push(UndoEntry {
             rope: old_rope,
             edit: EditDescription {
@@ -458,6 +678,43 @@ impl Buffer {
         self.views = views;
         result
     }
+
+    fn adjust_marks_for_edit(&mut self, range: Range, inserted_len: u64) {
+        let start = range.start;
+        let end = range.end;
+        let old_len = range.len();
+        let new_end = start.saturating_add(inserted_len);
+
+        for (_, mark) in &mut self.marks {
+            let pos = mark.pos;
+            mark.pos = if pos < start {
+                pos
+            } else if pos > end {
+                pos - old_len + inserted_len
+            } else if pos == start {
+                if old_len == 0 && mark.gravity == MarkGravity::Right {
+                    new_end
+                } else if old_len == 0 {
+                    start
+                } else {
+                    match mark.gravity {
+                        MarkGravity::Left => start,
+                        MarkGravity::Right => new_end,
+                    }
+                }
+            } else if pos < end {
+                match mark.gravity {
+                    MarkGravity::Left => start,
+                    MarkGravity::Right => new_end,
+                }
+            } else {
+                match mark.gravity {
+                    MarkGravity::Left => start,
+                    MarkGravity::Right => new_end,
+                }
+            };
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +742,27 @@ pub enum BufferError {
     Intercepted {
         /// Human-readable reason. Surfaced verbatim to the user.
         reason: String,
+    },
+    /// A re-entrant edit was attempted on a buffer that is already
+    /// mid-edit (T M7.4). The most common path: a Lua intercept body
+    /// running on buffer A called `A:insert(...)` or similar.
+    /// Cross-buffer re-entry (`A`'s intercept editing `B`) is allowed
+    /// and does not surface this error.
+    ///
+    /// The message names a workaround per the project convention.
+    #[error(
+        "buffer `{name}` (id {id:?}) is already being edited; \
+         re-entrant edits on the same buffer are not supported. \
+         To compose with the current edit, return a transformed table \
+         from this intercept; to schedule a follow-up edit, register an \
+         on-edit hook that runs after the current edit completes, or \
+         edit a different buffer."
+    )]
+    ConcurrentEdit {
+        /// The buffer's identifier.
+        id: BufferId,
+        /// The buffer's name, for diagnostics.
+        name: String,
     },
 }
 
@@ -525,13 +803,12 @@ mod tests {
     impl View for RecorderView {
         fn intercept_edit<'a>(
             &mut self,
-            buf: &Buffer,
+            ctx: &crate::view::InterceptContext,
             op: EditOp<'a>,
         ) -> Result<EditOp<'a>, BufferError> {
-            self.events
-                .lock()
-                .unwrap()
-                .push(RecorderEvent::Intercept { pre_len: buf.len() });
+            self.events.lock().unwrap().push(RecorderEvent::Intercept {
+                pre_len: ctx.buf_len,
+            });
             Ok(op)
         }
         fn on_edit(&mut self, buf: &Buffer, edit: &Edit) -> Result<(), BufferError> {
@@ -550,7 +827,7 @@ mod tests {
     impl View for ReverseInsertView {
         fn intercept_edit<'a>(
             &mut self,
-            _buf: &Buffer,
+            _ctx: &crate::view::InterceptContext,
             op: EditOp<'a>,
         ) -> Result<EditOp<'a>, BufferError> {
             // Cannot return EditOp with owned bytes given the lifetime
@@ -619,6 +896,58 @@ mod tests {
         assert_eq!(b.len(), 3);
         assert!(b.is_modified());
         assert_eq!(collect(&b), b"abc");
+    }
+
+    #[test]
+    fn marks_apply_insertion_gravity() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "test", b"abcd");
+        let left = b.create_mark(2, MarkGravity::Left).unwrap();
+        let right = b.create_mark(2, MarkGravity::Right).unwrap();
+
+        b.apply_edit(EditOp::Insert {
+            pos: 2,
+            bytes: b"XX",
+        })
+        .unwrap();
+
+        assert_eq!(b.mark_pos(left), Some(2));
+        assert_eq!(b.mark_pos(right), Some(4));
+    }
+
+    #[test]
+    fn marks_shift_and_clamp_through_delete() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "test", b"abcdef");
+        let before = b.create_mark(1, MarkGravity::Right).unwrap();
+        let inside = b.create_mark(3, MarkGravity::Left).unwrap();
+        let after = b.create_mark(5, MarkGravity::Right).unwrap();
+
+        b.apply_edit(EditOp::Delete {
+            range: Range::new(2, 4),
+        })
+        .unwrap();
+
+        assert_eq!(b.mark_pos(before), Some(1));
+        assert_eq!(b.mark_pos(inside), Some(2));
+        assert_eq!(b.mark_pos(after), Some(3));
+    }
+
+    #[test]
+    fn marks_follow_undo_and_redo() {
+        let mut b = Buffer::from_bytes(BufferId::next(), "test", b"abcd");
+        let mark = b.create_mark(3, MarkGravity::Right).unwrap();
+
+        b.apply_edit(EditOp::Insert {
+            pos: 1,
+            bytes: b"XX",
+        })
+        .unwrap();
+        assert_eq!(b.mark_pos(mark), Some(5));
+
+        b.undo().unwrap();
+        assert_eq!(b.mark_pos(mark), Some(3));
+
+        b.redo().unwrap();
+        assert_eq!(b.mark_pos(mark), Some(5));
     }
 
     #[test]

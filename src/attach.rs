@@ -1220,6 +1220,27 @@ fn classify_ssh_exit(
 mod tests {
     use super::*;
 
+    /// Try to bind a `UnixListener` at `path`. On `PermissionDenied`
+    /// (e.g., a sandboxed CI environment that disallows `AF_UNIX`
+    /// socket creation), prints a skip notice and returns `None`;
+    /// the calling test should early-return so the suite reports
+    /// `0 failed` rather than a misleading panic. Mirror of the
+    /// helper in `daemon_attach.rs`'s test module.
+    fn bind_or_skip(path: &std::path::Path) -> Option<UnixListener> {
+        match UnixListener::bind(path) {
+            Ok(l) => Some(l),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "test skipped: UnixListener::bind {} → PermissionDenied \
+                     (sandboxed environment).",
+                    path.display()
+                );
+                None
+            }
+            Err(e) => panic!("UnixListener::bind {} failed: {e}", path.display()),
+        }
+    }
+
     #[test]
     fn format_uptime_shapes() {
         assert_eq!(format_uptime(5), "5s");
@@ -1474,7 +1495,9 @@ mod tests {
     fn version_mismatch_errors_at_construction_site() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let socket_path = tmp.path().join("test.sock");
-        let listener = UnixListener::bind(&socket_path).expect("UnixListener::bind");
+        let Some(listener) = bind_or_skip(&socket_path) else {
+            return;
+        };
 
         // Fake daemon: accept one connection, write a Hello with a
         // bogus protocol version, exit. The accept blocks until

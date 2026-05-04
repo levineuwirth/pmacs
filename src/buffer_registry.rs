@@ -35,6 +35,24 @@ pub enum RegistryError {
         /// the Lua boundary (R52).
         id: BufferId,
     },
+    /// Removal was requested for a buffer that is currently mid-edit
+    /// (T M7.4). The most common path: a Lua intercept body on buffer
+    /// `A` called `pmacs.buffer.remove(A)`. Mirrors
+    /// [`crate::buffer::BufferError::ConcurrentEdit`] in spirit; the
+    /// message names the workaround per project convention.
+    #[error(
+        "buffer `{name}` (id {id:?}) is already being edited; \
+         it cannot be removed while an intercept is running on it. \
+         To remove this buffer, return from the intercept first \
+         (the registry borrow will release at that point), or remove \
+         a different buffer."
+    )]
+    ConcurrentEdit {
+        /// The buffer's identifier.
+        id: BufferId,
+        /// The buffer's name, for diagnostics.
+        name: String,
+    },
 }
 
 /// Owns [`Buffer`]s behind their [`BufferId`]s.
@@ -100,7 +118,23 @@ impl BufferRegistry {
 
     /// Remove and return the buffer behind `id`. Subsequent lookups of
     /// `id` produce [`RegistryError::Missing`].
+    ///
+    /// Refuses to remove a buffer that is currently mid-edit (T M7.4):
+    /// an intercept body running on buffer `A` cannot drop `A` out
+    /// from under itself. Returns
+    /// [`RegistryError::ConcurrentEdit`] in that case, leaving the
+    /// buffer in place.
     pub fn remove(&mut self, id: BufferId) -> Result<Buffer, RegistryError> {
+        // Peek without taking ownership: if the buffer is mid-edit we
+        // surface a typed error and leave the registry untouched.
+        if let Some(buf) = self.buffers.get(&id) {
+            if buf.editing_in_progress() {
+                return Err(RegistryError::ConcurrentEdit {
+                    id,
+                    name: buf.name().to_string(),
+                });
+            }
+        }
         let buf = self
             .buffers
             .remove(&id)
@@ -178,8 +212,12 @@ mod tests {
         let r = BufferRegistry::new();
         let stale = BufferId::next();
         let err = r.get(stale).err().expect("expected stale-handle error");
-        let RegistryError::Missing { id } = err;
-        assert_eq!(id, stale);
+        match err {
+            RegistryError::Missing { id } => assert_eq!(id, stale),
+            other @ RegistryError::ConcurrentEdit { .. } => {
+                panic!("expected Missing, got {other:?}")
+            }
+        }
     }
 
     #[test]

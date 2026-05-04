@@ -60,18 +60,32 @@ impl Chord {
     /// Canonicalization rules:
     /// * `KeyCode::Char('A')` with `SHIFT` --- the SHIFT bit is
     ///   stripped; the uppercase letter already implies it.
+    /// * `KeyCode::Char('a')` with `SHIFT` --- promoted to
+    ///   `KeyCode::Char('A')` and SHIFT stripped. Some terminals (or
+    ///   kitty-protocol modes the user might enable separately) report
+    ///   shifted ASCII letters as the unshifted code with SHIFT set;
+    ///   normalizing here means `S-a` and `A` hash identically and
+    ///   self-insert produces `A`. Non-letter shifted keys like
+    ///   `Shift+9` rely on terminal-side layout translation (frontend
+    ///   does not push `REPORT_ALL_KEYS_AS_ESCAPE_CODES`); pmacs has
+    ///   no layout knowledge to map `9 + SHIFT` to `(`.
     /// * `KeyCode::Char(c)` for any `c` whose lowercase is itself
     ///   (`/`, `1`, ...) leaves modifiers as-is.
     #[must_use]
     pub fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
-        let mods = match code {
-            KeyCode::Char(ch) if ch.is_ascii_uppercase() => modifiers - KeyModifiers::SHIFT,
-            _ => modifiers,
+        let (code, modifiers) = match code {
+            KeyCode::Char(ch) if ch.is_ascii_uppercase() => (code, modifiers - KeyModifiers::SHIFT),
+            KeyCode::Char(ch)
+                if ch.is_ascii_lowercase() && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                (
+                    KeyCode::Char(ch.to_ascii_uppercase()),
+                    modifiers - KeyModifiers::SHIFT,
+                )
+            }
+            _ => (code, modifiers),
         };
-        Self {
-            code,
-            modifiers: mods,
-        }
+        Self { code, modifiers }
     }
 
     /// Build a plain unmodified chord.
@@ -431,6 +445,38 @@ mod tests {
         let with_shift = Chord::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
         let bare = Chord::plain(KeyCode::Char('A'));
         assert_eq!(with_shift, bare);
+    }
+
+    #[test]
+    fn lowercase_letter_with_shift_promotes_to_uppercase() {
+        // Some terminals (or kitty-protocol modes a user may enable
+        // separately) report shifted ASCII letters as the unshifted
+        // code with SHIFT set: `Shift+a` arrives as `Char('a')+SHIFT`,
+        // not `Char('A')`. The canonicalization promotes to the
+        // uppercase form so self-insert produces 'A' and bindings
+        // for `S-a` hash identically to bindings for `A`.
+        let promoted = Chord::new(KeyCode::Char('a'), KeyModifiers::SHIFT);
+        let bare = Chord::plain(KeyCode::Char('A'));
+        assert_eq!(promoted, bare);
+    }
+
+    #[test]
+    fn shift_a_equals_capital_a_through_parser() {
+        // Parser emits the same chord whether you write `S-a` or `A`.
+        assert_eq!(parse_chord("S-a").unwrap(), parse_chord("A").unwrap());
+    }
+
+    #[test]
+    fn non_letter_shifted_chars_keep_modifiers() {
+        // pmacs has no layout knowledge: a chord built from
+        // `Char('9')+SHIFT` cannot be promoted to `Char('(')`. We
+        // leave it as-is and rely on the terminal to deliver the
+        // post-shift character (`(`) in normal operation. This test
+        // pins the no-touch behavior so the canonicalization doesn't
+        // creep into territory that would need a layout map.
+        let chord = Chord::new(KeyCode::Char('9'), KeyModifiers::SHIFT);
+        assert_eq!(chord.code, KeyCode::Char('9'));
+        assert!(chord.modifiers.contains(KeyModifiers::SHIFT));
     }
 
     #[test]

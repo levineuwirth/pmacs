@@ -77,6 +77,14 @@ pub enum AnsiEvent {
     /// Set the window title (OSC 0 / OSC 2 with terminator).
     /// Exposed as a per-buffer attribute by the M6.4 REPL view.
     SetTitle(String),
+    /// `OSC 133;A`: shell prompt begins.
+    PromptStart,
+    /// `OSC 133;B`: shell prompt ends.
+    PromptEnd,
+    /// `OSC 133;C`: command input begins.
+    CommandStart,
+    /// `OSC 133;D`: command output begins / command finished marker.
+    OutputStart,
     /// `CSI 200 ~`: a process-emitted bracketed-paste begin marker.
     BracketedPasteBegin,
     /// `CSI 201 ~`: a process-emitted bracketed-paste end marker.
@@ -286,8 +294,20 @@ pub struct AnsiParser {
     ignore_byte_count: usize,
     /// In-progress text run accumulator. Flushed as a single
     /// [`AnsiEvent::Text`] when we leave Ground for any non-Ground
-    /// state.
+    /// state. Holds only complete (valid UTF-8) characters; partial
+    /// multi-byte sequences live in `utf8_buf` until they complete.
     text_run: String,
+    /// Pending UTF-8 bytes that haven't yet decoded to a complete
+    /// scalar. Cross-feed buffer: a multi-byte sequence split across
+    /// `feed()` calls accumulates here until the trailing byte
+    /// arrives (or until a non-continuation byte invalidates the
+    /// sequence, at which point we emit U+FFFD for the malformed
+    /// bytes and continue). The buffer holds at most a few bytes
+    /// (the longest valid UTF-8 sequence is 4 bytes; we cap at 8
+    /// defensively). This replaces the M6.3-stage-1 shortcut where
+    /// every non-ASCII byte was emitted as U+FFFD regardless of
+    /// whether it was actually malformed.
+    utf8_buf: Vec<u8>,
     /// Suppress `Text` and `SetStyle` events while alternate-screen
     /// is active. Spec §sec:ansi-scope: parser advances state
     /// normally but emits no payload.
@@ -321,6 +341,7 @@ impl AnsiParser {
             current_style: Style::default(),
             ignore_byte_count: 0,
             text_run: String::new(),
+            utf8_buf: Vec::new(),
             alt_screen_active: false,
             csi: CsiCollector::default(),
             osc_body: Vec::new(),
@@ -336,6 +357,7 @@ impl AnsiParser {
         self.state = State::Ground;
         self.ignore_byte_count = 0;
         self.text_run.clear();
+        self.utf8_buf.clear();
         self.csi.reset();
         self.osc_body.clear();
         self.escape_intermediates.clear();
@@ -354,7 +376,20 @@ impl AnsiParser {
         // resolve and the bytes belong to it). Since we only build
         // text_run while in Ground, this is safe to flush
         // unconditionally as a final step.
-        self.flush_text_run(&mut events);
+        //
+        // We do NOT flush `utf8_buf` here: an incomplete multi-byte
+        // sequence at the feed boundary is exactly the case the
+        // cross-feed buffer was added to handle --- the trailing
+        // bytes are expected to arrive in the next feed. The state
+        // transition path (flush_text_run) does emit U+FFFD for
+        // pending bytes because a non-text byte genuinely
+        // interrupts the sequence; feed-boundary doesn't.
+        if !self.text_run.is_empty() && !self.alt_screen_active {
+            let run = std::mem::take(&mut self.text_run);
+            events.push(AnsiEvent::Text(run));
+        } else {
+            self.text_run.clear();
+        }
         events
     }
 
@@ -425,6 +460,11 @@ impl AnsiParser {
     // -----------------------------------------------------------------------
 
     fn flush_text_run(&mut self, events: &mut Vec<AnsiEvent>) {
+        // Any pending UTF-8 prefix at this point is interrupted by
+        // a non-text byte (control byte, CSI start, etc.); the
+        // sequence can't continue across that boundary. Emit U+FFFD
+        // for the incomplete bytes before committing the run.
+        self.flush_pending_utf8_as_replacement();
         if self.text_run.is_empty() {
             return;
         }
@@ -498,58 +538,125 @@ impl AnsiParser {
             // line break in the rope; HT as a literal tab. Other
             // C0 controls (0x00..=0x06, 0x0E..=0x1F) and DEL
             // (0x7F) are dropped silently.
-            0x07 | 0x09 | 0x0A | 0x0B | 0x0C | 0x20..=0x7E => {
-                self.text_run.push(b as char);
+            //
+            // 0x80..=0xFF: UTF-8 lead or continuation byte. Goes
+            // through `push_text_byte`'s stateful decoder so
+            // multi-byte sequences across feeds are buffered until
+            // complete.
+            //
+            // All text bytes route through `push_text_byte` (not
+            // just non-ASCII): an ASCII byte arriving while a
+            // partial UTF-8 sequence is pending invalidates that
+            // sequence (the partial prefix's expected continuation
+            // didn't arrive), and `push_text_byte` is the only
+            // place that knows to flush the partial as `U+FFFD`.
+            // The fast path inside `push_text_byte` keeps the
+            // pure-ASCII case allocation-free.
+            0x07 | 0x09 | 0x0A | 0x0B | 0x0C | 0x20..=0x7E | 0x80..=0xFF => {
+                self.push_text_byte(b);
             }
             0x00..=0x1F | 0x7F => {}
-            // 0x80..=0xFF: UTF-8 continuation. Push raw bytes; we
-            // commit on text-run flush. The push-as-char approach
-            // is wrong for multi-byte UTF-8, so we route through a
-            // byte-level buffer that gets decoded on flush.
-            0x80..=0xFF => {
-                // Append as a raw byte. We store text_run as a
-                // String, so push UTF-8 bytes via a fallback path:
-                // accumulate into a Vec<u8> first if we hit non-ASCII.
-                // For simplicity, push the byte and let
-                // String::push_byte handle it via a helper.
-                self.push_text_byte(b);
+        }
+    }
+
+    /// Append a single text byte, handling multi-byte UTF-8
+    /// correctly across feed boundaries.
+    ///
+    /// ASCII bytes (0x00..=0x7F) take a fast path directly into
+    /// `text_run` when no partial sequence is pending. Non-ASCII
+    /// bytes (0x80..=0xFF) and any byte arriving while a partial
+    /// sequence is pending go through `utf8_buf`, which is then
+    /// greedily decoded by `try_decode_utf8_buf`. Complete scalars
+    /// flush to `text_run`; an incomplete trailing sequence stays
+    /// in `utf8_buf` for the next byte (whether next-feed or
+    /// later in the same feed).
+    ///
+    /// Malformed sequences (lone continuation, invalid start byte,
+    /// non-continuation arriving where one was expected, overlong
+    /// encoding) emit `U+FFFD` for the offending bytes only and
+    /// resume decoding the rest --- they do not corrupt subsequent
+    /// valid UTF-8.
+    fn push_text_byte(&mut self, b: u8) {
+        if self.utf8_buf.is_empty() && b < 0x80 {
+            self.text_run.push(b as char);
+            return;
+        }
+        self.utf8_buf.push(b);
+        self.try_decode_utf8_buf();
+    }
+
+    /// Greedy UTF-8 decoder over `utf8_buf`. Pushes complete chars
+    /// to `text_run`; emits `U+FFFD` for malformed bytes; leaves
+    /// the trailing incomplete prefix in `utf8_buf` for the next
+    /// byte to complete.
+    ///
+    /// Caps the buffer at 8 bytes defensively: a valid UTF-8
+    /// sequence is at most 4 bytes, so any trailing run longer
+    /// than that is malformed (we'd have hit either a complete
+    /// scalar or a `from_utf8` error before reaching 8). The cap
+    /// bounds the pathological-input memory cost.
+    fn try_decode_utf8_buf(&mut self) {
+        loop {
+            if self.utf8_buf.is_empty() {
+                return;
+            }
+            match std::str::from_utf8(&self.utf8_buf) {
+                Ok(s) => {
+                    // Whole buffer is valid UTF-8: flush all of it.
+                    self.text_run.push_str(s);
+                    self.utf8_buf.clear();
+                    return;
+                }
+                Err(e) => {
+                    let valid = e.valid_up_to();
+                    if valid > 0 {
+                        // Push the valid prefix.
+                        let prefix = std::str::from_utf8(&self.utf8_buf[..valid])
+                            .expect("invariant: valid_up_to bytes are valid UTF-8");
+                        self.text_run.push_str(prefix);
+                        self.utf8_buf.drain(..valid);
+                    }
+                    match e.error_len() {
+                        None => {
+                            // Trailing incomplete sequence; wait for
+                            // more bytes (next push_text_byte or next
+                            // feed). The 8-byte defensive cap below
+                            // guards against a pathological producer
+                            // that never finishes a sequence.
+                            if self.utf8_buf.len() >= 8 {
+                                self.text_run.push('\u{FFFD}');
+                                self.utf8_buf.clear();
+                            }
+                            return;
+                        }
+                        Some(n) => {
+                            // n bytes after the valid prefix are an
+                            // invalid sequence: emit U+FFFD for them
+                            // and continue with whatever follows.
+                            self.text_run.push('\u{FFFD}');
+                            self.utf8_buf.drain(..n);
+                            // Loop to retry.
+                        }
+                    }
+                }
             }
         }
     }
 
-    /// Append a single byte to the text run, handling UTF-8
-    /// continuation correctly. ASCII bytes go directly; non-ASCII
-    /// bytes accumulate in a pending UTF-8 buffer that flushes
-    /// once a complete scalar arrives or recovers as U+FFFD on a
-    /// malformed sequence.
-    fn push_text_byte(&mut self, b: u8) {
-        // For correctness across multi-byte UTF-8 split across feeds
-        // we'd need a stateful UTF-8 decoder. For v0.1 / M6.3, we
-        // append the byte as-is by reinterpreting the String's
-        // backing buffer: since we always hit this path after an
-        // ASCII run, and the only non-ASCII source is text, the
-        // simple safe approach is to accumulate raw bytes in a
-        // separate Vec until flush time and then convert. That's a
-        // bigger refactor; for stage 1 we use String::from_utf8_lossy
-        // at flush time. Implementation bridge: stash raw bytes in
-        // text_run via unsafe? No --- forbid(unsafe_code). Instead,
-        // route through a small helper that writes the byte as a
-        // single-byte char iff it's ASCII, else uses a
-        // String-extending fallback. For non-ASCII we append a
-        // valid char that we'll fix up at flush time.
-        //
-        // Stage 1 simplification: convert the byte to its ASCII
-        // approximation. Stage 2 will introduce a proper UTF-8
-        // continuation decoder.
-        //
-        // TODO(M6.3 stage 2): proper UTF-8 across feed boundaries.
-        if b.is_ascii() {
-            self.text_run.push(b as char);
-        } else {
-            // Fall back: render as Unicode replacement character.
-            // This is wrong for proper UTF-8 input but never panics
-            // and never corrupts state. Stage 2 fix.
+    /// Drain any pending UTF-8 prefix as `U+FFFD`. Called from
+    /// `flush_text_run` when the text run is being committed
+    /// because we're transitioning out of Ground (a control byte,
+    /// a CSI start, etc.). At that boundary, an unfinished
+    /// multi-byte sequence is genuinely interrupted --- it can't
+    /// continue across the non-text bytes --- so we emit the
+    /// replacement character and clear.
+    ///
+    /// Not called at end-of-feed: a sequence interrupted by feed
+    /// boundary may legitimately resume in the next feed.
+    fn flush_pending_utf8_as_replacement(&mut self) {
+        if !self.utf8_buf.is_empty() {
             self.text_run.push('\u{FFFD}');
+            self.utf8_buf.clear();
         }
     }
 
@@ -896,10 +1003,22 @@ impl AnsiParser {
         let num: Option<u32> = std::str::from_utf8(num_part)
             .ok()
             .and_then(|s| s.parse().ok());
-        // Only OSC 0 (set icon name + window title) and OSC 2 (set
-        // window title) produce a SetTitle event. Other OSC numbers
-        // are parsed and discarded per spec §sec:ansi-scope, with
-        // the critical guarantee that state alignment is preserved.
+        if matches!(num, Some(133)) && !self.alt_screen_active {
+            match text_part.first().copied() {
+                Some(b'A') => events.push(AnsiEvent::PromptStart),
+                Some(b'B') => events.push(AnsiEvent::PromptEnd),
+                Some(b'C') => events.push(AnsiEvent::CommandStart),
+                Some(b'D') => events.push(AnsiEvent::OutputStart),
+                _ => {}
+            }
+            return;
+        }
+
+        // Only OSC 0 (set icon name + window title), OSC 2 (set
+        // window title), and the OSC 133 shell integration markers
+        // above produce events. Other OSC numbers are parsed and
+        // discarded per spec §sec:ansi-scope, with the critical
+        // guarantee that state alignment is preserved.
         if matches!(num, Some(0 | 2)) && !self.alt_screen_active {
             let title = String::from_utf8_lossy(text_part).into_owned();
             events.push(AnsiEvent::SetTitle(title));
@@ -1256,6 +1375,33 @@ mod tests {
         assert_eq!(collect_text(&evs), "hello");
     }
 
+    #[test]
+    fn m6_3_osc_133_prompt_markers_are_structured_events() {
+        let mut p = AnsiParser::new();
+        let evs = p.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
+        let kinds: Vec<&str> = evs
+            .iter()
+            .map(|ev| match ev {
+                AnsiEvent::PromptStart => "prompt_start",
+                AnsiEvent::Text(s) if s == "$ " => "text",
+                AnsiEvent::PromptEnd => "prompt_end",
+                AnsiEvent::CommandStart => "command_start",
+                AnsiEvent::OutputStart => "output_start",
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "prompt_start",
+                "text",
+                "prompt_end",
+                "command_start",
+                "output_start"
+            ]
+        );
+    }
+
     // -----------------------------------------------------------------
     // Acceptance bullet 4: alternate-screen suppression
     // -----------------------------------------------------------------
@@ -1382,6 +1528,177 @@ mod tests {
     // -----------------------------------------------------------------
     // Strikethrough advances state without corrupting running style
     // -----------------------------------------------------------------
+
+    // ---- UTF-8 cross-feed handling (post-M6.10 audit fix) -----------------
+
+    /// Multi-byte UTF-8 in a single feed decodes to the correct
+    /// scalar, not U+FFFD. Catches the M6.3-stage-1 shortcut that
+    /// emitted U+FFFD for every non-ASCII byte regardless of whether
+    /// it was actually malformed.
+    #[test]
+    fn ansi_utf8_multibyte_in_single_feed_decodes_correctly() {
+        let mut p = AnsiParser::new();
+        // "café" --- the é is U+00E9, encoded as 0xC3 0xA9 in UTF-8.
+        let evs = p.feed("café".as_bytes());
+        assert_eq!(collect_text(&evs), "café");
+    }
+
+    /// Three-byte UTF-8 (e.g., CJK) decodes correctly. Same gate as
+    /// above but exercises the 1110xxxx start byte + two
+    /// continuations path.
+    #[test]
+    fn ansi_utf8_three_byte_sequence_decodes_correctly() {
+        let mut p = AnsiParser::new();
+        let evs = p.feed("日本語".as_bytes());
+        assert_eq!(collect_text(&evs), "日本語");
+    }
+
+    /// Four-byte UTF-8 (e.g., emoji past U+FFFF) decodes correctly.
+    /// Exercises the 11110xxx start byte + three continuations path.
+    #[test]
+    fn ansi_utf8_four_byte_sequence_decodes_correctly() {
+        let mut p = AnsiParser::new();
+        // U+1F600 = 😀 = 0xF0 0x9F 0x98 0x80
+        let evs = p.feed("😀".as_bytes());
+        assert_eq!(collect_text(&evs), "😀");
+    }
+
+    /// A multi-byte sequence split across two feeds completes
+    /// correctly. This is the load-bearing cross-feed behavior:
+    /// pre-fix, the first feed would emit U+FFFD for the start byte
+    /// and the second feed would emit U+FFFDs for the continuation
+    /// bytes; post-fix, the partial bytes wait in `utf8_buf` and
+    /// flush as one correct char when the trailing byte arrives.
+    #[test]
+    fn ansi_utf8_split_across_two_feeds() {
+        let mut p = AnsiParser::new();
+        let bytes = "café".as_bytes();
+        // Split between the start byte (0xC3) and continuation
+        // (0xA9) of the é.
+        let split = bytes.len() - 1;
+        let evs1 = p.feed(&bytes[..split]);
+        let evs2 = p.feed(&bytes[split..]);
+        let combined: String = collect_text(&evs1) + &collect_text(&evs2);
+        assert_eq!(combined, "café");
+    }
+
+    /// A four-byte sequence split across three feeds completes
+    /// correctly. Exercises the cross-feed buffer holding 2 bytes
+    /// across one feed and 1 byte across the next.
+    #[test]
+    fn ansi_utf8_four_byte_split_across_three_feeds() {
+        let mut p = AnsiParser::new();
+        // U+1F600 = 0xF0 0x9F 0x98 0x80
+        let evs1 = p.feed(&[0xF0]);
+        let evs2 = p.feed(&[0x9F, 0x98]);
+        let evs3 = p.feed(&[0x80]);
+        let combined = collect_text(&evs1) + &collect_text(&evs2) + &collect_text(&evs3);
+        assert_eq!(combined, "😀");
+    }
+
+    /// Mixed ASCII and multi-byte text decodes correctly.
+    #[test]
+    fn ansi_utf8_mixed_ascii_and_multibyte() {
+        let mut p = AnsiParser::new();
+        let evs = p.feed("hello, café 日本 😀!".as_bytes());
+        assert_eq!(collect_text(&evs), "hello, café 日本 😀!");
+    }
+
+    /// A lone continuation byte (no preceding start) emits U+FFFD
+    /// for that byte only; subsequent ASCII still decodes to ASCII.
+    #[test]
+    fn ansi_utf8_lone_continuation_byte_emits_replacement() {
+        let mut p = AnsiParser::new();
+        // 0x80 alone is a continuation byte with no start.
+        // ASCII follows; it should decode normally.
+        let evs = p.feed(&[b'a', 0x80, b'b']);
+        assert_eq!(collect_text(&evs), "a\u{FFFD}b");
+    }
+
+    /// An invalid start byte (0xFF) emits U+FFFD; subsequent ASCII
+    /// decodes normally.
+    #[test]
+    fn ansi_utf8_invalid_start_byte_emits_replacement() {
+        let mut p = AnsiParser::new();
+        let evs = p.feed(&[b'a', 0xFF, b'b']);
+        assert_eq!(collect_text(&evs), "a\u{FFFD}b");
+    }
+
+    /// A start byte expecting two continuations followed by ASCII
+    /// (one continuation, then ASCII) emits U+FFFD for the
+    /// truncated sequence and decodes the ASCII normally.
+    #[test]
+    fn ansi_utf8_truncated_sequence_then_ascii() {
+        let mut p = AnsiParser::new();
+        // 0xE6 (start of 3-byte) + 0x97 (continuation) + 'X' (ASCII,
+        // not a continuation). The sequence is malformed: 0xE6 0x97
+        // followed by ASCII.
+        let evs = p.feed(&[0xE6, 0x97, b'X']);
+        // The 0xE6 0x97 prefix is malformed; std::str::from_utf8
+        // reports error_len() = 2, so we emit one U+FFFD covering
+        // both bytes, then ASCII.
+        let text = collect_text(&evs);
+        assert!(
+            text.contains('\u{FFFD}') && text.ends_with('X'),
+            "expected U+FFFD then 'X', got {text:?}"
+        );
+    }
+
+    /// A multi-byte sequence interrupted by a control byte (CSI
+    /// start) flushes pending bytes as U+FFFD, then resumes
+    /// processing the control byte normally.
+    #[test]
+    fn ansi_utf8_partial_interrupted_by_csi_emits_replacement() {
+        let mut p = AnsiParser::new();
+        // 0xC3 (start of 2-byte) then ESC [ 31 m (red SGR).
+        // The 0xC3 is interrupted by the ESC; should emit U+FFFD
+        // for the partial, then process the SGR.
+        let evs = p.feed(&[b'a', 0xC3, 0x1B, b'[', b'3', b'1', b'm', b'b']);
+        let text = collect_text(&evs);
+        assert!(
+            text.starts_with("a\u{FFFD}") && text.ends_with('b'),
+            "expected a + U+FFFD + b, got {text:?}"
+        );
+        // The SGR should still have produced a SetStyle event.
+        let styles = collect_styles(&evs);
+        assert_eq!(styles.len(), 1, "expected one SetStyle from the SGR");
+        assert_eq!(styles[0].fg, Color::Indexed(1));
+    }
+
+    /// Pending UTF-8 prefix that exceeds the 8-byte defensive cap
+    /// (pathological producer that never finishes a sequence)
+    /// flushes as U+FFFD and recovers. Ensures the buffer can't
+    /// grow unbounded.
+    #[test]
+    fn ansi_utf8_pathological_pending_caps_at_8_bytes() {
+        let mut p = AnsiParser::new();
+        // Feed 8 start bytes in a row. Each is a "start of 2-byte"
+        // marker; the next one arriving where a continuation is
+        // expected is malformed. The first one accumulates; each
+        // subsequent one emits U+FFFD for the malformed prefix.
+        // After 8 bytes accumulated without completing, the cap
+        // forces a flush.
+        let evs = p.feed(&[0xC3; 9]);
+        let text = collect_text(&evs);
+        // Every byte should have been replaced; no panic, no
+        // unbounded growth.
+        assert!(
+            text.chars().all(|c| c == '\u{FFFD}'),
+            "all 9 bytes should be replaced; got {text:?}"
+        );
+    }
+
+    /// `reset()` clears any pending UTF-8 prefix.
+    #[test]
+    fn ansi_utf8_reset_clears_pending_buffer() {
+        let mut p = AnsiParser::new();
+        let _ = p.feed(&[0xC3]); // partial é prefix pending
+        p.reset();
+        // Subsequent valid input must decode cleanly --- the stale
+        // prefix should not contaminate it.
+        let evs = p.feed("hello".as_bytes());
+        assert_eq!(collect_text(&evs), "hello");
+    }
 
     /// SGR 9 (strikethrough) is a no-op for the running style ---
     /// the cell `Style` has no strikethrough field, so the running
