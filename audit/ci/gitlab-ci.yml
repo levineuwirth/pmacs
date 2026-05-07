@@ -1,0 +1,42 @@
+# Sample GitLab CI configuration for pmacs-audit (T M7.9).
+#
+# Copy this file into your package repo at `.gitlab-ci.yml` (or
+# `include:` it from there). The job:
+#
+#   1. Pulls a Rust toolchain image.
+#   2. Builds `pmacs-audit` from a pinned pmacs revision.
+#   3. Runs the audit lint against the package's Lua sources.
+#   4. Saves the JSON report as a job artifact (downloadable from
+#      the GitLab UI for 7 days; tune `expire_in` as needed).
+#
+# pmacs-audit exits 1 on any Error-severity finding; `script:`
+# propagates that to the job status. Warnings and info-level
+# findings show up in the report but do not gate the pipeline.
+
+stages:
+  - audit
+
+audit:
+  stage: audit
+  image: rust:1.85
+  cache:
+    key: pmacs-audit
+    paths:
+      - .cargo/
+      - target/
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  script:
+    # Pin to a tag once pmacs has its first audit-supporting release.
+    - cargo install --git https://git.levineuwirth.org/neuwirth/pmacs
+        --rev main
+        --bin pmacs-audit
+        --root $CI_PROJECT_DIR/.cargo
+        pmacs
+    - $CI_PROJECT_DIR/.cargo/bin/pmacs-audit --pretty . > audit-report.json
+  artifacts:
+    name: audit-report
+    paths:
+      - audit-report.json
+    expire_in: 7 days
+    when: always

@@ -1,0 +1,59 @@
+# Sample GitHub Actions workflow for pmacs-audit (T M7.9).
+#
+# Copy this file into your package repo at
+# `.github/workflows/audit.yml`. The job:
+#
+#   1. Checks out the package source.
+#   2. Installs Rust + builds `pmacs-audit` from a pinned pmacs revision.
+#   3. Runs the audit lint against the package's Lua sources.
+#   4. Uploads the JSON report as a build artifact.
+#
+# pmacs-audit exits 1 on any Error-severity finding, which fails the
+# job. Warnings and info-level findings are visible in the report
+# but do not gate the job; that policy is intentional for v1.0 (see
+# `TRANSITION-M7.md`, M7.9 section).
+
+name: pmacs-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out package
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pmacs-audit-${{ hashFiles('**/Cargo.lock') }}
+
+      # Build pmacs-audit from a pinned commit. Pin to a tag once
+      # pmacs has its first audit-supporting release.
+      - name: Build pmacs-audit
+        run: |
+          cargo install --git https://git.levineuwirth.org/neuwirth/pmacs \
+            --rev main \
+            --bin pmacs-audit \
+            pmacs
+
+      - name: Run audit lint
+        run: pmacs-audit --pretty . > audit-report.json
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: audit-report.json

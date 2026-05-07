@@ -1,0 +1,6 @@
+name = "pmacs-outline"
+version = "0.1.0"
+summary = "Org-shaped outline parser, navigation, and selective-rendering primitives."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["pmacs-outline", "pmacs-outline.parser", "pmacs-outline.view", "pmacs-outline.nav", "pmacs-outline.aggregate"]

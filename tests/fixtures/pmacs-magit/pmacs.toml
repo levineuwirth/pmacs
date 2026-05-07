@@ -1,0 +1,6 @@
+name = "pmacs-magit"
+version = "0.1.0"
+summary = "Foldable section view; future home of magit-class Git integration."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["pmacs-magit", "pmacs-magit.fold", "pmacs-magit.status", "pmacs-magit.gestures"]

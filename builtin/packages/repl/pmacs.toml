@@ -1,0 +1,17 @@
+# pmacs.toml --- manifest for the bundled `repl` package.
+#
+# T M7.11 deliverable. The REPL was an in-tree builtin loaded
+# directly via `eval(include_str!(...))` through M7.10; this
+# manifest brings it onto the same package machinery a third-party
+# package would use. The bootstrap (`src/editor.rs`) materializes
+# this directory at editor startup and registers it in the
+# installed-packages roster, so the REPL goes through the M7.7
+# searcher, the manifest's `exports` whitelist, and the per-package
+# `_ENV` table just as any installed package does.
+
+name = "repl"
+version = "0.1.0"
+summary = "Process REPL package: spawn long-running processes (shell, REPL) and interact through PTY-aware buffer editing."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["repl"]

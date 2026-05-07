@@ -1,0 +1,6 @@
+name = "pmacs-dired"
+version = "0.1.0"
+summary = "Directory editor: buffer-as-projection-of-external-state."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["pmacs-dired"]

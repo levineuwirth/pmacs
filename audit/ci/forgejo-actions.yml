@@ -1,0 +1,70 @@
+# Sample Forgejo Actions workflow for pmacs-audit (T M7.9).
+#
+# Forgejo Actions implements the GitHub Actions schema, so this
+# file is intentionally close to its GitHub-Actions sibling. Copy
+# into `.forgejo/workflows/audit.yml` (or
+# `.gitea/workflows/audit.yml` on a Gitea-compatible runner).
+#
+# Differences from the GitHub Actions sample:
+#
+#   * `runs-on: docker` (Forgejo's default labels) instead of
+#     `ubuntu-latest`.
+#   * Action versions (`actions/checkout`, `actions/cache`,
+#     `actions/upload-artifact`) point to the Forgejo Actions
+#     mirror namespace where the runner picks up actions.
+#     Adjust the action paths to match your runner's `host` field.
+#   * No `dtolnay/rust-toolchain` action is bundled with the
+#     Forgejo runner image catalog by default; we install Rust
+#     via `rustup-init` in a step instead. If your runner image
+#     ships Rust, remove that step.
+#
+# pmacs-audit exits 1 on any Error-severity finding; the runner
+# treats that as job failure. Warnings and info-level findings
+# show up in the report without gating the pipeline.
+
+name: pmacs-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: docker
+    steps:
+      - name: Check out package
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+            -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pmacs-audit-${{ hashFiles('**/Cargo.lock') }}
+
+      # Pin to a tag once pmacs has its first audit-supporting release.
+      - name: Build pmacs-audit
+        run: |
+          cargo install --git https://git.levineuwirth.org/neuwirth/pmacs \
+            --rev main \
+            --bin pmacs-audit \
+            pmacs
+
+      - name: Run audit lint
+        run: pmacs-audit --pretty . > audit-report.json
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: audit-report.json
