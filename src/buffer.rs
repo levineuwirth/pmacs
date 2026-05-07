@@ -57,6 +57,13 @@ impl BufferId {
     pub const fn raw(self) -> u64 {
         self.0
     }
+
+    /// Rebuild an ID from a raw value for crate-internal references that
+    /// persist an already-issued buffer identity in generated text.
+    #[must_use]
+    pub(crate) const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 /// Opaque, per-buffer identifier for an attached view.

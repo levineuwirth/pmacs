@@ -23,19 +23,30 @@
 //!   deferred-dispatcher pattern used for `pmacs.attach` does not
 //!   apply --- attach is a transport handoff, install is just I/O,
 //!   and a synchronous failure pins the offending `init.lua` line.
-//! - **No transitive resolution**: each spec is resolved and
-//!   installed independently. Dependency closure / lockfile come in
-//!   T M7.5 / T M7.6.
-//! - **Tag-only resolution**: we pick the highest-numbered semver tag
-//!   that satisfies the constraint. Branch / commit pinning is the
-//!   resolver's job in M7.5; for v0.1 the install API only takes
-//!   `version` constraints, which by definition target tags.
+//! - **Standalone vs resolver-driven**. The installer has two
+//!   entry points. [`Installer::install`] is standalone: it
+//!   independently picks a tag for [`InstallPin::Version`] via
+//!   [`best_match`] and refuses to overwrite an existing install
+//!   at a different commit. [`Installer::install_at_commit`] /
+//!   [`Installer::replace_at_commit`] are the resolver-driven
+//!   paths: they trust the supplied commit and (for replace)
+//!   stage-and-swap an existing install. The Lua surface
+//!   (`pmacs.packages.install` / `update`) goes through the
+//!   resolver-driven paths so the resolver's revision choice is
+//!   authoritative; transitive resolution and lockfile writes
+//!   live in the surrounding orchestration code.
+//! - **All three pin kinds supported**. [`InstallPin::Version`]
+//!   maps to `best_match` over upstream tags;
+//!   [`InstallPin::Branch`] resolves to the named branch's HEAD;
+//!   [`InstallPin::Commit`] resolves to a specific revision. The
+//!   user surface accepts all three via the table form (`{ ...,
+//!   branch = ... }` / `{ ..., commit = ... }`).
 //! - **Install dir naming**: `<install_root>/<basename>/`, where
-//!   `basename` is the package name's last `/`-segment. Two installs
-//!   with the same basename collide on disk; for v0.1 we accept the
-//!   collision (the caller can `pmacs.packages.installed()` to spot
-//!   conflicts before they bite). Proper handling lands with the
-//!   M7.5 resolver.
+//!   `basename` is the package name's last `/`-segment. Two
+//!   packages with the same basename collide on disk; for v0.1 we
+//!   accept the collision (the resolver / caller can
+//!   `pmacs.packages.installed()` to spot conflicts before they
+//!   bite).
 
 use std::fs;
 use std::io::{self, Write};
@@ -43,6 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::address::{Address, AddressError};
@@ -58,7 +70,7 @@ use super::manifest::{ManifestError, PackageManifest};
 /// `User` resolves to `$XDG_DATA_HOME/pmacs/packages/` (or
 /// `$HOME/.local/share/pmacs/packages/` if `XDG_DATA_HOME` is unset).
 /// `Project` resolves to `<project_root>/.pmacs/packages/`.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InstallScope {
     /// User-config install (per-user, persistent across projects).
     User,
@@ -125,7 +137,7 @@ fn xdg_data_root() -> Result<PathBuf, InstallError> {
 ///   Useful for pinning to a known-good state before the upstream
 ///   has tagged a release, or for reproducing a colleague's
 ///   environment exactly without semver drift.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InstallPin {
     /// Highest semver tag satisfying the constraint.
     Version(VersionReq),
@@ -134,6 +146,18 @@ pub enum InstallPin {
     /// Specific commit (full or partial SHA; the fetcher accepts
     /// either via `git rev-parse`).
     Commit(String),
+    /// Working-tree symlink installed via
+    /// [`pmacs.packages.install_local`] (T M8.1c). Carries the
+    /// source path so the Lua-visible roster entry can show where
+    /// the live tree lives. Local-pinned packages are *ephemeral*:
+    /// they never enter the lockfile and aren't reproducible across
+    /// machines --- they exist for the M8 dev loop ("edit a
+    /// package's source on disk and reload without restarting") and
+    /// nothing else.
+    Local {
+        /// Source path the install dir symlinks to.
+        source_path: PathBuf,
+    },
 }
 
 impl InstallPin {
@@ -145,20 +169,63 @@ impl InstallPin {
             Self::Version(_) => "version",
             Self::Branch(_) => "branch",
             Self::Commit(_) => "commit",
+            Self::Local { .. } => "local",
         }
     }
 
     /// User-supplied value as a string: the constraint for
     /// [`Self::Version`], the branch name for [`Self::Branch`], the
-    /// SHA for [`Self::Commit`].
+    /// SHA for [`Self::Commit`], the source path for [`Self::Local`].
     #[must_use]
     pub fn value(&self) -> String {
         match self {
             Self::Version(req) => req.to_string(),
             Self::Branch(b) => b.clone(),
             Self::Commit(c) => c.clone(),
+            Self::Local { source_path } => source_path.display().to_string(),
         }
     }
+}
+
+/// Result of [`Installer::plan_local`]: everything needed to
+/// commit a working-tree symlink install, with no disk changes
+/// yet performed (T M8.1c).
+///
+/// The plan/commit split lets the Lua binding layer interleave
+/// `on_unload`-hook execution between validation and the disk
+/// swap. If a hook fails, the caller can drop the plan and the
+/// disk is unchanged.
+#[derive(Debug, Clone)]
+pub struct LocalInstallPlan {
+    /// Parsed manifest from `<source_path>/pmacs.toml`.
+    pub manifest: PackageManifest,
+    /// Where the symlink will be placed:
+    /// `<install_root>/<basename>`.
+    pub install_path: PathBuf,
+    /// Canonicalized source path the symlink will point at. Holds
+    /// an absolute path so the symlink resolves regardless of
+    /// where the editor's CWD ends up.
+    pub canonical_source: PathBuf,
+    /// Install basename (the last `/`-segment of `manifest.name`).
+    /// Useful to the binding layer for keying registry slots
+    /// (`PackageUnloadHooks`, etc.) without re-deriving from the
+    /// manifest.
+    pub basename: String,
+    /// Scope (user / project) this install will land in.
+    pub scope: InstallScope,
+}
+
+/// A local install whose new symlink has already been created at a
+/// sibling staging path, but has not yet been published over
+/// [`LocalInstallPlan::install_path`].
+///
+/// The Lua binding uses this to front-load the fallible symlink
+/// creation before it runs the prior package's `on_unload` hooks.
+/// After hooks complete, publishing is a same-directory `rename(2)`.
+#[derive(Debug, Clone)]
+pub struct StagedLocalInstall {
+    plan: LocalInstallPlan,
+    staging_path: PathBuf,
 }
 
 /// A normalized install request: where to fetch and how to pin the
@@ -271,6 +338,25 @@ impl InstalledPackage {
 // Installer
 // ---------------------------------------------------------------------------
 
+/// Internal options passed through [`Installer::install_with`].
+/// Public callers use [`Installer::install`] /
+/// [`Installer::install_at_commit`] /
+/// [`Installer::replace_at_commit`] which set these flags
+/// appropriately.
+#[derive(Debug, Default)]
+struct InstallOptions {
+    /// If `Some`, treat this commit as the resolver's choice and
+    /// skip the installer's own tag/branch/commit lookup. The
+    /// manifest is read at this commit.
+    resolved_commit: Option<String>,
+    /// If `true`, an existing install at the same path with a
+    /// different commit is replaced rather than rejected with
+    /// [`InstallError::AlreadyInstalled`]. The replacement is
+    /// staged at `<install_path>.new` and only swapped in after
+    /// successful extraction.
+    replace_existing: bool,
+}
+
 /// Installer: pairs a [`Fetcher`] with an [`InstallScope`].
 ///
 /// One `Installer` per scope; `LuaHost` constructs two (user-scoped and
@@ -326,43 +412,387 @@ impl Installer {
     }
 
     /// Install one package. See module docs for the step-by-step flow.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// `install()` is the standalone entry point: the installer
+    /// independently picks the tag for `InstallPin::Version` via
+    /// [`best_match`]. Resolver-driven flows
+    /// (`pmacs.packages.install` / `pmacs.packages.update`) instead
+    /// call [`Self::install_at_commit`] / [`Self::replace_at_commit`]
+    /// so the installer honors the resolver's revision choice rather
+    /// than re-deriving it.
     pub fn install(&self, spec: &InstallSpec) -> Result<InstalledPackage, InstallError> {
+        self.install_with(spec, &InstallOptions::default())
+    }
+
+    /// Install at a commit pre-chosen by the resolver. The displayed
+    /// `pin` field on the returned [`InstalledPackage`] still
+    /// reflects `spec.pin` (so a `Version(^1.0.0)` request shows up
+    /// as a version pin), but the installer skips its own tag
+    /// enumeration and checks out the supplied commit directly.
+    /// The displayed `tag` is synthesized from `manifest.version` for
+    /// Version pins, or kept as `branch:<name>`/`commit:<short>` for
+    /// the other variants.
+    ///
+    /// Refuses to overwrite an existing install at a different
+    /// commit; for that path see [`Self::replace_at_commit`].
+    pub fn install_at_commit(
+        &self,
+        spec: &InstallSpec,
+        commit: &str,
+    ) -> Result<InstalledPackage, InstallError> {
+        self.install_with(
+            spec,
+            &InstallOptions {
+                resolved_commit: Some(commit.to_string()),
+                replace_existing: false,
+            },
+        )
+    }
+
+    /// Install or replace at a commit pre-chosen by the resolver.
+    /// Differs from [`Self::install_at_commit`] only in that an
+    /// existing install at the same path with a different commit is
+    /// replaced rather than erroring. The replacement is staged at
+    /// `<install_path>.new` and only swapped in after extraction
+    /// succeeds, so a failing update leaves the prior install intact.
+    ///
+    /// Used by `pmacs.packages.update`, which by definition expects
+    /// to overwrite a prior install when upstream has moved.
+    pub fn replace_at_commit(
+        &self,
+        spec: &InstallSpec,
+        commit: &str,
+    ) -> Result<InstalledPackage, InstallError> {
+        self.install_with(
+            spec,
+            &InstallOptions {
+                resolved_commit: Some(commit.to_string()),
+                replace_existing: true,
+            },
+        )
+    }
+
+    /// Install from a local working-tree path by symlinking it
+    /// into the install root (T M8.1c). The dev-loop counterpart
+    /// to [`Self::install`]: edits to files under `source_path`
+    /// become live in the editor without re-running the package
+    /// pipeline; `pmacs.packages.reload(name)` (M8.1d) picks them
+    /// up without restarting the session.
+    ///
+    /// Semantics:
+    ///
+    /// - `source_path` must contain a readable `pmacs.toml`.
+    ///   Anything else fails with [`InstallError::LocalManifestMissing`].
+    /// - The install dir is `<install_root>/<basename>`. If a
+    ///   symlink already lives there, it is replaced by staging a
+    ///   sibling symlink and atomically renaming it into place.
+    /// - If a *real* directory lives at the install path,
+    ///   [`InstallError::LocalRealInstallInWay`] surfaces. The user
+    ///   removes that install first (manually or via a future
+    ///   uninstall API).
+    /// - The returned [`InstalledPackage`] carries
+    ///   [`InstallPin::Local`] so the Lua-visible roster entry
+    ///   names the source. No lockfile work is done; `install_local`
+    ///   is explicitly ephemeral.
+    pub fn install_local(&self, source_path: &Path) -> Result<InstalledPackage, InstallError> {
+        let plan = self.plan_local(source_path)?;
+        self.commit_local(plan)
+    }
+
+    /// Validate `source_path` and compute where its symlink should
+    /// land, **without making any disk changes**. The returned
+    /// [`LocalInstallPlan`] is consumed by [`Self::commit_local`],
+    /// which performs the symlink swap.
+    ///
+    /// The plan/commit split exists so the Lua binding layer can
+    /// run prior-install `on_unload` hooks between the two steps:
+    /// if any hook fails, the disk symlink hasn't moved, so disk
+    /// and runtime state remain in sync. Without the split, a
+    /// failing hook leaves the symlink at the new source while the
+    /// roster / `package.loaded` / per-package env still track the
+    /// old one --- a desync the user can only resolve by
+    /// restarting.
+    pub fn plan_local(&self, source_path: &Path) -> Result<LocalInstallPlan, InstallError> {
+        // Manifest must exist and parse. A friendly error here
+        // beats a surprising error later when the searcher tries
+        // to load a non-existent entry.
+        let manifest_path = source_path.join("pmacs.toml");
+        let manifest_str = std::fs::read_to_string(&manifest_path).map_err(|e| {
+            InstallError::LocalManifestMissing {
+                source_path: source_path.to_path_buf(),
+                cause: e.to_string(),
+            }
+        })?;
+        let manifest = PackageManifest::from_toml(&manifest_str).map_err(|e| {
+            InstallError::LocalManifestMissing {
+                source_path: source_path.to_path_buf(),
+                cause: e.to_string(),
+            }
+        })?;
+
+        // pmacs_required check, identical to the fetched-install
+        // path. install_local doesn't bypass any compatibility
+        // gate; the dev-loop story doesn't extend to "ignore the
+        // version constraint."
+        let running_pmacs = running_pmacs_version();
+        if !manifest.pmacs_required.matches(&running_pmacs) {
+            return Err(InstallError::PmacsVersionIncompatible {
+                address: source_path.display().to_string(),
+                tag: format!("local:{}", source_path.display()),
+                required: manifest.pmacs_required.to_string(),
+                running: running_pmacs.to_string(),
+            });
+        }
+
+        let install_root = self.install_root()?;
+        let basename = package_basename(manifest.name.as_str()).to_string();
+        let install_path = install_root.join(&basename);
+
+        // Probe the install path. We don't mutate it here --- the
+        // commit step does. We do reject the real-directory case
+        // up front so the Lua binding layer can refuse before
+        // running any unload hooks (a hook running and then the
+        // commit failing because of a real-dir collision would be
+        // worse than refusing immediately).
+        match std::fs::symlink_metadata(&install_path) {
+            Ok(meta) if meta.file_type().is_symlink() => { /* ok, we'll replace */ }
+            Ok(_) => {
+                return Err(InstallError::LocalRealInstallInWay { install_path });
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => { /* ok, we'll create */ }
+            Err(source) => {
+                return Err(InstallError::Io {
+                    path: install_path.clone(),
+                    source,
+                });
+            }
+        }
+
+        // Canonicalize the source so the symlink points at an
+        // absolute path. Without this, a relative source resolves
+        // against the install dir's parent rather than the user's
+        // CWD, and the user's CWD is the contract here.
+        let canonical_source =
+            std::fs::canonicalize(source_path).map_err(|source| InstallError::Io {
+                path: source_path.to_path_buf(),
+                source,
+            })?;
+
+        Ok(LocalInstallPlan {
+            manifest,
+            install_path,
+            canonical_source,
+            basename,
+            scope: self.scope.clone(),
+        })
+    }
+
+    /// Commit a [`LocalInstallPlan`] in one step: stage a new symlink
+    /// at a sibling temp path, then atomically rename it over
+    /// `plan.install_path`. After this returns, the plan's bytes are
+    /// live on disk; the caller is responsible for cache invalidation.
+    ///
+    /// Callers that need to interleave package teardown hooks between
+    /// staging and publishing should use [`Self::stage_local`] followed
+    /// by [`Self::publish_local`].
+    ///
+    /// **Atomicity.** The replacement uses `rename(2)` to swap the
+    /// staged symlink over the existing one. On the same
+    /// filesystem (which it is by construction --- the staging
+    /// path is in the same directory as `install_path`),
+    /// `rename(2)` is atomic with respect to other observers: at
+    /// any moment, `install_path` either holds the old symlink or
+    /// the new one, never neither. This is the upgrade from the
+    /// prior remove-then-create shape, where a `symlink(2)` failure
+    /// after the `unlink(2)` left the install path missing while
+    /// the runtime still tracked the old install.
+    ///
+    /// Re-checks the install path's symlink-vs-real-dir state at
+    /// commit time: belt-and-braces against a TOCTOU between plan
+    /// and commit (the dev-loop is single-user, so a real
+    /// race is unlikely, but a `LocalRealInstallInWay` returned
+    /// here keeps the contract symmetric with [`Self::plan_local`]).
+    pub fn commit_local(&self, plan: LocalInstallPlan) -> Result<InstalledPackage, InstallError> {
+        let staged = self.stage_local(plan)?;
+        self.publish_local(staged)
+    }
+
+    /// Stage a [`LocalInstallPlan`] by creating the new symlink at a
+    /// hidden sibling path, but do not publish it over the live
+    /// install path yet.
+    ///
+    /// This performs the fallible symlink-creation work before the
+    /// binding layer runs `on_unload` hooks. If staging fails, the old
+    /// package is still live and no teardown hooks have fired.
+    pub fn stage_local(&self, plan: LocalInstallPlan) -> Result<StagedLocalInstall, InstallError> {
+        // Re-check the install path. A real dir surfacing here
+        // would indicate either a TOCTOU race or a bug in the
+        // plan/commit caller; either way refuse rather than
+        // silently overwrite. Symlinks and missing paths are both
+        // valid commit destinations; the atomic rename below
+        // handles both shapes uniformly.
+        match std::fs::symlink_metadata(&plan.install_path) {
+            Ok(meta) if meta.file_type().is_symlink() => { /* ok, atomic swap */ }
+            Ok(_) => {
+                return Err(InstallError::LocalRealInstallInWay {
+                    install_path: plan.install_path,
+                });
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => { /* ok, fresh create */ }
+            Err(source) => {
+                return Err(InstallError::Io {
+                    path: plan.install_path.clone(),
+                    source,
+                });
+            }
+        }
+
+        // Stage the new symlink at a sibling path. Same directory
+        // as the install path means rename(2) is atomic. The
+        // sentinel-prefix (`.<basename>.swap.tmp`) is hidden in
+        // ls(1) output and namespaced so concurrent commits for
+        // different basenames don't collide. A leftover from a
+        // prior crashed commit would be unlinked here before we
+        // re-stage.
+        let staging_path = plan
+            .install_path
+            .with_file_name(format!(".{}.swap.tmp", plan.basename));
+        if let Err(e) = std::fs::remove_file(&staging_path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                return Err(InstallError::Io {
+                    path: staging_path,
+                    source: e,
+                });
+            }
+        }
+        symlink_create(&plan.canonical_source, &staging_path)?;
+
+        Ok(StagedLocalInstall { plan, staging_path })
+    }
+
+    /// Best-effort cleanup for a staged local install that will not be
+    /// published, typically because an `on_unload` hook failed.
+    pub fn discard_staged_local(&self, staged: StagedLocalInstall) {
+        let _ = std::fs::remove_file(staged.staging_path);
+    }
+
+    /// Publish a staged local install with a same-directory atomic
+    /// rename, returning the Lua-visible package record.
+    pub fn publish_local(
+        &self,
+        staged: StagedLocalInstall,
+    ) -> Result<InstalledPackage, InstallError> {
+        let StagedLocalInstall { plan, staging_path } = staged;
+
+        // Atomic swap. rename(2) replaces install_path
+        // (whether or not it currently exists) in a single
+        // observable step. On failure the staged symlink is
+        // unlinked so we don't leave a dangling .swap.tmp file
+        // behind; the original install_path is untouched.
+        if let Err(source) = std::fs::rename(&staging_path, &plan.install_path) {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(InstallError::Io {
+                path: plan.install_path.clone(),
+                source,
+            });
+        }
+
+        Ok(InstalledPackage {
+            version: plan.manifest.version.clone(),
+            manifest: plan.manifest,
+            install_path: plan.install_path,
+            // No commit. The synthetic `local` token marks this as
+            // an ephemeral install in the Lua-visible roster
+            // (callers compare the `pin.kind` field, not commit).
+            commit: "local".to_string(),
+            tag: format!("local:{}", plan.canonical_source.display()),
+            scope: plan.scope,
+            pin: InstallPin::Local {
+                source_path: plan.canonical_source,
+            },
+        })
+    }
+
+    /// Unified install flow used by [`Self::install`],
+    /// [`Self::install_at_commit`], and [`Self::replace_at_commit`].
+    /// The three differ only in `opts`.
+    #[allow(clippy::too_many_lines)]
+    fn install_with(
+        &self,
+        spec: &InstallSpec,
+        opts: &InstallOptions,
+    ) -> Result<InstalledPackage, InstallError> {
+        // Reject Local pins early: the fetched-install path needs a
+        // clone URL, and Local pins don't have one. install_local()
+        // owns the working-tree symlink path. T M8.1c.
+        if let InstallPin::Local { source_path } = &spec.pin {
+            return Err(InstallError::LocalPinNotSupported {
+                source_path: source_path.clone(),
+            });
+        }
         let url = spec.address.to_git_url();
         let bare = self.fetcher.fetch(&url).map_err(InstallError::Fetch)?;
 
         // Resolve the user's pin to a concrete (commit, tag-descriptor)
-        // pair. The descriptor is what we display to users in the
-        // `tag` field of the resulting `InstalledPackage`.
-        let (commit, tag_descriptor) = match &spec.pin {
-            InstallPin::Version(req) => {
-                let tags = self.fetcher.list_tags(&bare).map_err(InstallError::Fetch)?;
-                let chosen =
-                    best_match(&tags, req).ok_or_else(|| InstallError::NoMatchingVersion {
-                        address: url.clone(),
-                        req: req.to_string(),
-                        available: tags.clone(),
-                    })?;
-                let commit = self
-                    .fetcher
-                    .resolve(&bare, &RefSpec::Tag(chosen.tag.clone()))
-                    .map_err(InstallError::Fetch)?;
-                (commit, chosen.tag)
-            }
-            InstallPin::Branch(name) => {
-                let commit = self
-                    .fetcher
-                    .resolve(&bare, &RefSpec::Branch(name.clone()))
-                    .map_err(InstallError::Fetch)?;
-                (commit, format!("branch:{name}"))
-            }
-            InstallPin::Commit(sha) => {
-                let commit = self
-                    .fetcher
-                    .resolve(&bare, &RefSpec::Commit(sha.clone()))
-                    .map_err(InstallError::Fetch)?;
-                let short = commit.get(..7).unwrap_or(commit.as_str()).to_string();
-                (commit, format!("commit:{short}"))
+        // pair. When the resolver has supplied a commit, we use it
+        // directly: this keeps the installer aligned with the
+        // resolver's choice for InstallPin::Version (where re-running
+        // best_match() could otherwise diverge if upstream tagged a
+        // newer version that the resolver rejected for compatibility
+        // reasons). The descriptor for Version pins is synthesized
+        // from manifest.version after we read the manifest.
+        let (commit, tag_descriptor) = if let Some(forced) = opts.resolved_commit.as_deref() {
+            let commit = self
+                .fetcher
+                .resolve(&bare, &RefSpec::Commit(forced.to_string()))
+                .map_err(InstallError::Fetch)?;
+            let descriptor = match &spec.pin {
+                // Replaced post-manifest-read below.
+                InstallPin::Version(_) => String::new(),
+                InstallPin::Branch(name) => format!("branch:{name}"),
+                InstallPin::Commit(_) => {
+                    let short = commit.get(..7).unwrap_or(commit.as_str()).to_string();
+                    format!("commit:{short}")
+                }
+                InstallPin::Local { .. } => {
+                    unreachable!("Local pins refused at install_with entry")
+                }
+            };
+            (commit, descriptor)
+        } else {
+            match &spec.pin {
+                InstallPin::Version(req) => {
+                    let tags = self.fetcher.list_tags(&bare).map_err(InstallError::Fetch)?;
+                    let chosen =
+                        best_match(&tags, req).ok_or_else(|| InstallError::NoMatchingVersion {
+                            address: url.clone(),
+                            req: req.to_string(),
+                            available: tags.clone(),
+                        })?;
+                    let commit = self
+                        .fetcher
+                        .resolve(&bare, &RefSpec::Tag(chosen.tag.clone()))
+                        .map_err(InstallError::Fetch)?;
+                    (commit, chosen.tag)
+                }
+                InstallPin::Branch(name) => {
+                    let commit = self
+                        .fetcher
+                        .resolve(&bare, &RefSpec::Branch(name.clone()))
+                        .map_err(InstallError::Fetch)?;
+                    (commit, format!("branch:{name}"))
+                }
+                InstallPin::Commit(sha) => {
+                    let commit = self
+                        .fetcher
+                        .resolve(&bare, &RefSpec::Commit(sha.clone()))
+                        .map_err(InstallError::Fetch)?;
+                    let short = commit.get(..7).unwrap_or(commit.as_str()).to_string();
+                    (commit, format!("commit:{short}"))
+                }
+                InstallPin::Local { .. } => {
+                    unreachable!("Local pins refused at install_with entry")
+                }
             }
         };
 
@@ -384,6 +814,16 @@ impl Installer {
                 tag: tag_descriptor.clone(),
             })?;
         let manifest = PackageManifest::from_toml(manifest_str).map_err(InstallError::Manifest)?;
+
+        // Synthesize the Version-pin descriptor now that we know the
+        // manifest version. Mirrors the conventional `v{X.Y.Z}` form
+        // produced by the standalone tag-matching path.
+        let tag_descriptor =
+            if opts.resolved_commit.is_some() && matches!(spec.pin, InstallPin::Version(_)) {
+                format!("v{}", manifest.version)
+            } else {
+                tag_descriptor
+            };
 
         // Refuse to install a package whose `pmacs_required` constraint
         // does not match the running pmacs version. Applies to every
@@ -422,10 +862,14 @@ impl Installer {
         let basename = package_basename(manifest.name.as_str());
         let install_path = install_root.join(basename);
 
-        // If the install path already exists with the same commit, treat
-        // as idempotent. With a different commit, we refuse rather than
-        // overwrite --- callers ask for `update` (M7.6), not silent
-        // replacement.
+        // If the install path already exists with the same commit,
+        // treat as idempotent. With a different commit, behavior
+        // depends on `opts.replace_existing`: the standalone install
+        // path refuses (`pmacs.packages.install` callers reach this
+        // when re-running install with a moved upstream and should
+        // be told to use `update`); the resolver-driven update path
+        // proceeds to a staged replacement.
+        let mut needs_replace = false;
         if install_path.exists() {
             let existing = read_install_marker(&install_path).ok();
             match existing {
@@ -439,6 +883,9 @@ impl Installer {
                         scope: self.scope.clone(),
                         pin: spec.pin.clone(),
                     });
+                }
+                _ if opts.replace_existing => {
+                    needs_replace = true;
                 }
                 _ => {
                     return Err(InstallError::AlreadyInstalled {
@@ -454,17 +901,80 @@ impl Installer {
             .fetcher
             .archive_commit(&bare, &commit)
             .map_err(InstallError::Fetch)?;
-        fs::create_dir_all(&install_path).map_err(|source| InstallError::Io {
-            path: install_path.clone(),
+
+        // Staging path: when replacing, extract to a sibling dir and
+        // only rename into place after success, so a failing replace
+        // leaves the prior install untouched. Same-filesystem rename
+        // makes the swap visible atomically; a crash between removing
+        // the old dir and renaming the staged dir leaves the staged
+        // dir in place, which is recoverable on next run.
+        let extract_target = if needs_replace {
+            let staged = install_path.with_extension("new");
+            // A leftover staging dir from a prior crash would
+            // confuse `create_dir_all` semantics; clear it first.
+            if staged.exists() {
+                fs::remove_dir_all(&staged).map_err(|source| InstallError::Io {
+                    path: staged.clone(),
+                    source,
+                })?;
+            }
+            staged
+        } else {
+            install_path.clone()
+        };
+
+        fs::create_dir_all(&extract_target).map_err(|source| InstallError::Io {
+            path: extract_target.clone(),
             source,
         })?;
-        if let Err(e) = extract_tar(&archive, &install_path) {
-            // Roll back partial extraction: an empty install dir is more
-            // recoverable than a half-populated one.
-            let _ = fs::remove_dir_all(&install_path);
+        if let Err(e) = extract_tar(&archive, &extract_target) {
+            // Roll back partial extraction. For the staging path
+            // this leaves the prior install untouched; for the
+            // direct path this leaves the install root clean.
+            let _ = fs::remove_dir_all(&extract_target);
             return Err(e);
         }
-        write_install_marker(&install_path, &commit)?;
+        write_install_marker(&extract_target, &commit)?;
+
+        if needs_replace {
+            // Swap with rollback: rename the old install aside,
+            // rename the staged dir into place, then remove the
+            // backup. If the second rename fails, restore from the
+            // backup so the prior install survives the failed
+            // update. The two renames are individually atomic on the
+            // same filesystem; the only window where neither dir
+            // sits at `install_path` is between them, and a crash in
+            // that window leaves both `.old` and `.new` siblings
+            // for manual recovery.
+            let backup = install_path.with_extension("old");
+            // Clear any leftover backup from a prior crash.
+            if backup.exists() {
+                fs::remove_dir_all(&backup).map_err(|source| InstallError::Io {
+                    path: backup.clone(),
+                    source,
+                })?;
+            }
+            fs::rename(&install_path, &backup).map_err(|source| InstallError::Io {
+                path: install_path.clone(),
+                source,
+            })?;
+            if let Err(source) = fs::rename(&extract_target, &install_path) {
+                // Restore. If even the restore fails, surface the
+                // original error --- the operator now needs to
+                // manually swap `<path>.old` back into place, but
+                // we've at least preserved the bytes.
+                let _ = fs::rename(&backup, &install_path);
+                return Err(InstallError::Io {
+                    path: install_path.clone(),
+                    source,
+                });
+            }
+            // Both renames succeeded --- safe to drop the backup.
+            // A failure here leaves `<path>.old` behind (best-
+            // effort): the new install is correct on disk, just a
+            // disk-space leak.
+            let _ = fs::remove_dir_all(&backup);
+        }
 
         Ok(InstalledPackage {
             version: manifest.version.clone(),
@@ -527,7 +1037,13 @@ fn parse_tag_as_semver(tag: &str) -> Option<Version> {
     Version::parse(stripped).ok()
 }
 
-fn package_basename(name: &str) -> &str {
+/// Strip a `<owner>/` namespace prefix from a manifest name and
+/// return the trailing segment used for the on-disk install dir
+/// and for `require()` lookup. `"magit"` → `"magit"`,
+/// `"user/magit"` → `"magit"`. The `pub(crate)` exposure lets
+/// `lua_bindings::do_update` derive the basename for a lockfile
+/// entry without re-implementing the rule.
+pub(crate) fn package_basename(name: &str) -> &str {
     match name.rsplit_once('/') {
         Some((_, last)) => last,
         None => name,
@@ -580,6 +1096,31 @@ fn extract_tar(archive: &[u8], dest: &Path) -> Result<(), InstallError> {
 
 const MARKER_NAME: &str = ".pmacs-install";
 
+/// Create a symlink at `link` pointing at `target`. Unix-only in
+/// v0.1; pmacs doesn't ship Windows builds and `std::os::unix`'s
+/// symlink semantics are what dired/wdired need (the link is the
+/// thing being managed; the target is data).
+fn symlink_create(target: &Path, link: &Path) -> Result<(), InstallError> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).map_err(|source| InstallError::Io {
+            path: link.to_path_buf(),
+            source,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        Err(InstallError::Io {
+            path: link.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "install_local requires Unix symlink support",
+            ),
+        })
+    }
+}
+
 fn write_install_marker(install_path: &Path, commit: &str) -> Result<(), InstallError> {
     let p = install_path.join(MARKER_NAME);
     fs::write(&p, format!("{commit}\n")).map_err(|source| InstallError::Io { path: p, source })
@@ -601,6 +1142,46 @@ pub enum InstallError {
     /// `$XDG_DATA_HOME` and `$HOME` were both unset.
     #[error("cannot resolve XDG data directory: HOME and XDG_DATA_HOME are both unset")]
     NoDataHome,
+    /// [`Installer::install`] / [`Installer::install_at_commit`] /
+    /// [`Installer::replace_at_commit`] received an
+    /// [`InstallPin::Local`]. Local pins must go through
+    /// [`Installer::install_local`] (T M8.1c); routing them to the
+    /// fetched-install path would require a clone URL that doesn't
+    /// exist for working-tree installs.
+    #[error(
+        "InstallPin::Local cannot be installed via the fetched-install path; \
+         use Installer::install_local for source path `{source_path}`"
+    )]
+    LocalPinNotSupported {
+        /// The source path the Local pin named.
+        source_path: PathBuf,
+    },
+    /// [`Installer::install_local`] was given a path that doesn't
+    /// contain a readable `pmacs.toml`. The package layout
+    /// requirements are documented in the package author guide; the
+    /// user typically forgot to write the manifest or pointed at
+    /// the wrong directory.
+    #[error("install_local: no readable pmacs.toml at `{source_path}`: {cause}")]
+    LocalManifestMissing {
+        /// The source path the user passed.
+        source_path: PathBuf,
+        /// The underlying I/O or parse error message.
+        cause: String,
+    },
+    /// [`Installer::install_local`] was asked to install at a name
+    /// that already has a real (non-symlink) install. The user must
+    /// uninstall the fetched copy first. We refuse rather than
+    /// silently replace because losing a fetched-install tree is a
+    /// real risk (it might contain manual edits the user made
+    /// before discovering `install_local`).
+    #[error(
+        "install_local: `{install_path}` is a real install, not a symlink; \
+         remove it first, then re-run install_local"
+    )]
+    LocalRealInstallInWay {
+        /// The install dir that's blocking the new symlink.
+        install_path: PathBuf,
+    },
     /// Underlying fetch/clone/resolve operation failed.
     #[error(transparent)]
     Fetch(#[from] FetchError),

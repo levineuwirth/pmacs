@@ -305,6 +305,16 @@ pmacs.workers.compute_sum = dispatch_sum
 pmacs.workers.emit_n = dispatch_emit_n
 pmacs.workers.grep = dispatch_grep
 
+-- Runtime-internal: expose the Handle / Stream factories so other
+-- builtin runtime files (pmacs.fs in M8.1, future siblings) can
+-- construct handles for ids dispatched through their own raw
+-- _dispatch_* primitives without re-implementing the class. The
+-- underscore prefix marks these as not part of the documented
+-- package-author surface; package code uses :await() / :cancel() /
+-- :on_complete() on the returned handles, never these factories.
+pmacs.workers._new_handle = new_handle
+pmacs.workers._new_stream = new_stream
+
 -- Name-based dispatch matching the spec example:
 --   pmacs.workers.dispatch("grep", { ... }, { supersede = "grep" }):await()
 -- v0.1 ships with the two stub handlers above; M4 adds tree-sitter,

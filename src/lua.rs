@@ -88,6 +88,10 @@ pub struct LuaHost {
     /// stale [`crate::text_view::TextView`] line cache).
     core: Option<SharedCore>,
     errors: Vec<LuaErrorRecord>,
+    /// T M7.8 cancel token. Owns the [`AtomicBool`] the count hook
+    /// polls. Hosts hand out [`crate::lua_isolation::CancelHandle`]
+    /// clones for cross-thread C-g delivery.
+    cancel: crate::lua_isolation::CancelToken,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -125,6 +129,17 @@ impl LuaHost {
     /// boundary closures fail to register.
     pub fn with_registry(registry: SharedRegistry) -> mlua::Result<Self> {
         let lua = Lua::new();
+        let cancel = crate::lua_isolation::CancelToken::new();
+        // T M7.8: install the count hook before any chunk runs so even
+        // the first eval is interruptible. The hook closure captures
+        // an `Arc<AtomicBool>` clone of `cancel`'s flag; subsequent
+        // `cancel.cancel()` / `cancel.handle().cancel()` calls are
+        // observed within `DEFAULT_INSTRUCTION_BUDGET` instructions.
+        crate::lua_isolation::install_cancel_hook(
+            &lua,
+            &cancel,
+            crate::lua_isolation::DEFAULT_INSTRUCTION_BUDGET,
+        );
         let commands: SharedCommandRegistry = Rc::new(RefCell::new(CommandRegistry::new()));
         let keymaps: SharedKeymapStack = Rc::new(RefCell::new(KeymapStack::new()));
         let hooks: SharedHookRegistry = Rc::new(RefCell::new(HookRegistry::new()));
@@ -137,6 +152,7 @@ impl LuaHost {
             hooks,
             core: None,
             errors: Vec::new(),
+            cancel,
             _not_send: PhantomData,
         })
     }
@@ -145,6 +161,28 @@ impl LuaHost {
     /// curated APIs that later milestones layer on top.
     pub fn lua(&self) -> &Lua {
         &self.lua
+    }
+
+    /// Cross-thread handle for flipping this VM's cancel flag.
+    ///
+    /// The returned [`crate::lua_isolation::CancelHandle`] is
+    /// `Send + Sync` and may be moved or cloned to other threads
+    /// (e.g. an input-watching thread that maps C-g to a cancel
+    /// request). The next time the count hook runs in the VM (within
+    /// [`crate::lua_isolation::DEFAULT_INSTRUCTION_BUDGET`]
+    /// instructions on lua54; see the LuaJIT-trace caveat in
+    /// [`crate::lua_isolation`]) the running chunk aborts with an
+    /// [`crate::lua_isolation::IsolationError::Cancelled`].
+    #[must_use]
+    pub fn cancel_handle(&self) -> crate::lua_isolation::CancelHandle {
+        self.cancel.handle()
+    }
+
+    /// Flip this VM's cancel flag in-process. Equivalent to
+    /// `self.cancel_handle().cancel()` for callers that already hold
+    /// `&self`.
+    pub fn request_cancel(&self) {
+        self.cancel.cancel();
     }
 
     /// Shared handle to the buffer registry. Both Rust callers (e.g. the
@@ -221,7 +259,16 @@ impl LuaHost {
         let snapshot = self.hooks.borrow().snapshot(name);
         let (kind, callbacks) = snapshot?;
         let outcome = crate::hook::run_snapshot(kind, &callbacks, args);
+        // T M7.8: if any callback observed a cancellation, the flag
+        // is still set — reset before the next eval. (Callbacks
+        // dispatched after the first cancel observed the still-set
+        // flag and aborted as well; that matches the user-intent
+        // semantics of C-g during a hook fan-out.)
+        let mut saw_cancel = false;
         for err in &outcome.errors {
+            if crate::lua_isolation::is_cancellation(&err.error) {
+                saw_cancel = true;
+            }
             let record = LuaErrorRecord {
                 at: SystemTime::now(),
                 source: Some(format!("hook:{name}")),
@@ -229,6 +276,9 @@ impl LuaHost {
             };
             self.append_to_errors_buffer(&record);
             self.errors.push(record);
+        }
+        if saw_cancel {
+            self.cancel.reset();
         }
         Some(outcome)
     }
@@ -261,7 +311,16 @@ impl LuaHost {
                 .body
                 .clone()
         };
-        body.call::<mlua::MultiValue>(args)
+        match body.call::<mlua::MultiValue>(args) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // T M7.8: consume the cancel signal once.
+                if crate::lua_isolation::is_cancellation(&e) {
+                    self.cancel.reset();
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Evaluate a Lua chunk and return the resulting value.
@@ -293,6 +352,14 @@ impl LuaHost {
         match loader.eval::<Value>() {
             Ok(v) => Ok(v),
             Err(e) => {
+                // T M7.8: a cancellation is consumed exactly once.
+                // Reset the flag here so the *next* eval starts
+                // fresh. If we left it set, the very first hook tick
+                // of the next chunk would abort it without anyone
+                // having asked.
+                if crate::lua_isolation::is_cancellation(&e) {
+                    self.cancel.reset();
+                }
                 let record = LuaErrorRecord {
                     at: SystemTime::now(),
                     source: source.map(str::to_owned),
@@ -355,6 +422,33 @@ impl LuaHost {
         self.registry.borrow().find_by_name(ERRORS_BUFFER_NAME)
     }
 
+    /// Snapshot the full text of the `*errors*` buffer as a UTF-8
+    /// string (lossy on non-UTF-8 bytes — error messages are routinely
+    /// concatenations of arbitrary user data).
+    ///
+    /// Returns the empty string if the buffer hasn't been created
+    /// yet. Used by tests and any introspection tool that needs the
+    /// canonical error log without going through the buffer registry
+    /// directly. Does not consume or clear the buffer.
+    #[must_use]
+    pub fn errors_buffer_text(&self) -> String {
+        let Some(id) = self.errors_buffer_id() else {
+            return String::new();
+        };
+        let reg = self.registry.borrow();
+        let Ok(buf) = reg.get(id) else {
+            return String::new();
+        };
+        let rope = buf.snapshot_rope();
+        let len = rope.len();
+        if len == 0 {
+            return String::new();
+        }
+        let mut bytes = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
+        rope.slice(0, len, &mut bytes);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     /// All captured errors, in arrival order.
     pub fn errors(&self) -> &[LuaErrorRecord] {
         &self.errors
@@ -388,6 +482,20 @@ impl LuaHost {
     pub fn set_init_complete(&self) {
         if let Some(flag) = self.lua.app_data_ref::<InitCompleteFlag>() {
             flag.set_complete();
+        }
+    }
+
+    /// Re-open the init phase (test/dev only). Counterpart to
+    /// [`Self::set_init_complete`]: integration tests that exercise
+    /// init-only Lua APIs against a fully-constructed
+    /// [`crate::editor::EditorState`] use this to reset the flag
+    /// the editor flips during startup. Marked `#[doc(hidden)]` to
+    /// keep it out of the user-facing surface; production code
+    /// never re-opens init phase after a single startup flip.
+    #[doc(hidden)]
+    pub fn reopen_init_phase_for_testing(&self) {
+        if let Some(flag) = self.lua.app_data_ref::<InitCompleteFlag>() {
+            flag.reopen_for_testing();
         }
     }
 

@@ -165,6 +165,12 @@ fn format_outcome(outcome: &JobOutcome) -> String {
         JobOutcome::Complete(JobResult::Parse { duration_ms }) => {
             format!("ok (parse {duration_ms}ms)")
         }
+        JobOutcome::Complete(JobResult::ReadDir(entries)) => {
+            format!("ok ({} entries)", entries.len())
+        }
+        JobOutcome::Complete(JobResult::Stat(entry)) => {
+            format!("ok (stat {:?})", entry.name)
+        }
         JobOutcome::Cancelled => "cancelled".to_string(),
         JobOutcome::Failed(msg) => {
             // Trim the failure message for the table; the full

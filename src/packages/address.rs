@@ -2,12 +2,14 @@
 
 //! Address parsing (T M7.2, spec §sec:packages-future).
 //!
-//! v1.0 ships three address forms:
+//! v1.0 ships four address forms:
 //!
 //! - `github:owner/repo` --- sugar that expands to
 //!   `https://github.com/owner/repo.git`. The `.git` suffix is
 //!   tolerated; `github:owner/repo.git` is accepted and treated as
 //!   equivalent.
+//! - `gitlab:owner/repo` --- the same sugar against `gitlab.com`. A
+//!   self-hosted GitLab instance is reachable via the `git:` form.
 //! - `git:<URL>` --- the prefix is stripped and whatever remains is
 //!   passed to `git clone` as-is. This intentionally accepts anything
 //!   `git clone` accepts: full URLs (`https://`, `ssh://`, `file://`,
@@ -22,11 +24,12 @@
 //!
 //! ## Forge aliases (deferred)
 //!
-//! `gitlab:`, `codeberg:`, and `forgejo:` were considered for v1.0 and
-//! deferred to a post-v1.0 patch release driven by user demand (see
-//! T M7.2 box in `pmacs-tasks.tex`). Inputs starting with these
-//! prefixes return [`AddressError::DeferredAlias`], whose message names
-//! the alias and points at the `git:URL` fallback.
+//! `codeberg:` and `forgejo:` were considered for v1.0 and deferred
+//! to a post-v1.0 patch release driven by user demand. The
+//! extension path is the same one match arm `gitlab:` takes below;
+//! see T M7.2 box in `pmacs-tasks.tex`. Inputs starting with these
+//! prefixes return [`AddressError::DeferredAlias`], whose message
+//! names the alias and points at the `git:URL` fallback.
 //!
 //! ## Authentication
 //!
@@ -36,6 +39,7 @@
 //! does not handle credentials; it only produces the URL string that
 //! `git clone` will eventually receive.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -44,9 +48,10 @@ use thiserror::Error;
 
 /// A parsed package address.
 ///
-/// Two variants in v1.0: a special-cased GitHub form (because it's the
-/// most common) and an opaque URL form (everything else).
-#[derive(Debug, Clone, Eq, PartialEq)]
+/// Three variants in v1.0: a special-cased GitHub form (the most
+/// common), a special-cased GitLab.com form (the second most
+/// common), and an opaque URL form (everything else).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Address {
     /// `github:owner/repo` sugar.
     Github {
@@ -54,6 +59,18 @@ pub enum Address {
         owner: String,
         /// Repository name. Tolerates an optional `.git` suffix at parse
         /// time but stores the bare name.
+        repo: String,
+    },
+    /// `gitlab:owner/repo` sugar against `gitlab.com`. Self-hosted
+    /// GitLab instances must use the `git:` form with a full URL.
+    /// v1.0 admits a single owner segment (user or top-level group);
+    /// nested subgroups (`gitlab:group/subgroup/repo`) are out of
+    /// scope for the sugar and need the explicit
+    /// `git:https://gitlab.com/group/subgroup/repo.git` form.
+    Gitlab {
+        /// Repository owner (user or top-level group).
+        owner: String,
+        /// Repository name (with optional `.git` suffix tolerated).
         repo: String,
     },
     /// Any clone-cloneable URL or shorthand. Stored as-is; passed to
@@ -90,6 +107,15 @@ impl Address {
         // 2. github:owner/repo (with optional .git suffix).
         if let Some(rest) = s.strip_prefix("github:") {
             return parse_github(rest, s);
+        }
+
+        // 2a. gitlab:owner/repo (with optional .git suffix). Same
+        // shape as the github sugar; the only difference is the
+        // expanded clone URL host. Self-hosted GitLab instances are
+        // not addressable via this prefix --- they must use the
+        // generic `git:https://gitlab.example/...` form.
+        if let Some(rest) = s.strip_prefix("gitlab:") {
+            return parse_gitlab(rest, s);
         }
 
         // 3. git:<anything> --- pass-through. Whatever follows is fed to
@@ -133,43 +159,65 @@ impl Address {
             Self::Github { owner, repo } => {
                 format!("https://github.com/{owner}/{repo}.git")
             }
+            Self::Gitlab { owner, repo } => {
+                format!("https://gitlab.com/{owner}/{repo}.git")
+            }
             Self::Url(u) => u.clone(),
         }
     }
 }
 
-const DEFERRED_ALIASES: &[&str] = &["gitlab:", "codeberg:", "forgejo:"];
+const DEFERRED_ALIASES: &[&str] = &["codeberg:", "forgejo:"];
 
 fn parse_github(rest: &str, original: &str) -> Result<Address, AddressError> {
-    // Tolerate trailing `.git` --- users will type it by habit.
+    let (owner, repo) = parse_forge_pair(
+        rest,
+        original,
+        AddressError::InvalidGithub {
+            input: original.to_string(),
+        },
+    )?;
+    Ok(Address::Github { owner, repo })
+}
+
+fn parse_gitlab(rest: &str, original: &str) -> Result<Address, AddressError> {
+    let (owner, repo) = parse_forge_pair(
+        rest,
+        original,
+        AddressError::InvalidGitlab {
+            input: original.to_string(),
+        },
+    )?;
+    Ok(Address::Gitlab { owner, repo })
+}
+
+/// Shared parser for the `<forge>:<owner>/<repo>` sugar. Tolerates a
+/// trailing `.git` (users type it by habit) and rejects obviously
+/// malformed inputs (missing slash, extra segment, suspicious
+/// characters). Conservative `[A-Za-z0-9_.-]` character class
+/// covers every realistic case; wider sets can be admitted later
+/// if a real package surfaces a rejection.
+fn parse_forge_pair(
+    rest: &str,
+    _original: &str,
+    err: AddressError,
+) -> Result<(String, String), AddressError> {
     let body = rest.strip_suffix(".git").unwrap_or(rest);
     let mut parts = body.split('/');
     let owner = parts.next().unwrap_or("");
     let repo = parts.next().unwrap_or("");
     if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
-        return Err(AddressError::InvalidGithub {
-            input: original.to_string(),
-        });
+        return Err(err);
     }
-    // Conservative character validation: GitHub itself allows a wider
-    // set, but accepting only `[A-Za-z0-9_.-]` covers every realistic
-    // case and rejects obvious typos (slashes inside segments, etc.)
-    // without spec churn. Wider sets can be admitted later if a real
-    // package surfaces a rejection.
     for seg in [owner, repo] {
         if !seg
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
         {
-            return Err(AddressError::InvalidGithub {
-                input: original.to_string(),
-            });
+            return Err(err);
         }
     }
-    Ok(Address::Github {
-        owner: owner.to_string(),
-        repo: repo.to_string(),
-    })
+    Ok((owner.to_string(), repo.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +241,12 @@ pub enum AddressError {
         /// The offending input.
         input: String,
     },
+    /// `gitlab:owner/repo` form was malformed.
+    #[error("invalid gitlab address `{input}`: expected `gitlab:owner/repo`")]
+    InvalidGitlab {
+        /// The offending input.
+        input: String,
+    },
     /// `git:` prefix was followed by an empty body.
     #[error("empty git target in `{input}`: expected `git:<URL>`")]
     EmptyGitTarget {
@@ -205,16 +259,16 @@ pub enum AddressError {
         /// The offending input.
         input: String,
     },
-    /// Address used a forge-alias prefix that v1.0 deferred (gitlab:,
-    /// codeberg:, forgejo:). The message points at the `git:URL`
-    /// fallback so the user knows what to type instead.
+    /// Address used a forge-alias prefix that v1.0 deferred
+    /// (`codeberg:`, `forgejo:`). The message points at the
+    /// `git:URL` fallback so the user knows what to type instead.
     #[error(
         "address scheme `{alias}` is deferred for v1.0; \
          use `git:<full-URL>` instead (e.g. `git:https://gitlab.com/owner/repo.git`). \
          Offending input: `{input}`"
     )]
     DeferredAlias {
-        /// The deferred alias prefix (e.g. `"gitlab:"`).
+        /// The deferred alias prefix (e.g. `"codeberg:"`).
         alias: String,
         /// The full offending input.
         input: String,
@@ -222,7 +276,8 @@ pub enum AddressError {
     /// Address did not match any v1.0 scheme.
     #[error(
         "unknown address scheme in `{input}`; \
-         expected `github:owner/repo`, `git:<URL>`, `https://...`, or `git://...`"
+         expected `github:owner/repo`, `gitlab:owner/repo`, \
+         `git:<URL>`, `https://...`, or `git://...`"
     )]
     UnknownScheme {
         /// The offending input.
@@ -373,22 +428,54 @@ mod tests {
         assert!(matches!(err, AddressError::MalformedHttps { .. }));
     }
 
-    // -- Forge aliases rejected with helpful pointer ------------------------
+    // -- gitlab sugar -------------------------------------------------------
 
     #[test]
-    fn gitlab_alias_rejected_with_pointer_to_git_fallback() {
-        let err = Address::parse("gitlab:owner/repo").unwrap_err();
-        let msg = err.to_string();
-        assert!(matches!(err, AddressError::DeferredAlias { .. }));
-        assert!(
-            msg.contains("gitlab:"),
-            "error should name the alias: {msg}"
-        );
-        assert!(
-            msg.contains("git:"),
-            "error should point at fallback: {msg}"
+    fn gitlab_simple_form_parses() {
+        let a = Address::parse("gitlab:user/repo").unwrap();
+        assert_eq!(
+            a,
+            Address::Gitlab {
+                owner: "user".into(),
+                repo: "repo".into(),
+            }
         );
     }
+
+    #[test]
+    fn gitlab_to_git_url_canonicalizes_to_gitlab_com() {
+        let a = Address::parse("gitlab:user/repo").unwrap();
+        assert_eq!(a.to_git_url(), "https://gitlab.com/user/repo.git");
+    }
+
+    #[test]
+    fn gitlab_dot_git_suffix_tolerated() {
+        let a = Address::parse("gitlab:user/repo.git").unwrap();
+        assert_eq!(
+            a,
+            Address::Gitlab {
+                owner: "user".into(),
+                repo: "repo".into(),
+            }
+        );
+        assert_eq!(a.to_git_url(), "https://gitlab.com/user/repo.git");
+    }
+
+    #[test]
+    fn gitlab_rejects_missing_slash() {
+        let err = Address::parse("gitlab:user").unwrap_err();
+        assert!(matches!(err, AddressError::InvalidGitlab { .. }));
+    }
+
+    #[test]
+    fn gitlab_rejects_extra_segment() {
+        // Subgroups (`group/subgroup/repo`) aren't supported by the
+        // sugar; users with subgroups go through `git:https://...`.
+        let err = Address::parse("gitlab:group/sub/repo").unwrap_err();
+        assert!(matches!(err, AddressError::InvalidGitlab { .. }));
+    }
+
+    // -- Forge aliases rejected with helpful pointer ------------------------
 
     #[test]
     fn codeberg_alias_rejected_with_pointer_to_git_fallback() {

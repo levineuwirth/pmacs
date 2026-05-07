@@ -12,6 +12,7 @@
 //!
 //! * `[command: cursor.left]` --- navigate to that command's help.
 //! * `[key: C-x C-s]` --- describe the chord.
+//! * `[key: s @buffer:3]` --- describe a buffer-local chord.
 //! * `[buffer: *errors*]` --- describe a buffer by name.
 //! * `[mode: normal]`, `[hook: buffer.before-save]`, `[view: *help*]`.
 //!
@@ -58,7 +59,7 @@ pub fn render_command(
     let _ = writeln!(text);
     let _ = writeln!(text, "{}", cmd.description);
     let _ = writeln!(text);
-    write_command_bindings(&mut text, &cmd.name, keymaps);
+    write_command_bindings(registry, &mut text, &cmd.name, keymaps);
     if cmd.predicate.is_some() {
         let _ = writeln!(text);
         let _ = writeln!(text, "Predicate: yes (this command can refuse to run).");
@@ -70,14 +71,22 @@ pub fn render_command(
 
 /// Render help for a chord sequence. Returns the help buffer id if
 /// the sequence resolves to a binding, [`None`] otherwise.
+///
+/// `active_buffer` is the buffer scope to consult when resolving
+/// the chord sequence. Pass `Some(id)` to surface buffer-local
+/// bindings (matching what `dispatch_key` would see) and `None`
+/// for global-only resolution. Buffer-scope keys (e.g.,
+/// `pmacs-magit.stage` bound to `s` on the magit buffer) are
+/// invisible without this, which is the M8.7 describe-key gap.
 pub fn render_key(
     registry: &mut BufferRegistry,
     commands: &CommandRegistry,
     keymaps: &KeymapStack,
+    active_buffer: Option<BufferId>,
     sequence: &str,
 ) -> RenderResult {
     let chords = parse_sequence(sequence).ok()?;
-    let resolution = keymaps.resolve(&chords, None, &[]);
+    let resolution = keymaps.resolve(&chords, active_buffer, &[]);
     let StackResolution::Bound(rb) = resolution else {
         return None;
     };
@@ -198,7 +207,12 @@ fn format_view_text(buf: &Buffer) -> String {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn write_command_bindings(out: &mut String, command: &str, keymaps: &KeymapStack) {
+fn write_command_bindings(
+    registry: &BufferRegistry,
+    out: &mut String,
+    command: &str,
+    keymaps: &KeymapStack,
+) {
     let bindings: Vec<(Scope, Sequence, Binding)> = keymaps
         .iter_all()
         .into_iter()
@@ -209,13 +223,41 @@ fn write_command_bindings(out: &mut String, command: &str, keymaps: &KeymapStack
     } else {
         let _ = writeln!(out, "Bound to:");
         for (scope, seq, _) in &bindings {
-            let _ = writeln!(
-                out,
-                "  [key: {}]   ({})",
-                display_sequence(seq),
-                scope.render()
-            );
+            match scope {
+                Scope::Buffer(id) if registry.contains(*id) => {
+                    let _ = writeln!(
+                        out,
+                        "  [key: {} @buffer:{}]   ({})",
+                        display_sequence(seq),
+                        id.raw(),
+                        scope.render()
+                    );
+                }
+                _ => {
+                    let _ = writeln!(
+                        out,
+                        "  [key: {}]   ({})",
+                        display_sequence(seq),
+                        scope.render()
+                    );
+                }
+            }
         }
+    }
+}
+
+fn parse_key_target(registry: &BufferRegistry, target: &str) -> Option<(String, Option<BufferId>)> {
+    let Some((sequence, raw)) = target.rsplit_once(" @buffer:") else {
+        return Some((target.to_owned(), None));
+    };
+    let Ok(raw) = raw.trim().parse::<u64>() else {
+        return None;
+    };
+    let id = BufferId::from_raw(raw);
+    if registry.contains(id) {
+        Some((sequence.trim().to_owned(), Some(id)))
+    } else {
+        None
     }
 }
 
@@ -366,7 +408,10 @@ pub fn follow_link_at(
     let link = link_at(&text, cursor)?;
     match link.kind.as_str() {
         "command" => render_command(registry, commands, keymaps, &link.target),
-        "key" => render_key(registry, commands, keymaps, &link.target),
+        "key" => {
+            let (sequence, active_buffer) = parse_key_target(registry, &link.target)?;
+            render_key(registry, commands, keymaps, active_buffer, &sequence)
+        }
         "buffer" => {
             let id = registry.find_by_name(&link.target)?;
             render_buffer(registry, id)
@@ -476,7 +521,7 @@ mod tests {
             },
         )
         .unwrap();
-        let id = render_key(&mut reg, &cmds, &kms, "C-x C-s").unwrap();
+        let id = render_key(&mut reg, &cmds, &kms, None, "C-x C-s").unwrap();
         let body = read_buffer_text(reg.get(id).unwrap());
         assert!(body.contains("Key: C-x C-s"));
         assert!(body.contains("[command: save]"));
@@ -488,7 +533,7 @@ mod tests {
         let mut reg = BufferRegistry::new();
         let cmds = CommandRegistry::new();
         let kms = KeymapStack::new();
-        assert!(render_key(&mut reg, &cmds, &kms, "C-q").is_none());
+        assert!(render_key(&mut reg, &cmds, &kms, None, "C-q").is_none());
     }
 
     #[test]
@@ -649,5 +694,41 @@ mod tests {
         assert_eq!(returned, id);
         let body = read_help(&reg);
         assert!(body.contains("Command: beta"), "{body}");
+    }
+
+    #[test]
+    fn follow_link_at_chases_command_to_buffer_local_key() {
+        let lua = Lua::new();
+        let mut reg = BufferRegistry::new();
+        let target_buffer = reg.create("magit");
+        let mut cmds = CommandRegistry::new();
+        let mut kms = KeymapStack::new();
+        let hooks = HookRegistry::new();
+        cmds.define(make_command(&lua, "pmacs-magit.stage", "Stage item."))
+            .unwrap();
+        kms.bind_buffer(
+            target_buffer,
+            &parse_sequence("s").unwrap(),
+            "pmacs-magit.stage",
+            SourceLocation {
+                file: "magit.lua".into(),
+                line: 12,
+            },
+        )
+        .unwrap();
+
+        render_command(&mut reg, &cmds, &kms, "pmacs-magit.stage").unwrap();
+        let body = read_help(&reg);
+        assert!(
+            body.contains(&format!("[key: s @buffer:{}]", target_buffer.raw())),
+            "buffer-local key link must carry its buffer scope: {body}"
+        );
+        let cursor = body.find("s @buffer").unwrap() as u64;
+        let returned = follow_link_at(&mut reg, &cmds, &kms, &hooks, cursor).unwrap();
+        assert_eq!(returned, reg.find_by_name(HELP_BUFFER_NAME).unwrap());
+        let body = read_help(&reg);
+        assert!(body.contains("Key: s"), "{body}");
+        assert!(body.contains("Scope: buffer"), "{body}");
+        assert!(body.contains("[command: pmacs-magit.stage]"), "{body}");
     }
 }

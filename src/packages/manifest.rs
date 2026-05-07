@@ -47,7 +47,7 @@
 //! version = "*"
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ use thiserror::Error;
 ///
 /// Construct via [`PackageName::new`]; deserialization runs the same
 /// validator and surfaces a parse-time error on invalid names.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
 pub struct PackageName(String);
 
 impl PackageName {
@@ -189,15 +189,63 @@ impl PackageManifest {
     ///
     /// Validation happens during deserialization: missing required
     /// fields produce errors naming the field; invalid semver in
-    /// `version` or `pmacs_required` is rejected at parse time.
+    /// `version` or `pmacs_required` is rejected at parse time. After
+    /// deserialization the [`entry`](Self::entry) path is validated to
+    /// stay inside the package root --- an absolute path or any `..`
+    /// component is rejected with [`ManifestError::EscapingEntry`].
     pub fn from_toml(s: &str) -> Result<Self, ManifestError> {
-        toml::from_str(s).map_err(ManifestError::from)
+        let m: Self = toml::from_str(s).map_err(ManifestError::from)?;
+        validate_entry_path(&m.entry)?;
+        Ok(m)
     }
 
     /// Serialize to canonical TOML form.
     pub fn to_toml(&self) -> Result<String, ManifestError> {
         toml::to_string(self).map_err(ManifestError::from)
     }
+}
+
+/// Reject manifest `entry` paths that could escape the package
+/// root. The loader joins this onto `install_path`; an absolute
+/// path or `..` component would let a malicious manifest read
+/// (and therefore execute) arbitrary code.
+///
+/// Rules:
+/// - Path must not be absolute.
+/// - No component may be `..`.
+/// - No component may be a Windows prefix (drive letter, UNC).
+/// - The path must be non-empty.
+fn validate_entry_path(p: &std::path::Path) -> Result<(), ManifestError> {
+    if p.as_os_str().is_empty() {
+        return Err(ManifestError::EscapingEntry {
+            value: String::new(),
+            reason: "empty path".into(),
+        });
+    }
+    if p.is_absolute() {
+        return Err(ManifestError::EscapingEntry {
+            value: p.display().to_string(),
+            reason: "absolute paths are forbidden".into(),
+        });
+    }
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                return Err(ManifestError::EscapingEntry {
+                    value: p.display().to_string(),
+                    reason: "`..` components are forbidden".into(),
+                });
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(ManifestError::EscapingEntry {
+                    value: p.display().to_string(),
+                    reason: "drive prefixes / root components are forbidden".into(),
+                });
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +272,16 @@ pub enum ManifestError {
     /// TOML serialization failed (e.g., a non-UTF-8 path).
     #[error("manifest serialize error: {0}")]
     Serialize(#[from] toml::ser::Error),
+    /// `entry` was either absolute or contained a `..` component, both
+    /// of which would let a malicious manifest direct the loader to
+    /// load files outside the package root.
+    #[error("manifest entry path `{value}` escapes the package root: {reason}")]
+    EscapingEntry {
+        /// The offending path string.
+        value: String,
+        /// Which rule it violated (absolute, `..`, etc.).
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +546,91 @@ mod tests {
         "#;
         let err = PackageManifest::from_toml(s).unwrap_err();
         assert!(err.to_string().contains("BAD-CAPS") || err.to_string().contains("name"));
+    }
+
+    // -- Entry-path validation: reject escapes -----------------------------
+
+    #[test]
+    fn entry_absolute_path_is_rejected() {
+        let s = r#"
+            name = "x"
+            version = "0.1.0"
+            summary = "y"
+            pmacs_required = ">=0.1.0"
+            entry = "/etc/passwd"
+            exports = []
+        "#;
+        let err = PackageManifest::from_toml(s).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::EscapingEntry { .. }),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("absolute"));
+    }
+
+    #[test]
+    fn entry_with_parent_dir_component_is_rejected() {
+        let s = r#"
+            name = "x"
+            version = "0.1.0"
+            summary = "y"
+            pmacs_required = ">=0.1.0"
+            entry = "../../escape.lua"
+            exports = []
+        "#;
+        let err = PackageManifest::from_toml(s).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::EscapingEntry { .. }),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("`..`"));
+    }
+
+    #[test]
+    fn entry_with_embedded_parent_dir_is_rejected() {
+        let s = r#"
+            name = "x"
+            version = "0.1.0"
+            summary = "y"
+            pmacs_required = ">=0.1.0"
+            entry = "subdir/../../etc/passwd"
+            exports = []
+        "#;
+        let err = PackageManifest::from_toml(s).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::EscapingEntry { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn entry_subdir_relative_path_is_accepted() {
+        let s = r#"
+            name = "x"
+            version = "0.1.0"
+            summary = "y"
+            pmacs_required = ">=0.1.0"
+            entry = "subdir/init.lua"
+            exports = []
+        "#;
+        let m = PackageManifest::from_toml(s).expect("subdir entry should parse");
+        assert_eq!(m.entry.to_str().unwrap(), "subdir/init.lua");
+    }
+
+    #[test]
+    fn entry_with_curdir_prefix_is_accepted() {
+        // `./init.lua` normalizes to `init.lua`. CurDir components are
+        // benign and shouldn't trip the validator.
+        let s = r#"
+            name = "x"
+            version = "0.1.0"
+            summary = "y"
+            pmacs_required = ">=0.1.0"
+            entry = "./init.lua"
+            exports = []
+        "#;
+        let m = PackageManifest::from_toml(s).expect("./entry should parse");
+        assert!(m.entry.to_str().unwrap().contains("init.lua"));
     }
 
     // -- Optional dependencies / conflicts respected ------------------------

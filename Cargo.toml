@@ -21,6 +21,10 @@ path = "src/lib.rs"
 name = "pmacs"
 path = "src/main.rs"
 
+[[bin]]
+name = "pmacs-audit"
+path = "src/bin/pmacs_audit.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
@@ -114,6 +118,10 @@ toml = "0.8"
 # `serde` feature gives us localized parse errors during deserialization
 # (rejected at parse time, not at install time).
 semver = { version = "1", features = ["serde"] }
+# T M7.6 lockfile content-hashing. SHA-256 over `git archive --format=tar`
+# bytes detects upstream tampering even when the host serves a SHA-1
+# collision. Pure-Rust implementation; no system dep.
+sha2 = "0.10"
 
 [dev-dependencies]
 proptest = "1"

@@ -39,6 +39,7 @@
 //! chain is reachable from Rust via `error.source()`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use mlua::{FromLua, Function, Lua, Table, UserData, UserDataMethods, Value, Variadic};
@@ -60,7 +61,7 @@ use crate::key::{display_sequence, parse_sequence};
 use crate::keymap_stack::KeymapStack;
 use crate::packages::{
     Address, Fetcher, InstallError, InstallPin, InstallScope, InstallSpec, InstalledPackage,
-    Installer,
+    Installer, LookupOutcome, ResolvedKind, lookup_in_roster,
 };
 use crate::protocol::{AttachTarget, AttachmentHandle, InstanceIdentity};
 use crate::rope::Range;
@@ -124,6 +125,19 @@ impl InitCompleteFlag {
     /// Mark init complete. Idempotent — calling twice is fine.
     pub fn set_complete(&self) {
         self.0.set(true);
+    }
+
+    /// Re-open the init phase. Test/dev-only escape hatch:
+    /// integration tests that exercise init-only Lua APIs
+    /// (`pmacs.packages.install_local`, `pmacs.attach`) against a
+    /// fully-constructed [`crate::editor::EditorState`] need a way
+    /// to reset the flag the editor flips during startup.
+    /// Production code flips this once and never re-opens; the
+    /// `_for_testing` suffix and the `#[doc(hidden)]` mark this
+    /// as not part of the user-facing surface.
+    #[doc(hidden)]
+    pub fn reopen_for_testing(&self) {
+        self.0.set(false);
     }
 }
 
@@ -285,11 +299,13 @@ impl Default for LocalInstanceInfo {
 
 /// In-memory roster of packages installed during the init phase.
 ///
-/// Populated by `pmacs.packages.install{...}` and `install_project{...}`
-/// (T M7.3). Read by `pmacs.packages.installed()` for introspection
-/// and by the future M7.6 lockfile writer to enumerate the resolved
-/// set. Single-threaded `Rc<RefCell<...>>` per the boundary's
-/// main-thread invariant.
+/// Populated by `pmacs.packages.install{...}` and
+/// `install_project{...}` (T M7.3). Read by
+/// `pmacs.packages.installed()` for introspection, by the M7.7
+/// require-searcher to resolve `require("<pkg>")`, and by
+/// `pmacs.packages.update` to determine which on-disk installs
+/// need to be reinstalled or pruned. Single-threaded
+/// `Rc<RefCell<...>>` per the boundary's main-thread invariant.
 #[derive(Debug, Clone, Default)]
 pub struct InstalledPackages(Rc<RefCell<Vec<InstalledPackage>>>);
 
@@ -300,17 +316,164 @@ impl InstalledPackages {
         Self::default()
     }
 
-    /// Record a successful install. Order matches install order; that
-    /// matters for diagnostics ("which install errored?") more than
-    /// for resolution.
+    /// Record a successful install. If a previous entry has the
+    /// same `install_path` it is replaced in place; otherwise the
+    /// new package is appended. Replacement (rather than blind
+    /// append) keeps the roster a unique set of currently-installed
+    /// packages, which is what the M7.7 searcher and
+    /// `pmacs.packages.update` both rely on --- a stale duplicate
+    /// would surface either through `pmacs.packages.installed()` or
+    /// through the searcher's most-recent-first lookup.
+    ///
+    /// Keying by `install_path` (not just by basename) preserves the
+    /// legitimate case of the same package installed at both user
+    /// and project scope: both rosters reside in the same slot but
+    /// at different paths, and both should be visible to
+    /// `pmacs.packages.installed()`.
     pub fn record(&self, pkg: InstalledPackage) {
-        self.0.borrow_mut().push(pkg);
+        let path = pkg.install_path.clone();
+        let mut roster = self.0.borrow_mut();
+        if let Some(slot) = roster.iter_mut().find(|p| p.install_path == path) {
+            *slot = pkg;
+        } else {
+            roster.push(pkg);
+        }
+    }
+
+    /// Remove every roster entry whose `install_path` matches
+    /// `path` exactly. Used by `pmacs.packages.update` when a
+    /// transitive dependency drops out of the new resolve plan:
+    /// the on-disk install dir is removed, and the matching roster
+    /// entry must follow so the searcher stops finding it.
+    ///
+    /// Path-scoped (not basename-scoped) so a project-scope
+    /// install sharing the basename of a pruned user-scope install
+    /// is preserved --- the two paths are distinct, and `update`
+    /// only owns the user-scope set.
+    pub fn remove_by_install_path(&self, path: &std::path::Path) {
+        self.0.borrow_mut().retain(|p| p.install_path != path);
+    }
+
+    /// Replace the roster wholesale from a previously captured
+    /// snapshot. Used by `pmacs.packages.update` rollback: if a later
+    /// mutation or lockfile write fails, the in-memory search roster
+    /// must return to the same state as the still-current lockfile.
+    pub fn replace_snapshot(&self, packages: Vec<InstalledPackage>) {
+        *self.0.borrow_mut() = packages;
     }
 
     /// Snapshot the current roster for read-only consumers.
     #[must_use]
     pub fn snapshot(&self) -> Vec<InstalledPackage> {
         self.0.borrow().clone()
+    }
+}
+
+/// Stack of currently-loading package basenames (T M8.1d).
+///
+/// Pushed by the wrapped loader returned from
+/// [`load_package_chunk`] before the package's chunk runs;
+/// popped after the chunk returns (or errors). Used by
+/// [`pmacs.packages.on_unload`] as a fallback when
+/// [`mlua::Function::environment`] returns `None` --- under Lua
+/// 5.4, a closure that doesn't reference any global doesn't
+/// capture `_ENV` as an upvalue, so the env-identity check can't
+/// find the owning package. The stack lets the binding still
+/// recover the basename for the typical case (`on_unload` called
+/// at chunk top-level or from a chunk-direct function call).
+///
+/// A stack rather than a single slot because `require()` chains
+/// can be re-entrant (package A's chunk requires B; B's chunk
+/// runs nested inside A's). Each push corresponds to one chunk
+/// invocation.
+#[derive(Default)]
+pub struct CurrentlyLoadingPackage(Rc<RefCell<Vec<String>>>);
+
+impl CurrentlyLoadingPackage {
+    /// Construct an empty stack. Installed once per Lua state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&self, basename: String) {
+        self.0.borrow_mut().push(basename);
+    }
+
+    fn pop(&self) {
+        self.0.borrow_mut().pop();
+    }
+
+    fn top(&self) -> Option<String> {
+        self.0.borrow().last().cloned()
+    }
+}
+
+/// Registry of `pmacs.packages.on_unload` hooks (T M8.1d).
+///
+/// Keyed by package basename --- each package registers zero or more
+/// callbacks via `pmacs.packages.on_unload(fn)`, and
+/// `pmacs.packages.reload(name)` runs them in registration order
+/// before invalidating `package.loaded` and re-`require`-ing.
+///
+/// Hooks are *consumed* on reload: after running, the entry is
+/// cleared, so a re-loaded package re-registers fresh hooks. This
+/// keeps each reload cycle self-contained --- a stale closure that
+/// captures the prior chunk's locals can't fire on a later reload.
+#[derive(Default)]
+pub struct PackageUnloadHooks(Rc<RefCell<HashMap<String, Vec<mlua::Function>>>>);
+
+impl PackageUnloadHooks {
+    /// Construct an empty registry. Installed once per Lua state via
+    /// `lua.set_app_data` during the binding bootstrap.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append `hook` for `basename`. Order matters --- hooks run in
+    /// registration order on reload, so a "shut down workers, then
+    /// flush state" pair stays in that order.
+    pub fn register(&self, basename: &str, hook: mlua::Function) {
+        self.0
+            .borrow_mut()
+            .entry(basename.to_string())
+            .or_default()
+            .push(hook);
+    }
+
+    /// Drain the entire hook list for `basename`, returning it
+    /// as a Vec. The registry's slot for `basename` is empty
+    /// afterward.
+    ///
+    /// Used by [`run_unload_hooks`] to snapshot the cycle's hooks
+    /// at start; new `on_unload` registrations during the cycle
+    /// land in the (now empty) registry slot instead of extending
+    /// the current queue. A successful reload / replacement then
+    /// clears that old-env slot before the fresh chunk registers
+    /// its next-cycle hooks. This prevents a self-replicating hook
+    /// from extending the current unload cycle indefinitely.
+    pub fn drain(&self, basename: &str) -> Vec<mlua::Function> {
+        self.0.borrow_mut().remove(basename).unwrap_or_default()
+    }
+
+    /// Insert `hooks` at the front of the existing list for
+    /// `basename`. Existing entries (typically registered by the
+    /// chunk during the cycle that just failed) shift to follow
+    /// the prepended list.
+    ///
+    /// Used by [`run_unload_hooks`] on a hook failure: the unrun
+    /// tail (including the failed hook at index 0) is pushed back
+    /// to the front of the registry so a retry re-attempts them
+    /// in order before any newly-registered hooks fire.
+    pub fn prepend(&self, basename: &str, mut hooks: Vec<mlua::Function>) {
+        if hooks.is_empty() {
+            return;
+        }
+        let mut map = self.0.borrow_mut();
+        let existing = map.remove(basename).unwrap_or_default();
+        hooks.extend(existing);
+        map.insert(basename.to_string(), hooks);
     }
 }
 
@@ -664,16 +827,126 @@ pub enum BindingError {
     #[error("{0}")]
     PackageInstall(#[from] InstallError),
 
-    /// Stub for `pmacs.packages.update(...)` which is implemented in
-    /// T M7.6. Per the project's "stub posture" convention, we accept
-    /// the call shape (so v0.1 init.lua's that try it get a clean
-    /// error) and fail with the milestone target named.
+    /// The dependency resolver surfaced a typed error.
+    #[error("{0}")]
+    PackageResolve(#[from] crate::packages::ResolveError),
+
+    /// The lockfile machinery surfaced a typed error (parse, I/O,
+    /// content-hash mismatch, missing manifest, etc.).
+    #[error("{0}")]
+    PackageLockfile(#[from] crate::packages::LockfileError),
+
+    /// `pmacs.packages.update` was called but the lockfile contains
+    /// no top-level entries to re-resolve. Either no `install` has
+    /// completed yet, or the lockfile was hand-edited.
     #[error(
-        "pmacs.packages.update is implemented in M7.6 (lockfile + \
-         resolver). v0.1 / current builds: re-run `pmacs.packages.install` \
-         with the new constraint to upgrade in place."
+        "pmacs.packages.update: no top-level packages in lockfile to update. \
+         Run `pmacs.packages.install` first."
     )]
-    PackagesUpdateUnsupported,
+    PackagesUpdateNoEntries,
+    /// `pmacs.packages.update("name")` was passed a value that
+    /// failed [`PackageName`](crate::packages::PackageName)
+    /// validation.
+    #[error("pmacs.packages.update: invalid package name `{name}`: {reason}")]
+    PackagesUpdateBadName {
+        /// The offending value.
+        name: String,
+        /// Why it was rejected.
+        reason: String,
+    },
+    /// `pmacs.packages.update("name")` was called for a package
+    /// that isn't in the lockfile. Surfaces the typo loudly rather
+    /// than silently no-op-ing.
+    #[error(
+        "pmacs.packages.update: package `{name}` is not in the lockfile. \
+         Available names come from `pmacs.packages.installed()`."
+    )]
+    PackagesUpdateUnknownName {
+        /// The unknown name the caller passed.
+        name: String,
+    },
+
+    /// `pmacs.packages.reload("name")` was called but no installed
+    /// package has that basename. The roster is the source of
+    /// truth; if the user expects the package to be there, they
+    /// either misspelled the name or the package failed to
+    /// install at startup.
+    #[error(
+        "pmacs.packages.reload: no installed package named `{name}`. \
+         Available names come from `pmacs.packages.installed()`."
+    )]
+    PackagesReloadUnknownName {
+        /// The unknown name the caller passed.
+        name: String,
+    },
+
+    /// `pmacs.packages.on_unload(fn)` was called but the runtime
+    /// can't recover the calling package's basename via identity
+    /// against the registered per-package env tables. This
+    /// shouldn't fire under normal use --- it indicates the call
+    /// ran outside any package's chunk (e.g. directly from
+    /// `init.lua` or a non-package Lua chunk), where there's no
+    /// owning package to attach the hook to. The error message
+    /// names the workaround.
+    #[error(
+        "pmacs.packages.on_unload must be called from inside a package's chunk; \
+         the calling function's environment isn't one of the registered \
+         per-package _ENV tables, so there's no owning package to attach the \
+         hook to. If you need a teardown hook for editor-shutdown cleanup \
+         from non-package code, use \
+         `pmacs.hook.add('editor.before-quit', function() ... end)`."
+    )]
+    PackagesOnUnloadOutsidePackage,
+
+    /// The `on_unload` registry slot wasn't installed. Programming
+    /// error like [`Self::NoInstalledPackagesSlot`].
+    #[error("Lua app data missing: PackageUnloadHooks slot was not installed on this Lua state")]
+    NoUnloadHooksSlot,
+
+    /// `require("pkg.x")` for a submodule the package's manifest does
+    /// not list in `exports`. The error surfaces both the missing
+    /// export and the available ones so the user can fix their
+    /// require or update the manifest.
+    #[error(
+        "pmacs package `{package}` does not export `{requested}`. \
+         Available exports: {exports_display}. \
+         If `{requested}` should be public, add it to the package's \
+         `exports` list in pmacs.toml; otherwise this require is \
+         reaching into the package's internals.",
+        exports_display = format_exports_for_error(exports),
+    )]
+    PackageNotExported {
+        /// Package basename.
+        package: String,
+        /// The full require name as written.
+        requested: String,
+        /// Sorted exports list from the manifest.
+        exports: Vec<String>,
+    },
+
+    /// `require("pkg.x")` named an export the manifest declared, but
+    /// neither `<dir>/x.lua` nor `<dir>/x/init.lua` exists on disk.
+    /// Indicates the package's tree is missing a file the manifest
+    /// promised — broken upstream, not a user error.
+    #[error(
+        "pmacs package export `{requested}` is declared in the manifest \
+         but the file is missing on disk (expected `{expected_path}`). \
+         The package's installed snapshot is incomplete; reinstall or \
+         report this to the package maintainer."
+    )]
+    PackageExportFileMissing {
+        /// The full require name.
+        requested: String,
+        /// The path the searcher tried to read first (the `<dir>/x.lua`
+        /// form; the `init.lua` fallback was also absent).
+        expected_path: String,
+    },
+
+    /// Lua app data missing: `pmacs.packages.describe` was called but
+    /// the [`InstalledPackages`] roster slot is unpopulated. Same
+    /// programming-error category as [`Self::NoInstalledPackagesSlot`].
+    #[error("pmacs.packages.describe: InstalledPackages roster is not installed on this Lua state")]
+    DescribeNoRoster,
 
     /// A Lua intercept returned a table that was missing one of the
     /// required position/range fields. The intercept contract requires
@@ -1020,19 +1293,27 @@ fn checked_range(start: i64, end: i64) -> mlua::Result<Range> {
 /// `kind` is one of `"insert"`, `"delete"`, `"replace"`. Position
 /// fields:
 ///
-/// - `kind = "insert"`:  `pos: integer`, `bytes_len: integer`
+/// - `kind = "insert"`:  `pos: integer`, `bytes: string`, `bytes_len: integer`
 /// - `kind = "delete"`:  `start: integer`, `end: integer`
-/// - `kind = "replace"`: `start: integer`, `end: integer`, `bytes_len: integer`
+/// - `kind = "replace"`: `start: integer`, `end: integer`, `bytes: string`, `bytes_len: integer`
 ///
-/// `bytes_len` is informational. The bytes themselves are not
-/// surfaced to Lua: [`crate::buffer::EditOp`] borrows them with a
-/// lifetime tied to the caller's `apply_edit` frame, and a v0.1
-/// byte-mutating intercept would require either copying the bytes
-/// across the FFI boundary on every edit (expensive) or extending
-/// [`crate::buffer::EditOp`] to use [`std::borrow::Cow`] (a wider
-/// change than M6.4 needs). The byte stream is therefore immutable
-/// through the chain in M6.4; M8's dired-class package will revisit
-/// when it needs filename-edit-to-rename translation.
+/// `bytes` is the literal byte content the caller proposes to insert
+/// (for `insert`) or replace into the range (for `replace`). It is
+/// the inserted/incoming bytes, *not* the bytes being overwritten;
+/// `delete` carries no `bytes` field because deletion has no
+/// payload. Surfaced as a Lua string (which is byte-clean: Lua
+/// strings hold arbitrary 8-bit data, not UTF-8).
+///
+/// **Why M6.4 punted on `bytes`, and why M8.3 added it.** The
+/// concern was per-edit FFI cost: every keystroke would copy the
+/// inserted bytes across the boundary. In practice typical inserts
+/// are 1 byte (a typed character), and the wdired pattern (M8.3)
+/// genuinely needs the bytes — the dired-class package validates
+/// permission-column edits against the rwx alphabet by inspecting
+/// the proposed bytes, which the spec explicitly requires
+/// ("rejection at the `intercept_edit` layer, not at the syscall").
+/// `bytes_len` is retained for the rare case where an intercept
+/// only needs the size and wants to skip a length lookup.
 ///
 /// The function returns one of:
 ///
@@ -1098,12 +1379,19 @@ impl crate::view::View for LuaInterceptView {
 }
 
 /// Build the table passed to a Lua intercept on each `apply_edit`.
+///
+/// `bytes` is surfaced as a Lua string for `insert` and `replace`
+/// (M8.3 enhancement, see [`LuaInterceptView`] doc). Lua strings are
+/// byte-clean — `lua.create_string(&[u8])` preserves arbitrary
+/// non-UTF-8 content — so a `name` field containing a non-UTF-8
+/// byte from an exotic filesystem still round-trips correctly.
 fn build_intercept_input(lua: &Lua, op: &EditOp<'_>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     match *op {
         EditOp::Insert { pos, bytes } => {
             t.set("kind", "insert")?;
             t.set("pos", i64_clamp(pos))?;
+            t.set("bytes", lua.create_string(bytes)?)?;
             t.set("bytes_len", i64_clamp(bytes.len() as u64))?;
         }
         EditOp::Delete { range } => {
@@ -1115,6 +1403,7 @@ fn build_intercept_input(lua: &Lua, op: &EditOp<'_>) -> mlua::Result<Table> {
             t.set("kind", "replace")?;
             t.set("start", i64_clamp(range.start))?;
             t.set("end", i64_clamp(range.end))?;
+            t.set("bytes", lua.create_string(bytes)?)?;
             t.set("bytes_len", i64_clamp(bytes.len() as u64))?;
         }
     }
@@ -1416,6 +1705,8 @@ pub fn install(
     lua.set_app_data(CurrentAttachmentSlot::new());
     lua.set_app_data(LocalInstanceInfo::new());
     lua.set_app_data(InstalledPackages::new());
+    lua.set_app_data(PackageUnloadHooks::new());
+    lua.set_app_data(CurrentlyLoadingPackage::new());
 
     let pmacs = lua.create_table()?;
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
@@ -2010,15 +2301,37 @@ fn install_ansi_module(lua: &Lua) -> mlua::Result<Table> {
 ///   the spec).
 /// - `pmacs.packages.installed()` --- snapshot of packages that
 ///   completed install during the init phase.
-/// - `pmacs.packages.update(...)` --- M7.6 stub; currently errors
-///   pointing at the workaround (re-running install with a new
-///   constraint).
+/// - `pmacs.packages.update(name?)` --- re-resolve top-level
+///   packages against the current upstream and replace the
+///   on-disk install. With no argument, updates every top-level
+///   entry recorded in `<install_root>/pmacs.lock`; with a name,
+///   updates only that entry (`UpdatePolicy::UpdateOne`). Returns
+///   a Lua summary table reporting `version`, `commit`,
+///   `prior_commit`, and `changed` per package.
 ///
 /// Both install variants are init-time-only via [`require_init_phase`];
 /// mid-session calls produce [`BindingError::InitOnlyApi`] naming
 /// the equivalent CLI flag (none yet --- restart with an updated
 /// init.lua). Each install is synchronous: errors raise back at the
 /// call site so the offending init.lua line is named in the traceback.
+/// Comma-separated quoted list of available exports, with `(none)`
+/// when the manifest declares no exports. Used by
+/// [`BindingError::PackageNotExported`]'s `Display`.
+fn format_exports_for_error(exports: &[String]) -> String {
+    if exports.is_empty() {
+        return "(none)".to_string();
+    }
+    let mut quoted: Vec<String> = exports.iter().map(|e| format!("`{e}`")).collect();
+    quoted.sort();
+    quoted.dedup();
+    quoted.join(", ")
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear list of packages.set(...) bindings, each a small closure; \
+              splitting into helpers fragments the surface without removing decisions"
+)]
 fn install_packages_module(lua: &Lua) -> mlua::Result<Table> {
     let packages = lua.create_table()?;
 
@@ -2059,10 +2372,125 @@ fn install_packages_module(lua: &Lua) -> mlua::Result<Table> {
 
     packages.set(
         "update",
-        lua.create_function(|_, _args: Variadic<Value>| -> mlua::Result<()> {
-            Err(mlua::Error::external(
-                BindingError::PackagesUpdateUnsupported,
-            ))
+        lua.create_function(|lua, target: Option<String>| -> mlua::Result<Table> {
+            require_init_phase(lua, "pmacs.packages.update")?;
+            do_update(lua, target.as_deref())
+        })?,
+    )?;
+
+    packages.set(
+        "install_local",
+        lua.create_function(|lua, source_path: String| -> mlua::Result<Table> {
+            require_init_phase(lua, "pmacs.packages.install_local")?;
+            do_install_local(lua, std::path::Path::new(&source_path))
+        })?,
+    )?;
+
+    packages.set(
+        "on_unload",
+        lua.create_function(|lua, callback: Function| -> mlua::Result<()> {
+            // Recover the calling package's basename via *identity*
+            // comparison against the cached per-package _ENV
+            // tables. The M7.7 searcher attaches each package's
+            // private env (`pmacs.pkgenvs/<basename>`) as the
+            // chunk's `_ENV`; a closure created inside that chunk
+            // inherits that exact table by reference. Walking the
+            // cache and matching `candidate == callback_env` finds
+            // the basename without trusting any field the chunk
+            // could fabricate.
+            //
+            // Calls from non-package code (init.lua's top level,
+            // the REPL) hit a callback whose env is _G or some
+            // non-package table; that doesn't match anything in the
+            // cache, so the lookup falls through to the
+            // PackagesOnUnloadOutsidePackage error. A user setting
+            // `_PACKAGE = { name = "victim" }` in _G doesn't
+            // matter --- _G is never a registered env table.
+            // Primary: identity-check the callback's env against
+            // the cached per-package envs. Works whenever the
+            // closure references any global (so Lua compiles it
+            // with `_ENV` as an upvalue) --- the typical case.
+            let basename_from_env = match callback.environment() {
+                Some(env) => env_table_basename(lua, &env)?,
+                None => None,
+            };
+            // Fallback: under Lua 5.4 a closure that touches only
+            // locals doesn't capture `_ENV`, so
+            // `Function::environment` returns `None` and the
+            // identity check has nothing to compare. Recover the
+            // owning package from the [`CurrentlyLoadingPackage`]
+            // stack: if we're inside a chunk-load (the typical
+            // moment for `on_unload` registration), the wrapped
+            // loader has pushed the basename for us. Calls from
+            // outside any package's chunk have an empty stack and
+            // surface the standard error.
+            let basename = if let Some(b) = basename_from_env {
+                b
+            } else {
+                let from_stack = lua
+                    .app_data_ref::<CurrentlyLoadingPackage>()
+                    .and_then(|s| s.top());
+                from_stack.ok_or_else(|| {
+                    mlua::Error::external(BindingError::PackagesOnUnloadOutsidePackage)
+                })?
+            };
+            let slot = lua
+                .app_data_ref::<PackageUnloadHooks>()
+                .ok_or_else(|| mlua::Error::external(BindingError::NoUnloadHooksSlot))?;
+            slot.register(&basename, callback);
+            Ok(())
+        })?,
+    )?;
+
+    packages.set(
+        "reload",
+        lua.create_function(|lua, name: String| -> mlua::Result<Value> { do_reload(lua, &name) })?,
+    )?;
+
+    packages.set(
+        "load",
+        lua.create_function(|lua, name: String| -> mlua::Result<bool> {
+            // T M7.8 isolation boundary for load-time errors. Wraps
+            // `require(name)` in a Rust-side catch so a single broken
+            // package doesn't abort the surrounding init.lua: caller
+            // gets `false` and the error lands in `*errors*` tagged
+            // with the package name. Successful loads return `true`.
+            //
+            // Cancellations propagate (return Err) rather than being
+            // logged as a load error: a C-g during `require` is a
+            // user-initiated abort, not a package failure, and the
+            // outer eval's error path resets the flag.
+            let require: Function = lua.globals().get("require")?;
+            match require.call::<Value>(name.clone()) {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    if crate::lua_isolation::is_cancellation(&e) {
+                        return Err(e);
+                    }
+                    log_package_load_error(lua, &name, &e);
+                    Ok(false)
+                }
+            }
+        })?,
+    )?;
+
+    packages.set(
+        "describe",
+        lua.create_function(|lua, name: String| -> mlua::Result<mlua::Value> {
+            let slot = lua
+                .app_data_ref::<InstalledPackages>()
+                .ok_or_else(|| mlua::Error::external(BindingError::DescribeNoRoster))?;
+            let snapshot = slot.snapshot();
+            // Most-recent-first match, mirroring searcher precedence.
+            for pkg in snapshot.iter().rev() {
+                if pkg.install_basename() != name {
+                    continue;
+                }
+                return Ok(mlua::Value::Table(installed_package_describe_table(
+                    lua, pkg,
+                )?));
+            }
+            Ok(mlua::Value::Nil)
         })?,
     )?;
 
@@ -2075,34 +2503,43 @@ fn install_packages_module(lua: &Lua) -> mlua::Result<Table> {
 /// `package.loaders` (Lua 5.1, `LuaJIT`) that consults the
 /// [`InstalledPackages`] roster at require time.
 ///
-/// # Why
+/// # Three responsibilities (T M7.7)
 ///
-/// `prepend_package_path` (the existing mechanism) only handles the
-/// standard Lua layout: `<install_root>/<basename>.lua` or
-/// `<install_root>/<basename>/init.lua`. A package whose manifest
-/// declares e.g. `entry = "main.lua"` or `entry = "lib/foo.lua"`
-/// has its entry file at a path the standard `?.lua;?/init.lua`
-/// pattern does not match, and `require("<basename>")` would fail
-/// even though the install completed. The custom searcher closes
-/// that gap by mapping `require("<basename>")` directly to the
-/// manifest's declared entry path.
+/// 1. **Resolve `require("<basename>")` to the manifest's `entry`.**
+///    Carried over from T M7.3: a package whose entry isn't at the
+///    standard `<basename>/init.lua` path needs the searcher to map
+///    the require to the manifest's declared file.
+/// 2. **Gate access via the `exports` whitelist.** Per spec, only
+///    submodules listed in `manifest.exports` are visible to other
+///    packages. `require("<basename>.<sub>")` for an unlisted
+///    `<sub>` raises a clear error naming the package and the
+///    available exports — the searcher takes responsibility for the
+///    require-name (rather than returning "not found" and letting
+///    `package.path` find the file anyway, which would defeat the
+///    whitelist).
+/// 3. **Set a per-package environment table** on every loaded
+///    chunk. Each package gets its own `_ENV` (cached by basename in
+///    the Lua registry), with `__index = _G` so reads still see the
+///    standard library and pmacs API but writes stay local. This
+///    enforces the "package A cannot accidentally pollute package B's
+///    globals" boundary called out in the M7.7 spec without requiring
+///    a Lua sandbox.
 ///
 /// # Precedence
 ///
-/// The searcher is appended to the searchers/loaders list, after
-/// the path-based searcher. Standard layouts (`init.lua` etc.)
-/// continue to load via the path mechanism; the custom searcher
-/// only kicks in when the path search misses. This keeps
-/// drop-in-compatible packages on the well-trodden path and avoids
-/// a behavior change for anyone using the conventional layout.
+/// The searcher is **inserted at the front** of the searchers list
+/// (position 1, before the path-based searcher). This makes the
+/// pmacs roster authoritative for installed packages: `require("foo")`
+/// where `foo` is an installed package goes through this searcher
+/// even if a `foo.lua` exists somewhere on `package.path`. Requires
+/// for non-installed names return a string (Lua's "not found" idiom)
+/// so subsequent searchers — preload, path-based — get a turn.
 ///
-/// Within the searcher, the [`InstalledPackages`] roster is iterated
-/// in *reverse* so the most recently installed package wins on a
-/// basename collision. Combined with `init.lua`'s typical pattern
-/// (user install first, then project install), this makes
-/// project-scope installs override user-scope installs of the same
-/// basename --- mirroring `prepend_package_path`'s "newer
-/// installations prepend to package.path" semantics.
+/// In M7.3 the searcher was *appended*; that ordering predates
+/// `exports` enforcement. The path searcher would happily find
+/// `<install>/internal.lua` regardless of whether `internal` was in
+/// the exports list, defeating the whitelist. M7.7 needs the pmacs
+/// searcher to win first or `exports` is decorative.
 ///
 /// # 5.1 vs 5.4 names
 ///
@@ -2120,49 +2557,287 @@ fn register_package_searcher(lua: &Lua) -> mlua::Result<()> {
 
     let searcher = lua.create_function(|lua, name: String| -> mlua::Result<mlua::Value> {
         let Some(slot) = lua.app_data_ref::<InstalledPackages>() else {
-            // Slot uninstalled (shouldn't happen under
-            // production wiring, but a defensive nil keeps
-            // require working under unusual test setups).
+            // Slot uninstalled (shouldn't happen under production
+            // wiring; defensive nil keeps require working under
+            // unusual test setups).
             return Ok(mlua::Value::Nil);
         };
         let snapshot = slot.snapshot();
-        // Most-recent-first: a project-scope install of a
-        // basename overrides a prior user-scope install.
-        for pkg in snapshot.iter().rev() {
-            if pkg.install_basename() != name {
-                continue;
+
+        match lookup_in_roster(&name, &snapshot) {
+            LookupOutcome::NotInstalled => {
+                // Fall through to the next searcher. Lua appends
+                // this string to the aggregate require-error
+                // message if no later searcher succeeds either.
+                let s =
+                    lua.create_string(format!("\n\tno installed pmacs package named '{name}'"))?;
+                Ok(mlua::Value::String(s))
             }
-            let entry = pkg.entry_path();
-            let bytes = match std::fs::read(&entry) {
-                Ok(b) => b,
-                Err(e) => {
-                    // Searcher convention: a non-function return
-                    // is treated as "not found, here's why" and
-                    // appended to the require error message.
-                    let s = lua.create_string(format!(
-                        "\n\tinstalled pmacs package '{name}' \
-                             entry `{}` could not be read: {e}",
-                        entry.display()
-                    ))?;
-                    return Ok(mlua::Value::String(s));
+            LookupOutcome::EntryModule { entry_path } => {
+                load_package_chunk(lua, &name, &entry_path, package_basename_from_name(&name))
+            }
+            LookupOutcome::ExportedModule { file_path, kind } => {
+                if matches!(kind, ResolvedKind::MissingBoth) {
+                    // Manifest promises this export, but neither
+                    // `<dir>/x.lua` nor `<dir>/x/init.lua` exists.
+                    // Surface the broken-package state with the
+                    // declared-but-absent file path so the
+                    // packager can fix the manifest or ship the
+                    // missing file.
+                    return Err(mlua::Error::external(
+                        BindingError::PackageExportFileMissing {
+                            requested: name.clone(),
+                            expected_path: file_path.display().to_string(),
+                        },
+                    ));
                 }
-            };
-            let chunk_name = format!("@{}", entry.display());
-            let func = lua.load(&bytes).set_name(&chunk_name).into_function()?;
-            return Ok(mlua::Value::Function(func));
+                load_package_chunk(lua, &name, &file_path, package_basename_from_name(&name))
+            }
+            LookupOutcome::NotExported {
+                package,
+                requested,
+                exports,
+            } => Err(mlua::Error::external(BindingError::PackageNotExported {
+                package,
+                requested,
+                exports,
+            })),
         }
-        // No installed package matches. Return a string so Lua
-        // appends our reason to the aggregate require error.
-        let s = lua.create_string(format!("\n\tno installed pmacs package named '{name}'"))?;
-        Ok(mlua::Value::String(s))
     })?;
 
-    // Append to the searcher list. Lua tables are 1-indexed; the
-    // new searcher runs after every existing searcher (preload,
-    // path-based, etc.), so standard layouts are unaffected.
+    // Insert at position 1, before all existing searchers, so the
+    // pmacs roster is authoritative for installed packages. Lua
+    // tables are 1-indexed; we shift the existing entries up by one.
     let len = searchers.raw_len();
-    searchers.set(len + 1, searcher)?;
+    for i in (1..=len).rev() {
+        let existing: mlua::Value = searchers.get(i)?;
+        searchers.set(i + 1, existing)?;
+    }
+    searchers.set(1, searcher)?;
     Ok(())
+}
+
+/// First segment of a dotted require name (or the whole name if no
+/// dot). Used to identify which package a chunk belongs to so its
+/// environment table can be cached and shared across the package's
+/// modules.
+fn package_basename_from_name(name: &str) -> &str {
+    name.split_once('.').map_or(name, |(h, _)| h)
+}
+
+/// Load a chunk from disk, set its environment to the package's
+/// per-package env table, and return it wrapped as a Lua function
+/// that the searcher hands back to `require`.
+fn load_package_chunk(
+    lua: &Lua,
+    require_name: &str,
+    file_path: &std::path::Path,
+    package_basename: &str,
+) -> mlua::Result<mlua::Value> {
+    let bytes = match std::fs::read(file_path) {
+        Ok(b) => b,
+        Err(e) => {
+            // Searcher convention: a string return becomes a "not
+            // found, here's why" reason appended to the require
+            // error. The package was correctly identified but its
+            // file isn't readable; that's a packager / disk error,
+            // not a "wrong basename" error, so we still surface a
+            // searcher-style message rather than raising.
+            let s = lua.create_string(format!(
+                "\n\tpmacs package '{require_name}' \
+                 file `{}` could not be read: {e}",
+                file_path.display(),
+            ))?;
+            return Ok(mlua::Value::String(s));
+        }
+    };
+    let chunk_name = format!("@{}", file_path.display());
+    let func = lua.load(&bytes).set_name(&chunk_name).into_function()?;
+    let env = package_env_for(lua, package_basename)?;
+    func.set_environment(env)?;
+
+    // Wrap the chunk function so the package's basename is pushed
+    // onto the [`CurrentlyLoadingPackage`] stack before the chunk
+    // runs and popped after it returns (or errors). This is the
+    // fallback path `pmacs.packages.on_unload` uses when the
+    // callback doesn't carry an `_ENV` upvalue --- a Lua 5.4
+    // closure that touches only locals/upvalues compiles without
+    // an `_ENV` capture, and `Function::environment` then returns
+    // `None`, defeating the env-identity ownership check. The push
+    // makes "I am loading <basename> right now" recoverable from
+    // the binding without depending on closure-time env capture.
+    //
+    // The stack is popped on both success and error paths so a
+    // failing chunk can't leak a basename into the next load.
+    let basename_owned = package_basename.to_string();
+    let wrapped = lua.create_function(
+        move |lua, args: mlua::MultiValue| -> mlua::Result<mlua::MultiValue> {
+            if let Some(slot) = lua.app_data_ref::<CurrentlyLoadingPackage>() {
+                slot.push(basename_owned.clone());
+            }
+            let result = func.call::<mlua::MultiValue>(args);
+            if let Some(slot) = lua.app_data_ref::<CurrentlyLoadingPackage>() {
+                slot.pop();
+            }
+            result
+        },
+    )?;
+    Ok(mlua::Value::Function(wrapped))
+}
+
+/// Registry key under which per-package `_ENV` tables are cached.
+/// Owned by [`package_env_for`] and cleared by
+/// [`clear_package_env`] on reload / `install_local` replacement.
+const PACKAGE_ENVS_REGISTRY_KEY: &str = "pmacs.pkgenvs";
+
+/// Get (or lazily create) the per-package environment table for
+/// `basename`. Cached in the Lua registry under
+/// [`PACKAGE_ENVS_REGISTRY_KEY`]`/<basename>`.
+///
+/// The env table has `__index = _G` so reads see the standard
+/// library and the pmacs API; writes stay local. A `_PACKAGE` table
+/// inside the env carries the package's basename for introspection.
+fn package_env_for(lua: &Lua, basename: &str) -> mlua::Result<Table> {
+    let envs = package_envs_table(lua)?;
+    if let Some(env) = envs.get::<Option<Table>>(basename)? {
+        return Ok(env);
+    }
+    let env = lua.create_table()?;
+    let mt = lua.create_table()?;
+    mt.set("__index", lua.globals())?;
+    env.set_metatable(Some(mt));
+    let info = lua.create_table_with_capacity(0, 1)?;
+    info.set("name", basename)?;
+    env.set("_PACKAGE", info)?;
+    envs.set(basename, env.clone())?;
+    Ok(env)
+}
+
+/// Lazily get-or-create the env-cache table at
+/// [`PACKAGE_ENVS_REGISTRY_KEY`]. Shared between
+/// [`package_env_for`] and [`clear_package_env`] /
+/// [`callback_belongs_to_package`] so the registry layout is owned
+/// in exactly one place.
+fn package_envs_table(lua: &Lua) -> mlua::Result<Table> {
+    if let Some(t) = lua.named_registry_value::<Option<Table>>(PACKAGE_ENVS_REGISTRY_KEY)? {
+        return Ok(t);
+    }
+    let t = lua.create_table()?;
+    lua.set_named_registry_value(PACKAGE_ENVS_REGISTRY_KEY, t.clone())?;
+    Ok(t)
+}
+
+/// Drop the cached `_ENV` table for `basename`, so the next
+/// [`package_env_for`] call constructs a fresh one. Called from
+/// `pmacs.packages.reload(name)` (after `on_unload` hooks run,
+/// before re-`require`) and from `pmacs.packages.install_local`
+/// when it replaces an existing symlink to a different source.
+///
+/// Without this, removed-from-source globals stay visible after
+/// reload because the env table outlives the chunk that wrote
+/// them. The dev-loop story ("edit on disk, see new behavior") is
+/// only honest if env globals reset on reload.
+///
+/// Also drops any `on_unload` hooks still registered for
+/// `basename`. Hooks that survived the just-run cycle were
+/// registered by closures whose env-table is the *old* env we're
+/// about to discard --- they reference a chunk that no longer
+/// exists. Firing them on the next cycle would either trip the
+/// identity check in `pmacs.packages.on_unload` (because the env
+/// is no longer in the cache) or call into resources the dead
+/// chunk thinks are gone. The freshly-required chunk will
+/// re-register whatever hooks it still wants.
+fn clear_package_env(lua: &Lua, basename: &str) -> mlua::Result<()> {
+    let envs = package_envs_table(lua)?;
+    envs.set(basename, mlua::Value::Nil)?;
+    if let Some(slot) = lua.app_data_ref::<PackageUnloadHooks>() {
+        let _ = slot.drain(basename);
+    }
+    Ok(())
+}
+
+/// Run the registered `on_unload` hooks for `basename` in
+/// registration order. The cycle's hooks are *snapshotted* at
+/// start (drained from the live registry into a local queue);
+/// new `on_unload` registrations made by hook bodies land in the
+/// now-empty live registry slot instead of extending the current
+/// queue. On a successful reload / replacement, [`clear_package_env`]
+/// drops those old-env survivors before the freshly-required chunk
+/// registers next-cycle hooks. This prevents a self-replicating hook
+/// from looping the current cycle indefinitely.
+///
+/// Each queued hook is called in order. A successful call drops
+/// the hook from the queue and is returned to the caller as
+/// completed. A failing hook stays at the front of the queue; the
+/// unrun queue (including the failed hook) is prepended back onto
+/// the live registry so a retry of the surrounding operation
+/// re-attempts the failed cleanup in order before any newly-
+/// registered hooks fire.
+///
+/// **Idempotence contract.** `on_unload` hooks must be safe to
+/// call more than once. Under retry-preserving semantics, a hook
+/// that fails will be re-attempted on the next reload /
+/// `install_local` replacement. A hook that's not idempotent
+/// (e.g. `worker:terminate()` followed by something that asserts
+/// the worker is still alive) will see a different observable
+/// state on the retry than on the original attempt; the package
+/// author has to handle that.
+///
+/// Used by both [`do_reload`] and [`do_install_local`] so the
+/// hook semantics are identical whether the package is being
+/// re-loaded against fresh disk or being swapped out for a
+/// different working tree at the same name.
+fn run_unload_hooks(lua: &Lua, basename: &str) -> mlua::Result<Vec<mlua::Function>> {
+    let mut queue: Vec<mlua::Function> = {
+        let slot = lua
+            .app_data_ref::<PackageUnloadHooks>()
+            .ok_or_else(|| mlua::Error::external(BindingError::NoUnloadHooksSlot))?;
+        slot.drain(basename)
+    };
+    let mut completed = Vec::new();
+
+    while !queue.is_empty() {
+        // Clone the front (cheap — Function is a Lua reference
+        // handle). Don't pop yet; we only consume on success so
+        // a failing hook stays at the front of the queue for
+        // restoration to the registry.
+        let hook = queue[0].clone();
+        if let Err(e) = hook.call::<()>(()) {
+            // Push the unrun queue back onto the live registry's
+            // front. Any hooks the chunk registered during the
+            // cycle (in the now-non-empty registry slot) shift
+            // to follow them — they'll fire after the retry
+            // completes the original queue.
+            let slot = lua
+                .app_data_ref::<PackageUnloadHooks>()
+                .ok_or_else(|| mlua::Error::external(BindingError::NoUnloadHooksSlot))?;
+            slot.prepend(basename, queue);
+            return Err(e);
+        }
+        completed.push(queue.remove(0));
+    }
+    Ok(completed)
+}
+
+/// If `env` is one of the cached per-package `_ENV` tables, return
+/// the basename it's stored under. Otherwise `Ok(None)`.
+///
+/// Identity-based comparison (mlua's `Table: PartialEq` is reference
+/// equality on the underlying Lua reference). This is what makes
+/// `pmacs.packages.on_unload` unspoofable: a chunk in `_G` can
+/// fabricate a table with `_PACKAGE.name = "victim"`, but it can't
+/// fabricate the actual cached env-table reference for `victim`,
+/// because that table is constructed by the searcher in Rust and
+/// only handed out as the `_ENV` of `victim`'s chunk.
+fn env_table_basename(lua: &Lua, env: &Table) -> mlua::Result<Option<String>> {
+    let envs = package_envs_table(lua)?;
+    for pair in envs.pairs::<String, Table>() {
+        let (basename, candidate) = pair?;
+        if candidate == *env {
+            return Ok(Some(basename));
+        }
+    }
+    Ok(None)
 }
 
 /// Parse the Lua-side `install(...)` argument into an [`InstallSpec`].
@@ -2344,45 +3019,691 @@ fn current_eval_dir(lua: &Lua) -> Option<std::path::PathBuf> {
 }
 
 /// Run the install end-to-end: build a fetcher rooted at
-/// `$XDG_CACHE_HOME/pmacs/git/`, run [`Installer::install`], extend
-/// `package.path` so the entry module is requireable, and record the
-/// result in the [`InstalledPackages`] roster.
+/// `$XDG_CACHE_HOME/pmacs/git/`, resolve the spec's full dependency
+/// closure via [`crate::packages::Resolver`], call
+/// [`Installer::install_at_commit`] for every package in the
+/// resulting plan (so the installer honors the resolver's commit
+/// choice rather than independently re-running tag matching),
+/// extend `package.path` for each, and record each result in the
+/// [`InstalledPackages`] roster.
 ///
-/// A [`PackageInstallOverride`] in app data, if present, redirects the
-/// fetcher's cache dir and the user-scope install root. Tests use this
-/// instead of mutating `XDG_*` env vars (which would require `unsafe`).
+/// The Lua-callable spec is a single top-level package; transitive
+/// dependencies declared in that package's manifest are pulled in
+/// by the resolver and installed in topological order. The Lua
+/// caller gets back the *top-level* package's metadata table (the
+/// thing they asked to install); transitive dependencies are
+/// observable through `pmacs.packages.installed()`.
+///
+/// A [`PackageInstallOverride`] in app data, if present, redirects
+/// the fetcher's cache dir and the user-scope install root. Tests
+/// use this instead of mutating `XDG_*` env vars (which would
+/// require `unsafe`).
 fn do_install(lua: &Lua, spec: &InstallSpec, scope: &InstallScope) -> mlua::Result<Table> {
     let override_data = lua.app_data_ref::<PackageInstallOverride>();
     let cache_override = override_data.as_ref().and_then(|o| o.cache_dir.clone());
     let user_root_override = override_data
         .as_ref()
         .and_then(|o| o.user_install_root.clone());
+    drop(override_data);
 
-    let fetcher = match cache_override {
+    // Build a fetcher to share with the resolver and the installer.
+    // The resolver enumerates tags / reads manifests through it; the
+    // installer reuses the same cache for the actual checkout.
+    let resolver_fetcher = match &cache_override {
+        Some(dir) => Fetcher::with_cache_dir(dir.clone()),
+        None => Fetcher::from_xdg()
+            .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
+    };
+    let installer_fetcher = match &cache_override {
+        Some(dir) => Fetcher::with_cache_dir(dir.clone()),
+        None => Fetcher::from_xdg()
+            .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
+    };
+
+    // Resolve the full plan including transitive deps.
+    let resolver = crate::packages::Resolver::new(resolver_fetcher);
+    let request = crate::packages::ResolveRequest {
+        address: spec.address.clone(),
+        pin: spec.pin.clone(),
+    };
+    let plan = resolver
+        .resolve(&[request])
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+
+    // Install every plan entry in topological order. The plan
+    // already orders dependencies before dependents, so an
+    // installer that reads a freshly-installed dependency's
+    // manifest finds it on disk by the time it's needed.
+    let mut installer = Installer::new(installer_fetcher, scope.clone());
+    if let (InstallScope::User, Some(root)) = (scope, user_root_override) {
+        installer = installer.with_install_root_override(root);
+    }
+
+    let top_level_url = spec.address.to_git_url();
+    let mut top_level_installed: Option<InstalledPackage> = None;
+
+    let slot = lua
+        .app_data_ref::<InstalledPackages>()
+        .ok_or_else(|| mlua::Error::external(BindingError::NoInstalledPackagesSlot))?;
+
+    for rp in &plan.packages {
+        // Top-level: install with the user's original pin so the
+        // returned `tag` / `pin` fields reflect what the user
+        // asked for ("version `^1.0.0`" or "branch `main`").
+        // Transitive deps: install at the resolver's chosen commit
+        // (the commit is what's reproducible; transitive pins
+        // don't carry forward branch/version semantics).
+        //
+        // In both cases we route through `install_at_commit` so
+        // the installer honors the resolver's commit choice
+        // rather than independently re-running its own tag
+        // matching --- the resolver may have rejected a newer
+        // upstream tag for compatibility reasons, and a divergent
+        // installer pick would defeat that constraint.
+        let is_top_level = rp.address.to_git_url() == top_level_url;
+        let install_spec = if is_top_level {
+            InstallSpec {
+                address: rp.address.clone(),
+                pin: spec.pin.clone(),
+            }
+        } else {
+            InstallSpec {
+                address: rp.address.clone(),
+                pin: crate::packages::InstallPin::Commit(rp.commit.clone()),
+            }
+        };
+        let installed = installer
+            .install_at_commit(&install_spec, &rp.commit)
+            .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+
+        if let Some(parent) = installed.install_path.parent() {
+            prepend_package_path(lua, parent)?;
+        }
+        slot.record(installed.clone());
+        if is_top_level {
+            top_level_installed = Some(installed);
+        }
+    }
+    drop(slot);
+
+    let top = top_level_installed
+        .ok_or_else(|| mlua::Error::external(BindingError::NoInstalledPackagesSlot))?;
+
+    // Lockfile write. Build a Lockfile from the just-installed plan,
+    // merge any pre-existing lockfile entries that aren't in this
+    // plan (so multiple installs in the same init.lua accumulate
+    // rather than clobber), and write back. Failure to write here is
+    // surfaced --- the install bytes are already on disk; an unwritten
+    // lockfile means a future Frozen install can't reproduce this
+    // state and the user should know about it.
+    let install_root = installer
+        .install_root()
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+    let lockfile_fetcher = match &cache_override {
+        Some(dir) => Fetcher::with_cache_dir(dir.clone()),
+        None => Fetcher::from_xdg()
+            .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
+    };
+    write_merged_lockfile(&plan, &lockfile_fetcher, &install_root)
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+
+    installed_package_to_lua(lua, &top)
+}
+
+/// `pmacs.packages.update(name?)` --- re-resolve top-level
+/// packages against the current upstream and reinstall the result.
+///
+/// Reads the user-scope lockfile at
+/// `<install_root>/pmacs.lock` for the package set: every entry
+/// whose `top_level_pin` is set is treated as a user-stated
+/// install. Builds [`ResolveRequest`]s from those, dispatches to
+/// [`crate::packages::Resolver::resolve_with_policy`] under
+/// [`crate::packages::UpdatePolicy::UpdateOne`] (when `target` is
+/// `Some(name)`) or [`crate::packages::UpdatePolicy::UpdateAll`]
+/// (when `target` is `None`), reinstalls the resulting plan, and
+/// writes the new lockfile (replacing the old one --- update is a
+/// full re-resolve).
+///
+/// Returns a Lua table with one entry per updated package, naming
+/// the prior commit, the new commit, and the new version. The
+/// `pmacs.packages.installed()` snapshot also reflects the change.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear flow: read lockfile → build requests → resolve → install → write. \
+              Splitting helpers fragments the read without removing complexity."
+)]
+fn do_update(lua: &Lua, target: Option<&str>) -> mlua::Result<Table> {
+    use crate::packages::{
+        Address, LOCKFILE_FILENAME, Lockfile, LockfileEntry, PackageName, ResolveRequest, Resolver,
+        UpdatePolicy,
+    };
+
+    let override_data = lua.app_data_ref::<PackageInstallOverride>();
+    let cache_override = override_data.as_ref().and_then(|o| o.cache_dir.clone());
+    let user_root_override = override_data
+        .as_ref()
+        .and_then(|o| o.user_install_root.clone());
+    drop(override_data);
+
+    let resolver_fetcher = match &cache_override {
+        Some(dir) => Fetcher::with_cache_dir(dir.clone()),
+        None => Fetcher::from_xdg()
+            .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
+    };
+    let installer_fetcher = match &cache_override {
+        Some(dir) => Fetcher::with_cache_dir(dir.clone()),
+        None => Fetcher::from_xdg()
+            .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
+    };
+    let lockfile_fetcher = match &cache_override {
+        Some(dir) => Fetcher::with_cache_dir(dir.clone()),
+        None => Fetcher::from_xdg()
+            .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
+    };
+
+    // The Lua surface always targets user scope --- project-scope
+    // updates would need a `project_root` argument, deferred to a
+    // future `pmacs.packages.update_project`.
+    let scope = InstallScope::User;
+    let mut installer = Installer::new(installer_fetcher, scope.clone());
+    if let Some(root) = user_root_override {
+        installer = installer.with_install_root_override(root);
+    }
+    let install_root = installer
+        .install_root()
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+    let lock_path = install_root.join(LOCKFILE_FILENAME);
+
+    let lock = Lockfile::read_from(&lock_path)
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+
+    // Collect ResolveRequests from top-level entries.
+    let mut requests = Vec::new();
+    for entry in &lock.packages {
+        if let Some(top_pin) = &entry.top_level_pin {
+            let pin = top_pin
+                .to_install_pin()
+                .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+            requests.push(ResolveRequest {
+                address: Address::Url(entry.url.clone()),
+                pin,
+            });
+        }
+    }
+    if requests.is_empty() {
+        return Err(mlua::Error::external(BindingError::PackagesUpdateNoEntries));
+    }
+
+    // Capture prior commits so we can report what moved.
+    let prior_commit_by_name: std::collections::BTreeMap<PackageName, String> = lock
+        .packages
+        .iter()
+        .map(|e| (e.name.clone(), e.commit.clone()))
+        .collect();
+
+    let policy = match target {
+        None => UpdatePolicy::UpdateAll,
+        Some(name) => {
+            let pkg_name = PackageName::new(name).map_err(|e| {
+                mlua::Error::external(BindingError::PackagesUpdateBadName {
+                    name: name.to_string(),
+                    reason: e.to_string(),
+                })
+            })?;
+            // Refuse to update a name that isn't in the lockfile ---
+            // surfaces the typo loudly rather than silently doing
+            // nothing.
+            if lock.entry(&pkg_name).is_none() {
+                return Err(mlua::Error::external(
+                    BindingError::PackagesUpdateUnknownName {
+                        name: name.to_string(),
+                    },
+                ));
+            }
+            UpdatePolicy::UpdateOne(pkg_name)
+        }
+    };
+
+    let resolver = Resolver::new(resolver_fetcher);
+    let plan = resolver
+        .resolve_with_policy(&requests, Some(&lock), &policy)
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+
+    // Build and serialize the new lockfile before mutating the
+    // install tree. Hashing/serialization failures should leave disk
+    // and the in-memory roster exactly as they were.
+    let new_lock = Lockfile::from_plan(&plan, &lockfile_fetcher)
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+    let new_lock_bytes = new_lock
+        .to_bytes()
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+
+    // Build a path-keyed view of the OLD lockfile: each prior entry
+    // resolves to `<install_root>/<basename>`. Pruning by exact path
+    // (rather than by basename) avoids touching a project-scope
+    // roster entry whose basename happens to collide with a
+    // user-scope dep that's about to disappear.
+    let prior_by_path: std::collections::BTreeMap<std::path::PathBuf, &LockfileEntry> = lock
+        .packages
+        .iter()
+        .map(|e| {
+            let basename = crate::packages::installer::package_basename(e.name.as_str());
+            (install_root.join(basename), e)
+        })
+        .collect();
+
+    // Reinstall every plan entry, tracking which paths the new plan
+    // covers and which basenames need their `package.loaded` cache
+    // cleared. A package is "stale in Lua" if (a) its commit moved
+    // (an updated package whose old code is still cached in
+    // package.loaded would otherwise return the prior module table)
+    // or (b) it disappeared entirely from the plan (handled in the
+    // prune loop below).
+    let slot = lua
+        .app_data_ref::<InstalledPackages>()
+        .ok_or_else(|| mlua::Error::external(BindingError::NoInstalledPackagesSlot))?;
+    let old_roster = slot.snapshot();
+    let mut new_paths: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+    let mut invalidate: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    let update_result: mlua::Result<()> = (|| {
+        for rp in &plan.packages {
+            // For top-level entries, prefer the original top_level_pin
+            // recorded in the lockfile (so the displayed `pin` field
+            // matches what the user originally asked for); for
+            // transitives, install at the resolver's commit.
+            //
+            // `replace_at_commit` is the update-aware path: when the
+            // resolver picks a different commit than the on-disk
+            // install, the existing tree is staged-and-swapped rather
+            // than rejected as `AlreadyInstalled`. Without this, an
+            // update couldn't actually move a package to a new version.
+            let pin_to_use = rp
+                .top_level_pin
+                .clone()
+                .unwrap_or_else(|| crate::packages::InstallPin::Commit(rp.commit.clone()));
+            let install_spec = InstallSpec {
+                address: rp.address.clone(),
+                pin: pin_to_use,
+            };
+            let installed = installer
+                .replace_at_commit(&install_spec, &rp.commit)
+                .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+            if let Some(parent) = installed.install_path.parent() {
+                prepend_package_path(lua, parent)?;
+            }
+            let path = installed.install_path.clone();
+            if prior_by_path
+                .get(&path)
+                .is_some_and(|old| old.commit != installed.commit)
+            {
+                invalidate.insert(installed.install_basename().to_string());
+            }
+            new_paths.insert(path);
+            slot.record(installed);
+        }
+
+        // Prune anything that disappeared from the plan: a transitive
+        // dep the resolver no longer needs, or a package the user
+        // dropped from their top-level set. Without this the on-disk
+        // tree, the roster, and the searcher all keep stale state and
+        // `require("dropped-pkg")` would still succeed against the old
+        // install --- defeating the lockfile's claim of authority.
+        for stale_path in prior_by_path.keys().filter(|p| !new_paths.contains(*p)) {
+            if stale_path.exists() {
+                std::fs::remove_dir_all(stale_path).map_err(|source| {
+                    mlua::Error::external(BindingError::from(crate::packages::InstallError::Io {
+                        path: stale_path.clone(),
+                        source,
+                    }))
+                })?;
+            }
+            if let Some(basename) = stale_path.file_name().and_then(|s| s.to_str()) {
+                invalidate.insert(basename.to_string());
+            }
+            slot.remove_by_install_path(stale_path);
+        }
+
+        // Update is a full re-resolve --- write a fresh lockfile, no
+        // merge. Any package that was in the old lockfile but isn't in
+        // the new plan was a transitive dep that the resolver decided
+        // is no longer needed. The bytes were precomputed above so the
+        // only remaining failure class here is filesystem I/O, and the
+        // write itself is atomic.
+        Lockfile::write_bytes_to(&lock_path, &new_lock_bytes)
+            .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+        Ok(())
+    })();
+
+    if let Err(err) = update_result {
+        restore_user_update_state(
+            &mut installer,
+            &lock,
+            &old_roster,
+            &install_root,
+            &new_paths,
+            &slot,
+        );
+        drop(slot);
+        return Err(err);
+    }
+    drop(slot);
+
+    // Now that disk + roster + lockfile are durable, drop stale
+    // entries from `package.loaded` so a subsequent `require()`
+    // reroutes through the searcher and picks up the new code (or
+    // fails if the package was pruned). Doing this *after* the
+    // lockfile write means a partial failure earlier in update
+    // doesn't leave Lua's module cache out of sync with what's on
+    // disk.
+    for basename in &invalidate {
+        invalidate_loaded_package(lua, basename)?;
+    }
+
+    // Build the change summary table.
+    let summary = lua.create_table()?;
+    for (i, entry) in new_lock.packages.iter().enumerate() {
+        let row = lua.create_table()?;
+        row.set("name", entry.name.as_str())?;
+        row.set("version", entry.version.to_string())?;
+        row.set("commit", entry.commit.as_str())?;
+        if let Some(prior) = prior_commit_by_name.get(&entry.name) {
+            row.set("prior_commit", prior.as_str())?;
+            row.set("changed", *prior != entry.commit)?;
+        } else {
+            // New entry --- e.g., a transitive dep that wasn't in
+            // the prior lockfile. (Could happen if the previous
+            // install used an older version that didn't depend on
+            // this package.)
+            row.set("changed", true)?;
+        }
+        summary.set(i + 1, row)?;
+    }
+    Ok(summary)
+}
+
+/// Best-effort rollback for `pmacs.packages.update`.
+///
+/// `update` computes the new lockfile before touching disk, but the
+/// later install/prune/write steps still involve fallible filesystem
+/// operations. If any of them fails, the old lockfile remains the
+/// source of truth; this helper tries to make disk and the in-memory
+/// roster match it again before the original error is returned.
+fn restore_user_update_state(
+    installer: &mut Installer,
+    old_lock: &crate::packages::Lockfile,
+    old_roster: &[InstalledPackage],
+    install_root: &std::path::Path,
+    new_paths: &std::collections::BTreeSet<std::path::PathBuf>,
+    slot: &InstalledPackages,
+) {
+    let old_paths: std::collections::BTreeSet<std::path::PathBuf> = old_lock
+        .packages
+        .iter()
+        .map(|entry| {
+            let basename = crate::packages::installer::package_basename(entry.name.as_str());
+            install_root.join(basename)
+        })
+        .collect();
+
+    for entry in &old_lock.packages {
+        let spec = InstallSpec {
+            address: Address::Url(entry.url.clone()),
+            pin: InstallPin::Commit(entry.commit.clone()),
+        };
+        let _ = installer.replace_at_commit(&spec, &entry.commit);
+    }
+
+    for path in new_paths.difference(&old_paths) {
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    slot.replace_snapshot(old_roster.to_vec());
+}
+
+/// Run `install_local` end-to-end: validate the source has a
+/// `pmacs.toml`, symlink `<install_root>/<basename>` to a
+/// canonicalized form of the source path, record into the
+/// [`InstalledPackages`] roster, and skip the lockfile (Local pins
+/// are explicitly ephemeral).
+///
+/// Replaces an existing symlink at the install path. Refuses if
+/// the install path holds a real directory (a previous fetched
+/// install) --- the user must clear that first to avoid surprising
+/// loss of an installed tree.
+///
+/// Always invalidates `package.loaded[<basename>]` before returning,
+/// so a re-call against a different source picks up the new code on
+/// the next `require()`. (Strictly speaking, `init.lua` doesn't
+/// have a load order that gets two `install_local` calls into the
+/// same name --- the API is init-only --- but invalidating
+/// unconditionally is cheap and protects against user error.)
+fn do_install_local(lua: &Lua, source_path: &std::path::Path) -> mlua::Result<Table> {
+    let override_data = lua.app_data_ref::<PackageInstallOverride>();
+    let user_root_override = override_data
+        .as_ref()
+        .and_then(|o| o.user_install_root.clone());
+    drop(override_data);
+
+    // install_local uses a fetcher only as a constructor argument
+    // for Installer; the install_local() method itself never
+    // touches the network. We pass the XDG-rooted fetcher (or its
+    // override) for symmetry with the other install paths.
+    let fetcher = match lua
+        .app_data_ref::<PackageInstallOverride>()
+        .as_ref()
+        .and_then(|o| o.cache_dir.clone())
+    {
         Some(dir) => Fetcher::with_cache_dir(dir),
         None => Fetcher::from_xdg()
             .map_err(|e| mlua::Error::external(BindingError::from(InstallError::Fetch(e))))?,
     };
-    let mut installer = Installer::new(fetcher, scope.clone());
-    if let (InstallScope::User, Some(root)) = (scope, user_root_override) {
+    let mut installer = Installer::new(fetcher, InstallScope::User);
+    if let Some(root) = user_root_override {
         installer = installer.with_install_root_override(root);
     }
-    let installed = installer
-        .install(spec)
+
+    // Phase 1: plan. Validates the manifest, computes the install
+    // path, but makes no disk changes. If validation fails we
+    // surface the error immediately; nothing's been mutated.
+    let plan = installer
+        .plan_local(source_path)
+        .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
+    let basename = plan.basename.clone();
+
+    // Phase 2: stage the replacement symlink BEFORE unloading the
+    // prior package. This front-loads fallible symlink creation while
+    // the old package is still live; if staging fails, no hooks have
+    // run and disk / roster / runtime state remain aligned.
+    let staged = installer
+        .stage_local(plan)
         .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
 
-    // Extend package.path so the package's entry module is requireable.
+    // Phase 3: run the prior install's on_unload hooks (if any)
+    // BEFORE publishing the staged symlink. If a hook fails, we
+    // discard the staged symlink, propagate the error, and leave the
+    // live install path untouched. The failed hook stays in the
+    // registry so retry re-attempts it.
+    let completed_hooks = match run_unload_hooks(lua, &basename) {
+        Ok(hooks) => hooks,
+        Err(e) => {
+            installer.discard_staged_local(staged);
+            return Err(e);
+        }
+    };
+
+    // Phase 4: publish, then cache invalidation. If even the final
+    // same-directory rename fails, restore the completed hooks so a
+    // retry can re-run the prior package's idempotent teardown before
+    // trying the publish again.
+    let installed = installer.publish_local(staged).map_err(|e| {
+        if let Some(slot) = lua.app_data_ref::<PackageUnloadHooks>() {
+            slot.prepend(&basename, completed_hooks);
+        }
+        mlua::Error::external(BindingError::from(e))
+    })?;
+
     if let Some(parent) = installed.install_path.parent() {
         prepend_package_path(lua, parent)?;
     }
 
-    // Record in the in-memory roster.
     let slot = lua
         .app_data_ref::<InstalledPackages>()
         .ok_or_else(|| mlua::Error::external(BindingError::NoInstalledPackagesSlot))?;
     slot.record(installed.clone());
+    drop(slot);
+
+    // Invalidate package.loaded so a previous require() against an
+    // earlier install_local target doesn't shadow the freshly
+    // symlinked tree. Mirrors the post-update invalidation;
+    // unconditional here because the cost is one Lua table walk.
+    invalidate_loaded_package(lua, &basename)?;
+
+    // Drop the cached per-package _ENV too. Same rationale as
+    // `do_reload`: without this, globals from a prior install
+    // (e.g. install_local against an old source, then again
+    // against an updated one) would persist into the freshly
+    // symlinked tree's chunk, and the dev-loop "edit on disk and
+    // see only what's currently in the source" promise would
+    // quietly fail.
+    clear_package_env(lua, &basename)?;
 
     installed_package_to_lua(lua, &installed)
+}
+
+/// `pmacs.packages.reload(name)` --- run the package's `on_unload`
+/// hooks, drop its `package.loaded` cache entries, and call
+/// `require(name)` to load the freshly-readable bytes (T M8.1d).
+///
+/// Returns the new module table the re-`require` produced.
+///
+/// Reload is the dev-loop counterpart to `update`: where `update`
+/// re-resolves the package set against upstream and replaces the
+/// install bytes, `reload` works against whatever's already on disk
+/// (typically a working tree symlinked in via `install_local`,
+/// freshly edited). It does *not* re-run install machinery.
+///
+/// Hooks run in registration order. Errors raised by an `on_unload`
+/// hook propagate to the caller --- a partial-teardown reload is a
+/// programming error in the package, not something the runtime can
+/// paper over. The hook list is consumed on reload, so a re-`require`
+/// re-registers fresh hooks; this keeps each reload cycle
+/// self-contained.
+fn do_reload(lua: &Lua, name: &str) -> mlua::Result<Value> {
+    // Walk the roster to confirm the name exists (the searcher
+    // would also catch a missing name on the require, but a clearer
+    // up-front error helps users who typo).
+    let slot = lua
+        .app_data_ref::<InstalledPackages>()
+        .ok_or_else(|| mlua::Error::external(BindingError::NoInstalledPackagesSlot))?;
+    let snapshot = slot.snapshot();
+    drop(slot);
+    if !snapshot.iter().any(|p| p.install_basename() == name) {
+        return Err(mlua::Error::external(
+            BindingError::PackagesReloadUnknownName {
+                name: name.to_string(),
+            },
+        ));
+    }
+
+    // Run on_unload hooks in registration order via the shared
+    // peek-call-pop runner. A failing hook stays at the front of
+    // the registry so a retry re-attempts the same cleanup; only
+    // hooks that actually completed are popped.
+    let _ = run_unload_hooks(lua, name)?;
+
+    // Invalidate the module cache so the next require runs the
+    // chunk against the freshly-readable bytes (the
+    // install_local-symlinked working tree, or the
+    // last-update-replaced install dir).
+    invalidate_loaded_package(lua, name)?;
+
+    // Drop the cached per-package _ENV table. Without this,
+    // removed-or-renamed globals from the prior chunk would still
+    // be visible after reload, because the env table outlives the
+    // chunk that wrote them. The next package_env_for() call
+    // (during the re-require below) constructs a fresh env.
+    clear_package_env(lua, name)?;
+
+    // Re-require. The M7.7 searcher resolves against the same
+    // roster entry the original load used; we don't re-resolve via
+    // the package system because reload's contract is "pick up
+    // disk changes," not "switch packages."
+    let require: Function = lua.globals().get("require")?;
+    require.call::<Value>(name.to_string())
+}
+
+/// Build a fresh [`Lockfile`] from `plan`, merge it with any
+/// pre-existing lockfile at `<install_root>/pmacs.lock` (entries
+/// not in the new plan are preserved), and write the result back.
+///
+/// Merge policy: by package name. A new-plan entry replaces a
+/// same-named existing entry; non-overlapping existing entries are
+/// preserved. Output is sorted alphabetically (matching
+/// [`Lockfile::from_plan`]'s contract).
+#[allow(
+    clippy::result_large_err,
+    reason = "Mirrors LockfileError's own carrier-of-diagnostic-context posture; \
+              boxing here would only hide the cost without changing the surface."
+)]
+fn write_merged_lockfile(
+    plan: &crate::packages::ResolvePlan,
+    fetcher: &Fetcher,
+    install_root: &std::path::Path,
+) -> Result<(), crate::packages::LockfileError> {
+    use crate::packages::{LOCKFILE_FILENAME, Lockfile};
+
+    let mut new_lock = Lockfile::from_plan(plan, fetcher)?;
+    let lock_path = install_root.join(LOCKFILE_FILENAME);
+    if let Ok(existing) = Lockfile::read_from(&lock_path) {
+        let new_names: std::collections::HashSet<_> =
+            new_lock.packages.iter().map(|e| e.name.clone()).collect();
+        for entry in existing.packages {
+            if !new_names.contains(&entry.name) {
+                new_lock.packages.push(entry);
+            }
+        }
+        new_lock.packages.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    new_lock.write_to(&lock_path)
+}
+
+/// Drop `package.loaded[basename]` and every `package.loaded[basename.<sub>]`
+/// so a subsequent `require(basename)` re-runs the M7.7 searcher
+/// against the freshly-installed bytes (or fails if the package was
+/// pruned). Called from `pmacs.packages.update` for any basename
+/// whose commit moved or that disappeared from the new plan ---
+/// without this step, a `require()` after `update()` would return
+/// the cached module table from before the update, defeating the
+/// whole point of an in-process update.
+///
+/// Submodules are matched by `<basename>.` prefix so a package with
+/// nested exports (e.g. `mypkg.submod` in
+/// `package.loaded["mypkg.submod"]`) is fully invalidated, not just
+/// at its top-level entry. Other packages' entries are untouched
+/// because the prefix match terminates at the dot boundary.
+fn invalidate_loaded_package(lua: &Lua, basename: &str) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    let loaded: Table = package.get("loaded")?;
+
+    let prefix = format!("{basename}.");
+    let mut keys: Vec<String> = Vec::new();
+    for pair in loaded.clone().pairs::<mlua::Value, mlua::Value>() {
+        let (key, _) = pair?;
+        if let mlua::Value::String(s) = key {
+            let k = s.to_str()?;
+            if *k == *basename || k.starts_with(&prefix) {
+                keys.push(k.to_string());
+            }
+        }
+    }
+    for key in keys {
+        loaded.set(key, mlua::Value::Nil)?;
+    }
+    Ok(())
 }
 
 /// Idempotently prepend `<root>/?.lua;<root>/?/init.lua` to
@@ -2407,6 +3728,23 @@ fn prepend_package_path(lua: &Lua, root: &std::path::Path) -> mlua::Result<()> {
     };
     package_global.set("path", combined)?;
     Ok(())
+}
+
+/// Render the manifest's metadata + exports list as a Lua table,
+/// suitable for `pmacs.packages.describe(name)`. Extends the standard
+/// [`installed_package_to_lua`] record with `pmacs_required` and a
+/// 1-indexed `exports` array; the union of fields is what a
+/// "describe-package" caller needs to render a complete view of the
+/// package without reaching back through any other API.
+fn installed_package_describe_table(lua: &Lua, pkg: &InstalledPackage) -> mlua::Result<Table> {
+    let t = installed_package_to_lua(lua, pkg)?;
+    t.set("pmacs_required", pkg.manifest.pmacs_required.to_string())?;
+    let exports = lua.create_table_with_capacity(pkg.manifest.exports.len(), 0)?;
+    for (i, e) in pkg.manifest.exports.iter().enumerate() {
+        exports.set(i + 1, e.as_str())?;
+    }
+    t.set("exports", exports)?;
+    Ok(t)
 }
 
 /// Translate an [`InstalledPackage`] into the Lua-facing record
@@ -2618,6 +3956,44 @@ fn install_command_module(lua: &Lua, commands: &SharedCommandRegistry) -> mlua::
         )?;
     }
 
+    {
+        // `pmacs.command.unregister(name)` is the inverse of `define`.
+        // It exists for the M8.1 dev-loop story: a package that defines
+        // commands at top level cannot be reloaded otherwise (the second
+        // chunk run hits `DuplicateName`). Packages call this from their
+        // `pmacs.packages.on_unload` hook to drop ownership before the
+        // chunk is re-executed.
+        //
+        // Not init-phase gated. `define` is also not gated (the REPL,
+        // audit-lint, and packages all register commands during normal
+        // operation), and `unregister` is its symmetric inverse:
+        // both are registry-CRUD, not the attach/detach-style
+        // lifecycle calls that the init-phase gate exists for.
+        // Crucially, `pmacs.packages.reload(name)` is itself not
+        // init-gated --- the dev-loop story is "edit, save, reload" at
+        // any time --- so an init-gated `unregister` would break every
+        // package that defines commands and tries to clean them up
+        // from `on_unload` post-init.
+        //
+        // Returns `true` if a command was removed, `false` if `name`
+        // wasn't registered. We chose return-bool over erroring on
+        // `NotFound` so package authors can write idempotent teardown
+        // (`pcall` works too, but `if pmacs.command.exists(...)` reads
+        // worse than the natural drop-and-ignore).
+        let cmds = commands.clone();
+        command.set(
+            "unregister",
+            lua.create_function(move |_, name: String| -> mlua::Result<bool> {
+                let mut r = cmds.borrow_mut();
+                match r.remove(&name) {
+                    Ok(_) => Ok(true),
+                    Err(CommandError::NotFound { .. }) => Ok(false),
+                    Err(e) => Err(mlua::Error::external(e)),
+                }
+            })?,
+        )?;
+    }
+
     Ok(command)
 }
 
@@ -2663,11 +4039,18 @@ fn install_help_module(
         help_t.set(
             "show_key",
             lua.create_function(move |lua, sequence: String| {
+                // Resolve against the active window's buffer so
+                // help.show_key surfaces buffer-local bindings ---
+                // mirrors the same fix as pmacs.describe.key (M8.8
+                // audit finding 1).
+                let active_buffer = lua
+                    .app_data_ref::<SharedCore>()
+                    .map(|core| core.borrow().active_buffer_id());
                 let result = {
                     let mut r = reg.borrow_mut();
                     let c = cmds.borrow();
                     let k = kms.borrow();
-                    help::render_key(&mut r, &c, &k, &sequence)
+                    help::render_key(&mut r, &c, &k, active_buffer, &sequence)
                 };
                 if let Some(id) = result {
                     rebuild_help_buffer_views(lua, id);
@@ -2938,6 +4321,39 @@ fn log_hook_error(lua: &Lua, hook_name: &str, err: &crate::hook::HookCallbackErr
     }
 }
 
+/// T M7.8: append a `[package <name>]` entry to `*errors*`.
+///
+/// Mirrors `log_hook_error`'s implementation. Used by
+/// `pmacs.packages.load` so a single failing package's error lands in
+/// the canonical sink without abandoning the rest of the load list.
+fn log_package_load_error(lua: &Lua, package: &str, err: &mlua::Error) {
+    let line = format!("[package {package}] load failed: {err}\n");
+    let result = {
+        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
+            return;
+        };
+        let mut reg = app.borrow_mut();
+        let id = match reg.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
+            Some(id) => id,
+            None => reg.create(crate::lua::ERRORS_BUFFER_NAME),
+        };
+        let Ok(buf) = reg.get_mut(id) else {
+            return;
+        };
+        let pos = buf.len();
+        let edit = buf
+            .apply_edit(EditOp::Insert {
+                pos,
+                bytes: line.as_bytes(),
+            })
+            .ok();
+        edit.map(|e| (id, e))
+    };
+    if let Some((id, edit)) = result {
+        notify_buffer_edit_to_windows(lua, id, &edit);
+    }
+}
+
 fn install_describe_module(
     lua: &Lua,
     registry: &SharedRegistry,
@@ -2970,11 +4386,20 @@ fn install_describe_module(
             "key",
             lua.create_function(move |lua, sequence: String| {
                 let chords = parse_sequence(&sequence).map_err(mlua::Error::external)?;
-                // Active scopes are an editor-runtime concept; describe.key
-                // currently consults global only. Once the editor wires its
-                // active buffer/modes through, we'll thread them in.
+                // Resolve against the active window's buffer scope so
+                // buffer-local bindings (`scope = "buffer"`) actually
+                // surface --- without this, a `pmacs-magit.stage`
+                // binding on the magit buffer is invisible to
+                // describe-key, even when the user is sitting on
+                // that buffer with their cursor. `&[]` for the
+                // mode list mirrors what `dispatch_key` passes
+                // today (no mode system yet); when modes land, both
+                // call sites update together.
+                let active_buffer = lua
+                    .app_data_ref::<SharedCore>()
+                    .map(|core| core.borrow().active_buffer_id());
                 let km = kms.borrow();
-                let r = km.resolve(&chords, None, &[]);
+                let r = km.resolve(&chords, active_buffer, &[]);
                 match r {
                     crate::keymap_stack::StackResolution::Bound(rb) => {
                         let cmds = cmds.borrow();
@@ -3327,6 +4752,24 @@ fn grep_spec_from_table(t: &Table) -> mlua::Result<GrepSpec> {
 /// callback sees. The shape is per-variant: `U64` becomes a Lua
 /// integer; `Match` becomes a `{ file, line, text, match_start,
 /// match_end }` table. New variants extend this match exhaustively.
+/// Convert a [`crate::fs::FsDirEntry`] into the Lua-side table
+/// `pmacs.fs.read_dir`'s callers consume. The shape pins the v0.1
+/// keys --- adding fields is non-breaking, removing or renaming
+/// them is a breaking change for every dired/wdired-class package.
+fn fs_dir_entry_to_lua(lua: &Lua, entry: &crate::fs::FsDirEntry) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(0, 7)?;
+    t.set("name", entry.name.as_str())?;
+    t.set("kind", entry.kind.as_str())?;
+    t.set("size", i64::try_from(entry.size).unwrap_or(i64::MAX))?;
+    t.set("mtime", entry.mtime_secs)?;
+    t.set("mtime_nsec", i64::from(entry.mtime_nsec))?;
+    t.set("mode", i64::from(entry.mode))?;
+    if let Some(target) = &entry.symlink_target {
+        t.set("symlink_target", target.as_str())?;
+    }
+    Ok(t)
+}
+
 fn stream_payload_to_lua(lua: &Lua, payload: StreamPayload) -> mlua::Result<mlua::Value> {
     match payload {
         StreamPayload::U64(v) => Ok(mlua::Value::Integer(i64::try_from(v).unwrap_or(i64::MAX))),
@@ -3417,6 +4860,68 @@ pub fn install_async(
     {
         let rt = runtime.clone();
         async_mod.set(
+            "_dispatch_fs_read_dir",
+            lua.create_function(move |_, (path, key): (String, Option<String>)| {
+                Ok(rt.dispatch_fs_read_dir(std::path::PathBuf::from(path), key.as_deref()))
+            })?,
+        )?;
+    }
+
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_dispatch_fs_stat",
+            lua.create_function(move |_, (path, key): (String, Option<String>)| {
+                Ok(rt.dispatch_fs_stat(std::path::PathBuf::from(path), key.as_deref()))
+            })?,
+        )?;
+    }
+
+    // Mutating fs raw dispatchers: no supersede parameter exposed
+    // at the Lua surface. The Rust runtime methods still accept
+    // `Option<&str>` for symmetry, but pmacs._async hard-codes
+    // `None` so packages reaching for the raw bindings can't
+    // bypass the no-supersede-on-mutation safety decision the
+    // wrappers in `builtin/runtime/fs.lua` document. Rationale:
+    // a "cancelled" syscall may have already run and changed
+    // disk; supersede semantics are misleading for ops that mutate.
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_dispatch_fs_rename",
+            lua.create_function(move |_, (from, to): (String, String)| {
+                Ok(rt.dispatch_fs_rename(
+                    std::path::PathBuf::from(from),
+                    std::path::PathBuf::from(to),
+                    None,
+                ))
+            })?,
+        )?;
+    }
+
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_dispatch_fs_chmod",
+            lua.create_function(move |_, (path, mode): (String, u32)| {
+                Ok(rt.dispatch_fs_chmod(std::path::PathBuf::from(path), mode, None))
+            })?,
+        )?;
+    }
+
+    {
+        let rt = runtime.clone();
+        async_mod.set(
+            "_dispatch_fs_remove",
+            lua.create_function(move |_, path: String| {
+                Ok(rt.dispatch_fs_remove(std::path::PathBuf::from(path), None))
+            })?,
+        )?;
+    }
+
+    {
+        let rt = runtime.clone();
+        async_mod.set(
             "_take_stream_batches",
             lua.create_function(move |lua, ()| {
                 let batches = rt.take_stream_batches();
@@ -3441,16 +4946,24 @@ pub fn install_async(
                             Some(JobOutcome::Failed(msg)) => {
                                 ("failed", mlua::Value::String(lua.create_string(&msg)?))
                             }
-                            // Unit, Parse, and "no recorded outcome" all
-                            // surface as a clean ok-with-nil to Lua;
-                            // streams that close without an explicit
-                            // outcome (the typical emit_n case) are
+                            // Unit, Parse, ReadDir, and "no recorded
+                            // outcome" all surface as a clean
+                            // ok-with-nil to Lua. Streams that close
+                            // without an explicit outcome (the
+                            // typical emit_n case) are
                             // indistinguishable from ones that
-                            // returned `Unit`. Parse jobs aren't
-                            // streams in M4.1 but the arm is here
-                            // for exhaustiveness.
+                            // returned `Unit`. Parse and ReadDir
+                            // jobs aren't streams; the arms are
+                            // here for exhaustiveness, since a
+                            // settled non-stream job's outcome
+                            // could in principle reach this branch
+                            // if the runtime were extended to ship
+                            // a stream-closed reply for them.
                             Some(JobOutcome::Complete(
-                                JobResult::Unit | JobResult::Parse { .. },
+                                JobResult::Unit
+                                | JobResult::Parse { .. }
+                                | JobResult::ReadDir(_)
+                                | JobResult::Stat(_),
                             ))
                             | None => ("ok", mlua::Value::Nil),
                         };
@@ -3553,6 +5066,24 @@ pub fn install_async(
                         out.push_back(mlua::Value::Integer(
                             i64::try_from(duration_ms).unwrap_or(i64::MAX),
                         ));
+                    }
+                    Some(JobOutcome::Complete(JobResult::ReadDir(entries))) => {
+                        // Lua surface for fs.read_dir settle:
+                        // status "ok", value = array of per-entry
+                        // tables. T M8.1.
+                        out.push_back(mlua::Value::String(lua.create_string("ok")?));
+                        let t = lua.create_table_with_capacity(entries.len(), 0)?;
+                        for (i, entry) in entries.into_iter().enumerate() {
+                            t.set(i + 1, fs_dir_entry_to_lua(lua, &entry)?)?;
+                        }
+                        out.push_back(mlua::Value::Table(t));
+                    }
+                    Some(JobOutcome::Complete(JobResult::Stat(entry))) => {
+                        // Lua surface for fs.stat settle: status
+                        // "ok", value = single per-entry table
+                        // (same shape as a read_dir entry). T M8.1.
+                        out.push_back(mlua::Value::String(lua.create_string("ok")?));
+                        out.push_back(mlua::Value::Table(fs_dir_entry_to_lua(lua, &entry)?));
                     }
                     Some(JobOutcome::Cancelled) => {
                         out.push_back(mlua::Value::String(lua.create_string("cancelled")?));
@@ -3681,6 +5212,13 @@ fn workers_snapshot_to_lua(lua: &Lua, runtime: &SharedAsyncRuntime) -> mlua::Res
                 "ok",
                 mlua::Value::Integer(i64::try_from(*duration_ms).unwrap_or(i64::MAX)),
             ),
+            JobOutcome::Complete(JobResult::ReadDir(entries)) => (
+                "ok",
+                mlua::Value::Integer(i64::try_from(entries.len()).unwrap_or(i64::MAX)),
+            ),
+            JobOutcome::Complete(JobResult::Stat(entry)) => {
+                ("ok", mlua::Value::String(lua.create_string(&entry.name)?))
+            }
             JobOutcome::Cancelled => ("cancelled", mlua::Value::Nil),
             JobOutcome::Failed(msg) => ("failed", mlua::Value::String(lua.create_string(msg)?)),
         };
@@ -8584,6 +10122,84 @@ mod tests {
     }
 
     #[test]
+    fn m8_3_intercept_input_carries_inserted_bytes() {
+        // M8.3 enhancement: the intercept input table carries the
+        // proposed insert/replace bytes verbatim as a Lua string.
+        // The wdired layer relies on this to validate permission-
+        // column edits against the rwx alphabet without waiting for
+        // the chmod syscall.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let observed: String = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.create("scratch")
+                local seen = nil
+                pmacs.buffer.add_intercept(id, function(op)
+                    if op.kind == "insert" then seen = op.bytes end
+                    return nil
+                end)
+                id:insert(0, "hello")
+                return seen
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(observed, "hello");
+    }
+
+    #[test]
+    fn m8_3_intercept_input_bytes_round_trip_non_utf8() {
+        // Lua strings are byte-clean; surfacing bytes as a Lua string
+        // must preserve arbitrary 8-bit content, not coerce to UTF-8.
+        // The dired-class package handles non-UTF-8 filename bytes
+        // (POSIX permits any byte except `/` and NUL).
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        // Insert two bytes: 0xC3 0x28, which is *not* a valid UTF-8
+        // sequence (0xC3 starts a 2-byte form; 0x28 is below the
+        // 0x80..0xBF continuation range).
+        let observed_len: i64 = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.create("scratch")
+                local seen_len = nil
+                pmacs.buffer.add_intercept(id, function(op)
+                    if op.kind == "insert" then seen_len = #op.bytes end
+                    return nil
+                end)
+                id:insert(0, string.char(0xC3, 0x28))
+                return seen_len
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(observed_len, 2, "non-UTF-8 bytes must round-trip 1:1");
+    }
+
+    #[test]
+    fn m8_3_intercept_input_bytes_for_replace() {
+        // Replace ops also carry the *incoming* bytes (not the bytes
+        // being overwritten).
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let observed: String = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.create("scratch")
+                id:insert(0, "AAA")
+                local seen = nil
+                pmacs.buffer.add_intercept(id, function(op)
+                    if op.kind == "replace" then seen = op.bytes end
+                    return nil
+                end)
+                id:replace(0, 3, "ZZ")
+                return seen
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(observed, "ZZ");
+    }
+
+    #[test]
     fn m6_4_intercept_reject_via_error_propagates_to_lua() {
         // An intercept that raises an error stops the edit; the Rust
         // side returns BufferError::Intercepted; the Lua-side
@@ -9289,6 +10905,63 @@ mod tests {
         assert!(
             msg.contains("\"nope\" not found"),
             "expected NotFound: {msg}"
+        );
+    }
+
+    #[test]
+    fn command_unregister_then_redefine_round_trips() {
+        // Regression for the M8.2 reproducibility/reload finding:
+        // packages that define commands at top level need an inverse
+        // of `define` so re-running their chunk doesn't hit
+        // DuplicateName.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let result: String = lua
+            .load(
+                r#"
+                pmacs.command.define { name = "x", description = "v1", fn = function() return "v1" end }
+                local removed = pmacs.command.unregister("x")
+                assert(removed == true, "first unregister must report removed")
+                pmacs.command.define { name = "x", description = "v2", fn = function() return "v2" end }
+                return pmacs.command.invoke("x")
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(result, "v2");
+    }
+
+    #[test]
+    fn command_unregister_unknown_returns_false() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let result: bool = lua
+            .load(r#"return pmacs.command.unregister("nope")"#)
+            .eval()
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn command_unregister_works_post_init_phase() {
+        // unregister is registry CRUD, symmetric with define (which
+        // also runs post-init). Reload itself isn't init-gated, so a
+        // gate here would break the dev-loop for any package that
+        // defines commands and tries to clean them up from
+        // pmacs.packages.on_unload running post-startup.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        lua.load(r#"pmacs.command.define { name = "x", description = "y", fn = function() end }"#)
+            .exec()
+            .unwrap();
+        // Flip init-complete the way EditorState::new does in production.
+        lua.app_data_ref::<InitCompleteFlag>()
+            .expect("init flag installed by fresh()")
+            .set_complete();
+        let removed: bool = lua
+            .load(r#"return pmacs.command.unregister("x")"#)
+            .eval()
+            .unwrap();
+        assert!(
+            removed,
+            "unregister must succeed after init-complete (parity with define)"
         );
     }
 

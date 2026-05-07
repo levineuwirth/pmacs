@@ -97,6 +97,13 @@ impl EditorState {
     /// Panics only if Lua initialization or the builtin command/keymap
     /// chunks fail to load --- both indicate broken builds.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear bootstrap sequence: registry → core → LuaHost → \
+                  per-builtin module installs (async/syntax/process/lsp/index/...). \
+                  Splitting into helpers fragments the wiring without removing \
+                  any single decision the reader needs to follow."
+    )]
     pub fn new() -> Self {
         // Build the buffer registry first so EditorCore and LuaHost
         // share the same `Rc`. Both reach buffers through this handle;
@@ -132,6 +139,18 @@ impl EditorState {
                 include_str!("../builtin/runtime/async.lua"),
             )
             .expect("load async builtin chunk");
+        // T M8.1 filesystem worker primitives. Sits on top of the
+        // raw `pmacs._async._dispatch_fs_*` bindings installed by
+        // `make_async_runtime` and reuses the Handle factory
+        // exposed at the end of async.lua. Loaded immediately after
+        // async.lua so `pmacs.fs.*` is available to every later
+        // builtin and to user init.lua.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/fs.lua"),
+                include_str!("../builtin/runtime/fs.lua"),
+            )
+            .expect("load fs builtin chunk");
         // T M4.1 tree-sitter Lua surface; M4.2 layers the Lua-side
         // auto-attach hook on top. The registry is empty at startup;
         // `pmacs.parse.language` lazy-loads from `BUILTIN_LANGUAGES`
@@ -191,19 +210,52 @@ impl EditorState {
                 include_str!("../builtin/runtime/lsp.lua"),
             )
             .expect("load lsp builtin chunk");
-        // T M6.4 REPL package skeleton. The package is the v0.1
-        // ship-gate test (spec §sec:repl-audit); it lives under the
-        // builtin runtime so the audit's "zero direct calls into
-        // Rust core" invariant has a fixed surface area to measure.
+        // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
+        // was loaded directly via `eval(include_str!(...))`; the
+        // M7.11 deliverable migrates it to the package system so it
+        // goes through the same manifest, exports, and per-package
+        // `_ENV` machinery a third-party package would. The
+        // sequence is:
+        //
+        //   1. Materialize each bundled package (currently just
+        //      `repl`) to a process-stable directory under the OS
+        //      temp dir. See `crate::builtin_packages` for the
+        //      design rationale.
+        //   2. Push the resulting `InstalledPackage` records onto
+        //      the `InstalledPackages` roster slot held in the
+        //      Lua VM's app-data, so the M7.7 searcher finds them.
+        //   3. Drive the load via `pmacs.packages.load("repl")` so
+        //      the load goes through the boundary `pmacs.packages`
+        //      function (which catches load-time errors and routes
+        //      them to *errors*) rather than a bare `require`.
+        //
         // Depends on `pmacs.buffer.add_intercept` (T M6.4 Stage 1)
         // and `pmacs.ansi.parser()` (T M6.4 Stage 2), both available
-        // by the time `install` returns above.
-        lua_host
-            .eval(
-                Some("@pmacs/builtin/runtime/repl.lua"),
-                include_str!("../builtin/runtime/repl.lua"),
-            )
-            .expect("load repl builtin chunk");
+        // by the time `attach_editor` returns above.
+        let bundled_root = crate::builtin_packages::bundled_runtime_dir();
+        let bundled_packages = crate::builtin_packages::materialize_all(&bundled_root)
+            .expect("materialize bundled packages");
+        {
+            let slot = lua_host
+                .lua()
+                .app_data_ref::<crate::lua_bindings::InstalledPackages>()
+                .expect("InstalledPackages slot installed by attach_editor");
+            for pkg in &bundled_packages {
+                slot.record(pkg.clone());
+            }
+        }
+        for pkg in &bundled_packages {
+            let basename = pkg.install_basename().to_string();
+            let script = format!(
+                "if not pmacs.packages.load({basename:?}) then \
+                 error('bundled package failed to load: ' .. {basename:?}) end"
+            );
+            lua_host
+                .eval(Some("@pmacs/bundled-load"), &script)
+                .unwrap_or_else(|e| {
+                    panic!("bundled package `{basename}` failed to load: {e}");
+                });
+        }
         // User config is loaded after the builtins so it can override
         // them. Failures inside `init.lua` are captured into the
         // `*errors*` buffer; the editor still starts.
@@ -247,7 +299,7 @@ impl EditorState {
     /// tick releases its borrow. Lua subscribers typically own a
     /// `{[process_id] = handle}` registry and drain events via
     /// `pmacs.process.events_take(id)`; the REPL package
-    /// (`builtin/runtime/repl.lua`) is the first such consumer.
+    /// (`builtin/packages/repl/init.lua`) is the first such consumer.
     pub fn tick_processes(&mut self) {
         self.process_supervisor.borrow_mut().tick();
         self.lua_host
@@ -357,9 +409,16 @@ impl EditorState {
             return;
         }
 
+        // Buffer-scope keybindings need the active buffer id passed
+        // through the dispatcher (otherwise `keymap_stack::resolve`
+        // skips the buffer-local map entirely and every "scope =
+        // buffer" binding falls through to global). The id is read
+        // outside the keymap borrow so a single-buffer focus check
+        // doesn't collide with the stack lookup below.
+        let active_buffer = Some(self.core.borrow().active_buffer_id());
         let action = {
             let stack = self.lua_host.keymaps().borrow();
-            self.dispatcher.dispatch(chord, &stack, None, &[])
+            self.dispatcher.dispatch(chord, &stack, active_buffer, &[])
         };
 
         // Snapshot the active buffer's edit revision before the command

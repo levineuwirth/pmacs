@@ -70,6 +70,10 @@ use std::time::{Duration, Instant};
 use crossbeam::channel as cb_channel;
 use serde::{Deserialize, Serialize};
 
+use crate::fs::{
+    FsDirEntry, FsError, chmod_blocking, read_dir_blocking, remove_blocking, rename_blocking,
+    stat_blocking,
+};
 use crate::message_bus::{BusEnd, MessageBus, SchemaRegistry};
 use crate::syntax::{self as syntax_mod, ParseRequest, ParseTreeBundle};
 use crate::worker::{CancellationToken, WorkerPool};
@@ -215,6 +219,18 @@ enum ReplyKind {
     /// queueing) and is what the M4.1 acceptance criteria measure.
     /// T M4.1.
     Parse { duration_ms: u64 },
+    /// `dispatch_fs_read_dir` completed; payload is the directory
+    /// listing. The Vec is `Serialize` so it crosses the bus
+    /// directly --- no side handoff like parse trees need. T M8.1.
+    ReadDir(Vec<FsDirEntry>),
+    /// `dispatch_fs_stat` completed; payload is the per-path
+    /// metadata. T M8.1.
+    Stat(FsDirEntry),
+    /// Generic completion-with-no-payload reply for the unit-result
+    /// fs primitives (`rename`, `chmod`, `remove`). Distinct from
+    /// [`Self::Sleep`] so the worker observability layer can label
+    /// fs jobs separately. T M8.1.
+    FsUnit,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -244,6 +260,15 @@ pub enum JobResult {
         /// Parse-only wall-clock duration in milliseconds.
         duration_ms: u64,
     },
+    /// `dispatch_fs_read_dir` produced a directory listing. The
+    /// Lua boundary in [`crate::lua_bindings`] turns the Vec into a
+    /// per-entry table when `_take_result` consumes the result.
+    /// T M8.1.
+    ReadDir(Vec<FsDirEntry>),
+    /// `dispatch_fs_stat` produced metadata for a single path. The
+    /// Lua boundary turns the [`FsDirEntry`] into the same table
+    /// shape `read_dir` entries use. T M8.1.
+    Stat(FsDirEntry),
 }
 
 /// Terminal state a [`PendingJob`] settles into.
@@ -275,6 +300,16 @@ pub enum JobKind {
     Grep,
     /// `dispatch_parse` --- tree-sitter parse on a worker ([T M4.1]).
     Parse,
+    /// `dispatch_fs_read_dir` --- directory enumeration ([T M8.1]).
+    FsReadDir,
+    /// `dispatch_fs_stat` --- single-path metadata ([T M8.1]).
+    FsStat,
+    /// `dispatch_fs_rename` --- atomic rename ([T M8.1]).
+    FsRename,
+    /// `dispatch_fs_chmod` --- permission-bit replacement ([T M8.1]).
+    FsChmod,
+    /// `dispatch_fs_remove` --- delete a single object ([T M8.1]).
+    FsRemove,
 }
 
 impl JobKind {
@@ -287,6 +322,11 @@ impl JobKind {
             JobKind::EmitN => "emit_n",
             JobKind::Grep => "grep",
             JobKind::Parse => "parse",
+            JobKind::FsReadDir => "fs_read_dir",
+            JobKind::FsStat => "fs_stat",
+            JobKind::FsRename => "fs_rename",
+            JobKind::FsChmod => "fs_chmod",
+            JobKind::FsRemove => "fs_remove",
         }
     }
 }
@@ -743,6 +783,67 @@ impl AsyncRuntime {
         id
     }
 
+    /// Dispatch a `read_dir(path)` job. The worker enumerates
+    /// `path`, returning one [`FsDirEntry`] per child with
+    /// `lstat`-style metadata. Polls cancel every batch of
+    /// entries; supersede follows the same rule as the other
+    /// dispatchers. T M8.1.
+    pub fn dispatch_fs_read_dir(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
+        let (id, cancel) = self.allocate(JobKind::FsReadDir, supersede, None);
+        let bus = self.workers.clone();
+        self.pool.dispatch(move |_pool| {
+            let kind = run_fs_read_dir(&cancel, &path);
+            let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
+        });
+        id
+    }
+
+    /// Dispatch a `stat(path)` job. Returns one [`FsDirEntry`] of
+    /// metadata for `path`. T M8.1.
+    pub fn dispatch_fs_stat(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
+        let (id, cancel) = self.allocate(JobKind::FsStat, supersede, None);
+        let bus = self.workers.clone();
+        self.pool.dispatch(move |_pool| {
+            let kind = run_fs_stat(&cancel, &path);
+            let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
+        });
+        id
+    }
+
+    /// Dispatch a `rename(from, to)` job. Settles to
+    /// [`JobResult::Unit`] on success. T M8.1.
+    pub fn dispatch_fs_rename(&self, from: PathBuf, to: PathBuf, supersede: Option<&str>) -> JobId {
+        let (id, cancel) = self.allocate(JobKind::FsRename, supersede, None);
+        let bus = self.workers.clone();
+        self.pool.dispatch(move |_pool| {
+            let kind = run_fs_rename(&cancel, &from, &to);
+            let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
+        });
+        id
+    }
+
+    /// Dispatch a `chmod(path, mode)` job. T M8.1.
+    pub fn dispatch_fs_chmod(&self, path: PathBuf, mode: u32, supersede: Option<&str>) -> JobId {
+        let (id, cancel) = self.allocate(JobKind::FsChmod, supersede, None);
+        let bus = self.workers.clone();
+        self.pool.dispatch(move |_pool| {
+            let kind = run_fs_chmod(&cancel, &path, mode);
+            let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
+        });
+        id
+    }
+
+    /// Dispatch a `remove(path)` job. T M8.1.
+    pub fn dispatch_fs_remove(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
+        let (id, cancel) = self.allocate(JobKind::FsRemove, supersede, None);
+        let bus = self.workers.clone();
+        self.pool.dispatch(move |_pool| {
+            let kind = run_fs_remove(&cancel, &path);
+            let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
+        });
+        id
+    }
+
     /// Drain the parse-tree bundle for `id` from the side handoff.
     /// Returns `None` if the job is unknown, still running, didn't
     /// produce a tree (cancelled or failed), or has already been
@@ -812,16 +913,25 @@ impl AsyncRuntime {
                 ReplyKind::Sleep
                 | ReplyKind::Sum(_)
                 | ReplyKind::Parse { .. }
+                | ReplyKind::ReadDir(_)
+                | ReplyKind::Stat(_)
+                | ReplyKind::FsUnit
                 | ReplyKind::Cancelled
                 | ReplyKind::Error(_)
                     if matches!(job.state, PendingState::Running) =>
                 {
                     job.state = match reply.kind {
-                        ReplyKind::Sleep => PendingState::Complete(JobResult::Unit),
+                        ReplyKind::Sleep | ReplyKind::FsUnit => {
+                            PendingState::Complete(JobResult::Unit)
+                        }
                         ReplyKind::Sum(v) => PendingState::Complete(JobResult::Sum(v)),
                         ReplyKind::Parse { duration_ms } => {
                             PendingState::Complete(JobResult::Parse { duration_ms })
                         }
+                        ReplyKind::ReadDir(entries) => {
+                            PendingState::Complete(JobResult::ReadDir(entries))
+                        }
+                        ReplyKind::Stat(entry) => PendingState::Complete(JobResult::Stat(entry)),
                         ReplyKind::Cancelled => PendingState::Cancelled,
                         ReplyKind::Error(msg) => PendingState::Failed(msg),
                         _ => unreachable!("matched above"),
@@ -1066,6 +1176,57 @@ fn run_sleep(cancel: &CancellationToken, total: Duration) -> ReplyKind {
         return ReplyKind::Cancelled;
     }
     ReplyKind::Sleep
+}
+
+/// Worker body for [`AsyncRuntime::dispatch_fs_read_dir`].
+/// Translates [`crate::fs::read_dir_blocking`]'s
+/// [`FsError`] taxonomy into the bus reply enum:
+/// [`FsError::Cancelled`] becomes [`ReplyKind::Cancelled`];
+/// [`FsError::Io`] becomes [`ReplyKind::Error`] with the
+/// human-readable message attached.
+fn run_fs_read_dir(cancel: &CancellationToken, path: &Path) -> ReplyKind {
+    match read_dir_blocking(path, cancel) {
+        Ok(entries) => ReplyKind::ReadDir(entries),
+        Err(FsError::Cancelled) => ReplyKind::Cancelled,
+        Err(e @ (FsError::Io { .. } | FsError::NonUtf8Path { .. })) => {
+            ReplyKind::Error(e.to_string())
+        }
+    }
+}
+
+fn run_fs_stat(cancel: &CancellationToken, path: &Path) -> ReplyKind {
+    match stat_blocking(path, cancel) {
+        Ok(entry) => ReplyKind::Stat(entry),
+        Err(FsError::Cancelled) => ReplyKind::Cancelled,
+        Err(e @ (FsError::Io { .. } | FsError::NonUtf8Path { .. })) => {
+            ReplyKind::Error(e.to_string())
+        }
+    }
+}
+
+fn run_fs_rename(cancel: &CancellationToken, from: &Path, to: &Path) -> ReplyKind {
+    fs_unit_to_reply(rename_blocking(from, to, cancel))
+}
+
+fn run_fs_chmod(cancel: &CancellationToken, path: &Path, mode: u32) -> ReplyKind {
+    fs_unit_to_reply(chmod_blocking(path, mode, cancel))
+}
+
+fn run_fs_remove(cancel: &CancellationToken, path: &Path) -> ReplyKind {
+    fs_unit_to_reply(remove_blocking(path, cancel))
+}
+
+/// Shared error-mapping for the unit-result fs primitives. Keeps
+/// the rename/chmod/remove worker bodies one-liners so the table
+/// of dispatchers reads at a glance.
+fn fs_unit_to_reply(result: Result<(), FsError>) -> ReplyKind {
+    match result {
+        Ok(()) => ReplyKind::FsUnit,
+        Err(FsError::Cancelled) => ReplyKind::Cancelled,
+        Err(e @ (FsError::Io { .. } | FsError::NonUtf8Path { .. })) => {
+            ReplyKind::Error(e.to_string())
+        }
+    }
 }
 
 fn run_compute_sum(cancel: &CancellationToken, n: u64) -> ReplyKind {
