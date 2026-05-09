@@ -1,0 +1,6 @@
+name = "pmacs-mcp-resources"
+version = "0.1.0"
+summary = "Render MCP resources as buffers (text, markdown, directory) with subscription-driven refresh."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["pmacs-mcp-resources", "pmacs-mcp-resources.view"]

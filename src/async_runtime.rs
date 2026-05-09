@@ -231,6 +231,11 @@ enum ReplyKind {
     /// [`Self::Sleep`] so the worker observability layer can label
     /// fs jobs separately. T M8.1.
     FsUnit,
+    /// Externally-settled job produced a JSON value. Sent by
+    /// [`AsyncRuntime::complete_external_ok`] from the main thread;
+    /// the runtime's `tick` translates it to
+    /// [`JobResult::Json`]. T M9.1.
+    Json(serde_json::Value),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -269,6 +274,12 @@ pub enum JobResult {
     /// Lua boundary turns the [`FsDirEntry`] into the same table
     /// shape `read_dir` entries use. T M8.1.
     Stat(FsDirEntry),
+    /// External request/reply produced a JSON-shaped result. Used by
+    /// the M9.1 MCP integration; the Lua boundary in
+    /// [`crate::lua_bindings`] translates the inner
+    /// [`serde_json::Value`] to a Lua table when `_take_result` is
+    /// called. T M9.1.
+    Json(serde_json::Value),
 }
 
 /// Terminal state a [`PendingJob`] settles into.
@@ -310,6 +321,15 @@ pub enum JobKind {
     FsChmod,
     /// `dispatch_fs_remove` --- delete a single object ([T M8.1]).
     FsRemove,
+    /// External request/reply settled by code outside the worker
+    /// pool. Used by the M9.1 MCP integration: the manager registers
+    /// a pending entry via [`AsyncRuntime::register_external`] and
+    /// settles it via [`AsyncRuntime::complete_external_ok`] /
+    /// `complete_external_failed` / `complete_external_cancelled`
+    /// when the corresponding JSON-RPC response arrives on the
+    /// supervisor pipe. No worker thread is occupied for the
+    /// round-trip.
+    McpRequest,
 }
 
 impl JobKind {
@@ -327,6 +347,7 @@ impl JobKind {
             JobKind::FsRename => "fs_rename",
             JobKind::FsChmod => "fs_chmod",
             JobKind::FsRemove => "fs_remove",
+            JobKind::McpRequest => "mcp_request",
         }
     }
 }
@@ -844,6 +865,71 @@ impl AsyncRuntime {
         id
     }
 
+    /// Register a pending entry that will be settled from outside the
+    /// worker pool. Returns `(JobId, CancellationToken)`. The caller
+    /// is responsible for eventually calling
+    /// [`Self::complete_external_ok`], [`Self::complete_external_failed`],
+    /// or [`Self::complete_external_cancelled`] on the returned id;
+    /// the cancellation token is what `pmacs.workers._cancel(id)`
+    /// flips, and the caller should poll it (e.g. inside its tick)
+    /// to give up on outstanding requests when the user cancels.
+    ///
+    /// T M9.1: this is the entry point the MCP layer uses to bind
+    /// JSON-RPC request ids to async-runtime job ids without
+    /// occupying a worker thread for the synchronous-write +
+    /// pipe-response round-trip. Future protocols that ride on the
+    /// same supervisor (DAP, etc.) reuse this surface.
+    ///
+    /// `supersede` follows the same rule as the worker dispatchers.
+    pub fn register_external(
+        &self,
+        kind: JobKind,
+        supersede: Option<&str>,
+    ) -> (JobId, CancellationToken) {
+        self.allocate(kind, supersede, None)
+    }
+
+    /// Settle an externally-registered job with a JSON value. Wakes
+    /// any coroutine parked on the corresponding [`Handle:await()`]
+    /// on the next [`Self::tick`].
+    ///
+    /// Idempotent against double-completion: the second call is a
+    /// no-op (the entry has already settled). T M9.1.
+    pub fn complete_external_ok(&self, id: JobId, value: serde_json::Value) {
+        let _ = self.workers.send(
+            ASYNC_REPLY_TOPIC,
+            &WorkerReply {
+                job_id: id,
+                kind: ReplyKind::Json(value),
+            },
+        );
+    }
+
+    /// Settle an externally-registered job with a failure message.
+    /// T M9.1.
+    pub fn complete_external_failed(&self, id: JobId, message: impl Into<String>) {
+        let _ = self.workers.send(
+            ASYNC_REPLY_TOPIC,
+            &WorkerReply {
+                job_id: id,
+                kind: ReplyKind::Error(message.into()),
+            },
+        );
+    }
+
+    /// Settle an externally-registered job as cancelled. Used when
+    /// the underlying request was abandoned without a response (e.g.
+    /// the MCP server crashed mid-flight). T M9.1.
+    pub fn complete_external_cancelled(&self, id: JobId) {
+        let _ = self.workers.send(
+            ASYNC_REPLY_TOPIC,
+            &WorkerReply {
+                job_id: id,
+                kind: ReplyKind::Cancelled,
+            },
+        );
+    }
+
     /// Drain the parse-tree bundle for `id` from the side handoff.
     /// Returns `None` if the job is unknown, still running, didn't
     /// produce a tree (cancelled or failed), or has already been
@@ -916,6 +1002,7 @@ impl AsyncRuntime {
                 | ReplyKind::ReadDir(_)
                 | ReplyKind::Stat(_)
                 | ReplyKind::FsUnit
+                | ReplyKind::Json(_)
                 | ReplyKind::Cancelled
                 | ReplyKind::Error(_)
                     if matches!(job.state, PendingState::Running) =>
@@ -932,6 +1019,7 @@ impl AsyncRuntime {
                             PendingState::Complete(JobResult::ReadDir(entries))
                         }
                         ReplyKind::Stat(entry) => PendingState::Complete(JobResult::Stat(entry)),
+                        ReplyKind::Json(v) => PendingState::Complete(JobResult::Json(v)),
                         ReplyKind::Cancelled => PendingState::Cancelled,
                         ReplyKind::Error(msg) => PendingState::Failed(msg),
                         _ => unreachable!("matched above"),

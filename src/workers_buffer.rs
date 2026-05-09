@@ -171,6 +171,7 @@ fn format_outcome(outcome: &JobOutcome) -> String {
         JobOutcome::Complete(JobResult::Stat(entry)) => {
             format!("ok (stat {:?})", entry.name)
         }
+        JobOutcome::Complete(JobResult::Json(_)) => "ok (json)".to_string(),
         JobOutcome::Cancelled => "cancelled".to_string(),
         JobOutcome::Failed(msg) => {
             // Trim the failure message for the table; the full

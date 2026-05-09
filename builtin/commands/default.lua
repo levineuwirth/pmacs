@@ -615,3 +615,83 @@ cmd { name = "buffer.kill-this",
         local id = pmacs.window.buffer()
         if id ~= nil then pmacs.buffer.kill(id) end
       end }
+
+-- describe-command (M9.6 acceptance lever) ---------------------------------
+--
+-- M9.6's third acceptance bullet ("describe-command reports the
+-- tool's schema as the documentation") needs a user-callable entry
+-- point — `pmacs.describe.command(name)` returns the table at the
+-- Rust layer, but without this M-x command there's no way to reach
+-- it interactively. Modeled on `editor.describe-instance-buffer`:
+-- a single `*help*` buffer reused across invocations, with a
+-- buffer-local `q` → `buffer.kill-this` for dismissal.
+
+local HELP_BUFFER_NAME = "*help*"
+local help_buffer_id = nil
+
+local function find_or_create_help_buffer()
+  for _, id in ipairs(pmacs.buffer.list()) do
+    local d = pmacs.describe.buffer(id)
+    if d ~= nil and d.name == HELP_BUFFER_NAME then
+      return id, false
+    end
+  end
+  return pmacs.buffer.create(HELP_BUFFER_NAME), true
+end
+
+local function show_help_text(text)
+  local buf, fresh = find_or_create_help_buffer()
+  -- `buf:delete(0, len)` matches `editor.list-buffers` render_list — we
+  -- replace contents wholesale rather than diffing, since *help* is
+  -- always reflowed for the new subject.
+  local len = buf:len()
+  if len > 0 then buf:delete(0, len) end
+  if #text > 0 then buf:insert(0, text) end
+  if fresh or help_buffer_id ~= buf then
+    pcall(function()
+      pmacs.keymap.unbind { scope = "buffer", buffer = buf, sequence = "q" }
+    end)
+    pmacs.keymap.bind {
+      scope = "buffer",
+      buffer = buf,
+      sequence = "q",
+      command = "buffer.kill-this",
+    }
+    help_buffer_id = buf
+  end
+  pmacs.window.switch_buffer(buf)
+end
+
+cmd { name = "editor.describe-command",
+      description = "Prompt for a command name and render its description in *help*.",
+      fn = function()
+        pmacs.minibuffer.read {
+          prompt = "Describe command: ",
+          source = "commands",
+          history = "command",
+          on_accept = function(name)
+            if name == nil or name == "" then return end
+            local info = pmacs.describe.command(name)
+            if info == nil then
+              pmacs.editor.set_status("describe-command: no such command: " .. name)
+              return
+            end
+            local lines = { name, "" }
+            local desc = info.description
+            if type(desc) ~= "string" or desc == "" then
+              desc = "(no description)"
+            end
+            lines[#lines + 1] = desc
+            local key_bindings = info.key_bindings
+            if type(key_bindings) == "table" and #key_bindings > 0 then
+              lines[#lines + 1] = ""
+              lines[#lines + 1] = "Bindings:"
+              for _, b in ipairs(key_bindings) do
+                local seq = (type(b) == "table" and b.sequence) or tostring(b)
+                lines[#lines + 1] = "  " .. tostring(seq)
+              end
+            end
+            show_help_text(table.concat(lines, "\n"))
+          end,
+        }
+      end }

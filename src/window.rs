@@ -184,6 +184,15 @@ impl Window {
         self.overlays.push(view);
     }
 
+    /// Stable kind identifiers of every overlay on this window, in
+    /// push order. Test seam used by `pmacs.window._overlay_kinds()`
+    /// to verify that a specific overlay type actually attached
+    /// (e.g. a code-format prompt result buffer expects a
+    /// `"syntax-highlight"` overlay after the wire-up step).
+    pub fn overlay_kinds(&self) -> Vec<&'static str> {
+        self.overlays.iter().map(|v| v.kind()).collect()
+    }
+
     /// Active region as `(lo, hi)` byte positions, if any. Returns
     /// `None` when no selection is active or when the selection is
     /// empty (anchor == cursor).

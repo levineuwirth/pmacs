@@ -358,6 +358,25 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         loader: || tree_sitter_lua::LANGUAGE.into(),
         highlights_query: tree_sitter_lua::HIGHLIGHTS_QUERY,
     },
+    // T M9.7: markdown grammar for prompt-result buffers with
+    // `_meta.format = "markdown"`. Uses only the block grammar
+    // (`tree_sitter_md::LANGUAGE`) — block-level highlighting (headers,
+    // lists, fenced code blocks, blockquotes) is the v0.1 floor.
+    // Inline highlighting (emphasis, links inside running text) would
+    // require the dual-grammar `MarkdownParser` and is M9.8+ work.
+    // The `markdown_inline` fixture prompt + matching acceptance test
+    // pin this floor: an `**emphasis**` span must not crash, and is
+    // expected to render unhighlighted; any future expansion that
+    // adds inline coverage is additive, not a regression.
+    // Note the constant name: `HIGHLIGHT_QUERY_BLOCK` (singular) is
+    // the markdown crate's idiom; `tree-sitter-rust` and
+    // `tree-sitter-lua` use `HIGHLIGHTS_QUERY` (plural).
+    LanguageEntry {
+        name: "markdown",
+        extensions: &["md", "markdown"],
+        loader: || tree_sitter_md::LANGUAGE.into(),
+        highlights_query: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+    },
 ];
 
 /// Registry that the Lua surface ([`crate::lua_bindings::install_parse`])

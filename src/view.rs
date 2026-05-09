@@ -219,6 +219,17 @@ pub trait View {
     fn display_to_pos(&self, _buf: &Buffer, _coord: DisplayCoord) -> Option<Position> {
         None
     }
+
+    /// Stable identifier for this view's *kind*. Used by introspection
+    /// seams (e.g. `pmacs.window._overlay_kinds()`) to verify that a
+    /// specific overlay type actually attached after a wire-up step,
+    /// without needing `Any` downcasts. The default `"unknown"` is
+    /// fine for views that no test cares about; views that participate
+    /// in cross-package wiring (syntax highlight, style overlays)
+    /// should override.
+    fn kind(&self) -> &'static str {
+        "unknown"
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,14 @@ pub struct EditorState {
     /// supervisor's reader threads, which means a runaway server's
     /// log-flood doesn't stall the editor.
     pub lsp_manager: crate::lsp::SharedLspManager,
+    /// MCP manager (T M9.1). Holds one [`crate::mcp::McpClient`] per
+    /// MCP server; rides on top of [`Self::process_supervisor`] for
+    /// spawn / I/O / restart, sharing the supervisor with the LSP
+    /// manager. The two managers are siblings — the protocol-uniformity
+    /// claim from spec §sec:concurrency holds because the dispatch
+    /// machinery (supervisor → bytes → parser → state machine →
+    /// events) is identical; only the per-protocol parser differs.
+    pub mcp_manager: crate::mcp::SharedMcpManager,
     /// Workspace / project model (T M4.9). Owns one
     /// [`crate::project::Project`] per open project root and tracks
     /// which one is active for project-scoped commands. Sits next to
@@ -178,6 +186,27 @@ impl EditorState {
         let lsp_manager =
             crate::lua_bindings::make_lsp_manager(lua_host.lua(), process_supervisor.clone())
                 .expect("install pmacs.lsp");
+        // T M9.1 MCP manager. Wires onto the same supervisor that LSP
+        // and `pmacs.process.*` use; the protocol-uniformity claim is
+        // that this share is sufficient (no parallel dispatch path).
+        // `pmacs.mcp.*` is the Lua surface; the manager itself is a
+        // sibling of `lsp_manager`.
+        let mcp_manager = crate::lua_bindings::make_mcp_manager(
+            lua_host.lua(),
+            process_supervisor.clone(),
+            async_runtime.clone(),
+        )
+        .expect("install pmacs.mcp");
+        // builtin/runtime/mcp.lua overrides `pmacs.mcp.send_request`
+        // with the Handle-returning friendly wrapper. Loaded after
+        // both async.lua (provides `pmacs.workers._new_handle`) and
+        // make_mcp_manager (provides `pmacs.mcp._send_request_raw`).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/mcp.lua"),
+                include_str!("../builtin/runtime/mcp.lua"),
+            )
+            .expect("load mcp builtin chunk");
         // T M4.9 project / workspace surface. Built atop the LSP
         // manager so `pmacs.project.lsp_for` can hand back a
         // server scoped to (project_root, language_id).
@@ -284,6 +313,7 @@ impl EditorState {
             syntax_registry,
             process_supervisor,
             lsp_manager,
+            mcp_manager,
             workspace,
             project_indexer,
             completion_registry,
@@ -314,6 +344,16 @@ impl EditorState {
     /// calls both in order.
     pub fn tick_lsp(&mut self) {
         self.lsp_manager.borrow_mut().tick();
+    }
+
+    /// One pass of the MCP manager (T M9.1): same shape as
+    /// [`Self::tick_lsp`], applied to MCP servers. The supervisor
+    /// is shared, so [`Self::tick_processes`] feeding LSP and MCP is
+    /// a single call; only the per-manager parse-and-dispatch step
+    /// is per-protocol. Order is `tick_processes` → `tick_lsp` →
+    /// `tick_mcp` so any in-the-same-batch I/O lands deterministically.
+    pub fn tick_mcp(&mut self) {
+        self.mcp_manager.borrow_mut().tick();
     }
 
     /// One pass of the main-thread async runtime: drain the worker
@@ -897,6 +937,7 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
         state.tick_async();
         state.tick_processes();
         state.tick_lsp();
+        state.tick_mcp();
     }
     let _ = frontend.poll_event(Duration::from_millis(0));
     Ok(())

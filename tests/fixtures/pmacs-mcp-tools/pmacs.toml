@@ -1,0 +1,6 @@
+name = "pmacs-mcp-tools"
+version = "0.1.0"
+summary = "Surface MCP tools as pmacs commands. Required-arg prompts via minibuffer; auto-reconciles on notifications/tools/list_changed."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["pmacs-mcp-tools"]

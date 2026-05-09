@@ -706,6 +706,31 @@ impl ProcessSupervisor {
         self.signal(id, Signal::SIGTERM)
     }
 
+    /// Close `id`'s stdin pipe by dropping the writer. The child
+    /// observes EOF on its next read, which is the canonical
+    /// stdio-graceful-shutdown signal for protocols (notably MCP)
+    /// that have no protocol-level shutdown message. Idempotent: a
+    /// second call after the writer is gone is a no-op. Errors only
+    /// if the process id is unknown.
+    ///
+    /// Note: this does NOT kill the process. Callers that want a
+    /// guaranteed exit follow up with [`Self::terminate`] (SIGTERM)
+    /// after a grace window, and the supervisor's
+    /// [`Self::shutdown`] applies the SIGKILL fallback at editor
+    /// drop time.
+    pub fn close_stdin(&mut self, id: ProcessId) -> Result<(), String> {
+        let proc = self
+            .processes
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown process: {id}"))?;
+        if let Some(runtime) = proc.runtime.as_mut() {
+            // Dropping the writer closes the pipe at the kernel
+            // level. `take()` is idempotent — second call sees None.
+            let _ = runtime.stdin.take();
+        }
+        Ok(())
+    }
+
     /// Write `bytes` to `id`'s stdin. Errors if the id is unknown,
     /// the process is not running, or stdin is closed (the child
     /// closed stdin on its end, or stdin was never piped in the

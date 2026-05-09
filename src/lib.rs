@@ -63,6 +63,7 @@ pub mod lsp_status;
 pub mod lua;
 pub mod lua_bindings;
 pub mod lua_isolation;
+pub mod mcp;
 pub mod message_bus;
 pub mod minibuffer;
 pub mod overlay;

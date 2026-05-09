@@ -332,6 +332,10 @@ impl SyntaxHighlightView {
 }
 
 impl View for SyntaxHighlightView {
+    fn kind(&self) -> &'static str {
+        "syntax-highlight"
+    }
+
     fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
         self.refresh_cache_if_stale();
         let Some(bundle) = self.cache.bundle.clone() else {

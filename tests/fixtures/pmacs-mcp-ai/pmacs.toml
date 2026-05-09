@@ -1,0 +1,19 @@
+name = "pmacs-mcp-ai"
+version = "0.1.0"
+summary = "AI-assistance example package. Selects context from the current buffer or project, sends a prompt to a configured MCP server, renders the response in a result buffer. The package's only AI dependency is the MCP server it talks to — no model-specific code."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["pmacs-mcp-ai"]
+
+# init.lua does `require("pmacs-mcp-prompts")` for its result-buffer
+# rendering layer (M9.7 promoted `M.render` to public surface as the
+# stable contract M9.8 depends on). The dependency is declared here so
+# the resolver pulls it in transitively for registry-based installs;
+# `install_local` ignores the dependencies block (per
+# `src/packages/installer.rs:plan_local`), so the test harness's
+# explicit two-call install is unaffected. The address is a
+# placeholder pending the M9.10 release pipeline's choice of registry
+# scheme; the version constraint is real and binds at resolve time.
+[[dependencies]]
+address = "github:pmacs/pmacs-mcp-prompts"
+version = "^0.1.0"

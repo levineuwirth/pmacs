@@ -1,0 +1,6 @@
+name = "pmacs-mcp-prompts"
+version = "0.1.0"
+summary = "Surface MCP prompts as pmacs commands. Required-arg prompts via minibuffer; results land in *mcp:<label>:<prompt>* buffers rendered by format (text / code with tree-sitter / markdown). Auto-reconciles on notifications/prompts/list_changed."
+pmacs_required = ">= 0.1.0"
+entry = "init.lua"
+exports = ["pmacs-mcp-prompts"]

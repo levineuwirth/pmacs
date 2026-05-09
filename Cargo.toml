@@ -95,6 +95,15 @@ tree-sitter = "0.26"
 # `crate::syntax::BUILTIN_LANGUAGES`.
 tree-sitter-rust = "0.24"
 tree-sitter-lua = "0.5"
+# T M9.7: markdown grammar so prompt result buffers with
+# `_meta.format = "markdown"` get structured highlighting through the
+# same M4 path as rust/lua — no special-case painter in Lua.
+# Pinned to `0.5` (caret-excludes-major for 0.x; see
+# `tree-sitter-rust = "0.24"` style above). The crate is the official
+# tree-sitter-org grammar (`tree-sitter-md` on crates.io); the
+# alternative names `tree-sitter-markdown*` are forks of varying
+# maintenance status — pick the upstream one.
+tree-sitter-md = "0.5"
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
 # the feature surface tight to keep build time low (no syscalls
 # beyond `kill(2)` for v0.1).
