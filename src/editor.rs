@@ -706,7 +706,7 @@ impl EditorState {
     /// origin (0 row = first text row of this window's content).
     fn activate_and_position(&mut self, win_id: WindowId, local_row: u32, local_col: u32) {
         let mut core = self.core.borrow_mut();
-        core.active = win_id;
+        core.set_active_window_id(win_id);
         let view_top = core.windows[&win_id].view_top;
         let buffer_id = core.windows[&win_id].buffer_id;
         let display_row = view_top.saturating_add(local_row as usize);
@@ -814,7 +814,7 @@ fn window_at_cell(
         return None;
     }
     let area = Rect::new(0, 0, text_rows, term_size.cols);
-    let placements = core.layout.compute(area);
+    let placements = core.active_layout().compute(area);
     placements.iter().find_map(|(id, rect)| {
         if cell_row >= rect.origin.row
             && cell_row < rect.origin.row + rect.size.rows
@@ -902,7 +902,8 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
     let mut render_state = crate::instance_render::RenderState::new(frontend.size());
 
     loop {
-        let messages = render_state.render_frame(&state);
+        // In-process TUI never has remote frontends; no overlays.
+        let messages = render_state.render_frame(&state, &[]);
         frontend.present_messages(&messages)?;
         if state.core.borrow().quit {
             break;
@@ -1005,8 +1006,8 @@ pub fn paint_frame(
     // Compute per-window rectangles. The text area is the term size
     // minus the bottom row (status / minibuffer).
     let text_area = crate::window::Rect::new(0, 0, text_rows, term_size.cols);
-    let placements = core.layout.compute(text_area);
-    let active = core.active;
+    let placements = core.active_layout().compute(text_area);
+    let active = core.active_window_id();
 
     // Clear the whole grid first so windows that shrink on resize
     // don't leak the old contents.
@@ -1024,10 +1025,9 @@ pub fn paint_frame(
         let reg = registry.borrow();
         let buf_id = core.active_buffer_id();
         if let Ok(buf) = reg.get(buf_id) {
-            let aw = core
-                .windows
-                .get_mut(&active)
-                .expect("invariant: core.active is always a live window in core.windows");
+            let aw = core.windows.get_mut(&active).expect(
+                "invariant: active_window_id always references a live window in core.windows",
+            );
             let cursor_row = aw
                 .text_view
                 .pos_to_display(buf, aw.cursor)
@@ -3077,7 +3077,7 @@ mod tests {
         let core = s.core.borrow();
         assert_eq!(core.windows.len(), 8);
         let area = crate::window::Rect::new(0, 0, 40, 120);
-        let placements = core.layout.compute(area);
+        let placements = core.active_layout().compute(area);
         assert_eq!(placements.len(), 8);
         for r in placements.values() {
             assert!(!r.is_empty(), "rect was empty: {r:?}");
@@ -3099,13 +3099,13 @@ mod tests {
             )
             .exec()
             .unwrap();
-        let start = s.core.borrow().active;
+        let start = s.core.borrow().active_window_id();
         let total = s.core.borrow().windows.len();
         assert_eq!(total, 3);
         for _ in 0..total {
             s.core.borrow_mut().focus_next();
         }
-        assert_eq!(s.core.borrow().active, start);
+        assert_eq!(s.core.borrow().active_window_id(), start);
     }
 
     /// Bullet 3: the buffer-list buffer is a regular Buffer in the
@@ -3439,7 +3439,7 @@ mod tests {
             .unwrap();
         // Set a 2:1 weight on the root split.
         if let crate::window::LayoutNode::Split { weights, .. } =
-            &mut s.core.borrow_mut().layout.root
+            &mut s.core.borrow_mut().active_layout_mut().root
         {
             *weights = vec![2, 1];
         } else {
@@ -3448,12 +3448,12 @@ mod tests {
         let p1 = s
             .core
             .borrow()
-            .layout
+            .active_layout()
             .compute(crate::window::Rect::new(0, 0, 24, 90));
         let p2 = s
             .core
             .borrow()
-            .layout
+            .active_layout()
             .compute(crate::window::Rect::new(0, 0, 24, 60));
         // Both should preserve the 2:1 ratio. Find the two windows
         // and verify the larger:smaller ratio is 2:1 in both.
@@ -3488,10 +3488,11 @@ mod tests {
         // apply_active_edit.
         let core = s.core.borrow();
         assert_eq!(core.active_buffer_len(), 6);
+        let active = core.active_window_id();
         let other_id = core
             .windows
             .keys()
-            .find(|id| **id != core.active)
+            .find(|id| **id != active)
             .copied()
             .unwrap();
         assert_eq!(core.windows[&other_id].buffer_id, buf_id);
@@ -3508,7 +3509,7 @@ mod tests {
     ) -> Vec<crate::cell::Cell> {
         use crate::cell::{Cell, CellGrid, CellSize};
         use crate::view::Viewport;
-        let active = core.active;
+        let active = core.active_window_id();
         let win = core.windows.get_mut(&active).unwrap();
         let rect = crate::window::Rect::new(0, 0, 24, 80);
         let cell_count = (rect.size.rows * rect.size.cols) as usize;
@@ -3644,7 +3645,7 @@ mod tests {
 
         let (single_avg_ns, dispatch_avg_ns, realistic_avg_ns) = {
             let mut core = s.core.borrow_mut();
-            let active = core.active;
+            let active = core.active_window_id();
             let buf_id = core.windows[&active].buffer_id;
             let registry = core.registry.clone();
             let reg = registry.borrow();
@@ -4017,7 +4018,7 @@ mod tests {
             .load("pmacs.window.split_vertical()")
             .exec()
             .unwrap();
-        let original_active = s.core.borrow().active;
+        let original_active = s.core.borrow().active_window_id();
         // Click on the right side (col 60 — guaranteed in the second window
         // for any standard 80-col terminal split in half).
         s.dispatch_mouse(
@@ -4025,7 +4026,7 @@ mod tests {
             mouse(MouseEventKind::Down(MouseButton::Left), 0, 60),
             term_size_24x80(),
         );
-        let new_active = s.core.borrow().active;
+        let new_active = s.core.borrow().active_window_id();
         assert_ne!(
             new_active, original_active,
             "click in other window did not activate it"

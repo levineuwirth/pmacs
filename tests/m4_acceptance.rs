@@ -466,7 +466,7 @@ fn render_active_window_to_grid(
     use pmacs::window::Rect;
 
     let mut core = state.core.borrow_mut();
-    let active = core.active;
+    let active = core.active_window_id();
     let registry = core.registry.clone();
     let win = core.windows.get_mut(&active).expect("active window");
     let rect = Rect::new(0, 0, rows, cols);
@@ -559,7 +559,7 @@ fn m4_3_highlight_updates_within_one_frame_after_parse() {
         let core = state.core.borrow();
         let win = core
             .windows
-            .get(&core.active)
+            .get(&core.active_window_id())
             .expect("active window present");
         assert!(
             !win.overlays.is_empty(),

@@ -37,37 +37,74 @@ use std::fmt::Write;
 use crate::async_runtime::{
     ActiveJobInfo, CompletedJobInfo, JobOutcome, JobResult, WorkersSnapshot,
 };
-use crate::buffer::{BufferId, EditOp};
+use crate::buffer::{Buffer, BufferId, EditOp};
 use crate::buffer_registry::BufferRegistry;
 
 /// Canonical name for the workers observability buffer.
 pub const WORKERS_BUFFER_NAME: &str = "*workers*";
 
 /// Render `snapshot` into the `*workers*` buffer (creating it if
-/// absent), replacing its full contents. Returns the buffer id.
+/// absent), replacing its full contents. Returns the buffer id
+/// and the Edits produced by the replacement (zero, one, or two —
+/// one Delete for non-empty old content, one Insert for non-empty
+/// new content).
 ///
-/// The buffer is marked clean after rendering --- the modeline
+/// # Post-audit-round-6 F31 — broadcast queueing
+///
+/// When the buffer has been upgraded to CRDT-backed (which happens
+/// at every replica's attach via `send_buffer_snapshots`), each
+/// `apply_edit` produces an `Edit::crdt_op` that must broadcast to
+/// every replica frontend so their `BufferMirror`s converge with
+/// the daemon's new content. Returning the Edits lets the caller
+/// queue them via `EditorCore::queue_daemon_origin_crdt_op` — the
+/// render function itself doesn't have an `EditorCore` reference,
+/// only the `BufferRegistry`.
+///
+/// The buffer is marked clean after rendering — the modeline
 /// shouldn't claim unsaved changes for a generated buffer.
-pub fn render(registry: &mut BufferRegistry, snapshot: &WorkersSnapshot) -> BufferId {
+pub fn render(
+    registry: &mut BufferRegistry,
+    snapshot: &WorkersSnapshot,
+) -> (BufferId, Vec<crate::rope::Edit>) {
     let text = format_snapshot(snapshot);
     let id = registry
         .find_by_name(WORKERS_BUFFER_NAME)
         .unwrap_or_else(|| registry.create(WORKERS_BUFFER_NAME));
     let buf = registry.get_mut(id).expect("just resolved");
+    let mut edits = Vec::new();
+    if buffer_contents_equal(buf, &text) {
+        buf.mark_clean();
+        return (id, edits);
+    }
     if !buf.is_empty() {
         let len = buf.len();
-        let _ = buf.apply_edit(EditOp::Delete {
+        if let Ok(edit) = buf.apply_edit(EditOp::Delete {
             range: crate::rope::Range::new(0, len),
-        });
+        }) {
+            edits.push(edit);
+        }
     }
     if !text.is_empty() {
-        let _ = buf.apply_edit(EditOp::Insert {
+        if let Ok(edit) = buf.apply_edit(EditOp::Insert {
             pos: 0,
             bytes: text.as_bytes(),
-        });
+        }) {
+            edits.push(edit);
+        }
     }
     buf.mark_clean();
-    id
+    (id, edits)
+}
+
+fn buffer_contents_equal(buf: &Buffer, text: &str) -> bool {
+    if buf.len() != text.len() as u64 {
+        return false;
+    }
+    let mut bytes = vec![0u8; text.len()];
+    if !bytes.is_empty() {
+        buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
+    }
+    bytes == text.as_bytes()
 }
 
 /// Format a snapshot as the buffer's text payload.
@@ -286,6 +323,22 @@ mod tests {
         assert!(text.contains("#3"));
         assert!(text.contains("ok (sum=55)"));
         assert!(text.contains("200ms ago"));
+    }
+
+    #[test]
+    fn render_same_snapshot_is_no_op() {
+        let mut reg = BufferRegistry::new();
+        let s = snapshot_with(vec![], vec![]);
+        let (_id, first_edits) = render(&mut reg, &s);
+        assert!(
+            !first_edits.is_empty(),
+            "initial render should create buffer contents"
+        );
+        let (_id, second_edits) = render(&mut reg, &s);
+        assert!(
+            second_edits.is_empty(),
+            "unchanged workers render must not emit delete/insert edits"
+        );
     }
 
     #[test]

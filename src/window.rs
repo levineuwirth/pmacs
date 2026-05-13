@@ -238,6 +238,27 @@ pub struct Layout {
     pub root: LayoutNode,
 }
 
+/// T M10.8 — one attached frontend's view of the editor.
+///
+/// Per-frontend state for multi-frontend operation: the split tree
+/// the frontend sees and which window within it is focused.
+/// `WindowId`s are globally unique across all frontends — the
+/// `EditorCore::windows` flat map holds every window, and each
+/// frontend's `FrontendView` references a subset via its `Layout`.
+///
+/// The buffers themselves remain shared in `EditorCore::registry` —
+/// two frontends with windows onto the same `BufferId` see the same
+/// content but each window owns its own cursor / `view_top` / `goal_col`.
+#[derive(Clone, Debug)]
+pub struct FrontendView {
+    /// Window tree visible to this frontend.
+    pub layout: Layout,
+    /// Focused window within `layout`. Always a `WindowId` that
+    /// `layout` references (invariant: `layout.iter_ids()` contains
+    /// `active`).
+    pub active: WindowId,
+}
+
 impl Layout {
     /// A trivial single-window layout.
     #[must_use]

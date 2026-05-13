@@ -295,6 +295,31 @@ pub enum FrontendEvent {
     /// Frontend is going away. Instance treats this as immediate
     /// detach; no acknowledgement required.
     Detach(FrontendId),
+    /// T M10.5: CRDT operation produced by this frontend's local
+    /// edit, sent to the instance for broadcast to the other
+    /// attached frontends. The actual flow that produces these
+    /// (frontend maintaining a local CRDT state, applying edits
+    /// optimistically, sending the resulting op) is wired in M10.8
+    /// + M10.10; M10.5 declares the wire shape so the protocol
+    ///   version bump (1 → 2) covers it.
+    ///
+    /// Only sent by v1.0 frontends (`protocol_version = 2`); v0.1
+    /// frontends never emit this variant. Sessions negotiated at
+    /// protocol version 1 must NOT receive this on the
+    /// instance-side dispatcher (the daemon filters per-session;
+    /// the editor-core treats it as an unknown frontend event if
+    /// it ever arrives from a v1 session, which it shouldn't).
+    CrdtOp {
+        /// Which attached frontend produced this op. The instance
+        /// uses this to avoid echoing the op back to its sender.
+        frontend_id: FrontendId,
+        /// Which buffer this op affects. The instance routes the
+        /// op to that buffer's CRDT state.
+        buffer_id: crate::buffer::BufferId,
+        /// The CRDT operation payload — `peer_id` + opaque wire bytes
+        /// loro's `import_updates` decodes.
+        op: crate::rope::CrdtOp,
+    },
 }
 
 impl FrontendEvent {
@@ -308,7 +333,8 @@ impl FrontendEvent {
             | Self::Paste { frontend_id, .. }
             | Self::FocusGained(frontend_id)
             | Self::FocusLost(frontend_id)
-            | Self::Detach(frontend_id) => *frontend_id,
+            | Self::Detach(frontend_id)
+            | Self::CrdtOp { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -361,6 +387,27 @@ pub enum GoodbyeReason {
     /// Frontend sent a malformed message or otherwise violated the
     /// protocol. The connection is closed without further dialogue.
     ProtocolError,
+    /// T M10.7: frontend declared one or more negotiated capability
+    /// bits that the instance cannot honor. The handshake fails after
+    /// the version check but before any further messages.
+    ///
+    /// `missing` lists the capability *field names* (e.g.,
+    /// `"multi_frontend"`, `"crdt_replica"`) the frontend requested
+    /// (`true`) that the instance reports as `false`. These strings
+    /// are stable wire-format identifiers: they are exactly the
+    /// `FrontendCapabilities` / `InstanceCapabilities` field names,
+    /// not human-readable descriptions. The frontend translates them
+    /// for display via [`AttachError`]'s formatting. Renaming a
+    /// capability bit requires changing both the field name AND the
+    /// missing-string emission in `negotiate_capabilities` in
+    /// lockstep — see the M10.7 audit's wire-format-stability
+    /// section.
+    CapabilityMismatch {
+        /// The capability bit names the frontend asked for that the
+        /// instance does not support. Each entry is a verbatim
+        /// `FrontendCapabilities` field name.
+        missing: Vec<String>,
+    },
 }
 
 /// Rendering and signals from instance to frontend.
@@ -388,6 +435,173 @@ pub enum InstanceMessage {
     Signal(InstanceSignal),
     /// Instance is terminating the attachment.
     Goodbye(GoodbyeReason),
+    /// T M10.5: CRDT operation broadcast from the instance to all
+    /// attached frontends. The originating frontend produced this op
+    /// (via `FrontendEvent::CrdtOp` or via a local editor-core edit
+    /// that synthesizes one); the instance fans it out so every
+    /// attached frontend can apply the op to its local CRDT state.
+    ///
+    /// Only sent to v1.0 frontends — sessions negotiated at
+    /// `protocol_version = 1` never receive this variant, per
+    /// `§sec:m10-backward-compat`. The daemon filters at the
+    /// outgoing-message path; this variant simply existing in the
+    /// enum is not a wire-compat issue for v1 sessions because the
+    /// daemon never emits it to them.
+    ///
+    /// M10.5 declares the wire shape. M10.8 wires the editor-core →
+    /// daemon → frontend flow that actually emits these.
+    CrdtOp {
+        /// Which buffer this op affects. v1.0 frontends maintain
+        /// a per-buffer local CRDT state; this routes to the right
+        /// one.
+        buffer_id: crate::buffer::BufferId,
+        /// The CRDT operation payload — `peer_id` + opaque wire bytes
+        /// loro's `import_updates` decodes.
+        op: crate::rope::CrdtOp,
+    },
+    /// T M10.6: cursor + selection state of one attached frontend,
+    /// broadcast to the other v1.0 frontends so they can render
+    /// peer-presence overlays. Coalesced at the daemon: rapid cursor
+    /// movement produces one `PresenceUpdate` per tick per source
+    /// frontend, carrying the *final* state, not intermediate values.
+    ///
+    /// Sender exclusion: the source frontend never receives its own
+    /// `PresenceUpdate`. v0.1 sessions (negotiated `protocol_version =
+    /// 1`) are filtered out at the daemon's outgoing-message path.
+    ///
+    /// M10.6 declares the wire shape AND wires the daemon-side
+    /// sweep with per-session filter. In single-frontend deployments
+    /// the recipient list is structurally empty (sender exclusion
+    /// with no other v2 sessions); M10.8 enables the multi-frontend
+    /// case where this message actually crosses the wire. The
+    /// frontend's renderer for peer-cursor overlays is also M10.8.
+    PresenceUpdate {
+        /// Which attached frontend this presence belongs to. v1.0
+        /// frontends use this to label the peer-cursor overlay
+        /// ("user 4 is editing here").
+        frontend_id: FrontendId,
+        /// Which buffer the source frontend's cursor is in.
+        buffer_id: crate::buffer::BufferId,
+        /// Byte offset of the source frontend's cursor within
+        /// `buffer_id`. Frontends convert to line/column at render
+        /// time via the rope's coord-mapping; the wire carries the
+        /// canonical byte offset to avoid encoding-vs-rendering
+        /// drift across frontends.
+        cursor: crate::rope::Position,
+        /// Active selection range, if any.
+        selection: Option<SelectionSnapshot>,
+    },
+    /// T M10.10: bootstrap a frontend's local CRDT replica with the
+    /// instance's current authoritative state. Sent once per active
+    /// buffer at `SessionEstablished` time (and on subsequent
+    /// buffer-creation events) to frontends that negotiated
+    /// `crdt_replica: true`. Frontends that didn't negotiate the
+    /// capability never receive this variant — the daemon's
+    /// outgoing-message filter gates the send on
+    /// `NegotiatedCapabilities::crdt_replica`.
+    ///
+    /// `crdt_snapshot` carries loro's run-encoded snapshot
+    /// (`CrdtState::export_snapshot()`) — the CRDT-internal state
+    /// including peer IDs, version vectors, and op-history structure.
+    /// Raw byte contents are insufficient because a fresh CRDT replica
+    /// initialized from bytes alone diverges on the first concurrent
+    /// edit.
+    ///
+    /// Cursor position is intentionally absent: cursor is per-frontend
+    /// window state (M10.8 `FrontendView`), not per-buffer CRDT
+    /// state. The same buffer can appear in multiple windows on one
+    /// frontend with different cursors; coupling cursor to
+    /// `BufferSnapshot` would break this model.
+    BufferSnapshot {
+        /// Which buffer's CRDT state this snapshot represents.
+        buffer_id: crate::buffer::BufferId,
+        /// `loro::LoroDoc::export(ExportMode::Snapshot)` output. Applied
+        /// to a fresh `CrdtState::new(peer_id_from_frontend(my_id))`
+        /// via `import_snapshot(bytes)` on the receiving frontend.
+        crdt_snapshot: Vec<u8>,
+    },
+    /// T M10.10: the active buffer for a replica frontend, with the
+    /// cursor position within it.
+    ///
+    /// # Semantics (Day 3 step 3b composition-check broadened
+    /// contract)
+    ///
+    /// `CursorByte` represents "the active buffer for this frontend
+    /// is `buffer_id`; the cursor in that buffer is at `byte_pos`."
+    /// Not just "the cursor moved." This contract matters: a narrow
+    /// "cursor moved" emission would miss active-buffer-changed-
+    /// without-cursor-motion events (Lua-driven buffer switch
+    /// landing at the same byte position), and the frontend's
+    /// active-buffer tracking would go stale.
+    ///
+    /// Daemon emits `CursorByte` on every per-tick render frame for
+    /// replica frontends, derived fresh from `active_window_for(fid)`.
+    /// Cursor move, active-buffer change, and active-window change
+    /// all produce a new emission carrying the current `(buffer_id,
+    /// byte_pos)`. The per-tick rate (16ms at 60Hz) is the same as
+    /// `Cursor`'s grid-coord variant.
+    ///
+    /// # Why a separate variant from `Cursor`
+    ///
+    /// `Cursor` carries grid coordinates (row/col cells) — the
+    /// frontend uses them to paint the cursor. The optimistic-apply
+    /// path needs byte position (CRDT insert/delete is byte-indexed),
+    /// which the grid coordinate can't recover without duplicating
+    /// the daemon's view-layout logic (tab expansion, line wrap,
+    /// double-width chars, viewport offset). `CursorByte` is the
+    /// authoritative byte position for the active buffer.
+    ///
+    /// # Atomicity with `Cursor`
+    ///
+    /// The daemon emits `Cursor` and `CursorByte` together for
+    /// replica frontends — both derived from the same render-frame
+    /// iteration so they describe the cursor in the same instant in
+    /// two reference frames. Non-replica frontends receive only
+    /// `Cursor` (existing behavior). The replica frontend that sees
+    /// `Cursor` without a paired `CursorByte` would interpret stale
+    /// byte position; the daemon guarantees both emit together by
+    /// derivation, not by message-protocol atomicity.
+    ///
+    /// # Wire-format compatibility
+    ///
+    /// New variant in v2; receivers without M10.10 hard-error on
+    /// decode (postcard does not gracefully degrade unknown variants,
+    /// per M10.10-FRAMING.md Refinement 3). Capability-gated: daemon
+    /// sends only to frontends that negotiated `crdt_replica: true`.
+    /// `PROTOCOL_VERSION` stays at 2.
+    CursorByte {
+        /// The buffer the cursor is in. A replica frontend tracks
+        /// per-buffer cursors; this routes the update to the right
+        /// entry.
+        buffer_id: crate::buffer::BufferId,
+        /// Byte offset of the cursor within `buffer_id`. Source of
+        /// truth for the optimistic-apply path's insert / delete
+        /// position arguments. Wire type matches
+        /// `PresenceUpdate::cursor` (`u64`) for consistency; frontend
+        /// converts to `usize` for the loro API.
+        byte_pos: crate::rope::Position,
+    },
+}
+
+/// Flat selection state for the wire.
+///
+/// Mirrors [`crate::window::Selection`] but as a self-contained pair
+/// of byte offsets — `anchor` is where the selection began,
+/// `active` is the current selection cursor. Either may be the
+/// numerically larger value; callers wanting `(lo, hi)` order
+/// compute it locally.
+///
+/// Kept flat (no nested types) so [`PartialEq`] equality is exactly
+/// wire-representation equality: two `SelectionSnapshot`s compare
+/// equal iff they serialize to identical bytes. The presence-diff
+/// sweep relies on this — see [`crate::presence::SessionRegistry`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SelectionSnapshot {
+    /// Where the selection began.
+    pub anchor: crate::rope::Position,
+    /// The active end (typically the cursor at the moment of the
+    /// snapshot).
+    pub active: crate::rope::Position,
 }
 
 // ---------------------------------------------------------------------------
@@ -891,9 +1105,39 @@ impl AttachmentHandle {
 /// Wire-protocol version. Bumped on any breaking change to the
 /// `Hello` / `AttachRequest` / event-message shapes.
 ///
-/// The handshake compares the two sides' values; mismatches close the
-/// connection with [`GoodbyeReason::VersionMismatch`].
-pub const PROTOCOL_VERSION: u32 = 1;
+/// The handshake compares against [`SUPPORTED_PROTOCOL_VERSIONS`];
+/// mismatches close the connection with
+/// [`GoodbyeReason::VersionMismatch`]. v1.0 servers and clients accept
+/// either the v0.1 wire (version 1) or the v1.0 wire (version 2) per
+/// `§sec:m10-backward-compat` — both directions of the version
+/// asymmetry need symmetric relaxation so v0.1-era binaries connect
+/// to v1.0-era binaries (and vice versa) once both have shipped.
+///
+/// T M10.5: bumped from 1 to 2. The v0.1 wire (version 1) remains
+/// accepted by v1.0 binaries; CRDT-only message variants
+/// (`InstanceMessage::CrdtOp`, `FrontendEvent::CrdtOp`) are filtered
+/// per-session for v1 negotiated sessions.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// T M10.5: the set of protocol versions a v1.0 binary accepts on
+/// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
+/// `[1, 2]` so the version asymmetry the §sec:m10-backward-compat
+/// spec section describes is handled symmetrically on both sides.
+///
+/// The handshake check is "is the peer's `protocol_version` present in
+/// this slice?" — not strict equality on `PROTOCOL_VERSION`. The
+/// session's negotiated version (the peer's) is recorded for
+/// downstream filtering: v1 sessions don't receive
+/// `InstanceMessage::CrdtOp` / `PresenceUpdate` messages even from
+/// a v2 daemon.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2];
+
+/// T M10.5: predicate for the handshake check. Returns `true` if
+/// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].
+#[must_use]
+pub fn is_supported_protocol_version(peer_version: u32) -> bool {
+    SUPPORTED_PROTOCOL_VERSIONS.contains(&peer_version)
+}
 
 /// Identifies an instance for client-side display.
 ///
@@ -954,9 +1198,73 @@ impl InstanceIdentity {
 ///
 /// Empty for v0.1; the type exists so that adding capabilities in v0.2+
 /// is not a breaking-change. Symmetric with [`FrontendCapabilities`].
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+///
+/// T M10.5: added `multi_frontend` and `crdt_replica` bits with
+/// `#[serde(default)]` so v1 wire bytes still deserialize. The
+/// negotiation logic (which side advertises what, and what the
+/// instance does with mismatches) is M10.7 scope; M10.5 just makes
+/// the bit positions stable in the wire format.
+///
+/// T M10.5/8: bit defaults evolve with the substrate.
+///
+/// - M10.5 declared the bits with `#[serde(default)]` so v1 wire
+///   bytes deserialize forward-compatibly. M10.5–M10.7 set both bits
+///   to `false` so a frontend declaring `multi_frontend: true` got
+///   `Goodbye(CapabilityMismatch)` — the multi-frontend path
+///   wasn't actually wired yet.
+/// - **T M10.8 Day 4 flip**: the instance's `multi_frontend` and
+///   `crdt_replica` defaults flip to `true`. This is the "M10.8 enables
+///   multi-frontend" moment — the underlying dispatcher (Day 3) and
+///   broadcast routing (Day 4) support both capabilities, so the
+///   instance advertises them.
+///
+/// The frontend-side defaults remain `false` (a frontend that omits
+/// the field is conservatively treated as not supporting the
+/// capability; matches v0.1 wire-format semantics).
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InstanceCapabilities {
-    // No fields in v0.1. Reserved for future expansion.
+    /// T M10.5: instance can host multi-frontend sessions on the
+    /// same buffer (per `§sec:m10-collab`). T M10.8 Day 4: default
+    /// flipped to `true` — the dispatcher supports multiple
+    /// attached frontends.
+    #[serde(default = "default_true")]
+    pub multi_frontend: bool,
+    /// T M10.5: instance can broadcast `InstanceMessage::CrdtOp`
+    /// messages. T M10.8 Day 4: default flipped to `true` — the
+    /// broadcast routing for CRDT ops wires up in this milestone.
+    #[serde(default = "default_true")]
+    pub crdt_replica: bool,
+}
+
+// Clippy in non-CRDT builds notes that `cfg!(feature = "crdt")`
+// evaluates to `false`, making this impl derivable. In CRDT builds
+// the values are `true`, so the impl is genuinely manual. Allow.
+#[allow(clippy::derivable_impls)]
+impl Default for InstanceCapabilities {
+    fn default() -> Self {
+        // T M10.10 — the `crdt_replica` default tracks the `crdt`
+        // Cargo feature. A daemon built without the `crdt` feature
+        // can't honor a `crdt_replica: true` negotiation (the
+        // CRDT-handling code paths are conditionally compiled out
+        // — `send_buffer_snapshots`, `apply_remote_crdt_op`, the
+        // dispatcher's CursorByte emit). Advertising `true`
+        // unconditionally would be wire-protocol false advertising.
+        //
+        // `multi_frontend` is conceptually independent of CRDT but
+        // in M10.10's architecture every multi-frontend participant
+        // is also a CRDT replica; gating both on the same feature
+        // keeps the daemon's advertised capabilities consistent
+        // with what it can actually do.
+        Self {
+            multi_frontend: cfg!(feature = "crdt"),
+            crdt_replica: cfg!(feature = "crdt"),
+        }
+    }
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn default_true() -> bool {
+    true
 }
 
 /// Capabilities the frontend advertises to the instance.
@@ -996,6 +1304,106 @@ pub struct FrontendCapabilities {
     /// branching is done on the explicit capability bits above.
     #[serde(default)]
     pub terminal_kind: Option<String>,
+    /// T M10.5: frontend can participate in multi-frontend sessions
+    /// (per `§sec:m10-collab`). false for v0.1 frontends — they
+    /// attach as single-frontend and never receive `CrdtOp` /
+    /// `PresenceUpdate` broadcasts. v1.0 frontends opt in via M10.7's
+    /// negotiation handshake. M10.5 declares the bit position; M10.7
+    /// wires the negotiation.
+    ///
+    /// Default is `false` — v1 frontends are treated as not
+    /// supporting this feature, which matches reality (v1 frontends
+    /// have no local CRDT state). A `true` default would have v1
+    /// frontends claimed to support features they don't.
+    #[serde(default)]
+    pub multi_frontend: bool,
+    /// T M10.5: frontend can apply incoming `CrdtOp` messages to a
+    /// local CRDT state. false for v0.1; v1.0 opts in. M10.7 wires
+    /// negotiation; M10.5 declares the bit position.
+    #[serde(default)]
+    pub crdt_replica: bool,
+}
+
+/// T M10.7 — the negotiated capability bits for one attached session.
+///
+/// Computed by [`negotiate_capabilities`] from the frontend's
+/// [`FrontendCapabilities`] and the instance's [`InstanceCapabilities`].
+/// Each negotiated bit is the AND of the two declared bits. Fields
+/// added here in future milestones append at the end with sensible
+/// defaults so existing call sites stay valid.
+///
+/// This is a daemon-internal struct (not on the wire); the
+/// negotiation result is communicated to the frontend via the
+/// success of the handshake (no capability-mismatch `Goodbye`) and
+/// the instance's behavior thereafter.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct NegotiatedCapabilities {
+    /// Session is eligible for multi-frontend operation. True iff
+    /// both the frontend and the instance declared `multi_frontend =
+    /// true`. v0.1 frontends always end up here as `false` (the v0.1
+    /// wire format does not carry the field; `#[serde(default)]`
+    /// makes the deserialized value `false`).
+    pub multi_frontend: bool,
+    /// Session can produce/consume `InstanceMessage::CrdtOp` /
+    /// `FrontendEvent::CrdtOp`. True iff both sides declared
+    /// `crdt_replica = true`. The daemon's outgoing-message filter for
+    /// `CrdtOp` consults this in M10.8.
+    pub crdt_replica: bool,
+}
+
+/// T M10.7 — pure-function capability negotiation.
+///
+/// For each negotiated bit (`multi_frontend`, `crdt_replica`):
+///
+/// | Frontend wants | Instance has | Result |
+/// |----------------|--------------|--------|
+/// | `false`        | `false`      | bit `false`, no error |
+/// | `false`        | `true`       | bit `false`, no error |
+/// | `true`         | `true`       | bit `true`,  no error |
+/// | `true`         | `false`      | bit appears in `missing` |
+///
+/// If any bit ends up in `missing`, the negotiation fails as a whole
+/// (returns `Err`). Otherwise the negotiated bits are returned as
+/// [`NegotiatedCapabilities`]. The `Err` form gathers ALL missing
+/// bits into one `CapabilityMismatch` — one round-trip carries the
+/// complete picture rather than serial rejections.
+///
+/// # Wire-format stability
+///
+/// The strings emitted into `missing` are exactly the
+/// `FrontendCapabilities` field names (`"multi_frontend"`,
+/// `"crdt_replica"`). These are stable wire-format identifiers, not
+/// human-readable descriptions. User-facing translation is the
+/// frontend's responsibility (see [`AttachError`]'s `Display` impl).
+/// Renaming a capability bit requires updating both the field name
+/// and the missing-string emission here in lockstep.
+pub fn negotiate_capabilities(
+    frontend: &FrontendCapabilities,
+    instance: &InstanceCapabilities,
+) -> Result<NegotiatedCapabilities, GoodbyeReason> {
+    let mut missing = Vec::new();
+    let multi_frontend = match (frontend.multi_frontend, instance.multi_frontend) {
+        (true, false) => {
+            missing.push("multi_frontend".to_string());
+            false
+        }
+        (a, b) => a && b,
+    };
+    let crdt_replica = match (frontend.crdt_replica, instance.crdt_replica) {
+        (true, false) => {
+            missing.push("crdt_replica".to_string());
+            false
+        }
+        (a, b) => a && b,
+    };
+    if missing.is_empty() {
+        Ok(NegotiatedCapabilities {
+            multi_frontend,
+            crdt_replica,
+        })
+    } else {
+        Err(GoodbyeReason::CapabilityMismatch { missing })
+    }
 }
 
 /// First message sent by the instance to a freshly-attached frontend.
@@ -2169,10 +2577,24 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_one_for_v01() {
-        // Pin the value: every wire-shape change in v0.1 patch releases
-        // must keep this constant or break the handshake.
-        assert_eq!(PROTOCOL_VERSION, 1);
+    fn protocol_version_is_two_for_v10() {
+        // Pin the value: T M10.5 bumped from 1 to 2. The v1.0 wire
+        // adds CrdtOp / PresenceUpdate variants; the v1.0 binary
+        // serves both v1 and v2 sessions per §sec:m10-backward-compat.
+        assert_eq!(PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn supported_protocol_versions_includes_one_and_two() {
+        // T M10.5: v1.0 binaries accept both wire versions during the
+        // handshake. v0.1 binaries (with their strict-equality check)
+        // accepted only v1; this is the symmetric relaxation that
+        // makes §sec:m10-backward-compat hold once both binaries ship.
+        assert!(is_supported_protocol_version(1));
+        assert!(is_supported_protocol_version(2));
+        assert!(!is_supported_protocol_version(0));
+        assert!(!is_supported_protocol_version(3));
+        assert!(!is_supported_protocol_version(u32::MAX));
     }
 
     #[test]
@@ -2205,6 +2627,8 @@ mod tests {
                 mouse: true,
                 bracketed_paste: true,
                 terminal_kind: Some("xterm-256color".into()),
+                multi_frontend: false,
+                crdt_replica: false,
             },
             initial_size: CellSize::new(50, 200),
         };
@@ -2375,6 +2799,492 @@ mod tests {
         match decoded {
             FrontendEvent::Key(k) => assert_eq!(k.key, Key::Unknown(0x0103)),
             other => panic!("expected Key, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // T M10.5 round-trip tests for the new wire variants.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn instance_message_crdt_op_round_trips_through_postcard() {
+        // Synthetic CrdtOp with known peer_id + arbitrary bytes.
+        // Verifies the protocol-level serialization shape. The
+        // real-loro-bytes variant is in the test below.
+        let msg = InstanceMessage::CrdtOp {
+            buffer_id: crate::buffer::BufferId::next(),
+            op: crate::rope::CrdtOp {
+                peer_id: 0x1234_5678_9abc_def0,
+                bytes: vec![1, 2, 3, 4, 5, 0xFF, 0xFE, 0xFD],
+            },
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        match decoded {
+            InstanceMessage::CrdtOp {
+                op: crate::rope::CrdtOp { peer_id, bytes: ob },
+                ..
+            } => {
+                assert_eq!(peer_id, 0x1234_5678_9abc_def0);
+                assert_eq!(ob, vec![1, 2, 3, 4, 5, 0xFF, 0xFE, 0xFD]);
+            }
+            other => panic!("expected CrdtOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontend_event_crdt_op_round_trips_through_postcard() {
+        let ev = FrontendEvent::CrdtOp {
+            frontend_id: FrontendId(42),
+            buffer_id: crate::buffer::BufferId::next(),
+            op: crate::rope::CrdtOp {
+                peer_id: 99,
+                bytes: vec![0xAA, 0xBB, 0xCC],
+            },
+        };
+        let bytes = postcard::to_allocvec(&ev).expect("encode");
+        let decoded: FrontendEvent = postcard::from_bytes(&bytes).expect("decode");
+        match decoded {
+            FrontendEvent::CrdtOp {
+                frontend_id, op, ..
+            } => {
+                assert_eq!(frontend_id, FrontendId(42));
+                assert_eq!(op.peer_id, 99);
+                assert_eq!(op.bytes, vec![0xAA, 0xBB, 0xCC]);
+            }
+            other => panic!("expected FrontendEvent::CrdtOp, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn instance_message_crdt_op_round_trips_with_real_loro_bytes() {
+        // T M10.5 framing-pass addition: use actual loro-exported
+        // bytes (not synthetic) so the test catches surprising
+        // interactions between loro's wire format and postcard's
+        // encoding. Also logs the per-CrdtOp wire byte size — a
+        // reference number M10.8's broadcast-cost reasoning relies on.
+        use crate::crdt::CrdtState;
+        let state = CrdtState::new(7).expect("CRDT state");
+        let pre_version = state.version();
+        state.insert(0, "hello world").expect("insert");
+        let real_bytes = state.export_updates_since(&pre_version).expect("export");
+        let real_bytes_len = real_bytes.len();
+        let msg = InstanceMessage::CrdtOp {
+            buffer_id: crate::buffer::BufferId::next(),
+            op: crate::rope::CrdtOp {
+                peer_id: 7,
+                bytes: real_bytes.clone(),
+            },
+        };
+        let postcard_bytes = postcard::to_allocvec(&msg).expect("encode");
+        let postcard_len = postcard_bytes.len();
+        eprintln!(
+            "[T M10.5 wire-size] real-loro CrdtOp for `hello world` insert:\n  \
+             loro export bytes: {} B\n  \
+             postcard-encoded InstanceMessage::CrdtOp: {} B\n  \
+             protocol overhead: {} B (BufferId + peer_id + framing)",
+            real_bytes_len,
+            postcard_len,
+            postcard_len.saturating_sub(real_bytes_len)
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&postcard_bytes).expect("decode");
+        match decoded {
+            InstanceMessage::CrdtOp { op, .. } => {
+                assert_eq!(op.peer_id, 7);
+                assert_eq!(
+                    op.bytes, real_bytes,
+                    "loro bytes must round-trip identically"
+                );
+                // Verify the round-tripped bytes apply on a remote
+                // CrdtState and produce the originating state's
+                // projection — the property M10.5's wire codec must
+                // preserve for M10.8's broadcast path to work.
+                let receiver = CrdtState::new(99).expect("receiver");
+                receiver.import_updates(&op.bytes).expect("import");
+                assert_eq!(receiver.materialize_string(), "hello world");
+            }
+            other => panic!("expected CrdtOp, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // T M10.5 — backward-compat handshake matrix tests.
+    //
+    // Four cases per the framing-pass handshake matrix:
+    //   1. v1 daemon ↔ v1 frontend: pre-existing behavior; not retested.
+    //   2. v1 daemon ↔ v2 frontend: rejected with VersionMismatch.
+    //   3. v2 daemon ↔ v1 frontend: success; v1 session.
+    //   4. v2 daemon ↔ v2 frontend: success; v2 session.
+    //
+    // These tests exercise `is_supported_protocol_version` directly
+    // since the full daemon-attach path requires socket setup that's
+    // in m5_5_acceptance.rs. The version-check predicate is the
+    // load-bearing piece; daemon-level integration tests are in the
+    // separate integration test file.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn m10_5_handshake_matrix_v2_daemon_accepts_v1_frontend() {
+        // The relaxation that makes §sec:m10-backward-compat hold.
+        assert!(
+            is_supported_protocol_version(1),
+            "v2 daemon must accept v1 frontend per §sec:m10-backward-compat"
+        );
+    }
+
+    #[test]
+    fn m10_5_handshake_matrix_v2_daemon_accepts_v2_frontend() {
+        // The new case M10.5 enables.
+        assert!(
+            is_supported_protocol_version(2),
+            "v2 daemon must accept v2 frontend (the v1.0 happy path)"
+        );
+    }
+
+    #[test]
+    fn m10_5_handshake_matrix_versions_outside_range_rejected() {
+        // v1 daemon's strict-equality behavior is documented at the
+        // v0.1 code level (different binary); v2 daemon's range check
+        // rejects v3+ until v0.2 ships.
+        assert!(!is_supported_protocol_version(0));
+        assert!(!is_supported_protocol_version(3));
+        assert!(!is_supported_protocol_version(u32::MAX));
+    }
+
+    #[test]
+    fn m10_5_strict_equality_v1_frontend_simulation() {
+        // T M10.5 framing-pass risk #5 verification: existing v1
+        // frontends (the v0.1.0 release codebase, pre-M10.5) do
+        // strict equality on Hello.protocol_version. Simulate that
+        // check explicitly so the audit doc has empirical evidence
+        // of the actual backward-compat surface.
+        //
+        // Before M10.5: `if hello.protocol_version != 1 { reject }`.
+        // After M10.5: `if !is_supported_protocol_version(...) { reject }`.
+        //
+        // For a v1-strict-frontend connecting to a v2 daemon: the
+        // daemon's Hello carries protocol_version=2; the v1-strict
+        // frontend rejects with VersionMismatch.
+        fn v1_strict_check(hello_version: u32) -> bool {
+            hello_version == 1
+        }
+        // v1-strict frontend hitting v2 daemon's Hello: rejected.
+        assert!(
+            !v1_strict_check(2),
+            "v1-strict frontend rejects v2 daemon's Hello — pre-M10.5 binaries \
+             can NOT connect to v2 daemons even though v2 daemons accept their requests"
+        );
+        // v1-strict frontend hitting v1 daemon's Hello: accepted.
+        assert!(v1_strict_check(1));
+        // For comparison, M10.5's relaxed check (v2 frontend after this milestone):
+        assert!(is_supported_protocol_version(1));
+        assert!(is_supported_protocol_version(2));
+    }
+
+    // T M10.6 — PresenceUpdate wire shape tests.
+
+    #[test]
+    fn instance_message_presence_update_round_trips_no_selection() {
+        let msg = InstanceMessage::PresenceUpdate {
+            frontend_id: FrontendId(42),
+            buffer_id: crate::buffer::BufferId::next(),
+            cursor: 100,
+            selection: None,
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn instance_message_presence_update_round_trips_with_selection() {
+        let msg = InstanceMessage::PresenceUpdate {
+            frontend_id: FrontendId(7),
+            buffer_id: crate::buffer::BufferId::next(),
+            cursor: 500,
+            selection: Some(SelectionSnapshot {
+                anchor: 480,
+                active: 500,
+            }),
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn presence_update_typical_size_under_64_bytes() {
+        // T M10.6 size acceptance — typical case: cursor at offset
+        // 100 in a small buffer, no selection. Should be well under
+        // 64B (varint encoding of small u64s is 1-2 bytes each).
+        let msg = InstanceMessage::PresenceUpdate {
+            frontend_id: FrontendId(2),
+            buffer_id: crate::buffer::BufferId::next(),
+            cursor: 100,
+            selection: None,
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let size = bytes.len();
+        eprintln!(
+            "[T M10.6 wire-size] PresenceUpdate typical (cursor=100, no selection): {size} B"
+        );
+        assert!(
+            size < 64,
+            "typical PresenceUpdate is {size} B; spec target is <64 B"
+        );
+    }
+
+    #[test]
+    fn presence_update_worst_case_size_recorded() {
+        // T M10.6 size acceptance — worst case: max u64 values for
+        // every position field, selection present spanning a large
+        // range. Varint encoding of u64::MAX is 10 bytes; this is
+        // the upper bound on a single PresenceUpdate's wire size.
+        // Recording the actual number for the audit doc.
+        let msg = InstanceMessage::PresenceUpdate {
+            frontend_id: FrontendId(u64::MAX),
+            buffer_id: crate::buffer::BufferId::next(),
+            cursor: u64::MAX,
+            selection: Some(SelectionSnapshot {
+                anchor: 0,
+                active: u64::MAX,
+            }),
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let size = bytes.len();
+        eprintln!(
+            "[T M10.6 wire-size] PresenceUpdate worst-case (all-max u64s + selection): {size} B"
+        );
+        // Worst-case bound: 1 (variant tag) + 10 (frontend_id) + ~2
+        // (BufferId varint — small) + 10 (cursor) + 1 (Some tag) +
+        // 10 (anchor zero = 1B) + 10 (active = u64::MAX = 10B) = ~44
+        // upper bound. Buffer-id is freshly minted so its varint
+        // encoding is small. We assert <64 to cover the spec target,
+        // and log the actual number for the audit.
+        assert!(
+            size < 64,
+            "worst-case PresenceUpdate is {size} B; spec target is <64 B"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // T M10.10 round-trip + size tests for BufferSnapshot.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn instance_message_buffer_snapshot_round_trips_through_postcard() {
+        // Synthetic loro-snapshot bytes — the wire-level test is
+        // independent of the actual loro encoding.
+        let msg = InstanceMessage::BufferSnapshot {
+            buffer_id: crate::buffer::BufferId::next(),
+            crdt_snapshot: vec![0xCD, 0x07, 0x00, 0x01, 0x02, 0x03, 0xFF],
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        match decoded {
+            InstanceMessage::BufferSnapshot { crdt_snapshot, .. } => {
+                assert_eq!(
+                    crdt_snapshot,
+                    vec![0xCD, 0x07, 0x00, 0x01, 0x02, 0x03, 0xFF]
+                );
+            }
+            other => panic!("expected BufferSnapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instance_message_cursor_byte_round_trips_through_postcard() {
+        let msg = InstanceMessage::CursorByte {
+            buffer_id: crate::buffer::BufferId::next(),
+            byte_pos: 12345,
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        match decoded {
+            InstanceMessage::CursorByte { byte_pos, .. } => assert_eq!(byte_pos, 12345),
+            other => panic!("expected CursorByte, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instance_message_cursor_byte_zero_position_round_trips() {
+        let msg = InstanceMessage::CursorByte {
+            buffer_id: crate::buffer::BufferId::next(),
+            byte_pos: 0,
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        assert!(matches!(
+            decoded,
+            InstanceMessage::CursorByte { byte_pos: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn instance_message_buffer_snapshot_empty_snapshot_round_trips() {
+        // An empty CRDT (no edits yet) — loro's export produces a
+        // small but non-zero byte string. The wire layer must round-trip
+        // a zero-length crdt_snapshot regardless of whether loro ever
+        // emits one.
+        let msg = InstanceMessage::BufferSnapshot {
+            buffer_id: crate::buffer::BufferId::next(),
+            crdt_snapshot: vec![],
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        match decoded {
+            InstanceMessage::BufferSnapshot { crdt_snapshot, .. } => {
+                assert!(crdt_snapshot.is_empty());
+            }
+            other => panic!("expected BufferSnapshot, got {other:?}"),
+        }
+    }
+
+    // T M10.7 — capability negotiation matrix + error round-trip.
+
+    /// Build a `FrontendCapabilities` with the M10-era negotiated
+    /// bits set as specified and all other fields at their default.
+    fn front_caps(multi_frontend: bool, crdt_replica: bool) -> FrontendCapabilities {
+        FrontendCapabilities {
+            multi_frontend,
+            crdt_replica,
+            ..FrontendCapabilities::default()
+        }
+    }
+
+    fn inst_caps(multi_frontend: bool, crdt_replica: bool) -> InstanceCapabilities {
+        InstanceCapabilities {
+            multi_frontend,
+            crdt_replica,
+        }
+    }
+
+    #[test]
+    fn negotiate_neither_side_declares_anything() {
+        let res = negotiate_capabilities(&front_caps(false, false), &inst_caps(false, false))
+            .expect("ok");
+        assert!(!res.multi_frontend);
+        assert!(!res.crdt_replica);
+    }
+
+    #[test]
+    fn negotiate_frontend_silent_instance_offers() {
+        // Frontend didn't request, instance has — frontend's silence
+        // is accepted as "single-frontend subset is fine."
+        let res =
+            negotiate_capabilities(&front_caps(false, false), &inst_caps(true, true)).expect("ok");
+        assert!(!res.multi_frontend, "frontend didn't ask → doesn't get");
+        assert!(!res.crdt_replica, "frontend didn't ask → doesn't get");
+    }
+
+    #[test]
+    fn negotiate_both_sides_declare_multi_frontend() {
+        let res =
+            negotiate_capabilities(&front_caps(true, false), &inst_caps(true, false)).expect("ok");
+        assert!(res.multi_frontend);
+        assert!(!res.crdt_replica);
+    }
+
+    #[test]
+    fn negotiate_both_sides_declare_both_bits() {
+        let res =
+            negotiate_capabilities(&front_caps(true, true), &inst_caps(true, true)).expect("ok");
+        assert!(res.multi_frontend);
+        assert!(res.crdt_replica);
+    }
+
+    #[test]
+    fn negotiate_frontend_wants_multi_instance_lacks() {
+        // T M10.7 criterion 4 — mismatch produces clear error
+        // naming what was requested vs available.
+        let err = negotiate_capabilities(&front_caps(true, false), &inst_caps(false, false))
+            .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                assert_eq!(missing, vec!["multi_frontend".to_string()]);
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_frontend_wants_crdt_replica_instance_lacks() {
+        let err = negotiate_capabilities(&front_caps(false, true), &inst_caps(false, false))
+            .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                assert_eq!(missing, vec!["crdt_replica".to_string()]);
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_frontend_wants_both_instance_lacks_both() {
+        // Multiple missing bits land in a single CapabilityMismatch
+        // — one round-trip carries the complete picture.
+        let err = negotiate_capabilities(&front_caps(true, true), &inst_caps(false, false))
+            .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                assert_eq!(
+                    missing,
+                    vec!["multi_frontend".to_string(), "crdt_replica".to_string()]
+                );
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_partial_mismatch_only_lists_missing() {
+        // Frontend wants both, instance has multi but not crdt:
+        // only crdt_replica lands in `missing`.
+        let err = negotiate_capabilities(&front_caps(true, true), &inst_caps(true, false))
+            .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                assert_eq!(missing, vec!["crdt_replica".to_string()]);
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn goodbye_capability_mismatch_round_trips() {
+        let msg = InstanceMessage::Goodbye(GoodbyeReason::CapabilityMismatch {
+            missing: vec!["multi_frontend".to_string(), "crdt_replica".to_string()],
+        });
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn missing_strings_are_field_names_not_descriptions() {
+        // T M10.7 wire-format-stability commitment: the strings
+        // emitted into `missing` are exactly the
+        // `FrontendCapabilities`/`InstanceCapabilities` field names.
+        // Human-readable translation happens in
+        // `AttachError::Display`, not on the wire. Renaming a bit
+        // requires updating both this emission and the field name
+        // in lockstep — this test pins the current names so a
+        // future rename forces an audit-visible diff here too.
+        let err = negotiate_capabilities(&front_caps(true, true), &inst_caps(false, false))
+            .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                // The exact strings the wire carries — no
+                // pluralization, no hyphenation, no human polish.
+                assert!(
+                    missing
+                        .iter()
+                        .all(|s| s.chars().all(|c| c.is_ascii_lowercase() || c == '_')),
+                    "missing strings must be field-name identifiers (ascii lowercase + underscore), got {missing:?}"
+                );
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
         }
     }
 }

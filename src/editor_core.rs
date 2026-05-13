@@ -21,7 +21,7 @@
 //! window's --- two windows on the same buffer keep their layout
 //! caches synchronized.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use crate::buffer::{Buffer, BufferId, EditOp};
@@ -33,19 +33,52 @@ use crate::rope::Edit;
 use crate::rope::{Position, Range};
 use crate::text_view::TextView;
 use crate::view::{DisplayCoord, View};
-use crate::window::{Layout, Orientation, Window, WindowId};
+use crate::window::{FrontendView, Layout, Orientation, Window, WindowId};
+
+/// T M10.10 post-audit-round-3 F16 — origin of a queued CRDT op.
+///
+/// Records **whether the originating frontend already applied the
+/// op to its local mirror**, which determines whether the broadcast
+/// sweep should exclude that frontend.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum CrdtOpOrigin {
+    /// A replica frontend's `FrontendEvent::CrdtOp` path applied the
+    /// op to its local mirror before sending. Broadcast must exclude
+    /// that frontend (it would double-apply otherwise — see
+    /// `BufferMirror::apply_local_insert` /
+    /// `apply_local_delete` and `optimistic::apply_incoming_crdt_op`'s
+    /// echo-skip rule).
+    OptimisticReplica(FrontendId),
+    /// Daemon-side mutation (a `FrontendEvent::Key` round-trip, a
+    /// Lua-driven edit, a fallback path) generated the op. No
+    /// frontend has applied it locally; broadcast to every replica
+    /// frontend, including the one whose `Key` event drove the
+    /// daemon path (its mirror is otherwise stale).
+    DaemonKey,
+}
 
 /// The world state mutated by editor commands.
 pub struct EditorCore {
     /// Shared buffer registry. The registry is the canonical owner
     /// of every buffer; windows reference buffers by [`BufferId`].
     pub registry: SharedRegistry,
-    /// Open windows, keyed by id for stable iteration.
+    /// All windows, keyed by id for stable iteration. `WindowId`s
+    /// are globally unique across all frontends; each
+    /// [`FrontendView`] in `views` references a subset via its
+    /// `Layout`.
     pub windows: BTreeMap<WindowId, Window>,
-    /// Window tree mapping the cell grid to windows.
-    pub layout: Layout,
-    /// The focused window. `pmacs.editor.*` primitives target it.
-    pub active: WindowId,
+    /// T M10.8 — per-frontend views. Each attached frontend has its
+    /// own `Layout` (split tree) + `active: WindowId`. Buffers are
+    /// shared via `registry`; cursors / `view_top`s live in the
+    /// per-frontend `Window` instances.
+    ///
+    /// Invariant: `FrontendId::LOCAL` always has an entry. The
+    /// in-process editor uses this view; daemon-attached frontends
+    /// register additional entries on attach (M10.8 Day 3 wires
+    /// the per-attach registration via the dispatcher; Day 2 ships
+    /// a fallback-to-LOCAL accessor so single-frontend tests pass
+    /// before per-attach registration lands).
+    pub views: HashMap<FrontendId, FrontendView>,
     /// One-line message shown in the status line.
     pub status: String,
     /// True iff the editor should exit at the next iteration.
@@ -68,6 +101,31 @@ pub struct EditorCore {
     /// (multi-window, multi-user) where each input event must be
     /// attributable to its source frontend.
     pub active_frontend: FrontendId,
+    /// T M10.8 Day 4 — pending CRDT ops queue.
+    ///
+    /// Each [`CrdtOpOrigin`] entry records both **what** to broadcast
+    /// and **who already applied it locally** (the sender-exclusion
+    /// signal). The dispatcher drains the queue per-tick and
+    /// broadcasts each op to multi-frontend sessions with
+    /// `crdt_replica` negotiated.
+    ///
+    /// # M10.10 post-audit-round-3 F16: origin tagging
+    ///
+    /// Sender exclusion depends on **whether the originating
+    /// frontend already applied the op to its local mirror**:
+    ///
+    /// - [`CrdtOpOrigin::OptimisticReplica`] — a replica frontend's
+    ///   `FrontendEvent::CrdtOp` path applied the op to its mirror
+    ///   before sending. Broadcast must exclude that frontend so it
+    ///   doesn't double-apply.
+    /// - [`CrdtOpOrigin::DaemonKey`] — daemon-side mutation (a
+    ///   `FrontendEvent::Key` round-trip, a Lua-driven edit, etc.)
+    ///   generated the op. No frontend's mirror has applied it
+    ///   locally; broadcast must include every replica frontend
+    ///   *including* the active one. Without this, the
+    ///   active frontend's mirror would silently drift from daemon
+    ///   state after every fallback / Key-path edit.
+    pub pending_crdt_ops: Vec<(CrdtOpOrigin, BufferId, crate::rope::CrdtOp)>,
 }
 
 impl EditorCore {
@@ -84,17 +142,25 @@ impl EditorCore {
         let window = Window::new(id, buffer_id, text_view);
         let mut windows = BTreeMap::new();
         windows.insert(id, window);
+        let mut views = HashMap::new();
+        views.insert(
+            FrontendId::LOCAL,
+            FrontendView {
+                layout: Layout::single(id),
+                active: id,
+            },
+        );
         Self {
             registry,
             windows,
-            layout: Layout::single(id),
-            active: id,
+            views,
             status: String::new(),
             quit: false,
             file_path: None,
             file_meta: None,
             minibuffer: Minibuffer::new(),
             active_frontend: FrontendId::LOCAL,
+            pending_crdt_ops: Vec::new(),
         }
     }
 
@@ -127,19 +193,111 @@ impl EditorCore {
 
     // ---- accessors ---------------------------------------------------------
 
-    /// Reference the active [`Window`].
+    /// T M10.8 — the active frontend's view (layout + active window).
+    ///
+    /// **Day 2 transitional behavior**: if `active_frontend` has no
+    /// registered view (the daemon-attached frontend case before Day
+    /// 3's dispatcher refactor wires `register_frontend_view`), fall
+    /// back to `FrontendId::LOCAL`'s view. The invariant "LOCAL
+    /// always has a view" is enforced by the constructor.
+    #[must_use]
+    pub fn active_view(&self) -> &FrontendView {
+        self.views.get(&self.active_frontend).unwrap_or_else(|| {
+            self.views.get(&FrontendId::LOCAL).expect(
+                "invariant: FrontendId::LOCAL always has a registered FrontendView; \
+                 populated by EditorCore::new and never removed",
+            )
+        })
+    }
+
+    /// Mutable view of the active frontend's [`FrontendView`].
+    ///
+    /// Same fallback semantics as [`active_view`].
+    pub fn active_view_mut(&mut self) -> &mut FrontendView {
+        // Choose the key first to avoid borrowing `self.views`
+        // twice with overlapping lifetimes (the fallback path).
+        let key = if self.views.contains_key(&self.active_frontend) {
+            self.active_frontend
+        } else {
+            FrontendId::LOCAL
+        };
+        self.views.get_mut(&key).expect(
+            "invariant: FrontendId::LOCAL always has a registered FrontendView; \
+             populated by EditorCore::new and never removed",
+        )
+    }
+
+    /// The active frontend's window-split tree.
+    #[must_use]
+    pub fn active_layout(&self) -> &Layout {
+        &self.active_view().layout
+    }
+
+    /// Mutable access to the active frontend's window-split tree.
+    pub fn active_layout_mut(&mut self) -> &mut Layout {
+        &mut self.active_view_mut().layout
+    }
+
+    /// `WindowId` of the active frontend's focused window.
+    #[must_use]
+    pub fn active_window_id(&self) -> WindowId {
+        self.active_view().active
+    }
+
+    /// Set the active frontend's focused window.
+    pub fn set_active_window_id(&mut self, id: WindowId) {
+        self.active_view_mut().active = id;
+    }
+
+    /// Reference the active [`Window`] — the window currently
+    /// focused in the active frontend's view.
     #[must_use]
     pub fn active_window(&self) -> &Window {
+        let id = self.active_window_id();
         self.windows
-            .get(&self.active)
-            .expect("active window present")
+            .get(&id)
+            .expect("active window present in core.windows")
     }
 
     /// Mutably reference the active [`Window`].
     pub fn active_window_mut(&mut self) -> &mut Window {
+        let id = self.active_window_id();
         self.windows
-            .get_mut(&self.active)
-            .expect("active window present")
+            .get_mut(&id)
+            .expect("active window present in core.windows")
+    }
+
+    /// Reference a specific frontend's active [`Window`].
+    ///
+    /// Returns `None` if `fid` has no registered view (no fallback —
+    /// callers explicitly asking about a specific frontend get a
+    /// truthful answer about whether that frontend has state).
+    #[must_use]
+    pub fn active_window_for(&self, fid: FrontendId) -> Option<&Window> {
+        let view = self.views.get(&fid)?;
+        self.windows.get(&view.active)
+    }
+
+    /// Mutably reference a specific frontend's active [`Window`].
+    pub fn active_window_mut_for(&mut self, fid: FrontendId) -> Option<&mut Window> {
+        let win_id = self.views.get(&fid)?.active;
+        self.windows.get_mut(&win_id)
+    }
+
+    /// T M10.8 — register a `FrontendView` for `fid`. Called by the
+    /// daemon on attach (Day 3 dispatcher work). Day 2's fallback
+    /// path makes this optional; Day 3 makes it required.
+    pub fn register_frontend_view(&mut self, fid: FrontendId, view: FrontendView) {
+        self.views.insert(fid, view);
+    }
+
+    /// T M10.8 — drop a frontend's view on detach. The frontend's
+    /// windows remain in `self.windows` until explicit cleanup (M10.x
+    /// may add per-detach window pruning); for M10.8 they're
+    /// orphaned but accessible by id (matches v0.1 behavior where
+    /// closing a window left others intact).
+    pub fn unregister_frontend_view(&mut self, fid: FrontendId) {
+        self.views.remove(&fid);
     }
 
     /// [`BufferId`] of the active window's buffer.
@@ -217,6 +375,20 @@ impl EditorCore {
                     let _ = overlay.on_edit(buffer, &edit);
                 }
             }
+        }
+        // T M10.8 Day 4 — capture CRDT op (if the buffer was in
+        // CRDT mode and produced one) for the dispatcher to
+        // broadcast on the next tick.
+        //
+        // M10.10 post-audit-round-3 F16: this is the **daemon-side**
+        // mutation path (e.g. `FrontendEvent::Key` round-trip,
+        // Lua-driven edit, fallback). The source frontend's mirror
+        // has NOT applied this op locally; the queued origin is
+        // [`CrdtOpOrigin::DaemonKey`] so the broadcast sweep includes
+        // every replica (no sender exclusion).
+        if let Some(crdt_op) = edit.crdt_op.as_ref() {
+            self.pending_crdt_ops
+                .push((CrdtOpOrigin::DaemonKey, buffer_id, (**crdt_op).clone()));
         }
         Ok(edit.new_rope.len())
     }
@@ -743,6 +915,13 @@ impl EditorCore {
                         }
                     }
                 }
+                drop(reg);
+                // Post-audit-round-5 F27: undo on a CRDT-backed
+                // buffer produces a crdt_op that must broadcast to
+                // every replica frontend (including the one whose
+                // command triggered the undo — its BufferMirror has
+                // no other way to converge with the post-undo state).
+                self.queue_daemon_origin_crdt_op(buffer_id, &edit);
             }
             Err(_) => self.status = "nothing to undo".into(),
         }
@@ -774,8 +953,35 @@ impl EditorCore {
                         }
                     }
                 }
+                drop(reg);
+                // Post-audit-round-5 F27 — same as undo above.
+                self.queue_daemon_origin_crdt_op(buffer_id, &edit);
             }
             Err(_) => self.status = "nothing to redo".into(),
+        }
+    }
+
+    /// T M10.10 post-audit-round-5 F27 + F28 — queue a CRDT op
+    /// produced by a daemon-origin edit (undo/redo via core, Lua
+    /// bindings, command pipeline) for broadcast.
+    ///
+    /// Pushes into `pending_crdt_ops` with
+    /// [`CrdtOpOrigin::DaemonKey`] semantics: the broadcast sweep
+    /// includes every replica frontend (no sender exclusion). The
+    /// originating frontend's `BufferMirror` has not applied the op
+    /// locally — only the daemon's authoritative buffer has — so
+    /// the source's mirror needs the broadcast just like every
+    /// other replica.
+    ///
+    /// No-op when the edit doesn't carry a `crdt_op` (the buffer
+    /// wasn't CRDT-backed at the time of the edit). Callers can
+    /// invoke this unconditionally after any daemon-origin
+    /// `apply_*` that returns an `Edit`; non-CRDT buffers pay no
+    /// cost beyond the early return.
+    pub fn queue_daemon_origin_crdt_op(&mut self, buffer_id: BufferId, edit: &Edit) {
+        if let Some(crdt_op) = edit.crdt_op.as_ref() {
+            self.pending_crdt_ops
+                .push((CrdtOpOrigin::DaemonKey, buffer_id, (**crdt_op).clone()));
         }
     }
 
@@ -799,18 +1005,24 @@ impl EditorCore {
         let new_id = WindowId::next();
         let new_window = Window::new(new_id, buffer_id, text_view);
         self.windows.insert(new_id, new_window);
-        self.layout.split_window(self.active, orientation, new_id);
+        let active = self.active_window_id();
+        self.active_layout_mut()
+            .split_window(active, orientation, new_id);
         new_id
     }
 
     /// Move focus to the next window in iteration order.
     pub fn focus_next(&mut self) {
-        self.active = self.layout.focus_next(self.active);
+        let active = self.active_window_id();
+        let next = self.active_layout().focus_next(active);
+        self.set_active_window_id(next);
     }
 
     /// Move focus to the previous window in iteration order.
     pub fn focus_prev(&mut self) {
-        self.active = self.layout.focus_prev(self.active);
+        let active = self.active_window_id();
+        let prev = self.active_layout().focus_prev(active);
+        self.set_active_window_id(prev);
     }
 
     /// Close the active window (unless it's the only one). Returns
@@ -819,22 +1031,23 @@ impl EditorCore {
         if self.windows.len() <= 1 {
             return false;
         }
-        let target = self.active;
-        self.layout.close_window(target);
+        let target = self.active_window_id();
+        self.active_layout_mut().close_window(target);
         self.windows.remove(&target);
         // Pick an adjacent window as the new focus.
-        self.active = *self
-            .layout
+        let next = *self
+            .active_layout()
             .iter_ids()
             .first()
             .expect("at least one window remains");
+        self.set_active_window_id(next);
         true
     }
 
     /// Close every window except the active one.
     pub fn close_others(&mut self) {
-        let keep = self.active;
-        self.layout.keep_only(keep);
+        let keep = self.active_window_id();
+        self.active_layout_mut().keep_only(keep);
         self.windows.retain(|id, _| *id == keep);
     }
 
@@ -1326,10 +1539,84 @@ mod tests {
         assert!(s.status.contains("no file"));
     }
 
+    /// T M10.8 — pins the Day 2 transitional fallback behavior in
+    /// [`EditorCore::active_view`].
+    ///
+    /// **Day 2 → Day 3 transition contract**: while the dispatcher
+    /// thread is being wired (Day 3 work), the daemon may set
+    /// `active_frontend` to a daemon-attached `FrontendId` whose
+    /// `FrontendView` hasn't been registered yet. The fallback to
+    /// `FrontendId::LOCAL`'s view keeps single-frontend behavior
+    /// observable.
+    ///
+    /// **Day 3 cleanup**: once
+    /// [`EditorCore::register_frontend_view`] is invariantly called
+    /// before any event dispatch, this test flips to assert "every
+    /// `active_frontend` has its own registered view, no fallback
+    /// ever activates." Until then, the fallback is the bridge.
+    #[test]
+    fn active_view_falls_back_to_local_when_active_frontend_unregistered() {
+        let mut s = fresh();
+        // Default active_frontend is LOCAL → no fallback yet.
+        assert_eq!(s.active_frontend, FrontendId::LOCAL);
+        let local_active_window = s.active_view().active;
+
+        // Simulate the Day 2 transitional state: a daemon-attached
+        // frontend's id is set as active, but no FrontendView is
+        // registered for it (Day 3 work).
+        s.active_frontend = FrontendId(42);
+        assert!(!s.views.contains_key(&FrontendId(42)));
+
+        // Fallback activates: active_view() returns LOCAL's view.
+        let fallback_view = s.active_view();
+        assert_eq!(
+            fallback_view.active, local_active_window,
+            "Day 2 fallback: active_view() returns LOCAL's view when active_frontend has no entry"
+        );
+
+        // Same for active_window().
+        let win = s.active_window();
+        assert_eq!(win.id, local_active_window);
+    }
+
+    #[test]
+    fn active_view_for_explicit_fid_returns_none_when_unregistered() {
+        // T M10.8 — explicit-fid lookups don't fall back. Callers
+        // explicitly asking about a specific frontend get a truthful
+        // None when that frontend has no state, distinguishing
+        // "active by default" from "actually has its own view."
+        let s = fresh();
+        assert!(s.active_window_for(FrontendId(42)).is_none());
+        assert!(s.active_window_for(FrontendId::LOCAL).is_some());
+    }
+
+    #[test]
+    fn register_and_unregister_frontend_view() {
+        // T M10.8 — the lifecycle API the dispatcher uses on attach
+        // and detach. Wiring lives in `daemon.rs`; this test pins
+        // the EditorCore-side semantics.
+        let mut s = fresh();
+        let fid = FrontendId(7);
+        assert!(s.active_window_for(fid).is_none());
+
+        // Build a view referencing the existing scratch window so
+        // we don't need a fresh window allocation in this test.
+        let local_view = s.views[&FrontendId::LOCAL].clone();
+        s.register_frontend_view(fid, local_view);
+        assert!(s.active_window_for(fid).is_some());
+
+        // Unregister drops the entry; explicit lookup returns None.
+        s.unregister_frontend_view(fid);
+        assert!(s.active_window_for(fid).is_none());
+
+        // LOCAL invariant survives unrelated register/unregister.
+        assert!(s.views.contains_key(&FrontendId::LOCAL));
+    }
+
     #[test]
     fn split_active_creates_a_second_window_on_same_buffer() {
         let mut s = fresh();
-        let original = s.active;
+        let original = s.active_window_id();
         let new_id = s.split_active(Orientation::Vertical, true);
         assert_ne!(new_id, original);
         assert_eq!(s.windows.len(), 2);
@@ -1349,12 +1636,8 @@ mod tests {
         assert_eq!(s.active_buffer_len(), 4);
         // The other window's text_view has the same line count,
         // confirming on_edit fired.
-        let other = s
-            .windows
-            .keys()
-            .find(|id| **id != s.active)
-            .copied()
-            .unwrap();
+        let active = s.active_window_id();
+        let other = s.windows.keys().find(|id| **id != active).copied().unwrap();
         assert_eq!(s.windows[&other].text_view.line_count(), 1);
     }
 
@@ -1377,17 +1660,112 @@ mod tests {
     #[test]
     fn focus_next_round_robins() {
         let mut s = fresh();
-        let a = s.active;
+        let a = s.active_window_id();
         let _b = s.split_active(Orientation::Vertical, true);
         let _c = s.split_active(Orientation::Horizontal, true);
         // Splits don't move focus; `a` is still active.
-        assert_eq!(s.active, a);
-        let order = s.layout.iter_ids();
+        assert_eq!(s.active_window_id(), a);
+        let order = s.active_layout().iter_ids();
         assert_eq!(order.len(), 3);
         // Walking N times wraps back to the original.
         for _ in 0..3 {
             s.focus_next();
         }
-        assert_eq!(s.active, a);
+        assert_eq!(s.active_window_id(), a);
+    }
+
+    // ------------------------------------------------------------------
+    // F27 / F28 (post-audit-round-5) — daemon-origin CRDT ops are
+    // queued on `pending_crdt_ops` so they reach all replicas.
+    // ------------------------------------------------------------------
+
+    /// Helper: upgrade the active buffer to CRDT-backed under the
+    /// LOCAL peer id (mirrors what the daemon does at attach time
+    /// for replica sessions).
+    #[cfg(feature = "crdt")]
+    fn upgrade_active_to_crdt(s: &mut EditorCore) {
+        let buffer_id = s.active_buffer_id();
+        let mut reg = s.registry.borrow_mut();
+        let buf = reg.get_mut(buffer_id).expect("active buffer present");
+        buf.upgrade_to_crdt(crate::crdt::peer_id_from_frontend(
+            crate::protocol::FrontendId::LOCAL,
+        ))
+        .expect("upgrade");
+    }
+
+    /// F27 — undo on a CRDT-backed buffer queues the resulting
+    /// CRDT op for broadcast.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn undo_on_crdt_buffer_queues_crdt_op_for_broadcast_f27() {
+        let mut s = from_bytes(b"abc");
+        upgrade_active_to_crdt(&mut s);
+        // Apply an edit so there's something to undo. apply_active_edit
+        // also pushes a DaemonKey-origin op.
+        s.apply_active_edit(crate::buffer::EditOp::Insert {
+            pos: 3,
+            bytes: b"X",
+        })
+        .expect("edit");
+        let queued_after_edit = s.pending_crdt_ops.len();
+        assert!(queued_after_edit >= 1, "edit must queue a CRDT op");
+
+        // Drain to isolate the undo's queueing.
+        s.pending_crdt_ops.clear();
+        s.undo();
+
+        assert!(
+            !s.pending_crdt_ops.is_empty(),
+            "F27: undo on a CRDT-backed buffer must queue a CRDT op for broadcast"
+        );
+        // Origin must be DaemonKey (broadcast-to-all-replicas).
+        let (origin, _, _) = &s.pending_crdt_ops[0];
+        assert!(
+            matches!(origin, CrdtOpOrigin::DaemonKey),
+            "F27: undo's CRDT op must be queued with DaemonKey origin (broadcast to all replicas including active frontend)"
+        );
+    }
+
+    /// F27 — redo on a CRDT-backed buffer queues the resulting
+    /// CRDT op for broadcast.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn redo_on_crdt_buffer_queues_crdt_op_for_broadcast_f27() {
+        let mut s = from_bytes(b"abc");
+        upgrade_active_to_crdt(&mut s);
+        s.apply_active_edit(crate::buffer::EditOp::Insert {
+            pos: 3,
+            bytes: b"X",
+        })
+        .expect("edit");
+        s.undo();
+        s.pending_crdt_ops.clear();
+        s.redo();
+        assert!(
+            !s.pending_crdt_ops.is_empty(),
+            "F27: redo on a CRDT-backed buffer must queue a CRDT op for broadcast"
+        );
+        let (origin, _, _) = &s.pending_crdt_ops[0];
+        assert!(matches!(origin, CrdtOpOrigin::DaemonKey));
+    }
+
+    /// F27 — undo on a non-CRDT buffer is a no-op for the broadcast
+    /// queue (the buffer produced no `crdt_op` on the Edit).
+    #[test]
+    fn undo_on_non_crdt_buffer_does_not_queue_crdt_op_f27() {
+        let mut s = from_bytes(b"abc");
+        s.apply_active_edit(crate::buffer::EditOp::Insert {
+            pos: 3,
+            bytes: b"X",
+        })
+        .expect("edit");
+        // Non-CRDT — apply_active_edit's pending push is a no-op
+        // (Edit::crdt_op is None). Confirm precondition then undo.
+        assert!(s.pending_crdt_ops.is_empty());
+        s.undo();
+        assert!(
+            s.pending_crdt_ops.is_empty(),
+            "F27: undo on a non-CRDT buffer must not produce a phantom queue entry"
+        );
     }
 }

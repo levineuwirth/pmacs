@@ -197,6 +197,8 @@ mod tests {
                 mouse: true,
                 bracketed_paste: true,
                 terminal_kind: Some("xterm-256color".into()),
+                multi_frontend: false,
+                crdt_replica: false,
             },
             initial_size: crate::cell::CellSize::new(24, 80),
         };

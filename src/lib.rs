@@ -38,6 +38,15 @@ pub mod command;
 pub mod completion;
 pub mod completion_framework;
 pub mod config;
+// T M10.2: CRDT-backed buffer state. Feature-gated so v0.1 builds
+// carry zero overhead — the `loro` dependency isn't pulled in, no
+// field on the Buffer struct layout, no branch on `apply_edit`.
+#[cfg(feature = "crdt")]
+pub mod crdt;
+// T M10.10: frontend-side CRDT replica for optimistic local edits.
+// Gated on `crdt` because BufferMirror wraps `CrdtState`.
+#[cfg(feature = "crdt")]
+pub mod buffer_mirror;
 pub mod daemon;
 pub mod daemon_attach;
 pub mod definition;
@@ -66,8 +75,16 @@ pub mod lua_isolation;
 pub mod mcp;
 pub mod message_bus;
 pub mod minibuffer;
+// T M10.10: frontend-side optimistic-apply infrastructure (predicate
+// + echo-dedup filter). Gated on `crdt` because it consumes
+// BufferMirror.
+#[cfg(feature = "crdt")]
+pub mod optimistic;
 pub mod overlay;
+pub mod overlay_color;
+pub mod overlay_paint;
 pub mod packages;
+pub mod presence;
 pub mod process;
 pub mod project;
 pub mod project_index;

@@ -185,6 +185,7 @@ impl Rope {
                 new_rope: self.clone(),
                 range: Range::new(pos, pos),
                 inserted_len: 0,
+                crdt_op: None,
             });
         }
 
@@ -202,6 +203,7 @@ impl Rope {
             new_rope: Self { root },
             range: Range::new(pos, pos),
             inserted_len: bytes.len() as u64,
+            crdt_op: None,
         })
     }
 
@@ -228,6 +230,7 @@ impl Rope {
                 new_rope: self.clone(),
                 range: Range::new(start, end),
                 inserted_len: 0,
+                crdt_op: None,
             });
         }
 
@@ -241,6 +244,7 @@ impl Rope {
             new_rope: Self { root: new_root },
             range: Range::new(start, end),
             inserted_len: 0,
+            crdt_op: None,
         })
     }
 
@@ -256,6 +260,7 @@ impl Rope {
             new_rope: after_insert.new_rope,
             range: Range::new(start, end),
             inserted_len: bytes.len() as u64,
+            crdt_op: None,
         })
     }
 }
@@ -304,6 +309,55 @@ pub struct Edit {
     pub range: Range,
     /// Number of bytes inserted at `range.start` in the *new* rope.
     pub inserted_len: u64,
+    /// T M10.2 Day 3: optional CRDT-op metadata.
+    ///
+    /// `Some` when this Edit was produced by a CRDT-backed Buffer's
+    /// edit path (`apply_edit` / `undo` / `redo`); `None` otherwise — both
+    /// in v0.1 mode (no CRDT) and for no-op edits in CRDT mode (an
+    /// empty insert at an empty range produces no CRDT op).
+    ///
+    /// `Box` indirection: keeps Edit's None-case cost to 8 bytes
+    /// (Box has a niche-optimized None) rather than the ~32 bytes
+    /// inline `Option<CrdtOp>` would take. Edit is constructed in
+    /// hot paths (every rope edit), so the size matters; CRDT mode
+    /// pays one allocation per edit, v0.1 mode pays nothing extra.
+    ///
+    /// Always present (not `#[cfg]`-gated) to avoid feature-flag
+    /// proliferation through every Edit consumer (views, hooks,
+    /// intercepts, undo stack — dozens of touch points). Consumers
+    /// that don't care ignore the field; M10.5 (wire protocol) and
+    /// M10.4 (per-frontend undo) consume it.
+    pub crdt_op: Option<Box<CrdtOp>>,
+}
+
+/// T M10.2 Day 3: CRDT-op metadata carried by [`Edit`] in CRDT mode.
+///
+/// Two fields:
+///
+/// * `peer_id` — the producing-frontend identity. M10.4's per-frontend
+///   undo reads this as the "is this op mine?" filter; saves the
+///   consumer from parsing the op bytes to extract identity.
+/// * `bytes` — wire-format serialization of the CRDT ops produced by
+///   the originating edit, as returned by loro's
+///   `ExportMode::updates_owned(pre_version)`. M10.5+ sends these
+///   over the wire; receiving frontends import them via loro's
+///   `import` to apply on their local CRDT.
+///
+/// Constructed by `Buffer::apply_edit` (and `undo` / `redo`) in CRDT
+/// mode; rope's edit constructors set `Edit::crdt_op` to `None` and
+/// the Buffer wraps after the rope returns.
+///
+/// T M10.5: serde derives added so this type can be the payload of
+/// `InstanceMessage::CrdtOp` and `FrontendEvent::CrdtOp` on the wire.
+/// `bytes` is opaque to the protocol layer — it's loro's incremental-
+/// update format; the receiving end's `CrdtState::import_updates`
+/// decodes it.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CrdtOp {
+    /// Producing frontend's identity (loro `PeerID`).
+    pub peer_id: u64,
+    /// Wire-format op bytes (loro `ExportMode::updates_owned` output).
+    pub bytes: Vec<u8>,
 }
 
 /// A half-open byte range `[start, end)` into a rope.

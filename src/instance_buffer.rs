@@ -25,7 +25,7 @@
 
 use std::fmt::Write;
 
-use crate::buffer::{BufferId, EditOp};
+use crate::buffer::{Buffer, BufferId, EditOp};
 use crate::buffer_registry::BufferRegistry;
 use crate::protocol::{AttachmentHandle, InstanceIdentity};
 
@@ -69,8 +69,14 @@ pub fn format_echo_line(
 }
 
 /// Render the full description into the `*pmacs-instance*` buffer
-/// (creating it if absent), replacing its full contents. Returns the
-/// buffer id.
+/// (creating it if absent), replacing its full contents. Returns
+/// the buffer id and the Edits produced by the replacement.
+///
+/// # Post-audit-round-6 F31 — broadcast queueing
+///
+/// Returning the Edits lets the caller queue any `crdt_op` they
+/// carry via `EditorCore::queue_daemon_origin_crdt_op`. See the
+/// equivalent doc on `workers_buffer::render`.
 ///
 /// The buffer is marked clean — the modeline shouldn't claim unsaved
 /// changes for a generated buffer.
@@ -78,26 +84,46 @@ pub fn render(
     registry: &mut BufferRegistry,
     identity: &InstanceIdentity,
     attachment: Option<&AttachmentHandle>,
-) -> BufferId {
+) -> (BufferId, Vec<crate::rope::Edit>) {
     let text = format_full_text(identity, attachment);
     let id = registry
         .find_by_name(INSTANCE_BUFFER_NAME)
         .unwrap_or_else(|| registry.create(INSTANCE_BUFFER_NAME));
     let buf = registry.get_mut(id).expect("just resolved");
+    let mut edits = Vec::new();
+    if buffer_contents_equal(buf, &text) {
+        buf.mark_clean();
+        return (id, edits);
+    }
     if !buf.is_empty() {
         let len = buf.len();
-        let _ = buf.apply_edit(EditOp::Delete {
+        if let Ok(edit) = buf.apply_edit(EditOp::Delete {
             range: crate::rope::Range::new(0, len),
-        });
+        }) {
+            edits.push(edit);
+        }
     }
     if !text.is_empty() {
-        let _ = buf.apply_edit(EditOp::Insert {
+        if let Ok(edit) = buf.apply_edit(EditOp::Insert {
             pos: 0,
             bytes: text.as_bytes(),
-        });
+        }) {
+            edits.push(edit);
+        }
     }
     buf.mark_clean();
-    id
+    (id, edits)
+}
+
+fn buffer_contents_equal(buf: &Buffer, text: &str) -> bool {
+    if buf.len() != text.len() as u64 {
+        return false;
+    }
+    let mut bytes = vec![0u8; text.len()];
+    if !bytes.is_empty() {
+        buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
+    }
+    bytes == text.as_bytes()
 }
 
 /// Multi-section text payload for the buffer view. Sections:
@@ -360,7 +386,7 @@ mod tests {
     #[test]
     fn render_creates_named_buffer_and_writes_text() {
         let mut reg = BufferRegistry::new();
-        let id = render(&mut reg, &local_identity(), None);
+        let (id, _edits) = render(&mut reg, &local_identity(), None);
         let buf = reg.get(id).expect("just rendered");
         assert_eq!(buf.name(), INSTANCE_BUFFER_NAME);
         let len = buf.len();
@@ -378,8 +404,8 @@ mod tests {
     #[test]
     fn render_replaces_existing_contents_on_second_call() {
         let mut reg = BufferRegistry::new();
-        let id1 = render(&mut reg, &local_identity(), None);
-        let id2 = render(&mut reg, &named_identity(), None);
+        let (id1, _) = render(&mut reg, &local_identity(), None);
+        let (id2, _) = render(&mut reg, &named_identity(), None);
         assert_eq!(id1, id2, "render must reuse the named buffer");
         let buf = reg.get(id2).expect("rendered");
         let len = buf.len();
@@ -396,10 +422,25 @@ mod tests {
     }
 
     #[test]
+    fn render_same_identity_is_no_op() {
+        let mut reg = BufferRegistry::new();
+        let (_id, first_edits) = render(&mut reg, &local_identity(), None);
+        assert!(
+            !first_edits.is_empty(),
+            "initial render should create buffer contents"
+        );
+        let (_id, second_edits) = render(&mut reg, &local_identity(), None);
+        assert!(
+            second_edits.is_empty(),
+            "unchanged instance render must not emit delete/insert edits"
+        );
+    }
+
+    #[test]
     fn render_with_attachment_includes_remote_section() {
         let mut reg = BufferRegistry::new();
         let h = sample_attachment();
-        let id = render(&mut reg, &local_identity(), Some(&h));
+        let (id, _) = render(&mut reg, &local_identity(), Some(&h));
         let buf = reg.get(id).expect("rendered");
         let len = buf.len();
         let mut bytes = vec![0u8; usize::try_from(len).unwrap()];

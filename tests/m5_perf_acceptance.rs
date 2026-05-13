@@ -150,6 +150,8 @@ fn build_default_caps() -> FrontendCapabilities {
         mouse: true,
         bracketed_paste: true,
         terminal_kind: Some("perf-gate".into()),
+        multi_frontend: false,
+        crdt_replica: false,
     }
 }
 

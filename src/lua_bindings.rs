@@ -1198,10 +1198,31 @@ fn add_history_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
 }
 
 /// Notify every window currently displaying `buffer_id` that the
-/// buffer was just edited via the Lua surface. Without this, a window
-/// already displaying the edited buffer would keep a stale
+/// buffer was just edited via the Lua surface, AND queue the edit's
+/// CRDT op (if any) for broadcast to replica frontends.
+///
+/// Without the window notification, a window already displaying the
+/// edited buffer would keep a stale
 /// [`crate::text_view::TextView`] line cache — cursor motions stop
 /// updating the screen until the window switches buffers.
+///
+/// # Post-audit-round-5 F28: daemon-origin CRDT op broadcast
+///
+/// Lua-driven edits (`buf:insert`, `buf:delete`, `buf:replace`,
+/// `buf:undo`, `buf:redo`) on CRDT-backed buffers produce Edits with
+/// `crdt_op` populated. Without explicit broadcast queueing, those
+/// ops never reach replica frontends — their `BufferMirror`s see the
+/// resulting `CellDelta` repaint but never import the CRDT op, so
+/// subsequent optimistic edits on the replica are generated against
+/// stale mirror content.
+///
+/// We push the op as
+/// [`crate::editor_core::CrdtOpOrigin::DaemonKey`] (via
+/// `EditorCore::queue_daemon_origin_crdt_op`) so the broadcast sweep
+/// includes every replica with no sender exclusion: no frontend
+/// applied the op locally; every replica's mirror needs the bytes.
+///
+/// # No-op cases
 ///
 /// No-op when no [`SharedCore`] has been registered as Lua app data
 /// (the shape used by the early-stage tests that exercise the
@@ -1210,7 +1231,12 @@ fn notify_buffer_edit_to_windows(lua: &Lua, buffer_id: BufferId, edit: &crate::r
     let Some(core) = lua.app_data_ref::<SharedCore>() else {
         return;
     };
-    core.borrow_mut().notify_buffer_edit(buffer_id, edit);
+    let mut core = core.borrow_mut();
+    core.notify_buffer_edit(buffer_id, edit);
+    // F28 — queue for broadcast. `queue_daemon_origin_crdt_op` is a
+    // no-op when the edit doesn't carry a `crdt_op` (the buffer
+    // wasn't CRDT-backed at edit time).
+    core.queue_daemon_origin_crdt_op(buffer_id, edit);
 }
 
 /// Force any window showing `buffer_id` to rebuild its `TextView`.
@@ -2045,10 +2071,53 @@ fn install_instance_show_binding(lua: &Lua, registry: &SharedRegistry) -> mlua::
         let attachment = lua
             .app_data_ref::<CurrentAttachmentSlot>()
             .and_then(|s| s.get());
-        let id =
+        let (id, edits) =
             crate::instance_buffer::render(&mut reg.borrow_mut(), &identity, attachment.as_ref());
+        queue_generated_buffer_edits(lua, id, &edits);
+        if !edits.is_empty() {
+            rebuild_generated_buffer_views(lua, id);
+        }
         Ok(BufferIdLua(id))
     })
+}
+
+/// T M10.10 post-audit-round-6 F31 — queue every CRDT op produced
+/// by a generated-buffer render to the daemon's broadcast queue.
+///
+/// The three generated buffers (`*help*`, `*workers*`,
+/// `*pmacs-instance*`) get upgraded to CRDT-backed at every
+/// replica's attach via `send_buffer_snapshots`. Each subsequent
+/// regenerate (delete-all + insert-new) produces zero, one, or two
+/// `Edit`s carrying `crdt_op`. Replicas need every `CrdtOp` so their
+/// `BufferMirror`s converge with the daemon's new content for
+/// these buffers; without queueing, the replicas see the
+/// `CellDelta` repaint but their mirrors permanently desync.
+///
+/// Caller: every site in `lua_bindings.rs` that drives one of the
+/// render functions. The render functions return their Edits
+/// alongside the `BufferId` so this helper can queue them via
+/// `EditorCore::queue_daemon_origin_crdt_op`.
+///
+/// No-op when:
+/// - No `SharedCore` is registered as Lua app data (early-stage
+///   tests use the registry without an editor core).
+/// - The edits' buffer wasn't CRDT-backed (`queue_daemon_origin_crdt_op`
+///   itself early-returns when the edit has no `crdt_op`).
+fn queue_generated_buffer_edits(lua: &Lua, buffer_id: BufferId, edits: &[crate::rope::Edit]) {
+    let Some(core) = lua.app_data_ref::<SharedCore>() else {
+        return;
+    };
+    let mut core = core.borrow_mut();
+    for edit in edits {
+        core.queue_daemon_origin_crdt_op(buffer_id, edit);
+    }
+}
+
+fn rebuild_generated_buffer_views(lua: &Lua, buffer_id: BufferId) {
+    let Some(core) = lua.app_data_ref::<SharedCore>() else {
+        return;
+    };
+    core.borrow_mut().rebuild_views_for(buffer_id);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4024,10 +4093,11 @@ fn install_help_module(
                     let k = kms.borrow();
                     help::render_command(&mut r, &c, &k, &name)
                 };
-                if let Some(id) = result {
-                    rebuild_help_buffer_views(lua, id);
+                if let Some((id, edits)) = result.as_ref() {
+                    queue_generated_buffer_edits(lua, *id, edits);
+                    rebuild_help_buffer_views(lua, *id);
                 }
-                Ok(result.map(BufferIdLua))
+                Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
         )?;
     }
@@ -4052,10 +4122,11 @@ fn install_help_module(
                     let k = kms.borrow();
                     help::render_key(&mut r, &c, &k, active_buffer, &sequence)
                 };
-                if let Some(id) = result {
-                    rebuild_help_buffer_views(lua, id);
+                if let Some((id, edits)) = result.as_ref() {
+                    queue_generated_buffer_edits(lua, *id, edits);
+                    rebuild_help_buffer_views(lua, *id);
                 }
-                Ok(result.map(BufferIdLua))
+                Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
         )?;
     }
@@ -4069,10 +4140,11 @@ fn install_help_module(
                     let mut r = reg.borrow_mut();
                     help::render_buffer(&mut r, id.0)
                 };
-                if let Some(rid) = result {
-                    rebuild_help_buffer_views(lua, rid);
+                if let Some((rid, edits)) = result.as_ref() {
+                    queue_generated_buffer_edits(lua, *rid, edits);
+                    rebuild_help_buffer_views(lua, *rid);
                 }
-                Ok(result.map(BufferIdLua))
+                Ok(result.map(|(rid, _)| BufferIdLua(rid)))
             })?,
         )?;
     }
@@ -4088,10 +4160,11 @@ fn install_help_module(
                     let k = kms.borrow();
                     help::render_mode(&mut r, &k, &name)
                 };
-                if let Some(id) = result {
-                    rebuild_help_buffer_views(lua, id);
+                if let Some((id, edits)) = result.as_ref() {
+                    queue_generated_buffer_edits(lua, *id, edits);
+                    rebuild_help_buffer_views(lua, *id);
                 }
-                Ok(result.map(BufferIdLua))
+                Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
         )?;
     }
@@ -4107,10 +4180,11 @@ fn install_help_module(
                     let h = hks.borrow();
                     help::render_hook(&mut r, &h, &name)
                 };
-                if let Some(id) = result {
-                    rebuild_help_buffer_views(lua, id);
+                if let Some((id, edits)) = result.as_ref() {
+                    queue_generated_buffer_edits(lua, *id, edits);
+                    rebuild_help_buffer_views(lua, *id);
                 }
-                Ok(result.map(BufferIdLua))
+                Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
         )?;
     }
@@ -4124,10 +4198,11 @@ fn install_help_module(
                     let mut r = reg.borrow_mut();
                     help::render_view(&mut r, id.0)
                 };
-                if let Some(rid) = result {
-                    rebuild_help_buffer_views(lua, rid);
+                if let Some((rid, edits)) = result.as_ref() {
+                    queue_generated_buffer_edits(lua, *rid, edits);
+                    rebuild_help_buffer_views(lua, *rid);
                 }
-                Ok(result.map(BufferIdLua))
+                Ok(result.map(|(rid, _)| BufferIdLua(rid)))
             })?,
         )?;
     }
@@ -4148,10 +4223,11 @@ fn install_help_module(
                     let h = hks.borrow();
                     help::follow_link_at(&mut r, &c, &k, &h, cursor)
                 };
-                if let Some(id) = result {
-                    rebuild_help_buffer_views(lua, id);
+                if let Some((id, edits)) = result.as_ref() {
+                    queue_generated_buffer_edits(lua, *id, edits);
+                    rebuild_help_buffer_views(lua, *id);
                 }
-                Ok(result.map(BufferIdLua))
+                Ok(result.map(|(id, _)| BufferIdLua(id)))
             })?,
         )?;
     }
@@ -5150,9 +5226,13 @@ pub fn install_async(
         let reg = registry.clone();
         async_mod.set(
             "_show_workers_buffer",
-            lua.create_function(move |_, ()| {
+            lua.create_function(move |lua, ()| {
                 let snap = rt.workers_snapshot();
-                let id = workers_buffer::render(&mut reg.borrow_mut(), &snap);
+                let (id, edits) = workers_buffer::render(&mut reg.borrow_mut(), &snap);
+                queue_generated_buffer_edits(lua, id, &edits);
+                if !edits.is_empty() {
+                    rebuild_generated_buffer_views(lua, id);
+                }
                 Ok(BufferIdLua(id))
             })?,
         )?;
@@ -9666,7 +9746,7 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
             lua.create_function(move |lua, ()| {
                 let c = cc.borrow();
                 let t = lua.create_table()?;
-                for (i, id) in c.layout.iter_ids().iter().enumerate() {
+                for (i, id) in c.active_layout().iter_ids().iter().enumerate() {
                     t.set(i + 1, id.raw())?;
                 }
                 Ok(t)
@@ -9678,7 +9758,7 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
         let cc = core.clone();
         win.set(
             "current",
-            lua.create_function(move |_, ()| Ok(cc.borrow().active.raw()))?,
+            lua.create_function(move |_, ()| Ok(cc.borrow().active_window_id().raw()))?,
         )?;
     }
 

@@ -36,9 +36,21 @@ use crate::keymap_tree::{Binding, Keymap};
 /// [`BufferRegistry::find_by_name`].
 pub const HELP_BUFFER_NAME: &str = "*help*";
 
-/// Result of a render: the buffer id of `*help*`, or [`None`] if the
+/// Result of a render: the buffer id of `*help*` paired with the
+/// Edits produced by the content replacement, or [`None`] if the
 /// described target doesn't exist (e.g. unknown command name).
-pub type RenderResult = Option<BufferId>;
+///
+/// # Post-audit-round-6 F31 — broadcast queueing
+///
+/// Returning the Edits (zero, one, or two — Delete for old
+/// non-empty content + Insert for new non-empty content) lets the
+/// caller queue any `crdt_op` they carry via
+/// `EditorCore::queue_daemon_origin_crdt_op`. Without this, replica
+/// frontends see the `*help*` repaint as `CellDelta` but never
+/// update their `BufferMirror`s for the CRDT-backed `*help*`
+/// buffer; subsequent optimistic edits on the replica would run
+/// against stale mirror content.
+pub type RenderResult = Option<(BufferId, Vec<crate::rope::Edit>)>;
 
 // ---------------------------------------------------------------------------
 // Render entry points
@@ -278,27 +290,35 @@ fn write_mode_bindings(out: &mut String, map: &Keymap) {
     }
 }
 
-fn replace_help_buffer(registry: &mut BufferRegistry, text: &str) -> BufferId {
+fn replace_help_buffer(
+    registry: &mut BufferRegistry,
+    text: &str,
+) -> (BufferId, Vec<crate::rope::Edit>) {
     let id = registry
         .find_by_name(HELP_BUFFER_NAME)
         .unwrap_or_else(|| registry.create(HELP_BUFFER_NAME));
     let buf = registry.get_mut(id).expect("just resolved");
+    let mut edits = Vec::new();
     if !buf.is_empty() {
         let len = buf.len();
-        let _ = buf.apply_edit(EditOp::Delete {
+        if let Ok(edit) = buf.apply_edit(EditOp::Delete {
             range: crate::rope::Range::new(0, len),
-        });
+        }) {
+            edits.push(edit);
+        }
     }
     if !text.is_empty() {
-        let _ = buf.apply_edit(EditOp::Insert {
+        if let Ok(edit) = buf.apply_edit(EditOp::Insert {
             pos: 0,
             bytes: text.as_bytes(),
-        });
+        }) {
+            edits.push(edit);
+        }
     }
     // The help buffer is regenerated content; mark it clean so the
     // modeline doesn't claim it has unsaved changes.
     buf.mark_clean();
-    id
+    (id, edits)
 }
 
 // ---------------------------------------------------------------------------
@@ -386,10 +406,11 @@ fn read_buffer_text(buf: &Buffer) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
-/// Result of [`follow_link_at`]: the help buffer id (re-rendered if a
-/// link was found), or [`None`] if the cursor wasn't on a recognized
-/// link.
-pub type FollowResult = Option<BufferId>;
+/// Result of [`follow_link_at`]: the help buffer id paired with the
+/// Edits produced by the re-render (zero, one, or two), or [`None`]
+/// if the cursor wasn't on a recognized link. Same broadcast-queueing
+/// contract as [`RenderResult`].
+pub type FollowResult = Option<(BufferId, Vec<crate::rope::Edit>)>;
 
 /// Parse the link under the cursor in the `*help*` buffer and
 /// re-render. Returns the help buffer id on success.
@@ -489,7 +510,7 @@ mod tests {
             },
         )
         .unwrap();
-        let id = render_command(&mut reg, &cmds, &kms, "cursor.left").unwrap();
+        let (id, _) = render_command(&mut reg, &cmds, &kms, "cursor.left").unwrap();
         let body = read_buffer_text(reg.get(id).unwrap());
         assert!(body.contains("Command: cursor.left"));
         assert!(body.contains("Move cursor left."));
@@ -521,7 +542,7 @@ mod tests {
             },
         )
         .unwrap();
-        let id = render_key(&mut reg, &cmds, &kms, None, "C-x C-s").unwrap();
+        let (id, _) = render_key(&mut reg, &cmds, &kms, None, "C-x C-s").unwrap();
         let body = read_buffer_text(reg.get(id).unwrap());
         assert!(body.contains("Key: C-x C-s"));
         assert!(body.contains("[command: save]"));
@@ -690,7 +711,7 @@ mod tests {
         // Find cursor on the cross-ref.
         let body = read_help(&reg);
         let cursor = body.find("beta").unwrap() as u64;
-        let returned = follow_link_at(&mut reg, &cmds, &kms, &hooks, cursor).unwrap();
+        let (returned, _) = follow_link_at(&mut reg, &cmds, &kms, &hooks, cursor).unwrap();
         assert_eq!(returned, id);
         let body = read_help(&reg);
         assert!(body.contains("Command: beta"), "{body}");
@@ -724,7 +745,7 @@ mod tests {
             "buffer-local key link must carry its buffer scope: {body}"
         );
         let cursor = body.find("s @buffer").unwrap() as u64;
-        let returned = follow_link_at(&mut reg, &cmds, &kms, &hooks, cursor).unwrap();
+        let (returned, _) = follow_link_at(&mut reg, &cmds, &kms, &hooks, cursor).unwrap();
         assert_eq!(returned, reg.find_by_name(HELP_BUFFER_NAME).unwrap());
         let body = read_help(&reg);
         assert!(body.contains("Key: s"), "{body}");

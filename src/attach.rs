@@ -124,11 +124,51 @@ impl std::fmt::Display for AttachError {
         match self {
             Self::Io(e) => write!(f, "attach I/O error: {e}"),
             Self::Transport(e) => write!(f, "{e}"),
-            Self::VersionMismatch { server, client } => write!(
-                f,
-                "protocol version mismatch (instance v{server}, client v{client})"
-            ),
-            Self::Rejected(reason) => write!(f, "instance rejected attach: {reason:?}"),
+            Self::VersionMismatch { server, client } => {
+                // T M10.7 criterion 5: the message must tell the user
+                // which side is at the older version. Comparing
+                // `server` against `client` produces an unambiguous
+                // identification without the user needing to decode
+                // version-number semantics.
+                let which_older = match server.cmp(client) {
+                    std::cmp::Ordering::Less => {
+                        " The pmacs daemon is at the older version — upgrade the daemon \
+                         (or restart it after upgrading the pmacs binary)."
+                    }
+                    std::cmp::Ordering::Greater => {
+                        " Your pmacs binary is at the older version — upgrade the binary."
+                    }
+                    std::cmp::Ordering::Equal => "",
+                };
+                write!(
+                    f,
+                    "protocol version mismatch (instance v{server}, client v{client}).{which_older}"
+                )
+            }
+            Self::Rejected(reason) => match reason {
+                // T M10.7: capability negotiation mismatch — name the
+                // capabilities the frontend asked for that the
+                // instance can't provide. The strings on the wire are
+                // exactly the `FrontendCapabilities` field names
+                // (e.g., `multi_frontend`); user-facing translation
+                // happens here.
+                GoodbyeReason::CapabilityMismatch { missing } => {
+                    let translated: Vec<&str> = missing
+                        .iter()
+                        .map(|name| match name.as_str() {
+                            "multi_frontend" => "multi-frontend collaboration",
+                            "crdt_replica" => "CRDT replica participation",
+                            other => other,
+                        })
+                        .collect();
+                    write!(
+                        f,
+                        "instance does not support the requested capabilities: {}",
+                        translated.join(", ")
+                    )
+                }
+                _ => write!(f, "instance rejected attach: {reason:?}"),
+            },
             Self::Terminal(e) => write!(f, "terminal error: {e}"),
             Self::SshSpawnFailed { command, source } => write!(
                 f,
@@ -259,6 +299,35 @@ pub(crate) trait AttachPumpFrontend {
     fn present_messages(&mut self, msgs: &[InstanceMessage]) -> std::io::Result<()>;
     fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
     fn size(&self) -> CellSize;
+
+    /// T M10.10 Day 3 step 5 Path β — paint an optimistic insert
+    /// at the terminal's current cursor position. Used when the
+    /// optimistic-apply orchestrator landed a `CrdtOp` AND the
+    /// mirror reports `cursor_at_end_of_line == true` for the active
+    /// buffer.
+    ///
+    /// Default impl no-ops; the production `Frontend` overrides with
+    /// the actual terminal-write path. Tests using stub frontends
+    /// inherit the no-op (visual paint isn't being asserted at the
+    /// unit-test level).
+    ///
+    /// Feature-gated: the orchestrator's call site is `#[cfg(feature =
+    /// "crdt")]`; the trait method exists only in CRDT builds to keep
+    /// the non-CRDT trait surface minimal.
+    #[cfg(feature = "crdt")]
+    fn paint_optimistic_insert(&mut self, _c: char) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// T M10.10 Day 3 step 5 Path β — paint an optimistic
+    /// delete-back: erase the cell to the left of the cursor and
+    /// retreat the cursor one column. Cells match what the daemon's
+    /// `CellDelta` will eventually carry (last char of line becomes a
+    /// space at the cursor position before the cursor returns).
+    #[cfg(feature = "crdt")]
+    fn paint_optimistic_delete_back(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl AttachPumpFrontend for Frontend {
@@ -270,6 +339,14 @@ impl AttachPumpFrontend for Frontend {
     }
     fn size(&self) -> CellSize {
         Frontend::size(self)
+    }
+    #[cfg(feature = "crdt")]
+    fn paint_optimistic_insert(&mut self, c: char) -> std::io::Result<()> {
+        Frontend::paint_optimistic_insert(self, c)
+    }
+    #[cfg(feature = "crdt")]
+    fn paint_optimistic_delete_back(&mut self) -> std::io::Result<()> {
+        Frontend::paint_optimistic_delete_back(self)
     }
 }
 
@@ -289,7 +366,13 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     // mismatch, malformed Hello, EOF), the error message reaches a
     // normal terminal — `Frontend::new` hasn't taken over yet.
     let hello: Hello = read_message(&mut stream)?;
-    if hello.protocol_version != PROTOCOL_VERSION {
+    // T M10.5: relaxed from strict equality to range membership per
+    // `§sec:m10-backward-compat`. A v1.0 frontend accepts a Hello
+    // from a v0.1 daemon (protocol_version=1) and downgrades its own
+    // request to match the server's version; symmetric to the daemon-
+    // side relaxation. Versions outside `SUPPORTED_PROTOCOL_VERSIONS`
+    // are still rejected.
+    if !crate::protocol::is_supported_protocol_version(hello.protocol_version) {
         return Err(AttachError::VersionMismatch {
             server: hello.protocol_version,
             client: PROTOCOL_VERSION,
@@ -300,8 +383,13 @@ pub fn run_attach(socket_path: PathBuf) -> Result<(), AttachError> {
     let (cols, rows) = crossterm::terminal::size().map_err(AttachError::Terminal)?;
     let initial_size = CellSize::new(u32::from(rows), u32::from(cols));
 
+    // T M10.5: match the server's protocol version so a v1.0 frontend
+    // connecting to a v0.1 daemon advertises protocol_version=1 in
+    // its AttachRequest (the v0.1 daemon's strict-equality check will
+    // accept). The frontend's runtime behavior on the wire is the
+    // intersection of features both sides support.
     let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello.protocol_version,
         frontend_capabilities: build_capabilities(),
         initial_size,
     };
@@ -399,9 +487,26 @@ impl Read for KickAwareUnixReader {
     }
 }
 
-fn build_capabilities() -> FrontendCapabilities {
+// `pub` so the post-audit Finding 6 production-path test in
+// `tests/m5_5_acceptance.rs` can verify the production caps directly
+// rather than reconstructing them in the test (which is exactly the
+// gap that allowed Finding 1 to survive M10.10's first audit —
+// `attach_multi()`'s custom caps bypassed the production function).
+//
+// Not part of the stable public API; reserved for internal test use.
+#[doc(hidden)]
+pub fn build_capabilities() -> FrontendCapabilities {
     // The v0.1 TUI implements all of these; we report them honestly
     // so the daemon doesn't strip features that work fine.
+    //
+    // T M10.10 — `multi_frontend` and `crdt_replica` advertise the
+    // M10.10 BufferMirror + optimistic-apply infrastructure. Gated
+    // on the `crdt` Cargo feature because the relevant modules
+    // (`buffer_mirror`, `optimistic`) are conditionally compiled.
+    // A non-CRDT build's frontend can't bootstrap a mirror and
+    // shouldn't claim it can. CRDT-feature builds advertise true;
+    // the daemon's per-tick CursorByte + BufferSnapshot bootstrap +
+    // CrdtOp routing are then negotiated correctly.
     FrontendCapabilities {
         synchronized_output: true,
         unicode_smp: true,
@@ -409,6 +514,8 @@ fn build_capabilities() -> FrontendCapabilities {
         mouse: true,
         bracketed_paste: true,
         terminal_kind: std::env::var("TERM").ok(),
+        multi_frontend: cfg!(feature = "crdt"),
+        crdt_replica: cfg!(feature = "crdt"),
     }
 }
 
@@ -465,6 +572,16 @@ fn format_uptime(secs: u64) -> String {
 /// is joined before this function returns. The closure-and-call
 /// wind-down pattern guarantees this regardless of which `return`
 /// the loop takes.
+// M10.10 grew this function with optimistic-apply orchestration +
+// BufferSnapshot/CursorByte/CrdtOp routing in the message-drain
+// loop. The 146-line size is intentionally cohesive: the closure
+// captures the AttachIo writer and BufferMirror together, and
+// splitting would require parameterizing both across helper
+// functions or restructuring the wind-down pattern (drop(writer)
+// → kick → join) which is the function's primary correctness
+// invariant. The lint flags growth without naming a structural
+// problem; defer to v0.2+ refactor if growth continues.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_attach_pair(
     io: AttachIo,
     frontend: &mut dyn AttachPumpFrontend,
@@ -479,6 +596,13 @@ pub(crate) fn run_attach_pair(
     let (tx, rx) = mpsc::channel::<InstanceMessage>();
     let reader_handle = thread::spawn(move || run_reader(reader, tx));
 
+    // T M10.10: per-session CRDT replica state. Bootstrapped by
+    // `InstanceMessage::BufferSnapshot` messages routed in the
+    // drain loop below; consumed by the optimistic-apply predicate
+    // wired in Day 3.
+    #[cfg(feature = "crdt")]
+    let mut buffer_mirror = crate::buffer_mirror::BufferMirror::new(assigned_id);
+
     // Closure-and-call: any `return` from this closure still falls
     // through to `kick()` and `reader_handle.join()` below. Without
     // this wrapping a writer-side IO error inside the loop would skip
@@ -486,8 +610,8 @@ pub(crate) fn run_attach_pair(
     let result: Result<(), AttachError> = (|| {
         loop {
             // Drain instance messages. Goodbye exits immediately;
-            // other messages are batched into a single
-            // present_messages call.
+            // BufferSnapshot routes to the mirror; other messages are
+            // batched into a single present_messages call.
             let mut batch: Vec<InstanceMessage> = Vec::new();
             let mut goodbye: Option<GoodbyeReason> = None;
             let mut reader_eof = false;
@@ -496,6 +620,81 @@ pub(crate) fn run_attach_pair(
                     Ok(InstanceMessage::Goodbye(reason)) => {
                         goodbye = Some(reason);
                         break;
+                    }
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::BufferSnapshot {
+                        buffer_id,
+                        crdt_snapshot,
+                    }) => {
+                        // T M10.10: bootstrap the mirror for
+                        // `buffer_id`. AlreadyInitialized errors
+                        // surface a daemon-side bug (double-send) but
+                        // shouldn't abort the session — log and
+                        // continue with prior state. Loro decode
+                        // errors are similarly logged.
+                        if let Err(e) = buffer_mirror.init_from_snapshot(buffer_id, &crdt_snapshot)
+                        {
+                            eprintln!("pmacs: BufferMirror init for {buffer_id:?} failed: {e}");
+                        }
+                    }
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::CursorByte {
+                        buffer_id,
+                        byte_pos,
+                    }) => {
+                        // T M10.10 Finding 2: authoritative cursor
+                        // byte-position update from the daemon. The
+                        // optimistic-apply path consults
+                        // `buffer_mirror.cursor_byte_pos(buffer_id)`
+                        // before generating a local CrdtOp; this
+                        // keeps that lookup current. Convert wire
+                        // u64 → usize for the loro API.
+                        buffer_mirror.set_cursor_byte_pos(buffer_id, byte_pos as usize);
+                    }
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::CrdtOp { buffer_id, op }) => {
+                        // T M10.10 step 4 — remote CrdtOp routing.
+                        //
+                        // The filter site is the message loop, NOT
+                        // inside BufferMirror. Echoes of locally-
+                        // applied edits arrive via CrdtOp broadcasts
+                        // (the daemon fans out every op including the
+                        // originator's own); the mirror has already
+                        // applied these via apply_local_insert /
+                        // apply_local_delete at keystroke time;
+                        // re-applying would double-insert. The
+                        // BufferMirror layer stays identity-ignorant
+                        // by design — `apply_incoming_crdt_op` does
+                        // the FrontendId comparison before invoking
+                        // the mirror.
+                        //
+                        // Source FrontendId is derived from
+                        // `op.peer_id` via the identity mapping
+                        // documented in `crdt::peer_id_from_frontend`
+                        // (FrontendId(n).0 == n).
+                        let source = FrontendId(op.peer_id);
+                        match crate::optimistic::apply_incoming_crdt_op(
+                            &mut buffer_mirror,
+                            assigned_id,
+                            source,
+                            buffer_id,
+                            &op.bytes,
+                        ) {
+                            Ok(_outcome) => {
+                                // Applied or SkippedEcho — both are
+                                // success. Paint reconciliation
+                                // (step 5) handles the visible diff.
+                            }
+                            Err(e) => {
+                                // NotReady is the common case for a
+                                // buffer this frontend hasn't been
+                                // snapshotted for (mid-session
+                                // buffer creation; v0.2's broadcast
+                                // will close this gap). Log and
+                                // continue.
+                                eprintln!("pmacs: CrdtOp routing for {buffer_id:?} failed: {e}");
+                            }
+                        }
                     }
                     Ok(msg) => batch.push(msg),
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -534,10 +733,139 @@ pub(crate) fn run_attach_pair(
                 return Ok(());
             }
 
-            if let Err(e) = forward_event(&mut writer, &ev, assigned_id, frontend.size()) {
-                // Likely a broken pipe — instance went away.
-                eprintln!("pmacs: {e}");
-                return Err(e);
+            // T M10.10 Day 3 step 3b — text-input optimistic-apply
+            // orchestration. For Press/Repeat key events, the
+            // orchestrator either:
+            //  - returns FrontendEvent::CrdtOp (after applying the
+            //    edit to the local mirror) when the mirror is ready
+            //    for the active buffer, or
+            //  - returns FrontendEvent::Key (graceful Refinement 4
+            //    fallback) when the optimistic path isn't viable.
+            // The caller writes whatever event was produced. Other
+            // event kinds (mouse, resize, paste, focus, Release-kind
+            // keys) fall through to the existing forward_event path.
+            #[cfg(feature = "crdt")]
+            let optimistic_handled = if let Event::Key(k) = &ev {
+                if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                    let timestamp_ns = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(0))
+                        .unwrap_or(0);
+                    let pmacs_key = key_from_crossterm(k, assigned_id, timestamp_ns);
+
+                    // T M10.10 Day 3 step 5 Path β — determine
+                    // visual-paint eligibility BEFORE the orchestrator
+                    // mutates the mirror's cursor. End-of-line typing
+                    // is the only case where single-Print optimistic
+                    // paint matches the daemon's eventual CellDelta
+                    // exactly (no cells right of cursor to shift). The
+                    // action enum is captured so we can dispatch to
+                    // the right paint primitive after the orchestrator
+                    // produces a CrdtOp.
+                    let action = crate::optimistic::classify_key(pmacs_key.key, pmacs_key.mods);
+                    // Insert paint requires cursor at end-of-line (the
+                    // single-Print sequence matches the daemon's
+                    // eventual CellDelta exactly).
+                    // Delete-back paint requires the stricter
+                    // `cursor_at_end_of_line_safe_for_delete_back`
+                    // predicate per post-audit Finding 5: also requires
+                    // prev char != '\n'. Backspace that joins lines
+                    // (prev char = newline) can't be represented by the
+                    // single-column-erase paint sequence; falls
+                    // through to v0.1 round-trip.
+                    let active_buf = buffer_mirror.active_buffer();
+                    let insert_paint_eligible = active_buf
+                        .and_then(|b| buffer_mirror.cursor_at_end_of_line(b))
+                        == Some(true);
+                    let delete_back_paint_eligible = active_buf
+                        .and_then(|b| buffer_mirror.cursor_at_end_of_line_safe_for_delete_back(b))
+                        == Some(true);
+
+                    let frontend_event = crate::optimistic::frontend_event_for_keystroke(
+                        &mut buffer_mirror,
+                        assigned_id,
+                        pmacs_key,
+                    );
+                    if let Err(e) = write_message(&mut writer, &frontend_event) {
+                        eprintln!("pmacs: write keystroke failed: {e}");
+                        return Err(AttachError::from(e));
+                    }
+                    // Post-audit-round-4 F22 — if we round-tripped via
+                    // `FrontendEvent::Key`, the daemon's command
+                    // pipeline may move the cursor in ways the mirror
+                    // can't predict locally (motion, Enter/Tab,
+                    // mid-line edits, delete-forward, etc.). Mark the
+                    // active buffer's cursor stale so subsequent
+                    // keystrokes round-trip too until the daemon's
+                    // next `CursorByte` re-grounds the mirror cursor.
+                    if matches!(frontend_event, FrontendEvent::Key(_)) {
+                        if let Some(active_buf) = buffer_mirror.active_buffer() {
+                            buffer_mirror.mark_cursor_stale(active_buf);
+                        }
+                    }
+
+                    // Visual optimistic paint (Path β). Fires only when
+                    // the orchestrator landed a CrdtOp (mirror was
+                    // ready, action was optimistic-eligible) AND the
+                    // pre-edit cursor was at an action-specific safe
+                    // position. Mid-line operations, line-joining
+                    // backspace, and round-trip cases skip — the
+                    // daemon's CellDelta drives paint for those.
+                    //
+                    // Daemon-side CellDelta suppression is NOT needed:
+                    // under Path β, optimistic paint either matches
+                    // the eventual CellDelta exactly (end-of-line)
+                    // or doesn't exist (mid-line / line-join). Either
+                    // way, no flicker.
+                    if matches!(frontend_event, FrontendEvent::CrdtOp { .. }) {
+                        let paint_result = match action {
+                            crate::optimistic::OptimisticAction::Insert(c)
+                                if insert_paint_eligible =>
+                            {
+                                frontend.paint_optimistic_insert(c)
+                            }
+                            crate::optimistic::OptimisticAction::DeleteBack
+                                if delete_back_paint_eligible =>
+                            {
+                                frontend.paint_optimistic_delete_back()
+                            }
+                            _ => Ok(()),
+                        };
+                        if let Err(e) = paint_result {
+                            eprintln!("pmacs: optimistic paint failed: {e}");
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            #[cfg(not(feature = "crdt"))]
+            let optimistic_handled = false;
+
+            if !optimistic_handled {
+                if let Err(e) = forward_event(&mut writer, &ev, assigned_id, frontend.size()) {
+                    // Likely a broken pipe — instance went away.
+                    eprintln!("pmacs: {e}");
+                    return Err(e);
+                }
+                // Post-audit-round-6 F30 — `forward_event` (success
+                // path) may write a Mouse / Paste / Resize /
+                // FocusGained / FocusLost event (or no-op for a Key
+                // Release). Mouse down/drag in particular can move
+                // the daemon's active window cursor, change the
+                // active buffer, or both. Anything except an
+                // optimistic CrdtOp can desync the mirror's cursor
+                // from the daemon's view; conservatively mark the
+                // active buffer's cursor stale so subsequent
+                // keystrokes round-trip until the daemon's next
+                // `CursorByte` re-grounds the mirror.
+                #[cfg(feature = "crdt")]
+                if let Some(active_buf) = buffer_mirror.active_buffer() {
+                    buffer_mirror.mark_cursor_stale(active_buf);
+                }
             }
         }
     })();
@@ -1136,7 +1464,10 @@ fn run_one_session(
             ));
         }
     };
-    if hello.protocol_version != PROTOCOL_VERSION {
+    // T M10.5: relaxed to range membership per
+    // `§sec:m10-backward-compat`. Symmetric with the local-socket
+    // attach path above.
+    if !crate::protocol::is_supported_protocol_version(hello.protocol_version) {
         return Err(handshake_error_with_child(
             child,
             stderr_handle,
@@ -1166,8 +1497,11 @@ fn run_one_session(
         },
     };
 
+    // T M10.5: match the server's protocol version so v1.0 frontends
+    // attaching to v0.1 daemons advertise protocol_version=1. Same
+    // pattern as the local-socket path above.
     let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello.protocol_version,
         frontend_capabilities: build_capabilities(),
         initial_size,
     };
@@ -1938,5 +2272,90 @@ mod tests {
             banner_disconnected_countdown(Duration::from_secs(30)),
             "[pmacs disconnected — reconnecting in 30s — Ctrl-C to exit]"
         );
+    }
+
+    // T M10.7 — AttachError message formatting.
+    //
+    // Criterion 5 of the spec: the version-mismatch message must
+    // tell the user which side is at the older version. These tests
+    // pin the substring assertions explicitly so a future regression
+    // (the message no longer naming the older side) fails visibly.
+
+    #[test]
+    fn version_mismatch_daemon_older_message_names_daemon() {
+        let err = AttachError::VersionMismatch {
+            server: 1,
+            client: 2,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("daemon is at the older version"),
+            "criterion 5: message must name daemon as older when server < client; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn version_mismatch_binary_older_message_names_binary() {
+        let err = AttachError::VersionMismatch {
+            server: 2,
+            client: 1,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("binary is at the older version"),
+            "criterion 5: message must name client binary as older when server > client; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn version_mismatch_equal_no_older_clause() {
+        // Pathological case (the daemon shouldn't emit
+        // VersionMismatch when versions match) — but the formatter
+        // shouldn't claim an older side when there isn't one.
+        let err = AttachError::VersionMismatch {
+            server: 2,
+            client: 2,
+        };
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("older version"),
+            "no older clause when equal; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn capability_mismatch_message_names_multi_frontend() {
+        // T M10.7 criterion 4 — the error names the specific
+        // capability the frontend asked for that wasn't available.
+        let err = AttachError::Rejected(GoodbyeReason::CapabilityMismatch {
+            missing: vec!["multi_frontend".to_string()],
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains("multi-frontend collaboration"),
+            "criterion 4: message must name the capability in user-readable form; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn capability_mismatch_message_names_crdt_replica() {
+        let err = AttachError::Rejected(GoodbyeReason::CapabilityMismatch {
+            missing: vec!["crdt_replica".to_string()],
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CRDT replica participation"),
+            "message must translate crdt_replica to user-readable form; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn capability_mismatch_message_lists_multiple() {
+        let err = AttachError::Rejected(GoodbyeReason::CapabilityMismatch {
+            missing: vec!["multi_frontend".to_string(), "crdt_replica".to_string()],
+        });
+        let msg = err.to_string();
+        assert!(msg.contains("multi-frontend collaboration"));
+        assert!(msg.contains("CRDT replica participation"));
     }
 }

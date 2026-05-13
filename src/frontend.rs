@@ -46,6 +46,8 @@
 use std::io::{self, BufWriter, Stdout, Write};
 use std::time::Duration;
 
+#[cfg(feature = "crdt")]
+use crossterm::{cursor::MoveLeft, style::Print};
 use crossterm::{
     cursor::{self, MoveTo},
     event::{
@@ -226,6 +228,93 @@ impl Frontend {
         self.out.flush()
     }
 
+    /// T M10.10 Day 3 step 5 Path β — paint an optimistic insert.
+    ///
+    /// The character is written at the terminal's current cursor
+    /// position; the terminal advances the cursor by one column.
+    /// This is the visual half of the optimistic-apply path:
+    /// `BufferMirror::apply_local_insert` updated the CRDT mirror;
+    /// this method updates the user-visible display in the same
+    /// keystroke.
+    ///
+    /// Called only when the cursor is at end-of-line for the active
+    /// buffer (per `BufferMirror::cursor_at_end_of_line`). End-of-
+    /// line is the dominant typing case and the only case where the
+    /// daemon's eventual `CellDelta` matches a single-Print
+    /// optimistic paint exactly (no cells right of cursor to shift).
+    ///
+    /// # Post-audit round 2 (F15): style-blindness
+    ///
+    /// This paint is **default-style only**. We explicitly reset
+    /// terminal attributes before the `Print` so the painted glyph
+    /// is deterministic and doesn't inherit leftover SGR state from
+    /// a prior `emit_span`. The `emit_span` epilogue already issues
+    /// `ResetColor + SetAttribute(Attribute::Reset)`, but the
+    /// invariant is fragile across crossterm versions and we'd
+    /// rather pay one extra reset than re-flash whatever style the
+    /// previous span set.
+    ///
+    /// **Honest scope**: if the cell the daemon will eventually
+    /// paint into has a non-default style (e.g., a diagnostic
+    /// region, a syntax-highlighted token in a future milestone),
+    /// the optimistic glyph briefly renders default-styled until the
+    /// authoritative `CellDelta` arrives (within one frame target).
+    /// For v0.1 there is no syntax-highlighting pipeline; styled
+    /// regions are restricted to diagnostics squiggles, completion
+    /// popups, and overlays — none of which typically sit on the
+    /// end-of-line cell that Path β paints into. A future milestone
+    /// that introduces in-buffer styled content should track the
+    /// cursor-cell's pending style from the previous `CellDelta` and
+    /// apply it here, or suppress the optimistic paint on styled
+    /// cells altogether. The right fix needs per-cell style memory
+    /// the attach loop doesn't carry today.
+    #[cfg(feature = "crdt")]
+    pub fn paint_optimistic_insert(&mut self, c: char) -> io::Result<()> {
+        queue!(
+            self.out,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Print(c)
+        )?;
+        self.out.flush()
+    }
+
+    /// T M10.10 Day 3 step 5 Path β — paint an optimistic
+    /// delete-back.
+    ///
+    /// Sequence: move cursor one column left, overwrite the cell
+    /// with a space, retreat cursor one column to its final
+    /// position. Matches what the daemon's eventual `CellDelta`
+    /// will carry: the last char of the line becomes a space at
+    /// the cursor's pre-edit column.
+    ///
+    /// Called only when the cursor is at end-of-line and there's a
+    /// previous character to erase. Mid-line backspace falls
+    /// through to v0.1 round-trip per Path β scope.
+    ///
+    /// # Post-audit round 2 (F15): style-blindness
+    ///
+    /// The space is painted with default style (explicit reset
+    /// before `Print`). For end-of-line backspace this is correct
+    /// in nearly all v0.1 cases: the cell becomes empty / cleared,
+    /// and the daemon's eventual `CellDelta` for an empty cell is
+    /// itself default-styled. Same scope caveat as
+    /// [`Self::paint_optimistic_insert`] for any future milestone
+    /// where the post-erase cell might re-render with a non-default
+    /// background or syntax style.
+    #[cfg(feature = "crdt")]
+    pub fn paint_optimistic_delete_back(&mut self) -> io::Result<()> {
+        queue!(
+            self.out,
+            MoveLeft(1),
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Print(' '),
+            MoveLeft(1)
+        )?;
+        self.out.flush()
+    }
+
     /// Apply a single [`InstanceMessage`] to the terminal.
     ///
     /// `CellDelta` emits one cursor-move + run-of-glyphs sequence per
@@ -253,7 +342,33 @@ impl Frontend {
             },
             InstanceMessage::ModeLine(_)
             | InstanceMessage::Signal(_)
-            | InstanceMessage::Goodbye(_) => {
+            | InstanceMessage::Goodbye(_)
+            // T M10.5: CrdtOp's wire shape exists; the v1.0 TUI doesn't
+            // maintain a local CRDT state yet (M10.8 wires that). A v2
+            // daemon shouldn't send CrdtOp to this frontend because our
+            // FrontendCapabilities advertise crdt_replica: false. If one
+            // arrives anyway, drop it silently — same v0.1-ignored
+            // category as ModeLine / Signal / Goodbye for now.
+            | InstanceMessage::CrdtOp { .. }
+            // T M10.6: PresenceUpdate joins the v0.1-ignored category.
+            // The peer-cursor overlay renderer is M10.8 work; until
+            // then any incoming PresenceUpdate is dropped silently.
+            | InstanceMessage::PresenceUpdate { .. }
+            // T M10.10: BufferSnapshot is consumed by the BufferMirror
+            // layer on M10.10-aware frontends (gated by negotiated
+            // `crdt_replica`). The legacy TUI render path here doesn't
+            // maintain a BufferMirror, so the variant drops silently
+            // in this path. The M10.10 frontend wiring intercepts
+            // BufferSnapshot in the attach.rs message loop BEFORE it
+            // reaches apply_message.
+            | InstanceMessage::BufferSnapshot { .. }
+            // T M10.10: CursorByte is paired with Cursor for replica
+            // frontends. The cursor's grid position (consumed by the
+            // legacy render path above via Cursor) drives paint; the
+            // byte position (consumed by BufferMirror's cursor tracker
+            // in attach.rs) drives optimistic-apply. The legacy path
+            // here only needs grid; the byte variant drops silently.
+            | InstanceMessage::CursorByte { .. } => {
                 // v0.1 TUI ignores these; v0.3 GUI consumes them.
             }
         }

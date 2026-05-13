@@ -409,8 +409,18 @@ impl LuaHost {
         // switched to it via C-x b), its line cache would otherwise go
         // stale on every appended error and cursor motion would stop
         // updating the screen.
+        //
+        // Post-audit-round-6 F32 — also queue the resulting CRDT op
+        // for broadcast if the buffer is CRDT-backed. `*errors*`
+        // gets upgraded to CRDT at every replica's attach via
+        // `send_buffer_snapshots`, so each Lua-runtime-driven append
+        // produces an `Edit::crdt_op` that must reach replica
+        // `BufferMirror`s — otherwise their mirrors permanently
+        // desync from daemon state for `*errors*`.
         if let Some(core) = self.core.as_ref() {
-            core.borrow_mut().notify_buffer_edit(id, &edit);
+            let mut core = core.borrow_mut();
+            core.notify_buffer_edit(id, &edit);
+            core.queue_daemon_origin_crdt_op(id, &edit);
         }
     }
 

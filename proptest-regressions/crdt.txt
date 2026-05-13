@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 00a6ea2f06ee46f9058c802c4eccd65e938e069dcc93212c87257e61a4cac55f # shrinks to peer_count = 2, op_seqs = [[Insert(0, "a")], [Insert(0, "a")]], sync_pattern = Sequential
