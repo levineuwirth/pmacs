@@ -538,6 +538,76 @@ impl BufferMirror {
         })
     }
 
+    /// Optimistically undo this frontend's last edit on `buffer_id`,
+    /// returning the inverse op's wire-format bytes (to be broadcast
+    /// as a `FrontendEvent::CrdtOp`) on success.
+    ///
+    /// Loro's `UndoManager` is bound to the doc's `peer_id` at
+    /// construction (see `src/crdt.rs:60-65`, `"Local-only"`: undoes
+    /// the bound peer's most recent change). Each frontend's
+    /// `BufferMirror` holds a per-buffer `CrdtState` whose
+    /// `UndoManager` is bound to this frontend's `peer_id`, so calling
+    /// `state.undo()` reverses *this frontend's* most recent edit
+    /// regardless of concurrent remote activity — exactly M10.4's
+    /// per-frontend undo property. The inverse op is exported and
+    /// returned for broadcast; the daemon imports it as an ordinary
+    /// CRDT update (no daemon-side `UndoManager` involvement).
+    ///
+    /// This is the CRDT-native per-frontend undo path (M10.11 P1).
+    /// The daemon-side `Buffer::undo` remains the daemon-peer-only
+    /// undo path (vestigial from single-frontend mode + still used
+    /// for Lua-driven daemon-side edits); frontends route `Ctrl-4`
+    /// through this method via `optimistic::frontend_event_for_keystroke`.
+    ///
+    /// # Cursor staleness
+    ///
+    /// Undo can change content at arbitrary positions relative to
+    /// the cursor — the inverse of an insert at position 17 deletes
+    /// bytes at position 17, but the local cursor may be at 42
+    /// (after subsequent edits). The cursor for this buffer is
+    /// marked stale on successful undo; the daemon's next
+    /// `CursorByte` re-grounds it. Optimistic-apply round-trips
+    /// while stale.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(Some(bytes))` — the undo succeeded and produced an
+    ///   inverse op. The caller should send this as a
+    ///   `FrontendEvent::CrdtOp`.
+    /// - `Ok(None)` — nothing to undo on this frontend's local
+    ///   replica (the `UndoManager`'s stack is empty). Caller should
+    ///   round-trip the original keystroke; daemon's `buffer.undo`
+    ///   may have its own daemon-peer ops to undo (Lua-driven
+    ///   edits), so the Key path remains the right fallback.
+    /// - `Err(BufferMirrorError::NotReady)` — buffer hasn't received
+    ///   a snapshot yet (bootstrap window). Caller should round-trip.
+    /// - `Err(BufferMirrorError::Loro)` — loro's undo or export
+    ///   failed. Caller should round-trip.
+    pub fn apply_local_undo(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Result<Option<Vec<u8>>, BufferMirrorError> {
+        let state = self
+            .states
+            .get_mut(&buffer_id)
+            .ok_or(BufferMirrorError::NotReady(buffer_id))?;
+        let version_before = state.version();
+        let did_undo = state.undo()?;
+        if !did_undo {
+            return Ok(None);
+        }
+        let bytes = state.export_updates_since(&version_before).map_err(|e| {
+            BufferMirrorError::Loro(LoroError::DecodeError(
+                format!("export_updates: {e:?}").into(),
+            ))
+        })?;
+        // Content changed at arbitrary positions; cursor needs to be
+        // re-grounded by the daemon's next `CursorByte`. Same shape as
+        // `apply_remote_op`'s post-content-change handling below.
+        self.stale_cursors.insert(buffer_id);
+        Ok(Some(bytes))
+    }
+
     /// Apply a remote op (received via `InstanceMessage::CrdtOp`) to
     /// the mirror for `buffer_id`.
     ///

@@ -22,8 +22,8 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,140 +42,12 @@ use pmacs::protocol::{
 };
 use pmacs::transport::{read_message, write_message};
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
-/// A foreground daemon spawned in the test, with cleanup on Drop.
-struct TestDaemon {
-    /// Tempdir holding the socket and lockfile; auto-cleaned on Drop.
-    _tempdir: TempDir,
-    socket_path: PathBuf,
-    process: Child,
-}
-
-impl TestDaemon {
-    fn spawn() -> Self {
-        Self::spawn_with_env(&[])
-    }
-
-    /// T M10.8 Day 4 — spawn with extra env-var overrides for
-    /// instance-capability tests.
-    fn spawn_with_env(env_vars: &[(&str, &str)]) -> Self {
-        let tempdir = TempDir::new().expect("tempdir");
-        // tempfile::TempDir creates 0755-mode directories; the daemon
-        // requires a 0700-or-stricter parent for the socket. Tighten
-        // the tempdir before spawning.
-        fs::set_permissions(tempdir.path(), fs::Permissions::from_mode(0o700))
-            .expect("chmod tempdir 0700");
-        let socket_path = tempdir.path().join("pmacs.sock");
-        let process = spawn_daemon_process_with_env(&socket_path, env_vars);
-        wait_for_socket_or_exit(&socket_path, &process, Duration::from_secs(10))
-            .expect("daemon socket appeared");
-        Self {
-            _tempdir: tempdir,
-            socket_path,
-            process,
-        }
-    }
-
-    fn pid(&self) -> u32 {
-        self.process.id()
-    }
-
-    fn connect(&self) -> UnixStream {
-        UnixStream::connect(&self.socket_path).expect("connect")
-    }
-
-    fn is_alive(&mut self) -> bool {
-        self.process.try_wait().ok().flatten().is_none()
-    }
-
-    fn lockfile_path(&self) -> PathBuf {
-        let mut s = self.socket_path.as_os_str().to_os_string();
-        s.push(".lock");
-        PathBuf::from(s)
-    }
-}
-
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
-}
-
-fn spawn_daemon_process(socket_path: &Path) -> Child {
-    spawn_daemon_process_with_env(socket_path, &[])
-}
-
-/// Spawn a daemon with extra environment-variable overrides.
-///
-/// T M10.8 Day 4 — used by tests that need to exercise non-default
-/// instance capabilities (e.g., the M10.7 mismatch test, which
-/// needs `PMACS_INSTANCE_MULTI_FRONTEND=0` so a frontend declaring
-/// `multi_frontend: true` hits the capability-mismatch path).
-/// Production daemons don't set these vars.
-fn spawn_daemon_process_with_env(socket_path: &Path, env_vars: &[(&str, &str)]) -> Child {
-    let isolated_home = socket_path.parent().expect("socket has parent");
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_pmacs"));
-    cmd.args(["--daemon", "--socket"])
-        .arg(socket_path)
-        .env("HOME", isolated_home)
-        .env("XDG_CONFIG_HOME", isolated_home)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    for (key, value) in env_vars {
-        cmd.env(key, value);
-    }
-    cmd.spawn().expect("spawn pmacs --daemon")
-}
-
-fn wait_for_socket_or_exit(
-    socket: &Path,
-    _process: &Child,
-    deadline: Duration,
-) -> Result<(), String> {
-    // We probe by attempting to *connect*, not by file-exists. A stale
-    // socket file from a previous (crashed) daemon can satisfy
-    // `exists` without anyone actually listening — only a successful
-    // connect proves the new daemon has run through `bind` and
-    // `listen`. ECONNREFUSED on a stale socket retries until the new
-    // daemon takes over.
-    let start = Instant::now();
-    while start.elapsed() < deadline {
-        if let Ok(mut stream) = UnixStream::connect(socket) {
-            // Read the Hello so the daemon's `send_message` succeeds
-            // and doesn't log a "send Hello failed" warning to its
-            // stderr (which our test runner inherits). After reading
-            // we drop without sending AttachRequest; the daemon
-            // observes the disconnect and falls back to accept.
-            stream
-                .set_read_timeout(Some(Duration::from_millis(500)))
-                .ok();
-            let _ = read_message::<Hello>(&mut stream);
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    Err(format!(
-        "daemon did not start listening on {} within {deadline:?}",
-        socket.display()
-    ))
-}
-
-fn build_default_caps() -> FrontendCapabilities {
-    FrontendCapabilities {
-        synchronized_output: true,
-        unicode_smp: true,
-        true_color: true,
-        mouse: true,
-        bracketed_paste: true,
-        terminal_kind: Some("test".into()),
-        multi_frontend: false,
-        crdt_replica: false,
-    }
-}
+mod common;
+#[cfg(feature = "crdt")]
+use common::daemon::attach_multi;
+use common::daemon::{
+    TestDaemon, build_default_caps, spawn_daemon_process, wait_for_socket_or_exit,
+};
 
 /// Read the daemon's `Hello`, send our `AttachRequest`, return the Hello.
 fn do_handshake(stream: &mut UnixStream) -> Hello {
@@ -203,7 +75,7 @@ fn daemon_starts_socket_and_lockfile_appear_with_correct_modes() {
     // with explicit mode and lands at 0600). The "x" bit on the
     // socket has no semantic meaning, so we assert the security
     // property — no group/other bits — rather than an exact 0o600.
-    let socket_meta = fs::metadata(&daemon.socket_path).expect("stat socket");
+    let socket_meta = fs::metadata(daemon.socket_path()).expect("stat socket");
     let socket_mode = socket_meta.permissions().mode() & 0o7777;
     assert_eq!(
         socket_mode & 0o077,
@@ -221,7 +93,7 @@ fn daemon_starts_socket_and_lockfile_appear_with_correct_modes() {
     );
 
     // Parent dir: at most 0700 (no group/other bits).
-    let parent_meta = fs::metadata(daemon.socket_path.parent().unwrap()).expect("stat parent");
+    let parent_meta = fs::metadata(daemon.socket_path().parent().unwrap()).expect("stat parent");
     let parent_mode = parent_meta.permissions().mode() & 0o7777;
     assert_eq!(
         parent_mode & 0o077,
@@ -375,10 +247,10 @@ fn second_daemon_same_socket_fails_clearly() {
     let mut daemon_a = TestDaemon::spawn();
 
     // Spawn second daemon at the same socket; capture its stderr.
-    let isolated_home = daemon_a.socket_path.parent().unwrap();
+    let isolated_home = daemon_a.socket_path().parent().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_pmacs"))
         .args(["--daemon", "--socket"])
-        .arg(&daemon_a.socket_path)
+        .arg(daemon_a.socket_path())
         .env("HOME", isolated_home)
         .env("XDG_CONFIG_HOME", isolated_home)
         .stdout(Stdio::null())
@@ -412,7 +284,7 @@ fn second_daemon_same_socket_fails_clearly() {
 #[test]
 fn sigterm_daemon_sends_goodbye_and_cleans_up() {
     let mut daemon = TestDaemon::spawn();
-    let socket_path = daemon.socket_path.clone();
+    let socket_path = daemon.socket_path().to_path_buf();
     let lockfile_path = daemon.lockfile_path();
     let pid = daemon.pid();
 
@@ -447,7 +319,7 @@ fn sigterm_daemon_sends_goodbye_and_cleans_up() {
     assert!(got_goodbye, "expected Goodbye(ShuttingDown) before EOF");
 
     // Daemon should exit cleanly.
-    let status = daemon.process.wait().expect("wait");
+    let status = daemon.wait_for_exit().expect("wait");
     assert!(
         status.success(),
         "daemon should exit 0 after SIGTERM, got {status}"
@@ -477,7 +349,7 @@ fn sigkill_daemon_leaves_stale_files_next_start_recovers() {
 
     // First daemon.
     let mut daemon1 = spawn_daemon_process(&socket_path);
-    wait_for_socket_or_exit(&socket_path, &daemon1, Duration::from_secs(10))
+    wait_for_socket_or_exit(&socket_path, &mut daemon1, Duration::from_secs(10))
         .expect("daemon 1 socket appeared");
 
     let mut lockfile_path = socket_path.as_os_str().to_os_string();
@@ -507,7 +379,7 @@ fn sigkill_daemon_leaves_stale_files_next_start_recovers() {
 
     // Second daemon must successfully recover.
     let mut daemon2 = spawn_daemon_process(&socket_path);
-    wait_for_socket_or_exit(&socket_path, &daemon2, Duration::from_secs(10))
+    wait_for_socket_or_exit(&socket_path, &mut daemon2, Duration::from_secs(10))
         .expect("daemon 2 socket appeared");
 
     // Verify socket is fresh and owner-only (kernel applies umask
@@ -679,35 +551,6 @@ fn m10_7_no_negotiation_for_v1_frontend() {
 // ---------------------------------------------------------------------------
 // T M10.8 Day 4 — multi-attach end-to-end acceptance + Q5 admission matrix.
 // ---------------------------------------------------------------------------
-
-/// Caps for a v1.0 multi-frontend frontend (declares both bits).
-#[cfg(feature = "crdt")]
-fn multi_frontend_caps() -> FrontendCapabilities {
-    FrontendCapabilities {
-        multi_frontend: true,
-        crdt_replica: true,
-        ..build_default_caps()
-    }
-}
-
-/// Connect and run the `AttachRequest` with multi-frontend caps.
-/// Reads but does not assert on the initial `CellDelta` — caller
-/// handles that. Returns the Hello + stream.
-#[cfg(feature = "crdt")]
-fn attach_multi(daemon: &TestDaemon) -> (Hello, UnixStream) {
-    let mut stream = daemon.connect();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let hello: Hello = read_message(&mut stream).expect("read Hello");
-    let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
-        frontend_capabilities: multi_frontend_caps(),
-        initial_size: CellSize::new(24, 80),
-    };
-    write_message(&mut stream, &req).expect("write AttachRequest");
-    (hello, stream)
-}
 
 /// M10.8 acceptance criterion 1 + 2 + 3 — happy-path multi-attach.
 ///

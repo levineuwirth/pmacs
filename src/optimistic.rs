@@ -41,8 +41,8 @@ use unicode_width::UnicodeWidthChar;
 /// Result of classifying a keystroke for optimistic apply.
 ///
 /// The frontend's keystroke handler matches on this to either take the
-/// optimistic path (the three concrete actions) or fall through to the
-/// v0.1 `FrontendEvent::Key` send.
+/// optimistic path (the concrete actions) or fall through to the v0.1
+/// `FrontendEvent::Key` send.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum OptimisticAction {
     /// Insert a single character at the cursor.
@@ -51,10 +51,19 @@ pub enum OptimisticAction {
     DeleteBack,
     /// Delete one byte/grapheme at the cursor (Delete-forward).
     DeleteForward,
+    /// Undo this frontend's most recent edit on the active buffer
+    /// (M10.11 P1). Triggered by single-key undo bindings whose
+    /// modifier set is `Ctrl` and whose `Char` is `_` or `/` — the
+    /// two terminal-portable spellings of the default-keymap undo
+    /// binding (`builtin/keymaps/default.lua`). Multi-key undo
+    /// bindings like `C-x u` fall through to `RoundTrip` because
+    /// the optimistic layer doesn't track keymap-prefix state.
+    Undo,
     /// No optimistic path applies; fall through to round-trip via
     /// `FrontendEvent::Key`. Covers control-char modifiers (Ctrl, Alt,
-    /// Meta, Hyper), function keys, navigation keys, and any
-    /// keystroke whose semantics aren't text-input.
+    /// Meta, Hyper) that aren't bound to an optimistic action,
+    /// function keys, navigation keys, and any keystroke whose
+    /// semantics aren't text-input or recognized commands.
     RoundTrip,
 }
 
@@ -84,6 +93,44 @@ const fn is_text_input_modifiers(mods: Modifiers) -> bool {
 /// semantics in editor keymaps (indentation, newline-with-indent).
 #[must_use]
 pub fn classify_key(key: Key, mods: Modifiers) -> OptimisticAction {
+    // M10.11 P1 — single-key undo bindings.
+    //
+    // The default keymap (`builtin/keymaps/default.lua`) binds four
+    // forms of undo: `C-/`, `C-_`, `C-4`, and `C-x u`. Crossterm's
+    // raw-terminal parser (`crossterm-0.28.1` /
+    // `event/sys/unix/parse.rs:106-113`) only delivers some of
+    // these as the literal `Char + Modifiers::CTRL` shape:
+    //
+    // - 0x01..=0x1A (Ctrl-A..Ctrl-Z) → `Char(letter)` + CTRL
+    // - 0x1C..=0x1F → `Char('4')..Char('7')` + CTRL (the offset-
+    //   from-'4' convention crossterm uses for non-letter Ctrl
+    //   bytes; *not* the "Ctrl-_" / "Ctrl-/" naming users
+    //   intuitively expect — that mapping requires Kitty Keyboard
+    //   Protocol enhanced mode, which pmacs doesn't currently
+    //   negotiate).
+    //
+    // Practical consequence: when a real terminal user presses
+    // Ctrl-_, the byte 0x1F arrives, crossterm produces
+    // `Char('7')` + CTRL, *no* default-keymap binding matches.
+    // The deliverable undo keystrokes for raw-terminal users are
+    // C-4 (byte 0x1C) and C-x u (multi-key, falls through to
+    // daemon dispatch).
+    //
+    // We optimistically recognize `Char('4')` + CTRL as Undo
+    // because the default keymap binds it, AND it's the form a
+    // real terminal can actually deliver. `Char('/')` and
+    // `Char('_')` with CTRL are also recognized for symmetry —
+    // they'll match when Kitty enhanced mode is negotiated, or
+    // when a non-PTY frontend (future GUI) emits them directly.
+    // Multi-key bindings like `C-x u` round-trip because the
+    // optimistic layer doesn't track keymap-prefix state.
+    //
+    // The `mods == CTRL` exact-match (rather than `contains(CTRL)`)
+    // ensures combos like `C-S-_` round-trip rather than triggering
+    // undo unexpectedly. Lua-rebound forms similarly round-trip.
+    if mods == Modifiers::CTRL && matches!(key, Key::Char('/' | '_' | '4')) {
+        return OptimisticAction::Undo;
+    }
     if !is_text_input_modifiers(mods) {
         return OptimisticAction::RoundTrip;
     }
@@ -162,20 +209,49 @@ pub fn frontend_event_for_keystroke(
     if matches!(action, OptimisticAction::RoundTrip) {
         return round_trip();
     }
-    // Need: active buffer, mirror ready for it, cursor tracked for
-    // it, AND the cursor is authoritative (post-audit-round-4 F22 +
-    // F23 freshness invariant). A stale cursor means the mirror's
-    // cursor for this buffer hasn't been re-grounded by the daemon's
-    // `CursorByte` since the last potential desync (either an
-    // outbound `FrontendEvent::Key` whose daemon-side cursor effect
-    // we can't predict, or an inbound `apply_remote_op` that didn't
-    // right-gravity-adjust the cursor locally).
+    // Need: active buffer + mirror ready for it. The cursor-position
+    // and cursor-freshness checks only apply to position-targeted
+    // actions (Insert / DeleteBack); Undo reverses the last op by
+    // peer regardless of cursor position, so it skips those gates.
     let Some(buffer_id) = mirror.active_buffer() else {
         return round_trip();
     };
     if !mirror.is_ready(buffer_id) {
         return round_trip();
     }
+
+    // M10.11 P1 — undo's optimistic path. Undo doesn't depend on
+    // cursor position or paint eligibility (stance α: no visual
+    // paint for optimistic undo; daemon's CellDelta drives
+    // reconciliation). The undo affects content at arbitrary
+    // positions; `apply_local_undo` marks the cursor stale so
+    // subsequent optimistic keystrokes round-trip until the daemon's
+    // `CursorByte` re-grounds.
+    if matches!(action, OptimisticAction::Undo) {
+        return match mirror.apply_local_undo(buffer_id) {
+            Ok(Some(op_bytes)) => FrontendEvent::CrdtOp {
+                frontend_id: my_fid,
+                buffer_id,
+                op: CrdtOp {
+                    peer_id: mirror.peer_id(),
+                    bytes: op_bytes,
+                },
+            },
+            // Nothing to undo locally (UndoManager stack empty) or
+            // loro error. Round-trip the Key event; the daemon's
+            // dispatch_key may have its own daemon-peer ops to undo
+            // (Lua-driven daemon-side edits), so the Key path remains
+            // the right fallback. If the daemon also has nothing, the
+            // path silently no-ops — same as v0.1.
+            Ok(None) | Err(_) => round_trip(),
+        };
+    }
+
+    // Position-targeted actions need authoritative cursor state
+    // (post-audit-round-4 F22 + F23 freshness invariant). A stale
+    // cursor means the mirror's cursor for this buffer hasn't been
+    // re-grounded by the daemon's `CursorByte` since the last
+    // potential desync.
     if !mirror.is_cursor_fresh(buffer_id) {
         return round_trip();
     }
@@ -242,6 +318,7 @@ pub fn frontend_event_for_keystroke(
             // source receives it).
             return round_trip();
         }
+        OptimisticAction::Undo => unreachable!("Undo handled above"),
         OptimisticAction::RoundTrip => unreachable!("RoundTrip handled above"),
     };
 

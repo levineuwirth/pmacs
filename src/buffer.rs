@@ -1336,29 +1336,44 @@ impl Buffer {
 
     /// T M10.4: per-frontend undo for a specific attached frontend.
     ///
-    /// In M10.4 (single-frontend buffers), the buffer holds one
-    /// `UndoManager`; this method ignores the `frontend_id` argument
-    /// and routes to the same `UndoManager` that [`Self::undo`] uses.
-    /// In M10.8 (multi-frontend buffers), the buffer will hold a
-    /// `HashMap<FrontendId, UndoManager>` and this method routes
-    /// by the explicit `frontend_id`. The API surface is shipped
-    /// in M10.4 so M10.8's generalization doesn't introduce a
-    /// breaking signature change.
+    /// **M10.11 architecture-record:** the M10.4 framing predicted
+    /// that this method would dispatch by `frontend_id` to a
+    /// `HashMap<FrontendId, UndoManager>` on the buffer. M10.11's
+    /// Day 2 verification surfaced that loro's `UndoManager` binds
+    /// to one peer at construction (`src/crdt.rs:60-65`,
+    /// `loro-internal/src/undo.rs:572-672`) — you can't maintain
+    /// per-peer `UndoManager` instances on a single doc. The
+    /// CRDT-native per-frontend undo path lives on the **frontend**
+    /// side: each `BufferMirror` holds its own `CrdtState` whose
+    /// `UndoManager` is bound to that frontend's `peer_id` (see
+    /// `BufferMirror::apply_local_undo` and
+    /// `optimistic::frontend_event_for_keystroke`'s
+    /// `OptimisticAction::Undo` arm). The frontend produces an
+    /// inverse `CrdtOp` and the daemon imports it as an ordinary
+    /// update. The daemon-side `Buffer::undo` (this method's
+    /// no-arg sibling) remains the daemon-peer-only undo path —
+    /// used for Lua-driven daemon-side edits and the v0.1 single-
+    /// frontend mode.
     ///
-    /// v0.1 mode: same behavior as [`Self::undo`] (`frontend_id`
-    /// ignored; there's only one undo path).
+    /// This method therefore routes `frontend_id` arguments to
+    /// `Self::undo` directly: there is no per-frontend dispatch to
+    /// do at the buffer level. The signature is preserved for any
+    /// callers that were threading a frontend id; behavior is
+    /// unchanged from the M10.4 single-frontend semantics.
     ///
     /// Threading: main thread only.
     pub fn undo_for(
         &mut self,
         _frontend_id: crate::protocol::FrontendId,
     ) -> Result<Edit, BufferError> {
-        // M10.4 single-frontend routing: degenerate case routes to
-        // the single UndoManager. M10.8 generalizes.
+        // Per the M10.11 architecture record above: per-frontend
+        // undo lives frontend-side via BufferMirror's peer-bound
+        // UndoManager. Daemon-side undo is daemon-peer-scoped.
         self.undo()
     }
 
-    /// T M10.4: symmetric to [`Self::undo_for`].
+    /// T M10.4: symmetric to [`Self::undo_for`]. Same architecture
+    /// record applies: per-frontend redo lives frontend-side.
     pub fn redo_for(
         &mut self,
         _frontend_id: crate::protocol::FrontendId,

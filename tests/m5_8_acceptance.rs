@@ -49,17 +49,14 @@
 //! All tests use `PMACS_TEST_BACKOFF_SCALE_MS` to keep CI runtime
 //! tight; without it, three handshake retries take ~1.5s minimum.
 
-use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, PtySize};
 use tempfile::TempDir;
 
 use pmacs::attach::PMACS_TEST_SSH_BIN;
@@ -67,6 +64,9 @@ use pmacs::attach_reconnect::{HANDSHAKE_RETRY_CAP, PMACS_TEST_BACKOFF_SCALE_MS};
 use pmacs::protocol::{
     FrontendId, Hello, InstanceCapabilities, InstanceIdentity, PROTOCOL_VERSION,
 };
+
+mod common;
+use common::pty::spawn_pmacs_in_pty;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -372,107 +372,6 @@ fn write_session_reconnect_fake_ssh(
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
         .expect("chmod fake-ssh-session.sh +x");
     script
-}
-
-/// Pmacs spawned inside a real PTY. Holds the master so the slave
-/// stays alive; `child` is reapable via `try_wait`. The writer
-/// allows the test to inject keystrokes (e.g. `\x03` for Ctrl-C);
-/// the reader is kept around so the slave's output buffer doesn't
-/// fill and block pmacs's writes.
-struct PmacsPty {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    writer: Box<dyn Write + Send>,
-    _reader_thread: thread::JoinHandle<()>,
-    _master: Box<dyn portable_pty::MasterPty + Send>,
-}
-
-impl PmacsPty {
-    /// Inject bytes into pmacs's stdin via the PTY master.
-    fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()
-    }
-
-    /// Poll-wait for pmacs to exit, up to `timeout`. Returns the
-    /// exit status on success, `None` on timeout (and leaves the
-    /// child running for the caller to clean up).
-    fn wait_for_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) => {}
-                Err(_) => return None,
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
-
-impl Drop for PmacsPty {
-    fn drop(&mut self) {
-        // Best-effort cleanup if the test panicked / timed out.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Spawn pmacs inside a fresh PTY pair, returning a handle that
-/// owns the master + child + reader-thread. The reader thread
-/// drains the master so pmacs's writes never block on a full
-/// terminal buffer.
-fn spawn_pmacs_in_pty(args: &[&str], envs: &[(&str, &Path)], rows: u16, cols: u16) -> PmacsPty {
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("openpty");
-
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_pmacs"));
-    for arg in args {
-        cmd.arg(arg);
-    }
-    for (k, v) in envs {
-        let mut value = OsString::new();
-        value.push(v);
-        cmd.env(k, value);
-    }
-
-    let child = pair.slave.spawn_command(cmd).expect("spawn pmacs");
-    // Drop the slave on our side so EOF on the master is detectable
-    // when the child exits (pmacs's stdio is the only thing keeping
-    // the slave alive after this).
-    drop(pair.slave);
-
-    let writer = pair.master.take_writer().expect("take_writer");
-    let mut reader = pair.master.try_clone_reader().expect("try_clone_reader");
-    // Drain reader to /dev/null so pmacs's writes never block on a
-    // backed-up terminal output buffer. We don't need to inspect the
-    // bytes; the tests assert on exit status and side effects, not
-    // on screen content.
-    let reader_thread = thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {}
-            }
-        }
-    });
-
-    PmacsPty {
-        child,
-        writer,
-        _reader_thread: reader_thread,
-        _master: pair.master,
-    }
 }
 
 /// Common test setup for the PTY tests: a tempdir with the

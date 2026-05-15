@@ -715,7 +715,18 @@ mod tests {
             version_req_strategy(),
             prop::collection::vec(dep_spec_strategy(), 0..3),
             prop::collection::vec(dep_spec_strategy(), 0..3),
-            prop::string::string_regex("[a-z][a-z0-9_/.]{0,16}\\.lua").unwrap(),
+            // Entry path: `/`-separated segments, each starting with a
+            // lowercase letter and containing only [a-z0-9_], ending
+            // in `.lua`. Segments cannot contain `.`, so `..`
+            // components are structurally impossible — the parser
+            // forbids `..` and the generator must produce *valid*
+            // manifests (per the surrounding test's name). The prior
+            // regex `[a-z][a-z0-9_/.]{0,16}\.lua` allowed free `.` and
+            // `/`, producing inputs like `a/../.lua` that the parser
+            // (correctly) rejects. (M8-era generator bug; fixed during
+            // M10.10 Day 4 sweep to preserve test-suite signal.)
+            prop::string::string_regex("[a-z][a-z0-9_]{0,7}(/[a-z][a-z0-9_]{0,7}){0,2}\\.lua")
+                .unwrap(),
             prop::collection::vec(
                 prop::string::string_regex("[a-z][a-z0-9_.]{0,16}").unwrap(),
                 0..4,
