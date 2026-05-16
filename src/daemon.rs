@@ -213,6 +213,47 @@ struct DaemonState {
     /// signal. v0.2+ work on per-frontend latency injection would
     /// move the sleep into a per-frontend writer thread.
     injected_render_latency_ms: u64,
+    /// T M10.11 Q6/Q8 — test-only jitter on top of the fixed latency.
+    /// Read once at startup from `PMACS_INSTANCE_LATENCY_JITTER_MS`.
+    /// When `> 0`, each `CellDelta` write is delayed by
+    /// `injected_render_latency_ms + rand(0..jitter)` instead of the
+    /// fixed value, simulating variable network latency. No actual
+    /// drops — TCP/UDS never drops application bytes and loro has no
+    /// dropped-op recovery (Tension B / Q6: "packet loss" is
+    /// interpreted as latency variation only). Production leaves
+    /// this 0.
+    injected_render_latency_jitter_ms: u64,
+    /// T M10.11 Q8 — seed for the jitter PRNG. Read from
+    /// `PMACS_INSTANCE_LATENCY_JITTER_SEED` (default `0xC0FFEE`,
+    /// matching M10.1's microbench-seed convention) so
+    /// convergence-under-jitter scenarios are deterministically
+    /// reproducible. A flake's seed is the one to re-run.
+    jitter_seed: u64,
+}
+
+/// T M10.11 Q8 — `SplitMix64` PRNG for deterministic jitter.
+///
+/// Chosen because it is six lines of pure wrapping arithmetic: no
+/// `unsafe`, no new dependency (the project is `forbid(unsafe_code)`
+/// and the `rand` crate would be a production dep pulled in for a
+/// test-only seam). Statistically adequate for "uniform-ish delay in
+/// `[0, jitter)`"; the jitter scenario asserts CRDT convergence
+/// regardless of delay ordering, not a distribution property, so PRNG
+/// quality is not load-bearing — only reproducibility (seed) is.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    const fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
 }
 
 /// T M10.8 Day 4 — RAII guard for the non-multi-session slot.
@@ -256,6 +297,18 @@ impl DaemonState {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        // T M10.11 Q6/Q8 — jitter magnitude + PRNG seed, same
+        // read-once-at-startup discipline. Production leaves both
+        // unset (jitter 0; seed defaults but unused when jitter 0).
+        let injected_render_latency_jitter_ms: u64 =
+            std::env::var("PMACS_INSTANCE_LATENCY_JITTER_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+        let jitter_seed: u64 = std::env::var("PMACS_INSTANCE_LATENCY_JITTER_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0x00C0_FFEE);
         Self {
             instance_name,
             started: Instant::now(),
@@ -265,6 +318,8 @@ impl DaemonState {
             non_multi_session_count: AtomicU64::new(0),
             color_registry: std::sync::Mutex::new(HashMap::new()),
             injected_render_latency_ms,
+            injected_render_latency_jitter_ms,
+            jitter_seed,
         }
     }
 
@@ -272,6 +327,16 @@ impl DaemonState {
     /// emission. Returns 0 in production.
     fn injected_render_latency_ms(&self) -> u64 {
         self.injected_render_latency_ms
+    }
+
+    /// T M10.11 Q6/Q8 — jitter magnitude (0 in production).
+    fn injected_render_latency_jitter_ms(&self) -> u64 {
+        self.injected_render_latency_jitter_ms
+    }
+
+    /// T M10.11 Q8 — jitter PRNG seed (default `0xC0FFEE`).
+    fn jitter_seed(&self) -> u64 {
+        self.jitter_seed
     }
 
     /// T M10.9 — look up or assign a color slot for the given uid.
@@ -388,6 +453,8 @@ pub fn run_daemon(socket_path: PathBuf, instance_name: Option<String>) -> Result
         &mut editor,
         &shutdown,
         daemon_state.injected_render_latency_ms(),
+        daemon_state.injected_render_latency_jitter_ms(),
+        daemon_state.jitter_seed(),
     )?;
 
     // Dispatcher exited (shutdown or quit). Wake the accept thread
@@ -682,17 +749,26 @@ fn per_attach_thread(
     clippy::needless_pass_by_value,
     clippy::too_many_lines
 )]
+#[allow(clippy::needless_pass_by_value)]
 fn dispatcher_loop(
     dispatcher_rx: mpsc::Receiver<DispatcherEvent>,
     editor: &mut EditorState,
     shutdown: &Arc<AtomicBool>,
     injected_render_latency_ms: u64,
+    injected_render_latency_jitter_ms: u64,
+    jitter_seed: u64,
 ) -> Result<(), DaemonError> {
     // Per-frontend dispatcher state.
     let mut render_states: HashMap<FrontendId, RenderState> = HashMap::new();
     let mut streams: HashMap<FrontendId, UnixStream> = HashMap::new();
     let mut term_sizes: HashMap<FrontendId, CellSize> = HashMap::new();
     let mut session_registry = SessionRegistry::new();
+    // T M10.11 Q8 — jitter PRNG, seeded once so the
+    // convergence-under-jitter scenario is deterministically
+    // reproducible. Mutated across the loop; one stream of delays
+    // for the whole dispatcher (jitter is dispatcher-wide, matching
+    // the fixed-latency seam's scope per the field docs).
+    let mut jitter_rng = SplitMix64::new(jitter_seed);
 
     loop {
         // Per-tick render + presence sweep for each attached
@@ -810,7 +886,40 @@ fn dispatcher_loop(
                     // conditions. Dispatcher-wide scope: multi-
                     // frontend tests at injected latency conflate
                     // frontends.
-                    if injected_render_latency_ms > 0
+                    // T M10.11 Q6/Q8 Finding 5 — two scoped modes,
+                    // one seam (Q6's "no new injection seams"
+                    // preserved: single sleep-site; the match scope,
+                    // not the seam count, varies):
+                    //
+                    // - **Fixed-latency mode** (`PMACS_INSTANCE_LATENCY_MS`,
+                    //   no jitter): CellDelta-only, unchanged from
+                    //   M10.10 Day 4. Criterion 1 ("local edit visible
+                    //   in <1 frame regardless of instance latency")
+                    //   is a *render-write* latency property; CellDelta
+                    //   is the right and only target. Preserving this
+                    //   scope exactly keeps criterion-1 tests' behavior
+                    //   identical.
+                    // - **Jitter mode** (`PMACS_INSTANCE_LATENCY_JITTER_MS`):
+                    //   CellDelta *and* CrdtOp. Criterion 3 ("the CRDT
+                    //   layer converges under jitter") lives on the
+                    //   CrdtOp path — CRDT convergence is CrdtOp-driven,
+                    //   not CellDelta. Finding 5: Q6's CellDelta-only
+                    //   scope did not exercise criterion 3's assertion
+                    //   target; widening jitter-mode to CrdtOp closes
+                    //   that composition gap. Tension-B holds — both
+                    //   message types are *delayed*, neither *dropped*.
+                    if injected_render_latency_jitter_ms > 0 {
+                        if matches!(
+                            msg,
+                            InstanceMessage::CellDelta { .. } | InstanceMessage::CrdtOp { .. }
+                        ) {
+                            let delay_ms = injected_render_latency_ms
+                                + (jitter_rng.next_u64() % injected_render_latency_jitter_ms);
+                            if delay_ms > 0 {
+                                thread::sleep(Duration::from_millis(delay_ms));
+                            }
+                        }
+                    } else if injected_render_latency_ms > 0
                         && matches!(msg, InstanceMessage::CellDelta { .. })
                     {
                         thread::sleep(Duration::from_millis(injected_render_latency_ms));
