@@ -1161,22 +1161,33 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
 /// Daemon spawned with `PMACS_INSTANCE_LATENCY_JITTER_MS=50` and a
 /// pinned seed (`0xC0FFEE` = 12648430) so the delay pattern is
 /// deterministically reproducible — a flake's seed is the one to
-/// re-run (framing Q8). Per **Finding 5 + (B)**, jitter-mode delays
-/// both `CellDelta` *and* `CrdtOp`, so the CRDT-convergence path
-/// (which is CrdtOp-driven, not CellDelta) is actually exercised
-/// under jitter — criterion 3 says "the CRDT layer converges," and
-/// this test reaches that layer.
+/// re-run (framing Q8).
+///
+/// **F2 correction.** Finding 5's first resolution ("(B): jitter-mode
+/// delays both CellDelta and CrdtOp") was wrong — it widened the
+/// match in the render-message loop, which never carries broadcast
+/// `CrdtOp`s; the CRDT-convergence path was *not* exercised and this
+/// test silently asserted nothing about CRDT-under-jitter. F2 moved
+/// the jitter to the actual `broadcast_crdt_op` write site
+/// (`daemon.rs`), so delivered ops are now genuinely delayed.
+///
+/// **Falsification guard.** Because a no-op jitter (or jitter at the
+/// wrong site, the original bug) would let convergence happen in
+/// sub-millisecond time, this test asserts a **wall-clock floor**:
+/// with `JITTER_MS=50` applied to every broadcast `CrdtOp` write,
+/// first-send→convergence must take materially longer than
+/// un-jittered delivery. A regression that detaches the jitter from
+/// the CRDT path again fails the floor, not just the (weaker)
+/// convergence assertion. This is the reviewer's "no-op jitter
+/// cannot pass" requirement made executable.
 ///
 /// The load-bearing CRDT property: **convergence is
 /// delivery-order-independent.** Jitter reorders/delays op delivery;
-/// the converged result must be *identical to the no-jitter result*
-/// (jitter changes timing, never the CRDT outcome). The expected
-/// string is pinned (record-and-assert-stable, mirroring cat-1): a
-/// change signals either a loro-determinism regression or jitter
-/// leaking into the CRDT outcome — both real bugs.
+/// the converged result must be *identical to the no-jitter result*.
+/// Pinned (record-and-assert-stable, mirroring cat-1).
 ///
 /// One scenario, not a sweep (Q8 scope guard; a fuzz sweep is v0.2).
-/// Generous timeout: 50ms jitter × every CellDelta+CrdtOp write
+/// Generous timeout: 50ms jitter × every broadcast-CrdtOp write
 /// accumulates; convergence-within-timeout, not per-event budget
 /// (Q5: PTY/jitter paths have no perf gate).
 ///
@@ -1198,6 +1209,17 @@ fn m10_11_q8_convergence_under_jitter() {
     replica_a.import_snapshot(&snap_a).expect("A import");
     let replica_b = CrdtState::new(hello_b.assigned_frontend_id.0).expect("B new");
     replica_b.import_snapshot(&snap_b).expect("B import");
+
+    // Falsification-guard timer: started before the first send,
+    // measured after convergence. With JITTER_MS=50 applied to every
+    // broadcast-CrdtOp write (the F2-corrected site), first-send →
+    // convergence accumulates tens-to-hundreds of ms. Un-jittered
+    // synthetic in-process convergence is sub-10ms. A 30ms floor sits
+    // far above un-jittered and far below the jittered expectation —
+    // non-flaky in both directions, and a regression that detaches
+    // jitter from the CRDT path (Finding 5's original bug) drops
+    // convergence back under 10ms and fails the floor loudly.
+    let t0 = Instant::now();
 
     // Deterministic op sequence, interleaved between peers, several
     // positions. The daemon's jittered delivery reorders these on the
@@ -1255,6 +1277,21 @@ fn m10_11_q8_convergence_under_jitter() {
         Duration::from_secs(20),
     )
     .expect("Q8/criterion-3: CRDT layer must converge under jitter");
+    let elapsed = t0.elapsed();
+
+    // Falsification guard: jitter must have actually delayed the
+    // broadcast-CrdtOp path. If this fails with a small `elapsed`,
+    // the jitter is detached from the CRDT path again (Finding 5's
+    // original bug / an F2 regression) — the convergence assertions
+    // below would still pass while testing nothing about
+    // CRDT-under-jitter.
+    assert!(
+        elapsed >= Duration::from_millis(30),
+        "criterion-3 jitter not reaching the broadcast-CrdtOp path: \
+         converged in {elapsed:?} (un-jittered speed). With \
+         JITTER_MS=50 on every broadcast write this must be \
+         materially slower. This is the F2 regression guard."
+    );
 
     // No op lost: all four tokens survive the jittered merge.
     for tok in ["a", "b", "A", "B"] {

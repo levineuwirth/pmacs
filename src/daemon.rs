@@ -256,6 +256,33 @@ impl SplitMix64 {
     }
 }
 
+/// T M10.11 F2 — apply jitter delay before a wire write.
+///
+/// One *mechanism* (this fn), called at two *sites*: the `CrdtOp`
+/// broadcast write (criterion 3 — the CRDT-convergence path) and the
+/// render-message `CellDelta` write (criterion 1 — the render-latency
+/// path). **Q6's original "no new injection seams; one place"
+/// commitment was wrong** and Finding 5's first resolution compounded
+/// the error: criterion 1 and criterion 3 ride *different message
+/// paths* (render output vs `broadcast_crdt_op`), so they
+/// structurally require two call sites. Honest framing: one jitter
+/// mechanism, two call sites because there are two paths — not "one
+/// seam" (there isn't) and not "widen one loop's match" (Finding 5's
+/// flawed fix, which matched `CrdtOp` in the render loop that never
+/// carries broadcast `CrdtOp`s).
+///
+/// No-op when `jitter_ms == 0`. Tension-B holds: the write is
+/// *delayed*, never dropped.
+fn maybe_jitter_sleep(jitter_ms: u64, base_ms: u64, rng: &mut SplitMix64) {
+    if jitter_ms == 0 {
+        return;
+    }
+    let delay_ms = base_ms + (rng.next_u64() % jitter_ms);
+    if delay_ms > 0 {
+        thread::sleep(Duration::from_millis(delay_ms));
+    }
+}
+
 /// T M10.8 Day 4 — RAII guard for the non-multi-session slot.
 ///
 /// Acquired via [`NonMultiSlotGuard::try_acquire`] at per-attach
@@ -804,6 +831,22 @@ fn dispatcher_loop(
                 let entries = session_registry.broadcast_crdt_op(exclude, buffer_id, op);
                 for entry in entries {
                     if let Some(stream) = streams.get_mut(&entry.recipient) {
+                        // T M10.11 F2 — THE criterion-3 jitter site.
+                        // CRDT convergence is driven by these
+                        // `broadcast_crdt_op` writes, NOT by render
+                        // CellDeltas. Finding 5's first fix jittered
+                        // the render loop (which never carries
+                        // broadcast CrdtOps) and falsely claimed
+                        // criterion 3 was exercised. This is the
+                        // write that actually delivers ops to
+                        // replicas; jittering here is what makes
+                        // `m10_11_q8_convergence_under_jitter`
+                        // genuinely test CRDT-under-jitter.
+                        maybe_jitter_sleep(
+                            injected_render_latency_jitter_ms,
+                            injected_render_latency_ms,
+                            &mut jitter_rng,
+                        );
                         let _ = write_message(stream, &entry.message);
                     }
                 }
@@ -877,52 +920,36 @@ fn dispatcher_loop(
             let mut write_failed = false;
             if let Some(stream) = streams.get_mut(fid) {
                 for msg in &messages {
-                    // T M10.10 Day 4 — test-only latency injection.
-                    // When `PMACS_INSTANCE_LATENCY_MS` is set (>0),
-                    // sleep before each CellDelta write to simulate
-                    // slow daemon→frontend transport. Verifies
-                    // criterion 1 ("less than one frame regardless of
-                    // instance latency") under realistic high-latency
-                    // conditions. Dispatcher-wide scope: multi-
-                    // frontend tests at injected latency conflate
-                    // frontends.
-                    // T M10.11 Q6/Q8 Finding 5 — two scoped modes,
-                    // one seam (Q6's "no new injection seams"
-                    // preserved: single sleep-site; the match scope,
-                    // not the seam count, varies):
+                    // T M10.10 Day 4 / M10.11 F2 — the criterion-1
+                    // jitter site: render-write latency.
                     //
-                    // - **Fixed-latency mode** (`PMACS_INSTANCE_LATENCY_MS`,
-                    //   no jitter): CellDelta-only, unchanged from
-                    //   M10.10 Day 4. Criterion 1 ("local edit visible
-                    //   in <1 frame regardless of instance latency")
-                    //   is a *render-write* latency property; CellDelta
-                    //   is the right and only target. Preserving this
-                    //   scope exactly keeps criterion-1 tests' behavior
-                    //   identical.
-                    // - **Jitter mode** (`PMACS_INSTANCE_LATENCY_JITTER_MS`):
-                    //   CellDelta *and* CrdtOp. Criterion 3 ("the CRDT
-                    //   layer converges under jitter") lives on the
-                    //   CrdtOp path — CRDT convergence is CrdtOp-driven,
-                    //   not CellDelta. Finding 5: Q6's CellDelta-only
-                    //   scope did not exercise criterion 3's assertion
-                    //   target; widening jitter-mode to CrdtOp closes
-                    //   that composition gap. Tension-B holds — both
-                    //   message types are *delayed*, neither *dropped*.
-                    if injected_render_latency_jitter_ms > 0 {
-                        if matches!(
-                            msg,
-                            InstanceMessage::CellDelta { .. } | InstanceMessage::CrdtOp { .. }
-                        ) {
-                            let delay_ms = injected_render_latency_ms
-                                + (jitter_rng.next_u64() % injected_render_latency_jitter_ms);
-                            if delay_ms > 0 {
-                                thread::sleep(Duration::from_millis(delay_ms));
-                            }
+                    // `messages` is render output only (CellDelta /
+                    // Cursor / CursorByte) — it NEVER carries broadcast
+                    // CrdtOps (those go out via `broadcast_crdt_op` at
+                    // the top of the loop, the criterion-3 site). So
+                    // jitter here is CellDelta-only *by the nature of
+                    // this loop*, not by a match choice. Finding 5's
+                    // first fix added `| CrdtOp` to the match below
+                    // believing it widened jitter to the CRDT path;
+                    // that arm was dead — no broadcast CrdtOp ever
+                    // reaches this loop. Reverted to honest
+                    // CellDelta-only; criterion-3 jitter lives at the
+                    // broadcast site via the same `maybe_jitter_sleep`
+                    // mechanism. Criterion 1 ("local edit visible in
+                    // <1 frame regardless of instance latency") is a
+                    // render-write-latency property; CellDelta is its
+                    // correct and only target. Fixed-latency mode
+                    // (no jitter) is unchanged from M10.10 Day 4.
+                    if matches!(msg, InstanceMessage::CellDelta { .. }) {
+                        if injected_render_latency_jitter_ms > 0 {
+                            maybe_jitter_sleep(
+                                injected_render_latency_jitter_ms,
+                                injected_render_latency_ms,
+                                &mut jitter_rng,
+                            );
+                        } else if injected_render_latency_ms > 0 {
+                            thread::sleep(Duration::from_millis(injected_render_latency_ms));
                         }
-                    } else if injected_render_latency_ms > 0
-                        && matches!(msg, InstanceMessage::CellDelta { .. })
-                    {
-                        thread::sleep(Duration::from_millis(injected_render_latency_ms));
                     }
                     if let Err(e) = write_message(stream, msg) {
                         eprintln!("pmacs: write failed for {fid:?} in dispatcher: {e}");

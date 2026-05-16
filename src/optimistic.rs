@@ -1151,4 +1151,63 @@ mod tests {
             "remote op must apply when source != local"
         );
     }
+
+    /// **F1 gap pin.** The manual checklist originally told operators
+    /// to undo with `C-x u`. That is the *wrong* keystroke for the
+    /// per-frontend optimistic-undo path Scenario 2 tests: only the
+    /// single-key forms (`Ctrl-4`, and — under Kitty enhanced mode —
+    /// `Ctrl-/` / `Ctrl-_`) classify as `OptimisticAction::Undo`
+    /// (frontend per-peer undo). `C-x` is a multi-key prefix the
+    /// optimistic layer has no state for; it classifies `RoundTrip`
+    /// and the sequence `C-x u` round-trips to the *daemon's* undo,
+    /// which operates on the daemon's CRDT peer and cannot isolate a
+    /// single frontend's edits.
+    ///
+    /// This pins the gap as a tested invariant rather than prose:
+    /// if a future change made `C-x` optimistic, or de-classified
+    /// `Ctrl-4`, this fails — and the checklist's `Ctrl-4`
+    /// instruction (F1 fix) would silently become wrong again.
+    #[test]
+    fn f1_undo_keystroke_gap_cx_u_round_trips_only_single_key_is_optimistic() {
+        // The keystroke the manual checklist (post-F1) and the PTY
+        // test both use — reaches frontend per-peer undo.
+        assert_eq!(
+            classify_key(Key::Char('4'), Modifiers::CTRL),
+            OptimisticAction::Undo,
+            "Ctrl-4 must be the frontend per-peer optimistic undo \
+             (raw-terminal-deliverable; what the checklist now uses)"
+        );
+        // Kitty-enhanced-mode forms — also optimistic undo (only
+        // delivered when Kitty negotiation lands; v0.2).
+        assert_eq!(
+            classify_key(Key::Char('/'), Modifiers::CTRL),
+            OptimisticAction::Undo
+        );
+        assert_eq!(
+            classify_key(Key::Char('_'), Modifiers::CTRL),
+            OptimisticAction::Undo
+        );
+        // `C-x` — the prefix of the OLD (wrong) checklist instruction
+        // `C-x u`. Round-trips; the optimistic layer has no multi-key
+        // prefix state, so `C-x u` can NEVER compose to frontend
+        // per-peer undo — it reaches daemon undo, which Scenario 2's
+        // per-frontend-isolation claim is not about.
+        assert_eq!(
+            classify_key(Key::Char('x'), Modifiers::CTRL),
+            OptimisticAction::RoundTrip,
+            "C-x must round-trip — it's the daemon-undo prefix, NOT \
+             frontend per-peer undo; this is why the checklist had \
+             to switch from C-x u to Ctrl-4 (F1)"
+        );
+        // The lone `u` after `C-x`, seen in isolation by the
+        // stateless optimistic layer, is just text — confirming no
+        // prefix-composition path to undo exists.
+        assert_eq!(
+            classify_key(Key::Char('u'), Modifiers::NONE),
+            OptimisticAction::Insert('u'),
+            "no multi-key prefix state: the 'u' in C-x u is plain \
+             text to the optimistic layer; C-x u cannot be \
+             frontend-undo by construction"
+        );
+    }
 }
