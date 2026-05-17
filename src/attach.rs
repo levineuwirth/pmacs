@@ -1475,9 +1475,23 @@ fn run_one_session(
     // overlay communicates state; handshake errors here are bubbled
     // up so the M5.8d loop can decide whether to retry.
     attach_debug("waiting for Hello from remote daemon bridge");
+    let hello_wait_done = Arc::new(AtomicBool::new(false));
+    if attach_debug_enabled() {
+        let done = Arc::clone(&hello_wait_done);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(5));
+            if !done.load(Ordering::SeqCst) {
+                eprintln!(
+                    "pmacs attach debug: still waiting for Hello after 5s; \
+                     remote bridge connected but no daemon bytes reached local stdout"
+                );
+            }
+        });
+    }
     let hello: Hello = match read_message(&mut child_stdout) {
         Ok(h) => h,
         Err(e) => {
+            hello_wait_done.store(true, Ordering::SeqCst);
             attach_debug(format!("failed reading Hello: {e}"));
             return Err(handshake_error_with_child(
                 child,
@@ -1487,6 +1501,7 @@ fn run_one_session(
             ));
         }
     };
+    hello_wait_done.store(true, Ordering::SeqCst);
     attach_debug(format!(
         "received Hello: protocol_version={}, assigned_frontend_id={}",
         hello.protocol_version, hello.assigned_frontend_id.0

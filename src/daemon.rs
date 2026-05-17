@@ -70,6 +70,21 @@ use crate::protocol::{
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
 
+/// Shared debug switch with the SSH attach path. When set before
+/// daemon startup, emits stderr breadcrumbs for accept/handshake
+/// progress without changing the wire protocol.
+const PMACS_ATTACH_DEBUG: &str = "PMACS_ATTACH_DEBUG";
+
+fn daemon_debug_enabled() -> bool {
+    std::env::var_os(PMACS_ATTACH_DEBUG).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+fn daemon_debug(msg: impl AsRef<str>) {
+    if daemon_debug_enabled() {
+        eprintln!("pmacs daemon debug: {}", msg.as_ref());
+    }
+}
+
 /// T M10.8 — events the dispatcher thread processes.
 ///
 /// The dispatcher is the single thread that owns the editor; all
@@ -507,9 +522,11 @@ fn accept_loop(
     dispatcher_tx: mpsc::Sender<DispatcherEvent>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<(), DaemonError> {
+    daemon_debug("accept loop started");
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                daemon_debug("accepted frontend socket; spawning per-attach thread");
                 let daemon_state = Arc::clone(daemon_state);
                 let tx = dispatcher_tx.clone();
                 thread::spawn(move || per_attach_thread(stream, daemon_state, tx));
@@ -601,7 +618,9 @@ fn per_attach_thread(
     daemon_state: Arc<DaemonState>,
     dispatcher_tx: mpsc::Sender<DispatcherEvent>,
 ) {
+    daemon_debug("per-attach thread started");
     let frontend_id = FrontendId(daemon_state.next_frontend_id.fetch_add(1, Ordering::SeqCst));
+    daemon_debug(format!("assigned {frontend_id:?}; preparing Hello"));
 
     // Send Hello immediately on accept. The instance capabilities
     // advertised here (and used for negotiation below) come from the
@@ -618,8 +637,10 @@ fn per_attach_thread(
         eprintln!("pmacs: send Hello failed: {e}");
         return;
     }
+    daemon_debug(format!("sent Hello to {frontend_id:?}"));
 
     // Read AttachRequest.
+    daemon_debug(format!("waiting for AttachRequest from {frontend_id:?}"));
     let req: AttachRequest = match read_message(&mut stream) {
         Ok(r) => r,
         Err(e) => {
@@ -627,6 +648,7 @@ fn per_attach_thread(
             return;
         }
     };
+    daemon_debug(format!("received AttachRequest from {frontend_id:?}"));
 
     // T M10.5 version check.
     if !crate::protocol::is_supported_protocol_version(req.protocol_version) {
