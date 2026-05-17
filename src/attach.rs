@@ -68,6 +68,14 @@ pub const PMACS_TEST_SSH_BIN: &str = "PMACS_TEST_SSH_BIN";
 /// need to set it on the initiating shell.
 const PMACS_ATTACH_DEBUG: &str = "PMACS_ATTACH_DEBUG";
 
+/// Diagnostic fallback: carry the SSH protocol stream over the
+/// SSH stderr channel instead of stdout. Useful when a host's SSH
+/// stdout path appears to buffer indefinitely while stderr streams.
+const PMACS_ATTACH_SSH_PROTOCOL_STDERR: &str = "PMACS_ATTACH_SSH_PROTOCOL_STDERR";
+
+/// Remote-side env var consumed by `daemon_attach.rs`.
+const PMACS_ATTACH_PROTOCOL_FD: &str = "PMACS_ATTACH_PROTOCOL_FD";
+
 /// Maximum bytes of remote stderr retained for diagnostic surfacing
 /// in [`AttachError::SshChildExited`]. Sized to catch typical SSH
 /// failure messages (one or two short lines plus optional banner)
@@ -1014,6 +1022,10 @@ fn attach_debug_enabled() -> bool {
     std::env::var_os(PMACS_ATTACH_DEBUG).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+fn protocol_stderr_enabled() -> bool {
+    std::env::var_os(PMACS_ATTACH_SSH_PROTOCOL_STDERR).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 fn attach_debug(msg: impl AsRef<str>) {
     if attach_debug_enabled() {
         eprintln!("pmacs attach debug: {}", msg.as_ref());
@@ -1104,7 +1116,9 @@ pub(crate) fn build_ssh_command(target: &AttachTarget) -> Option<Command> {
         cmd.arg("-l").arg(u);
     }
     cmd.arg(host);
-    if attach_debug_enabled() {
+    if protocol_stderr_enabled() {
+        cmd.arg("env").arg(format!("{PMACS_ATTACH_PROTOCOL_FD}=2"));
+    } else if attach_debug_enabled() {
         cmd.arg("env").arg(format!("{PMACS_ATTACH_DEBUG}=1"));
     }
     cmd.arg("pmacs").arg("--daemon-attach");
@@ -1506,7 +1520,6 @@ fn run_one_session(
         .stdout
         .take()
         .expect("Stdio::piped on stdout guarantees a handle");
-    let mut child_stdout = DebugReader::new("ssh stdout", child_stdout);
     let mut child_stdin = child
         .stdin
         .take()
@@ -1516,13 +1529,32 @@ fn run_one_session(
         .take()
         .expect("Stdio::piped on stderr guarantees a handle");
 
-    // Tee SSH stderr to our stderr only on the first attempt, where
-    // raw mode hasn't engaged yet. On reconnect attempts (slot is
-    // `Some`), raw mode is active and live tee'd bytes would
-    // corrupt the cell grid; the tail is still captured for the
-    // give-up message via `AttachError::SshChildExited`.
-    let tee_to_stderr = frontend_slot.is_none();
-    let (stderr_handle, stderr_tail) = spawn_stderr_tee(child_stderr, tee_to_stderr);
+    let protocol_over_stderr = protocol_stderr_enabled();
+    let (mut protocol_reader, stderr_handle, stderr_tail): (
+        Box<dyn Read + Send>,
+        thread::JoinHandle<()>,
+        Arc<Mutex<VecDeque<u8>>>,
+    ) = if protocol_over_stderr {
+        attach_debug("using SSH stderr as protocol stream; remote stderr diagnostics disabled");
+        (
+            Box::new(DebugReader::new("ssh stderr(protocol)", child_stderr)),
+            thread::spawn(|| {}),
+            Arc::new(Mutex::new(VecDeque::new())),
+        )
+    } else {
+        // Tee SSH stderr to our stderr only on the first attempt,
+        // where raw mode hasn't engaged yet. On reconnect attempts
+        // (slot is `Some`), raw mode is active and live tee'd bytes
+        // would corrupt the cell grid; the tail is still captured
+        // for the give-up message via `AttachError::SshChildExited`.
+        let tee_to_stderr = frontend_slot.is_none();
+        let (stderr_handle, stderr_tail) = spawn_stderr_tee(child_stderr, tee_to_stderr);
+        (
+            Box::new(DebugReader::new("ssh stdout", child_stdout)),
+            stderr_handle,
+            stderr_tail,
+        )
+    };
 
     // Hello / AttachRequest handshake. On the FIRST attempt
     // (`frontend_slot` is `None`) raw mode is not engaged yet, so
@@ -1544,7 +1576,7 @@ fn run_one_session(
             }
         });
     }
-    let hello: Hello = match read_message(&mut child_stdout) {
+    let hello: Hello = match read_message(&mut protocol_reader) {
         Ok(h) => h,
         Err(e) => {
             hello_wait_done.store(true, Ordering::SeqCst);
@@ -1638,7 +1670,7 @@ fn run_one_session(
 
     let pid = child.id();
     let io = AttachIo {
-        reader: Box::new(child_stdout),
+        reader: protocol_reader,
         writer: Box::new(child_stdin),
         kick: ssh_kick(pid),
     };

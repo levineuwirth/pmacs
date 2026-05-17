@@ -164,13 +164,25 @@ const AUTO_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// child's stderr, so this stays off the protocol stdout stream.
 const PMACS_ATTACH_DEBUG: &str = "PMACS_ATTACH_DEBUG";
 
+const PMACS_ATTACH_PROTOCOL_FD: &str = "PMACS_ATTACH_PROTOCOL_FD";
+
 fn bridge_debug_enabled() -> bool {
     std::env::var_os(PMACS_ATTACH_DEBUG).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 fn bridge_debug(msg: impl AsRef<str>) {
-    if bridge_debug_enabled() {
+    // If fd 2 carries the protocol stream, stderr diagnostics would
+    // corrupt it. The local attach side deliberately does not enable
+    // remote debug in that mode, but keep this defensive.
+    if bridge_debug_enabled() && protocol_fd() != 2 {
         eprintln!("pmacs daemon-attach debug: {}", msg.as_ref());
+    }
+}
+
+fn protocol_fd() -> i32 {
+    match std::env::var(PMACS_ATTACH_PROTOCOL_FD).ok().as_deref() {
+        Some("2") => 2,
+        _ => 1,
     }
 }
 
@@ -197,8 +209,8 @@ pub fn run_daemon_attach(socket_path: PathBuf) -> Result<(), BridgeError> {
     // `Send` and behave as expected for line-oriented or byte
     // streaming use.
     let stdin = std::io::stdin();
-    let stdout = RawStdout::new();
-    run_bridge_connected(socket, stdin, stdout)
+    let output = RawProtocolOutput::new(protocol_fd());
+    run_bridge_connected(socket, stdin, output)
 }
 
 /// Make sure a daemon is listening at `socket_path`, auto-starting
@@ -388,28 +400,38 @@ fn copy_with_flush_named<R: Read, W: Write>(
     }
 }
 
-/// Unbuffered writer for the bridge's protocol stdout.
+/// Unbuffered writer for the bridge's protocol output fd.
 ///
 /// `std::io::Stdout` is allowed to buffer internally, which is toxic
 /// for `pmacs --daemon-attach`: the first daemon `Hello` is a small
 /// binary frame with no newline and the local frontend is blocked
 /// waiting for it. This writer bypasses Rust's stdout buffering and
-/// writes directly to fd 1 using safe `nix::unistd::write`.
-struct RawStdout {
-    stdout: std::io::Stdout,
+/// writes directly to fd 1 (or fd 2 for a diagnostic SSH fallback)
+/// using safe `nix::unistd::write`.
+enum RawProtocolOutput {
+    Stdout(std::io::Stdout),
+    Stderr(std::io::Stderr),
 }
 
-impl RawStdout {
-    fn new() -> Self {
-        Self {
-            stdout: std::io::stdout(),
+impl RawProtocolOutput {
+    fn new(fd: i32) -> Self {
+        match fd {
+            2 => Self::Stderr(std::io::stderr()),
+            _ => Self::Stdout(std::io::stdout()),
         }
     }
 }
 
-impl Write for RawStdout {
+impl Write for RawProtocolOutput {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        nix::unistd::write(self.stdout.as_fd(), buf).map_err(std::io::Error::from)
+        match self {
+            Self::Stdout(stdout) => {
+                nix::unistd::write(stdout.as_fd(), buf).map_err(std::io::Error::from)
+            }
+            Self::Stderr(stderr) => {
+                nix::unistd::write(stderr.as_fd(), buf).map_err(std::io::Error::from)
+            }
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
