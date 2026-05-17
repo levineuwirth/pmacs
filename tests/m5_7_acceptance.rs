@@ -294,10 +294,10 @@ fn cli_attach_invokes_test_ssh_with_expected_argv() {
     });
     let lines: Vec<&str> = argv.lines().collect();
     // build_ssh_command for `ssh:mac-studio` (no user, no instance)
-    // emits `[host, "pmacs", "--daemon-attach"]`.
+    // emits `[-T, host, "pmacs", "--daemon-attach"]`.
     assert_eq!(
         lines,
-        vec!["mac-studio", "pmacs", "--daemon-attach"],
+        vec!["-T", "mac-studio", "pmacs", "--daemon-attach"],
         "argv shape: {lines:?}"
     );
 }
@@ -326,6 +326,7 @@ fn cli_attach_with_user_and_instance_name_passes_through_dash_l_and_dash_dash_so
     assert_eq!(
         lines,
         vec![
+            "-T",
             "-l",
             "alice",
             "workstation",

@@ -1020,6 +1020,58 @@ fn attach_debug(msg: impl AsRef<str>) {
     }
 }
 
+fn hex_preview(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (idx, byte) in bytes.iter().take(16).enumerate() {
+        if idx > 0 {
+            out.push(' ');
+        }
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    if bytes.len() > 16 {
+        out.push_str(" ...");
+    }
+    out
+}
+
+struct DebugReader<R> {
+    label: &'static str,
+    inner: R,
+    total: u64,
+}
+
+impl<R> DebugReader<R> {
+    fn new(label: &'static str, inner: R) -> Self {
+        Self {
+            label,
+            inner,
+            total: 0,
+        }
+    }
+}
+
+impl<R: Read> Read for DebugReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if attach_debug_enabled() {
+            if n == 0 {
+                attach_debug(format!("{}: EOF after {} bytes", self.label, self.total));
+            } else {
+                self.total += n as u64;
+                attach_debug(format!(
+                    "{}: read chunk {} bytes (total {}), first bytes [{}]",
+                    self.label,
+                    n,
+                    self.total,
+                    hex_preview(&buf[..n])
+                ));
+            }
+        }
+        Ok(n)
+    }
+}
+
 /// Construct the [`Command`] for SSH attach without spawning.
 ///
 /// Pure (modulo the env-var lookup for test substitution): used
@@ -1045,6 +1097,9 @@ pub(crate) fn build_ssh_command(target: &AttachTarget) -> Option<Command> {
         return None;
     };
     let mut cmd = Command::new(ssh_binary());
+    // This is a binary stdio transport. Force no remote pseudo-tty
+    // even if the user's ssh_config requests one for the host.
+    cmd.arg("-T");
     if let Some(u) = user {
         cmd.arg("-l").arg(u);
     }
@@ -1447,10 +1502,11 @@ fn run_one_session(
     })?;
     attach_debug(format!("ssh child spawned with pid {}", child.id()));
 
-    let mut child_stdout = child
+    let child_stdout = child
         .stdout
         .take()
         .expect("Stdio::piped on stdout guarantees a handle");
+    let mut child_stdout = DebugReader::new("ssh stdout", child_stdout);
     let mut child_stdin = child
         .stdin
         .take()
@@ -2093,8 +2149,8 @@ mod tests {
         let arg_strs: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
         assert_eq!(
             arg_strs,
-            vec!["mac-studio", "pmacs", "--daemon-attach"],
-            "bare host should produce: <host> pmacs --daemon-attach",
+            vec!["-T", "mac-studio", "pmacs", "--daemon-attach"],
+            "bare host should produce: -T <host> pmacs --daemon-attach",
         );
     }
 
@@ -2109,7 +2165,14 @@ mod tests {
         let arg_strs: Vec<&str> = ssh_args(&cmd).iter().filter_map(|s| s.to_str()).collect();
         assert_eq!(
             arg_strs,
-            vec!["-l", "alice", "workstation", "pmacs", "--daemon-attach"],
+            vec![
+                "-T",
+                "-l",
+                "alice",
+                "workstation",
+                "pmacs",
+                "--daemon-attach",
+            ],
         );
     }
 
@@ -2125,6 +2188,7 @@ mod tests {
         assert_eq!(
             arg_strs,
             vec![
+                "-T",
                 "-l",
                 "bob",
                 "workstation",
