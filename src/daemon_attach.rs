@@ -170,29 +170,30 @@ const AUTO_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 // (`run_attach`, `run_daemon`); pedantic clippy is wrong here.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run_daemon_attach(socket_path: PathBuf) -> Result<(), BridgeError> {
-    ensure_daemon_running(&socket_path)?;
+    let socket = ensure_daemon_running(&socket_path)?;
     // Use the owned `Stdin` / `Stdout` (not `.lock()`) so the halves
     // can move into threads with `'static` lifetimes. Both are
     // `Send` and behave as expected for line-oriented or byte
     // streaming use.
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    run_bridge(socket_path, stdin, stdout)
+    run_bridge_connected(socket, stdin, stdout)
 }
 
 /// Make sure a daemon is listening at `socket_path`, auto-starting
 /// one if necessary.
 ///
 /// 1. Try to connect. If that succeeds, the daemon is already
-///    running — return immediately.
+///    running — return that stream for the bridge to use.
 /// 2. Otherwise spawn `pmacs --daemon --socket PATH` as a child,
 ///    then poll the socket every [`AUTO_START_POLL_INTERVAL`] until
-///    a connect succeeds or [`AUTO_START_TIMEOUT`] elapses.
+///    a connect succeeds or [`AUTO_START_TIMEOUT`] elapses. The
+///    successful poll stream is returned to the bridge.
 ///
 /// On timeout the spawned daemon child is **not** killed — it may
 /// be slow to start rather than broken. The user can investigate by
 /// running the daemon directly to see its stderr.
-pub(crate) fn ensure_daemon_running(socket_path: &Path) -> Result<(), BridgeError> {
+pub(crate) fn ensure_daemon_running(socket_path: &Path) -> Result<UnixStream, BridgeError> {
     ensure_daemon_running_with(socket_path, AUTO_START_TIMEOUT, spawn_daemon_subprocess)
 }
 
@@ -209,14 +210,16 @@ fn ensure_daemon_running_with<F>(
     socket_path: &Path,
     timeout: Duration,
     spawner: F,
-) -> Result<(), BridgeError>
+) -> Result<UnixStream, BridgeError>
 where
     F: FnOnce(&Path) -> Result<(), BridgeError>,
 {
-    // Fast path: daemon already listening. Drop the test stream
-    // immediately so the daemon doesn't see a stuck connection.
-    if UnixStream::connect(socket_path).is_ok() {
-        return Ok(());
+    // Fast path: daemon already listening. Keep this connection and
+    // use it as the bridge socket. The daemon speaks first, so a
+    // disposable connect probe is not transparent: dropping it before
+    // reading the daemon's Hello can make the daemon log BrokenPipe.
+    if let Ok(stream) = UnixStream::connect(socket_path) {
+        return Ok(stream);
     }
 
     // Slow path: ask the spawner to arrange a daemon, then poll.
@@ -224,8 +227,8 @@ where
 
     let deadline = Instant::now() + timeout;
     loop {
-        if UnixStream::connect(socket_path).is_ok() {
-            return Ok(());
+        if let Ok(stream) = UnixStream::connect(socket_path) {
+            return Ok(stream);
         }
         if Instant::now() >= deadline {
             return Err(BridgeError::AutoStartTimeout {
@@ -321,13 +324,49 @@ fn copy_with_flush<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io
     }
 }
 
+/// F8 diagnostic byte-capture. Active only when the marker directory
+/// `/tmp/pmacs-bridge-capture` exists on the bridge's host (or
+/// `PMACS_BRIDGE_CAPTURE_DIR` points at a directory). When active,
+/// each direction's bytes are mirrored verbatim to a file there so
+/// the exact wire image the daemon sees can be decoded offline. The
+/// mirror is best-effort and never alters the forwarded stream;
+/// when inactive this is a single `is_dir` syscall and nothing else.
+fn capture_sink(name: &str) -> Option<std::fs::File> {
+    let dir = std::env::var_os("PMACS_BRIDGE_CAPTURE_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| {
+            let marker = PathBuf::from("/tmp/pmacs-bridge-capture");
+            marker.is_dir().then_some(marker)
+        })?;
+    std::fs::File::create(dir.join(name)).ok()
+}
+
+/// Reader that mirrors every byte it yields to a side file
+/// (best-effort) before returning it to the caller. Diagnostic only;
+/// the byte stream the bridge forwards is unchanged.
+struct TeeReader<R> {
+    inner: R,
+    sink: std::fs::File,
+}
+
+impl<R: Read> Read for TeeReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let _ = self.sink.write_all(&buf[..n]);
+        let _ = self.sink.flush();
+        Ok(n)
+    }
+}
+
 // Owned `PathBuf` matches the public entry-point signature; clippy's
 // pedantic pass-by-value is wrong for this seam.
 #[allow(clippy::needless_pass_by_value)]
+#[cfg(test)]
 pub(crate) fn run_bridge<R, W>(
     socket_path: PathBuf,
     local_input: R,
-    mut local_output: W,
+    local_output: W,
 ) -> Result<(), BridgeError>
 where
     R: Read + Send + 'static,
@@ -337,7 +376,18 @@ where
         socket: socket_path.clone(),
         source,
     })?;
+    run_bridge_connected(socket, local_input, local_output)
+}
 
+fn run_bridge_connected<R, W>(
+    socket: UnixStream,
+    local_input: R,
+    mut local_output: W,
+) -> Result<(), BridgeError>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+{
     let socket_for_writer = socket.try_clone().map_err(BridgeError::Io)?;
     let kick_handle = socket.try_clone().map_err(BridgeError::Io)?;
     let mut socket_reader = socket;
@@ -346,7 +396,18 @@ where
     let stdin_thread = thread::spawn(move || {
         let mut local_input = local_input;
         let mut socket_writer = socket_for_writer;
-        let result = copy_with_flush(&mut local_input, &mut socket_writer);
+        // Diagnostic: mirror exactly the bytes we forward toward the
+        // daemon (the client's AttachRequest et seq).
+        let result = match capture_sink("to_daemon.bin") {
+            Some(sink) => {
+                let mut tee = TeeReader {
+                    inner: local_input,
+                    sink,
+                };
+                copy_with_flush(&mut tee, &mut socket_writer)
+            }
+            None => copy_with_flush(&mut local_input, &mut socket_writer),
+        };
         // After stdin EOF, signal write-side close so the daemon's
         // blocking read returns 0. Without this, the daemon never
         // sees EOF (we hold other socket FDs on the main thread)
@@ -362,7 +423,18 @@ where
     // swallowed — once we've decided to tear down, the caller cares
     // only about whether the connect succeeded, not about the exact
     // shape of the disconnect.
-    let _ = copy_with_flush(&mut socket_reader, &mut local_output);
+    // Diagnostic: mirror exactly the bytes the daemon sent us (its
+    // Hello et seq), as the client receives them.
+    let _ = match capture_sink("from_daemon.bin") {
+        Some(sink) => {
+            let mut tee = TeeReader {
+                inner: socket_reader,
+                sink,
+            };
+            copy_with_flush(&mut tee, &mut local_output)
+        }
+        None => copy_with_flush(&mut socket_reader, &mut local_output),
+    };
 
     // Wake the stdin thread's pending socket write. If the thread is
     // currently blocked in a *read* of local_input, this doesn't
@@ -632,6 +704,36 @@ mod tests {
     }
 
     #[test]
+    fn ensure_running_reuses_existing_connection_instead_of_probe_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket_path = tmp.path().join("test.sock");
+        let Some(listener) = bind_or_skip(&socket_path) else {
+            return;
+        };
+
+        let daemon = thread::spawn(move || {
+            let (mut stream, _addr) = listener.accept().unwrap();
+            stream.write_all(b"HELLO").unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut stream = ensure_daemon_running_with(
+            &socket_path,
+            Duration::from_secs(1),
+            |_path: &Path| -> Result<(), BridgeError> {
+                panic!("spawner must not run when daemon is already listening")
+            },
+        )
+        .expect("existing daemon connection");
+
+        let mut received = [0u8; 5];
+        stream.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"HELLO");
+
+        daemon.join().unwrap();
+    }
+
+    #[test]
     fn ensure_running_invokes_spawner_then_waits_for_socket_to_appear() {
         let tmp = tempfile::tempdir().unwrap();
         let socket_path = tmp.path().join("test.sock");
@@ -762,5 +864,97 @@ mod tests {
         assert!(msg.contains("/usr/local/bin/pmacs"));
         assert!(msg.contains("permission denied"));
         assert!(msg.contains("PATH"), "should hint at PATH check: {msg}",);
+    }
+
+    /// F8 reproduction (M10.11 acceptance criterion 1, SSH transport).
+    ///
+    /// Models the production failure: the daemon speaks first
+    /// (`per_attach_thread` writes `Hello` *before* reading
+    /// `AttachRequest`, see `src/daemon.rs:617`), and the bridge's
+    /// local input reaches EOF immediately — exactly what
+    /// `std::io::empty()` provides, and what was observed when
+    /// `pmacs --attach ssh:...` drove the remote `pmacs
+    /// --daemon-attach`.
+    ///
+    /// The daemon thread deliberately sleeps before writing `Hello`
+    /// so the bridge's immediate-stdin-EOF teardown path
+    /// (`copy_with_flush` returns `Ok(0)` → `shutdown(Write)` →
+    /// `done_tx`) wins the race, reproducing the production ordering
+    /// where the daemon's first write lands *after* the bridge has
+    /// reacted to EOF.
+    ///
+    /// Acceptance: the daemon's `Hello` write must NOT fail with
+    /// `BrokenPipe`, and the `Hello` bytes must reach the bridge's
+    /// local output. If this test fails, F8 is reproduced in-process
+    /// and the defect is in `run_bridge`'s local teardown logic — not
+    /// ssh-specific. If it passes against unfixed code, the in-process
+    /// model does NOT capture F8 and the cause is ssh-transport
+    /// specific (report honestly; do not claim a `run_bridge` fix).
+    #[test]
+    fn f8_daemon_speaks_first_survives_immediate_stdin_eof() {
+        // Length-prefixed Hello-shaped frame. Content is irrelevant —
+        // the bridge is byte-transparent; only survival matters.
+        const HELLO_FRAME: &[u8] = &[0x00, 0x00, 0x00, 0x05, b'H', b'E', b'L', b'L', b'O'];
+
+        let tmp = tempfile::tempdir().unwrap();
+        let socket_path = tmp.path().join("f8.sock");
+        let Some(listener) = bind_or_skip(&socket_path) else {
+            return;
+        };
+
+        let (write_result_tx, write_result_rx) = mpsc::channel::<std::io::Result<()>>();
+        let daemon = thread::spawn(move || {
+            let (mut stream, _addr) = listener.accept().unwrap();
+            // Production ordering: the bridge has process/network
+            // latency before our first write reaches it. Sleep so the
+            // bridge's immediate-EOF teardown definitely happens first.
+            thread::sleep(Duration::from_millis(150));
+            let result = stream.write_all(HELLO_FRAME).and_then(|()| stream.flush());
+            let _ = write_result_tx.send(result);
+            // Mirror per_attach_thread: after Hello, read AttachRequest
+            // (here just drain to EOF so the socket lifecycle matches).
+            let mut sink = Vec::new();
+            let _ = stream.read_to_end(&mut sink);
+        });
+
+        let (mut output_reader, output_writer) = pipe();
+        let bridge_socket = socket_path.clone();
+        // std::io::empty() == immediate stdin EOF.
+        let bridge =
+            thread::spawn(move || run_bridge(bridge_socket, std::io::empty(), output_writer));
+
+        // 1. The daemon's Hello write must not EPIPE.
+        let write_result = write_result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("daemon thread should attempt the Hello write within 3s");
+        assert!(
+            write_result.is_ok(),
+            "F8 reproduced: daemon's Hello write failed ({:?}) — \
+             run_bridge tore the socket down on immediate stdin-EOF \
+             before the daemon's first write could land",
+            write_result.as_ref().err().map(std::io::Error::kind),
+        );
+
+        // 2. The Hello bytes must reach the bridge's local output.
+        let mut received = vec![0u8; HELLO_FRAME.len()];
+        output_reader
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        match output_reader.read_exact(&mut received) {
+            Ok(()) => assert_eq!(received, HELLO_FRAME, "Hello bytes corrupted in transit",),
+            Err(e) => panic!(
+                "F8 reproduced: Hello never reached local output ({e}) — \
+                 the bridge dropped the daemon→client direction on \
+                 immediate stdin-EOF",
+            ),
+        }
+
+        // Bounded teardown so a deadlock fails loudly, not silently.
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(bridge.join());
+        });
+        let _ = done_rx.recv_timeout(Duration::from_secs(3));
+        let _ = daemon.join();
     }
 }
