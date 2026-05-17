@@ -158,6 +158,21 @@ const AUTO_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// socket to become connectable.
 const AUTO_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Shared with `attach.rs`: when set to a non-empty, non-"0" value,
+/// emit stderr breadcrumbs. The remote bridge's stderr is the SSH
+/// child's stderr, so this stays off the protocol stdout stream.
+const PMACS_ATTACH_DEBUG: &str = "PMACS_ATTACH_DEBUG";
+
+fn bridge_debug_enabled() -> bool {
+    std::env::var_os(PMACS_ATTACH_DEBUG).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+fn bridge_debug(msg: impl AsRef<str>) {
+    if bridge_debug_enabled() {
+        eprintln!("pmacs daemon-attach debug: {}", msg.as_ref());
+    }
+}
+
 /// Run `pmacs --daemon-attach`: ensure a daemon is listening at
 /// `socket_path` (auto-starting one if not), then bridge our
 /// stdin/stdout to it.
@@ -170,7 +185,12 @@ const AUTO_START_POLL_INTERVAL: Duration = Duration::from_millis(50);
 // (`run_attach`, `run_daemon`); pedantic clippy is wrong here.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run_daemon_attach(socket_path: PathBuf) -> Result<(), BridgeError> {
+    bridge_debug(format!(
+        "starting bridge for socket {}",
+        socket_path.display()
+    ));
     let socket = ensure_daemon_running(&socket_path)?;
+    bridge_debug("daemon socket ready; entering byte bridge");
     // Use the owned `Stdin` / `Stdout` (not `.lock()`) so the halves
     // can move into threads with `'static` lifetimes. Both are
     // `Send` and behave as expected for line-oriented or byte
@@ -218,19 +238,40 @@ where
     // use it as the bridge socket. The daemon speaks first, so a
     // disposable connect probe is not transparent: dropping it before
     // reading the daemon's Hello can make the daemon log BrokenPipe.
-    if let Ok(stream) = UnixStream::connect(socket_path) {
-        return Ok(stream);
+    match UnixStream::connect(socket_path) {
+        Ok(stream) => {
+            bridge_debug(format!(
+                "connected to existing daemon at {}",
+                socket_path.display()
+            ));
+            return Ok(stream);
+        }
+        Err(e) => {
+            bridge_debug(format!(
+                "initial connect to {} failed: {e}; attempting auto-start",
+                socket_path.display()
+            ));
+        }
     }
 
     // Slow path: ask the spawner to arrange a daemon, then poll.
     spawner(socket_path)?;
+    bridge_debug("auto-start command spawned; polling socket");
 
     let deadline = Instant::now() + timeout;
     loop {
         if let Ok(stream) = UnixStream::connect(socket_path) {
+            bridge_debug(format!(
+                "connected to auto-started daemon at {}",
+                socket_path.display()
+            ));
             return Ok(stream);
         }
         if Instant::now() >= deadline {
+            bridge_debug(format!(
+                "auto-start timed out after {:.1}s",
+                timeout.as_secs_f32()
+            ));
             return Err(BridgeError::AutoStartTimeout {
                 socket: socket_path.to_path_buf(),
                 after: timeout,
@@ -254,6 +295,11 @@ fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
         exe: PathBuf::from("<current_exe unavailable>"),
         source,
     })?;
+    bridge_debug(format!(
+        "spawning daemon subprocess: {} --daemon --socket {}",
+        exe.display(),
+        socket_path.display()
+    ));
     Command::new(&exe)
         .arg("--daemon")
         .arg("--socket")
@@ -265,6 +311,9 @@ fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
         .map_err(|source| BridgeError::SpawnFailed {
             exe: exe.clone(),
             source,
+        })
+        .map(|child| {
+            bridge_debug(format!("spawned daemon subprocess pid {}", child.id()));
         })?;
     Ok(())
 }
@@ -391,11 +440,13 @@ where
     let socket_for_writer = socket.try_clone().map_err(BridgeError::Io)?;
     let kick_handle = socket.try_clone().map_err(BridgeError::Io)?;
     let mut socket_reader = socket;
+    bridge_debug("bridge connected; starting copy loops");
 
     let (done_tx, done_rx) = mpsc::channel::<()>();
     let stdin_thread = thread::spawn(move || {
         let mut local_input = local_input;
         let mut socket_writer = socket_for_writer;
+        bridge_debug("stdin->daemon copy loop started");
         // Diagnostic: mirror exactly the bytes we forward toward the
         // daemon (the client's AttachRequest et seq).
         let result = match capture_sink("to_daemon.bin") {
@@ -408,6 +459,10 @@ where
             }
             None => copy_with_flush(&mut local_input, &mut socket_writer),
         };
+        match &result {
+            Ok(n) => bridge_debug(format!("stdin->daemon copy loop ended after {n} bytes")),
+            Err(e) => bridge_debug(format!("stdin->daemon copy loop failed: {e}")),
+        }
         // After stdin EOF, signal write-side close so the daemon's
         // blocking read returns 0. Without this, the daemon never
         // sees EOF (we hold other socket FDs on the main thread)
@@ -425,7 +480,8 @@ where
     // shape of the disconnect.
     // Diagnostic: mirror exactly the bytes the daemon sent us (its
     // Hello et seq), as the client receives them.
-    let _ = match capture_sink("from_daemon.bin") {
+    bridge_debug("daemon->stdout copy loop started");
+    let daemon_to_stdout = match capture_sink("from_daemon.bin") {
         Some(sink) => {
             let mut tee = TeeReader {
                 inner: socket_reader,
@@ -435,6 +491,11 @@ where
         }
         None => copy_with_flush(&mut socket_reader, &mut local_output),
     };
+    match &daemon_to_stdout {
+        Ok(n) => bridge_debug(format!("daemon->stdout copy loop ended after {n} bytes")),
+        Err(e) => bridge_debug(format!("daemon->stdout copy loop failed: {e}")),
+    }
+    let _ = daemon_to_stdout;
 
     // Wake the stdin thread's pending socket write. If the thread is
     // currently blocked in a *read* of local_input, this doesn't
@@ -461,6 +522,7 @@ where
     let _ = done_rx.recv_timeout(Duration::from_millis(500));
     drop(stdin_thread);
 
+    bridge_debug("bridge exiting cleanly");
     Ok(())
 }
 

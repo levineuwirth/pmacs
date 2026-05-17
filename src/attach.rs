@@ -62,6 +62,12 @@ use crate::transport::{TransportError, read_message, write_message};
 /// will get a dedicated CLI flag.
 pub const PMACS_TEST_SSH_BIN: &str = "PMACS_TEST_SSH_BIN";
 
+/// Enable stderr breadcrumbs for SSH attach and the far-side
+/// `--daemon-attach` bridge. The local side propagates this to the
+/// remote command via `env PMACS_ATTACH_DEBUG=1 ...`, so users only
+/// need to set it on the initiating shell.
+const PMACS_ATTACH_DEBUG: &str = "PMACS_ATTACH_DEBUG";
+
 /// Maximum bytes of remote stderr retained for diagnostic surfacing
 /// in [`AttachError::SshChildExited`]. Sized to catch typical SSH
 /// failure messages (one or two short lines plus optional banner)
@@ -1004,6 +1010,16 @@ fn ssh_binary() -> PathBuf {
     std::env::var_os(PMACS_TEST_SSH_BIN).map_or_else(|| PathBuf::from("ssh"), PathBuf::from)
 }
 
+fn attach_debug_enabled() -> bool {
+    std::env::var_os(PMACS_ATTACH_DEBUG).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+fn attach_debug(msg: impl AsRef<str>) {
+    if attach_debug_enabled() {
+        eprintln!("pmacs attach debug: {}", msg.as_ref());
+    }
+}
+
 /// Construct the [`Command`] for SSH attach without spawning.
 ///
 /// Pure (modulo the env-var lookup for test substitution): used
@@ -1033,6 +1049,9 @@ pub(crate) fn build_ssh_command(target: &AttachTarget) -> Option<Command> {
         cmd.arg("-l").arg(u);
     }
     cmd.arg(host);
+    if attach_debug_enabled() {
+        cmd.arg("env").arg(format!("{PMACS_ATTACH_DEBUG}=1"));
+    }
     cmd.arg("pmacs").arg("--daemon-attach");
     if let Some(name) = instance_name {
         cmd.arg("--socket").arg(name);
@@ -1421,10 +1440,12 @@ fn run_one_session(
         .stderr(Stdio::piped());
 
     let bin_for_error = ssh_binary();
+    attach_debug(format!("spawning ssh command: {:?}", cmd));
     let mut child = cmd.spawn().map_err(|source| AttachError::SshSpawnFailed {
         command: bin_for_error,
         source,
     })?;
+    attach_debug(format!("ssh child spawned with pid {}", child.id()));
 
     let mut child_stdout = child
         .stdout
@@ -1453,9 +1474,11 @@ fn run_one_session(
     // On reconnect (`Some`) the Frontend is up and the M5.8c
     // overlay communicates state; handshake errors here are bubbled
     // up so the M5.8d loop can decide whether to retry.
+    attach_debug("waiting for Hello from remote daemon bridge");
     let hello: Hello = match read_message(&mut child_stdout) {
         Ok(h) => h,
         Err(e) => {
+            attach_debug(format!("failed reading Hello: {e}"));
             return Err(handshake_error_with_child(
                 child,
                 stderr_handle,
@@ -1464,6 +1487,10 @@ fn run_one_session(
             ));
         }
     };
+    attach_debug(format!(
+        "received Hello: protocol_version={}, assigned_frontend_id={}",
+        hello.protocol_version, hello.assigned_frontend_id.0
+    ));
     // T M10.5: relaxed to range membership per
     // `§sec:m10-backward-compat`. Symmetric with the local-socket
     // attach path above.
@@ -1506,6 +1533,7 @@ fn run_one_session(
         initial_size,
     };
     if let Err(e) = write_message(&mut child_stdin, &req) {
+        attach_debug(format!("failed writing AttachRequest: {e}"));
         return Err(handshake_error_with_child(
             child,
             stderr_handle,
@@ -1513,6 +1541,7 @@ fn run_one_session(
             e.into(),
         ));
     }
+    attach_debug("sent AttachRequest");
 
     // First-attempt-only side effects. On reconnect the user already
     // saw the info banner and the Frontend is already up; we skip
@@ -1544,6 +1573,10 @@ fn run_one_session(
     };
 
     let pump_result = run_attach_pair(io, frontend, hello.assigned_frontend_id);
+    attach_debug(format!(
+        "attach pump exited: {:?}",
+        pump_result.as_ref().err()
+    ));
 
     // Reap the child and drain the stderr tee with the Frontend
     // still alive. None of these steps emit terminal output, so raw
