@@ -61,6 +61,7 @@
 
 use std::io::{Read, Write};
 use std::net::Shutdown;
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -196,7 +197,7 @@ pub fn run_daemon_attach(socket_path: PathBuf) -> Result<(), BridgeError> {
     // `Send` and behave as expected for line-oriented or byte
     // streaming use.
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
+    let stdout = RawStdout::new();
     run_bridge_connected(socket, stdin, stdout)
 }
 
@@ -356,7 +357,16 @@ fn spawn_daemon_subprocess(socket_path: &Path) -> Result<(), BridgeError> {
 ///
 /// `Interrupted` is retried (matches `std::io::copy`'s behavior).
 /// Returns the same `(reader, writer)` error that `copy` would.
+#[cfg(test)]
 fn copy_with_flush<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io::Result<u64> {
+    copy_with_flush_named(reader, writer, None)
+}
+
+fn copy_with_flush_named<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    label: Option<&str>,
+) -> std::io::Result<u64> {
     let mut buf = [0u8; 8192];
     let mut total: u64 = 0;
     loop {
@@ -366,10 +376,44 @@ fn copy_with_flush<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io
                 writer.write_all(&buf[..n])?;
                 writer.flush()?;
                 total += n as u64;
+                if let Some(label) = label {
+                    bridge_debug(format!(
+                        "{label}: forwarded chunk {n} bytes (total {total})"
+                    ));
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// Unbuffered writer for the bridge's protocol stdout.
+///
+/// `std::io::Stdout` is allowed to buffer internally, which is toxic
+/// for `pmacs --daemon-attach`: the first daemon `Hello` is a small
+/// binary frame with no newline and the local frontend is blocked
+/// waiting for it. This writer bypasses Rust's stdout buffering and
+/// writes directly to fd 1 using safe `nix::unistd::write`.
+struct RawStdout {
+    stdout: std::io::Stdout,
+}
+
+impl RawStdout {
+    fn new() -> Self {
+        Self {
+            stdout: std::io::stdout(),
+        }
+    }
+}
+
+impl Write for RawStdout {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        nix::unistd::write(self.stdout.as_fd(), buf).map_err(std::io::Error::from)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -455,9 +499,11 @@ where
                     inner: local_input,
                     sink,
                 };
-                copy_with_flush(&mut tee, &mut socket_writer)
+                copy_with_flush_named(&mut tee, &mut socket_writer, Some("stdin->daemon"))
             }
-            None => copy_with_flush(&mut local_input, &mut socket_writer),
+            None => {
+                copy_with_flush_named(&mut local_input, &mut socket_writer, Some("stdin->daemon"))
+            }
         };
         match &result {
             Ok(n) => bridge_debug(format!("stdin->daemon copy loop ended after {n} bytes")),
@@ -487,9 +533,13 @@ where
                 inner: socket_reader,
                 sink,
             };
-            copy_with_flush(&mut tee, &mut local_output)
+            copy_with_flush_named(&mut tee, &mut local_output, Some("daemon->stdout"))
         }
-        None => copy_with_flush(&mut socket_reader, &mut local_output),
+        None => copy_with_flush_named(
+            &mut socket_reader,
+            &mut local_output,
+            Some("daemon->stdout"),
+        ),
     };
     match &daemon_to_stdout {
         Ok(n) => bridge_debug(format!("daemon->stdout copy loop ended after {n} bytes")),
