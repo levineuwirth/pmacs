@@ -389,7 +389,7 @@ const READER_SEND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// parser worker may still have already-read bytes in flight. This is
 /// not process termination grace; it is only the final output flush
 /// before the runtime handles are dropped.
-const EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
+const EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
 // Supervisor

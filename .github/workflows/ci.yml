@@ -61,7 +61,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: perf, memory, and 30s fuzz gates
-        run: cargo test --release --test acceptance -- --ignored --nocapture
+        run: cargo test --release --test acceptance -- --ignored --nocapture --test-threads=1
 
   m4-perf-gates:
     name: M4 Perf Gates
@@ -71,7 +71,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: tree-sitter parse + highlight latency budgets
-        run: cargo test --release --test m4_acceptance -- --ignored --nocapture
+        run: cargo test --release --test m4_acceptance -- --ignored --nocapture --test-threads=1
 
   # m5-perf-gates: luajit-only by design.
   # The keystroke-to-render gate measures protocol-path latency (Unix

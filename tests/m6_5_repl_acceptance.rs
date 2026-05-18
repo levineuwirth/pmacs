@@ -32,10 +32,16 @@
 use pmacs::editor::EditorState;
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 static PUMP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn pump_test_guard() -> MutexGuard<'static, ()> {
+    PUMP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Locate a shell binary for tests that require one. Returns the
 /// resolved path or `None` if the shell is neither at `PMACS_TEST_<NAME>`
@@ -70,6 +76,7 @@ fn locate_shell(name: &str) -> Option<PathBuf> {
 
 /// Construct a fresh editor and run the given Lua chunk against it.
 fn run(chunk: &str) {
+    let _guard = pump_test_guard();
     let mut editor = EditorState::new();
     editor
         .lua_host
@@ -84,7 +91,7 @@ fn run(chunk: &str) {
 /// `poll_until` pattern but routes through `tick_processes` so the M6.5
 /// after-tick contract is exercised end-to-end.
 fn run_with_pump(setup_chunk: &str, predicate_chunk: &str, timeout_ms: u64) {
-    let _guard = PUMP_TEST_LOCK.lock().expect("pump test lock");
+    let _guard = pump_test_guard();
     let mut editor = EditorState::new();
     editor
         .lua_host

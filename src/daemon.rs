@@ -79,6 +79,18 @@ fn daemon_debug_enabled() -> bool {
     std::env::var_os(PMACS_ATTACH_DEBUG).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+        .ok()
+        .map(|cred| cred.uid())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn peer_uid(_stream: &UnixStream) -> Option<u32> {
+    None
+}
+
 fn daemon_debug(msg: impl AsRef<str>) {
     if daemon_debug_enabled() {
         eprintln!("pmacs daemon debug: {}", msg.as_ref());
@@ -698,16 +710,13 @@ fn per_attach_thread(
     // reconnect → same color slot. If SO_PEERCRED fails (e.g.,
     // non-Unix peer, kernel API unavailable), fall back to a
     // per-FrontendId slot (degrades to per-connection stability).
-    let color_slot =
-        match nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerCredentials) {
-            Ok(cred) => daemon_state.color_slot_for_uid(cred.uid()),
-            Err(_) => {
-                // Fallback: use frontend_id-based slot; per-connection
-                // stability only (no cross-reconnect within session).
-                u8::try_from(frontend_id.0 % (crate::overlay_color::PALETTE_LEN as u64))
-                    .unwrap_or(0)
-            }
-        };
+    let color_slot = if let Some(uid) = peer_uid(&stream) {
+        daemon_state.color_slot_for_uid(uid)
+    } else {
+        // Fallback: use frontend_id-based slot; per-connection
+        // stability only (no cross-reconnect within session).
+        u8::try_from(frontend_id.0 % (crate::overlay_color::PALETTE_LEN as u64)).unwrap_or(0)
+    };
 
     let session_state =
         crate::presence::SessionState::new(req.protocol_version, negotiated_caps, color_slot);
