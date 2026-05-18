@@ -294,10 +294,18 @@ fn cli_attach_invokes_test_ssh_with_expected_argv() {
     });
     let lines: Vec<&str> = argv.lines().collect();
     // build_ssh_command for `ssh:mac-studio` (no user, no instance)
-    // emits `[-T, host, "pmacs", "--daemon-attach"]`.
+    // defaults to the stderr protocol channel and advertises the
+    // remote fd through env.
     assert_eq!(
         lines,
-        vec!["-T", "mac-studio", "pmacs", "--daemon-attach"],
+        vec![
+            "-T",
+            "mac-studio",
+            "env",
+            "PMACS_ATTACH_PROTOCOL_FD=2",
+            "pmacs",
+            "--daemon-attach",
+        ],
         "argv shape: {lines:?}"
     );
 }
@@ -330,6 +338,8 @@ fn cli_attach_with_user_and_instance_name_passes_through_dash_l_and_dash_dash_so
             "-l",
             "alice",
             "workstation",
+            "env",
+            "PMACS_ATTACH_PROTOCOL_FD=2",
             "pmacs",
             "--daemon-attach",
             "--socket",

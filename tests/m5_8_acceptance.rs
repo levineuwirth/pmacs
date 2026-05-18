@@ -68,6 +68,8 @@ use pmacs::protocol::{
 mod common;
 use common::pty::spawn_pmacs_in_pty;
 
+const PMACS_ATTACH_SSH_PROTOCOL: &str = "PMACS_ATTACH_SSH_PROTOCOL";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -145,6 +147,7 @@ fn handshake_retry_cap_fires_after_three_failed_handshakes() {
     let output = Command::new(env!("CARGO_BIN_EXE_pmacs"))
         .args(["--attach", "host"])
         .env(PMACS_TEST_SSH_BIN, &fake_ssh)
+        .env(PMACS_ATTACH_SSH_PROTOCOL, "stdout")
         .env(PMACS_TEST_BACKOFF_SCALE_MS, "1")
         .env("HOME", isolated_home)
         .env("XDG_CONFIG_HOME", isolated_home)
@@ -261,6 +264,7 @@ fn ssh_stderr_from_handshake_attempts_reaches_user() {
     let output = Command::new(env!("CARGO_BIN_EXE_pmacs"))
         .args(["--attach", "host"])
         .env(PMACS_TEST_SSH_BIN, &fake_ssh)
+        .env(PMACS_ATTACH_SSH_PROTOCOL, "stdout")
         .env(PMACS_TEST_BACKOFF_SCALE_MS, "1")
         .env("HOME", isolated_home)
         .env("XDG_CONFIG_HOME", isolated_home)
@@ -438,6 +442,7 @@ fn ssh_dies_mid_pump_then_reconnect_succeeds() {
         &["--attach", "host"],
         &[
             (PMACS_TEST_SSH_BIN, fx.fake_ssh.as_path()),
+            (PMACS_ATTACH_SSH_PROTOCOL, Path::new("stdout")),
             (PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1")),
             ("HOME", fx.isolated_home.as_path()),
             ("XDG_CONFIG_HOME", fx.isolated_home.as_path()),
@@ -489,6 +494,7 @@ fn ctrl_c_during_reconnect_sleep_yields_clean_exit() {
         &["--attach", "host"],
         &[
             (PMACS_TEST_SSH_BIN, fx.fake_ssh.as_path()),
+            (PMACS_ATTACH_SSH_PROTOCOL, Path::new("stdout")),
             (PMACS_TEST_BACKOFF_SCALE_MS, Path::new("1000")),
             ("HOME", fx.isolated_home.as_path()),
             ("XDG_CONFIG_HOME", fx.isolated_home.as_path()),
