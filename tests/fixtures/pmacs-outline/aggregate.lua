@@ -29,9 +29,9 @@
 --
 --   * Source-listener intercept on each source marks the aggregate
 --     dirty and schedules an async repaint via pmacs.async +
---     workers.sleep(0):await(). The body yields once so the source
---     edit's Phase-3 commit completes before repaint reads the
---     source's text.
+--     pmacs.async.yield_to_next_tick(). The body yields once so the
+--     source edit's Phase-3 commit completes before repaint reads
+--     the source's text.
 --
 --   * Cross-block edits are rejected. A delete or replace whose
 --     range spans more than one block --- for example, deleting
@@ -170,29 +170,19 @@ M.__pmacs_outline_test_repaint = repaint
 -- Source intercepts can't repaint synchronously: the source's
 -- Phase 3 hasn't committed yet, so reading source:slice would see
 -- the pre-edit text. We schedule a coroutine that yields once via
--- pmacs.workers.sleep(0):await(); the next tick_async resumes it
+-- pmacs.async.yield_to_next_tick(); the next tick_async resumes it
 -- after Phase 3 has applied. `repaint_scheduled` coalesces multiple
 -- source edits into one repaint per tick.
 --
--- Pass-6 finding 3 / timing semantics: `workers.sleep(0)` dispatches
--- a sleep job to a worker thread which immediately replies to the
--- main-thread bus; the next call to `state.tick_async` drains the
--- bus and resumes our coroutine. This is "within one tick *after
--- the worker reply settles*" --- not strictly one tick of the
--- editor's main event loop. In practice the worker reply arrives
--- in microseconds, so a single tick suffices once a small amount
--- of real time has elapsed; the M8.10 acceptance test verifies
--- bounded propagation via `pump_until` rather than a hard one-tick
--- count. SP-7 in V0.2-PREREQUISITES.md tracks the v0.2 work to add
--- a synchronous post-edit hook (or a worker-free coroutine yield
--- primitive) so aggregate repaint can be pinned to exactly one
--- tick of the main event loop.
+-- SP-7 resolution: this uses a worker-free next-tick yield primitive,
+-- so propagation is pinned to the editor's async tick rather than to
+-- a worker reply round trip.
 
 local function schedule_repaint(handle)
   if handle.repaint_scheduled or not handle.alive then return end
   handle.repaint_scheduled = true
   pmacs.async(function()
-    pmacs.workers.sleep(0):await()
+    pmacs.async.yield_to_next_tick()
     handle.repaint_scheduled = false
     if handle.alive and handle.dirty then
       repaint(handle)

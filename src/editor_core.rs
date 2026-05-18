@@ -355,6 +355,21 @@ impl EditorCore {
         aw.text_view.line_at_offset(aw.cursor)
     }
 
+    /// Move the active window's cursor to the start of a 0-based line.
+    /// Out-of-range line numbers clamp to the last line.
+    pub fn move_to_line(&mut self, line: usize) {
+        let line_count = self.active_window().text_view.line_count().max(1);
+        let target_line = line.min(line_count - 1);
+        let target = self
+            .active_window()
+            .text_view
+            .line_offset(target_line)
+            .unwrap_or_else(|| self.active_buffer_len());
+        let aw = self.active_window_mut();
+        aw.cursor = target;
+        aw.goal_col = None;
+    }
+
     // ---- editing primitives ------------------------------------------------
 
     /// Apply `op` to the active buffer; notify every window

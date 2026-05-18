@@ -67,6 +67,37 @@ fn editor_with_outline() -> (EditorState, TempDir, TempDir) {
     (state, cache, user_root)
 }
 
+#[test]
+fn public_pmacs_outline_query_returns_matching_entries() {
+    let (mut state, _cache, _user_root) = editor_with_outline();
+    state
+        .lua_host
+        .eval(
+            Some("public-outline-query"),
+            r#"
+                _G.SRC = pmacs.buffer.create("*outline-query-src*")
+                _G.SRC:replace(0, 0,
+                    "* TODO alpha :todo:\nbody\n" ..
+                    "* DONE beta :done:\nbody\n" ..
+                    "* TODO gamma :todo:\nbody\n")
+                local hits = pmacs.outline.query(_G.SRC, function(e)
+                    return e.tagset and e.tagset.todo
+                end)
+                _G.HIT_COUNT = #hits
+                _G.FIRST_TITLE = hits[1].title
+                _G.SECOND_TITLE = hits[2].title
+            "#,
+        )
+        .expect("public outline query");
+
+    let count: i64 = state.lua_host.lua().globals().get("HIT_COUNT").unwrap();
+    assert_eq!(count, 2);
+    let first: String = state.lua_host.lua().globals().get("FIRST_TITLE").unwrap();
+    let second: String = state.lua_host.lua().globals().get("SECOND_TITLE").unwrap();
+    assert_eq!(first, "TODO alpha");
+    assert_eq!(second, "TODO gamma");
+}
+
 /// Boot an outline view over a fresh source buffer pre-populated
 /// with `text`. After this call the visible projection buffer is
 /// active in the window. Globals stashed for test access:

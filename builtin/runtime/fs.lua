@@ -32,6 +32,13 @@
 -- exits with a structured `{ tag = "cancelled" }` error from
 -- :await() on cancel; callers either let it propagate (the typical
 -- behavior under supersede) or pcall around it.
+--
+--   pmacs.fs.watch(path, callback [, opts])
+--     Polling file watcher. Calls callback({ kind = "changed" |
+--     "created" | "removed", path = path, recursive = bool }) when
+--     the snapshot changes. opts.interval_ms defaults to 250;
+--     opts.recursive defaults to false. Returns a watcher with
+--     :cancel() and :is_cancelled().
 
 local async_mod = pmacs._async
 assert(async_mod, "pmacs._async must be installed before pmacs.fs loads")
@@ -141,6 +148,140 @@ function fs.remove(path)
     error("pmacs.fs.remove: path must be a string, got " .. type(path))
   end
   return build_handle(async_mod._dispatch_fs_remove(path))
+end
+
+local Watch = {}
+Watch.__index = Watch
+
+function Watch:cancel()
+  self.cancelled = true
+  if self._sleep_handle then
+    self._sleep_handle:cancel()
+  end
+end
+
+function Watch:is_cancelled()
+  return self.cancelled
+end
+
+local function join_path(base, name)
+  if base:sub(-1) == "/" then return base .. name end
+  return base .. "/" .. name
+end
+
+local function error_string(err)
+  if type(err) == "table" then
+    return tostring(err.tag or "error") .. ":" .. tostring(err.message or "")
+  end
+  return tostring(err)
+end
+
+local function entry_signature(path, entry)
+  return table.concat({
+    path,
+    tostring(entry.kind),
+    tostring(entry.size),
+    tostring(entry.mtime),
+    tostring(entry.mtime_nsec),
+    tostring(entry.mode),
+    tostring(entry.symlink_target or ""),
+  }, "|")
+end
+
+local function append_snapshot(parts, path, recursive)
+  local ok, entry = pcall(function() return fs.stat(path):await() end)
+  if not ok then
+    parts[#parts + 1] = path .. "|error|" .. error_string(entry)
+    return false
+  end
+  parts[#parts + 1] = entry_signature(path, entry)
+  if entry.kind ~= "dir" then
+    return true
+  end
+
+  local ok_dir, entries = pcall(function() return fs.read_dir(path):await() end)
+  if not ok_dir then
+    parts[#parts + 1] = path .. "|read_dir_error|" .. error_string(entries)
+    return true
+  end
+
+  table.sort(entries, function(a, b) return a.name < b.name end)
+  for _, child in ipairs(entries) do
+    local child_path = join_path(path, child.name)
+    parts[#parts + 1] = entry_signature(child_path, child)
+    if recursive and child.kind == "dir" then
+      append_snapshot(parts, child_path, true)
+    end
+  end
+  return true
+end
+
+local function snapshot(path, recursive)
+  local parts = {}
+  local exists = append_snapshot(parts, path, recursive)
+  table.sort(parts)
+  return table.concat(parts, "\n"), exists
+end
+
+function fs.watch(path, callback, opts)
+  if type(path) ~= "string" then
+    error("pmacs.fs.watch: path must be a string, got " .. type(path))
+  end
+  if type(callback) ~= "function" then
+    error("pmacs.fs.watch: callback must be a function, got " .. type(callback))
+  end
+  if opts ~= nil and type(opts) ~= "table" then
+    error("pmacs.fs.watch: opts must be a table or nil, got " .. type(opts))
+  end
+  opts = opts or {}
+  local interval_ms = opts.interval_ms or 250
+  if type(interval_ms) ~= "number" or interval_ms < 1 then
+    error("pmacs.fs.watch: opts.interval_ms must be a positive number")
+  end
+  interval_ms = math.floor(interval_ms)
+  local recursive = opts.recursive == true
+
+  local watch = setmetatable({
+    path = path,
+    recursive = recursive,
+    cancelled = false,
+    _sleep_handle = nil,
+  }, Watch)
+
+  pmacs.async(function()
+    local previous, previous_exists = snapshot(path, recursive)
+    while not watch.cancelled do
+      local sleep_handle = pmacs.workers.sleep(interval_ms)
+      watch._sleep_handle = sleep_handle
+      pcall(function() sleep_handle:await() end)
+      watch._sleep_handle = nil
+      if watch.cancelled then break end
+
+      local current, current_exists = snapshot(path, recursive)
+      if current ~= previous then
+        local kind = "changed"
+        if previous_exists and not current_exists then
+          kind = "removed"
+        elseif not previous_exists and current_exists then
+          kind = "created"
+        end
+        previous = current
+        previous_exists = current_exists
+        local ok, err = pcall(callback, {
+          kind = kind,
+          path = path,
+          recursive = recursive,
+        })
+        if not ok and pmacs.error then
+          pmacs.error("pmacs.fs.watch callback failed: " .. tostring(err))
+        elseif not ok then
+          error(err)
+        end
+      end
+    end
+  end)
+
+  return watch
 end
 
 pmacs.fs = fs

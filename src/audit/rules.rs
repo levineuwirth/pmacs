@@ -145,4 +145,10 @@ pub const DEFAULT_RULES: &[AuditRule] = &[
         severity: Severity::Info,
         message: "dotted require may target another package's non-exported submodule",
     },
+    // 15
+    AuditRule {
+        name: "reach-around-require-field",
+        severity: Severity::Info,
+        message: "private-looking field access on require() may reach another package's internals",
+    },
 ];

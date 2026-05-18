@@ -549,3 +549,63 @@ fn read_dir_on_missing_path_returns_failed_status() {
         "error message must name the offending path; got {message}"
     );
 }
+
+#[test]
+fn fs_watch_reports_file_change_and_can_cancel() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("watched.txt");
+    std::fs::write(&path, b"one").expect("write initial");
+
+    let mut state = fresh_editor();
+    let path_str = path.display().to_string();
+    let chunk = format!(
+        r#"
+        _G.WATCH_EVENTS = {{}}
+        _G.WATCH = pmacs.fs.watch("{path_str}", function(event)
+            WATCH_EVENTS[#WATCH_EVENTS + 1] = event.kind
+        end, {{ interval_ms = 5 }})
+    "#,
+    );
+    eval_sync::<()>(&mut state, &chunk);
+
+    // The watcher establishes its baseline snapshot asynchronously (an
+    // in-flight fs.stat). `pmacs._async.pending_count() == 1` cannot
+    // distinguish that in-flight baseline read from the steady-state
+    // poll sleep, so a single post-gate write can race the baseline,
+    // be absorbed into it, and never produce an event (the flake this
+    // replaces). Instead, rewrite the file with distinct-length
+    // content on every pump iteration: whatever snapshot the watcher
+    // captured as its baseline, a subsequent distinct write
+    // necessarily differs from it (size differs, so it holds even on
+    // coarse-mtime filesystems) and fires a "changed" event.
+    let writes = std::cell::Cell::new(0u32);
+    pump_until(&mut state, |s| {
+        let n = writes.get() + 1;
+        writes.set(n);
+        std::fs::write(&path, "v".repeat(n as usize + 1)).expect("rewrite changed");
+        let count: i64 = s
+            .lua_host
+            .lua()
+            .load("return #WATCH_EVENTS")
+            .eval()
+            .expect("event count");
+        count >= 1
+    });
+
+    let first: String = state
+        .lua_host
+        .lua()
+        .load("return WATCH_EVENTS[1]")
+        .eval()
+        .expect("first watch event");
+    assert_eq!(first, "changed");
+
+    eval_sync::<()>(&mut state, "WATCH:cancel()");
+    let cancelled: bool = state
+        .lua_host
+        .lua()
+        .load("return WATCH:is_cancelled()")
+        .eval()
+        .expect("cancelled");
+    assert!(cancelled, "watch handle must report cancellation");
+}

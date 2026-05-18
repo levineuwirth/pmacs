@@ -55,6 +55,9 @@
 --                                                 .parser_handle
 --   outline.close(handle)                     -- removes intercepts,
 --                                                 drops the visible buffer
+--   outline.query(source_buf, predicate)      -- public structure query;
+--                                                 also installed as
+--                                                 pmacs.outline.query
 --
 --   M-x pmacs-outline.next-headline           -- in visible buffer
 --   M-x pmacs-outline.parent-headline
@@ -320,6 +323,28 @@ function M.toggle_fold(handle, source_byte)
   repaint(handle)
 end
 
+function M.query(source_buf, predicate)
+  if type(predicate) ~= "function" then
+    error("pmacs-outline.query: predicate must be a function")
+  end
+
+  local h = find_handle_by("source", source_buf)
+  if h then
+    return parser.query(h.parser_handle, predicate)
+  end
+
+  local ph = parser.attach(source_buf)
+  local ok, result = pcall(function()
+    return parser.query(ph, predicate)
+  end)
+  parser.detach(ph)
+  if not ok then error(result) end
+  return result
+end
+
+pmacs.outline = pmacs.outline or {}
+pmacs.outline.query = M.query
+
 -- ---------------------------------------------------------------------------
 -- Commands
 -- ---------------------------------------------------------------------------
@@ -389,6 +414,9 @@ pmacs.packages.on_unload(function()
     pmacs.command.unregister(name)
   end
   OWNED_COMMANDS = {}
+  if pmacs.outline and pmacs.outline.query == M.query then
+    pmacs.outline.query = nil
+  end
 end)
 
 -- ---------------------------------------------------------------------------
