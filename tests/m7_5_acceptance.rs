@@ -246,7 +246,7 @@ fn make_branched_package(name: &str) -> (TempDir, PathBuf, String) {
     ]);
     std::fs::write(
         work.join("init.lua"),
-        format!("return {{ name = '{name}', version = '1.0.0', flavor = 'feature' }}\n",),
+        format!("return {{ name = '{name}', version = '1.0.0', flavor = 'feature' }}\n"),
     )
     .expect("write init.lua feature");
     run_git(&[

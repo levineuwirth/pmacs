@@ -939,7 +939,7 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("/usr/local/bin/pmacs"));
         assert!(msg.contains("permission denied"));
-        assert!(msg.contains("PATH"), "should hint at PATH check: {msg}",);
+        assert!(msg.contains("PATH"), "should hint at PATH check: {msg}");
     }
 
     /// F8 reproduction (M10.11 acceptance criterion 1, SSH transport).
@@ -1017,7 +1017,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         match output_reader.read_exact(&mut received) {
-            Ok(()) => assert_eq!(received, HELLO_FRAME, "Hello bytes corrupted in transit",),
+            Ok(()) => assert_eq!(received, HELLO_FRAME, "Hello bytes corrupted in transit"),
             Err(e) => panic!(
                 "F8 reproduced: Hello never reached local output ({e}) — \
                  the bridge dropped the daemon→client direction on \

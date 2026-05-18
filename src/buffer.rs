@@ -1050,10 +1050,9 @@ impl Buffer {
         let (lossy_owned, captured_crdt_op): (
             Option<Vec<u8>>,
             Option<Box<crate::rope::CrdtOp>>,
-        ) = if self.crdt.is_some() && !is_no_op_edit(current) {
-            Self::apply_to_crdt_then_normalize_bytes(self.crdt.as_ref().expect("checked"), current)?
-        } else {
-            (None, None)
+        ) = match (&self.crdt, is_no_op_edit(current)) {
+            (Some(crdt), false) => Self::apply_to_crdt_then_normalize_bytes(crdt, current)?,
+            _ => (None, None),
         };
 
         // Stage 2: rope edit. In CRDT mode, the EditOp's byte payload

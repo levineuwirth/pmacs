@@ -322,11 +322,11 @@ mod tests {
         let mut s = BackoffSchedule::new();
         let expected = [
             Duration::from_millis(500),
-            Duration::from_millis(1000),
-            Duration::from_millis(2000),
-            Duration::from_millis(4000),
-            Duration::from_millis(8000),
-            Duration::from_millis(16000),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(16),
             Duration::from_secs(30),
         ];
         for (i, &want) in expected.iter().enumerate() {
@@ -366,7 +366,7 @@ mod tests {
 
         s.reset();
         assert_eq!(s.next_delay(), Duration::from_millis(500));
-        assert_eq!(s.next_delay(), Duration::from_millis(1000));
+        assert_eq!(s.next_delay(), Duration::from_secs(1));
     }
 
     #[test]

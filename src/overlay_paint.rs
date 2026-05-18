@@ -249,21 +249,19 @@ fn paint_selection_in_window(
             break;
         };
         match (disp.row as usize).checked_sub(window.view_top) {
-            Some(r) if r < inner_rows as usize => {
-                if disp.col < rect.size.cols {
-                    let grid_row = rect.origin.row + r as u32;
-                    let grid_col = rect.origin.col + disp.col;
-                    if grid_row < grid.size.rows && grid_col < grid.size.cols {
-                        let cell = grid.at(CellCoord::new(grid_row, grid_col));
-                        cell.style.underline = UnderlineStyle::Single;
-                        // Use the source's color for the underline; if
-                        // the cell already has a foreground style, the
-                        // underline color comes from the fg. We don't
-                        // override fg to preserve the cell's existing
-                        // glyph appearance.
-                        if cell.style.fg == Color::Default {
-                            cell.style.fg = color;
-                        }
+            Some(r) if r < inner_rows as usize && disp.col < rect.size.cols => {
+                let grid_row = rect.origin.row + r as u32;
+                let grid_col = rect.origin.col + disp.col;
+                if grid_row < grid.size.rows && grid_col < grid.size.cols {
+                    let cell = grid.at(CellCoord::new(grid_row, grid_col));
+                    cell.style.underline = UnderlineStyle::Single;
+                    // Use the source's color for the underline; if
+                    // the cell already has a foreground style, the
+                    // underline color comes from the fg. We don't
+                    // override fg to preserve the cell's existing
+                    // glyph appearance.
+                    if cell.style.fg == Color::Default {
+                        cell.style.fg = color;
                     }
                 }
             }

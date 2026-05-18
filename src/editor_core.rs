@@ -323,7 +323,7 @@ impl EditorCore {
     #[must_use]
     pub fn active_buffer_len(&self) -> u64 {
         let id = self.active_buffer_id();
-        self.registry.borrow().get(id).map(Buffer::len).unwrap_or(0)
+        self.registry.borrow().get(id).map_or(0, Buffer::len)
     }
 
     /// Active buffer's name. Returns an owned String to release the

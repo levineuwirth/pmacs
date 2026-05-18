@@ -1073,7 +1073,7 @@ mod tests {
                     let pos = (rng() as usize) % (len + 1);
                     let n = (rng() % 64 + 1) as usize;
                     let bytes: Vec<u8> = (0..n)
-                        .map(|i| ((rng() as u8).wrapping_add(i as u8)))
+                        .map(|i| (rng() as u8).wrapping_add(i as u8))
                         .collect();
                     rope = rope.insert(pos as u64, &bytes).unwrap().new_rope;
                     reference.splice(pos..pos, bytes);

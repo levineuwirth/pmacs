@@ -121,7 +121,7 @@ fn read_dir_returns_one_entry_per_child_with_lstat_metadata() {
     if let Ok(err) = entries.get::<String>("error") {
         panic!("read_dir errored: {err}");
     }
-    let len: usize = entries.len().map(|n| n as usize).unwrap_or(0);
+    let len: usize = entries.len().map_or(0, |n| n as usize);
     assert_eq!(len, 3, "expected 3 entries, got {len}");
 
     // Names are filesystem-iteration-ordered; gather and sort.

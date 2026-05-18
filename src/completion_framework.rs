@@ -295,7 +295,7 @@ impl CompletionRegistry {
         // the highest-priority hit.
         let mut order: Vec<&RegisteredProvider> =
             self.providers.iter().filter(|p| p.enabled).collect();
-        order.sort_by(|a, b| b.priority.cmp(&a.priority));
+        order.sort_by_key(|p| std::cmp::Reverse(p.priority));
 
         let mut by_key: HashMap<(String, String), usize> = HashMap::new();
         let mut out: Vec<CompletionCandidate> = Vec::new();

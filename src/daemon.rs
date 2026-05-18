@@ -798,7 +798,6 @@ fn per_attach_thread(
     clippy::needless_pass_by_value,
     clippy::too_many_lines
 )]
-#[allow(clippy::needless_pass_by_value)]
 fn dispatcher_loop(
     dispatcher_rx: mpsc::Receiver<DispatcherEvent>,
     editor: &mut EditorState,

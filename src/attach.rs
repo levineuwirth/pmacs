@@ -803,8 +803,7 @@ pub(crate) fn run_attach_pair(
                 if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     let timestamp_ns = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(0))
-                        .unwrap_or(0);
+                        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(0));
                     let pmacs_key = key_from_crossterm(k, assigned_id, timestamp_ns);
 
                     // T M10.10 Day 3 step 5 Path β — determine
@@ -985,8 +984,7 @@ fn forward_event<W: Write>(
             let _ = KeyModifiers::empty(); // import touch: keeps lint happy if unused
             let timestamp_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| u64::try_from(d.as_nanos()).unwrap_or(0))
-                .unwrap_or(0);
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(0));
             let pmacs_key = key_from_crossterm(k, assigned_id, timestamp_ns);
             write_message(writer, &FrontendEvent::Key(pmacs_key))?;
         }
