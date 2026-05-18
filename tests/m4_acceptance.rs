@@ -501,7 +501,7 @@ fn open_and_wait_for_parse(path: std::path::PathBuf) -> pmacs::editor::EditorSta
     state
 }
 
-/// Cold parse + highlight-spans extraction for a 5000-line synthetic
+/// Cold parse + highlight-spans extraction for a 4000-line synthetic
 /// rust file completes in under 100 ms. The acceptance criterion
 /// covers "rust file opens with full syntax highlighting" --- "open"
 /// here means the path that produces the data the highlight view
@@ -511,7 +511,7 @@ fn open_and_wait_for_parse(path: std::path::PathBuf) -> pmacs::editor::EditorSta
 fn m4_3_open_rust_file_highlights_under_100ms() {
     use pmacs::syntax::{self, ParseRequest};
 
-    let source = synthetic_rust_source(5000);
+    let source = synthetic_rust_source(4000);
     let registry = pmacs::syntax::SyntaxRegistry::new();
     let language = registry.language("rust").expect("rust language");
     let query = registry

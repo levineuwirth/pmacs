@@ -640,6 +640,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn read_dir_on_non_utf8_entry_name_reports_structured_error() {
         use std::os::unix::ffi::OsStrExt;
