@@ -35,7 +35,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
@@ -67,6 +67,14 @@ pub const PMACS_TEST_SSH_BIN: &str = "PMACS_TEST_SSH_BIN";
 /// remote command via `env PMACS_ATTACH_DEBUG=1 ...`, so users only
 /// need to set it on the initiating shell.
 const PMACS_ATTACH_DEBUG: &str = "PMACS_ATTACH_DEBUG";
+
+/// Optional path for the full attach-debug log. When debug is
+/// enabled, breadcrumbs are *always* appended here (including
+/// live-session protocol reads, which must not hit the terminal the
+/// TUI renders on). Unset → a default under the temp dir. Stderr
+/// mirroring is additional and only happens before the interactive
+/// frontend takes the terminal.
+const PMACS_ATTACH_DEBUG_FILE: &str = "PMACS_ATTACH_DEBUG_FILE";
 
 /// Explicit per-invocation override of the SSH protocol channel:
 /// `stdout` / `1` or `stderr` / `2`. Unset → [`SSH_PROTOCOL_DEFAULT`].
@@ -1100,9 +1108,73 @@ fn ssh_protocol_channel() -> SshProtocolChannel {
     )
 }
 
+/// True once the interactive frontend owns the terminal (raw mode +
+/// alternate screen). After that point, attach breadcrumbs must not
+/// touch stderr — it *is* the screen the renderer paints — so they go
+/// to the log file only. Stays true across reconnects (the TUI is
+/// still up while a reconnect handshake runs).
+static TUI_TERMINAL_OWNED: AtomicBool = AtomicBool::new(false);
+
+/// Lazily-opened append handle for the full debug log. `None` inside
+/// the `Option` means open failed; debug then degrades to stderr-only
+/// (best-effort — diagnostics never abort the attach).
+static DEBUG_FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+
+/// Call right before handing the terminal to the interactive pump so
+/// subsequent breadcrumbs stop mirroring to stderr.
+fn mark_tui_terminal_owned() {
+    TUI_TERMINAL_OWNED.store(true, Ordering::Relaxed);
+}
+
+fn debug_file_path() -> PathBuf {
+    std::env::var_os(PMACS_ATTACH_DEBUG_FILE).map_or_else(
+        || std::env::temp_dir().join("pmacs-attach-debug.log"),
+        PathBuf::from,
+    )
+}
+
+fn debug_file() -> &'static Mutex<Option<std::fs::File>> {
+    DEBUG_FILE.get_or_init(|| {
+        let path = debug_file_path();
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(f) => {
+                // Emitted during the handshake phase (terminal not yet
+                // owned), so the user sees where the full log lives.
+                eprintln!("pmacs attach debug: logging to {}", path.display());
+                Mutex::new(Some(f))
+            }
+            Err(e) => {
+                eprintln!(
+                    "pmacs attach debug: could not open {} ({e}); stderr only",
+                    path.display()
+                );
+                Mutex::new(None)
+            }
+        }
+    })
+}
+
 fn attach_debug(msg: impl AsRef<str>) {
-    if attach_debug_enabled() {
-        eprintln!("pmacs attach debug: {}", msg.as_ref());
+    if !attach_debug_enabled() {
+        return;
+    }
+    let line = format!("pmacs attach debug: {}", msg.as_ref());
+    // Always append the full stream to the log file — including the
+    // live-session protocol reads that would otherwise paint over the
+    // TUI's alternate screen.
+    if let Ok(mut guard) = debug_file().lock()
+        && let Some(f) = guard.as_mut()
+    {
+        let _ = writeln!(f, "{line}");
+    }
+    // Mirror to stderr only while it is still a normal terminal —
+    // i.e., before the interactive frontend takes it over.
+    if !TUI_TERMINAL_OWNED.load(Ordering::Relaxed) {
+        eprintln!("{line}");
     }
 }
 
@@ -1846,6 +1918,12 @@ fn run_one_session(
     let frontend = frontend_slot
         .as_mut()
         .expect("frontend_slot was just initialized or already Some");
+
+    // The frontend now owns the terminal (raw mode + alt-screen).
+    // From here, including any later reconnect handshake, breadcrumbs
+    // go to the log file only — stderr is the screen the renderer
+    // paints.
+    mark_tui_terminal_owned();
 
     run_pump_and_reap(
         child,
