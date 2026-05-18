@@ -538,6 +538,12 @@ fn accept_loop(
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // macOS can inherit O_NONBLOCK from the listener onto
+                // accepted Unix streams. The per-attach reader loop
+                // expects blocking reads; a nonblocking stream would
+                // turn "no frontend event yet" into WouldBlock, which
+                // looks like an immediate detach before the first frame.
+                stream.set_nonblocking(false)?;
                 daemon_debug("accepted frontend socket; spawning per-attach thread");
                 let daemon_state = Arc::clone(daemon_state);
                 let tx = dispatcher_tx.clone();
