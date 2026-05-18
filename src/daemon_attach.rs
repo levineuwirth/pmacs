@@ -1012,12 +1012,19 @@ mod tests {
         );
 
         // 2. The Hello bytes must reach the bridge's local output.
-        let mut received = vec![0u8; HELLO_FRAME.len()];
-        output_reader
-            .set_read_timeout(Some(Duration::from_secs(3)))
-            .unwrap();
-        match output_reader.read_exact(&mut received) {
-            Ok(()) => assert_eq!(received, HELLO_FRAME, "Hello bytes corrupted in transit"),
+        // macOS rejects read timeouts on UnixStream::pair with EINVAL,
+        // so use a reader thread plus channel timeout for portability.
+        let (read_tx, read_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut received = vec![0u8; HELLO_FRAME.len()];
+            let result = output_reader.read_exact(&mut received).map(|()| received);
+            let _ = read_tx.send(result);
+        });
+        match read_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("reader thread should return within 3s")
+        {
+            Ok(received) => assert_eq!(received, HELLO_FRAME, "Hello bytes corrupted in transit"),
             Err(e) => panic!(
                 "F8 reproduced: Hello never reached local output ({e}) — \
                  the bridge dropped the daemon→client direction on \

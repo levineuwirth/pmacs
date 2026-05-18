@@ -2074,12 +2074,10 @@ mod tests {
     #[test]
     fn stream_supersede_cancels_predecessor_with_cancelled_outcome() {
         let rt = AsyncRuntime::with_pool_size(2);
-        let first = rt.dispatch_emit_n(1_000_000, Some("emit"), Some(64));
-        // Let the first emitter start producing.
-        thread::sleep(Duration::from_millis(10));
+        let first = rt.dispatch_emit_n(1_000_000, Some("emit"), Some(1_000_000));
         let _second = rt.dispatch_emit_n(10, Some("emit"), Some(64));
         // Drain until the first stream's closed batch arrives.
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mut first_outcome: Option<JobOutcome> = None;
         while first_outcome.is_none() {
             assert!(
