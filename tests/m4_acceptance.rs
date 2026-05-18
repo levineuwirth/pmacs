@@ -3646,3 +3646,81 @@ fn m4_5_await_superseded_request_is_cancelled() {
     );
     let _ = state.lua_host.lua().load("pmacs.lsp.stop(_G._lsp)").exec();
 }
+
+/// Regression for the T M4.5 frame-loop reorder. Drives the *exact*
+/// production tick order (`processes → lsp → mcp → async`) and asserts
+/// an awaited request resolves in the SAME frame its response was
+/// absorbed by `tick_lsp` — not the next one. Under the pre-reorder
+/// order (`async` first) this gap is 2 frames; here it must be 0.
+/// No other test drives production ordering (the suite open-codes
+/// per-test orders), so this is the only guard against a regression
+/// to `tick_async`-first.
+#[test]
+fn m4_5_await_resolves_same_frame_as_response_absorbed() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, None);
+    state
+        .lua_host
+        .lua()
+        .load(
+            "_G._done=false
+             pmacs.async(function()
+               pmacs.lsp.request_completion(_G._lsp,'file:///x.rs',0,0):await()
+               _G._done=true
+             end)",
+        )
+        .exec()
+        .expect("dispatch await coroutine");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut absorbed_cycle: Option<u32> = None;
+    let mut done_cycle: Option<u32> = None;
+    let mut cycle: u32 = 0;
+    while done_cycle.is_none() {
+        assert!(Instant::now() < deadline, "await never resolved");
+        cycle += 1;
+        // Production order: processes → lsp → mcp → async.
+        state.tick_processes();
+        state.tick_lsp();
+        // `tick_lsp`'s `handle_response` both absorbs into the store
+        // and settles the awaiter (same call), so store-population is
+        // a faithful proxy for "response absorbed this frame".
+        if absorbed_cycle.is_none() {
+            let n: i64 = state
+                .lua_host
+                .lua()
+                .load(
+                    "local it = pmacs.completion.items(_G._lsp,'file:///x.rs') \
+                     return (it and #it) or 0",
+                )
+                .eval()
+                .unwrap_or(0);
+            if n > 0 {
+                absorbed_cycle = Some(cycle);
+            }
+        }
+        state.tick_mcp();
+        state.tick_async();
+        if done_cycle.is_none() {
+            let done: bool = state
+                .lua_host
+                .lua()
+                .load("return _G._done == true")
+                .eval()
+                .unwrap_or(false);
+            if done {
+                done_cycle = Some(cycle);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let absorbed = absorbed_cycle.expect("completion store must populate");
+    let done = done_cycle.expect("coroutine must finish");
+    assert_eq!(
+        absorbed, done,
+        "await must resolve in the same frame the response is absorbed \
+         (absorbed @cycle {absorbed}, done @cycle {done}); a positive gap \
+         means tick_async ran before tick_lsp — the reorder regressed"
+    );
+}
