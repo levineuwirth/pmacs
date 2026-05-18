@@ -50,7 +50,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets --no-default-features --features ${{ matrix.lua }}
-      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }}
+      # Several acceptance binaries spawn real daemon / PTY child
+      # processes. Keep the harness serial so macOS runners do not
+      # expose cross-test process lifecycle races that are unrelated
+      # to the behavior under test.
+      - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
 
   acceptance:
