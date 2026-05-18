@@ -6,5 +6,10 @@
 # silently red-lined CI under newer rolling-stable lints. Bump
 # deliberately (its own validated cycle), never implicitly.
 channel = "1.95.0"
-components = ["clippy", "rustfmt"]
+# rust-analyzer is required: the M4 LSP acceptance suite spawns it
+# (tests/m4_acceptance.rs). Without it the rustup proxy resolves
+# `rust-analyzer` against this pinned toolchain, finds no component,
+# and the spawn dies before the LSP handshake — pinning must ship a
+# toolchain complete for the project's own test surface.
+components = ["clippy", "rustfmt", "rust-analyzer"]
 profile = "minimal"
