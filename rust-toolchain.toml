@@ -1,0 +1,10 @@
+[toolchain]
+# Pinned so local == CI permanently. The CI workflow installs the
+# `stable` channel via dtolnay/rust-toolchain; this directory override
+# makes every cargo invocation in the repo use the validated version
+# regardless, eliminating the local/CI toolchain-drift class that
+# silently red-lined CI under newer rolling-stable lints. Bump
+# deliberately (its own validated cycle), never implicitly.
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

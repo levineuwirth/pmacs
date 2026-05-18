@@ -252,17 +252,15 @@ impl Observer {
             InstanceMessage::BufferSnapshot {
                 buffer_id,
                 crdt_snapshot,
-            } => {
+            } if !self.replicas.contains_key(&buffer_id) => {
                 // Bootstrap each buffer's replica on first
                 // BufferSnapshot for that BufferId. Later snapshots
                 // for the same buffer are ignored — the established
                 // replica catches up via CrdtOps.
-                if !self.replicas.contains_key(&buffer_id) {
-                    let r = CrdtState::new(self.frontend_id.0).expect("observer CrdtState::new");
-                    r.import_snapshot(&crdt_snapshot)
-                        .expect("observer import_snapshot");
-                    self.replicas.insert(buffer_id, r);
-                }
+                let r = CrdtState::new(self.frontend_id.0).expect("observer CrdtState::new");
+                r.import_snapshot(&crdt_snapshot)
+                    .expect("observer import_snapshot");
+                self.replicas.insert(buffer_id, r);
             }
             InstanceMessage::CrdtOp { buffer_id, op } => {
                 // If we received a CrdtOp for a buffer whose snapshot
@@ -279,10 +277,10 @@ impl Observer {
                     }
                 }
             }
-            InstanceMessage::PresenceUpdate { frontend_id, .. } => {
-                if frontend_id != self.frontend_id {
-                    self.other_frontends.insert(frontend_id);
-                }
+            InstanceMessage::PresenceUpdate { frontend_id, .. }
+                if frontend_id != self.frontend_id =>
+            {
+                self.other_frontends.insert(frontend_id);
             }
             _ => {}
         }

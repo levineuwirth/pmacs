@@ -169,8 +169,7 @@ fn temp_sibling(target: &Path) -> PathBuf {
     // and `create_new` would error if hit.
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.subsec_nanos());
     name.push(format!("{nanos:x}"));
     parent.join(name)
 }
