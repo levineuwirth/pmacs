@@ -68,10 +68,50 @@ pub const PMACS_TEST_SSH_BIN: &str = "PMACS_TEST_SSH_BIN";
 /// need to set it on the initiating shell.
 const PMACS_ATTACH_DEBUG: &str = "PMACS_ATTACH_DEBUG";
 
-/// Diagnostic fallback: carry the SSH protocol stream over the
-/// SSH stderr channel instead of stdout. Useful when a host's SSH
-/// stdout path appears to buffer indefinitely while stderr streams.
+/// Explicit per-invocation override of the SSH protocol channel:
+/// `stdout` / `1` or `stderr` / `2`. Unset → [`SSH_PROTOCOL_DEFAULT`].
+/// This is the supported way to opt back to stdout (the F8b
+/// "fallback") without a rebuild.
+const PMACS_ATTACH_SSH_PROTOCOL: &str = "PMACS_ATTACH_SSH_PROTOCOL";
+
+/// Legacy/back-compat override (pre-F8b name). `=1`/non-empty →
+/// stderr, `=0` → stdout. Honored only when [`PMACS_ATTACH_SSH_PROTOCOL`]
+/// is unset/unrecognized. New code/users should prefer the clearer
+/// `PMACS_ATTACH_SSH_PROTOCOL`.
 const PMACS_ATTACH_SSH_PROTOCOL_STDERR: &str = "PMACS_ATTACH_SSH_PROTOCOL_STDERR";
+
+/// Which SSH channel carries the wire protocol.
+///
+/// **F8b (see `M10.11-AUDIT.md`).** At least one tested host
+/// (`OpenSSH_10.3p1`) does not forward a live non-PTY remote process's
+/// **stdout (fd1)** while it stays alive, but forwards **stderr
+/// (fd2)** in real time. The `--daemon-attach` bridge is exactly
+/// such a long-lived non-PTY process, so the protocol must ride
+/// stderr there; stdout hangs forever. Evidence is n=1, so this is
+/// deliberately a **single switch**: change [`SSH_PROTOCOL_DEFAULT`]
+/// (one line) to flip the default if breadth evidence ever shows
+/// stdout should win; nothing downstream needs to change. A
+/// per-invocation override (`PMACS_ATTACH_SSH_PROTOCOL=stdout|stderr`)
+/// selects without any rebuild.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SshProtocolChannel {
+    Stdout,
+    Stderr,
+}
+
+impl SshProtocolChannel {
+    /// The remote fd the far-side bridge must write the protocol to.
+    fn remote_fd(self) -> u8 {
+        match self {
+            Self::Stdout => 1,
+            Self::Stderr => 2,
+        }
+    }
+}
+
+/// THE switch. Flip this one line to change the SSH-attach protocol
+/// channel default; everything else derives from it.
+const SSH_PROTOCOL_DEFAULT: SshProtocolChannel = SshProtocolChannel::Stderr;
 
 /// Remote-side env var consumed by `daemon_attach.rs`.
 const PMACS_ATTACH_PROTOCOL_FD: &str = "PMACS_ATTACH_PROTOCOL_FD";
@@ -1022,8 +1062,44 @@ fn attach_debug_enabled() -> bool {
     std::env::var_os(PMACS_ATTACH_DEBUG).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
-fn protocol_stderr_enabled() -> bool {
-    std::env::var_os(PMACS_ATTACH_SSH_PROTOCOL_STDERR).is_some_and(|v| !v.is_empty() && v != "0")
+/// Pure channel resolver (env-free core, unit-tested without env
+/// mutation). Precedence: explicit `PMACS_ATTACH_SSH_PROTOCOL` >
+/// legacy `PMACS_ATTACH_SSH_PROTOCOL_STDERR` > `default`.
+fn resolve_ssh_protocol(
+    explicit: Option<&str>,
+    legacy: Option<&str>,
+    default: SshProtocolChannel,
+) -> SshProtocolChannel {
+    if let Some(e) = explicit {
+        match e.trim().to_ascii_lowercase().as_str() {
+            "stdout" | "1" => return SshProtocolChannel::Stdout,
+            "stderr" | "2" => return SshProtocolChannel::Stderr,
+            _ => {} // unrecognized → fall through
+        }
+    }
+    if let Some(l) = legacy {
+        let l = l.trim();
+        if !l.is_empty() {
+            return if l == "0" {
+                SshProtocolChannel::Stdout
+            } else {
+                SshProtocolChannel::Stderr
+            };
+        }
+    }
+    default
+}
+
+/// Env-reading wrapper over [`resolve_ssh_protocol`]. The single
+/// place env is consulted for the channel decision.
+fn ssh_protocol_channel() -> SshProtocolChannel {
+    resolve_ssh_protocol(
+        std::env::var(PMACS_ATTACH_SSH_PROTOCOL).ok().as_deref(),
+        std::env::var(PMACS_ATTACH_SSH_PROTOCOL_STDERR)
+            .ok()
+            .as_deref(),
+        SSH_PROTOCOL_DEFAULT,
+    )
 }
 
 fn attach_debug(msg: impl AsRef<str>) {
@@ -1103,11 +1179,9 @@ impl<R: Read> Read for DebugReader<R> {
 /// directly by [`run_attach_ssh`] and by unit tests that want to
 /// assert argument shape without spawning a real `ssh`.
 ///
-/// Argument order: `-T [user-flag] host exec [env VAR=val] pmacs
-/// --daemon-attach [--socket NAME]`. The leading `exec` (F8b fix)
-/// makes the remote login shell exec-replace itself with the bridge
-/// so no shell parent lingers holding the SSH channel fds. The user
-/// flag is `-l USER` if `user` is set;
+/// Argument order: `-T [user-flag] host [env VAR=val] pmacs
+/// --daemon-attach [--socket NAME]`. The user flag is `-l USER` if
+/// `user` is set;
 /// SSH's own `~/.ssh/config` is consulted by the binary, so we
 /// don't try to second-guess host aliases here.
 ///
@@ -1132,26 +1206,27 @@ pub(crate) fn build_ssh_command(target: &AttachTarget) -> Option<Command> {
         cmd.arg("-l").arg(u);
     }
     cmd.arg(host);
-    // F8b fix: `exec`-replace the remote login shell with the bridge.
-    // ssh runs the remote command via the user's login shell
-    // (`$SHELL -c "joined args"`). If that shell lingers as a parent
-    // process while the long-lived bridge runs, the SSH session's
-    // stdout/stderr fds have an extra holder, and OpenSSH keeps the
-    // channel's output buffered until *every* holder exits — so the
-    // bridge's `Hello` (and all traffic) is withheld until the bridge
-    // dies, i.e. forever during a session: the F8b hang. Confound-free
-    // probing (`f8b-shell-probe.sh`, sh==fish==login-shell all
-    // withheld; an `exec`'d single long-lived process streamed at the
-    // SSH floor while alive) pinned this exactly. `exec` is a builtin
-    // honored by every standard login shell ssh dispatches through;
-    // the shell has nothing to do after the bridge anyway, so
-    // exec-replacing it is unconditionally correct and removes the
-    // lingering fd holder.
-    cmd.arg("exec");
-    if protocol_stderr_enabled() {
-        cmd.arg("env").arg(format!("{PMACS_ATTACH_PROTOCOL_FD}=2"));
-    } else if attach_debug_enabled() {
-        cmd.arg("env").arg(format!("{PMACS_ATTACH_DEBUG}=1"));
+    // Single source of truth (F8b): the resolved channel drives the
+    // remote bridge's protocol fd. Stdout is fd 1 (the bridge's
+    // default when unset), so we only pass the fd env when it
+    // differs — keeps the stdout path's argv minimal and unchanged.
+    // Debug is independent and additive (the remote bridge already
+    // self-suppresses its stderr breadcrumbs when the protocol rides
+    // fd 2, so the two can coexist; the old mutually-exclusive
+    // `else if` could not).
+    let mut env_pairs: Vec<String> = Vec::new();
+    let fd = ssh_protocol_channel().remote_fd();
+    if fd != 1 {
+        env_pairs.push(format!("{PMACS_ATTACH_PROTOCOL_FD}={fd}"));
+    }
+    if attach_debug_enabled() {
+        env_pairs.push(format!("{PMACS_ATTACH_DEBUG}=1"));
+    }
+    if !env_pairs.is_empty() {
+        cmd.arg("env");
+        for kv in &env_pairs {
+            cmd.arg(kv);
+        }
     }
     cmd.arg("pmacs").arg("--daemon-attach");
     if let Some(name) = instance_name {
@@ -1538,13 +1613,16 @@ type ProtocolChannel = (
 
 /// Pick the SSH channel the protocol rides on.
 ///
-/// Default: protocol on stdout, SSH stderr tee'd to our stderr only
-/// on the first attempt (`tee_to_stderr`) — on reconnect raw mode is
-/// active and live tee'd bytes would corrupt the cell grid, so the
-/// tail is still captured for the give-up message but not echoed.
-/// F8b workaround (`protocol_over_stderr`): protocol on SSH stderr;
-/// remote stderr diagnostics are disabled by the caller, and there
-/// is no tee (a no-op join handle / empty tail keep the shape).
+/// `protocol_over_stderr` is [`SSH_PROTOCOL_DEFAULT`]-derived (F8b:
+/// stderr is the default — see `SshProtocolChannel`). When stderr:
+/// protocol reads SSH stderr, remote stderr diagnostics are disabled
+/// by the caller, and there is no tee (a no-op join handle / empty
+/// tail keep the return shape). When stdout (the F8b fallback /
+/// override): protocol reads SSH stdout, and SSH stderr is tee'd to
+/// our stderr only on the first attempt (`tee_to_stderr`) — on
+/// reconnect raw mode is active and live tee'd bytes would corrupt
+/// the cell grid, so the tail is still captured for the give-up
+/// message but not echoed.
 fn open_protocol_channel(
     child_stdout: std::process::ChildStdout,
     child_stderr: std::process::ChildStderr,
@@ -1663,7 +1741,7 @@ fn run_one_session(
         .take()
         .expect("Stdio::piped on stderr guarantees a handle");
 
-    let protocol_over_stderr = protocol_stderr_enabled();
+    let protocol_over_stderr = ssh_protocol_channel() == SshProtocolChannel::Stderr;
     let (mut protocol_reader, stderr_handle, stderr_tail) = open_protocol_channel(
         child_stdout,
         child_stderr,
@@ -2270,8 +2348,16 @@ mod tests {
         let arg_strs: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
         assert_eq!(
             arg_strs,
-            vec!["-T", "mac-studio", "exec", "pmacs", "--daemon-attach"],
-            "bare host should produce: -T <host> exec pmacs --daemon-attach",
+            vec![
+                "-T",
+                "mac-studio",
+                "env",
+                "PMACS_ATTACH_PROTOCOL_FD=2",
+                "pmacs",
+                "--daemon-attach",
+            ],
+            "bare host, F8b stderr default: -T <host> env \
+             PMACS_ATTACH_PROTOCOL_FD=2 pmacs --daemon-attach",
         );
     }
 
@@ -2291,7 +2377,8 @@ mod tests {
                 "-l",
                 "alice",
                 "workstation",
-                "exec",
+                "env",
+                "PMACS_ATTACH_PROTOCOL_FD=2",
                 "pmacs",
                 "--daemon-attach",
             ],
@@ -2314,7 +2401,8 @@ mod tests {
                 "-l",
                 "bob",
                 "workstation",
-                "exec",
+                "env",
+                "PMACS_ATTACH_PROTOCOL_FD=2",
                 "pmacs",
                 "--daemon-attach",
                 "--socket",
@@ -2331,6 +2419,62 @@ mod tests {
         assert!(
             build_ssh_command(&AttachTarget::LocalSocket(PathBuf::from("/tmp/x.sock"))).is_none(),
         );
+    }
+
+    // F8b: pure channel-resolver tests. No env mutation (the resolver
+    // core is env-free by design, so this is race-free under cargo's
+    // threaded runner). Precedence: explicit > legacy > default.
+    #[test]
+    fn ssh_protocol_resolution_precedence_and_default() {
+        use SshProtocolChannel::{Stderr, Stdout};
+
+        // Default applies when nothing is set. The shipped default is
+        // stderr (F8b); assert via the constant so flipping the one
+        // switch keeps this test honest rather than brittle.
+        assert_eq!(resolve_ssh_protocol(None, None, Stdout), Stdout);
+        assert_eq!(resolve_ssh_protocol(None, None, Stderr), Stderr);
+        assert_eq!(
+            resolve_ssh_protocol(None, None, SSH_PROTOCOL_DEFAULT),
+            Stderr
+        );
+
+        // Explicit override wins, case/space-insensitive, accepts fd
+        // numbers too.
+        for s in ["stdout", "STDOUT", "  Stdout ", "1"] {
+            assert_eq!(resolve_ssh_protocol(Some(s), None, Stderr), Stdout, "{s:?}");
+        }
+        for s in ["stderr", "STDERR", "2"] {
+            assert_eq!(resolve_ssh_protocol(Some(s), None, Stdout), Stderr, "{s:?}");
+        }
+
+        // Unrecognized explicit → ignored, falls through to legacy
+        // then default.
+        assert_eq!(resolve_ssh_protocol(Some("bogus"), None, Stderr), Stderr);
+        assert_eq!(
+            resolve_ssh_protocol(Some("bogus"), Some("0"), Stderr),
+            Stdout
+        );
+
+        // Legacy back-compat: =0 → stdout, anything else non-empty →
+        // stderr; empty → ignored.
+        assert_eq!(resolve_ssh_protocol(None, Some("0"), Stderr), Stdout);
+        assert_eq!(resolve_ssh_protocol(None, Some("1"), Stdout), Stderr);
+        assert_eq!(resolve_ssh_protocol(None, Some("yes"), Stdout), Stderr);
+        assert_eq!(resolve_ssh_protocol(None, Some(""), Stdout), Stdout);
+
+        // Explicit beats legacy even when they disagree.
+        assert_eq!(
+            resolve_ssh_protocol(Some("stdout"), Some("1"), Stderr),
+            Stdout
+        );
+        assert_eq!(
+            resolve_ssh_protocol(Some("stderr"), Some("0"), Stdout),
+            Stderr
+        );
+
+        // The remote fd mapping the bridge consumes.
+        assert_eq!(Stdout.remote_fd(), 1);
+        assert_eq!(Stderr.remote_fd(), 2);
     }
 
     #[test]
