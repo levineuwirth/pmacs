@@ -5,12 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] --- 2026-05-18
 
-> Scope note: this section currently records only release-affecting
-> changes surfaced during M10 ship-gate work. The full M6–M10 v1.0
-> changelog body is a separate release-authoring task and is not yet
-> written here.
+First stable release. Builds on the 0.1.0 preview (M1–M6) with the
+M7–M10 arc: third-party packages, the universality proof across three
+shape-distinct workloads, MCP, and multi-frontend CRDT collaboration.
+Solo development through 1.0; public contributions open from this
+release.
+
+### Added
+
+#### Third-party package system (M7)
+
+- Package install at user-config and project scope
+  (`pmacs.packages.install` / `install_project`) with `version` /
+  `branch` / `commit` pins and a lockfile.
+- Per-package environment with `exports`; `require` resolution scoped
+  so packages can declare module-level state without cross-package
+  collision.
+- Edit intercepts: packages observe and transform buffer mutations;
+  multiple intercepts thread in attach order.
+- Audit-lint rule set (the package-trust surface): error/warning/info
+  patterns across environment-escape, fs-mutation, process-spawn, and
+  reach-around classes; runnable locally and in CI.
+
+#### Filesystem API and bundled packages (M8)
+
+- `pmacs.fs.*` worker-dispatched surface: `read_dir`, `stat`,
+  `rename`, `chmod`, `remove` with M3 `supersede` chaining on read
+  ops; UTF-8 path constraint surfaced as a structured failure.
+- Three shape-distinct bundled packages proving the buffer
+  universality claim: dired (directory listing), magit (section
+  view), outline / outline-aggregate (derived structure views).
+- Dev-loop APIs: `pmacs.packages.install_local`, `reload`,
+  `on_unload`.
+
+#### MCP for package authors (M9)
+
+- Model Context Protocol surface so package authors can expose
+  editor capability to AI assistance over the same protocol-uniform
+  path as the rest of the system (see `docs/mcp-for-package-authors.md`).
+
+#### Multi-frontend CRDT collaboration (M10)
+
+- CRDT layer (loro-backed, feature-gated) with an optimistic-apply
+  keystroke path; daemon owns the authoritative replica, frontends
+  mirror it.
+- Two laptops attach to one daemon instance, both edit one file,
+  edits converge within a frame; per-frontend undo; presence and
+  per-frontend cursor rendering.
+- Convergence verified under simulated network jitter
+  (`PMACS_INSTANCE_LATENCY_JITTER_MS`); automated synthetic-frontend
+  and doubled-PTY acceptance plus a two-laptop manual checklist.
+
+#### Pulled-forward v0.2-prerequisite APIs
+
+Planned promotions from `V0.2-PREREQUISITES.md`, implemented and
+shipped in 1.0 (the public-API ceiling was raised by operator
+decision to absorb them):
+
+- `pmacs.buffer.from_file`, `pmacs.buffer.on_removed` (with an
+  idempotent `:remove()` handle; buffer-local keymaps pruned on
+  removal).
+- `bypass_intercept` option on `buffer.insert` / `delete` / `replace`
+  (skips the intercept chain only; undo/dirty/view/CRDT bookkeeping
+  preserved).
+- `pmacs.fs.watch` (polling watcher; `:cancel()` /
+  `:is_cancelled()`).
+- `pmacs.async.yield_to_next_tick` (worker-free next-tick yield).
+- `pmacs.editor.move_to_line` (0-based, clamps out of range).
+- `pmacs.outline.query` (cross-package outline structure query).
+- Audit-lint rule 16 `reach-around-require-field` (info).
 
 ### Changed
 
@@ -35,6 +100,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--daemon-attach` auto-start path was a disposable connect that
   could consume the daemon's server-speaks-first `Hello`; the
   established connection is now reused (regression-tested).
+
+### Known limitations
+
+- **Per-frontend undo history does not persist across reattach.**
+  After a frontend disconnects and reconnects, it is issued a fresh
+  collaboration identity; its pre-disconnect edits remain in the
+  converged document (CRDT state is fully restored) but are no longer
+  reachable by that frontend's undo command — undo only reaches
+  edits made since reconnecting. Workaround: remove unwanted
+  pre-disconnect content by editing it out. Preserving undo history
+  across reconnect is tracked for v0.2
+  (`V0.2-PREREQUISITES.md`, Finding 4).
+- **macOS REPL ctrl-c / exit-marker timing.** Two M6.5 REPL
+  acceptance tests (`m6_5_ctrl_c_sends_sigint`,
+  `m6_5_exit_marker_uses_basename_with_leading_newline`) time out on
+  macOS CI runners. The core daemon, CRDT, and remote-attach paths —
+  including the Mac-host collaboration scenario — build and pass on
+  macOS (the lib suite is green there); the limitation is confined
+  to bundled-REPL signal/exit-marker timing. Tracked for v0.2.
+
+### Project posture
+
+- `forbid(unsafe_code)` maintained across the crate; syscalls that
+  need unsafe are bridged via `/bin/sh` / coreutil / binary
+  trampolines or safe `nix` wrappers.
+- Rust toolchain pinned (`rust-toolchain.toml`, 1.95.0) so local and
+  CI build the same validated compiler; bumped deliberately.
+- Cross-flavor CI: every test runs under both `luajit` and `lua54`;
+  clippy `-D warnings` clean on both flavors and the `crdt` lane;
+  release-only perf-gate jobs.
+- Library suite ~1223 tests (non-crdt) / ~1377 (crdt), zero failing
+  on the pinned toolchain, plus per-milestone integration suites
+  through M10.
 
 ## [0.1.0] --- 2026-05-03
 
@@ -153,4 +251,5 @@ deferred until then.
   (m1-acceptance through m6_8, m6_perf, m4-acceptance, m5_5..m5_8,
   m6_4..m6_7).
 
+[1.0.0]: https://example.invalid/pmacs/releases/tag/v1.0.0
 [0.1.0]: https://example.invalid/pmacs/releases/tag/v0.1.0

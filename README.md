@@ -23,14 +23,15 @@ the package uses zero direct Rust core access was the v0.1 ship gate.
 
 ## Status
 
-**v0.1.0 --- preview.** The design described above is implemented and
-working. Solo development through 1.0; public contributions are
-deferred until then. Use, evaluate, and file issues; pull requests
-will get a friendly "thanks, see you at 1.0" until that gate.
+**v1.0.0 --- stable.** The design described above is implemented and
+working. Solo development carried the project to 1.0; public
+contributions are open from this release. Use, evaluate, file issues,
+and send pull requests.
 
 ## Build
 
-Requires Rust `1.85` or newer (edition 2024). Lua flavor selectable
+Builds on the toolchain pinned in `rust-toolchain.toml` (Rust
+`1.95.0`, edition 2024); rustup selects it automatically. Lua flavor selectable
 between `luajit` (default) and `lua54`; both pass the full test suite.
 
 ```sh
