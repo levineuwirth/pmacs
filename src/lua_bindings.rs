@@ -7117,16 +7117,31 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     }
 
     {
+        // T M4.5 task #8: hard per-request timeout, tunable from
+        // init.lua (e.g. raise it for a slow language server on a
+        // cold cache, or lower it in tests).
         let m = manager.clone();
         lsp_mod.set(
-            "request_completion",
+            "set_request_timeout_ms",
+            lua.create_function(move |_, ms: u64| {
+                m.borrow_mut()
+                    .set_request_timeout(std::time::Duration::from_millis(ms));
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_completion_raw",
             lua.create_function(
                 move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
-                    let req_id = m
+                    let job_id = m
                         .borrow_mut()
                         .request_completion(id.0, uri, line, col)
                         .map_err(mlua::Error::external)?;
-                    Ok(req_id)
+                    Ok(job_id)
                 },
             )?,
         )?;
@@ -7135,14 +7150,14 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
-            "request_hover",
+            "_request_hover_raw",
             lua.create_function(
                 move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
-                    let req_id = m
+                    let job_id = m
                         .borrow_mut()
                         .request_hover(id.0, uri, line, col)
                         .map_err(mlua::Error::external)?;
-                    Ok(req_id)
+                    Ok(job_id)
                 },
             )?,
         )?;
@@ -7151,14 +7166,14 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
-            "request_signature_help",
+            "_request_signature_help_raw",
             lua.create_function(
                 move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
-                    let req_id = m
+                    let job_id = m
                         .borrow_mut()
                         .request_signature_help(id.0, uri, line, col)
                         .map_err(mlua::Error::external)?;
-                    Ok(req_id)
+                    Ok(job_id)
                 },
             )?,
         )?;
@@ -7167,14 +7182,14 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
-            "request_definition",
+            "_request_definition_raw",
             lua.create_function(
                 move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
-                    let req_id = m
+                    let job_id = m
                         .borrow_mut()
                         .request_definition(id.0, uri, line, col)
                         .map_err(mlua::Error::external)?;
-                    Ok(req_id)
+                    Ok(job_id)
                 },
             )?,
         )?;
@@ -7183,7 +7198,7 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
-            "request_formatting",
+            "_request_formatting_raw",
             lua.create_function(
                 move |_,
                       (id, uri, tab_size, insert_spaces): (
@@ -7192,11 +7207,11 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
                     u32,
                     Option<bool>,
                 )| {
-                    let req_id = m
+                    let job_id = m
                         .borrow_mut()
                         .request_formatting(id.0, uri, tab_size, insert_spaces.unwrap_or(true))
                         .map_err(mlua::Error::external)?;
-                    Ok(req_id)
+                    Ok(job_id)
                 },
             )?,
         )?;
@@ -7424,8 +7439,9 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
 pub fn make_lsp_manager(
     lua: &Lua,
     supervisor: SharedProcessSupervisor,
+    runtime: crate::async_runtime::SharedAsyncRuntime,
 ) -> mlua::Result<SharedLspManager> {
-    let manager = Rc::new(RefCell::new(LspManager::new(supervisor)));
+    let manager = Rc::new(RefCell::new(LspManager::new(supervisor, runtime)));
     install_lsp(lua, &manager)?;
     install_diag(lua, &manager)?;
     install_completion(lua, &manager)?;

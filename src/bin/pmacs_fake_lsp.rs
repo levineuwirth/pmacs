@@ -70,6 +70,27 @@ fn main() {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        // T M4.5 async-bridge failure-path test modes:
+        //  * `error`  — answer every `textDocument/*` request with a
+        //    JSON-RPC error object (drives `Handle:await()` -> failed).
+        //  * `silent` — accept the request but never answer it while
+        //    staying alive (drives the request-timeout sweep, and
+        //    makes supersede deterministic: a superseded handle can
+        //    only settle via cancellation, never racing a response).
+        if method.starts_with("textDocument/") {
+            if mode == "error" && id.is_some() {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id.clone(),
+                    "error": { "code": -32603, "message": "synthetic error" }
+                });
+                write_frame(&mut stdout, &resp);
+                continue;
+            }
+            if mode == "silent" {
+                continue;
+            }
+        }
         match (method.as_str(), id) {
             ("initialize", Some(idv)) => {
                 let resp = serde_json::json!({

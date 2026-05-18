@@ -183,9 +183,12 @@ impl EditorState {
         // T M4.5 LSP manager. Wires onto the same supervisor so its
         // spawn/restart/I/O machinery is shared with `pmacs.process.*`.
         // The manager itself is reachable from Lua as `pmacs.lsp.*`.
-        let lsp_manager =
-            crate::lua_bindings::make_lsp_manager(lua_host.lua(), process_supervisor.clone())
-                .expect("install pmacs.lsp");
+        let lsp_manager = crate::lua_bindings::make_lsp_manager(
+            lua_host.lua(),
+            process_supervisor.clone(),
+            async_runtime.clone(),
+        )
+        .expect("install pmacs.lsp");
         // T M9.1 MCP manager. Wires onto the same supervisor that LSP
         // and `pmacs.process.*` use; the protocol-uniformity claim is
         // that this share is sufficient (no parallel dispatch path).

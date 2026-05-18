@@ -330,6 +330,14 @@ pub enum JobKind {
     /// supervisor pipe. No worker thread is occupied for the
     /// round-trip.
     McpRequest,
+    /// External request/reply for an LSP server, settled the same way
+    /// as [`JobKind::McpRequest`]: the [`crate::lsp::LspManager`]
+    /// registers a pending entry via [`AsyncRuntime::register_external`]
+    /// when a `textDocument/*` request goes out and settles it via
+    /// `complete_external_ok` / `_failed` / `_cancelled` when the
+    /// JSON-RPC response is routed in `LspManager::tick`. No worker
+    /// thread is occupied for the round-trip ([T M4.5] async bridge).
+    LspRequest,
 }
 
 impl JobKind {
@@ -348,6 +356,7 @@ impl JobKind {
             JobKind::FsChmod => "fs_chmod",
             JobKind::FsRemove => "fs_remove",
             JobKind::McpRequest => "mcp_request",
+            JobKind::LspRequest => "lsp_request",
         }
     }
 }

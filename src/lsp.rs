@@ -53,7 +53,7 @@
 //! it matters.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,10 +61,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use crate::async_runtime::{JobId, JobKind, SharedAsyncRuntime};
 use crate::process::{
     ProcessEvent, ProcessEventKind, ProcessId, ProcessMode, ProcessSpec, ProcessState,
     RestartPolicy, Termination,
 };
+use crate::worker::CancellationToken;
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -494,6 +496,13 @@ pub struct LspClient {
     attempt: u32,
     /// When the manager should attempt the next restart, if any.
     next_restart_at: Option<Instant>,
+    /// T M4.5: request ids we sent `$/cancelRequest` for after every
+    /// awaiter abandoned them. A server may still answer a cancelled
+    /// request (the cancel/response race); a late response whose id
+    /// is in this set is dropped silently instead of surfacing a
+    /// "response for unknown request id" `ProtocolError`. Mirrors
+    /// `mcp.rs`'s `cancelled_rids`.
+    cancelled_rids: HashSet<u64>,
 }
 
 impl LspClient {
@@ -507,6 +516,7 @@ impl LspClient {
             pending: HashMap::new(),
             attempt: 0,
             next_restart_at: None,
+            cancelled_rids: HashSet::new(),
         }
     }
 
@@ -574,6 +584,22 @@ pub struct LspManager {
     /// `request_completion` etc. record an entry here; `handle_response`
     /// consumes it to absorb the response into the correct store.
     pending_routes: HashMap<(LspServerId, u64), ResponseRoute>,
+    /// T M4.5 async bridge: `(server, request_id)` → the awaiters
+    /// parked on this request's async-runtime job(s). Settled in
+    /// [`Self::handle_response`] when the response routes, and
+    /// drained-cancelled wherever [`Self::pending_routes`] is purged
+    /// for a server (restart / exit / forget) so a coroutine never
+    /// parks forever on a server that went away.
+    pending_external: HashMap<(LspServerId, u64), PendingExternal>,
+    /// Async runtime handle. The bridge between the supervisor
+    /// reader-thread response delivery and Lua-side `Handle:await()`
+    /// resumption; mirrors [`crate::mcp::McpManager`]'s `runtime`.
+    runtime: SharedAsyncRuntime,
+    /// T M4.5 task #8: hard ceiling on how long an in-flight request
+    /// may park its awaiters before the sweep fails them with a
+    /// timeout. Generous by default (real servers can take seconds on
+    /// a cold cache); tunable from Lua via `pmacs.lsp.set_request_timeout_ms`.
+    request_timeout: Duration,
     /// T M4.8 status tracker. Folds every emitted [`LspEvent`] into a
     /// per-server [`crate::lsp_status::LspStatus`] for the modeline /
     /// `*lsp*` buffer.
@@ -607,15 +633,64 @@ enum ResponseRoute {
     Formatting { uri: String },
 }
 
+/// One Lua-visible awaiter bound to an in-flight LSP request. Mirrors
+/// [`crate::mcp`]'s `Awaiter`: each carries its own
+/// [`CancellationToken`] (minted by [`SharedAsyncRuntime::register_external`])
+/// so a single handle can be cancelled without disturbing the
+/// in-flight wire request or sibling awaiters.
+#[derive(Clone, Debug)]
+struct Awaiter {
+    job_id: JobId,
+    /// Per-awaiter cancellation token minted by `register_external`.
+    /// Flipped by `Handle:cancel()` or by supersede; the per-tick
+    /// [`LspManager::drain_cancelled_externals`] sweep observes it.
+    /// Mirrors `mcp.rs`'s `Awaiter::token`.
+    token: CancellationToken,
+}
+
+/// In-flight `textDocument/*` request bound to one or more
+/// async-runtime jobs. When the JSON-RPC response is routed in
+/// [`LspManager::handle_response`] the response is absorbed into the
+/// typed store (the hybrid model — popup/gutter consumers are
+/// untouched) *and* every non-cancelled awaiter is settled via
+/// [`SharedAsyncRuntime::complete_external_ok`] (or `_failed` on a
+/// server error). Keyed `(server, request_id)` alongside
+/// [`LspManager::pending_routes`]. T M4.5 async bridge.
+#[derive(Clone, Debug)]
+struct PendingExternal {
+    /// JSON-RPC method, kept for the `*workers*`/`*lsp*` observability
+    /// surface and protocol-error messages.
+    method: String,
+    /// Live awaiters. Never empty while this entry exists. The first
+    /// is the original caller; later entries are siblings.
+    awaiters: Vec<Awaiter>,
+    /// When the request went on the wire. T M4.5 task #8: the
+    /// per-tick sweep fails awaiters whose request has outlived
+    /// [`LspManager::request_timeout`], so a wedged-but-alive server
+    /// can't park a coroutine forever (the pre-v1.0 `poll_until` had
+    /// 500/1000 ms ceilings; this is the async-era equivalent, but a
+    /// generous hard ceiling rather than a UX poll budget).
+    dispatched_at: Instant,
+}
+
 impl LspManager {
-    /// Construct a fresh manager wired to `supervisor`.
+    /// Construct a fresh manager wired to `supervisor` and the
+    /// editor's `runtime`. The runtime bridges the supervisor's
+    /// reader-thread response delivery to Lua-side `Handle:await()`
+    /// resumption (mirrors [`crate::mcp::McpManager::new`]).
     #[must_use]
-    pub fn new(supervisor: crate::lua_bindings::SharedProcessSupervisor) -> Self {
+    pub fn new(
+        supervisor: crate::lua_bindings::SharedProcessSupervisor,
+        runtime: SharedAsyncRuntime,
+    ) -> Self {
         Self {
             supervisor,
+            runtime,
             clients: HashMap::new(),
             process_to_server: HashMap::new(),
             pending: HashMap::new(),
+            pending_external: HashMap::new(),
+            request_timeout: Duration::from_secs(10),
             restart_backoff: Duration::from_millis(500),
             diag_store: crate::diag::make_shared_store(),
             completion_store: crate::completion::make_shared_store(),
@@ -796,10 +871,18 @@ impl LspManager {
         client.next_restart_at = None;
         client.stdout = FrameParser::new();
         client.pending.clear();
+        // T M4.5 task #7: the new generation has a fresh request-id
+        // space; stale cancelled ids can never collide, so reset to
+        // keep the set from growing across restarts.
+        client.cancelled_rids.clear();
         // T M4.7: drop any pending response routes for this server.
         // Their request ids belong to the previous generation; the
         // new server starts request id numbering fresh.
         self.pending_routes.retain(|(sid, _), _| *sid != id);
+        // T M4.5: the previous generation's in-flight awaiters will
+        // never get a response (new process, fresh id space) — wake
+        // them cancelled before the restart.
+        self.drain_external_cancelled(id);
         client.state = LspClientState::Starting;
         let proc_spec = client.spec.to_process_spec();
         let pid = self.supervisor.borrow_mut().spawn(proc_spec)?;
@@ -899,97 +982,262 @@ impl LspManager {
         Ok(())
     }
 
+    /// Register an async-runtime awaiter for the just-sent request
+    /// `req_id` and return its [`JobId`] — the value the Lua surface
+    /// wraps in a `pmacs.workers` Handle. Called only after
+    /// [`Self::send_request`] succeeded, so the wire request is live
+    /// and a response (or a teardown drain) will settle it; no
+    /// rollback path is needed here (unlike `mcp.rs`, where the
+    /// register precedes the wire send). T M4.5 async bridge.
+    ///
+    /// T M4.5 task #7: the awaiter is registered with a supersede key
+    /// `lsp:{method}:{sid}:{uri}` — stable across calls for the same
+    /// (server, method, document). A newer request for the same thing
+    /// flips the prior job's [`CancellationToken`] through the async
+    /// runtime's supersede map; the next [`Self::drain_cancelled_externals`]
+    /// sweep settles that awaiter cancelled and `$/cancelRequest`s the
+    /// in-flight wire request. This is what keeps keystroke-driven
+    /// completion from piling up N in-flight requests on the server.
+    fn register_awaiter(
+        &mut self,
+        sid: LspServerId,
+        req_id: u64,
+        method: &str,
+        uri: &str,
+    ) -> JobId {
+        let supersede = format!("lsp:{method}:{}:{uri}", sid.raw());
+        let (job_id, token) = self
+            .runtime
+            .register_external(JobKind::LspRequest, Some(&supersede));
+        self.pending_external.insert(
+            (sid, req_id),
+            PendingExternal {
+                method: method.to_owned(),
+                awaiters: vec![Awaiter { job_id, token }],
+                dispatched_at: Instant::now(),
+            },
+        );
+        job_id
+    }
+
+    /// T M4.5 task #8: override the per-request timeout (default 10s).
+    /// Exposed to Lua as `pmacs.lsp.set_request_timeout_ms` and used
+    /// by the await-path tests to force fast timeouts.
+    pub fn set_request_timeout(&mut self, timeout: Duration) {
+        self.request_timeout = timeout;
+    }
+
+    /// T M4.5 async bridge: settle every awaiter for `sid` as
+    /// cancelled and drop its `pending_external` entries. Called
+    /// wherever [`Self::pending_routes`] is purged for a server
+    /// (restart generation flip / terminal exit / forget) so a
+    /// coroutine parked on a request whose server went away wakes
+    /// with `{ tag = "cancelled" }` instead of hanging forever.
+    /// Mirrors `mcp.rs`'s drain-on-exit. Idempotent: a second call
+    /// finds no entries (and `complete_external_cancelled` is itself
+    /// idempotent against double-completion).
+    fn drain_external_cancelled(&mut self, sid: LspServerId) {
+        let keys: Vec<(LspServerId, u64)> = self
+            .pending_external
+            .keys()
+            .filter(|(s, _)| *s == sid)
+            .copied()
+            .collect();
+        for k in keys {
+            if let Some(p) = self.pending_external.remove(&k) {
+                for a in &p.awaiters {
+                    self.runtime.complete_external_cancelled(a.job_id);
+                }
+            }
+        }
+    }
+
+    /// T M4.5 task #7: per-tick per-awaiter cancellation sweep for
+    /// `sid`. An awaiter whose [`CancellationToken`] was flipped —
+    /// either by `Handle:cancel()` or by being superseded by a newer
+    /// same-key request (see [`Self::register_awaiter`]) — is removed
+    /// and settled cancelled; the in-flight wire request continues if
+    /// sibling awaiters still want it. When the *last* awaiter of a
+    /// request abandons it, the entry and its route are dropped, the
+    /// rid is recorded in `cancelled_rids` so a late response is
+    /// dropped silently, and `$/cancelRequest` is sent best-effort so
+    /// the server can stop working. Mirrors `mcp.rs`'s
+    /// `drain_cancelled_externals` (LSP has no resource cache, so the
+    /// cache-state plumbing is omitted).
+    ///
+    /// T M4.5 task #8: the same sweep also fails any awaiter whose
+    /// request has outlived [`Self::request_timeout`] — a server that
+    /// stays alive but never answers a particular id would otherwise
+    /// park its coroutine forever. Timed-out entries take the same
+    /// abandon path as fully-cancelled ones (`$/cancelRequest` +
+    /// `cancelled_rids`), but settle `failed` rather than `cancelled`.
+    fn drain_cancelled_externals(&mut self, sid: LspServerId) {
+        let mut cancelled_jobs: Vec<JobId> = Vec::new();
+        let mut timed_out_jobs: Vec<(JobId, String)> = Vec::new();
+        let mut abandoned_rids: Vec<u64> = Vec::new();
+        // Captured into locals so the `retain` closure doesn't have to
+        // borrow `self` (it already borrows `self.pending_external`).
+        let now = Instant::now();
+        let timeout = self.request_timeout;
+        let timeout_ms = timeout.as_millis();
+        self.pending_external.retain(|(s, rid), p| {
+            if *s != sid {
+                return true;
+            }
+            let mut still: Vec<Awaiter> = Vec::with_capacity(p.awaiters.len());
+            for a in p.awaiters.drain(..) {
+                if a.token.is_cancelled() {
+                    cancelled_jobs.push(a.job_id);
+                } else {
+                    still.push(a);
+                }
+            }
+            // T M4.5 task #8: any awaiter that survived the cancel
+            // pass but whose request has outlived the timeout fails
+            // now — the server is alive but not answering this id.
+            if !still.is_empty() && now.duration_since(p.dispatched_at) >= timeout {
+                for a in still.drain(..) {
+                    timed_out_jobs.push((a.job_id, p.method.clone()));
+                }
+            }
+            p.awaiters = still;
+            if p.awaiters.is_empty() {
+                abandoned_rids.push(*rid);
+                false
+            } else {
+                true
+            }
+        });
+        for job_id in cancelled_jobs {
+            self.runtime.complete_external_cancelled(job_id);
+        }
+        for (job_id, method) in timed_out_jobs {
+            self.runtime.complete_external_failed(
+                job_id,
+                format!("LSP {method}: request timed out after {timeout_ms}ms"),
+            );
+        }
+        for rid in abandoned_rids {
+            self.pending_routes.remove(&(sid, rid));
+            if let Some(client) = self.clients.get_mut(&sid) {
+                client.pending.remove(&rid);
+                client.cancelled_rids.insert(rid);
+            }
+            self.send_cancel_request(sid, rid);
+        }
+    }
+
+    /// Send `$/cancelRequest { id }` to `sid`, best-effort. A server
+    /// that is not accepting writes (stopped / crashed) is skipped by
+    /// [`Self::send_notification`]'s state guard; the `Err` is
+    /// intentionally ignored. T M4.5 task #7.
+    fn send_cancel_request(&mut self, sid: LspServerId, rid: u64) {
+        let _ = self.send_notification(sid, "$/cancelRequest", json!({ "id": rid }));
+    }
+
     /// Send `textDocument/completion` for `uri` at `(line, col)`.
     /// The response is absorbed into the completion store at
-    /// `(sid, uri)`; the same `LspEventKind::Response` event is also
-    /// emitted so direct observers can see the raw payload.
-    /// Returns the JSON-RPC request id.
+    /// `(sid, uri)` (popup consumers untouched) and also settles the
+    /// returned awaiter. The same `LspEventKind::Response` event is
+    /// still emitted for raw observers. Returns the async-runtime
+    /// [`JobId`] the response will settle (`type JobId = u64`, so the
+    /// signature is unchanged for existing Rust callers — only the
+    /// value's meaning moved from JSON-RPC id to job id, and no
+    /// caller consumes it). T M4.5 async bridge.
     pub fn request_completion(
         &mut self,
         sid: LspServerId,
         uri: impl Into<String>,
         line: u32,
         col: u32,
-    ) -> Result<u64, String> {
+    ) -> Result<JobId, String> {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
             "position": { "line": line, "character": col }
         });
         let req_id = self.send_request(sid, "textDocument/completion", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/completion", &uri);
         self.pending_routes
             .insert((sid, req_id), ResponseRoute::Completion { uri });
-        Ok(req_id)
+        Ok(job_id)
     }
 
-    /// Send `textDocument/hover` for `uri` at `(line, col)`.
+    /// Send `textDocument/hover` for `uri` at `(line, col)`. Returns
+    /// the async-runtime [`JobId`] the response will settle.
     pub fn request_hover(
         &mut self,
         sid: LspServerId,
         uri: impl Into<String>,
         line: u32,
         col: u32,
-    ) -> Result<u64, String> {
+    ) -> Result<JobId, String> {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
             "position": { "line": line, "character": col }
         });
         let req_id = self.send_request(sid, "textDocument/hover", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/hover", &uri);
         self.pending_routes
             .insert((sid, req_id), ResponseRoute::Hover { uri });
-        Ok(req_id)
+        Ok(job_id)
     }
 
     /// Send `textDocument/signatureHelp` for `uri` at `(line, col)`.
+    /// Returns the async-runtime [`JobId`] the response will settle.
     pub fn request_signature_help(
         &mut self,
         sid: LspServerId,
         uri: impl Into<String>,
         line: u32,
         col: u32,
-    ) -> Result<u64, String> {
+    ) -> Result<JobId, String> {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
             "position": { "line": line, "character": col }
         });
         let req_id = self.send_request(sid, "textDocument/signatureHelp", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/signatureHelp", &uri);
         self.pending_routes
             .insert((sid, req_id), ResponseRoute::Signature { uri });
-        Ok(req_id)
+        Ok(job_id)
     }
 
     /// Send `textDocument/definition` for `uri` at `(line, col)`. The
     /// response is absorbed into the definition store at `(sid, uri)`.
+    /// Returns the async-runtime [`JobId`] the response will settle.
     pub fn request_definition(
         &mut self,
         sid: LspServerId,
         uri: impl Into<String>,
         line: u32,
         col: u32,
-    ) -> Result<u64, String> {
+    ) -> Result<JobId, String> {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
             "position": { "line": line, "character": col }
         });
         let req_id = self.send_request(sid, "textDocument/definition", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/definition", &uri);
         self.pending_routes
             .insert((sid, req_id), ResponseRoute::Definition { uri });
-        Ok(req_id)
+        Ok(job_id)
     }
 
     /// Send `textDocument/formatting` for `uri` with `tab_size` /
     /// `insert_spaces` formatting options. The response is absorbed
-    /// into the formatting store at `(sid, uri)`.
+    /// into the formatting store at `(sid, uri)`. Returns the
+    /// async-runtime [`JobId`] the response will settle.
     pub fn request_formatting(
         &mut self,
         sid: LspServerId,
         uri: impl Into<String>,
         tab_size: u32,
         insert_spaces: bool,
-    ) -> Result<u64, String> {
+    ) -> Result<JobId, String> {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
@@ -999,9 +1247,10 @@ impl LspManager {
             }
         });
         let req_id = self.send_request(sid, "textDocument/formatting", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/formatting", &uri);
         self.pending_routes
             .insert((sid, req_id), ResponseRoute::Formatting { uri });
-        Ok(req_id)
+        Ok(job_id)
     }
 
     /// Reply to a server-initiated request.
@@ -1036,6 +1285,10 @@ impl LspManager {
         let server_ids: Vec<LspServerId> = self.clients.keys().copied().collect();
         for sid in server_ids {
             self.drain_process_events(sid);
+            // T M4.5 task #7: after this tick's responses are absorbed
+            // (above), reap any awaiter cancelled or superseded since
+            // the last tick.
+            self.drain_cancelled_externals(sid);
             self.maybe_restart(sid);
         }
         // T M4.8: housekeeping for the status tracker (releases stale
@@ -1228,6 +1481,11 @@ impl LspManager {
                 !was_shutdown && should_restart(client.spec.restart),
             )
         };
+        // T M4.5: the server is gone (clean stop or crash) and will
+        // never answer its in-flight requests. Wake every awaiter
+        // cancelled now — not at the eventual restart/forget, which
+        // may never come under `LspRestartPolicy::Never`.
+        self.drain_external_cancelled(sid);
         if was_shutdown {
             self.push_event(sid, at, LspEventKind::Stopped);
         } else {
@@ -1363,6 +1621,14 @@ impl LspManager {
             let Some(client) = self.clients.get_mut(&sid) else {
                 return;
             };
+            // T M4.5 task #7: the cancel/response race. We sent
+            // `$/cancelRequest` for this id after every awaiter
+            // abandoned it; a server may answer anyway. By definition
+            // no awaiter is listening, so drop it silently rather
+            // than emitting a `ProtocolError` for an expected outcome.
+            if client.cancelled_rids.remove(&rid) {
+                return;
+            }
             client.pending.remove(&rid).unwrap_or_default()
         };
         if method.is_empty() {
@@ -1422,6 +1688,28 @@ impl LspManager {
             && let Some(value) = result.as_ref()
         {
             self.absorb_routed_response(sid, &route, value);
+        }
+        // T M4.5 async bridge: settle every awaiter parked on this
+        // request. Deliberately independent of the store-absorb guard
+        // above — a null result (e.g. "no hover here") is still a
+        // successful response and must wake `:await()` with `nil`
+        // rather than leave the coroutine parked forever. A server
+        // error settles the awaiter as failed so `:await()` raises the
+        // structured `{ tag = "failed" }`. The typed store was already
+        // populated above when present (hybrid model); popup/gutter
+        // consumers are unaffected by this block.
+        if let Some(p) = self.pending_external.remove(&(sid, rid)) {
+            if let Some(err) = error.as_ref() {
+                let msg = format!("LSP {} error {}: {}", p.method, err.code, err.message);
+                for a in &p.awaiters {
+                    self.runtime.complete_external_failed(a.job_id, msg.clone());
+                }
+            } else {
+                let value = result.clone().unwrap_or(Value::Null);
+                for a in &p.awaiters {
+                    self.runtime.complete_external_ok(a.job_id, value.clone());
+                }
+            }
         }
         // Generic response.
         self.push_event(
@@ -1659,6 +1947,10 @@ impl LspManager {
         self.clients.remove(&sid);
         self.pending.remove(&sid);
         self.pending_routes.retain(|(s, _), _| *s != sid);
+        // T M4.5: belt-and-braces — on_exit already drained on the
+        // terminal transition; this catches any awaiter registered
+        // between exit and forget. Idempotent.
+        self.drain_external_cancelled(sid);
         self.status_tracker.forget(sid);
         // T M4.9: drop the project scoping so the next
         // ensure_server_for_project call spawns a fresh server.
