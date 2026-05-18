@@ -119,7 +119,7 @@ pub struct Fetcher {
     timeout: Duration,
 }
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 
 impl Fetcher {
     /// Construct a fetcher with an explicit cache directory. The
@@ -472,10 +472,10 @@ fn xdg_cache_root() -> Result<PathBuf, FetchError> {
 #[must_use]
 pub fn normalize_url(url: &str) -> String {
     let mut u = url.trim_end_matches('/').to_string();
-    if dot_git_strip_applies(&u) {
-        if let Some(s) = u.strip_suffix(".git") {
-            u = s.to_string();
-        }
+    if dot_git_strip_applies(&u)
+        && let Some(s) = u.strip_suffix(".git")
+    {
+        u = s.to_string();
     }
     if let Some(scheme_end) = u.find("://") {
         let host_start = scheme_end + 3;
@@ -497,14 +497,12 @@ fn dot_git_strip_applies(u: &str) -> bool {
     }
     // SSH shorthand: `user@host:path`. Distinguished from URL forms
     // by the `@` appearing before any `:` and no `://` prefix.
-    if !u.contains("://") {
-        if let Some(at) = u.find('@') {
-            if let Some(colon) = u.find(':') {
-                if at < colon {
-                    return true;
-                }
-            }
-        }
+    if !u.contains("://")
+        && let Some(at) = u.find('@')
+        && let Some(colon) = u.find(':')
+        && at < colon
+    {
+        return true;
     }
     false
 }

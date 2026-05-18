@@ -396,7 +396,7 @@ fn m6_6_buffer_memory_stays_under_200mb_during_run() {
     let reached_target = pump_until(
         &mut editor,
         |e| history_bytes(e) >= TARGET_HISTORY_BYTES,
-        Duration::from_secs(60),
+        Duration::from_mins(1),
     );
     assert!(
         reached_target,

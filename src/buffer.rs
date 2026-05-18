@@ -2560,8 +2560,8 @@ mod tests {
                 for op in ops {
                     let op_repr = format!("{op:?}");
                     let edit = apply_capturing(&mut a, op);
-                    if let Some(edit) = edit {
-                        if let Some(crdt_op) = edit.crdt_op.as_ref() {
+                    if let Some(edit) = edit
+                        && let Some(crdt_op) = edit.crdt_op.as_ref() {
                             // Apply the wire-format bytes to the
                             // receiver. Receiver projection must match
                             // A's projection after this.
@@ -2580,7 +2580,6 @@ mod tests {
                                 op_repr, a_proj, b_proj
                             );
                         }
-                    }
                 }
             }
         }

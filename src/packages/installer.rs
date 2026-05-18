@@ -657,13 +657,13 @@ impl Installer {
         let staging_path = plan
             .install_path
             .with_file_name(format!(".{}.swap.tmp", plan.basename));
-        if let Err(e) = std::fs::remove_file(&staging_path) {
-            if e.kind() != io::ErrorKind::NotFound {
-                return Err(InstallError::Io {
-                    path: staging_path,
-                    source: e,
-                });
-            }
+        if let Err(e) = std::fs::remove_file(&staging_path)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            return Err(InstallError::Io {
+                path: staging_path,
+                source: e,
+            });
         }
         symlink_create(&plan.canonical_source, &staging_path)?;
 
@@ -846,15 +846,15 @@ impl Installer {
         // and pmacs.toml version disagree. Branch and commit pins
         // skip this check --- the user explicitly asked for that
         // revision regardless of what the manifest says.
-        if let InstallPin::Version(req) = &spec.pin {
-            if !req.matches(&manifest.version) {
-                return Err(InstallError::ManifestVersionMismatch {
-                    address: url.clone(),
-                    tag: tag_descriptor.clone(),
-                    manifest_version: manifest.version.to_string(),
-                    req: req.to_string(),
-                });
-            }
+        if let InstallPin::Version(req) = &spec.pin
+            && !req.matches(&manifest.version)
+        {
+            return Err(InstallError::ManifestVersionMismatch {
+                address: url.clone(),
+                tag: tag_descriptor.clone(),
+                manifest_version: manifest.version.to_string(),
+                req: req.to_string(),
+            });
         }
 
         // Archive + extract.

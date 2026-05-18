@@ -58,10 +58,10 @@ pub fn resolve_config_dir(
     xdg: Option<&std::ffi::OsStr>,
     home: Option<&std::ffi::OsStr>,
 ) -> Option<PathBuf> {
-    if let Some(xdg) = xdg {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join(CONFIG_SUBDIR));
-        }
+    if let Some(xdg) = xdg
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join(CONFIG_SUBDIR));
     }
     let home = home?;
     Some(PathBuf::from(home).join(".config").join(CONFIG_SUBDIR))

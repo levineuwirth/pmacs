@@ -321,10 +321,10 @@ fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<Vec<u8>>> {
         if line.is_empty() {
             continue;
         }
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
-                content_length = v.trim().parse().ok();
-            }
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim().eq_ignore_ascii_case("content-length")
+        {
+            content_length = v.trim().parse().ok();
         }
     }
     let n = content_length

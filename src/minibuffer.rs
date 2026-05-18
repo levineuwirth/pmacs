@@ -494,14 +494,15 @@ impl MinibufferAction {
             }
             return Self::Ignore;
         }
-        if alt && !ctrl {
-            if let KeyCode::Char(c) = chord.code {
-                return match c {
-                    'n' => Self::ScrollNext,
-                    'p' => Self::ScrollPrev,
-                    _ => Self::Ignore,
-                };
-            }
+        if alt
+            && !ctrl
+            && let KeyCode::Char(c) = chord.code
+        {
+            return match c {
+                'n' => Self::ScrollNext,
+                'p' => Self::ScrollPrev,
+                _ => Self::Ignore,
+            };
         }
         Self::Ignore
     }
@@ -631,10 +632,10 @@ pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
         if n[i] == hc {
             if j == 0 {
                 score += 10;
-            } else if let Some(prev_h) = h.get(j - 1) {
-                if matches!(*prev_h, '.' | '-' | '_' | ' ') {
-                    score += 5;
-                }
+            } else if let Some(prev_h) = h.get(j - 1)
+                && matches!(*prev_h, '.' | '-' | '_' | ' ')
+            {
+                score += 5;
             }
             if let Some(p) = prev_match {
                 if p + 1 == j {

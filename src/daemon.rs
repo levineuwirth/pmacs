@@ -1276,11 +1276,11 @@ fn send_buffer_snapshots(editor: &EditorState, write_stream: &mut UnixStream) {
         // Upgrade non-CRDT buffers to CRDT-backed in place. The
         // upgrade preserves the buffer's id, name, and content; only
         // the CRDT machinery is added.
-        if !buf.is_crdt_backed() {
-            if let Err(e) = buf.upgrade_to_crdt(instance_peer_id) {
-                eprintln!("pmacs: upgrade_to_crdt for {buffer_id:?} failed: {e:?}");
-                continue;
-            }
+        if !buf.is_crdt_backed()
+            && let Err(e) = buf.upgrade_to_crdt(instance_peer_id)
+        {
+            eprintln!("pmacs: upgrade_to_crdt for {buffer_id:?} failed: {e:?}");
+            continue;
         }
         let Some(crdt) = buf.crdt_state() else {
             // Upgrade succeeded but somehow crdt is still None —
@@ -1516,15 +1516,14 @@ fn validate_remote_crdt_op(
     let expected_peer_id = crate::crdt::peer_id_from_frontend(source);
     let registry_handle = editor.core.borrow().registry.clone();
     let registry = registry_handle.borrow();
-    if let Ok(buf) = registry.get(buffer_id) {
-        if buf
+    if let Ok(buf) = registry.get(buffer_id)
+        && buf
             .validate_remote_op_peer_ids(expected_peer_id, &op.bytes)
             .is_err()
-        {
-            return Err(
-                "op.bytes carry CRDT ops attributed to a peer other than the authenticated source",
-            );
-        }
+    {
+        return Err(
+            "op.bytes carry CRDT ops attributed to a peer other than the authenticated source",
+        );
     }
     Ok(())
 }

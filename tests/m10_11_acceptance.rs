@@ -269,12 +269,12 @@ impl Observer {
                 // reconstruct here. In M10.11's smoke / scenario
                 // tests, the observer attaches before any edit
                 // activity, so this branch shouldn't fire.
-                if let Some(r) = self.replicas.get(&buffer_id) {
-                    if let Err(e) = r.import_updates(&op.bytes) {
-                        self.import_errors
-                            .entry(buffer_id)
-                            .or_insert_with(|| format!("{e:?}"));
-                    }
+                if let Some(r) = self.replicas.get(&buffer_id)
+                    && let Err(e) = r.import_updates(&op.bytes)
+                {
+                    self.import_errors
+                        .entry(buffer_id)
+                        .or_insert_with(|| format!("{e:?}"));
                 }
             }
             InstanceMessage::PresenceUpdate { frontend_id, .. }
@@ -349,10 +349,10 @@ impl Observer {
         let deadline = Instant::now() + timeout;
         loop {
             self.pump(Duration::from_millis(100));
-            if let Some(text) = self.materialized(buffer_id) {
-                if text == expected {
-                    return Ok(());
-                }
+            if let Some(text) = self.materialized(buffer_id)
+                && text == expected
+            {
+                return Ok(());
             }
             if Instant::now() >= deadline {
                 let observed = self
@@ -375,10 +375,10 @@ impl Observer {
         let deadline = Instant::now() + timeout;
         loop {
             self.pump(Duration::from_millis(100));
-            if let Some(text) = self.materialized(buffer_id) {
-                if substrings.iter().all(|s| text.contains(s)) {
-                    return Ok(());
-                }
+            if let Some(text) = self.materialized(buffer_id)
+                && substrings.iter().all(|s| text.contains(s))
+            {
+                return Ok(());
             }
             if Instant::now() >= deadline {
                 let observed = self

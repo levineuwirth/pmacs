@@ -945,13 +945,12 @@ impl ProcessSupervisor {
         } else {
             // Schedule a restart attempt for `restart_backoff` from
             // now if not yet scheduled.
-            if let Some(proc) = self.processes.get_mut(&id) {
-                if matches!(proc.state, ProcessState::Terminated(_))
-                    && !matches!(proc.spec.restart, RestartPolicy::Never)
-                    && proc.next_restart_at.is_none()
-                {
-                    proc.next_restart_at = Some(now + self.restart_backoff);
-                }
+            if let Some(proc) = self.processes.get_mut(&id)
+                && matches!(proc.state, ProcessState::Terminated(_))
+                && !matches!(proc.spec.restart, RestartPolicy::Never)
+                && proc.next_restart_at.is_none()
+            {
+                proc.next_restart_at = Some(now + self.restart_backoff);
             }
         }
     }
@@ -1032,13 +1031,13 @@ impl ProcessSupervisor {
         }
         // SIGKILL anything left.
         for id in &ids {
-            if let Some(proc) = self.processes.get(id) {
-                if matches!(
+            if let Some(proc) = self.processes.get(id)
+                && matches!(
                     proc.state,
                     ProcessState::Running { .. } | ProcessState::Exiting { .. }
-                ) {
-                    let _ = self.signal(*id, Signal::SIGKILL);
-                }
+                )
+            {
+                let _ = self.signal(*id, Signal::SIGKILL);
             }
         }
         // Final reap loop. SIGKILL is delivered immediately by the

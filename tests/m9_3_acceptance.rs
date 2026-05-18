@@ -288,11 +288,11 @@ fn m9_3_cancellation_reaches_server() {
         // file.
         if let Ok(entries) = std::fs::read_dir(&cancel_dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("cancelled-") {
-                        sentinel_seen = true;
-                        break;
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.starts_with("cancelled-")
+                {
+                    sentinel_seen = true;
+                    break;
                 }
             }
         }

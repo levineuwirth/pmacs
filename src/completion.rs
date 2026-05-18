@@ -214,10 +214,10 @@ fn extract_markup_text(v: &Value) -> Option<String> {
     if let Some(s) = v.as_str() {
         return Some(s.to_owned());
     }
-    if let Some(obj) = v.as_object() {
-        if let Some(s) = obj.get("value").and_then(Value::as_str) {
-            return Some(s.to_owned());
-        }
+    if let Some(obj) = v.as_object()
+        && let Some(s) = obj.get("value").and_then(Value::as_str)
+    {
+        return Some(s.to_owned());
     }
     None
 }
@@ -431,10 +431,10 @@ impl CompletionTriggers {
         };
         let mut chars = Vec::with_capacity(arr.len());
         for v in arr {
-            if let Some(s) = v.as_str() {
-                if let Some(ch) = s.chars().next() {
-                    chars.push(ch);
-                }
+            if let Some(s) = v.as_str()
+                && let Some(ch) = s.chars().next()
+            {
+                chars.push(ch);
             }
         }
         Self { chars }

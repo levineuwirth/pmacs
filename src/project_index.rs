@@ -344,10 +344,10 @@ impl ProjectIndex {
     /// Save the index to `dest` as JSON, creating parent directories
     /// as needed.
     pub fn save(&self, dest: &Path) -> io::Result<()> {
-        if let Some(parent) = dest.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = dest.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
         }
         let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
         fs::write(dest, bytes)
@@ -729,10 +729,10 @@ fn extract_rust_heuristic(source: &str) -> Vec<Symbol> {
 
 fn strip_rust_visibility(s: &str) -> &str {
     let trimmed = s.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("pub(") {
-        if let Some(close) = rest.find(')') {
-            return rest[close + 1..].trim_start();
-        }
+    if let Some(rest) = trimmed.strip_prefix("pub(")
+        && let Some(close) = rest.find(')')
+    {
+        return rest[close + 1..].trim_start();
     }
     if let Some(rest) = trimmed.strip_prefix("pub ") {
         return rest.trim_start();
@@ -771,18 +771,18 @@ fn extract_lua_heuristic(source: &str) -> Vec<Symbol> {
             }
         }
         // local NAME = function(...
-        if let Some(rest) = line.strip_prefix("local ") {
-            if let Some(eq) = rest.find('=') {
-                let name = rest[..eq].trim();
-                let value = rest[eq + 1..].trim_start();
-                if is_identifier(name) {
-                    let kind = if value.starts_with("function") {
-                        SymbolKind::Function
-                    } else {
-                        SymbolKind::Variable
-                    };
-                    push_sym(&mut out, name, kind, line_idx, col);
-                }
+        if let Some(rest) = line.strip_prefix("local ")
+            && let Some(eq) = rest.find('=')
+        {
+            let name = rest[..eq].trim();
+            let value = rest[eq + 1..].trim_start();
+            if is_identifier(name) {
+                let kind = if value.starts_with("function") {
+                    SymbolKind::Function
+                } else {
+                    SymbolKind::Variable
+                };
+                push_sym(&mut out, name, kind, line_idx, col);
             }
         }
     }
@@ -917,21 +917,21 @@ pub fn extract_treesitter(
 
 fn walk_treesitter(node: tree_sitter::Node<'_>, bytes: &[u8], out: &mut Vec<Symbol>) {
     let kind_name = node.kind();
-    if let Some(sym_kind) = treesitter_kind(kind_name) {
-        if let Some(name_node) = node.child_by_field_name("name") {
-            let start = name_node.start_byte();
-            let end = name_node.end_byte();
-            if let Ok(name) = std::str::from_utf8(&bytes[start..end]) {
-                let pos = node.start_position();
-                out.push(Symbol {
-                    name: name.to_owned(),
-                    kind: sym_kind,
-                    line: pos.row as u32,
-                    col: pos.column as u32,
-                    source: SymbolSource::TreeSitter,
-                    container: None,
-                });
-            }
+    if let Some(sym_kind) = treesitter_kind(kind_name)
+        && let Some(name_node) = node.child_by_field_name("name")
+    {
+        let start = name_node.start_byte();
+        let end = name_node.end_byte();
+        if let Ok(name) = std::str::from_utf8(&bytes[start..end]) {
+            let pos = node.start_position();
+            out.push(Symbol {
+                name: name.to_owned(),
+                kind: sym_kind,
+                line: pos.row as u32,
+                col: pos.column as u32,
+                source: SymbolSource::TreeSitter,
+                container: None,
+            });
         }
     }
     let mut cursor = node.walk();
@@ -1027,26 +1027,25 @@ fn ingest_lsp_one(
         (parent_uri.map(str::to_owned), 0, 0)
     };
 
-    if !name.is_empty() {
-        if let Some(uri) = uri.as_deref() {
-            if let Some(path) = uri_to_path(uri) {
-                let kind = kind_code.map_or(SymbolKind::Other("unknown".into()), |code| {
-                    SymbolKind::from_lsp_code(code)
-                });
-                out.push(LspSymbolInbound {
-                    path,
-                    language: None,
-                    symbol: Symbol {
-                        name: name.to_owned(),
-                        kind,
-                        line,
-                        col,
-                        source: SymbolSource::Lsp,
-                        container: container.clone(),
-                    },
-                });
-            }
-        }
+    if !name.is_empty()
+        && let Some(uri) = uri.as_deref()
+        && let Some(path) = uri_to_path(uri)
+    {
+        let kind = kind_code.map_or(SymbolKind::Other("unknown".into()), |code| {
+            SymbolKind::from_lsp_code(code)
+        });
+        out.push(LspSymbolInbound {
+            path,
+            language: None,
+            symbol: Symbol {
+                name: name.to_owned(),
+                kind,
+                line,
+                col,
+                source: SymbolSource::Lsp,
+                container: container.clone(),
+            },
+        });
     }
 
     // DocumentSymbol form: recurse into children with the same uri.
@@ -1089,12 +1088,13 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push((h << 4) | l);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

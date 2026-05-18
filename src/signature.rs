@@ -149,20 +149,20 @@ fn parse_parameter(v: &Value, parent_label: &str) -> Option<SignatureParameter> 
             documentation,
         });
     }
-    if let Some(arr) = label_field.as_array() {
-        if arr.len() == 2 {
-            let start = arr[0].as_u64()? as u32;
-            let end = arr[1].as_u64()? as u32;
-            let s = parent_label
-                .get(start as usize..end as usize)
-                .unwrap_or("")
-                .to_owned();
-            return Some(SignatureParameter {
-                label: s,
-                span: Some((start, end)),
-                documentation,
-            });
-        }
+    if let Some(arr) = label_field.as_array()
+        && arr.len() == 2
+    {
+        let start = arr[0].as_u64()? as u32;
+        let end = arr[1].as_u64()? as u32;
+        let s = parent_label
+            .get(start as usize..end as usize)
+            .unwrap_or("")
+            .to_owned();
+        return Some(SignatureParameter {
+            label: s,
+            span: Some((start, end)),
+            documentation,
+        });
     }
     None
 }
@@ -171,10 +171,10 @@ fn extract_markup_text(v: &Value) -> Option<String> {
     if let Some(s) = v.as_str() {
         return Some(s.to_owned());
     }
-    if let Some(obj) = v.as_object() {
-        if let Some(s) = obj.get("value").and_then(Value::as_str) {
-            return Some(s.to_owned());
-        }
+    if let Some(obj) = v.as_object()
+        && let Some(s) = obj.get("value").and_then(Value::as_str)
+    {
+        return Some(s.to_owned());
     }
     None
 }
@@ -383,35 +383,34 @@ impl View for SignatureView {
             }
         }
 
-        if max_rows > 1 {
-            if let Some(doc) = snap.documentation.as_deref() {
-                for (i, line) in doc.lines().enumerate() {
-                    let row_idx = i as u32 + 1;
-                    if row_idx >= max_rows {
+        if max_rows > 1
+            && let Some(doc) = snap.documentation.as_deref()
+        {
+            for (i, line) in doc.lines().enumerate() {
+                let row_idx = i as u32 + 1;
+                if row_idx >= max_rows {
+                    break;
+                }
+                let mut col: u32 = 0;
+                for ch in line.chars() {
+                    if col >= max_cols {
                         break;
                     }
-                    let mut col: u32 = 0;
-                    for ch in line.chars() {
-                        if col >= max_cols {
-                            break;
-                        }
-                        let width = char_display_width(ch);
-                        if width == 0 {
-                            continue;
-                        }
-                        let cell = cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
-                        cell.glyph = Glyph::Char(ch);
-                        cell.style = Style::default();
-                        cell.attachment = None;
+                    let width = char_display_width(ch);
+                    if width == 0 {
+                        continue;
+                    }
+                    let cell = cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
+                    cell.glyph = Glyph::Char(ch);
+                    cell.style = Style::default();
+                    cell.attachment = None;
+                    col += 1;
+                    if width == 2 && col < max_cols {
+                        let cont = cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
+                        cont.glyph = Glyph::Continuation;
+                        cont.style = Style::default();
+                        cont.attachment = None;
                         col += 1;
-                        if width == 2 && col < max_cols {
-                            let cont =
-                                cells.at(CellCoord::new(origin.row + row_idx, origin.col + col));
-                            cont.glyph = Glyph::Continuation;
-                            cont.style = Style::default();
-                            cont.attachment = None;
-                            col += 1;
-                        }
                     }
                 }
             }

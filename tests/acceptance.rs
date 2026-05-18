@@ -356,7 +356,7 @@ mod soak_helpers {
             1 => rt.dispatch_compute_sum((u64::from(rng()) % 1_000) + 1, None),
             _ => rt.dispatch_emit_n((u64::from(rng()) % 32) + 1, None, Some(8)),
         };
-        if rng() % 4 == 0 {
+        if rng().is_multiple_of(4) {
             rt.cancel(id);
         }
         let inner_deadline = Instant::now() + Duration::from_secs(2);

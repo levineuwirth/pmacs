@@ -232,10 +232,10 @@ fn walk_for_marker(
         if let Some(kind) = match_marker(ancestor, markers) {
             return Some((ancestor.to_path_buf(), kind));
         }
-        if let Some(stop) = stop_root {
-            if ancestor == stop {
-                break;
-            }
+        if let Some(stop) = stop_root
+            && ancestor == stop
+        {
+            break;
         }
     }
     None

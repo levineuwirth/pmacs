@@ -859,10 +859,10 @@ pub(crate) fn run_attach_pair(
                     // active buffer's cursor stale so subsequent
                     // keystrokes round-trip too until the daemon's
                     // next `CursorByte` re-grounds the mirror cursor.
-                    if matches!(frontend_event, FrontendEvent::Key(_)) {
-                        if let Some(active_buf) = buffer_mirror.active_buffer() {
-                            buffer_mirror.mark_cursor_stale(active_buf);
-                        }
+                    if matches!(frontend_event, FrontendEvent::Key(_))
+                        && let Some(active_buf) = buffer_mirror.active_buffer()
+                    {
+                        buffer_mirror.mark_cursor_stale(active_buf);
                     }
 
                     // Visual optimistic paint (Path β). Fires only when
@@ -906,27 +906,27 @@ pub(crate) fn run_attach_pair(
             #[cfg(not(feature = "crdt"))]
             let optimistic_handled = false;
 
-            if !optimistic_handled {
-                if let Err(e) = forward_event(&mut writer, &ev, assigned_id, frontend.size()) {
-                    // Likely a broken pipe — instance went away.
-                    eprintln!("pmacs: {e}");
-                    return Err(e);
-                }
-                // Post-audit-round-6 F30 — `forward_event` (success
-                // path) may write a Mouse / Paste / Resize /
-                // FocusGained / FocusLost event (or no-op for a Key
-                // Release). Mouse down/drag in particular can move
-                // the daemon's active window cursor, change the
-                // active buffer, or both. Anything except an
-                // optimistic CrdtOp can desync the mirror's cursor
-                // from the daemon's view; conservatively mark the
-                // active buffer's cursor stale so subsequent
-                // keystrokes round-trip until the daemon's next
-                // `CursorByte` re-grounds the mirror.
-                #[cfg(feature = "crdt")]
-                if let Some(active_buf) = buffer_mirror.active_buffer() {
-                    buffer_mirror.mark_cursor_stale(active_buf);
-                }
+            if !optimistic_handled
+                && let Err(e) = forward_event(&mut writer, &ev, assigned_id, frontend.size())
+            {
+                // Likely a broken pipe — instance went away.
+                eprintln!("pmacs: {e}");
+                return Err(e);
+            }
+            // Post-audit-round-6 F30 — `forward_event` (success
+            // path) may write a Mouse / Paste / Resize /
+            // FocusGained / FocusLost event (or no-op for a Key
+            // Release). Mouse down/drag in particular can move
+            // the daemon's active window cursor, change the
+            // active buffer, or both. Anything except an
+            // optimistic CrdtOp can desync the mirror's cursor
+            // from the daemon's view; conservatively mark the
+            // active buffer's cursor stale so subsequent
+            // keystrokes round-trip until the daemon's next
+            // `CursorByte` re-grounds the mirror.
+            #[cfg(feature = "crdt")]
+            if let Some(active_buf) = buffer_mirror.active_buffer() {
+                buffer_mirror.mark_cursor_stale(active_buf);
             }
         }
     })();

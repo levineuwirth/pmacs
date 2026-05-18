@@ -1034,20 +1034,19 @@ fn main() {
                 // notification by writing a sentinel file. Tests
                 // that drove an `invoke_tool` cancellation poll for
                 // the file as proof the server actually got it.
-                if let Some(dir) = std::env::var_os("PMACS_FAKE_MCP_CANCEL_DIR") {
-                    if let Some(req_id) = params.get("requestId") {
-                        // requestId is whatever the client sent —
-                        // typically a u64, but per the spec it can
-                        // be any JSON value. Use its string form.
-                        let id_str = match req_id {
-                            serde_json::Value::Number(n) => n.to_string(),
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        let path =
-                            std::path::PathBuf::from(&dir).join(format!("cancelled-{id_str}"));
-                        let _ = std::fs::write(&path, b"");
-                    }
+                if let Some(dir) = std::env::var_os("PMACS_FAKE_MCP_CANCEL_DIR")
+                    && let Some(req_id) = params.get("requestId")
+                {
+                    // requestId is whatever the client sent —
+                    // typically a u64, but per the spec it can
+                    // be any JSON value. Use its string form.
+                    let id_str = match req_id {
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    let path = std::path::PathBuf::from(&dir).join(format!("cancelled-{id_str}"));
+                    let _ = std::fs::write(&path, b"");
                 }
             }
             ("prompts/get", Some(idv)) => {
@@ -1817,7 +1816,7 @@ fn main() {
     }
     if mode == "ignore_eof_sleep" {
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::thread::sleep(std::time::Duration::from_mins(1));
         }
     }
 }

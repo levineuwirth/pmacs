@@ -669,10 +669,10 @@ impl AsyncRuntime {
             // a time keeps RefCell happy across re-entrant pending
             // borrows.
             let prior_id = self.supersede.borrow().get(key).copied();
-            if let Some(prior) = prior_id {
-                if let Some(job) = self.pending.borrow().get(&prior) {
-                    job.cancel.cancel();
-                }
+            if let Some(prior) = prior_id
+                && let Some(job) = self.pending.borrow().get(&prior)
+            {
+                job.cancel.cancel();
             }
             self.supersede.borrow_mut().insert(key.to_owned(), id);
         }
@@ -1043,10 +1043,10 @@ impl AsyncRuntime {
             let now = Instant::now();
             for id in &newly_settled {
                 if let Some(job) = pending.get(id) {
-                    if let Some(key) = &job.supersede_key {
-                        if sup.get(key) == Some(id) {
-                            sup.remove(key);
-                        }
+                    if let Some(key) = &job.supersede_key
+                        && sup.get(key) == Some(id)
+                    {
+                        sup.remove(key);
                     }
                     // T M3.7: record the settle in the completion
                     // ring. We push the front and trim the back so
@@ -1548,15 +1548,14 @@ fn walk_dir(root: &Path, tx: &cb_channel::Sender<PathBuf>, cancel: &Cancellation
                 continue;
             }
             if file_type.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.')
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && (name.starts_with('.')
                         || matches!(
                             name,
                             "node_modules" | "target" | "build" | "dist" | "__pycache__"
-                        )
-                    {
-                        continue;
-                    }
+                        ))
+                {
+                    continue;
                 }
                 stack.push(path);
             } else if file_type.is_file() && tx.send(path).is_err() {

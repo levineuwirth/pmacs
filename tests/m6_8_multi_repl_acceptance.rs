@@ -84,14 +84,13 @@ fn locate_lua() -> Option<PathBuf> {
                 return Some(p);
             }
         }
-        if let Ok(out) = std::process::Command::new("which").arg(name).output() {
-            if out.status.success() {
-                if let Ok(path) = String::from_utf8(out.stdout) {
-                    let path = path.trim();
-                    if !path.is_empty() {
-                        return Some(PathBuf::from(path));
-                    }
-                }
+        if let Ok(out) = std::process::Command::new("which").arg(name).output()
+            && out.status.success()
+            && let Ok(path) = String::from_utf8(out.stdout)
+        {
+            let path = path.trim();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
             }
         }
     }

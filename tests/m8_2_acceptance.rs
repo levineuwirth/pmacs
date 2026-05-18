@@ -1012,13 +1012,13 @@ fn dired_sort_mtime_orders_newest_first() {
         .write(true)
         .open(&oldest)
         .unwrap()
-        .set_modified(now - Duration::from_secs(120))
+        .set_modified(now - Duration::from_mins(2))
         .expect("set mtime oldest");
     std::fs::File::options()
         .write(true)
         .open(&middle)
         .unwrap()
-        .set_modified(now - Duration::from_secs(60))
+        .set_modified(now - Duration::from_mins(1))
         .expect("set mtime middle");
     std::fs::File::options()
         .write(true)

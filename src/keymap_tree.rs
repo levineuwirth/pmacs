@@ -282,10 +282,10 @@ fn bind_recursive(map: &mut Keymap, sequence: &[Chord], command: String, source:
 fn unbind_recursive(map: &mut Keymap, sequence: &[Chord]) -> Option<Binding> {
     let (head, tail) = sequence.split_first()?;
     if tail.is_empty() {
-        if let Some(Branch::Leaf(_)) = map.branches.get(head) {
-            if let Some(Branch::Leaf(b)) = map.branches.remove(head) {
-                return Some(b);
-            }
+        if let Some(Branch::Leaf(_)) = map.branches.get(head)
+            && let Some(Branch::Leaf(b)) = map.branches.remove(head)
+        {
+            return Some(b);
         }
         return None;
     }
@@ -294,10 +294,10 @@ fn unbind_recursive(map: &mut Keymap, sequence: &[Chord]) -> Option<Binding> {
         _ => return None,
     };
     // Prune empty submaps so the tree doesn't grow stalactites.
-    if let Some(Branch::Submap(sub)) = map.branches.get(head) {
-        if sub.is_empty() {
-            map.branches.remove(head);
-        }
+    if let Some(Branch::Submap(sub)) = map.branches.get(head)
+        && sub.is_empty()
+    {
+        map.branches.remove(head);
     }
     Some(removed)
 }

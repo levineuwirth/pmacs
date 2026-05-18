@@ -103,13 +103,13 @@ pub fn render(
             edits.push(edit);
         }
     }
-    if !text.is_empty() {
-        if let Ok(edit) = buf.apply_edit(EditOp::Insert {
+    if !text.is_empty()
+        && let Ok(edit) = buf.apply_edit(EditOp::Insert {
             pos: 0,
             bytes: text.as_bytes(),
-        }) {
-            edits.push(edit);
-        }
+        })
+    {
+        edits.push(edit);
     }
     buf.mark_clean();
     (id, edits)

@@ -127,13 +127,13 @@ impl BufferRegistry {
     pub fn remove(&mut self, id: BufferId) -> Result<Buffer, RegistryError> {
         // Peek without taking ownership: if the buffer is mid-edit we
         // surface a typed error and leave the registry untouched.
-        if let Some(buf) = self.buffers.get(&id) {
-            if buf.editing_in_progress() {
-                return Err(RegistryError::ConcurrentEdit {
-                    id,
-                    name: buf.name().to_string(),
-                });
-            }
+        if let Some(buf) = self.buffers.get(&id)
+            && buf.editing_in_progress()
+        {
+            return Err(RegistryError::ConcurrentEdit {
+                id,
+                name: buf.name().to_string(),
+            });
         }
         let buf = self
             .buffers

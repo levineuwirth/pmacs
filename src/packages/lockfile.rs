@@ -408,13 +408,13 @@ impl Lockfile {
 
     /// Write pre-serialized lockfile bytes to disk atomically.
     pub fn write_bytes_to(path: &Path, bytes: &[u8]) -> Result<(), LockfileError> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|source| LockfileError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|source| LockfileError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
         crate::file_io::save_atomic(path, bytes)
             .map(|_| ())

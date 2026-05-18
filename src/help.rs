@@ -307,13 +307,13 @@ fn replace_help_buffer(
             edits.push(edit);
         }
     }
-    if !text.is_empty() {
-        if let Ok(edit) = buf.apply_edit(EditOp::Insert {
+    if !text.is_empty()
+        && let Ok(edit) = buf.apply_edit(EditOp::Insert {
             pos: 0,
             bytes: text.as_bytes(),
-        }) {
-            edits.push(edit);
-        }
+        })
+    {
+        edits.push(edit);
     }
     // The help buffer is regenerated content; mark it clean so the
     // modeline doesn't claim it has unsaved changes.

@@ -1137,16 +1137,16 @@ impl LspManager {
         };
         // Build the initialize request payload.
         let body = self.build_initialize(sid, init_request_id);
-        if let Some(client) = self.clients.get(&sid) {
-            if let Err(e) = send_frame_to(&self.supervisor, client, &body) {
-                self.push_event(
-                    sid,
-                    at,
-                    LspEventKind::ProtocolError {
-                        message: format!("failed to send initialize: {e}"),
-                    },
-                );
-            }
+        if let Some(client) = self.clients.get(&sid)
+            && let Err(e) = send_frame_to(&self.supervisor, client, &body)
+        {
+            self.push_event(
+                sid,
+                at,
+                LspEventKind::ProtocolError {
+                    message: format!("failed to send initialize: {e}"),
+                },
+            );
         }
         self.push_event(sid, at, LspEventKind::Started { pid });
     }
@@ -1233,10 +1233,8 @@ impl LspManager {
         } else {
             self.push_event(sid, at, LspEventKind::Crashed { reason });
         }
-        if restart {
-            if let Some(client) = self.clients.get_mut(&sid) {
-                client.next_restart_at = Some(at + self.restart_backoff);
-            }
+        if restart && let Some(client) = self.clients.get_mut(&sid) {
+            client.next_restart_at = Some(at + self.restart_backoff);
         }
     }
 
@@ -1263,10 +1261,10 @@ impl LspManager {
                     // Frame violations are unrecoverable on the same
                     // byte stream; terminate and let the restart
                     // policy bring things back if configured.
-                    if let Some(client) = self.clients.get_mut(&sid) {
-                        if let Some(pid) = client.process {
-                            let _ = self.supervisor.borrow_mut().terminate(pid);
-                        }
+                    if let Some(client) = self.clients.get_mut(&sid)
+                        && let Some(pid) = client.process
+                    {
+                        let _ = self.supervisor.borrow_mut().terminate(pid);
                     }
                     return;
                 }
@@ -1419,12 +1417,11 @@ impl LspManager {
         // help) get absorbed into the matching shared store before
         // surfacing as a generic `Response` event. Consumers
         // observing the event in the same tick see the fresh data.
-        if let Some(route) = self.pending_routes.remove(&(sid, rid)) {
-            if error.is_none() {
-                if let Some(value) = result.as_ref() {
-                    self.absorb_routed_response(sid, &route, value);
-                }
-            }
+        if let Some(route) = self.pending_routes.remove(&(sid, rid))
+            && error.is_none()
+            && let Some(value) = result.as_ref()
+        {
+            self.absorb_routed_response(sid, &route, value);
         }
         // Generic response.
         self.push_event(

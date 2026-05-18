@@ -142,14 +142,14 @@ fn attach_send_key_receive_cell_response() {
         stream
             .set_read_timeout(Some(Duration::from_millis(200)))
             .unwrap();
-        if let Ok(msg) = read_message::<InstanceMessage>(&mut stream) {
-            if matches!(
+        if let Ok(msg) = read_message::<InstanceMessage>(&mut stream)
+            && matches!(
                 msg,
                 InstanceMessage::CellDelta { .. } | InstanceMessage::Cursor(_)
-            ) {
-                got_response = true;
-                break;
-            }
+            )
+        {
+            got_response = true;
+            break;
         }
     }
     assert!(got_response, "expected render response after key");
@@ -830,11 +830,11 @@ fn m10_9_other_frontend_cursor_appears_in_recipient_cell_delta_with_color() {
                 for cell in &span.cells {
                     // The palette uses Color::Rgb(...). Any cell whose
                     // fg is a palette entry is an overlay cell.
-                    if let Color::Rgb(_, _, _) = cell.style.fg {
-                        if is_palette_color(cell.style.fg) {
-                            saw_palette_cell = true;
-                            break;
-                        }
+                    if let Color::Rgb(_, _, _) = cell.style.fg
+                        && is_palette_color(cell.style.fg)
+                    {
+                        saw_palette_cell = true;
+                        break;
                     }
                 }
                 if saw_palette_cell {
@@ -937,10 +937,10 @@ fn wait_for_palette_color_in_b(stream: &mut UnixStream, timeout: Duration) -> Op
         {
             for span in &spans {
                 for cell in &span.cells {
-                    if let Color::Rgb(_, _, _) = cell.style.fg {
-                        if is_palette_color(cell.style.fg) {
-                            return Some(cell.style.fg);
-                        }
+                    if let Color::Rgb(_, _, _) = cell.style.fg
+                        && is_palette_color(cell.style.fg)
+                    {
+                        return Some(cell.style.fg);
                     }
                 }
             }
@@ -1554,29 +1554,25 @@ fn m10_10_criterion_3_two_frontend_conflict_converges() {
     let mut a_received_b_op = false;
     let mut b_received_a_op = false;
     while Instant::now() < deadline && !(a_received_b_op && b_received_a_op) {
-        if !a_received_b_op {
-            if let Ok(InstanceMessage::CrdtOp { op, .. }) =
+        if !a_received_b_op
+            && let Ok(InstanceMessage::CrdtOp { op, .. }) =
                 read_message::<InstanceMessage>(&mut stream_a)
-            {
-                if op.peer_id == hello_b.assigned_frontend_id.0 {
-                    replica_a
-                        .import_updates(&op.bytes)
-                        .expect("a import B's op");
-                    a_received_b_op = true;
-                }
-            }
+            && op.peer_id == hello_b.assigned_frontend_id.0
+        {
+            replica_a
+                .import_updates(&op.bytes)
+                .expect("a import B's op");
+            a_received_b_op = true;
         }
-        if !b_received_a_op {
-            if let Ok(InstanceMessage::CrdtOp { op, .. }) =
+        if !b_received_a_op
+            && let Ok(InstanceMessage::CrdtOp { op, .. }) =
                 read_message::<InstanceMessage>(&mut stream_b)
-            {
-                if op.peer_id == hello_a.assigned_frontend_id.0 {
-                    replica_b
-                        .import_updates(&op.bytes)
-                        .expect("b import A's op");
-                    b_received_a_op = true;
-                }
-            }
+            && op.peer_id == hello_a.assigned_frontend_id.0
+        {
+            replica_b
+                .import_updates(&op.bytes)
+                .expect("b import A's op");
+            b_received_a_op = true;
         }
     }
     assert!(
@@ -2008,11 +2004,10 @@ fn m10_10_f26_spoofed_loro_internal_peer_id_is_rejected() {
     while Instant::now() < deadline {
         if let Ok(InstanceMessage::CrdtOp { op, .. }) =
             read_message::<InstanceMessage>(&mut stream_b)
+            && op.bytes == spoofed_bytes
         {
-            if op.bytes == spoofed_bytes {
-                saw_spoofed_broadcast = true;
-                break;
-            }
+            saw_spoofed_broadcast = true;
+            break;
         }
     }
     assert!(

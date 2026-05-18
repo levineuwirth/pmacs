@@ -1524,16 +1524,16 @@ impl McpManager {
             req_id
         };
         let body = build_initialize(init_request_id);
-        if let Some(client) = self.clients.get(&sid) {
-            if let Err(e) = send_frame_to(&self.supervisor, client, &body) {
-                self.push_event(
-                    sid,
-                    at,
-                    McpEventKind::ProtocolError {
-                        message: format!("failed to send initialize: {e}"),
-                    },
-                );
-            }
+        if let Some(client) = self.clients.get(&sid)
+            && let Err(e) = send_frame_to(&self.supervisor, client, &body)
+        {
+            self.push_event(
+                sid,
+                at,
+                McpEventKind::ProtocolError {
+                    message: format!("failed to send initialize: {e}"),
+                },
+            );
         }
         self.push_event(sid, at, McpEventKind::Started { pid });
     }
@@ -1597,10 +1597,8 @@ impl McpManager {
             TerminalKind::Stopped => self.push_event(sid, at, McpEventKind::Stopped),
             TerminalKind::Crashed => self.push_event(sid, at, McpEventKind::Crashed { reason }),
         }
-        if restart {
-            if let Some(client) = self.clients.get_mut(&sid) {
-                client.next_restart_at = Some(at + self.restart_backoff);
-            }
+        if restart && let Some(client) = self.clients.get_mut(&sid) {
+            client.next_restart_at = Some(at + self.restart_backoff);
         }
     }
 
@@ -1911,10 +1909,10 @@ impl McpManager {
     /// of the LSP layer's "frame violations are unrecoverable on the
     /// same byte stream" path.
     fn terminate_after_protocol_error(&mut self, sid: McpServerId) {
-        if let Some(client) = self.clients.get(&sid) {
-            if let Some(pid) = client.process {
-                let _ = self.supervisor.borrow_mut().terminate(pid);
-            }
+        if let Some(client) = self.clients.get(&sid)
+            && let Some(pid) = client.process
+        {
+            let _ = self.supervisor.borrow_mut().terminate(pid);
         }
     }
 

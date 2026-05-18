@@ -3002,11 +3002,11 @@ fn m4_12_definition_response_lands_in_store() {
         mgr.borrow_mut().tick();
         let store = mgr.borrow().definition_store();
         let guard = store.lock().expect("lock");
-        if let Some(r) = guard.get(&key) {
-            if let Some(loc) = r.locations.first() {
-                got = Some((loc.line, loc.col));
-                break;
-            }
+        if let Some(r) = guard.get(&key)
+            && let Some(loc) = r.locations.first()
+        {
+            got = Some((loc.line, loc.col));
+            break;
         }
         drop(guard);
         std::thread::sleep(Duration::from_millis(15));
@@ -3043,11 +3043,11 @@ fn m4_12_formatting_response_lands_in_store() {
         mgr.borrow_mut().tick();
         let store = mgr.borrow().formatting_store();
         let guard = store.lock().expect("lock");
-        if let Some(r) = guard.get(&key) {
-            if !r.edits.is_empty() {
-                got = r.edits.clone();
-                break;
-            }
+        if let Some(r) = guard.get(&key)
+            && !r.edits.is_empty()
+        {
+            got = r.edits.clone();
+            break;
         }
         drop(guard);
         std::thread::sleep(Duration::from_millis(15));

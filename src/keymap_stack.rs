@@ -245,18 +245,18 @@ impl KeymapStack {
         let mut any_pending = false;
 
         // 1) Buffer-local --- highest priority.
-        if let Some(id) = active_buffer {
-            if let Some(map) = self.buffers.get(&id) {
-                match map.lookup(sequence) {
-                    Resolution::Bound(b) => {
-                        return StackResolution::Bound(ResolvedBinding {
-                            binding: b,
-                            scope: Scope::Buffer(id),
-                        });
-                    }
-                    Resolution::Pending => any_pending = true,
-                    Resolution::Unbound => {}
+        if let Some(id) = active_buffer
+            && let Some(map) = self.buffers.get(&id)
+        {
+            match map.lookup(sequence) {
+                Resolution::Bound(b) => {
+                    return StackResolution::Bound(ResolvedBinding {
+                        binding: b,
+                        scope: Scope::Buffer(id),
+                    });
                 }
+                Resolution::Pending => any_pending = true,
+                Resolution::Unbound => {}
             }
         }
 

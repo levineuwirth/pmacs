@@ -102,10 +102,10 @@ pub fn resolve_socket_path_with_runtime(arg: Option<&str>, runtime: &Path) -> Pa
 /// non-empty, else `/tmp/pmacs-<uid>`.
 #[must_use]
 pub fn runtime_dir() -> PathBuf {
-    if let Some(xdg) = env::var_os("XDG_RUNTIME_DIR") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg);
-        }
+    if let Some(xdg) = env::var_os("XDG_RUNTIME_DIR")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg);
     }
     PathBuf::from(format!("/tmp/pmacs-{}", current_uid()))
 }

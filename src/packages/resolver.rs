@@ -890,23 +890,23 @@ impl<'a> ResolverState<'a> {
         // selection. This is the `UpdatePolicy::UpdateOne` cascade
         // brake — non-target packages stay at lockfile versions
         // unless current constraints force them to move.
-        if let Some(hint) = self.prefer_versions.get(url).cloned() {
-            if let Some(cand) = after_user.iter().find(|c| c.version == hint) {
-                let manifest = self
-                    .read_manifest(url, repo, &cand.commit_for_tag())?
-                    .clone();
-                if manifest.pmacs_required.matches(self.pmacs_version) {
-                    return Ok(ChosenTag {
-                        tag: cand.tag.clone(),
-                        commit: cand.commit_for_tag(),
-                        version: cand.version.clone(),
-                    });
-                }
-                // Hinted version is no longer pmacs-compatible (e.g.
-                // user upgraded pmacs and the locked version requires
-                // an older one). Fall through to highest-version
-                // selection.
+        if let Some(hint) = self.prefer_versions.get(url).cloned()
+            && let Some(cand) = after_user.iter().find(|c| c.version == hint)
+        {
+            let manifest = self
+                .read_manifest(url, repo, &cand.commit_for_tag())?
+                .clone();
+            if manifest.pmacs_required.matches(self.pmacs_version) {
+                return Ok(ChosenTag {
+                    tag: cand.tag.clone(),
+                    commit: cand.commit_for_tag(),
+                    version: cand.version.clone(),
+                });
             }
+            // Hinted version is no longer pmacs-compatible (e.g.
+            // user upgraded pmacs and the locked version requires
+            // an older one). Fall through to highest-version
+            // selection.
         }
 
         // Phase 2b: walk highest-first, fetch manifest lazily, return

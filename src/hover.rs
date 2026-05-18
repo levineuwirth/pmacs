@@ -94,10 +94,10 @@ fn collapse_contents(v: &Value) -> Option<String> {
         }
         return Some(out);
     }
-    if let Some(obj) = v.as_object() {
-        if let Some(s) = obj.get("value").and_then(Value::as_str) {
-            return Some(s.to_owned());
-        }
+    if let Some(obj) = v.as_object()
+        && let Some(s) = obj.get("value").and_then(Value::as_str)
+    {
+        return Some(s.to_owned());
     }
     None
 }
