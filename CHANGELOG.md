@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Semantic-frontend protocol scaffolding (M11.1)
+
+First milestone of the M11 semantic-frontend arc (see
+`docs/semantic-frontend-protocol.md`). Wire-format scaffolding only —
+no producer or consumer yet; mechanically identical to the M10.5 CRDT
+wire declaration.
+
+- `PROTOCOL_VERSION` bumped 2 → 3; `SUPPORTED_PROTOCOL_VERSIONS` now
+  `[1, 2, 3]`. The slice-membership handshake keeps v0.1/v1.0 binaries
+  connecting to v1.1 binaries unchanged.
+- New `semantic_render` capability bit on `FrontendCapabilities`,
+  `InstanceCapabilities`, and `NegotiatedCapabilities`
+  (`#[serde(default)]`; instance default `false` until the M11.2
+  projection seam lands). `negotiate_capabilities` AND-combines it and
+  enforces the `semantic_render ⇒ crdt_replica` dependency (a semantic
+  session is also a text replica) — rejected as a
+  `CapabilityMismatch`, never silently degraded.
+- `InstanceMessage` gains the `SemanticFrame` family: `StyleSpans`,
+  `Decorations`, `InlineAdornments`, `BlockAdornments`, `FoldState`,
+  `ResourceOffer`; `FrontendEvent` gains `Viewport`. All anchored in
+  byte offsets — the instance never learns a pixel.
+- `PMACS_INSTANCE_SEMANTIC_RENDER` env override mirrors the existing
+  per-capability test overrides.
+
 ## [1.0.0] --- 2026-05-18
 
 First stable release. Builds on the 0.1.0 preview (M1–M6) with the

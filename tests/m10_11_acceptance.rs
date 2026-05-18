@@ -215,6 +215,7 @@ impl Observer {
             terminal_kind: Some("test-observer".into()),
             multi_frontend: true,
             crdt_replica: true,
+            semantic_render: false,
         };
         let req = AttachRequest {
             protocol_version: PROTOCOL_VERSION,

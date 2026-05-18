@@ -574,6 +574,9 @@ fn cleanup(socket_path: &Path, lock: LockHandle) {
 /// anything else / absent → default `true`):
 /// - `PMACS_INSTANCE_MULTI_FRONTEND`
 /// - `PMACS_INSTANCE_CRDT_REPLICA`
+/// - `PMACS_INSTANCE_SEMANTIC_RENDER` (T M11.1; default `false`
+///   until the M11.2 projection seam lands, so this env var is the
+///   only way to advertise the bit for negotiation tests)
 ///
 /// Production daemons don't set these; tests do.
 fn instance_capabilities_with_env_override() -> InstanceCapabilities {
@@ -587,6 +590,7 @@ fn instance_capabilities_with_env_override() -> InstanceCapabilities {
     InstanceCapabilities {
         multi_frontend: env_bool("PMACS_INSTANCE_MULTI_FRONTEND", defaults.multi_frontend),
         crdt_replica: env_bool("PMACS_INSTANCE_CRDT_REPLICA", defaults.crdt_replica),
+        semantic_render: env_bool("PMACS_INSTANCE_SEMANTIC_RENDER", defaults.semantic_render),
     }
 }
 
@@ -1753,7 +1757,18 @@ fn apply_event(
         }
         FrontendEvent::Paste { .. }
         | FrontendEvent::FocusGained(_)
-        | FrontendEvent::FocusLost(_) => {
+        | FrontendEvent::FocusLost(_)
+        // T M11.1: the semantic-frontend viewport declaration. Its
+        // consumer is the instance-side projection seam
+        // (`SemanticRenderState`, M11.2), which scopes the
+        // SemanticFrame family to this byte range. M11.1 only
+        // declares the wire shape; no projection seam exists yet and
+        // the instance advertises `semantic_render: false`, so
+        // negotiation rejects any session that would emit this — it
+        // is unreachable in practice. Dropped silently until M11.2
+        // wires the consumer (same "declared, not yet wired" posture
+        // CrdtOp had between M10.5 and M10.8).
+        | FrontendEvent::Viewport { .. } => {
             // v0.1: silently ignored. Future work surfaces these
             // through Lua hooks (paste-text-fn, focus-changed-hook).
         }

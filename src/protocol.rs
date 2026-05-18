@@ -320,6 +320,38 @@ pub enum FrontendEvent {
         /// loro's `import_updates` decodes.
         op: crate::rope::CrdtOp,
     },
+    /// T M11.1: the buffer byte range a semantic frontend currently
+    /// has on screen, in buffer coordinates. Replaces the
+    /// instance-derived grid viewport for `semantic_render` sessions:
+    /// the instance scopes its `StyleSpans` / `Decorations` / … to
+    /// this range rather than shipping a whole file's styling.
+    ///
+    /// **No pixels.** This carries a byte range, never viewport pixel
+    /// size, DPI, font metrics, or glyph advances — the contract
+    /// boundary invariant from the semantic-frontend design note. The
+    /// frontend owns all visual-motion semantics and resolves
+    /// pixel→offset locally; there is deliberately no hit-test
+    /// request variant and no `SemanticResize`, both of which would
+    /// leak pixels across the boundary.
+    ///
+    /// `generation` ties the declared range to a CRDT version so the
+    /// instance can ignore a viewport that races a not-yet-applied
+    /// edit (symmetric with `StyleSpans::generation`).
+    ///
+    /// Only emitted by sessions that negotiated `semantic_render`;
+    /// a non-semantic session never sends it. M11.1 declares the
+    /// wire shape; the instance-side consumer is wired with the
+    /// projection seam in M11.2.
+    Viewport {
+        /// Which frontend's viewport this is.
+        frontend_id: FrontendId,
+        /// Which buffer the visible range indexes into.
+        buffer_id: crate::buffer::BufferId,
+        /// Half-open byte range currently on screen.
+        visible: ByteRange,
+        /// CRDT generation the frontend computed `visible` against.
+        generation: u64,
+    },
 }
 
 impl FrontendEvent {
@@ -334,7 +366,8 @@ impl FrontendEvent {
             | Self::FocusGained(frontend_id)
             | Self::FocusLost(frontend_id)
             | Self::Detach(frontend_id)
-            | Self::CrdtOp { frontend_id, .. } => *frontend_id,
+            | Self::CrdtOp { frontend_id, .. }
+            | Self::Viewport { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -581,6 +614,82 @@ pub enum InstanceMessage {
         /// converts to `usize` for the loro API.
         byte_pos: crate::rope::Position,
     },
+    /// T M11.1 — syntax + face styling over the semantic frontend's
+    /// current viewport range. `generation` ties the spans to a CRDT
+    /// version so the frontend can discard styling that predates an
+    /// edit it has already applied optimistically. Ships **no text** —
+    /// the frontend holds the rope via the `crdt_replica` machinery
+    /// and interprets these spans over it. Diffs against the previous
+    /// frame the way `CellDelta` does today: changed spans only,
+    /// scoped to the range the frontend last declared via
+    /// `FrontendEvent::Viewport`.
+    ///
+    /// Gated on negotiated `semantic_render`; never sent to a grid
+    /// session (the daemon's per-session outgoing filter — wired with
+    /// the producer in M11.2 — never emits it there, so postcard's
+    /// hard-error on unknown variants is mooted exactly as it is for
+    /// `CursorByte`).
+    StyleSpans {
+        /// Buffer these spans interpret.
+        buffer_id: crate::buffer::BufferId,
+        /// CRDT generation the spans were computed against.
+        generation: u64,
+        /// Styled byte runs, scoped to the declared viewport.
+        spans: Vec<StyleSpan>,
+    },
+    /// T M11.1 — diagnostics, search hits, current-line, and any
+    /// other "this region means something" overlay, as offset ranges
+    /// plus a kind. Peer selection is **not** here — it stays on the
+    /// existing `PresenceUpdate` path. Gated on `semantic_render`.
+    Decorations {
+        /// Buffer these decorations apply to.
+        buffer_id: crate::buffer::BufferId,
+        /// Decoration regions for the declared viewport.
+        decorations: Vec<Decoration>,
+    },
+    /// T M11.1 — inlay hints, blame, lens, virtual text. Anchored at
+    /// a single offset with a placement; occupies no document bytes —
+    /// the frontend interleaves it at layout time. Gated on
+    /// `semantic_render`.
+    InlineAdornments {
+        /// Buffer these adornments annotate.
+        buffer_id: crate::buffer::BufferId,
+        /// The adornment items for the declared viewport.
+        items: Vec<InlineAdornment>,
+    },
+    /// T M11.1 — diff zones, folded-region placeholders, anything
+    /// occupying its own vertical band. Anchored to the offset of the
+    /// line it precedes or replaces; the frontend allocates the
+    /// vertical space. Gated on `semantic_render`.
+    BlockAdornments {
+        /// Buffer these adornments annotate.
+        buffer_id: crate::buffer::BufferId,
+        /// The block items for the declared viewport.
+        items: Vec<BlockAdornment>,
+    },
+    /// T M11.1 — the instance's authoritative fold set as document
+    /// facts. Folding is an instance command-semantics concern (Lua
+    /// can fold); the visual collapse is a frontend layout concern —
+    /// the frontend renders the placeholder and adjusts its own
+    /// layout. Gated on `semantic_render`.
+    FoldState {
+        /// Buffer whose fold set this is.
+        buffer_id: crate::buffer::BufferId,
+        /// Folded byte ranges.
+        folds: Vec<ByteRange>,
+    },
+    /// T M11.1 — out-of-band content an adornment refers to (images,
+    /// blame avatars). Sent once, referenced by `handle`, so it is
+    /// not re-shipped per frame. Gated on `semantic_render`.
+    ResourceOffer {
+        /// Stable handle adornments reference via
+        /// [`AdornmentContent::Resource`].
+        handle: u64,
+        /// MIME type of `body`.
+        mime: String,
+        /// Inline bytes or a URI the frontend resolves itself.
+        body: ResourceBody,
+    },
 }
 
 /// Flat selection state for the wire.
@@ -602,6 +711,153 @@ pub struct SelectionSnapshot {
     /// The active end (typically the cursor at the moment of the
     /// snapshot).
     pub active: crate::rope::Position,
+}
+
+// ---------------------------------------------------------------------------
+// T M11.1 — Semantic-frontend projection types
+//
+// The payloads of the `InstanceMessage::StyleSpans` … `ResourceOffer`
+// family and `FrontendEvent::Viewport`. Everything is anchored in
+// **byte offsets** (consistent with `CursorByte`): line/col is a
+// frontend rendering concern, CRDT position is replica-internal. The
+// instance never learns a pixel — see the contract boundary in
+// `docs/semantic-frontend-protocol.md`.
+//
+// The variant/kind sets here are provisional and co-evolve within the
+// M11 arc behind the `semantic_render` capability + protocol v3,
+// exactly as the CRDT op shape evolved M10.5→M10.10 behind
+// `crdt_replica`. They are not a wire-compat hazard for non-semantic
+// sessions: the daemon's per-session outgoing filter (wired with the
+// producer in M11.2) never emits the family to a session that didn't
+// negotiate `semantic_render`, so postcard's hard-error on unknown
+// variants is mooted exactly as it is for `CursorByte`.
+// ---------------------------------------------------------------------------
+
+/// Half-open byte range `[start, end)` into a buffer's rope, matching
+/// the rope's own range convention.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ByteRange {
+    /// Inclusive start byte offset.
+    pub start: u64,
+    /// Exclusive end byte offset.
+    pub end: u64,
+}
+
+/// One run of buffer bytes carrying a resolved visual style. The
+/// instance is the single syntax/face authority; the frontend lays
+/// the style out locally over rope text it already holds. Reuses
+/// [`crate::cell::Style`] so the grid and semantic projections share
+/// one style vocabulary.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StyleSpan {
+    /// Byte range this style covers.
+    pub range: ByteRange,
+    /// The resolved style (syntax highlight ∘ faces ∘ theme).
+    pub style: crate::cell::Style,
+}
+
+/// What a [`Decoration`] region *means*. Provisional variant set (see
+/// the module-section note above). Peer selection is deliberately
+/// absent — it stays on the `PresenceUpdate` path.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum DecorationKind {
+    /// LSP diagnostic, error severity.
+    DiagnosticError,
+    /// LSP diagnostic, warning severity.
+    DiagnosticWarning,
+    /// LSP diagnostic, information severity.
+    DiagnosticInfo,
+    /// LSP diagnostic, hint severity.
+    DiagnosticHint,
+    /// The local selection region.
+    Selection,
+    /// A non-active search match.
+    SearchMatch,
+    /// The currently-focused search match.
+    SearchMatchActive,
+    /// The line containing the cursor.
+    CurrentLine,
+}
+
+/// A byte range tagged with what it means. The frontend decides how
+/// to paint each [`DecorationKind`] (squiggle, highlight, gutter
+/// mark) — the instance only states the fact.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Decoration {
+    /// Byte range the decoration covers.
+    pub range: ByteRange,
+    /// What the region signifies.
+    pub kind: DecorationKind,
+}
+
+/// Where an [`InlineAdornment`] sits relative to its anchor offset.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum AdornmentPlacement {
+    /// On its own, before the line containing `at`.
+    BeforeLine,
+    /// At the end of the line containing `at`.
+    EndOfLine,
+    /// Inline, exactly at the byte offset `at`.
+    AtOffset,
+}
+
+/// Adornment payload: either inline styled text, or a handle into a
+/// previously-sent [`InstanceMessage::ResourceOffer`] so out-of-band
+/// content (images, blame avatars) is shipped once, not per frame.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum AdornmentContent {
+    /// Styled virtual text.
+    Text {
+        /// The virtual text to display.
+        text: String,
+        /// Its style.
+        style: crate::cell::Style,
+    },
+    /// A handle into a `ResourceOffer`.
+    Resource {
+        /// The offered resource's handle.
+        handle: u64,
+    },
+}
+
+/// Virtual text occupying no document bytes (inlay hints, blame,
+/// lens). Anchored at a single offset; the frontend interleaves it
+/// at layout time.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InlineAdornment {
+    /// Buffer byte offset this adornment anchors to.
+    pub at: u64,
+    /// Placement relative to `at`.
+    pub placement: AdornmentPlacement,
+    /// What to render.
+    pub content: AdornmentContent,
+}
+
+/// Content occupying its own vertical band (diff zones, folded-region
+/// placeholders). Anchored to the offset of the line it precedes or
+/// replaces. `replaces` is `Some` when the band stands in for a
+/// collapsed region (the frontend renders the placeholder instead of
+/// that range), `None` for an additive band. The frontend allocates
+/// the vertical space — the instance never dictates pixel height.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BlockAdornment {
+    /// Buffer byte offset of the line this band precedes/replaces.
+    pub at: u64,
+    /// The byte range this band stands in for, if it replaces one.
+    pub replaces: Option<ByteRange>,
+    /// What to render in the band.
+    pub content: AdornmentContent,
+}
+
+/// The body of an [`InstanceMessage::ResourceOffer`] — inline bytes
+/// for small payloads, or a URI the frontend resolves itself for
+/// large or remote resources.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ResourceBody {
+    /// The resource bytes, carried inline.
+    Inline(Vec<u8>),
+    /// A URI the frontend fetches/resolves on its own.
+    Uri(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,20 +1373,34 @@ impl AttachmentHandle {
 /// accepted by v1.0 binaries; CRDT-only message variants
 /// (`InstanceMessage::CrdtOp`, `FrontendEvent::CrdtOp`) are filtered
 /// per-session for v1 negotiated sessions.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// T M11.1: bumped from 2 to 3. The v1.0 wire (version 2) remains
+/// accepted; the semantic-frontend variant family
+/// (`InstanceMessage::StyleSpans` … `ResourceOffer`,
+/// `FrontendEvent::Viewport`) is filtered per-session for sessions
+/// that did not negotiate `semantic_render`. Mechanically identical
+/// to the M10.5 bump: the slice-membership handshake check (not
+/// strict equality) means v0.1/v1.0 binaries keep connecting
+/// unchanged, and the new variants simply existing in the enums is
+/// not a wire-compat issue for non-semantic sessions because the
+/// daemon never emits them to those sessions.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
 /// `[1, 2]` so the version asymmetry the §sec:m10-backward-compat
 /// spec section describes is handled symmetrically on both sides.
 ///
-/// The handshake check is "is the peer's `protocol_version` present in
+/// T M11.1: extended to `[1, 2, 3]`. v1.1 binaries accept the v0.1
+/// (1), v1.0 (2), and semantic-frontend (3) wires. The check remains
+/// slice membership — "is the peer's `protocol_version` present in
 /// this slice?" — not strict equality on `PROTOCOL_VERSION`. The
 /// session's negotiated version (the peer's) is recorded for
 /// downstream filtering: v1 sessions don't receive
 /// `InstanceMessage::CrdtOp` / `PresenceUpdate` messages even from
-/// a v2 daemon.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2];
+/// a v3 daemon, and only sessions that negotiated `semantic_render`
+/// receive the `SemanticFrame` variant family.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2, 3];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].
@@ -1234,6 +1504,23 @@ pub struct InstanceCapabilities {
     /// broadcast routing for CRDT ops wires up in this milestone.
     #[serde(default = "default_true")]
     pub crdt_replica: bool,
+    /// T M11.1: instance can produce the semantic-frontend variant
+    /// family (`InstanceMessage::StyleSpans` … `ResourceOffer`) and
+    /// consume `FrontendEvent::Viewport`.
+    ///
+    /// Default is `false` — unlike `crdt_replica`, this does *not*
+    /// track the `crdt` Cargo feature. M11.1 declares the bit
+    /// position and the negotiation mechanics; the instance-side
+    /// projection seam (`SemanticRenderState`, the producer) is
+    /// M11.2. Advertising `true` before the producer exists would be
+    /// wire-protocol false advertising — the M10.5→M10.7 "bits false
+    /// until the path is wired" discipline, applied to M11. The
+    /// default flips to `cfg!(feature = "crdt")` when M11.2 lands the
+    /// projection seam (semantic sessions are also text replicas, so
+    /// the dependency on `crdt_replica` makes the feature gate the
+    /// natural ceiling).
+    #[serde(default)]
+    pub semantic_render: bool,
 }
 
 // Clippy in non-CRDT builds notes that `cfg!(feature = "crdt")`
@@ -1255,9 +1542,19 @@ impl Default for InstanceCapabilities {
         // is also a CRDT replica; gating both on the same feature
         // keeps the daemon's advertised capabilities consistent
         // with what it can actually do.
+        //
+        // T M11.1 — `semantic_render` defaults to `false`
+        // unconditionally (not gated on the `crdt` feature like the
+        // two bits above). There is no projection-seam producer yet;
+        // the producer and the feature-tracking default flip are
+        // M11.2 scope. Until then a frontend declaring
+        // `semantic_render: true` gets `Goodbye(CapabilityMismatch)`,
+        // exactly as `multi_frontend`/`crdt_replica` did between
+        // M10.5 and the M10.8 Day-4 flip.
         Self {
             multi_frontend: cfg!(feature = "crdt"),
             crdt_replica: cfg!(feature = "crdt"),
+            semantic_render: false,
         }
     }
 }
@@ -1322,6 +1619,20 @@ pub struct FrontendCapabilities {
     /// negotiation; M10.5 declares the bit position.
     #[serde(default)]
     pub crdt_replica: bool,
+    /// T M11.1: frontend is a semantic (layout-local) renderer — it
+    /// consumes the `InstanceMessage::StyleSpans` … `ResourceOffer`
+    /// family and emits `FrontendEvent::Viewport`. false for v0.1 and
+    /// v1.0 grid/TUI frontends; a future GPU/GUI frontend opts in.
+    ///
+    /// A semantic frontend is *required* to also be a text replica:
+    /// the semantic frame ships no text, so the frontend must hold
+    /// the rope locally via the `crdt_replica` machinery. This
+    /// dependency is enforced in [`negotiate_capabilities`], not just
+    /// documented — declaring `semantic_render: true` without
+    /// `crdt_replica: true` is a capability mismatch, never a silent
+    /// degrade.
+    #[serde(default)]
+    pub semantic_render: bool,
 }
 
 /// T M10.7 — the negotiated capability bits for one attached session.
@@ -1349,11 +1660,21 @@ pub struct NegotiatedCapabilities {
     /// `crdt_replica = true`. The daemon's outgoing-message filter for
     /// `CrdtOp` consults this in M10.8.
     pub crdt_replica: bool,
+    /// T M11.1 — session uses the semantic projection: it
+    /// produces/consumes the `InstanceMessage::StyleSpans` …
+    /// `ResourceOffer` family and `FrontendEvent::Viewport`. True iff
+    /// both sides declared `semantic_render = true` *and* the session
+    /// also negotiated `crdt_replica = true` (a semantic session is a
+    /// text replica; see [`negotiate_capabilities`]). The daemon's
+    /// per-session outgoing filter gates the entire semantic family
+    /// on this bit — wired with the producer in M11.2.
+    pub semantic_render: bool,
 }
 
 /// T M10.7 — pure-function capability negotiation.
 ///
-/// For each negotiated bit (`multi_frontend`, `crdt_replica`):
+/// For each negotiated bit (`multi_frontend`, `crdt_replica`,
+/// `semantic_render`):
 ///
 /// | Frontend wants | Instance has | Result |
 /// |----------------|--------------|--------|
@@ -1366,7 +1687,23 @@ pub struct NegotiatedCapabilities {
 /// (returns `Err`). Otherwise the negotiated bits are returned as
 /// [`NegotiatedCapabilities`]. The `Err` form gathers ALL missing
 /// bits into one `CapabilityMismatch` — one round-trip carries the
-/// complete picture rather than serial rejections.
+/// complete picture rather than serial rejections. Missing bits are
+/// ordered `multi_frontend`, `crdt_replica`, `semantic_render` for
+/// deterministic wire output.
+///
+/// # T M11.1 — the `semantic_render ⇒ crdt_replica` dependency
+///
+/// A semantic-render session ships no text on the semantic frame;
+/// the frontend holds the rope locally via the `crdt_replica`
+/// machinery (`BufferSnapshot` to bootstrap, `CrdtOp` to stay live).
+/// So `semantic_render` is only coherent on a session that also
+/// negotiated `crdt_replica`. When the AND-rule would yield
+/// `semantic_render = true` but the session did not also negotiate
+/// `crdt_replica = true`, this function rejects with
+/// `"semantic_render"` in `missing` rather than silently degrading
+/// the session to a text-only replica. The rejected identifier is
+/// `"semantic_render"` (the capability whose precondition is unmet),
+/// not `"crdt_replica"`.
 ///
 /// # Wire-format stability
 ///
@@ -1396,10 +1733,31 @@ pub fn negotiate_capabilities(
         }
         (a, b) => a && b,
     };
+    let semantic_render = match (frontend.semantic_render, instance.semantic_render) {
+        (true, false) => {
+            missing.push("semantic_render".to_string());
+            false
+        }
+        (a, b) => a && b,
+    };
+    // T M11.1 — dependency rule. A semantic session is a text replica
+    // (the semantic frame carries no text). If both sides declared
+    // `semantic_render` but the session did not also negotiate
+    // `crdt_replica`, reject rather than silently degrade. Guard
+    // against a duplicate push: the only path where `semantic_render`
+    // is already in `missing` is the `(true, false)` arm above, which
+    // also sets the local `semantic_render` to false, so the
+    // condition below cannot re-fire for that case — but the explicit
+    // membership check keeps this robust against future reordering.
+    if semantic_render && !crdt_replica && !missing.iter().any(|m| m == "semantic_render") {
+        missing.push("semantic_render".to_string());
+    }
+    let semantic_render = semantic_render && crdt_replica;
     if missing.is_empty() {
         Ok(NegotiatedCapabilities {
             multi_frontend,
             crdt_replica,
+            semantic_render,
         })
     } else {
         Err(GoodbyeReason::CapabilityMismatch { missing })
@@ -2577,23 +2935,27 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_two_for_v10() {
-        // Pin the value: T M10.5 bumped from 1 to 2. The v1.0 wire
-        // adds CrdtOp / PresenceUpdate variants; the v1.0 binary
-        // serves both v1 and v2 sessions per §sec:m10-backward-compat.
-        assert_eq!(PROTOCOL_VERSION, 2);
+    fn protocol_version_is_three_for_v11() {
+        // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
+        // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
+        // SemanticFrame family + FrontendEvent::Viewport). The v1.1
+        // binary serves v1, v2, and v3 sessions — the slice-membership
+        // handshake makes the relaxation symmetric, exactly as M10.5
+        // did for §sec:m10-backward-compat.
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     #[test]
-    fn supported_protocol_versions_includes_one_and_two() {
-        // T M10.5: v1.0 binaries accept both wire versions during the
-        // handshake. v0.1 binaries (with their strict-equality check)
-        // accepted only v1; this is the symmetric relaxation that
-        // makes §sec:m10-backward-compat hold once both binaries ship.
+    fn supported_protocol_versions_includes_one_two_three() {
+        // T M10.5: v1.0 binaries accept v1+v2. T M11.1: v1.1 binaries
+        // accept v1+v2+v3. The check is slice membership, not strict
+        // equality, so v0.1/v1.0 binaries keep connecting to v1.1
+        // binaries unchanged. v4+ is rejected until the next bump.
         assert!(is_supported_protocol_version(1));
         assert!(is_supported_protocol_version(2));
+        assert!(is_supported_protocol_version(3));
         assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(3));
+        assert!(!is_supported_protocol_version(4));
         assert!(!is_supported_protocol_version(u32::MAX));
     }
 
@@ -2629,6 +2991,7 @@ mod tests {
                 terminal_kind: Some("xterm-256color".into()),
                 multi_frontend: false,
                 crdt_replica: false,
+                semantic_render: false,
             },
             initial_size: CellSize::new(50, 200),
         };
@@ -2945,10 +3308,11 @@ mod tests {
     #[test]
     fn m10_5_handshake_matrix_versions_outside_range_rejected() {
         // v1 daemon's strict-equality behavior is documented at the
-        // v0.1 code level (different binary); v2 daemon's range check
-        // rejects v3+ until v0.2 ships.
+        // v0.1 code level (different binary); the v1.1 daemon's range
+        // check accepts v1/v2/v3 (T M11.1 added v3) and rejects v4+
+        // until the next protocol bump.
         assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(3));
+        assert!(!is_supported_protocol_version(4));
         assert!(!is_supported_protocol_version(u32::MAX));
     }
 
@@ -3157,6 +3521,36 @@ mod tests {
         InstanceCapabilities {
             multi_frontend,
             crdt_replica,
+            ..InstanceCapabilities::default()
+        }
+    }
+
+    /// T M11.1 — caps builder that also sets `semantic_render`, for
+    /// the semantic-negotiation matrix. The 2-arg `inst_caps` keeps
+    /// `semantic_render` at its `Default` (`false`) so the existing
+    /// M10.7 matrix tests are untouched.
+    fn inst_caps_s(
+        multi_frontend: bool,
+        crdt_replica: bool,
+        semantic_render: bool,
+    ) -> InstanceCapabilities {
+        InstanceCapabilities {
+            multi_frontend,
+            crdt_replica,
+            semantic_render,
+        }
+    }
+
+    fn front_caps_s(
+        multi_frontend: bool,
+        crdt_replica: bool,
+        semantic_render: bool,
+    ) -> FrontendCapabilities {
+        FrontendCapabilities {
+            multi_frontend,
+            crdt_replica,
+            semantic_render,
+            ..FrontendCapabilities::default()
         }
     }
 
@@ -3286,5 +3680,233 @@ mod tests {
             }
             other => panic!("expected CapabilityMismatch, got {other:?}"),
         }
+    }
+
+    // T M11.1 — semantic_render negotiation matrix + the
+    // semantic_render ⇒ crdt_replica dependency rule.
+
+    #[test]
+    fn negotiate_semantic_render_both_sides_with_crdt() {
+        // The only success shape: both sides want semantic_render AND
+        // the session also negotiates crdt_replica (the text-replica
+        // dependency). semantic_render true implies crdt_replica true.
+        let res = negotiate_capabilities(
+            &front_caps_s(true, true, true),
+            &inst_caps_s(true, true, true),
+        )
+        .expect("ok");
+        assert!(res.crdt_replica);
+        assert!(res.semantic_render);
+    }
+
+    #[test]
+    fn negotiate_semantic_render_frontend_silent() {
+        // Instance offers semantic_render; frontend doesn't ask. The
+        // subset (no semantic projection) is accepted, no error —
+        // identical posture to the multi_frontend/crdt_replica
+        // "frontend silent" case.
+        let res = negotiate_capabilities(
+            &front_caps_s(false, false, false),
+            &inst_caps_s(true, true, true),
+        )
+        .expect("ok");
+        assert!(!res.semantic_render);
+        assert!(!res.crdt_replica);
+    }
+
+    #[test]
+    fn negotiate_semantic_render_frontend_wants_instance_lacks() {
+        // Frontend wants crdt+semantic; instance has crdt but not the
+        // semantic projection (the M11.1 reality until M11.2 flips
+        // the instance default). Only semantic_render is missing.
+        let err = negotiate_capabilities(
+            &front_caps_s(false, true, true),
+            &inst_caps_s(false, true, false),
+        )
+        .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                assert_eq!(missing, vec!["semantic_render".to_string()]);
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_semantic_render_requires_crdt_replica_dependency() {
+        // Both sides declare semantic_render, but the frontend did
+        // NOT request crdt_replica. The AND-rule alone would yield
+        // semantic_render=true; the dependency rule rejects instead
+        // of silently degrading to a text-only replica. The rejected
+        // identifier is "semantic_render" (the capability whose
+        // precondition is unmet), not "crdt_replica".
+        let err = negotiate_capabilities(
+            &front_caps_s(false, false, true),
+            &inst_caps_s(false, true, true),
+        )
+        .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                assert_eq!(missing, vec!["semantic_render".to_string()]);
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_semantic_render_dependency_orders_after_crdt_replica() {
+        // Frontend wants crdt+semantic; instance has the semantic
+        // projection but lacks crdt. crdt_replica fails the AND-rule
+        // (true,false) → "crdt_replica"; the dependency rule then
+        // appends "semantic_render". Deterministic order:
+        // [crdt_replica, semantic_render]. No duplicate semantic_render.
+        let err = negotiate_capabilities(
+            &front_caps_s(false, true, true),
+            &inst_caps_s(false, false, true),
+        )
+        .expect_err("should mismatch");
+        match err {
+            GoodbyeReason::CapabilityMismatch { missing } => {
+                assert_eq!(
+                    missing,
+                    vec!["crdt_replica".to_string(), "semantic_render".to_string()]
+                );
+            }
+            other => panic!("expected CapabilityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_ok_semantic_render_always_implies_crdt_replica() {
+        // Invariant: every successful negotiation with
+        // semantic_render=true also has crdt_replica=true. Exhaust
+        // the 2³ declared-bit combinations on each side that the
+        // helpers can express; any Ok with semantic_render must carry
+        // crdt_replica.
+        for fc in [false, true] {
+            for fr in [false, true] {
+                for fs in [false, true] {
+                    for ic in [false, true] {
+                        for ir in [false, true] {
+                            for is in [false, true] {
+                                if let Ok(neg) = negotiate_capabilities(
+                                    &front_caps_s(fc, fr, fs),
+                                    &inst_caps_s(ic, ir, is),
+                                ) && neg.semantic_render
+                                {
+                                    assert!(
+                                        neg.crdt_replica,
+                                        "semantic_render without crdt_replica leaked through \
+                                         negotiation: front=({fc},{fr},{fs}) inst=({ic},{ir},{is})"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negotiate_two_arg_helpers_default_semantic_render_false() {
+        // Regression: the M10.7 matrix uses the 2-arg helpers, which
+        // must keep semantic_render at its Default (false) so adding
+        // the bit did not perturb existing negotiation outcomes.
+        let res =
+            negotiate_capabilities(&front_caps(true, true), &inst_caps(true, true)).expect("ok");
+        assert!(res.multi_frontend);
+        assert!(res.crdt_replica);
+        assert!(!res.semantic_render);
+    }
+
+    // T M11.1 — postcard round-trips for the SemanticFrame family and
+    // FrontendEvent::Viewport. Mirrors the M10.x variant round-trip
+    // tests: encode → decode → structural equality.
+
+    #[test]
+    fn semantic_frame_family_round_trips_through_postcard() {
+        let bid = crate::buffer::BufferId::next();
+        let msgs = vec![
+            InstanceMessage::StyleSpans {
+                buffer_id: bid,
+                generation: 7,
+                spans: vec![StyleSpan {
+                    range: ByteRange { start: 0, end: 12 },
+                    style: crate::cell::Style::default(),
+                }],
+            },
+            InstanceMessage::Decorations {
+                buffer_id: bid,
+                decorations: vec![
+                    Decoration {
+                        range: ByteRange { start: 3, end: 9 },
+                        kind: DecorationKind::DiagnosticError,
+                    },
+                    Decoration {
+                        range: ByteRange { start: 20, end: 20 },
+                        kind: DecorationKind::CurrentLine,
+                    },
+                ],
+            },
+            InstanceMessage::InlineAdornments {
+                buffer_id: bid,
+                items: vec![InlineAdornment {
+                    at: 42,
+                    placement: AdornmentPlacement::EndOfLine,
+                    content: AdornmentContent::Text {
+                        text: "→ i32".to_string(),
+                        style: crate::cell::Style::default(),
+                    },
+                }],
+            },
+            InstanceMessage::BlockAdornments {
+                buffer_id: bid,
+                items: vec![BlockAdornment {
+                    at: 64,
+                    replaces: Some(ByteRange { start: 64, end: 256 }),
+                    content: AdornmentContent::Resource { handle: 1 },
+                }],
+            },
+            InstanceMessage::FoldState {
+                buffer_id: bid,
+                folds: vec![ByteRange { start: 100, end: 400 }],
+            },
+            InstanceMessage::ResourceOffer {
+                handle: 1,
+                mime: "image/png".to_string(),
+                body: ResourceBody::Inline(vec![0x89, b'P', b'N', b'G']),
+            },
+            InstanceMessage::ResourceOffer {
+                handle: 2,
+                mime: "image/svg+xml".to_string(),
+                body: ResourceBody::Uri("file:///tmp/blame.svg".to_string()),
+            },
+        ];
+        for msg in msgs {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn frontend_event_viewport_round_trips_through_postcard() {
+        let ev = FrontendEvent::Viewport {
+            frontend_id: FrontendId(4),
+            buffer_id: crate::buffer::BufferId::next(),
+            visible: ByteRange {
+                start: 1_024,
+                end: 4_096,
+            },
+            generation: 99,
+        };
+        let bytes = postcard::to_allocvec(&ev).expect("encode");
+        let decoded: FrontendEvent = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(ev, decoded);
+        // The contract-boundary invariant, asserted structurally:
+        // frontend_id() must resolve for the new variant (it is part
+        // of the per-frontend routing alternation).
+        assert_eq!(decoded.frontend_id(), FrontendId(4));
     }
 }

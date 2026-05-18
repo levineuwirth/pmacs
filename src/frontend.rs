@@ -368,7 +368,21 @@ impl Frontend {
             // byte position (consumed by BufferMirror's cursor tracker
             // in attach.rs) drives optimistic-apply. The legacy path
             // here only needs grid; the byte variant drops silently.
-            | InstanceMessage::CursorByte { .. } => {
+            | InstanceMessage::CursorByte { .. }
+            // T M11.1: the semantic-frontend projection family. This
+            // is the grid TUI — it advertises `semantic_render: false`,
+            // so a v3 daemon never sends these here (the per-session
+            // outgoing filter, M11.2, gates the family). If one
+            // arrives anyway it drops silently, same v0.1-ignored
+            // category as CrdtOp / PresenceUpdate. A semantic
+            // frontend (M11.5) consumes them via its own layout path,
+            // not this cell-grid path.
+            | InstanceMessage::StyleSpans { .. }
+            | InstanceMessage::Decorations { .. }
+            | InstanceMessage::InlineAdornments { .. }
+            | InstanceMessage::BlockAdornments { .. }
+            | InstanceMessage::FoldState { .. }
+            | InstanceMessage::ResourceOffer { .. } => {
                 // v0.1 TUI ignores these; v0.3 GUI consumes them.
             }
         }

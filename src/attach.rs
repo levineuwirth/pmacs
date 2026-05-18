@@ -578,6 +578,11 @@ pub fn build_capabilities() -> FrontendCapabilities {
         terminal_kind: std::env::var("TERM").ok(),
         multi_frontend: cfg!(feature = "crdt"),
         crdt_replica: cfg!(feature = "crdt"),
+        // T M11.1 — the v0.1/v1.0 TUI is a grid frontend, not a
+        // semantic (layout-local) renderer. It never consumes the
+        // SemanticFrame family. A future GPU/GUI frontend sets this
+        // true; the TUI stays false.
+        semantic_render: false,
     }
 }
 
