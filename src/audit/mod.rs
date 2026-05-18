@@ -480,6 +480,34 @@ mod tests {
     }
 
     #[test]
+    fn reach_around_field_access_is_info_level() {
+        let f = engine().audit_source(
+            "t.lua",
+            r#"local seam = require("otherpkg").__pmacs_outline_test_seam_DO_NOT_USE"#,
+        );
+        let r = f
+            .iter()
+            .find(|x| x.rule == "reach-around-require-field")
+            .expect("expected reach-around field finding");
+        assert_eq!(r.severity, Severity::Info);
+    }
+
+    #[test]
+    fn reach_around_field_access_ignores_public_and_pmacs_fields() {
+        let f = engine().audit_source(
+            "t.lua",
+            r#"
+            local ok = require("otherpkg").query
+            local host = require("pmacs.foo")._private
+            "#,
+        );
+        assert!(
+            f.iter().all(|x| x.rule != "reach-around-require-field"),
+            "expected no field reach-around findings, got {f:?}"
+        );
+    }
+
+    #[test]
     fn bare_require_is_not_a_finding() {
         let f = engine().audit_source("t.lua", r#"require("magit")"#);
         assert!(f.is_empty(), "expected no findings, got {f:?}");

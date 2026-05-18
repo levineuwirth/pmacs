@@ -16,7 +16,13 @@
 /M*-AUDIT.md
 /M*-API-SURVEY.md
 /M*-SHIP-GATE.md
+/M*-FRAMING.md
 /V*-PREREQUISITES.md
 /MANUAL-TEST-CHECKLIST.md
 /tests/INDEX.md
 /.claude/
+
+# F8b SSH-transport diagnostic probes (M10.11). Kept local for now —
+# v0.2 breadth work (V0.2-PREREQUISITES.md SP-5-adjacent / F8b n=1)
+# reuses these. Revisit relocating to a tracked tools/ dir at v0.2.
+/f8b-*.sh

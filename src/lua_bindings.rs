@@ -97,6 +97,77 @@ pub type SharedCore = Rc<RefCell<EditorCore>>;
 /// rationale as the other `Rc<RefCell<...>>` aliases.
 pub type SharedHookRegistry = Rc<RefCell<HookRegistry>>;
 
+#[derive(Clone)]
+struct BufferRemoveCallbacks(Rc<RefCell<BufferRemoveCallbackState>>);
+
+struct BufferRemoveCallbackState {
+    next_id: u64,
+    callbacks: HashMap<BufferId, Vec<BufferRemoveCallback>>,
+}
+
+#[derive(Clone)]
+struct BufferRemoveCallback {
+    id: u64,
+    body: Function,
+    source: SourceLocation,
+}
+
+impl BufferRemoveCallbacks {
+    fn new() -> Self {
+        Self(Rc::new(RefCell::new(BufferRemoveCallbackState {
+            next_id: 1,
+            callbacks: HashMap::new(),
+        })))
+    }
+
+    fn add(&self, buffer: BufferId, body: Function, source: SourceLocation) -> u64 {
+        let mut state = self.0.borrow_mut();
+        let id = state.next_id;
+        state.next_id = state.next_id.saturating_add(1);
+        state
+            .callbacks
+            .entry(buffer)
+            .or_default()
+            .push(BufferRemoveCallback { id, body, source });
+        id
+    }
+
+    fn remove(&self, buffer: BufferId, callback_id: u64) -> bool {
+        let mut state = self.0.borrow_mut();
+        let Some(callbacks) = state.callbacks.get_mut(&buffer) else {
+            return false;
+        };
+        let before = callbacks.len();
+        callbacks.retain(|callback| callback.id != callback_id);
+        let removed = callbacks.len() != before;
+        if callbacks.is_empty() {
+            state.callbacks.remove(&buffer);
+        }
+        removed
+    }
+
+    fn take(&self, buffer: BufferId) -> Vec<BufferRemoveCallback> {
+        self.0
+            .borrow_mut()
+            .callbacks
+            .remove(&buffer)
+            .unwrap_or_default()
+    }
+}
+
+struct BufferRemoveCallbackHandleLua {
+    buffer: BufferId,
+    callback_id: u64,
+}
+
+impl UserData for BufferRemoveCallbackHandleLua {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("remove", |lua, this, ()| {
+            Ok(remove_buffer_removed_callback(lua, this))
+        });
+    }
+}
+
 /// Init-phase tracker. The user's `init.lua` runs while this is `false`;
 /// [`crate::editor::EditorState::new`] flips it to `true` after the
 /// init chunk returns. Lua bindings that gate on init phase
@@ -1083,45 +1154,90 @@ fn add_query_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
 }
 
 fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
-    methods.add_method("insert", |lua, this, (pos, bytes): (i64, mlua::String)| {
-        let pos = u64_from_lua(pos)?;
-        let payload = bytes.as_bytes();
-        let edit = run_managed_edit(
-            lua,
-            this.0,
-            EditOp::Insert {
-                pos,
-                bytes: &payload,
-            },
-        )?;
-        notify_buffer_edit_to_windows(lua, this.0, &edit);
-        Ok(())
-    });
+    methods.add_method(
+        "insert",
+        |lua, this, (pos, bytes, opts): (i64, mlua::String, Option<Table>)| {
+            let pos = u64_from_lua(pos)?;
+            let bypass_intercept = parse_bypass_intercept(opts.as_ref())?;
+            let payload = bytes.as_bytes();
+            let edit = run_buffer_edit(
+                lua,
+                this.0,
+                EditOp::Insert {
+                    pos,
+                    bytes: &payload,
+                },
+                bypass_intercept,
+            )?;
+            notify_buffer_edit_to_windows(lua, this.0, &edit);
+            Ok(())
+        },
+    );
 
-    methods.add_method("delete", |lua, this, (start, end): (i64, i64)| {
-        let range = checked_range(start, end)?;
-        let edit = run_managed_edit(lua, this.0, EditOp::Delete { range })?;
-        notify_buffer_edit_to_windows(lua, this.0, &edit);
-        Ok(())
-    });
+    methods.add_method(
+        "delete",
+        |lua, this, (start, end, opts): (i64, i64, Option<Table>)| {
+            let range = checked_range(start, end)?;
+            let bypass_intercept = parse_bypass_intercept(opts.as_ref())?;
+            let edit = run_buffer_edit(lua, this.0, EditOp::Delete { range }, bypass_intercept)?;
+            notify_buffer_edit_to_windows(lua, this.0, &edit);
+            Ok(())
+        },
+    );
 
     methods.add_method(
         "replace",
-        |lua, this, (start, end, bytes): (i64, i64, mlua::String)| {
+        |lua, this, (start, end, bytes, opts): (i64, i64, mlua::String, Option<Table>)| {
             let range = checked_range(start, end)?;
+            let bypass_intercept = parse_bypass_intercept(opts.as_ref())?;
             let payload = bytes.as_bytes();
-            let edit = run_managed_edit(
+            let edit = run_buffer_edit(
                 lua,
                 this.0,
                 EditOp::Replace {
                     range,
                     bytes: &payload,
                 },
+                bypass_intercept,
             )?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
             Ok(())
         },
     );
+}
+
+fn parse_bypass_intercept(opts: Option<&Table>) -> mlua::Result<bool> {
+    Ok(match opts {
+        Some(opts) => opts
+            .get::<Option<bool>>("bypass_intercept")?
+            .unwrap_or(false),
+        None => false,
+    })
+}
+
+fn run_buffer_edit(
+    lua: &Lua,
+    id: BufferId,
+    op: EditOp<'_>,
+    bypass_intercept: bool,
+) -> mlua::Result<crate::rope::Edit> {
+    if bypass_intercept {
+        run_bypass_edit(lua, id, op)
+    } else {
+        run_managed_edit(lua, id, op)
+    }
+}
+
+fn run_bypass_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<crate::rope::Edit> {
+    with_registry_mut(lua, |r| {
+        let buf = resolve_mut(r, id)?;
+        buf.begin_edit().map_err(mlua::Error::external)?;
+        let result = buf
+            .apply_edit_skip_intercepts(op)
+            .map_err(mlua::Error::external);
+        buf.end_edit();
+        result
+    })
 }
 
 /// Three-phase edit flow that lets intercepts re-enter `pmacs.buffer.X`
@@ -1237,6 +1353,52 @@ fn notify_buffer_edit_to_windows(lua: &Lua, buffer_id: BufferId, edit: &crate::r
     // no-op when the edit doesn't carry a `crdt_op` (the buffer
     // wasn't CRDT-backed at edit time).
     core.queue_daemon_origin_crdt_op(buffer_id, edit);
+}
+
+fn remove_buffer_removed_callback(lua: &Lua, handle: &BufferRemoveCallbackHandleLua) -> bool {
+    let Some(callbacks) = lua.app_data_ref::<BufferRemoveCallbacks>() else {
+        return false;
+    };
+    callbacks.remove(handle.buffer, handle.callback_id)
+}
+
+fn remove_buffer_and_fire(lua: &Lua, registry: &SharedRegistry, id: BufferId) -> mlua::Result<()> {
+    registry
+        .borrow_mut()
+        .remove(id)
+        .map(|_| ())
+        .map_err(mlua::Error::external)?;
+    after_buffer_removed(lua, id);
+    Ok(())
+}
+
+fn after_buffer_removed(lua: &Lua, id: BufferId) {
+    if let Some(keymaps) = lua.app_data_ref::<SharedKeymapStack>() {
+        keymaps.borrow_mut().remove_buffer(id);
+    }
+    let callbacks = match lua.app_data_ref::<BufferRemoveCallbacks>() {
+        Some(callbacks) => callbacks.take(id),
+        None => Vec::new(),
+    };
+    for callback in callbacks {
+        if let Err(err) = callback.body.call::<()>(BufferIdLua(id)) {
+            log_buffer_removed_error(lua, &callback.source, &err);
+        }
+    }
+}
+
+fn run_hook_if_defined(lua: &Lua, name: &str, args: mlua::MultiValue) {
+    let snapshot = match lua.app_data_ref::<SharedHookRegistry>() {
+        Some(hooks) => hooks.borrow().snapshot(name),
+        None => None,
+    };
+    let Some((kind, callbacks)) = snapshot else {
+        return;
+    };
+    let outcome = crate::hook::run_snapshot(kind, &callbacks, args);
+    for err in &outcome.errors {
+        log_hook_error(lua, name, err);
+    }
 }
 
 /// Force any window showing `buffer_id` to rebuild its `TextView`.
@@ -1733,6 +1895,7 @@ pub fn install(
     lua.set_app_data(InstalledPackages::new());
     lua.set_app_data(PackageUnloadHooks::new());
     lua.set_app_data(CurrentlyLoadingPackage::new());
+    lua.set_app_data(BufferRemoveCallbacks::new());
 
     let pmacs = lua.create_table()?;
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
@@ -2149,6 +2312,32 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     {
         let reg = registry.clone();
         buffer.set(
+            "from_file",
+            lua.create_function(move |lua, path: String| -> mlua::Result<BufferIdLua> {
+                let path_buf = std::path::PathBuf::from(&path);
+                let (bytes, meta) = crate::file_io::load_file(&path_buf).map_err(|source| {
+                    mlua::Error::external(std::io::Error::new(
+                        source.kind(),
+                        format!("failed to load {path}: {source}"),
+                    ))
+                })?;
+                let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                    let mut core = core.borrow_mut();
+                    core.switch_active_buffer(id)
+                        .map_err(mlua::Error::external)?;
+                    core.file_path = Some(path_buf);
+                    core.file_meta = Some(meta);
+                }
+                run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
+                Ok(BufferIdLua(id))
+            })?,
+        )?;
+    }
+
+    {
+        let reg = registry.clone();
+        buffer.set(
             "list",
             lua.create_function(move |lua, ()| {
                 let r = reg.borrow();
@@ -2165,12 +2354,34 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
         let reg = registry.clone();
         buffer.set(
             "remove",
-            lua.create_function(move |_, id: BufferIdLua| {
-                reg.borrow_mut()
-                    .remove(id.0)
-                    .map(|_| ())
-                    .map_err(mlua::Error::external)
+            lua.create_function(move |lua, id: BufferIdLua| {
+                remove_buffer_and_fire(lua, &reg, id.0)
             })?,
+        )?;
+    }
+
+    {
+        let reg = registry.clone();
+        buffer.set(
+            "on_removed",
+            lua.create_function(
+                move |lua,
+                      (id, body): (BufferIdLua, Function)|
+                      -> mlua::Result<BufferRemoveCallbackHandleLua> {
+                    {
+                        let r = reg.borrow();
+                        resolve(&r, id.0)?;
+                    }
+                    let callbacks = lua
+                        .app_data_ref::<BufferRemoveCallbacks>()
+                        .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
+                    let callback_id = callbacks.add(id.0, body, caller_source(lua, 2));
+                    Ok(BufferRemoveCallbackHandleLua {
+                        buffer: id.0,
+                        callback_id,
+                    })
+                },
+            )?,
         )?;
     }
 
@@ -3953,10 +4164,12 @@ fn install_buffer_kill(lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     let cc = core.clone();
     buffer.set(
         "kill",
-        lua.create_function(move |_, id: BufferIdLua| -> mlua::Result<()> {
+        lua.create_function(move |lua, id: BufferIdLua| -> mlua::Result<()> {
             cc.borrow_mut()
                 .kill_buffer(id.0)
-                .map_err(mlua::Error::external)
+                .map_err(mlua::Error::external)?;
+            after_buffer_removed(lua, id.0);
+            Ok(())
         })?,
     )?;
     Ok(())
@@ -4404,6 +4617,37 @@ fn log_hook_error(lua: &Lua, hook_name: &str, err: &crate::hook::HookCallbackErr
 /// the canonical sink without abandoning the rest of the load list.
 fn log_package_load_error(lua: &Lua, package: &str, err: &mlua::Error) {
     let line = format!("[package {package}] load failed: {err}\n");
+    let result = {
+        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
+            return;
+        };
+        let mut reg = app.borrow_mut();
+        let id = match reg.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
+            Some(id) => id,
+            None => reg.create(crate::lua::ERRORS_BUFFER_NAME),
+        };
+        let Ok(buf) = reg.get_mut(id) else {
+            return;
+        };
+        let pos = buf.len();
+        let edit = buf
+            .apply_edit(EditOp::Insert {
+                pos,
+                bytes: line.as_bytes(),
+            })
+            .ok();
+        edit.map(|e| (id, e))
+    };
+    if let Some((id, edit)) = result {
+        notify_buffer_edit_to_windows(lua, id, &edit);
+    }
+}
+
+fn log_buffer_removed_error(lua: &Lua, source: &SourceLocation, err: &mlua::Error) {
+    let line = format!(
+        "[buffer.on_removed] callback at {} raised: {err}\n",
+        source.render()
+    );
     let result = {
         let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
             return;
@@ -9888,6 +10132,17 @@ fn install_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<
         "move_paragraph_down",
         EditorCore::move_paragraph_down,
     )?;
+    {
+        let cc = core.clone();
+        editor.set(
+            "move_to_line",
+            lua.create_function(move |_, line: i64| {
+                let line = usize::try_from(line).map_err(mlua::Error::external)?;
+                cc.borrow_mut().move_to_line(line);
+                Ok(())
+            })?,
+        )?;
+    }
     Ok(())
 }
 
@@ -10668,6 +10923,28 @@ mod tests {
     }
 
     #[test]
+    fn from_file_loads_existing_file_as_clean_buffer() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("seed.txt");
+        std::fs::write(&path, b"abcde").expect("write seed file");
+        let loaded: BufferIdLua = lua
+            .load("return pmacs.buffer.from_file(...)")
+            .call(path.display().to_string())
+            .unwrap();
+        let content: String = lua
+            .load("local id = ...; return id:slice(0, id:len())")
+            .call(loaded)
+            .unwrap();
+        let modified: bool = lua
+            .load("local id = ...; return id:is_modified()")
+            .call(loaded)
+            .unwrap();
+        assert_eq!(content, "abcde");
+        assert!(!modified, "loaded buffers should start clean");
+    }
+
+    #[test]
     fn delete_replace_undo_redo() {
         let (lua, _reg, _cmds, _kms, _hks) = fresh();
         lua.load(
@@ -11105,6 +11382,52 @@ mod tests {
     }
 
     #[test]
+    fn bypass_intercept_option_skips_intercept_chain() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let content: String = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.from_bytes("scratch", "abcdef")
+                pmacs.buffer.add_intercept(id, function()
+                    error("blocked")
+                end)
+                local ok = pcall(function() id:replace(0, 1, "X") end)
+                assert(not ok, "plain replace must still run intercepts")
+                id:replace(0, 1, "Y", { bypass_intercept = true })
+                return id:slice(0, id:len())
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(content, "Ybcdef");
+    }
+
+    #[test]
+    fn bypass_intercept_keeps_same_buffer_reentry_gate() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let msg: String = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.from_bytes("scratch", "abc")
+                pmacs.buffer.add_intercept(id, function()
+                    id:replace(0, 1, "X", { bypass_intercept = true })
+                    return nil
+                end)
+                local ok, err = pcall(function() id:replace(0, 1, "Y") end)
+                assert(not ok, "same-buffer re-entry must still be gated")
+                assert(id:slice(0, id:len()) == "abc")
+                return tostring(err)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(
+            msg.contains("already being edited") || msg.contains("ConcurrentEdit"),
+            "expected ConcurrentEdit-style error; got: {msg}"
+        );
+    }
+
+    #[test]
     fn cross_buffer_remove_from_intercept_succeeds() {
         // Cross-buffer remove from inside an intercept is allowed:
         // the gate is per-buffer, not global. A's intercept removing
@@ -11133,6 +11456,60 @@ mod tests {
         assert!(
             !still_present_after,
             "cross-buffer remove from intercept should drop the target buffer"
+        );
+    }
+
+    #[test]
+    fn on_removed_callback_fires_once_and_can_be_removed() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let called: bool = lua
+            .load(
+                r#"
+                local first = pmacs.buffer.create("first")
+                local second = pmacs.buffer.create("second")
+                local calls = 0
+                pmacs.buffer.on_removed(first, function(dead)
+                    assert(dead == first, "removed callback receives the removed buffer")
+                    calls = calls + 1
+                end)
+                local handle = pmacs.buffer.on_removed(second, function()
+                    calls = calls + 100
+                end)
+                assert(handle:remove() == true)
+                assert(handle:remove() == false)
+                pmacs.buffer.remove(first)
+                pmacs.buffer.remove(second)
+                return calls == 1
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(called);
+    }
+
+    #[test]
+    fn buffer_remove_prunes_buffer_local_keymaps() {
+        let (lua, _reg, _cmds, kms, _hks) = fresh();
+        let id: BufferIdLua = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.create("keyed")
+                pmacs.keymap.bind {
+                    scope = "buffer",
+                    buffer = id,
+                    sequence = "C-c x",
+                    command = "buffer.save",
+                }
+                return id
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(kms.borrow().buffers.contains_key(&id.0));
+        lua.load("pmacs.buffer.remove(...)").call::<()>(id).unwrap();
+        assert!(
+            !kms.borrow().buffers.contains_key(&id.0),
+            "buffer-local keymaps should be pruned on removal"
         );
     }
 

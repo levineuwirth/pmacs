@@ -196,3 +196,24 @@
  (#eq? @fn "require")
  (#match? @arg "\\.")
  (#not-match? @arg "^pmacs(\\.|$)")) @violation
+
+;; ---------------------------------------------------------------------------
+;; Rule 15: reach-around-require-field
+;;
+;; Info-level: detects field access directly on a required module
+;; when the field name is private-looking (`_name`) or a loud
+;; in-tree test seam (`__pmacs_*_DO_NOT_USE`). This catches
+;; `require("pkg")._private` / `require("pkg").__pmacs_X_DO_NOT_USE`,
+;; which the dotted-require rule above cannot see.
+;;
+;; The host `pmacs.X` namespaces are excluded for the same reason as
+;; Rule 14.
+;; ---------------------------------------------------------------------------
+((dot_index_expression
+   (function_call
+     (identifier) @fn
+     (arguments (string (string_content) @arg)))
+   (identifier) @field)
+ (#eq? @fn "require")
+ (#not-match? @arg "^pmacs(\\.|$)")
+ (#match? @field "^_|^__pmacs_.*_DO_NOT_USE$")) @violation

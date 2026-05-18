@@ -67,20 +67,6 @@ fn editor_with_outline() -> (EditorState, TempDir, TempDir) {
     (state, cache, user_root)
 }
 
-/// Pump the async runtime until `predicate` returns true or the
-/// deadline elapses. Magit and dired tests use the same shape.
-fn pump_until<F: Fn(&EditorState) -> bool>(state: &mut EditorState, predicate: F) {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !predicate(state) {
-        assert!(
-            Instant::now() < deadline,
-            "async pump deadline exceeded after 2s"
-        );
-        state.tick_async();
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
-
 fn agg_text(state: &mut EditorState) -> String {
     state
         .lua_host
@@ -251,18 +237,10 @@ fn outline_aggregate_source_change_propagates_within_one_tick() {
         )
         .expect("source edit");
 
-    // Pump the async runtime: the source-listener intercept scheduled
-    // a deferred repaint via pmacs.async(...sleep(0):await()...). One
-    // tick should be enough to dispatch it.
-    pump_until(&mut state, |state| {
-        let txt: String = state
-            .lua_host
-            .lua()
-            .load(r"return AGG.buffer:slice(0, AGG.buffer:len())")
-            .eval()
-            .expect("agg text");
-        txt.contains("TODO modified")
-    });
+    // SP-7: the source-listener intercept now schedules a deferred
+    // repaint via pmacs.async.yield_to_next_tick(), with no worker
+    // round trip. One async tick must be sufficient.
+    state.tick_async();
 
     let after = agg_text(&mut state);
     assert!(
@@ -1204,16 +1182,9 @@ fn outline_aggregate_package_reload_closes_aggregates() {
 
 #[test]
 fn outline_aggregate_source_change_propagates_with_tight_deadline() {
-    // Pass-6 finding 3. The bullet-3 acceptance test uses a 2s
-    // pump_until deadline, which validates eventual bounded
-    // propagation rather than a strict one-tick guarantee. This
-    // test pins the *bounded* claim explicitly with a tight 200ms
-    // deadline: under the v0.1 implementation (source-listener
-    // schedules via pmacs.async + workers.sleep(0):await()), the
-    // worker reply arrives in microseconds and a small number of
-    // ticks suffices. SP-7 in V0.2-PREREQUISITES.md tracks the
-    // v0.2 work to pin propagation to exactly one tick of the
-    // main event loop.
+    // SP-7 regression: the aggregate source-listener uses
+    // pmacs.async.yield_to_next_tick(), so the old worker-sleep
+    // timing path must not come back.
     let (mut state, _c, _u) = editor_with_outline();
     state
         .lua_host

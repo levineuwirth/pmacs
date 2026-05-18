@@ -197,6 +197,12 @@ impl KeymapStack {
         Ok(removed)
     }
 
+    /// Drop every buffer-local binding for a buffer that just left
+    /// the registry.
+    pub fn remove_buffer(&mut self, buffer: BufferId) -> bool {
+        self.buffers.remove(&buffer).is_some()
+    }
+
     /// Unbind a sequence from a mode keymap.
     ///
     /// # Errors

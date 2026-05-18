@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+> Scope note: this section currently records only release-affecting
+> changes surfaced during M10 ship-gate work. The full M6–M10 v1.0
+> changelog body is a separate release-authoring task and is not yet
+> written here.
+
+### Changed
+
+- **SSH remote attach now carries the wire protocol over the SSH
+  *stderr* channel by default** (previously stdout). On at least one
+  tested environment (`OpenSSH_10.3p1`), a non-PTY SSH session does
+  not forward a long-lived remote process's stdout until that process
+  exits, while stderr streams in real time; the `--daemon-attach`
+  bridge is exactly such a process, so a stdout-carried protocol hung
+  indefinitely (the daemon and bridge were correct throughout). The
+  default flip resolves this with no user action required. Override
+  per invocation with `PMACS_ATTACH_SSH_PROTOCOL=stdout|stderr` (the
+  legacy `PMACS_ATTACH_SSH_PROTOCOL_STDERR=0/1` is still honored).
+  Breadth is currently a single environment; the default is a
+  one-line internal switch so it can be revisited without downstream
+  impact.
+
+### Fixed
+
+- SSH remote attach no longer fails with a host-side
+  `send Hello failed: Broken pipe`: the daemon-liveness probe in the
+  `--daemon-attach` auto-start path was a disposable connect that
+  could consume the daemon's server-speaks-first `Hello`; the
+  established connection is now reused (regression-tested).
+
 ## [0.1.0] --- 2026-05-03
 
 First public preview. Solo development through 1.0; public contributions

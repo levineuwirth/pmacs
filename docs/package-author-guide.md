@@ -100,6 +100,29 @@ Practical implication: a package can declare module-level state
 without worrying about colliding with another package's module-level
 state, even if both pick the same name.
 
+### Runtime API availability
+
+Package entry chunks run during package load, including audit and
+headless load paths. Keep top-level code limited to registration and
+state setup. Surfaces installed by the base Lua host are available
+there: `pmacs.buffer`, `pmacs.command`, `pmacs.keymap`,
+`pmacs.hook`, `pmacs.describe`, `pmacs.help`, `pmacs.attach`,
+`pmacs.now_ms`, and the standard Lua libraries.
+
+Editor-state surfaces are available once the editor bridge is
+installed: command bodies invoked by pmacs, main-thread hooks fired by
+the editor, edit intercepts, and `pmacs.async` callbacks resumed by
+the editor loop can use `pmacs.editor`, `pmacs.window`,
+`pmacs.frontend`, and `pmacs.minibuffer`. Top-level package load code
+that also needs to run in audit/headless contexts should still guard
+editor-only work or defer it to a command/hook.
+
+All of these callbacks run on the main Lua state. Intercepts have one
+extra restriction: re-entering a mutation on the same buffer is
+rejected by the buffer re-entry guard. Use
+`{ bypass_intercept = true }` for package-owned redraws, not recursive
+same-buffer edits from inside the intercept body.
+
 ---
 
 ## 3. Address schemes (v1.0)
@@ -172,9 +195,10 @@ emits findings at three severity levels:
   Currently always fires for fs / process operations; will gate on
   a future manifest `permissions` field.
 * **Info** --- patterns that need human classification (currently
-  cross-package dotted requires).
+  cross-package dotted requires and private-looking fields read
+  directly from `require(...)`).
 
-### v1.0 rules (15 patterns across 7 spec classes)
+### v1.0 rules (16 patterns across 7 spec classes)
 
 The full list lives at
 [`audit/audit-rules.scm`](../audit/audit-rules.scm) (the published
@@ -188,7 +212,7 @@ contract) and `src/audit/rules.rs` (the metadata table). Summary:
 | Error    | environment escape     | `no-rawget-rawset-on-globals`, `no-setfenv-getfenv`                           |
 | Warning  | filesystem mutation    | `no-fs-mutation-io-open-write`, `no-fs-mutation-os`                           |
 | Warning  | process spawning       | `no-process-spawn-io`, `no-process-spawn-os`, `no-process-spawn-pmacs`        |
-| Info     | reach-around           | `reach-around-require`                                                        |
+| Info     | reach-around           | `reach-around-require`, `reach-around-require-field`                          |
 
 ### Common Error rules and their fixes
 
@@ -412,6 +436,7 @@ end)
 | `rename(from, to)` | nil on success | Atomic on the same filesystem; cross-fs returns EXDEV. |
 | `chmod(path, mode)` | nil on success | **Follows symlinks** (per `chmod(2)`); changes the target's mode, not the link's. Asymmetric with `read_dir`/`stat` which use lstat. |
 | `remove(path)` | nil on success | File or empty dir. Non-empty dirs fail; recurse at the package layer. Symlinks removed as symlinks (target survives). |
+| `watch(path, callback [, opts])` | watcher handle | Polls for file/directory changes. Calls `callback({ kind = "changed" \| "created" \| "removed", path = path, recursive = bool })`. `opts.interval_ms` defaults to 250; `opts.recursive` defaults to false. |
 
 `opts.supersede = "<key>"` chains read ops (`read_dir`, `stat`)
 into the M3 supersede semantics: a later op under the same key
@@ -420,10 +445,89 @@ Mutating ops (`rename`/`chmod`/`remove`) intentionally don't
 accept `opts.supersede` — a "cancelled" syscall may have already
 mutated disk.
 
+`watch` is intentionally polling-backed. The watcher handle exposes
+`:cancel()` and `:is_cancelled()`. Use package-side coalescing if a
+burst of filesystem writes should produce one refresh.
+
+Two consequences of the polling design are load-bearing for
+callers. First, the baseline snapshot is taken asynchronously after
+`watch` returns; a change that lands between the `watch` call and
+the first completed snapshot is folded into the baseline and never
+reported. Re-trigger the action if you need a guaranteed first
+event, rather than assuming `watch` is armed synchronously. Second,
+change detection compares a per-entry signature of size, mtime
+(including nanoseconds), mode, and symlink target — a same-size
+content rewrite within the filesystem's mtime granularity is not
+observed. Both are acceptable for the derived-view refresh use case
+`watch` targets; neither is suitable as a correctness-critical
+change feed.
+
+`pmacs.async.yield_to_next_tick()` may be called inside
+`pmacs.async(function() ... end)` when a package needs to resume on
+the next editor async tick without dispatching a worker job.
+
+`pmacs-outline` also publishes `pmacs.outline.query(buffer,
+predicate)` when the package is loaded. It returns parsed outline
+entries whose fields match the package parser entries, and is the
+public way for other packages to inspect outline structure without
+requiring `pmacs-outline.parser` directly.
+
 **UTF-8 constraint.** v0.1's `pmacs.fs` requires UTF-8 paths and
 entry names. A directory containing a non-UTF-8 entry surfaces a
 `failed` status from `:await()` with the parent path and offending
 raw bytes named. Byte-preserving paths are post-v0.1 work.
+
+### `pmacs.buffer.*` — buffers, file loading, and cleanup
+
+Packages can create scratch buffers from bytes, load files through the
+editor's file loader, and observe buffer removal for package-owned
+state.
+
+| Function | Shape | Notes |
+|----------|-------|-------|
+| `create(name)` | buffer handle | Empty clean buffer. |
+| `from_bytes(name, bytes)` | buffer handle | Byte-preserving buffer seeded from a Lua string. |
+| `from_file(path)` | buffer handle | Loads the file using pmacs's normal file loader, creates a clean buffer named by `path`, switches the editor core to it when an editor core is present, and runs `buffer.after-load` if that hook is defined. |
+| `remove(buf)` | nil on success | Removes a buffer and fires removal cleanup. |
+| `on_removed(buf, callback)` | handle | Calls `callback(buf)` after `buf` is removed by `remove` or `kill`. The returned handle has `:remove()` for idempotent unsubscription. |
+
+Buffer-local keymaps are pruned automatically when a buffer is
+removed. Package-local tables that hold per-buffer handles should use
+`on_removed` to drop their own state:
+
+```lua
+local cleanup = pmacs.buffer.on_removed(buf, function(dead)
+  handles[tostring(dead)] = nil
+end)
+
+-- Later, if the package tears down before the buffer dies:
+cleanup:remove()
+```
+
+For generated buffers with intercepts, package-owned writes can skip
+the intercept chain explicitly:
+
+```lua
+buf:replace(0, buf:len(), rendered, { bypass_intercept = true })
+```
+
+`bypass_intercept` applies only to the intercept chain. It does not
+disable the same-buffer re-entry guard, undo bookkeeping, dirty
+tracking, view notifications, or CRDT broadcast queueing.
+
+### `pmacs.editor.*` — active-window editor state
+
+Editor primitives operate on the active window for the active
+frontend. Cursor positions are byte offsets; line numbers are 0-based
+to match `cursor_line()`.
+
+| Function | Shape | Notes |
+|----------|-------|-------|
+| `cursor()` | byte offset | Active window cursor. |
+| `cursor_line()` | line index | 0-based line containing the cursor. |
+| `cursor_col()` | byte column | 0-based byte column within the current line. |
+| `move_to_line(line)` | nil | Moves to the start of `line`; out-of-range values clamp to the last line. |
+| `set_status(message)` | nil | Replaces the status message. |
 
 ### A complete dev-loop example
 
@@ -480,6 +584,11 @@ alphabet at intercept time, before any chmod syscall.
 Multiple intercepts may be attached to the same buffer; they run in
 attach order, threading the (possibly position-modified) op through
 the chain.
+
+Package-owned redraws of derived buffers should prefer
+`{ bypass_intercept = true }` on `insert`, `delete`, or `replace`
+instead of maintaining a separate `painting` boolean around every
+write.
 
 ---
 

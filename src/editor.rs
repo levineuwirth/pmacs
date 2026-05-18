@@ -3175,6 +3175,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn buffer_kill_fires_on_removed_callbacks() {
+        let s = EditorState::new();
+        let doomed = s
+            .lua_host
+            .registry()
+            .borrow_mut()
+            .create_from_bytes("doomed.txt", b"hello");
+        let called: bool = s
+            .lua_host
+            .lua()
+            .load(
+                r"
+                local doomed = ...
+                local called = false
+                pmacs.buffer.on_removed(doomed, function(dead)
+                    assert(dead == doomed)
+                    called = true
+                end)
+                pmacs.buffer.kill(doomed)
+                return called
+                ",
+            )
+            .call(crate::lua_bindings::BufferIdLua(doomed))
+            .unwrap();
+        assert!(called, "kill should fire buffer removal callbacks");
+    }
+
     /// `pmacs.buffer.kill` refuses to remove the last remaining
     /// buffer; the registry must never go empty.
     #[test]
@@ -3243,6 +3271,26 @@ mod tests {
             .invoke_command("editor.buffer-list-visit", mlua::MultiValue::new())
             .unwrap();
         assert_eq!(s.core.borrow().active_buffer_name(), "target.txt");
+    }
+
+    #[test]
+    fn editor_move_to_line_positions_cursor_by_zero_based_line() {
+        let s = fresh_with(b"alpha\nbeta\ngamma");
+        s.lua_host
+            .lua()
+            .load("pmacs.editor.move_to_line(1)")
+            .exec()
+            .unwrap();
+        assert_eq!(s.core.borrow().cursor_line(), 1);
+        assert_eq!(s.core.borrow().cursor(), 6);
+
+        s.lua_host
+            .lua()
+            .load("pmacs.editor.move_to_line(99)")
+            .exec()
+            .unwrap();
+        assert_eq!(s.core.borrow().cursor_line(), 2);
+        assert_eq!(s.core.borrow().cursor(), 11);
     }
 
     /// `editor.next-buffer` walks the active window through the

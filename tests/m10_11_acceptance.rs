@@ -1164,7 +1164,7 @@ fn m10_11_q13_cat2_undo_across_delayed_ops() {
 /// re-run (framing Q8).
 ///
 /// **F2 correction.** Finding 5's first resolution ("(B): jitter-mode
-/// delays both CellDelta and CrdtOp") was wrong — it widened the
+/// delays both `CellDelta` and `CrdtOp`") was wrong — it widened the
 /// match in the render-message loop, which never carries broadcast
 /// `CrdtOp`s; the CRDT-convergence path was *not* exercised and this
 /// test silently asserted nothing about CRDT-under-jitter. F2 moved

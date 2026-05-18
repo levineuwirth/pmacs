@@ -37,6 +37,8 @@ assert(async_mod, "pmacs._async must be installed before the async builtin loads
 local parked_coroutines = {}
 -- handle id -> array of on_complete callbacks.
 local on_complete_callbacks = {}
+-- coroutines waiting for the next async tick without dispatching a worker job.
+local next_tick_coroutines = {}
 -- coroutine -> the handle the coroutine yielded with last (so we can
 -- detect a coroutine that yields a non-handle and surface it).
 local coroutine_waiting_on = setmetatable({}, { __mode = "k" })
@@ -199,6 +201,8 @@ local function step(co)
   if type(yielded) == "table" and yielded._is_pmacs_handle then
     parked_coroutines[yielded._id] = co
     coroutine_waiting_on[co] = yielded._id
+  elseif type(yielded) == "table" and yielded._is_pmacs_next_tick then
+    next_tick_coroutines[#next_tick_coroutines + 1] = co
   else
     if pmacs.error then
       pmacs.error("pmacs.async: coroutine yielded a non-Handle value (" ..
@@ -209,13 +213,27 @@ local function step(co)
   end
 end
 
-function pmacs.async(fn)
+local function spawn_async(fn)
   if type(fn) ~= "function" then
     error("pmacs.async expects a function, got " .. type(fn))
   end
   local co = coroutine.create(fn)
   step(co)
 end
+
+local async_public = {}
+
+setmetatable(async_public, {
+  __call = function(_, fn)
+    return spawn_async(fn)
+  end,
+})
+
+function async_public.yield_to_next_tick()
+  coroutine.yield({ _is_pmacs_next_tick = true })
+end
+
+pmacs.async = async_public
 
 -- ---------------------------------------------------------------------------
 -- pmacs.workers --- name-based dispatch surface.
@@ -363,6 +381,12 @@ end
 -- ---------------------------------------------------------------------------
 
 function pmacs._async.tick()
+  local ready_next_tick = next_tick_coroutines
+  next_tick_coroutines = {}
+  for _, co in ipairs(ready_next_tick) do
+    step(co)
+  end
+
   local settled = async_mod._tick()
   for _, id in ipairs(settled) do
     -- Fire on_complete callbacks before resuming the parked coroutine.
