@@ -439,41 +439,6 @@ impl Write for RawProtocolOutput {
     }
 }
 
-/// F8 diagnostic byte-capture. Active only when the marker directory
-/// `/tmp/pmacs-bridge-capture` exists on the bridge's host (or
-/// `PMACS_BRIDGE_CAPTURE_DIR` points at a directory). When active,
-/// each direction's bytes are mirrored verbatim to a file there so
-/// the exact wire image the daemon sees can be decoded offline. The
-/// mirror is best-effort and never alters the forwarded stream;
-/// when inactive this is a single `is_dir` syscall and nothing else.
-fn capture_sink(name: &str) -> Option<std::fs::File> {
-    let dir = std::env::var_os("PMACS_BRIDGE_CAPTURE_DIR")
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .or_else(|| {
-            let marker = PathBuf::from("/tmp/pmacs-bridge-capture");
-            marker.is_dir().then_some(marker)
-        })?;
-    std::fs::File::create(dir.join(name)).ok()
-}
-
-/// Reader that mirrors every byte it yields to a side file
-/// (best-effort) before returning it to the caller. Diagnostic only;
-/// the byte stream the bridge forwards is unchanged.
-struct TeeReader<R> {
-    inner: R,
-    sink: std::fs::File,
-}
-
-impl<R: Read> Read for TeeReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        let _ = self.sink.write_all(&buf[..n]);
-        let _ = self.sink.flush();
-        Ok(n)
-    }
-}
-
 // Owned `PathBuf` matches the public entry-point signature; clippy's
 // pedantic pass-by-value is wrong for this seam.
 #[allow(clippy::needless_pass_by_value)]
@@ -513,20 +478,8 @@ where
         let mut local_input = local_input;
         let mut socket_writer = socket_for_writer;
         bridge_debug("stdin->daemon copy loop started");
-        // Diagnostic: mirror exactly the bytes we forward toward the
-        // daemon (the client's AttachRequest et seq).
-        let result = match capture_sink("to_daemon.bin") {
-            Some(sink) => {
-                let mut tee = TeeReader {
-                    inner: local_input,
-                    sink,
-                };
-                copy_with_flush_named(&mut tee, &mut socket_writer, Some("stdin->daemon"))
-            }
-            None => {
-                copy_with_flush_named(&mut local_input, &mut socket_writer, Some("stdin->daemon"))
-            }
-        };
+        let result =
+            copy_with_flush_named(&mut local_input, &mut socket_writer, Some("stdin->daemon"));
         match &result {
             Ok(n) => bridge_debug(format!("stdin->daemon copy loop ended after {n} bytes")),
             Err(e) => bridge_debug(format!("stdin->daemon copy loop failed: {e}")),
@@ -546,23 +499,12 @@ where
     // swallowed — once we've decided to tear down, the caller cares
     // only about whether the connect succeeded, not about the exact
     // shape of the disconnect.
-    // Diagnostic: mirror exactly the bytes the daemon sent us (its
-    // Hello et seq), as the client receives them.
     bridge_debug("daemon->stdout copy loop started");
-    let daemon_to_stdout = match capture_sink("from_daemon.bin") {
-        Some(sink) => {
-            let mut tee = TeeReader {
-                inner: socket_reader,
-                sink,
-            };
-            copy_with_flush_named(&mut tee, &mut local_output, Some("daemon->stdout"))
-        }
-        None => copy_with_flush_named(
-            &mut socket_reader,
-            &mut local_output,
-            Some("daemon->stdout"),
-        ),
-    };
+    let daemon_to_stdout = copy_with_flush_named(
+        &mut socket_reader,
+        &mut local_output,
+        Some("daemon->stdout"),
+    );
     match &daemon_to_stdout {
         Ok(n) => bridge_debug(format!("daemon->stdout copy loop ended after {n} bytes")),
         Err(e) => bridge_debug(format!("daemon->stdout copy loop failed: {e}")),
