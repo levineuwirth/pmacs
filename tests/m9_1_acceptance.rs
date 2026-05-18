@@ -280,7 +280,7 @@ fn m9_1_multiple_mcps_coexist_on_one_manager() {
 fn m9_1_lsp_and_mcp_can_coexist_on_one_supervisor() {
     let sup = Rc::new(RefCell::new(ProcessSupervisor::new()));
     let runtime: SharedAsyncRuntime = Rc::new(AsyncRuntime::with_pool_size(1));
-    let lsp_mgr = Rc::new(RefCell::new(LspManager::new(sup.clone())));
+    let lsp_mgr = Rc::new(RefCell::new(LspManager::new(sup.clone(), runtime.clone())));
     let mcp_mgr = Rc::new(RefCell::new(McpManager::new(sup.clone(), runtime.clone())));
 
     // Spin up one LSP and one MCP through the same supervisor.

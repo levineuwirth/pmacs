@@ -153,21 +153,51 @@ pmacs.hook.add("buffer.after-edit", function()
   pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, active_buffer_text())
 end)
 
--- Synchronous poll: tick the supervisor + manager in tight loops until
--- `predicate()` returns a truthy value or the deadline elapses. Uses
--- wall-clock `pmacs.now_ms` because `os.clock` counts CPU time, and
--- the inner ticks block on subprocess I/O instead of burning CPU.
--- The v0.2 LSP UX pass swaps this for async-await coroutines.
-local function poll_until(predicate, timeout_ms)
-  timeout_ms = timeout_ms or 250
-  local deadline = pmacs.now_ms() + timeout_ms
-  while pmacs.now_ms() < deadline do
-    pmacs.process._tick()
-    pmacs.lsp._tick()
-    local ok, value = pcall(predicate)
-    if ok and value then return value end
+-- Async request surface (T M4.5 async bridge). The Rust manager
+-- registers each `textDocument/*` request with the async runtime and
+-- returns a job id; the JSON-RPC response (or a server-teardown
+-- drain) settles it. `_request_*_raw` is the raw job-id-returning
+-- binding (mirrors `pmacs.mcp._send_request_raw`); the wrappers below
+-- hand back a `pmacs.workers` Handle whose `:await()` resumes the
+-- caller when the response lands. The pre-v1.0 `poll_until` tick-loop
+-- this replaced blocked the editor for the whole request; awaiting
+-- yields the coroutine instead.
+local workers_mod = pmacs.workers
+assert(workers_mod and workers_mod._new_handle,
+  "pmacs.workers._new_handle missing; did async.lua load before lsp.lua?")
+assert(pmacs.lsp._request_completion_raw,
+  "pmacs.lsp._request_completion_raw missing; lua_bindings::install_lsp not run?")
+local new_handle = workers_mod._new_handle
+
+local function wrap_request(raw)
+  -- Raises on dispatch failure (e.g. "server not ready"), matching
+  -- `mcp.lua`'s wrapper; callers pcall the `request():await()` chain.
+  return function(...)
+    return new_handle(raw(...))
   end
-  return nil
+end
+
+pmacs.lsp.request_completion = wrap_request(pmacs.lsp._request_completion_raw)
+pmacs.lsp.request_hover = wrap_request(pmacs.lsp._request_hover_raw)
+pmacs.lsp.request_signature_help = wrap_request(pmacs.lsp._request_signature_help_raw)
+pmacs.lsp.request_definition = wrap_request(pmacs.lsp._request_definition_raw)
+pmacs.lsp.request_formatting = wrap_request(pmacs.lsp._request_formatting_raw)
+
+-- Render an `:await()` failure into a modeline-friendly reason.
+-- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
+-- server went away mid-request (drain in `lsp.rs`) and
+-- `{ tag = "failed", message = ... }` for a JSON-RPC error response;
+-- a raw dispatch failure surfaces as a plain string.
+local function lsp_await_error(err)
+  if type(err) == "table" then
+    if err.tag == "cancelled" then
+      return "server unavailable (request cancelled)"
+    elseif err.tag == "failed" then
+      return err.message or "server error"
+    end
+    return tostring(err.tag or "error")
+  end
+  return tostring(err)
 end
 
 -- Cursor positioning ------------------------------------------------------
@@ -235,6 +265,16 @@ end
 
 -- Commands ----------------------------------------------------------------
 
+-- Each command captures the cursor/target at invocation time, then
+-- spawns a coroutine that awaits the request and reacts. The editor
+-- never blocks: the command function returns immediately and the
+-- modeline updates when the response lands (or the await fails).
+-- `:await()` sequences the work and surfaces server-gone / server-
+-- error as structured errors; the normalized typed store (hybrid
+-- model) is still the read path, so LSP result-shape variance
+-- (Location | Location[] | LocationLink[], MarkupContent, …) stays
+-- parsed in one place in Rust rather than re-derived here.
+
 function pmacs.lsp.go_to_definition()
   local rec = attached_for_active()
   if not rec then
@@ -244,28 +284,28 @@ function pmacs.lsp.go_to_definition()
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
   pmacs.definition.clear(rec.server, rec.uri)
-  local ok = pcall(pmacs.lsp.request_definition, rec.server, rec.uri, line, col)
-  if not ok then
-    pmacs.editor.set_status("LSP: server not ready")
-    return
-  end
-  local locs = poll_until(function()
-    local ls = pmacs.definition.locations(rec.server, rec.uri)
-    if #ls > 0 then return ls end
-    return nil
-  end, 500)
-  if not locs then
-    pmacs.editor.set_status("LSP: no definition found")
-    return
-  end
-  local first = locs[1]
-  if first.uri == rec.uri then
-    move_active_cursor_to(first.line, first.col)
-    pmacs.editor.set_status(string.format(
-      "LSP: definition at %d:%d", first.line + 1, first.col + 1))
-  else
-    pmacs.editor.set_status("LSP: definition lives in " .. first.uri)
-  end
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_definition(rec.server, rec.uri, line, col):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local locs = pmacs.definition.locations(rec.server, rec.uri)
+    if not locs or #locs == 0 then
+      pmacs.editor.set_status("LSP: no definition found")
+      return
+    end
+    local first = locs[1]
+    if first.uri == rec.uri then
+      move_active_cursor_to(first.line, first.col)
+      pmacs.editor.set_status(string.format(
+        "LSP: definition at %d:%d", first.line + 1, first.col + 1))
+    else
+      pmacs.editor.set_status("LSP: definition lives in " .. first.uri)
+    end
+  end)
 end
 
 function pmacs.lsp.format_buffer()
@@ -275,22 +315,22 @@ function pmacs.lsp.format_buffer()
     return
   end
   pmacs.formatting.clear(rec.server, rec.uri)
-  local ok = pcall(pmacs.lsp.request_formatting, rec.server, rec.uri, 4, true)
-  if not ok then
-    pmacs.editor.set_status("LSP: server not ready")
-    return
-  end
-  local edits = poll_until(function()
-    local es = pmacs.formatting.edits(rec.server, rec.uri)
-    if #es > 0 then return es end
-    return nil
-  end, 1000)
-  if not edits then
-    pmacs.editor.set_status("LSP: no formatting edits")
-    return
-  end
-  local n = apply_text_edits(edits)
-  pmacs.editor.set_status(string.format("LSP: applied %d edits", n))
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_formatting(rec.server, rec.uri, 4, true):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local edits = pmacs.formatting.edits(rec.server, rec.uri)
+    if not edits or #edits == 0 then
+      pmacs.editor.set_status("LSP: no formatting edits")
+      return
+    end
+    local n = apply_text_edits(edits)
+    pmacs.editor.set_status(string.format("LSP: applied %d edits", n))
+  end)
 end
 
 function pmacs.lsp.hover_at_cursor()
@@ -299,25 +339,28 @@ function pmacs.lsp.hover_at_cursor()
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
   pmacs.hover.clear(rec.server, rec.uri)
-  local ok = pcall(pmacs.lsp.request_hover, rec.server, rec.uri,
-    pmacs.editor.cursor_line(), pmacs.editor.cursor_col())
-  if not ok then
-    pmacs.editor.set_status("LSP: server not ready")
-    return
-  end
-  local hover = poll_until(function()
-    return pmacs.hover.current(rec.server, rec.uri)
-  end, 500)
-  if not hover then
-    pmacs.editor.set_status("LSP: no hover info")
-    return
-  end
-  -- v0.1 surfaces the first line of the hover body in the modeline. The
-  -- popup view subscribes to the same store; future work can wire one
-  -- in here when the keybinding is meant to surface a panel.
-  local first = (hover.contents or ""):match("^[^\n]*") or ""
-  pmacs.editor.set_status(first ~= "" and ("LSP: " .. first) or "LSP: hover empty")
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_hover(rec.server, rec.uri, line, col):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local hover = pmacs.hover.current(rec.server, rec.uri)
+    if not hover then
+      pmacs.editor.set_status("LSP: no hover info")
+      return
+    end
+    -- Surface the first line of the hover body in the modeline. The
+    -- popup view subscribes to the same store; a panel can wire in
+    -- here when the keybinding is meant to surface one.
+    local first = (hover.contents or ""):match("^[^\n]*") or ""
+    pmacs.editor.set_status(first ~= "" and ("LSP: " .. first) or "LSP: hover empty")
+  end)
 end
 
 function pmacs.lsp.signature_help_at_cursor()
@@ -326,22 +369,25 @@ function pmacs.lsp.signature_help_at_cursor()
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
   pmacs.signature.clear(rec.server, rec.uri)
-  local ok = pcall(pmacs.lsp.request_signature_help, rec.server, rec.uri,
-    pmacs.editor.cursor_line(), pmacs.editor.cursor_col())
-  if not ok then
-    pmacs.editor.set_status("LSP: server not ready")
-    return
-  end
-  local help = poll_until(function()
-    return pmacs.signature.current(rec.server, rec.uri)
-  end, 500)
-  if not help or not help.signatures or #help.signatures == 0 then
-    pmacs.editor.set_status("LSP: no signature help")
-    return
-  end
-  local active = help.signatures[(help.active_signature or 0) + 1]
-  pmacs.editor.set_status(active and ("LSP: " .. active.label) or "LSP: signature unknown")
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local help = pmacs.signature.current(rec.server, rec.uri)
+    if not help or not help.signatures or #help.signatures == 0 then
+      pmacs.editor.set_status("LSP: no signature help")
+      return
+    end
+    local active = help.signatures[(help.active_signature or 0) + 1]
+    pmacs.editor.set_status(active and ("LSP: " .. active.label) or "LSP: signature unknown")
+  end)
 end
 
 -- Default commands + keymap entries --------------------------------------

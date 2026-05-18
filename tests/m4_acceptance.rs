@@ -1069,7 +1069,12 @@ fn make_lsp_test_manager() -> (
     use std::rc::Rc;
 
     let sup = Rc::new(RefCell::new(pmacs::process::ProcessSupervisor::new()));
-    let mgr = Rc::new(RefCell::new(LspManager::new(sup.clone())));
+    // The manager owns the runtime Rc; these store-assertion tests
+    // never tick it, so the registered external entries are simply
+    // never drained (harmless). The await-path tests (T M4.5 task #9)
+    // use a separate helper that also returns the runtime.
+    let runtime = Rc::new(AsyncRuntime::with_pool_size(1));
+    let mgr = Rc::new(RefCell::new(LspManager::new(sup.clone(), runtime)));
     (sup, mgr)
 }
 
@@ -3367,4 +3372,277 @@ fn project_search_boundary_round_trips_via_lua() {
         after_clear.is_none(),
         "set_search_boundary(nil) must clear back to nil"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T M4.5 async bridge — Handle:await() path (task #9).
+//
+// These drive the real end-to-end surface: EditorState (runtime wired
+// into the LSP manager + builtin lsp.lua loaded), `pmacs.lsp.spawn`
+// with a fake-server mode, a `pmacs.async` coroutine that `:await()`s,
+// and Rust ticking processes/lsp/async until the coroutine settles a
+// `_G` flag. Mirrors `m9_1_lua_send_request_returns_awaitable_handle`.
+// ---------------------------------------------------------------------------
+
+/// Tick processes → lsp → async until the Lua expression `flag`
+/// evaluates true, or the deadline elapses. Returns whether it fired.
+fn pump_lua_flag(state: &mut pmacs::editor::EditorState, flag: &str, secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let done: bool = state
+            .lua_host
+            .lua()
+            .load(format!("return ({flag}) == true"))
+            .eval()
+            .unwrap_or(false);
+        if done {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Spawn the fake LSP via the Lua surface (optionally in a test mode)
+/// and pump until the manager reports it `initialized`.
+fn spawn_lsp_and_init(state: &mut pmacs::editor::EditorState, mode: Option<&str>) {
+    let fake = fake_lsp_path();
+    let env = match mode {
+        Some(m) => format!(", env = {{ PMACS_FAKE_LSP_MODE = '{m}' }}"),
+        None => String::new(),
+    };
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "_G._lsp = pmacs.lsp.spawn({{ label='await-test', language_id='rust', \
+             command='{fake}', restart='never'{env} }})"
+        ))
+        .exec()
+        .expect("spawn lsp via Lua");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let init: bool = state
+            .lua_host
+            .lua()
+            .load(
+                "for _,r in ipairs(pmacs.lsp.list()) do \
+                   if r.state and r.state.kind=='initialized' then return true end end \
+                 return false",
+            )
+            .eval()
+            .unwrap_or(false);
+        if init {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fake LSP never reached initialized (mode {mode:?})"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Success: `request_completion():await()` returns the result table,
+/// and the typed store is *also* populated (the hybrid model).
+#[test]
+fn m4_5_await_completion_returns_result_and_populates_store() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, None);
+    state
+        .lua_host
+        .lua()
+        .load(
+            "_G._done=false _G._res=nil
+             pmacs.async(function()
+               _G._res = pmacs.lsp.request_completion(_G._lsp,'file:///x.rs',0,0):await()
+               _G._items = pmacs.completion.items(_G._lsp,'file:///x.rs')
+               _G._done=true
+             end)",
+        )
+        .exec()
+        .expect("dispatch await coroutine");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "await coroutine never completed"
+    );
+    let (res_is_table, store_count): (bool, i64) = state
+        .lua_host
+        .lua()
+        .load("return type(_G._res)=='table', (_G._items and #_G._items) or 0")
+        .eval()
+        .expect("read result");
+    assert!(res_is_table, "await() should return the result table");
+    assert!(
+        store_count >= 3,
+        "hybrid: completion store must also be populated (got {store_count})"
+    );
+}
+
+/// Server JSON-RPC error → `:await()` raises `{ tag = 'failed' }`.
+#[test]
+fn m4_5_await_server_error_raises_failed() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, Some("error"));
+    state
+        .lua_host
+        .lua()
+        .load(
+            "_G._done=false _G._tag=nil _G._msg=nil
+             pmacs.async(function()
+               local ok,v = pcall(function()
+                 return pmacs.lsp.request_hover(_G._lsp,'file:///x.rs',0,0):await()
+               end)
+               _G._tag = (not ok) and type(v)=='table' and v.tag or 'unexpected-ok'
+               _G._msg = (type(v)=='table' and v.message) or ''
+               _G._done=true
+             end)",
+        )
+        .exec()
+        .expect("dispatch await coroutine");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "await coroutine never completed"
+    );
+    let (tag, msg): (String, String) = state
+        .lua_host
+        .lua()
+        .load("return _G._tag, _G._msg")
+        .eval()
+        .expect("read tag");
+    assert_eq!(tag, "failed", "server error must surface as failed");
+    assert!(
+        msg.contains("synthetic error"),
+        "failure message should carry the server's error text; got {msg:?}"
+    );
+}
+
+/// Server stopped while a request is in flight → the teardown drain
+/// wakes the awaiter with `{ tag = 'cancelled' }` (not a hang).
+#[test]
+fn m4_5_await_cancelled_when_server_stops_mid_request() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, Some("silent"));
+    state
+        .lua_host
+        .lua()
+        .load(
+            "_G._done=false _G._tag=nil
+             pmacs.async(function()
+               local ok,v = pcall(function()
+                 return pmacs.lsp.request_definition(_G._lsp,'file:///x.rs',0,0):await()
+               end)
+               _G._tag = (not ok) and type(v)=='table' and v.tag or 'unexpected-ok'
+               _G._done=true
+             end)
+             -- Request is now in flight against a silent server; stop it.
+             pmacs.lsp.stop(_G._lsp)",
+        )
+        .exec()
+        .expect("dispatch + stop");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "await coroutine never completed (server-stop drain didn't wake it)"
+    );
+    let tag: String = state
+        .lua_host
+        .lua()
+        .load("return _G._tag")
+        .eval()
+        .expect("read tag");
+    assert_eq!(tag, "cancelled", "server-gone must wake await as cancelled");
+}
+
+/// Alive-but-silent server → the per-request timeout sweep fails the
+/// awaiter (`{ tag = 'failed', message ~ 'timed out' }`) so it can't
+/// park forever.
+#[test]
+fn m4_5_await_times_out_against_silent_server() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, Some("silent"));
+    state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.lsp.set_request_timeout_ms(150)
+             _G._done=false _G._tag=nil _G._msg=nil
+             pmacs.async(function()
+               local ok,v = pcall(function()
+                 return pmacs.lsp.request_hover(_G._lsp,'file:///x.rs',0,0):await()
+               end)
+               _G._tag = (not ok) and type(v)=='table' and v.tag or 'unexpected-ok'
+               _G._msg = (type(v)=='table' and v.message) or ''
+               _G._done=true
+             end)",
+        )
+        .exec()
+        .expect("dispatch await coroutine");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "await coroutine never timed out"
+    );
+    let (tag, msg): (String, String) = state
+        .lua_host
+        .lua()
+        .load("return _G._tag, _G._msg")
+        .eval()
+        .expect("read tag");
+    assert_eq!(tag, "failed", "timeout must surface as failed");
+    assert!(
+        msg.contains("timed out"),
+        "timeout message should say so; got {msg:?}"
+    );
+}
+
+/// A newer same-(server,method,uri) request supersedes the in-flight
+/// one: the first handle's `:await()` raises `{ tag = 'cancelled' }`.
+/// Silent server so the only way the first can settle is supersede.
+#[test]
+fn m4_5_await_superseded_request_is_cancelled() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, Some("silent"));
+    state
+        .lua_host
+        .lua()
+        .load(
+            "_G._done=false _G._h1=nil
+             pmacs.async(function()
+               local h1 = pmacs.lsp.request_completion(_G._lsp,'file:///x.rs',0,0)
+               local h2 = pmacs.lsp.request_completion(_G._lsp,'file:///x.rs',0,0)
+               local ok1,v1 = pcall(function() return h1:await() end)
+               _G._h1 = (not ok1) and type(v1)=='table' and v1.tag or 'unexpected-ok'
+               _G._done=true
+               -- h2 left in flight; the server stop below drains it.
+             end)",
+        )
+        .exec()
+        .expect("dispatch supersede coroutine");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "supersede coroutine never completed"
+    );
+    let h1: String = state
+        .lua_host
+        .lua()
+        .load("return _G._h1")
+        .eval()
+        .expect("read h1 tag");
+    assert_eq!(
+        h1, "cancelled",
+        "the superseded (older) request must await-cancel"
+    );
+    let _ = state.lua_host.lua().load("pmacs.lsp.stop(_G._lsp)").exec();
 }
