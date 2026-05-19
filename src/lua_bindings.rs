@@ -7406,6 +7406,72 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_code_action_raw",
+            lua.create_function(
+                move |_,
+                      (id, uri, sl, sc, el, ec): (
+                    LspServerIdLua,
+                    String,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                )| {
+                    // v1 sends an empty diagnostics context (point/
+                    // range actions). Diagnostic-driven quick-fixes
+                    // are a later refinement of this same call.
+                    let job_id = m
+                        .borrow_mut()
+                        .request_code_action(id.0, uri, sl, sc, el, ec, &[])
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_execute_command_raw",
+            lua.create_function(
+                move |_, (id, command, args): (LspServerIdLua, String, Option<Value>)| {
+                    let arguments = match args {
+                        Some(v) => lua_to_json(v)?.as_array().cloned().unwrap_or_default(),
+                        None => Vec::new(),
+                    };
+                    let job_id = m
+                        .borrow_mut()
+                        .request_execute_command(id.0, command, &arguments)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        // Normalise an arbitrary LSP `WorkspaceEdit` JSON value (e.g.
+        // a server→client `workspace/applyEdit` param) into the same
+        // `{ files = { { uri, edits } }, unsupported = n }` shape the
+        // rename/code-action surfaces hand back — so the Lua applier
+        // has exactly one input format regardless of origin.
+        lsp_mod.set(
+            "_parse_workspace_edit",
+            lua.create_function(move |lua, edit: Value| {
+                let json = lua_to_json(edit)?;
+                let parsed = WorkspaceEditResponse::from_lsp_value(&json);
+                let out = lua.create_table_with_capacity(0, 2)?;
+                out.set("files", workspace_edit_to_lua(lua, &parsed)?)?;
+                out.set("unsupported", parsed.unsupported_ops)?;
+                Ok(out)
+            })?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "status",
             lua.create_function(move |lua, id: LspServerIdLua| {
                 let mgr = m.borrow();
@@ -7639,6 +7705,7 @@ pub fn make_lsp_manager(
     install_document_highlight(lua, &manager)?;
     install_formatting(lua, &manager)?;
     install_rename(lua, &manager)?;
+    install_code_action(lua, &manager)?;
     Ok(manager)
 }
 
@@ -8433,6 +8500,7 @@ pub fn install_diag(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
 // pmacs.completion / pmacs.hover / pmacs.signature: T M4.7 surfaces
 // ---------------------------------------------------------------------------
 
+use crate::code_action::{CodeActionItem, CodeActionKey};
 use crate::completion::{CompletionItem, CompletionItemKind, CompletionKey, CompletionTriggers};
 use crate::definition::{DefinitionKey, DefinitionLocation, DefinitionResponse};
 use crate::document_highlight::{DocumentHighlightKey, Highlight};
@@ -9179,6 +9247,76 @@ pub fn install_rename(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()>
     }
 
     pmacs.set("rename", m)?;
+    Ok(())
+}
+
+fn code_action_item_to_lua(lua: &Lua, a: &CodeActionItem) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(0, 4)?;
+    t.set("title", a.title.as_str())?;
+    if let Some(k) = a.kind.as_deref() {
+        t.set("kind", k)?;
+    }
+    t.set("has_edit", a.has_edit())?;
+    // Always present (possibly empty) so Lua can `#item.edit`.
+    t.set("edit", workspace_edit_to_lua(lua, &a.edit)?)?;
+    if let Some(c) = a.command.as_ref() {
+        let ct = lua.create_table_with_capacity(0, 3)?;
+        ct.set("command", c.command.as_str())?;
+        ct.set("title", c.title.as_str())?;
+        let args = lua.create_table_with_capacity(c.arguments.len(), 0)?;
+        for (i, v) in c.arguments.iter().enumerate() {
+            args.set(i + 1, json_to_lua(lua, v)?)?;
+        }
+        ct.set("arguments", args)?;
+        t.set("command", ct)?;
+    }
+    Ok(t)
+}
+
+/// Install `pmacs.code_action.*` (T M4.5 L3). `actions(sid, uri)`
+/// returns `{ { title, kind?, has_edit, edit = { … }, command? }, … }`
+/// in server order; `clear(sid, uri)` drops the entry.
+pub fn install_code_action(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    let m = lua.create_table()?;
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "actions",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().code_action_store();
+                let guard = store_handle
+                    .lock()
+                    .expect("code action store mutex poisoned");
+                let key = CodeActionKey::new(id.0.raw().to_string(), uri);
+                let out = lua.create_table()?;
+                if let Some(r) = guard.get(&key) {
+                    for (i, a) in r.actions.iter().enumerate() {
+                        out.set(i + 1, code_action_item_to_lua(lua, a)?)?;
+                    }
+                }
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "clear",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().code_action_store();
+                let mut guard = store_handle
+                    .lock()
+                    .expect("code action store mutex poisoned");
+                guard.clear(&CodeActionKey::new(id.0.raw().to_string(), uri));
+                Ok(())
+            })?,
+        )?;
+    }
+
+    pmacs.set("code_action", m)?;
     Ok(())
 }
 

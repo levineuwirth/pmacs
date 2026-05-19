@@ -5,14 +5,16 @@
 --   * Auto-attach + did_open / did_change / did_close on buffer events.
 --   * `pmacs.lsp.go_to_definition` / `pmacs.lsp.format_buffer` /
 --     `pmacs.lsp.hover_at_cursor` / `pmacs.lsp.signature_help_at_cursor`
---     / `pmacs.lsp.rename`, bound to default chords below.
+--     / `pmacs.lsp.rename` / `pmacs.lsp.code_actions`, bound to
+--     default chords below.
 --
 -- Scope: one server per language across all buffers; async-await
--- request/react (the editor never blocks). Cross-file go-to-definition
--- and a multi-file rename / WorkspaceEdit applier have landed (L1/L2).
--- Code actions, inlay hints, semantic tokens, resource-op edits
--- (create/rename/delete file), and file-watch capability registration
--- are later layers.
+-- request/react (the editor never blocks). Landed: cross-file
+-- go-to-definition (L1), multi-file rename / WorkspaceEdit applier
+-- (L2), code actions + `workspace/executeCommand` + server→client
+-- `workspace/applyEdit` (L3). Inlay hints, semantic tokens,
+-- resource-op edits (create/rename/delete file), and file-watch
+-- capability registration are later layers.
 
 pmacs.lsp = pmacs.lsp or {}
 pmacs.lsp.config = pmacs.lsp.config or {}
@@ -265,6 +267,8 @@ pmacs.lsp.request_document_symbol = wrap_request(pmacs.lsp._request_document_sym
 pmacs.lsp.request_workspace_symbol = wrap_request(pmacs.lsp._request_workspace_symbol_raw)
 pmacs.lsp.request_document_highlight = wrap_request(pmacs.lsp._request_document_highlight_raw)
 pmacs.lsp.request_rename = wrap_request(pmacs.lsp._request_rename_raw)
+pmacs.lsp.request_code_action = wrap_request(pmacs.lsp._request_code_action_raw)
+pmacs.lsp.request_execute_command = wrap_request(pmacs.lsp._request_execute_command_raw)
 
 -- Render an `:await()` failure into a modeline-friendly reason.
 -- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
@@ -384,6 +388,65 @@ local function apply_workspace_edit(file_edits)
   -- Return the user to where they invoked rename from.
   if origin then pmacs.buffer.find_or_open(origin) end
   return total, #plan
+end
+
+-- T M4.5 L3 — server→client `workspace/applyEdit` pump.
+--
+-- After a code action's `executeCommand`, servers (rust-analyzer,
+-- gopls, …) deliver the actual change as a `workspace/applyEdit`
+-- *request* — surfaced by the manager as a `request` event on the
+-- server's event stream (the same "expose the request to the
+-- consumer" path as `workspace/configuration`, minus the built-in
+-- answer). We drain attachment servers' events each async tick, apply
+-- any applyEdit through the shared applier, and reply `{ applied }`.
+--
+-- Only servers in `attachments` are drained, so a test (or package)
+-- that owns its own directly-spawned server and reads its events
+-- itself is unaffected. Server ids are snapshotted before the loop
+-- because `apply_workspace_edit` → `find_or_open` can attach a new
+-- buffer mid-iteration (mutating `attachments`).
+local function handle_apply_edit_requests()
+  local sids, seen = {}, {}
+  for _, rec in pairs(attachments) do
+    local sid = rec.server
+    if sid then
+      local k = tostring(sid)
+      if not seen[k] then
+        seen[k] = true
+        sids[#sids + 1] = sid
+      end
+    end
+  end
+  for _, sid in ipairs(sids) do
+    local ok, evs = pcall(pmacs.lsp.events_take, sid)
+    if ok and evs then
+      for _, ev in ipairs(evs) do
+        if ev.kind == "request" and ev.method == "workspace/applyEdit" then
+          local edit = ev.params and ev.params.edit
+          local applied, reason = false, nil
+          if edit then
+            local parsed = pmacs.lsp._parse_workspace_edit(edit)
+            local n, info = apply_workspace_edit(parsed.files)
+            if n then applied = true else reason = info end
+          else
+            reason = "missing edit"
+          end
+          local result = { applied = applied }
+          if not applied then result.failureReason = tostring(reason) end
+          pcall(pmacs.lsp.send_response, sid, ev.request_id, result)
+        end
+      end
+    end
+  end
+end
+
+if pmacs._async and pmacs._async.tick then
+  local _prior_async_tick = pmacs._async.tick
+  pmacs._async.tick = function(...)
+    local ret = _prior_async_tick(...)
+    pcall(handle_apply_edit_requests)
+    return ret
+  end
 end
 
 -- Commands ----------------------------------------------------------------
@@ -605,6 +668,65 @@ function pmacs.lsp.rename()
   }
 end
 
+-- T M4.5 L3 — code actions at the cursor. Requests the actions,
+-- then applies the first one: an inline `edit` goes through the
+-- shared WorkspaceEdit applier; a `command` is dispatched via
+-- `workspace/executeCommand` (after which the server usually drives
+-- the change with a server→client `workspace/applyEdit`, handled by
+-- the pump installed below). A selection UI over multiple actions is
+-- future UX work, like the references list and hover panel — v1
+-- acts on the first and reports how many were offered.
+function pmacs.lsp.code_actions()
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
+  pmacs.code_action.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_code_action(
+        rec.server, rec.uri, line, col, line, col):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local acts = pmacs.code_action.actions(rec.server, rec.uri)
+    if not acts or #acts == 0 then
+      pmacs.editor.set_status("LSP: no code actions")
+      return
+    end
+    local first = acts[1]
+    local bits = {}
+    if first.has_edit then
+      local n, info = apply_workspace_edit(first.edit)
+      if not n then
+        pmacs.editor.set_status("LSP: code action aborted: " .. tostring(info))
+        return
+      end
+      table.insert(bits, string.format("%d edit(s) / %d file(s)", n, info))
+    end
+    if first.command then
+      local ok2, cerr = pcall(function()
+        pmacs.lsp.request_execute_command(
+          rec.server, first.command.command, first.command.arguments):await()
+      end)
+      if not ok2 then
+        pmacs.editor.set_status("LSP: command failed: " .. lsp_await_error(cerr))
+        return
+      end
+      table.insert(bits, "ran '" .. first.command.command .. "'")
+    end
+    local detail = (#bits > 0) and (" — " .. table.concat(bits, ", ")) or ""
+    pmacs.editor.set_status(string.format(
+      "LSP: code action '%s'%s (%d available)",
+      first.title, detail, #acts))
+  end)
+end
+
 function pmacs.lsp.hover_at_cursor()
   local rec = attached_for_active()
   if not rec then
@@ -706,6 +828,12 @@ pmacs.command.define {
   fn = pmacs.lsp.rename,
 }
 
+pmacs.command.define {
+  name = "lsp.code-actions",
+  description = "Apply a code action for the symbol/range under the cursor (LSP).",
+  fn = pmacs.lsp.code_actions,
+}
+
 -- T M4.5 L1 — unwind the cross-file jump ring. Pairs with the
 -- `pmacs.editor.push_jump()` every navigation action records before
 -- it moves the cursor.
@@ -728,6 +856,7 @@ pmacs.keymap.bind { scope = "global", sequence = "M-?",   command = "lsp.find-re
 pmacs.keymap.bind { scope = "global", sequence = "M-,",   command = "lsp.jump-back" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c o", command = "lsp.document-symbols" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c r", command = "lsp.rename" }
+pmacs.keymap.bind { scope = "global", sequence = "C-c a", command = "lsp.code-actions" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }
