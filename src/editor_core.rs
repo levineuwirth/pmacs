@@ -333,7 +333,18 @@ impl EditorCore {
 
     /// Bind a path (and clear metadata) on a specific buffer. Used by
     /// file open / `pmacs.buffer.from_file`.
+    ///
+    /// The path is normalized to an absolute, lexically-clean form
+    /// first ([`normalize_buffer_path`]). This is the single seam
+    /// every buffer identity flows through (CLI open, Lua find-file,
+    /// `WorkspaceEdit` rename ops), so doing it here keeps the invariant
+    /// "a buffer's `file_path` is always absolute" — which the LSP
+    /// layer relies on to build a resolvable `file:///…` URI (a
+    /// relative or `~`-prefixed path produced `file://ipc.cpp`, which
+    /// clangd rejected with `-32602 unresolvable URI`) and which
+    /// cross-file navigation relies on for buffer-identity matching.
     pub fn set_buffer_path(&mut self, id: BufferId, path: Option<PathBuf>) {
+        let path = path.map(normalize_buffer_path);
         if let Ok(b) = self.registry.borrow_mut().get_mut(id) {
             b.set_file_path(path);
         }
@@ -1479,6 +1490,79 @@ fn backward_word(buf: &Buffer, mut pos: Position) -> Position {
     pos
 }
 
+/// Normalize a buffer path to an absolute, lexically-clean form:
+///
+/// 1. expand a leading `~` / `~/…` against `$HOME`,
+/// 2. join onto the process cwd if still relative,
+/// 3. fold `.` / `..` purely lexically.
+///
+/// No filesystem access and no symlink resolution (unlike
+/// [`std::fs::canonicalize`]): the result is correct for a
+/// not-yet-created "[new file]" buffer and never silently rewrites a
+/// path's on-disk identity. Every step is best-effort — if `$HOME`
+/// or the cwd is unavailable the path is returned as far as it could
+/// be resolved rather than panicking.
+fn normalize_buffer_path(path: PathBuf) -> PathBuf {
+    let path = expand_tilde(path);
+    let abs = if path.is_absolute() {
+        path
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(path)
+    } else {
+        path
+    };
+    lexical_normalize(&abs)
+}
+
+/// Expand a leading `~` (whole component only) using `$HOME`. A bare
+/// `~` becomes `$HOME`; `~/x` becomes `$HOME/x`. `~user` is left
+/// untouched (no passwd lookup). Returns the input unchanged if it
+/// has no leading `~`, isn't valid UTF-8, or `$HOME` is unset.
+fn expand_tilde(path: PathBuf) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path;
+    };
+    if s == "~" {
+        return std::env::var_os("HOME").map_or(path, PathBuf::from);
+    }
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return Path::new(&home).join(rest);
+    }
+    path
+}
+
+/// Fold `.` and `..` components without touching the filesystem.
+/// `..` pops a preceding normal segment; against the root (or a
+/// Windows prefix) it is dropped, since you cannot ascend past it.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut stack: Vec<Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match stack.last() {
+                Some(Component::Normal(_)) => {
+                    stack.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => stack.push(Component::ParentDir),
+            },
+            c => stack.push(c),
+        }
+    }
+    let mut out = PathBuf::new();
+    for c in stack {
+        out.push(c.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1488,6 +1572,54 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn lexical_normalize_folds_dot_and_dotdot() {
+        assert_eq!(
+            lexical_normalize(Path::new("/a/./b/../c")),
+            PathBuf::from("/a/c")
+        );
+        // `..` cannot ascend past the root.
+        assert_eq!(
+            lexical_normalize(Path::new("/../../x")),
+            PathBuf::from("/x")
+        );
+        // Already clean ⇒ unchanged (keeps tempdir paths stable so
+        // the LSP acceptance tests' exact-path asserts still hold).
+        assert_eq!(
+            lexical_normalize(Path::new("/tmp/quickshell/ipc.cpp")),
+            PathBuf::from("/tmp/quickshell/ipc.cpp")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_only_at_leading_component() {
+        // `~user` (no passwd lookup) and a non-leading `~` are left
+        // exactly as-is, independent of `$HOME`.
+        assert_eq!(
+            expand_tilde(PathBuf::from("~bob/x")),
+            PathBuf::from("~bob/x")
+        );
+        assert_eq!(expand_tilde(PathBuf::from("a/~/b")), PathBuf::from("a/~/b"));
+        // With `$HOME` set (the case in any normal test environment)
+        // a leading `~` / `~/…` expands against its real value.
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(expand_tilde(PathBuf::from("~")), PathBuf::from(&home));
+            assert_eq!(
+                expand_tilde(PathBuf::from("~/src/ipc.cpp")),
+                Path::new(&home).join("src/ipc.cpp")
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_buffer_path_yields_absolute() {
+        // A relative path becomes absolute (joined onto cwd) — this
+        // is exactly what made clangd reject `file://ipc.cpp`.
+        let p = normalize_buffer_path(PathBuf::from("ipc.cpp"));
+        assert!(p.is_absolute(), "expected absolute, got {p:?}");
+        assert!(p.ends_with("ipc.cpp"));
+    }
 
     fn fresh() -> EditorCore {
         let reg: SharedRegistry =
