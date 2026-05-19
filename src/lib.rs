@@ -34,6 +34,7 @@ pub mod buffer;
 pub mod buffer_registry;
 pub mod builtin_packages;
 pub mod cell;
+pub mod code_action;
 pub mod command;
 pub mod completion;
 pub mod completion_framework;

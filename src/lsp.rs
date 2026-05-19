@@ -759,6 +759,10 @@ pub struct LspManager {
     /// T M4.5 L2 rename store. Populated when a `textDocument/rename`
     /// response (a `WorkspaceEdit`) lands, keyed by the origin uri.
     rename_store: crate::rename::SharedRenameStore,
+    /// T M4.5 L3 code-action store. Populated when a
+    /// `textDocument/codeAction` response lands, keyed by `(server,
+    /// uri)`.
+    code_action_store: crate::code_action::SharedCodeActionStore,
     /// Per-server request id → response routing target.
     /// `request_completion` etc. record an entry here; `handle_response`
     /// consumes it to absorb the response into the correct store.
@@ -819,6 +823,9 @@ enum ResponseRoute {
     /// Absorb a `textDocument/rename` `WorkspaceEdit` into
     /// [`crate::rename::RenameStore`] at `(server, origin uri)`.
     Rename { uri: String },
+    /// Absorb a `textDocument/codeAction` response into
+    /// [`crate::code_action::CodeActionStore`] at `(server, uri)`.
+    CodeAction { uri: String },
     /// Absorb a Location-shaped nav response (references / declaration
     /// / typeDefinition / implementation) into
     /// [`crate::locations::LocationsStore`] at `(server, uri, kind)`.
@@ -861,6 +868,7 @@ impl ResponseRoute {
             | ResponseRoute::Definition { uri }
             | ResponseRoute::Formatting { uri }
             | ResponseRoute::Rename { uri }
+            | ResponseRoute::CodeAction { uri }
             | ResponseRoute::Locations { uri, .. }
             | ResponseRoute::DocumentSymbol { uri }
             | ResponseRoute::DocumentHighlight { uri } => uri,
@@ -943,6 +951,7 @@ impl LspManager {
             document_highlight_store: crate::document_highlight::make_shared_store(),
             formatting_store: crate::formatting::make_shared_store(),
             rename_store: crate::rename::make_shared_store(),
+            code_action_store: crate::code_action::make_shared_store(),
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
             project_servers: HashMap::new(),
@@ -1013,6 +1022,12 @@ impl LspManager {
     #[must_use]
     pub fn rename_store(&self) -> crate::rename::SharedRenameStore {
         self.rename_store.clone()
+    }
+
+    /// Shared code-action store (T M4.5 L3).
+    #[must_use]
+    pub fn code_action_store(&self) -> crate::code_action::SharedCodeActionStore {
+        self.code_action_store.clone()
     }
 
     /// T M4.8: per-server status snapshot, derived from the LSP event
@@ -1760,6 +1775,59 @@ impl LspManager {
         Ok(job_id)
     }
 
+    /// Send `textDocument/codeAction` over `[start, end]` in `uri`.
+    /// `context.diagnostics` is passed through verbatim (callers feed
+    /// the overlapping diagnostics so quick-fixes resolve); an empty
+    /// slice is a valid "no diagnostics" context. The response is
+    /// absorbed into the code-action store at `(sid, uri)`. Returns
+    /// the async-runtime [`JobId`] the response will settle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_code_action(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+        diagnostics: &[Value],
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "range": {
+                "start": { "line": start_line, "character": start_col },
+                "end":   { "line": end_line,   "character": end_col   },
+            },
+            "context": { "diagnostics": diagnostics },
+        });
+        let req_id = self.send_request(sid, "textDocument/codeAction", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/codeAction", &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::CodeAction { uri });
+        Ok(job_id)
+    }
+
+    /// Send `workspace/executeCommand`. No response route is
+    /// registered: the command result is usually `null` and the real
+    /// effect arrives as a server→client `workspace/applyEdit` (the
+    /// Lua event pump applies it). The returned awaiter still settles
+    /// when the command response lands so callers can sequence work
+    /// after it. Returns the async-runtime [`JobId`].
+    pub fn request_execute_command(
+        &mut self,
+        sid: LspServerId,
+        command: impl Into<String>,
+        arguments: &[Value],
+    ) -> Result<JobId, String> {
+        let command = command.into();
+        let params = json!({ "command": command, "arguments": arguments });
+        let req_id = self.send_request(sid, "workspace/executeCommand", params)?;
+        // Awaiter only — `absorb_routed_response` has no CodeAction-
+        // result store and the effect is delivered out of band.
+        Ok(self.register_awaiter(sid, req_id, "workspace/executeCommand", &command))
+    }
+
     /// Reply to a server-initiated request.
     pub fn send_response(
         &mut self,
@@ -2241,6 +2309,9 @@ impl LspManager {
         );
     }
 
+    // One arm per `ResponseRoute` variant — grows by a few lines with
+    // each new typed store; the dispatch stays a flat match.
+    #[allow(clippy::too_many_lines)]
     fn absorb_routed_response(&self, sid: LspServerId, route: &ResponseRoute, result: &Value) {
         // T M4.5 Option B: normalise every `Position` in the response
         // to pmacs byte offsets *before* the typed store parses it, so
@@ -2344,6 +2415,15 @@ impl LspManager {
                     .rename_store
                     .lock()
                     .expect("rename store mutex poisoned");
+                guard.set(key, resp);
+            }
+            ResponseRoute::CodeAction { uri } => {
+                let resp = crate::code_action::CodeActionResponse::from_lsp_value(result);
+                let key = crate::code_action::CodeActionKey::new(server_key, uri.clone());
+                let mut guard = self
+                    .code_action_store
+                    .lock()
+                    .expect("code action store mutex poisoned");
                 guard.set(key, resp);
             }
         }
@@ -2734,7 +2814,13 @@ fn default_capabilities() -> Value {
             "positionEncodings": ["utf-8", "utf-16"],
         },
         "workspace": {
-            "applyEdit": false,
+            // T M4.5 L3: pmacs applies server→client `workspace/
+            // applyEdit` requests via the Lua WorkspaceEdit applier
+            // (surfaced as a request event, answered with
+            // `{ applied }`). executeCommand-driven code actions
+            // depend on this.
+            "applyEdit": true,
+            "executeCommand": { "dynamicRegistration": false },
             // T M4.5: pmacs answers server→client `workspace/configuration`
             // pull requests from the per-server `settings` (see
             // `handle_request`). gopls / pyright / clangd all pull
@@ -2769,6 +2855,21 @@ fn default_capabilities() -> Value {
             // `prepareRename` round-trip (L2 scope); the symbol range
             // comes from the cursor position.
             "rename": { "dynamicRegistration": false, "prepareSupport": false },
+            // T M4.5 L3: code actions. `codeActionLiteralSupport`
+            // tells servers we accept the richer `CodeAction` shape
+            // (title/kind/edit/command), not just bare `Command`s.
+            "codeAction": {
+                "dynamicRegistration": false,
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": [
+                            "quickfix", "refactor", "refactor.extract",
+                            "refactor.inline", "refactor.rewrite",
+                            "source", "source.organizeImports",
+                        ],
+                    },
+                },
+            },
             "publishDiagnostics": { "relatedInformation": true },
         },
     })

@@ -454,6 +454,104 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            ("textDocument/codeAction", Some(idv)) => {
+                // T M4.5 L3: two actions — one with an inline edit
+                // (replace line-0 cols 3..6 with "ED1"), one that is
+                // command-only (the client must `executeCommand` it,
+                // and we then drive the change via a server→client
+                // `applyEdit`). The command carries the document URI
+                // as its argument so the executeCommand arm knows
+                // what to edit.
+                let uri = params
+                    .get("textDocument")
+                    .and_then(|t| t.get("uri"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let mut changes = serde_json::Map::new();
+                changes.insert(
+                    uri.as_str().unwrap_or("").to_owned(),
+                    serde_json::json!([{
+                        "range": {
+                            "start": { "line": 0, "character": 3 },
+                            "end":   { "line": 0, "character": 6 }
+                        },
+                        "newText": "ED1"
+                    }]),
+                );
+                // Command action first so a "apply the first action"
+                // client drives the executeCommand→applyEdit path;
+                // the inline-edit action second still exercises the
+                // CodeAction.edit normalisation in the store.
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": [
+                        {
+                            "title": "Run server command",
+                            "kind": "refactor",
+                            "command": {
+                                "title": "Run",
+                                "command": "pmacs.fake.applyEdit",
+                                "arguments": [uri]
+                            }
+                        },
+                        {
+                            "title": "Inline fix",
+                            "kind": "quickfix",
+                            "edit": { "changes": changes }
+                        }
+                    ]
+                });
+                write_frame(&mut stdout, &resp);
+            }
+            ("workspace/executeCommand", Some(idv)) => {
+                // T M4.5 L3: the real edit is delivered out of band
+                // via a server→client `workspace/applyEdit` request
+                // (id 9100), exactly as rust-analyzer et al. do.
+                // Replace line-1 cols 0..3 with "ED2". Then answer
+                // the original executeCommand with a null result; the
+                // client's reply to 9100 lands in the default arm and
+                // is ignored.
+                let cmd = params
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if cmd == "pmacs.fake.applyEdit" {
+                    let target = params
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|a| a.first())
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let apply = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 9100,
+                        "method": "workspace/applyEdit",
+                        "params": {
+                            "label": "fake refactor",
+                            "edit": {
+                                "documentChanges": [{
+                                    "textDocument": { "uri": target, "version": 1 },
+                                    "edits": [{
+                                        "range": {
+                                            "start": { "line": 1, "character": 0 },
+                                            "end":   { "line": 1, "character": 3 }
+                                        },
+                                        "newText": "ED2"
+                                    }]
+                                }]
+                            }
+                        }
+                    });
+                    write_frame(&mut stdout, &apply);
+                }
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": serde_json::Value::Null
+                });
+                write_frame(&mut stdout, &resp);
+            }
             // T M4.5 symbols/highlight. documentSymbol returns the
             // *hierarchical* DocumentSymbol shape (exercises tree
             // flatten + depth + parent); workspace/symbol the flat

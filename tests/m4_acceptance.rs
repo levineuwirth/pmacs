@@ -3554,6 +3554,98 @@ fn m4_13_rename_applies_cross_file_workspace_edit() {
     assert_eq!(b_text, "abcBARxyz\n", "b.rs should be renamed cross-file");
 }
 
+/// T M4.5 L3 — code action → `workspace/executeCommand` →
+/// server-initiated `workspace/applyEdit`, end to end through the
+/// default bundle. The `codeaction` fake offers a command action
+/// first; `pmacs.lsp.code_actions` dispatches it via
+/// `executeCommand`, the fake answers with a server→client
+/// `workspace/applyEdit` request, and the Lua applyEdit pump must
+/// apply that edit and reply `{ applied = true }`. Success is
+/// observable as the buffer mutation the out-of-band edit performed.
+#[test]
+fn m4_14_code_action_command_drives_apply_edit() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    // Line 0 is the codeAction range anchor; the executeCommand's
+    // applyEdit rewrites line-1 cols 0..3 ("___" -> "ED2").
+    std::fs::write(&a_path, b"abcfooxyz\n___zzz\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'codeaction' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.code_actions()")
+        .exec()
+        .expect("invoke code actions");
+
+    // The applyEdit pump runs on the async tick; it applies the
+    // server's out-of-band edit, turning line 1 "___zzz" -> "ED2zzz".
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() local b = pmacs.window.buffer() \
+               return b ~= nil and b:slice(0, b:len()):find('ED2', 1, true) ~= nil end)()",
+            5,
+        ),
+        "executeCommand→applyEdit never mutated the buffer"
+    );
+
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        text, "abcfooxyz\nED2zzz\n",
+        "only the applyEdit (line 1) should have applied; line 0 untouched"
+    );
+
+    // The applier restored / kept the origin buffer active.
+    let active: Option<String> = state
+        .lua_host
+        .lua()
+        .load("return pmacs.editor.file_path()")
+        .eval()
+        .unwrap();
+    assert_eq!(active.as_deref(), Some(a_disp.as_str()));
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default
