@@ -47,6 +47,33 @@ pmacs.lsp.config.python = pmacs.lsp.config.python or {
   },
 }
 
+-- C / C++ via clangd. One clangd binary serves both; `config.c` and
+-- `config.cpp` are separate entries only so the `language_id` sent in
+-- `didOpen` is accurate (clangd respects it). clangd takes its
+-- project model from `compile_commands.json` / `compile_flags.txt`
+-- at the project root, not `workspace/configuration`, so no
+-- `settings` here; `--background-index` enables cross-file features.
+-- Users override from init.lua before a C/C++ file opens.
+pmacs.lsp.config.c = pmacs.lsp.config.c or {
+  command = "clangd",
+  args = { "--background-index" },
+}
+pmacs.lsp.config.cpp = pmacs.lsp.config.cpp or {
+  command = "clangd",
+  args = { "--background-index" },
+}
+
+-- Go via gopls. `gopls` with no args serves LSP over stdio. gopls
+-- pulls its configuration via `workspace/configuration` (now
+-- answered, #13) under the `gopls` section; an empty section means
+-- "use defaults" — present, not null, which gopls prefers. Users
+-- populate it (e.g. staticcheck, analyses) from init.lua.
+pmacs.lsp.config.go = pmacs.lsp.config.go or {
+  command = "gopls",
+  args = {},
+  settings = { gopls = {} },
+}
+
 -- LSP-side extension → language map, deliberately independent of the
 -- tree-sitter detection in `pmacs.parse` (which is grammar-gated:
 -- Python has an LSP server but no bundled grammar). Consulted only
@@ -56,6 +83,16 @@ pmacs.lsp.config.python = pmacs.lsp.config.python or {
 pmacs.lsp.filetypes = pmacs.lsp.filetypes or {}
 pmacs.lsp.filetypes.py = pmacs.lsp.filetypes.py or "python"
 pmacs.lsp.filetypes.pyi = pmacs.lsp.filetypes.pyi or "python"
+-- C. `.h` is ambiguous C/C++; default it to C (clangd copes either
+-- way, and users can remap `pmacs.lsp.filetypes.h = "cpp"`).
+pmacs.lsp.filetypes.c = pmacs.lsp.filetypes.c or "c"
+pmacs.lsp.filetypes.h = pmacs.lsp.filetypes.h or "c"
+-- C++.
+for _, ext in ipairs({ "cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "inl", "cppm" }) do
+  pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "cpp"
+end
+-- Go.
+pmacs.lsp.filetypes.go = pmacs.lsp.filetypes.go or "go"
 
 -- Per-buffer attachment record: { language, server, uri, version }.
 -- Keyed by `tostring(BufferIdLua)` because BufferIdLua hands out fresh
