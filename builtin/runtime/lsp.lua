@@ -19,8 +19,9 @@
 -- (L4), inlay hints, and semantic tokens (each data + modeline;
 -- wiring them into rendering is a separate rendering milestone),
 -- incl. the server→client `workspace/inlayHint/refresh` and
--- `workspace/semanticTokens/refresh` requests. File-watch
--- capability registration is a later layer.
+-- `workspace/semanticTokens/refresh` requests, and dynamic
+-- `workspace/didChangeWatchedFiles` registration backed by a
+-- polling snapshot-diff watcher.
 
 pmacs.lsp = pmacs.lsp or {}
 pmacs.lsp.config = pmacs.lsp.config or {}
@@ -451,6 +452,244 @@ local function repull_for_attachments(sid, request_fn)
   end
 end
 
+-- T M4.5 — workspace file watching (workspace/didChangeWatchedFiles).
+--
+-- Servers register watchers dynamically via client/registerCapability.
+-- pmacs has no kernel file-watch, so each registration runs a polling
+-- snapshot-diff coroutine: walk the base dir into a { relpath = sig }
+-- map and, every tick, diff against the previous map to emit per-file
+-- created/changed/deleted FileEvents (filtered by the glob and the
+-- WatchKind bitmask), batched into one notification. Coarser than an
+-- inotify bridge but accurate; a watcher self-cancels when the server
+-- dies or the capability is unregistered.
+
+local FILE_WATCH_INTERVAL_MS = 250
+
+-- file_watchers[tostring(sid)][registrationId] = list of watch records
+-- ({ cancelled = bool, _sleep = handle? }), one per glob watcher.
+local file_watchers = {}
+
+-- WatchKind is a bitmask (Create=1, Change=2, Delete=4); test it
+-- arithmetically so this stays valid under luajit (no 5.3 `&`).
+local function kind_has(mask, bit)
+  return mask % (bit * 2) >= bit
+end
+
+-- Expand `{a,b}` alternations into brace-free globs (nested handled
+-- by recursing the remainder; unbalanced braces left literal).
+local function expand_braces(glob)
+  local open = glob:find("{", 1, true)
+  if not open then return { glob } end
+  local depth, close = 0, nil
+  for i = open, #glob do
+    local c = glob:sub(i, i)
+    if c == "{" then
+      depth = depth + 1
+    elseif c == "}" then
+      depth = depth - 1
+      if depth == 0 then
+        close = i
+        break
+      end
+    end
+  end
+  if not close then return { glob } end
+  local prefix, body, suffix =
+    glob:sub(1, open - 1), glob:sub(open + 1, close - 1), glob:sub(close + 1)
+  local parts, d2, start = {}, 0, 1
+  for i = 1, #body do
+    local c = body:sub(i, i)
+    if c == "{" then
+      d2 = d2 + 1
+    elseif c == "}" then
+      d2 = d2 - 1
+    elseif c == "," and d2 == 0 then
+      parts[#parts + 1] = body:sub(start, i - 1)
+      start = i + 1
+    end
+  end
+  parts[#parts + 1] = body:sub(start)
+  local out = {}
+  for _, alt in ipairs(parts) do
+    for _, tail in ipairs(expand_braces(suffix)) do
+      out[#out + 1] = prefix .. alt .. tail
+    end
+  end
+  return out
+end
+
+-- Translate one brace-free glob to an anchored Lua pattern.
+local function glob_one_to_pattern(glob)
+  local p, i, n = "^", 1, #glob
+  while i <= n do
+    local c = glob:sub(i, i)
+    if c == "*" then
+      if glob:sub(i + 1, i + 1) == "*" then
+        -- Lua patterns can't quantify a group, so `**/` (zero+ path
+        -- segments) becomes the lazy `.-` (`.` spans `/`); a bare
+        -- `**` becomes `.*`.
+        if glob:sub(i + 2, i + 2) == "/" then
+          p, i = p .. ".-", i + 3
+        else
+          p, i = p .. ".*", i + 2
+        end
+      else
+        p, i = p .. "[^/]*", i + 1
+      end
+    elseif c == "?" then
+      p, i = p .. "[^/]", i + 1
+    elseif c == "[" then
+      local j = i + 1
+      if glob:sub(j, j) == "!" then j = j + 1 end
+      if glob:sub(j, j) == "]" then j = j + 1 end
+      while j <= n and glob:sub(j, j) ~= "]" do j = j + 1 end
+      local cls = glob:sub(i + 1, j - 1):gsub("^!", "^")
+      p, i = p .. "[" .. cls .. "]", j + 1
+    else
+      if c:match("[%(%)%.%%%+%-%^%$%[%]%*%?]") then
+        p = p .. "%" .. c
+      else
+        p = p .. c
+      end
+      i = i + 1
+    end
+  end
+  return p .. "$"
+end
+
+local function glob_matcher(glob)
+  local pats = {}
+  for _, g in ipairs(expand_braces(glob)) do
+    pats[#pats + 1] = glob_one_to_pattern(g)
+  end
+  return function(rel)
+    for _, pat in ipairs(pats) do
+      if rel:match(pat) then return true end
+    end
+    return false
+  end
+end
+
+-- Recursively list files under `base` → { relpath = sig }. `sig`
+-- folds size+mtime+kind so a content/metadata change flips it.
+-- Symlinks are recorded, not traversed (loop-safe). Awaits fs
+-- primitives, so call from inside an async coroutine.
+local function scan_tree(base, matches)
+  local out = {}
+  local function walk(dir, rel_prefix)
+    local ok, entries = pcall(function()
+      return pmacs.fs.read_dir(dir):await()
+    end)
+    if not ok or not entries then return end
+    for _, e in ipairs(entries) do
+      local rel = (rel_prefix == "") and e.name or (rel_prefix .. "/" .. e.name)
+      if e.kind == "dir" then
+        walk(dir .. "/" .. e.name, rel)
+      elseif matches(rel) then
+        out[rel] = table.concat({
+          tostring(e.size), tostring(e.mtime),
+          tostring(e.mtime_nsec), tostring(e.kind),
+        }, "|")
+      end
+    end
+  end
+  walk(base, "")
+  return out
+end
+
+local FC_CREATED, FC_CHANGED, FC_DELETED = 1, 2, 3
+
+local function start_file_watcher(sid, base, glob, kind_mask, record)
+  local matches = glob_matcher(glob)
+  pmacs.async(function()
+    local prev = scan_tree(base, matches)
+    while not record.cancelled and server_is_live(sid) do
+      local sh = pmacs.workers.sleep(FILE_WATCH_INTERVAL_MS)
+      record._sleep = sh
+      pcall(function() sh:await() end)
+      record._sleep = nil
+      if record.cancelled or not server_is_live(sid) then break end
+
+      local cur = scan_tree(base, matches)
+      local changes = {}
+      for rel, sig in pairs(cur) do
+        local was = prev[rel]
+        if was == nil then
+          if kind_has(kind_mask, 1) then
+            changes[#changes + 1] =
+              { uri = file_uri_for(base .. "/" .. rel), type = FC_CREATED }
+          end
+        elseif was ~= sig and kind_has(kind_mask, 2) then
+          changes[#changes + 1] =
+            { uri = file_uri_for(base .. "/" .. rel), type = FC_CHANGED }
+        end
+      end
+      for rel in pairs(prev) do
+        if cur[rel] == nil and kind_has(kind_mask, 4) then
+          changes[#changes + 1] =
+            { uri = file_uri_for(base .. "/" .. rel), type = FC_DELETED }
+        end
+      end
+      if #changes > 0 then
+        pcall(pmacs.lsp.did_change_watched_files, sid, changes)
+      end
+      prev = cur
+    end
+  end)
+end
+
+-- Resolve a GlobPattern (string | { baseUri, pattern }) to
+-- (base_dir, pattern). A bare string with no base falls back to the
+-- directory of an attached file on `sid` (best effort).
+local function resolve_watcher(sid, gp)
+  if type(gp) == "table" and gp.baseUri then
+    return pmacs.lsp.path_for_uri(gp.baseUri), gp.pattern or "**"
+  end
+  if type(gp) == "string" then
+    for _, rec in pairs(attachments) do
+      if rec.server == sid and rec.uri then
+        local p = pmacs.lsp.path_for_uri(rec.uri)
+        local dir = p and p:match("^(.*)/[^/]*$")
+        if dir then return dir, gp end
+      end
+    end
+  end
+  return nil, nil
+end
+
+local function register_file_watchers(sid, registrations)
+  local skey = tostring(sid)
+  file_watchers[skey] = file_watchers[skey] or {}
+  for _, reg in ipairs(registrations or {}) do
+    if reg.method == "workspace/didChangeWatchedFiles" then
+      local recs = {}
+      for _, w in ipairs((reg.registerOptions or {}).watchers or {}) do
+        local base, pat = resolve_watcher(sid, w.globPattern)
+        if base and pat then
+          local r = { cancelled = false }
+          recs[#recs + 1] = r
+          start_file_watcher(sid, base, pat, w.kind or 7, r)
+        end
+      end
+      file_watchers[skey][reg.id] = recs
+    end
+  end
+end
+
+local function unregister_file_watchers(sid, unregs)
+  local byid = file_watchers[tostring(sid)]
+  if not byid then return end
+  for _, u in ipairs(unregs or {}) do
+    if u.method == "workspace/didChangeWatchedFiles" and byid[u.id] then
+      for _, r in ipairs(byid[u.id]) do
+        r.cancelled = true
+        if r._sleep then pcall(function() r._sleep:cancel() end) end
+      end
+      byid[u.id] = nil
+    end
+  end
+end
+
 -- T M4.5 — server→client request pump.
 --
 -- Some server→client *requests* are surfaced by the manager as a
@@ -468,6 +707,9 @@ end
 --     cached hints/tokens are stale; reply `null` and re-pull that
 --     family for every attached document so the matching store
 --     (`pmacs.inlay_hint` / `pmacs.semantic_tokens`) stays fresh.
+--   * `client/registerCapability` / `client/unregisterCapability` —
+--     start/stop the file-watch coroutines for any
+--     `workspace/didChangeWatchedFiles` registration; reply `null`.
 --
 -- Only servers in `attachments` are drained, so a test (or package)
 -- that owns its own directly-spawned server and reads its events
@@ -515,6 +757,17 @@ local function handle_server_requests()
             and ev.method == "workspace/semanticTokens/refresh" then
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
           repull_for_attachments(sid, pmacs.lsp.request_semantic_tokens)
+        elseif ev.kind == "request"
+            and ev.method == "client/registerCapability" then
+          pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
+          pcall(register_file_watchers, sid,
+            ev.params and ev.params.registrations)
+        elseif ev.kind == "request"
+            and ev.method == "client/unregisterCapability" then
+          pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
+          -- LSP spells the field "unregisterations".
+          pcall(unregister_file_watchers, sid,
+            ev.params and ev.params.unregisterations)
         end
       end
     end

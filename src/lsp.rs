@@ -963,6 +963,23 @@ struct PendingExternal {
     dispatched_at: Instant,
 }
 
+/// Per-server styling context for one URI's semantic tokens,
+/// resolved by [`LspManager::semantic_style_context`]. Decouples the
+/// semantic-render producer from `LspServerId` (kept opaque) while
+/// still giving it everything it needs to turn raw tokens into
+/// byte-anchored, named style spans.
+#[derive(Clone, Debug)]
+pub struct SemanticStyleContext {
+    /// The owning server's negotiated position encoding. The
+    /// producer converts token `start`/`length` from these units to
+    /// pmacs byte offsets (a no-op when it is `Utf8`).
+    pub encoding: PositionEncoding,
+    /// The server's `semanticTokensProvider.legend`, if advertised.
+    /// `None` ⇒ the producer falls back to raw type indices (the
+    /// same degradation `lsp.lua`'s summary already tolerates).
+    pub legend: Option<crate::semantic_tokens::SemanticTokensLegend>,
+}
+
 impl LspManager {
     /// Construct a fresh manager wired to `supervisor` and the
     /// editor's `runtime`. The runtime bridges the supervisor's
@@ -1091,6 +1108,43 @@ impl LspManager {
     #[must_use]
     pub fn semantic_token_store(&self) -> crate::semantic_tokens::SharedSemanticTokenStore {
         self.semantic_token_store.clone()
+    }
+
+    /// Styling inputs for `uri`'s semantic tokens: the owning
+    /// server's negotiated [`PositionEncoding`] and its
+    /// `semanticTokensProvider` legend (if the server advertised
+    /// one). `None` when no attached server has tokens for `uri`.
+    ///
+    /// Step 0 of the semantic-frontend producer arc established why
+    /// this is needed: `SemanticToken` `start`/`length` are LSP
+    /// encoding units (UTF-16 for clangd's default) and — unlike
+    /// inlay hints — are *not* byte-rewritten by the absorb path's
+    /// `inbound_converted`, because the relative-encoded `data`
+    /// array carries no `Position`-shaped object for the structural
+    /// walk to find. The producer therefore converts them itself and
+    /// needs the per-server encoding plus the legend to name token
+    /// types. The server resolved here is the same one
+    /// [`crate::semantic_tokens::SemanticTokenStore::for_uri`]
+    /// returns (lowest id), so a producer's token read and this
+    /// context read agree on the source.
+    #[must_use]
+    pub fn semantic_style_context(&self, uri: &str) -> Option<SemanticStyleContext> {
+        let server_key = {
+            let store = self.semantic_token_store.lock().ok()?;
+            store.for_uri(uri).map(|(s, _)| s.to_owned())?
+        };
+        let sid = self
+            .clients
+            .keys()
+            .copied()
+            .find(|id| id.raw().to_string() == server_key)?;
+        let legend = self
+            .capabilities(sid)
+            .and_then(crate::semantic_tokens::SemanticTokensLegend::from_capabilities);
+        Some(SemanticStyleContext {
+            encoding: self.position_encoding(sid),
+            legend,
+        })
     }
 
     /// T M4.8: per-server status snapshot, derived from the LSP event
@@ -2972,6 +3026,22 @@ impl LspManager {
         self.send_notification(sid, "textDocument/didChange", params)
     }
 
+    /// Send `workspace/didChangeWatchedFiles` to `sid`. `changes` is
+    /// the already-shaped `FileEvent[]` array (`[{ uri, type }]`,
+    /// type 1=created / 2=changed / 3=deleted) the Lua file-watch
+    /// module builds. T M4.5.
+    pub fn did_change_watched_files(
+        &mut self,
+        sid: LspServerId,
+        changes: &Value,
+    ) -> Result<(), String> {
+        self.send_notification(
+            sid,
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": changes }),
+        )
+    }
+
     /// Convenience: send `textDocument/didClose` to `sid`.
     pub fn did_close(&mut self, sid: LspServerId, uri: impl Into<String>) -> Result<(), String> {
         let uri = uri.into();
@@ -3101,6 +3171,14 @@ fn default_capabilities() -> Value {
             "configuration": true,
             "workspaceFolders": true,
             "didChangeConfiguration": { "dynamicRegistration": false },
+            // T M4.5 — file watching. `dynamicRegistration: true` is
+            // mandatory: clangd / rust-analyzer / gopls only ever
+            // register `workspace/didChangeWatchedFiles` dynamically
+            // (via `client/registerCapability`); without it the
+            // server never asks us to watch and the feature is dead.
+            // The Lua server-request pump handles the registration
+            // and runs the snapshot-diff watcher.
+            "didChangeWatchedFiles": { "dynamicRegistration": true },
             // T M4.5 — let servers tell us cached inlay hints /
             // semantic tokens are stale via a server→client
             // `workspace/inlayHint/refresh` /
