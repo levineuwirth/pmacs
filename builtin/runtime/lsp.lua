@@ -24,6 +24,15 @@
 -- polling snapshot-diff watcher.
 
 pmacs.lsp = pmacs.lsp or {}
+-- Per-language server config. Each entry:
+--   command       (string)  required — server binary
+--   args          (list)    argv after command
+--   env           (table)   extra environment
+--   init_options  (table)   `initializationOptions`
+--   settings      (table)   answered to `workspace/configuration`
+--   root          (string)  optional explicit project root; overrides
+--                           the `pmacs.project.detect` marker walk used
+--                           to set `rootUri`/`cwd` (see project_root_for)
 pmacs.lsp.config = pmacs.lsp.config or {}
 
 -- Default rust-analyzer config. Users replace any field from init.lua
@@ -235,11 +244,44 @@ local function active_buffer_language()
   return ext and pmacs.lsp.filetypes[ext] or nil
 end
 
-local function ensure_server(language)
+-- Directory component of a path, or nil if it has none.
+local function dir_of(path)
+  if not path then return nil end
+  return path:match("^(.*)/[^/]*$")
+end
+
+-- The project root to send as `rootUri` / `cwd` in `initialize`, for
+-- the file at `path`. Without this a server spawned by the auto-attach
+-- hook gets the *editor's* cwd as its root (the `build_initialize`
+-- fallback), which is wrong for project-model-strict servers: gopls
+-- and rust-analyzer only analyze files under the module/workspace at
+-- `rootUri`, so opening a file from outside the launch directory
+-- yields zero diagnostics/hover/definition. Resolution order:
+--   1. explicit `pmacs.lsp.config[language].root` override,
+--   2. `pmacs.project.detect` marker walk (go.mod / Cargo.toml /
+--      pyproject.toml / package.json / .git …) — the same detector
+--      the rest of the editor uses, honoring set_search_boundary,
+--   3. the file's own directory (a lone file still gets a sane root
+--      rather than leaking the editor cwd).
+-- This is single-root: it fixes which root the one per-language server
+-- uses, NOT one-server-per-root scoping (still deferred post-v0.1).
+local function project_root_for(language, path)
+  local cfg = pmacs.lsp.config[language]
+  if cfg and cfg.root then return cfg.root end
+  if not path then return nil end
+  local ok, det = pcall(pmacs.project.detect, path)
+  if ok and det and det.root then return det.root end
+  return dir_of(path)
+end
+
+local function ensure_server(language, path)
   local cfg = pmacs.lsp.config[language]
   if not cfg or not cfg.command then return nil end
   -- Reuse an existing same-language server if one is up. Multi-root
-  -- scoping (one server per project root) ships post-v0.1.
+  -- scoping (one server per project root) ships post-v0.1, so the
+  -- first file that attaches a given language fixes that server's
+  -- root; later files of the same language reuse it regardless of
+  -- their own project (known, documented limitation).
   for _, info in ipairs(pmacs.lsp.list()) do
     if info.language_id == language and info.state then
       local kind = info.state.kind
@@ -248,6 +290,7 @@ local function ensure_server(language)
       end
     end
   end
+  local root = project_root_for(language, path)
   local ok, sid = pcall(pmacs.lsp.spawn, {
     label = "default-" .. language,
     language_id = language,
@@ -256,6 +299,8 @@ local function ensure_server(language)
     env = cfg.env,
     init_options = cfg.init_options,
     settings = cfg.settings,
+    cwd = root,
+    root_uri = root and file_uri_for(root) or nil,
   })
   if ok then return sid end
   return nil
@@ -284,9 +329,11 @@ local function attach_buffer(buf)
   if existing then attachments[key] = nil end
   local language = active_buffer_language()
   if not language then return nil end
-  local sid = ensure_server(language)
-  if not sid then return nil end
+  -- Path resolved before spawn so the server's `rootUri` can be
+  -- derived from the file's project (see `project_root_for`).
   local path = active_buffer_path()
+  local sid = ensure_server(language, path)
+  if not sid then return nil end
   local uri = file_uri_for(path)
   if not uri then return nil end
   local rec = { language = language, server = sid, uri = uri, version = 1 }

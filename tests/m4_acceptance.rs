@@ -4450,6 +4450,292 @@ fn m4_25_tier1_language_server_configs_and_filetypes() {
     assert!(probe.get::<bool>("ft").unwrap(), "filetype map");
 }
 
+/// Hardening: a server spawned by the default-bundle auto-attach hook
+/// must receive `rootUri` derived from the *opened file's project*
+/// (the `go.mod` ancestor here), NOT the editor's process cwd. Before
+/// this fix `build_initialize` fell back to `std::env::current_dir()`
+/// because `ensure_server` never forwarded `cwd`/`root_uri` — which
+/// silently broke module-strict servers (gopls, rust-analyzer) unless
+/// pmacs happened to be launched from the project directory. Drives
+/// the real `buffer.after-load` → `attach_buffer` → `ensure_server`
+/// path; the fake records the `rootUri` it received to a side-channel.
+#[test]
+fn m4_26_auto_attach_roots_server_at_opened_files_project() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Canonicalize so the path matches what the marker-walk yields
+    // (tempfile may hand back a path under a symlinked /tmp).
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+    std::fs::write(root.join("go.mod"), b"module example\n\ngo 1.21\n").expect("go.mod");
+    let sub = root.join("pkg");
+    std::fs::create_dir(&sub).expect("mkdir pkg");
+    let go_file = sub.join("main.go");
+    std::fs::write(&go_file, b"package main\n\nfunc main() {}\n").expect("main.go");
+    let sink = root.join(".rooturi_sink");
+
+    let root_disp = root.display().to_string();
+    let sink_disp = sink.display().to_string();
+    let go_file_disp = go_file.display().to_string();
+    let fake = fake_lsp_path();
+
+    let mut state = EditorState::new();
+    // Clamp the marker walk to the tempdir so a stray ancestor marker
+    // (a developer's /tmp/.git, say) can't masquerade as the root.
+    // Point the default `go` server at the fake in `rooturi` mode.
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.project.set_search_boundary('{root_disp}')
+             pmacs.lsp.config.go = {{
+               command = '{fake}',
+               env = {{
+                 PMACS_FAKE_LSP_MODE = 'rooturi',
+                 PMACS_FAKE_LSP_ROOT_SINK = '{sink_disp}',
+               }},
+             }}"
+        ))
+        .exec()
+        .expect("configure go -> fake rooturi");
+
+    // Open the file from a *sub*directory of the module: fires
+    // `buffer.after-load`, which attaches & spawns the fake.
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{go_file_disp}')"))
+        .exec()
+        .expect("open pkg/main.go");
+
+    // The fake writes the received rootUri on `initialize`; wait for
+    // the side-channel to carry the scheme.
+    assert!(
+        pump_until_file_contains(&mut state, &sink, "file://", 5),
+        "fake never recorded a rootUri (server didn't initialize?)"
+    );
+    let recorded = std::fs::read_to_string(&sink).expect("read sink");
+
+    let expected = format!("file://{root_disp}");
+    let cwd_uri = format!(
+        "file://{}",
+        std::fs::canonicalize(std::env::current_dir().unwrap())
+            .unwrap()
+            .display()
+    );
+    let sub_uri = format!("file://{}", sub.display());
+    assert_eq!(
+        recorded, expected,
+        "rootUri must be the go.mod dir, not the cwd ({cwd_uri}) or the file's own dir ({sub_uri})"
+    );
+    assert_ne!(
+        recorded, cwd_uri,
+        "regression: rootUri fell back to the editor's process cwd"
+    );
+    assert_ne!(
+        recorded, sub_uri,
+        "rootUri must be the project root, not the file's immediate directory"
+    );
+}
+
+/// PATH-gated real-server hardening: drive **real gopls** through the
+/// default-bundle auto-attach path against a real Go module on disk,
+/// and assert it actually analyzes the file (documentSymbol + hover
+/// round-trip). gopls is module-strict — it returns nothing unless
+/// `rootUri` is the `go.mod` directory — so a green run here is the
+/// end-to-end proof of the `project_root_for` fix against a real
+/// strict server, not just the fake. The fake-LSP arc could never
+/// catch this (it ignores rootUri). Skips cleanly when gopls absent.
+#[test]
+fn m4_27_real_gopls_analyzes_module_via_auto_attach() {
+    use pmacs::editor::EditorState;
+
+    let Ok(gopls) = which_binary("gopls") else {
+        eprintln!("gopls not on PATH; skipping");
+        return;
+    };
+    let gopls = gopls.display().to_string();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    std::fs::write(root.join("go.mod"), b"module hardening\n\ngo 1.21\n").expect("go.mod");
+    let sub = root.join("pkg");
+    std::fs::create_dir(&sub).expect("mkdir pkg");
+    let src = "package main\n\
+               \n\
+               import \"fmt\"\n\
+               \n\
+               func Greet(name string) string {\n\
+               \treturn fmt.Sprintf(\"hello, %s\", name)\n\
+               }\n\
+               \n\
+               func main() {\n\
+               \tfmt.Println(Greet(\"world\"))\n\
+               }\n";
+    let go_file = sub.join("main.go");
+    std::fs::write(&go_file, src).expect("main.go");
+
+    let root_disp = root.display().to_string();
+    let go_file_disp = go_file.display().to_string();
+    let uri = format!("file://{go_file_disp}");
+
+    let mut state = EditorState::new();
+    // gopls handshake + workspace load is slow on a cold cache (30s).
+    real_server_open_and_init(&mut state, "go", &gopls, &root_disp, &go_file_disp);
+
+    // Fire documentSymbol + hover through the attached server and pump
+    // until both stores populate. Symbols coming back at all means
+    // gopls resolved the package — which only happens when rootUri is
+    // the module dir (the fix). Hover on `Greet` (line 4, col 5).
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "local sid for _,r in ipairs(pmacs.lsp.list()) do sid=r.id break end
+             pmacs.lsp.request_document_symbol(sid, '{uri}')
+             pmacs.lsp.request_hover(sid, '{uri}', 4, 5)"
+        ))
+        .exec()
+        .expect("fire documentSymbol + hover");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut have_syms = false;
+    let mut have_hover = false;
+    while Instant::now() < deadline && (!have_syms || !have_hover) {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let (s, h): (bool, bool) = state
+            .lua_host
+            .lua()
+            .load(format!(
+                "local sid for _,r in ipairs(pmacs.lsp.list()) do sid=r.id break end
+                 local syms = pmacs.document_symbol.symbols(sid, '{uri}')
+                 local hv = pmacs.hover.current(sid, '{uri}')
+                 return (syms and #syms > 0), (hv ~= nil and hv.contents ~= nil and #hv.contents > 0)"
+            ))
+            .eval()
+            .unwrap_or((false, false));
+        have_syms = s;
+        have_hover = h;
+        if !have_syms || !have_hover {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(
+        have_syms,
+        "real gopls returned no documentSymbols — package not resolved (rootUri regression?)"
+    );
+    assert!(
+        have_hover,
+        "real gopls returned no hover for Greet — package not resolved (rootUri regression?)"
+    );
+    assert_no_lsp_crash(&mut state, "gopls");
+}
+
+/// PATH-gated real-server hardening: drive **real clangd** through the
+/// default-bundle auto-attach path. clangd is the strict server that
+/// surfaced the #26 bugs (it discards notifications sent before
+/// `initialized`, and rejects a non-absolute file URI with -32602).
+/// This re-verifies both fixes against the real binary — diagnostics
+/// arriving at all proves the deferred-notification flush + path
+/// absolutization still hold — and exercises a post-#26 feature
+/// (semantic tokens) plus documentSymbol end to end. The fake-LSP arc
+/// is lenient and could not catch a #26 regression. Skips cleanly
+/// when clangd is absent.
+#[test]
+fn m4_28_real_clangd_diagnostics_and_semantic_tokens_via_auto_attach() {
+    use pmacs::editor::EditorState;
+
+    let Ok(clangd) = which_binary("clangd") else {
+        eprintln!("clangd not on PATH; skipping");
+        return;
+    };
+    let clangd = clangd.display().to_string();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    // compile_flags.txt is clangd's lightweight project model; -Wall
+    // makes the unused-variable warning below a deterministic
+    // diagnostic without breaking the AST (so symbols/tokens stay
+    // complete). Doubles as a non-language root marker for clangd.
+    std::fs::write(root.join("compile_flags.txt"), b"-std=c++17\n-Wall\n").expect("flags");
+    // No language marker `pmacs.project.detect` recognizes lives here,
+    // so `project_root_for` falls back to the file's own directory —
+    // which is `root`, exactly where clangd finds compile_flags.txt.
+    let src = "int add(int a, int b) { return a + b; }\n\
+               \n\
+               int main() {\n\
+               \tint unused = 41;\n\
+               \treturn add(1, 2);\n\
+               }\n";
+    let cpp = root.join("main.cpp");
+    std::fs::write(&cpp, src).expect("main.cpp");
+
+    let root_disp = root.display().to_string();
+    let cpp_disp = cpp.display().to_string();
+    let uri = format!("file://{cpp_disp}");
+
+    let mut state = EditorState::new();
+    real_server_open_and_init(&mut state, "cpp", &clangd, &root_disp, &cpp_disp);
+
+    // Fire a semantic-tokens request; diagnostics flow unsolicited
+    // from clangd after it parses the (auto-opened) document.
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "local sid for _,r in ipairs(pmacs.lsp.list()) do sid=r.id break end
+             pmacs.lsp.request_semantic_tokens(sid, '{uri}')
+             pmacs.lsp.request_document_symbol(sid, '{uri}')"
+        ))
+        .exec()
+        .expect("fire semantic tokens + documentSymbol");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (mut have_diag, mut have_tokens, mut have_syms) = (false, false, false);
+    while Instant::now() < deadline && !(have_diag && have_tokens && have_syms) {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let (d, t, s): (bool, bool, bool) = state
+            .lua_host
+            .lua()
+            .load(format!(
+                "local sid for _,r in ipairs(pmacs.lsp.list()) do sid=r.id break end
+                 local toks = pmacs.semantic_tokens.tokens(sid, '{uri}')
+                 local syms = pmacs.document_symbol.symbols(sid, '{uri}')
+                 return (pmacs.diag.count('{uri}') > 0), (toks and #toks > 0), (syms and #syms > 0)"
+            ))
+            .eval()
+            .unwrap_or((false, false, false));
+        have_diag = have_diag || d;
+        have_tokens = have_tokens || t;
+        have_syms = have_syms || s;
+        if !(have_diag && have_tokens && have_syms) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // Diagnostics arriving is the #26 regression guard: it can only
+    // happen if the pre-`initialized` `didOpen` was deferred & replayed
+    // (flush) AND the file URI was absolute (no -32602) against the
+    // strict server.
+    assert!(
+        have_diag,
+        "real clangd published no diagnostics — #26 regression \
+         (deferred-notification flush or URI absolutization broke)"
+    );
+    assert!(
+        have_tokens,
+        "real clangd returned no semantic tokens via auto-attach"
+    );
+    assert!(
+        have_syms,
+        "real clangd returned no documentSymbols via auto-attach"
+    );
+    assert_no_lsp_crash(&mut state, "clangd");
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default
@@ -4688,6 +4974,57 @@ fn pump_until_file_contains(
         }
         std::thread::sleep(Duration::from_millis(15));
     }
+}
+
+/// Shared scaffold for the PATH-gated real-server hardening tests:
+/// clamp project detection to `root` (so a stray ancestor marker
+/// can't masquerade as the root), point `config[lang_key]` at the real
+/// `command`, open `file` (firing `buffer.after-load` → auto-attach),
+/// and pump until the attached server reports `initialized`. Panics
+/// with a clear message if it never does.
+fn real_server_open_and_init(
+    state: &mut pmacs::editor::EditorState,
+    lang_key: &str,
+    command: &str,
+    root: &str,
+    file: &str,
+) {
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.project.set_search_boundary('{root}')
+             pmacs.lsp.config.{lang_key} = {{ command = '{command}', args = {{}} }}
+             pmacs.buffer.find_or_open('{file}')"
+        ))
+        .exec()
+        .expect("configure real server + open file");
+    assert!(
+        pump_lua_flag(
+            state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            30,
+        ),
+        "real {lang_key} server never reached initialized"
+    );
+}
+
+/// Assert no LSP server is in the `crashed` state — the real-server
+/// tests use this to confirm the server survived the exchange.
+fn assert_no_lsp_crash(state: &mut pmacs::editor::EditorState, label: &str) {
+    let crashed: bool = state
+        .lua_host
+        .lua()
+        .load(
+            "for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='crashed' then return true end \
+             end return false",
+        )
+        .eval()
+        .unwrap();
+    assert!(!crashed, "{label} crashed during the exchange");
 }
 
 /// Spawn the fake LSP via the Lua surface (optionally in a test mode)
