@@ -438,8 +438,7 @@ fn main() {
                             {
                                 "textDocument": { "uri": second, "version": 1 },
                                 "edits": edit.clone()
-                            },
-                            { "kind": "create", "uri": "file:///tmp/pmacs-fake-created.rs" }
+                            }
                         ]
                     })
                 } else {
@@ -523,25 +522,58 @@ fn main() {
                         .and_then(|a| a.first())
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
+                    // T M4.5 L4 `resourceops`: deliver an ordered
+                    // documentChanges that creates a file, fills it
+                    // (create-before-edit ordering), renames a
+                    // sibling, and deletes another — paths derived
+                    // from the request URI's directory so the test
+                    // doesn't have to thread them through env.
+                    let we = if mode == "resourceops" {
+                        let s = target.as_str().unwrap_or("");
+                        let base = match s.rfind('/') {
+                            Some(i) => &s[..=i],
+                            None => "",
+                        };
+                        let created = format!("{base}created.rs");
+                        let b = format!("{base}b.rs");
+                        let b2 = format!("{base}b2.rs");
+                        let c = format!("{base}c.rs");
+                        serde_json::json!({
+                            "documentChanges": [
+                                { "kind": "create", "uri": created },
+                                {
+                                    "textDocument": { "uri": created, "version": 1 },
+                                    "edits": [{
+                                        "range": {
+                                            "start": { "line": 0, "character": 0 },
+                                            "end":   { "line": 0, "character": 0 }
+                                        },
+                                        "newText": "NEW"
+                                    }]
+                                },
+                                { "kind": "rename", "oldUri": b, "newUri": b2 },
+                                { "kind": "delete", "uri": c }
+                            ]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "documentChanges": [{
+                                "textDocument": { "uri": target, "version": 1 },
+                                "edits": [{
+                                    "range": {
+                                        "start": { "line": 1, "character": 0 },
+                                        "end":   { "line": 1, "character": 3 }
+                                    },
+                                    "newText": "ED2"
+                                }]
+                            }]
+                        })
+                    };
                     let apply = serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": 9100,
                         "method": "workspace/applyEdit",
-                        "params": {
-                            "label": "fake refactor",
-                            "edit": {
-                                "documentChanges": [{
-                                    "textDocument": { "uri": target, "version": 1 },
-                                    "edits": [{
-                                        "range": {
-                                            "start": { "line": 1, "character": 0 },
-                                            "end":   { "line": 1, "character": 3 }
-                                        },
-                                        "newText": "ED2"
-                                    }]
-                                }]
-                            }
-                        }
+                        "params": { "label": "fake refactor", "edit": we }
                     });
                     write_frame(&mut stdout, &apply);
                 }

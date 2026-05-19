@@ -12,9 +12,10 @@
 -- request/react (the editor never blocks). Landed: cross-file
 -- go-to-definition (L1), multi-file rename / WorkspaceEdit applier
 -- (L2), code actions + `workspace/executeCommand` + server→client
--- `workspace/applyEdit` (L3). Inlay hints, semantic tokens,
--- resource-op edits (create/rename/delete file), and file-watch
--- capability registration are later layers.
+-- `workspace/applyEdit` (L3), ordered resource-op edits
+-- (create/rename/delete file) with buffer-registry reconciliation
+-- (L4). Inlay hints, semantic tokens, and file-watch capability
+-- registration are later layers.
 
 pmacs.lsp = pmacs.lsp or {}
 pmacs.lsp.config = pmacs.lsp.config or {}
@@ -350,44 +351,80 @@ local function apply_text_edits(edits)
   return #resolved
 end
 
--- T M4.5 L2 — apply a parsed LSP `WorkspaceEdit` (`pmacs.rename`'s
--- per-file shape: `{ { uri = , edits = { … } }, … }`) across however
--- many files it touches.
+-- T M4.5 L2/L4 — apply a parsed LSP `WorkspaceEdit` given as the
+-- ordered op list `pmacs.rename.ops` / `code_action.edit` /
+-- `_parse_workspace_edit` hand back: each entry is tagged `op` =
+-- "edit" | "create" | "rename" | "delete". Order is the server's and
+-- is honoured exactly, because the spec sequences ops (a `create`
+-- must precede the `edit` that fills the new file).
 --
--- Atomicity: a true cross-buffer transaction is out of scope here, so
--- the applier instead refuses to mutate *anything* unless every URI
--- with edits resolves to a real file path first (`path_for_uri`). A
--- rename that names an `untitled:`/non-file document aborts cleanly
--- with the origin buffer untouched, rather than half-applying.
+-- Atomicity: a true cross-buffer/disk transaction is out of scope, so
+-- the applier refuses to mutate *anything* unless every URI it
+-- touches resolves to a real file path first (`path_for_uri`). An op
+-- naming an `untitled:`/non-file document aborts the whole edit
+-- cleanly, origin buffer untouched, rather than half-applying.
 --
--- Per file the edits are applied through `apply_text_edits`, which
--- resolves offsets against that buffer's *original* text and applies
--- in reverse-start order — correct because each file's edits are
--- independent and `find_or_open` makes the target the active buffer
--- before its batch runs. The buffer the user invoked from is restored
--- last. Returns `total_edits, file_count` on success, or
+-- Text edits go through `apply_text_edits` (offsets resolved against
+-- that buffer's *original* text, applied reverse-start) after
+-- `find_or_open` makes the target active. Resource ops go through
+-- `pmacs.buffer.apply_resource_op` (filesystem + buffer-registry
+-- reconciliation). The buffer the user invoked from is restored last
+-- (best-effort: it may itself have been renamed/deleted). Returns
+-- `edit_count, file_count, resource_op_count` on success, or
 -- `nil, message` if the preflight rejected the edit.
-local function apply_workspace_edit(file_edits)
+local function apply_workspace_edit(ops)
   local plan = {}
-  for _, fe in ipairs(file_edits or {}) do
-    if fe.edits and #fe.edits > 0 then
-      local path = pmacs.lsp.path_for_uri(fe.uri)
-      if not path then
-        return nil, "cannot resolve " .. tostring(fe.uri)
+  for _, op in ipairs(ops or {}) do
+    if op.op == "edit" then
+      if op.edits and #op.edits > 0 then
+        local path = pmacs.lsp.path_for_uri(op.uri)
+        if not path then return nil, "cannot resolve " .. tostring(op.uri) end
+        plan[#plan + 1] = { kind = "edit", path = path, edits = op.edits }
       end
-      table.insert(plan, { path = path, edits = fe.edits })
+    elseif op.op == "create" then
+      local path = pmacs.lsp.path_for_uri(op.uri)
+      if not path then return nil, "cannot resolve " .. tostring(op.uri) end
+      plan[#plan + 1] = {
+        kind = "create", path = path,
+        overwrite = op.overwrite, ignore_if_exists = op.ignore_if_exists,
+      }
+    elseif op.op == "rename" then
+      local from = pmacs.lsp.path_for_uri(op.old_uri)
+      local to = pmacs.lsp.path_for_uri(op.new_uri)
+      if not from or not to then
+        return nil, "cannot resolve rename " ..
+          tostring(op.old_uri) .. " -> " .. tostring(op.new_uri)
+      end
+      plan[#plan + 1] = {
+        kind = "rename", old_path = from, new_path = to,
+        overwrite = op.overwrite, ignore_if_exists = op.ignore_if_exists,
+      }
+    elseif op.op == "delete" then
+      local path = pmacs.lsp.path_for_uri(op.uri)
+      if not path then return nil, "cannot resolve " .. tostring(op.uri) end
+      plan[#plan + 1] = {
+        kind = "delete", path = path,
+        recursive = op.recursive, ignore_if_not_exists = op.ignore_if_not_exists,
+      }
     end
   end
-  if #plan == 0 then return 0, 0 end
+  if #plan == 0 then return 0, 0, 0 end
   local origin = active_buffer_path()
-  local total = 0
+  local edit_total, files, res_ops = 0, 0, 0
   for _, item in ipairs(plan) do
-    pmacs.buffer.find_or_open(item.path)
-    total = total + apply_text_edits(item.edits)
+    if item.kind == "edit" then
+      pmacs.buffer.find_or_open(item.path)
+      edit_total = edit_total + apply_text_edits(item.edits)
+      files = files + 1
+    else
+      pmacs.buffer.apply_resource_op(item)
+      res_ops = res_ops + 1
+    end
   end
-  -- Return the user to where they invoked rename from.
-  if origin then pmacs.buffer.find_or_open(origin) end
-  return total, #plan
+  -- Return the user to where they invoked from — best-effort, since
+  -- that path may have just been renamed or deleted.
+  if origin then pcall(pmacs.buffer.find_or_open, origin) end
+  return edit_total, files, res_ops
 end
 
 -- T M4.5 L3 — server→client `workspace/applyEdit` pump.
@@ -426,7 +463,7 @@ local function handle_apply_edit_requests()
           local applied, reason = false, nil
           if edit then
             local parsed = pmacs.lsp._parse_workspace_edit(edit)
-            local n, info = apply_workspace_edit(parsed.files)
+            local n, info = apply_workspace_edit(parsed.ops)
             if n then applied = true else reason = info end
           else
             reason = "missing edit"
@@ -641,26 +678,24 @@ function pmacs.lsp.rename()
           pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
           return
         end
-        local fe = pmacs.rename.file_edits(rec.server, rec.uri)
-        local skipped = pmacs.rename.unsupported(rec.server, rec.uri)
-        if (not fe or #fe == 0) and skipped == 0 then
+        local ops = pmacs.rename.ops(rec.server, rec.uri)
+        if not ops or #ops == 0 then
           pmacs.editor.set_status("LSP: rename produced no edits")
           return
         end
-        local n, info = apply_workspace_edit(fe)
+        local n, files, res = apply_workspace_edit(ops)
         if not n then
           -- Preflight rejected it; nothing was mutated.
-          pmacs.editor.set_status("LSP: rename aborted: " .. tostring(info))
+          pmacs.editor.set_status("LSP: rename aborted: " .. tostring(files))
           return
         end
         local msg = string.format(
           "LSP: renamed — %d edit%s across %d file%s",
           n, (n == 1 and "" or "s"),
-          info, (info == 1 and "" or "s"))
-        if skipped > 0 then
+          files, (files == 1 and "" or "s"))
+        if res and res > 0 then
           msg = msg .. string.format(
-            " (%d unsupported op%s skipped)",
-            skipped, (skipped == 1 and "" or "s"))
+            " (+%d file op%s)", res, (res == 1 and "" or "s"))
         end
         pmacs.editor.set_status(msg)
       end)
@@ -702,12 +737,14 @@ function pmacs.lsp.code_actions()
     local first = acts[1]
     local bits = {}
     if first.has_edit then
-      local n, info = apply_workspace_edit(first.edit)
+      local n, files, res = apply_workspace_edit(first.edit)
       if not n then
-        pmacs.editor.set_status("LSP: code action aborted: " .. tostring(info))
+        pmacs.editor.set_status("LSP: code action aborted: " .. tostring(files))
         return
       end
-      table.insert(bits, string.format("%d edit(s) / %d file(s)", n, info))
+      local b = string.format("%d edit(s) / %d file(s)", n, files)
+      if res and res > 0 then b = b .. string.format(" / %d file op(s)", res) end
+      table.insert(bits, b)
     end
     if first.command then
       local ok2, cerr = pcall(function()

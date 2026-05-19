@@ -3646,6 +3646,106 @@ fn m4_14_code_action_command_drives_apply_edit() {
     assert_eq!(active.as_deref(), Some(a_disp.as_str()));
 }
 
+/// T M4.5 L4 — ordered `WorkspaceEdit` resource operations. The
+/// `resourceops` fake answers an executeCommand-driven
+/// `workspace/applyEdit` with `documentChanges` that **create** a
+/// file, **edit** that just-created file (proving create-before-edit
+/// ordering is honoured), **rename** a sibling, and **delete**
+/// another. The applier must perform all four against the real
+/// filesystem and reconcile the buffer registry.
+#[test]
+fn m4_15_workspace_edit_resource_ops_apply_in_order() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    let b_path = dir.path().join("b.rs");
+    let c_path = dir.path().join("c.rs");
+    std::fs::write(&a_path, b"abcfooxyz\n___zzz\n").expect("write a");
+    std::fs::write(&b_path, b"mod b;\n").expect("write b");
+    std::fs::write(&c_path, b"gone\n").expect("write c");
+    let a_disp = a_path.display().to_string();
+    let created = dir.path().join("created.rs");
+    let b2 = dir.path().join("b2.rs");
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'resourceops' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.code_actions()")
+        .exec()
+        .expect("invoke code actions");
+
+    // Completion signal: the created file exists on disk. Tick the
+    // full frame order (processes → lsp → async) so the
+    // executeCommand round-trip, the server-initiated applyEdit
+    // request, and the Lua applyEdit pump all run.
+    let created_disp = created.display().to_string();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !created.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "resource ops never created the new file"
+        );
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Rename moved b.rs -> b2.rs; delete removed c.rs.
+    assert!(b2.exists(), "RenameFile should have produced b2.rs");
+    assert!(!b_path.exists(), "RenameFile should have removed b.rs");
+    assert!(!c_path.exists(), "DeleteFile should have removed c.rs");
+
+    // The edit op ran *after* the create op, against the new file's
+    // buffer (create-before-edit ordering preserved).
+    let new_text: String = state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.buffer.find_or_open('{created_disp}') \
+             local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ))
+        .eval()
+        .unwrap();
+    assert_eq!(
+        new_text, "NEW",
+        "created file should have been filled by the edit op"
+    );
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default

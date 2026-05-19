@@ -1,23 +1,29 @@
-// rename.rs --- T M4.5 L2 LSP-backed rename / WorkspaceEdit state.
+// rename.rs --- T M4.5 LSP-backed rename / WorkspaceEdit state.
 
-//! `textDocument/rename` response state.
+//! `textDocument/rename` (and any other) `WorkspaceEdit` state.
 //!
-//! A rename answer is an LSP [`WorkspaceEdit`], which may touch many
-//! files. This module parses both edit carriers —
+//! A `WorkspaceEdit` may touch many files and, via `documentChanges`,
+//! interleave text edits with filesystem *resource operations*
+//! (create / rename / delete file). This module parses both carriers —
 //!
 //!   * `changes`: `{ uri: TextEdit[] }`
-//!   * `documentChanges`: `(TextDocumentEdit | resource-op)[]`
+//!   * `documentChanges`: `(TextDocumentEdit | CreateFile |
+//!     RenameFile | DeleteFile)[]`
 //!
-//! — into a flat, per-file edit list ([`WorkspaceEditResponse`]). The
-//! [`crate::formatting::TextEdit`] shape is reused verbatim (same
-//! zero-based, UTF-16-column coordinates). Resource operations
-//! (`create` / `rename` / `delete` file) are L4 work; they are skipped
-//! here and counted in [`WorkspaceEditResponse::unsupported_ops`] so
-//! the Lua surface can warn rather than silently drop a partial rename.
+//! — into a single **ordered** [`WorkspaceOp`] list
+//! ([`WorkspaceEditResponse::ops`]). Order is preserved exactly as the
+//! server sent it, because the spec requires sequential application
+//! (e.g. a `CreateFile` must precede the `TextDocumentEdit` that fills
+//! the new file). The `changes` map, which carries no resource ops and
+//! no inherent order, is emitted as URI-sorted edit ops for
+//! determinism.
 //!
-//! Like [`crate::formatting`], there is no Rust-side editor mutation:
-//! Lua reads the per-file lists and drives `pmacs.buffer.*` /
-//! `pmacs.editor.*` so the application strategy stays configurable.
+//! The [`crate::formatting::TextEdit`] shape is reused verbatim (same
+//! zero-based, UTF-16-column coordinates). As with
+//! [`crate::formatting`], nothing here mutates the editor or the disk:
+//! Lua reads the ordered ops and drives `pmacs.buffer.*` /
+//! `pmacs.editor.*` (text edits) and `pmacs.buffer.apply_resource_op`
+//! (filesystem ops) so the application strategy stays configurable.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -36,15 +42,47 @@ pub struct FileEdits {
     pub edits: Vec<TextEdit>,
 }
 
-/// A parsed `WorkspaceEdit`: per-file edit lists plus a count of
-/// resource operations we deliberately did not apply (L4).
+/// One entry of a `WorkspaceEdit`, in server-sent order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceOp {
+    /// Text edits for a single document.
+    Edit(FileEdits),
+    /// `CreateFile`. `overwrite` wins over `ignore_if_exists`.
+    Create {
+        /// URI to create.
+        uri: String,
+        /// Truncate if it already exists.
+        overwrite: bool,
+        /// No-op if it already exists (loses to `overwrite`).
+        ignore_if_exists: bool,
+    },
+    /// `RenameFile`.
+    Rename {
+        /// Existing URI.
+        old_uri: String,
+        /// Destination URI.
+        new_uri: String,
+        /// Overwrite the destination if it exists.
+        overwrite: bool,
+        /// No-op if the destination exists (loses to `overwrite`).
+        ignore_if_exists: bool,
+    },
+    /// `DeleteFile`.
+    Delete {
+        /// URI to delete.
+        uri: String,
+        /// Recurse into a directory.
+        recursive: bool,
+        /// Not an error if it is already gone.
+        ignore_if_not_exists: bool,
+    },
+}
+
+/// A parsed `WorkspaceEdit`: an ordered list of operations.
 #[derive(Clone, Debug, Default)]
 pub struct WorkspaceEditResponse {
-    /// One entry per touched document.
-    pub files: Vec<FileEdits>,
-    /// Number of `create` / `rename` / `delete` file operations the
-    /// server requested that this layer does not yet apply.
-    pub unsupported_ops: usize,
+    /// Operations in server-sent order.
+    pub ops: Vec<WorkspaceOp>,
 }
 
 impl WorkspaceEditResponse {
@@ -52,71 +90,113 @@ impl WorkspaceEditResponse {
     ///
     /// Per the LSP spec `documentChanges` supersedes `changes` when
     /// both are present, so it is preferred. A `null` / shapeless
-    /// result yields an empty response (rename produced nothing).
+    /// result yields an empty response.
     #[must_use]
     pub fn from_lsp_value(v: &Value) -> Self {
         if let Some(dc) = v.get("documentChanges").and_then(Value::as_array) {
-            return Self::from_document_changes(dc);
+            return Self {
+                ops: dc.iter().filter_map(parse_document_change).collect(),
+            };
         }
         if let Some(changes) = v.get("changes").and_then(Value::as_object) {
-            let mut files = Vec::with_capacity(changes.len());
-            for (uri, edits) in changes {
-                files.push(FileEdits {
+            let mut edits: Vec<FileEdits> = changes
+                .iter()
+                .map(|(uri, e)| FileEdits {
                     uri: uri.clone(),
-                    edits: parse_edit_array(edits),
-                });
-            }
-            // Object iteration order is unspecified; sort by URI so the
+                    edits: parse_edit_array(e),
+                })
+                .collect();
+            // `changes` has no inherent order; sort by URI so the
             // applier (and tests) see a deterministic sequence.
-            files.sort_by(|a, b| a.uri.cmp(&b.uri));
+            edits.sort_by(|a, b| a.uri.cmp(&b.uri));
             return Self {
-                files,
-                unsupported_ops: 0,
+                ops: edits.into_iter().map(WorkspaceOp::Edit).collect(),
             };
         }
         Self::default()
     }
 
-    fn from_document_changes(dc: &[Value]) -> Self {
-        let mut files = Vec::new();
-        let mut unsupported_ops = 0;
-        for entry in dc {
-            // A resource operation is tagged with `kind`; a
-            // TextDocumentEdit has a `textDocument` + `edits`.
-            if entry.get("kind").and_then(Value::as_str).is_some() {
-                unsupported_ops += 1;
-                continue;
-            }
-            let Some(uri) = entry
-                .get("textDocument")
-                .and_then(|t| t.get("uri"))
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            let edits = entry.get("edits").map(parse_edit_array).unwrap_or_default();
-            files.push(FileEdits {
-                uri: uri.to_owned(),
-                edits,
-            });
-        }
-        Self {
-            files,
-            unsupported_ops,
-        }
-    }
-
-    /// True iff there is nothing to apply and nothing was skipped.
+    /// True iff there is nothing to do — no ops, or only empty text
+    /// edits. Any resource op makes this `false` (the edit is
+    /// meaningful even with zero text changes).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.files.iter().all(|f| f.edits.is_empty()) && self.unsupported_ops == 0
+        self.ops
+            .iter()
+            .all(|op| matches!(op, WorkspaceOp::Edit(f) if f.edits.is_empty()))
     }
 
-    /// Total edits across every file.
+    /// Total text edits across every edit op.
     #[must_use]
     pub fn edit_count(&self) -> usize {
-        self.files.iter().map(|f| f.edits.len()).sum()
+        self.ops
+            .iter()
+            .map(|op| match op {
+                WorkspaceOp::Edit(f) => f.edits.len(),
+                _ => 0,
+            })
+            .sum()
     }
+
+    /// Number of filesystem resource ops (create/rename/delete).
+    #[must_use]
+    pub fn resource_op_count(&self) -> usize {
+        self.ops
+            .iter()
+            .filter(|op| !matches!(op, WorkspaceOp::Edit(_)))
+            .count()
+    }
+
+    /// The edit ops only, in order — the back-compat view for callers
+    /// that just want per-file text edits.
+    #[must_use]
+    pub fn files(&self) -> Vec<&FileEdits> {
+        self.ops
+            .iter()
+            .filter_map(|op| match op {
+                WorkspaceOp::Edit(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+fn parse_document_change(entry: &Value) -> Option<WorkspaceOp> {
+    // A resource op is tagged with a string `kind`; a
+    // TextDocumentEdit has `textDocument` + `edits` and no `kind`.
+    match entry.get("kind").and_then(Value::as_str) {
+        Some("create") => Some(WorkspaceOp::Create {
+            uri: entry.get("uri")?.as_str()?.to_owned(),
+            overwrite: opt_bool(entry, "overwrite"),
+            ignore_if_exists: opt_bool(entry, "ignoreIfExists"),
+        }),
+        Some("rename") => Some(WorkspaceOp::Rename {
+            old_uri: entry.get("oldUri")?.as_str()?.to_owned(),
+            new_uri: entry.get("newUri")?.as_str()?.to_owned(),
+            overwrite: opt_bool(entry, "overwrite"),
+            ignore_if_exists: opt_bool(entry, "ignoreIfExists"),
+        }),
+        Some("delete") => Some(WorkspaceOp::Delete {
+            uri: entry.get("uri")?.as_str()?.to_owned(),
+            recursive: opt_bool(entry, "recursive"),
+            ignore_if_not_exists: opt_bool(entry, "ignoreIfNotExists"),
+        }),
+        // Unknown future resource kind — skip rather than misapply.
+        Some(_) => None,
+        None => {
+            let uri = entry.get("textDocument")?.get("uri")?.as_str()?.to_owned();
+            let edits = entry.get("edits").map(parse_edit_array).unwrap_or_default();
+            Some(WorkspaceOp::Edit(FileEdits { uri, edits }))
+        }
+    }
+}
+
+fn opt_bool(entry: &Value, key: &str) -> bool {
+    entry
+        .get("options")
+        .and_then(|o| o.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Parse a `(TextEdit | AnnotatedTextEdit)[]` value into edits,
@@ -234,47 +314,89 @@ mod tests {
             }
         });
         let r = WorkspaceEditResponse::from_lsp_value(&v);
-        assert_eq!(r.files.len(), 2);
-        assert_eq!(r.files[0].uri, "file:///a.rs");
-        assert_eq!(r.files[0].edits.len(), 2);
-        assert_eq!(r.files[1].uri, "file:///b.rs");
+        let files = r.files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].uri, "file:///a.rs");
+        assert_eq!(files[0].edits.len(), 2);
+        assert_eq!(files[1].uri, "file:///b.rs");
         assert_eq!(r.edit_count(), 3);
-        assert_eq!(r.unsupported_ops, 0);
+        assert_eq!(r.resource_op_count(), 0);
     }
 
     #[test]
-    fn parses_document_changes_and_prefers_it_over_changes() {
+    fn document_changes_preserves_order_with_resource_ops() {
         let v = json!({
             "changes": { "file:///ignored.rs": [one_edit("NO")] },
             "documentChanges": [
-                {
-                    "textDocument": { "uri": "file:///a.rs", "version": 1 },
-                    "edits": [one_edit("A")]
-                }
+                { "kind": "create", "uri": "file:///new.rs",
+                  "options": { "ignoreIfExists": true } },
+                { "textDocument": { "uri": "file:///new.rs", "version": 1 },
+                  "edits": [one_edit("A")] },
+                { "kind": "rename", "oldUri": "file:///a.rs",
+                  "newUri": "file:///c.rs", "options": { "overwrite": true } },
+                { "kind": "delete", "uri": "file:///d.rs",
+                  "options": { "recursive": true, "ignoreIfNotExists": true } }
             ]
         });
         let r = WorkspaceEditResponse::from_lsp_value(&v);
-        assert_eq!(r.files.len(), 1);
-        assert_eq!(r.files[0].uri, "file:///a.rs");
-        assert_eq!(r.files[0].edits[0].new_text, "A");
+        assert_eq!(r.ops.len(), 4);
+        assert_eq!(r.resource_op_count(), 3);
+        assert_eq!(r.edit_count(), 1);
+        match &r.ops[0] {
+            WorkspaceOp::Create {
+                uri,
+                overwrite,
+                ignore_if_exists,
+            } => {
+                assert_eq!(uri, "file:///new.rs");
+                assert!(!overwrite);
+                assert!(ignore_if_exists);
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+        match &r.ops[1] {
+            WorkspaceOp::Edit(f) => assert_eq!(f.uri, "file:///new.rs"),
+            other => panic!("expected Edit, got {other:?}"),
+        }
+        match &r.ops[2] {
+            WorkspaceOp::Rename {
+                old_uri,
+                new_uri,
+                overwrite,
+                ..
+            } => {
+                assert_eq!(old_uri, "file:///a.rs");
+                assert_eq!(new_uri, "file:///c.rs");
+                assert!(overwrite);
+            }
+            other => panic!("expected Rename, got {other:?}"),
+        }
+        match &r.ops[3] {
+            WorkspaceOp::Delete {
+                uri,
+                recursive,
+                ignore_if_not_exists,
+            } => {
+                assert_eq!(uri, "file:///d.rs");
+                assert!(recursive);
+                assert!(ignore_if_not_exists);
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
     }
 
     #[test]
-    fn resource_ops_are_counted_not_applied() {
+    fn unknown_resource_kind_is_skipped() {
         let v = json!({
             "documentChanges": [
-                { "kind": "create", "uri": "file:///new.rs" },
-                {
-                    "textDocument": { "uri": "file:///a.rs", "version": 2 },
-                    "edits": [one_edit("A")]
-                },
-                { "kind": "rename", "oldUri": "file:///a.rs", "newUri": "file:///c.rs" }
+                { "kind": "teleport", "uri": "file:///x" },
+                { "textDocument": { "uri": "file:///a.rs", "version": 1 },
+                  "edits": [one_edit("A")] }
             ]
         });
         let r = WorkspaceEditResponse::from_lsp_value(&v);
-        assert_eq!(r.files.len(), 1);
-        assert_eq!(r.unsupported_ops, 2);
-        assert!(!r.is_empty());
+        assert_eq!(r.ops.len(), 1);
+        assert_eq!(r.edit_count(), 1);
     }
 
     #[test]
@@ -282,6 +404,17 @@ mod tests {
         let r = WorkspaceEditResponse::from_lsp_value(&Value::Null);
         assert!(r.is_empty());
         assert_eq!(r.edit_count(), 0);
+    }
+
+    #[test]
+    fn resource_only_edit_is_not_empty() {
+        let v = json!({ "documentChanges": [
+            { "kind": "delete", "uri": "file:///gone.rs" }
+        ]});
+        let r = WorkspaceEditResponse::from_lsp_value(&v);
+        assert!(!r.is_empty());
+        assert_eq!(r.edit_count(), 0);
+        assert_eq!(r.resource_op_count(), 1);
     }
 
     #[test]
@@ -300,8 +433,9 @@ mod tests {
             }]
         });
         let r = WorkspaceEditResponse::from_lsp_value(&v);
-        assert_eq!(r.files[0].edits[0].new_text, "Q");
-        assert_eq!(r.files[0].edits[0].start_line, 2);
+        let f = r.files();
+        assert_eq!(f[0].edits[0].new_text, "Q");
+        assert_eq!(f[0].edits[0].start_line, 2);
     }
 
     #[test]
@@ -311,7 +445,7 @@ mod tests {
         s.set(
             key.clone(),
             WorkspaceEditResponse {
-                files: vec![FileEdits {
+                ops: vec![WorkspaceOp::Edit(FileEdits {
                     uri: "file:///a".into(),
                     edits: vec![TextEdit {
                         start_line: 0,
@@ -320,11 +454,10 @@ mod tests {
                         end_col: 1,
                         new_text: "x".into(),
                     }],
-                }],
-                unsupported_ops: 0,
+                })],
             },
         );
-        assert_eq!(s.get(&key).unwrap().files.len(), 1);
+        assert_eq!(s.get(&key).unwrap().files().len(), 1);
         s.clear(&key);
         assert!(s.get(&key).is_none());
     }
