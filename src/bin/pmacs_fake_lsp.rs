@@ -140,6 +140,13 @@ fn main() {
                     resp["result"]["capabilities"]["positionEncoding"] =
                         serde_json::Value::from("utf-16");
                 }
+                // T M4.5: advertise prepareRename only in the
+                // prepare-* modes, so the default `rename` mode keeps
+                // exercising the no-prepare path.
+                if mode == "prepare" || mode == "preprefuse" {
+                    resp["result"]["capabilities"]["renameProvider"] =
+                        serde_json::json!({ "prepareProvider": true });
+                }
                 write_frame(&mut stdout, &resp);
                 if mode == "crash" {
                     crashed_after_init = true;
@@ -427,6 +434,28 @@ fn main() {
                             "newText": ";"
                         }
                     ]
+                });
+                write_frame(&mut stdout, &resp);
+            }
+            ("textDocument/prepareRename", Some(idv)) => {
+                // T M4.5: `preprefuse` → null (not renameable here);
+                // otherwise the `{ range, placeholder }` shape over
+                // the line-0 cols 3..6 span ("foo").
+                let result = if mode == "preprefuse" {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!({
+                        "range": {
+                            "start": { "line": 0, "character": 3 },
+                            "end":   { "line": 0, "character": 6 }
+                        },
+                        "placeholder": "foo"
+                    })
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": result
                 });
                 write_frame(&mut stdout, &resp);
             }

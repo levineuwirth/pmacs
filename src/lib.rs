@@ -88,6 +88,7 @@ pub mod overlay;
 pub mod overlay_color;
 pub mod overlay_paint;
 pub mod packages;
+pub mod prepare_rename;
 pub mod presence;
 pub mod process;
 pub mod project;
