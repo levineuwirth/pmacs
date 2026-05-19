@@ -180,8 +180,10 @@ fn handshake_retry_cap_fires_after_three_failed_handshakes() {
 /// behavior in wall-clock — proving the env var feeds through the
 /// production code path, not just the unit-tested helper. With
 /// scale=50ms the schedule yields 50 + 100 = 150ms of sleep across
-/// 3 attempts; with scale=1ms it's ~3ms. A 10x ratio between the
-/// two runs is well outside CI noise.
+/// 3 attempts; with scale=1ms it's ~3ms. The two runs share the
+/// same fixed spawn/handshake overhead, so the *difference*
+/// (≈147ms) — not their ratio — is the overhead-independent signal
+/// that the env var fed through.
 #[test]
 fn backoff_scaling_observable_in_wall_clock_runtime() {
     let tmp = TempDir::new().expect("tempdir");
@@ -225,13 +227,22 @@ fn backoff_scaling_observable_in_wall_clock_runtime() {
         "scale=50 should sleep at least 100ms, got {slow:?}"
     );
 
-    // Slow must also be meaningfully longer than fast — a 3x ratio
-    // is the conservative floor (theoretical 50x but CI overhead
-    // dominates short runs). This is the "env var actually feeds
-    // through" guard.
+    // The "env var actually feeds through" guard. A ratio
+    // (slow/fast) is the wrong shape here: both runs pay the same
+    // fixed process-spawn + 3×handshake-EOF overhead, which does not
+    // scale with the backoff env var and dominates these sub-second
+    // runs — so on a loaded runner slow/fast stays well under 3x even
+    // though the scaled sleep is working. The *difference* cancels
+    // that constant overhead and isolates exactly the scaled sleep:
+    // theoretically (50+100) − (1+2) ≈ 147ms. A 75ms floor is far
+    // above scheduler jitter yet collapses to ~0 if the env var were
+    // ignored, so it still catches the regression — without the
+    // overhead-sensitivity that made the ratio flaky.
+    let delta = slow.saturating_sub(fast);
     assert!(
-        slow.as_millis() >= fast.as_millis().saturating_mul(3),
-        "scale=50 ({slow:?}) should be ≥ 3x scale=1 ({fast:?})"
+        delta >= Duration::from_millis(75),
+        "scale=50 should add ≥75ms of scaled sleep over scale=1; \
+         got slow={slow:?}, fast={fast:?}, delta={delta:?}"
     );
 }
 

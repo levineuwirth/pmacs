@@ -2400,6 +2400,105 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
+        // T M4.5 L4 — apply one LSP `WorkspaceEdit` resource op.
+        // Callers (the `apply_workspace_edit` Lua applier) resolve
+        // URIs to paths first, so this works in plain filesystem
+        // paths and also reconciles any open buffer: a renamed file's
+        // buffer is rebound to the new path; a deleted file's buffer
+        // is removed. `spec.kind` is "create" | "rename" | "delete".
+        let reg = registry.clone();
+        buffer.set(
+            "apply_resource_op",
+            lua.create_function(move |lua, spec: Table| -> mlua::Result<()> {
+                let io_err = |ctx: &str, e: std::io::Error| {
+                    mlua::Error::external(std::io::Error::new(
+                        e.kind(),
+                        format!("apply_resource_op {ctx}: {e}"),
+                    ))
+                };
+                let kind: String = spec.get("kind")?;
+                match kind.as_str() {
+                    "create" => {
+                        let path: String = spec.get("path")?;
+                        let pb = std::path::PathBuf::from(&path);
+                        let overwrite: bool = spec.get("overwrite").unwrap_or(false);
+                        let ignore_if_exists: bool = spec.get("ignore_if_exists").unwrap_or(false);
+                        if pb.exists() && ignore_if_exists && !overwrite {
+                            return Ok(());
+                        }
+                        if let Some(parent) = pb.parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| io_err("create (parents)", e))?;
+                        }
+                        // Create, or truncate when overwrite is set /
+                        // implied (no options ⇒ overwrite per spec).
+                        std::fs::write(&pb, b"").map_err(|e| io_err("create", e))?;
+                    }
+                    "rename" => {
+                        let old_p: String = spec.get("old_path")?;
+                        let new_p: String = spec.get("new_path")?;
+                        let from = std::path::PathBuf::from(&old_p);
+                        let to = std::path::PathBuf::from(&new_p);
+                        let overwrite: bool = spec.get("overwrite").unwrap_or(false);
+                        let ignore_if_exists: bool = spec.get("ignore_if_exists").unwrap_or(false);
+                        if to.exists() && ignore_if_exists && !overwrite {
+                            return Ok(());
+                        }
+                        if let Some(parent) = to.parent() {
+                            std::fs::create_dir_all(parent)
+                                .map_err(|e| io_err("rename (parents)", e))?;
+                        }
+                        std::fs::rename(&from, &to).map_err(|e| io_err("rename", e))?;
+                        let bid = reg.borrow().find_by_path(&from);
+                        if let Some(id) = bid
+                            && let Some(core) = lua.app_data_ref::<SharedCore>()
+                        {
+                            core.borrow_mut().set_buffer_path(id, Some(to.clone()));
+                        }
+                    }
+                    "delete" => {
+                        let path: String = spec.get("path")?;
+                        let pb = std::path::PathBuf::from(&path);
+                        let recursive: bool = spec.get("recursive").unwrap_or(false);
+                        let ignore_if_not_exists: bool =
+                            spec.get("ignore_if_not_exists").unwrap_or(false);
+                        match std::fs::symlink_metadata(&pb) {
+                            Ok(md) => {
+                                let r = if md.is_dir() {
+                                    if recursive {
+                                        std::fs::remove_dir_all(&pb)
+                                    } else {
+                                        std::fs::remove_dir(&pb)
+                                    }
+                                } else {
+                                    std::fs::remove_file(&pb)
+                                };
+                                r.map_err(|e| io_err("delete", e))?;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                if !ignore_if_not_exists {
+                                    return Err(io_err("delete", e));
+                                }
+                            }
+                            Err(e) => return Err(io_err("delete (stat)", e)),
+                        }
+                        let bid = reg.borrow().find_by_path(&pb);
+                        if let Some(id) = bid {
+                            remove_buffer_and_fire(lua, &reg, id)?;
+                        }
+                    }
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "apply_resource_op: unknown kind {other:?}"
+                        )));
+                    }
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
         let reg = registry.clone();
         buffer.set(
             "on_removed",
@@ -7453,17 +7552,16 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         // Normalise an arbitrary LSP `WorkspaceEdit` JSON value (e.g.
         // a server→client `workspace/applyEdit` param) into the same
-        // `{ files = { { uri, edits } }, unsupported = n }` shape the
-        // rename/code-action surfaces hand back — so the Lua applier
-        // has exactly one input format regardless of origin.
+        // `{ ops = { … } }` ordered-op shape the rename/code-action
+        // surfaces hand back — so the Lua applier has exactly one
+        // input format regardless of origin.
         lsp_mod.set(
             "_parse_workspace_edit",
             lua.create_function(move |lua, edit: Value| {
                 let json = lua_to_json(edit)?;
                 let parsed = WorkspaceEditResponse::from_lsp_value(&json);
-                let out = lua.create_table_with_capacity(0, 2)?;
-                out.set("files", workspace_edit_to_lua(lua, &parsed)?)?;
-                out.set("unsupported", parsed.unsupported_ops)?;
+                let out = lua.create_table_with_capacity(0, 1)?;
+                out.set("ops", workspace_ops_to_lua(lua, &parsed)?)?;
                 Ok(out)
             })?,
         )?;
@@ -8507,7 +8605,7 @@ use crate::document_highlight::{DocumentHighlightKey, Highlight};
 use crate::formatting::{FormattingKey, FormattingResponse, TextEdit};
 use crate::hover::{Hover, HoverKey};
 use crate::locations::{LocationKind, LocationsKey};
-use crate::rename::{RenameKey, WorkspaceEditResponse};
+use crate::rename::{RenameKey, WorkspaceEditResponse, WorkspaceOp};
 use crate::signature::{Signature, SignatureHelp, SignatureKey, SignatureParameter};
 use crate::symbol::{Symbol as LspSymbol, SymbolKey};
 
@@ -9179,9 +9277,12 @@ pub fn install_formatting(lua: &Lua, manager: &SharedLspManager) -> mlua::Result
     Ok(())
 }
 
-fn workspace_edit_to_lua(lua: &Lua, r: &WorkspaceEditResponse) -> mlua::Result<Table> {
-    let files = lua.create_table_with_capacity(r.files.len(), 0)?;
-    for (i, f) in r.files.iter().enumerate() {
+/// The edit ops only, as `{ { uri =, edits = { … } }, … }` — the
+/// back-compat per-file view (`pmacs.rename.file_edits`).
+fn file_edits_to_lua(lua: &Lua, r: &WorkspaceEditResponse) -> mlua::Result<Table> {
+    let files = r.files();
+    let out = lua.create_table_with_capacity(files.len(), 0)?;
+    for (i, f) in files.iter().enumerate() {
         let entry = lua.create_table_with_capacity(0, 2)?;
         entry.set("uri", f.uri.as_str())?;
         let edits = lua.create_table_with_capacity(f.edits.len(), 0)?;
@@ -9189,16 +9290,73 @@ fn workspace_edit_to_lua(lua: &Lua, r: &WorkspaceEditResponse) -> mlua::Result<T
             edits.set(j + 1, text_edit_to_lua(lua, e)?)?;
         }
         entry.set("edits", edits)?;
-        files.set(i + 1, entry)?;
+        out.set(i + 1, entry)?;
     }
-    Ok(files)
+    Ok(out)
 }
 
-/// Install `pmacs.rename.*` (T M4.5 L2). `file_edits(sid, uri)`
-/// returns the parsed `WorkspaceEdit` as `{ { uri = , edits = { … } },
-/// … }` (per-file, deterministic order); `unsupported(sid, uri)` is
-/// the count of `create`/`rename`/`delete` file ops the L2 applier
-/// skips; `clear(sid, uri)` drops the entry.
+/// The full `WorkspaceEdit` as an ordered op list. Each element is a
+/// table tagged by `op`: `"edit"` (`uri`, `edits`), `"create"`
+/// (`uri`, `overwrite`, `ignore_if_exists`), `"rename"` (`old_uri`,
+/// `new_uri`, `overwrite`, `ignore_if_exists`), or `"delete"` (`uri`,
+/// `recursive`, `ignore_if_not_exists`). Order is the server's.
+fn workspace_ops_to_lua(lua: &Lua, r: &WorkspaceEditResponse) -> mlua::Result<Table> {
+    let out = lua.create_table_with_capacity(r.ops.len(), 0)?;
+    for (i, op) in r.ops.iter().enumerate() {
+        let t = lua.create_table()?;
+        match op {
+            WorkspaceOp::Edit(f) => {
+                t.set("op", "edit")?;
+                t.set("uri", f.uri.as_str())?;
+                let edits = lua.create_table_with_capacity(f.edits.len(), 0)?;
+                for (j, e) in f.edits.iter().enumerate() {
+                    edits.set(j + 1, text_edit_to_lua(lua, e)?)?;
+                }
+                t.set("edits", edits)?;
+            }
+            WorkspaceOp::Create {
+                uri,
+                overwrite,
+                ignore_if_exists,
+            } => {
+                t.set("op", "create")?;
+                t.set("uri", uri.as_str())?;
+                t.set("overwrite", *overwrite)?;
+                t.set("ignore_if_exists", *ignore_if_exists)?;
+            }
+            WorkspaceOp::Rename {
+                old_uri,
+                new_uri,
+                overwrite,
+                ignore_if_exists,
+            } => {
+                t.set("op", "rename")?;
+                t.set("old_uri", old_uri.as_str())?;
+                t.set("new_uri", new_uri.as_str())?;
+                t.set("overwrite", *overwrite)?;
+                t.set("ignore_if_exists", *ignore_if_exists)?;
+            }
+            WorkspaceOp::Delete {
+                uri,
+                recursive,
+                ignore_if_not_exists,
+            } => {
+                t.set("op", "delete")?;
+                t.set("uri", uri.as_str())?;
+                t.set("recursive", *recursive)?;
+                t.set("ignore_if_not_exists", *ignore_if_not_exists)?;
+            }
+        }
+        out.set(i + 1, t)?;
+    }
+    Ok(out)
+}
+
+/// Install `pmacs.rename.*`. `ops(sid, uri)` returns the parsed
+/// `WorkspaceEdit` as an ordered op list (T M4.5 L4 — edits and
+/// resource ops interleaved exactly as the server sent them);
+/// `file_edits(sid, uri)` is the edit-only back-compat view (`{ {
+/// uri =, edits = { … } }, … }`); `clear(sid, uri)` drops the entry.
 pub fn install_rename(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     let pmacs: Table = lua.globals().get("pmacs")?;
     let m = lua.create_table()?;
@@ -9206,13 +9364,13 @@ pub fn install_rename(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()>
     {
         let mgr = manager.clone();
         m.set(
-            "file_edits",
+            "ops",
             lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
                 let store_handle = mgr.borrow().rename_store();
                 let guard = store_handle.lock().expect("rename store mutex poisoned");
                 let key = RenameKey::new(id.0.raw().to_string(), uri);
                 if let Some(r) = guard.get(&key) {
-                    Ok(Value::Table(workspace_edit_to_lua(lua, r)?))
+                    Ok(Value::Table(workspace_ops_to_lua(lua, r)?))
                 } else {
                     Ok(Value::Table(lua.create_table_with_capacity(0, 0)?))
                 }
@@ -9223,12 +9381,16 @@ pub fn install_rename(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()>
     {
         let mgr = manager.clone();
         m.set(
-            "unsupported",
-            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+            "file_edits",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
                 let store_handle = mgr.borrow().rename_store();
                 let guard = store_handle.lock().expect("rename store mutex poisoned");
                 let key = RenameKey::new(id.0.raw().to_string(), uri);
-                Ok(guard.get(&key).map_or(0, |r| r.unsupported_ops))
+                if let Some(r) = guard.get(&key) {
+                    Ok(Value::Table(file_edits_to_lua(lua, r)?))
+                } else {
+                    Ok(Value::Table(lua.create_table_with_capacity(0, 0)?))
+                }
             })?,
         )?;
     }
@@ -9257,8 +9419,9 @@ fn code_action_item_to_lua(lua: &Lua, a: &CodeActionItem) -> mlua::Result<Table>
         t.set("kind", k)?;
     }
     t.set("has_edit", a.has_edit())?;
-    // Always present (possibly empty) so Lua can `#item.edit`.
-    t.set("edit", workspace_edit_to_lua(lua, &a.edit)?)?;
+    // Always present (possibly empty) so Lua can `#item.edit`. The
+    // ordered-op shape, identical to `pmacs.rename.ops`.
+    t.set("edit", workspace_ops_to_lua(lua, &a.edit)?)?;
     if let Some(c) = a.command.as_ref() {
         let ct = lua.create_table_with_capacity(0, 3)?;
         ct.set("command", c.command.as_str())?;

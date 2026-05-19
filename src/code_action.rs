@@ -246,7 +246,7 @@ mod tests {
         let a = &r.actions[0];
         assert_eq!(a.kind.as_deref(), Some("quickfix"));
         assert!(a.has_edit());
-        assert_eq!(a.edit.files[0].uri, "file:///a.rs");
+        assert_eq!(a.edit.files()[0].uri, "file:///a.rs");
         assert!(a.command.is_none());
     }
 
