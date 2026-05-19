@@ -321,6 +321,12 @@ local function server_is_live(sid)
   return false
 end
 
+-- M_B1: buffers that already had an `LspStyleView` overlay pushed,
+-- so the after-load / on-demand attach paths don't stack duplicate
+-- overlays. Mirrors `highlighted_buffers` in `syntax.lua`; the entry
+-- is keyed by the same `tostring(buf)` the attachments table uses.
+local styled_buffers = {}
+
 local function attach_buffer(buf)
   if not buf then return nil end
   local key = tostring(buf)
@@ -341,6 +347,19 @@ local function attach_buffer(buf)
   -- did_open is a notification; the manager queues it cleanly even
   -- while the server is in `starting` / `initializing`.
   pcall(pmacs.lsp.did_open, sid, uri, rec.version, active_buffer_text())
+  -- M_B1: policy A — when this buffer has no bundled tree-sitter
+  -- grammar (C/C++, …), push the LSP-driven style overlay onto the
+  -- active window so the grid TUI gets cell coloring from LSP
+  -- semantic tokens. Grammar-backed languages already have
+  -- `SyntaxHighlightView`; never both authorities on one buffer.
+  -- `language_for_path` returning nil is the grammar-less signal
+  -- (the LSP filetype map is consulted independently above).
+  if not styled_buffers[key]
+      and not pmacs.parse.language_for_path(path)
+  then
+    local ok, attached = pcall(pmacs.lsp._attach_style, buf)
+    if ok and attached then styled_buffers[key] = true end
+  end
   return rec
 end
 
