@@ -23,9 +23,12 @@
 //! that range so a 100k-line file's styling is never shipped wholesale.
 //!
 //! Produced families: `StyleSpans` (M11.2; dual authority per above)
-//! and `Decorations` (M11.3), both span-granularity diffed (M11.4).
-//! `InlineAdornments` / `BlockAdornments` / `FoldState` /
-//! `ResourceOffer` remain wire-declared but unproduced.
+//! and `Decorations` (M11.3), both span-granularity diffed (M11.4);
+//! `InlineAdornments` (Step 3, from the LSP inlay-hint store,
+//! M11.2-level suppression); `FileStyleSummary` (resolving Open Q#2 —
+//! per-line dominant style for a minimap, generation-keyed).
+//! `BlockAdornments` / `FoldState` / `ResourceOffer` remain wire-
+//! declared but unproduced.
 
 use std::collections::HashMap;
 
@@ -90,6 +93,14 @@ pub struct SemanticRenderState {
     /// byte-identical. `LastFrame::items` reuse keeps the shape
     /// uniform even though no segment diffing applies.
     last_adornments: HashMap<BufferId, LastFrame<InlineAdornment>>,
+    /// `FileStyleSummary` baseline (post-M11 minimap producer,
+    /// resolving design-note Open Q#2). The whole-file dominant-style
+    /// summary is expensive to compute on a 100k-line file, so the
+    /// producer short-circuits on the last sent CRDT generation: a
+    /// buffer at the same generation re-uses what the frontend
+    /// already has and emits nothing. First emission happens on the
+    /// first frame for a buffer; further emissions only after edits.
+    last_summary: HashMap<BufferId, u64>,
 }
 
 impl SemanticRenderState {
@@ -103,6 +114,7 @@ impl SemanticRenderState {
             last_sent: HashMap::new(),
             last_decorations: HashMap::new(),
             last_adornments: HashMap::new(),
+            last_summary: HashMap::new(),
         }
     }
 
@@ -250,6 +262,8 @@ impl SemanticRenderState {
 
         // --- InlineAdornments (Step 3 producer) ---
         out.extend(self.inline_adornments_msg(state, &vp));
+        // --- FileStyleSummary (minimap producer; Open Q#2) ---
+        out.extend(self.file_style_summary_msg(state, vp.buffer_id, generation));
         out
     }
 
@@ -290,6 +304,29 @@ impl SemanticRenderState {
         Some(InstanceMessage::InlineAdornments {
             buffer_id: vp.buffer_id,
             items: adornments,
+        })
+    }
+
+    /// The `FileStyleSummary` message for this frame, or `None`. The
+    /// summary is keyed on CRDT `generation`: a buffer with an
+    /// unchanged generation re-uses the cached summary and emits
+    /// nothing. The first frame for a buffer always emits (the
+    /// frontend needs the baseline). Updates the baseline on send.
+    fn file_style_summary_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+        generation: u64,
+    ) -> Option<InstanceMessage> {
+        if self.last_summary.get(&buffer_id).copied() == Some(generation) {
+            return None;
+        }
+        let lines = scoped_file_summary(state, buffer_id);
+        self.last_summary.insert(buffer_id, generation);
+        Some(InstanceMessage::FileStyleSummary {
+            buffer_id,
+            generation,
+            lines,
         })
     }
 
@@ -744,6 +781,81 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
     out
 }
 
+/// Compute the per-line dominant style summary for the whole buffer:
+/// one [`Style`] per source line, in line order. The "dominant" style
+/// for a line is the one covering the most bytes among the styled
+/// runs (`scoped_style_spans` for the full buffer); a line with no
+/// styled runs takes [`Style::default`]. Reuses [`scoped_style_spans`]
+/// so the policy-A authority choice (tree-sitter for grammar-backed
+/// languages, LSP semantic tokens otherwise) is inherited automatically.
+///
+/// `O(spans × lines)` in the worst case; the caller short-circuits on
+/// unchanged CRDT generation so this only runs on first sight of a
+/// buffer or after an edit, not per frame.
+fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
+    let source = {
+        let core = state.core.borrow();
+        let registry = core.registry.clone();
+        let reg = registry.borrow();
+        match reg.get(buffer_id) {
+            Ok(buf) => buffer_source_bytes(buf),
+            Err(_) => return Vec::new(),
+        }
+    };
+    let source_len = source.len() as u64;
+    let line_starts = line_start_offsets(&source);
+    let line_count = line_starts.len();
+    let mut out = vec![Style::default(); line_count];
+
+    // Reuse the existing producer with a whole-buffer "viewport". The
+    // clip is then a no-op and `scoped_style_spans` yields every
+    // styled run; policy A's authority pick (tree-sitter / LSP) is
+    // therefore identical to the per-frame styling.
+    let vp_all = DeclaredViewport {
+        buffer_id,
+        visible: ByteRange {
+            start: 0,
+            end: source_len,
+        },
+        frontend_generation: 0,
+    };
+    let spans = scoped_style_spans(state, &vp_all);
+    if spans.is_empty() {
+        return out;
+    }
+
+    // Per-line dominant style: tally bytes per style and pick the
+    // winner. `Style` doesn't implement `Hash`, so a small linear-scan
+    // tally is fine — the number of distinct styles per line is
+    // bounded by the theme's vocabulary (single digits in practice).
+    for (li, line_dominant) in out.iter_mut().enumerate() {
+        let line_start = line_starts[li];
+        // Same trailing-newline semantics as `line_col_to_byte`: the
+        // line's byte range excludes the `\n` (`next - 1`), and the
+        // trailing line (no next entry) runs to EOF.
+        let line_end = line_starts
+            .get(li + 1)
+            .map_or(source_len, |&next| next.saturating_sub(1));
+        let mut tally: Vec<(Style, u64)> = Vec::new();
+        for sp in &spans {
+            let lo = sp.range.start.max(line_start);
+            let hi = sp.range.end.min(line_end);
+            if hi > lo {
+                let bytes = hi - lo;
+                if let Some(entry) = tally.iter_mut().find(|(s, _)| *s == sp.style) {
+                    entry.1 += bytes;
+                } else {
+                    tally.push((sp.style, bytes));
+                }
+            }
+        }
+        if let Some(winner) = tally.into_iter().max_by_key(|(_, c)| *c) {
+            *line_dominant = winner.0;
+        }
+    }
+    out
+}
+
 /// The buffer's CRDT version projected to a monotonic scalar — the
 /// `generation` anchor for the semantic frame. `0` when the buffer is
 /// absent or not CRDT-backed (a `semantic_render` session always
@@ -795,9 +907,9 @@ mod tests {
     }
 
     /// All `InstanceMessage` variants the semantic projection may
-    /// emit are `StyleSpans`, `Decorations`, or `InlineAdornments` —
-    /// never `CellDelta`, grid `Cursor`, or the still-unwired
-    /// `BlockAdornments` / `FoldState` families.
+    /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`, or
+    /// `FileStyleSummary` — never `CellDelta`, grid `Cursor`, or the
+    /// still-unwired `BlockAdornments` / `FoldState` families.
     fn assert_semantic_only(msgs: &[InstanceMessage]) {
         for m in msgs {
             assert!(
@@ -806,6 +918,7 @@ mod tests {
                     InstanceMessage::StyleSpans { .. }
                         | InstanceMessage::Decorations { .. }
                         | InstanceMessage::InlineAdornments { .. }
+                        | InstanceMessage::FileStyleSummary { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
@@ -901,10 +1014,16 @@ mod tests {
         );
 
         // Empty scratch: no spans, no selection, no diagnostics — but
-        // the first frame is a `full` resync for both families (the
-        // frontend clears its viewport), carrying empty segments.
+        // the first frame is a `full` resync for both diffable families
+        // (the frontend clears its viewport), carrying empty segments.
+        // FileStyleSummary also emits on the first frame for this buffer
+        // (post-M11 minimap producer, generation-keyed).
         let first = s.render_frame(&state);
-        assert_eq!(first.len(), 2, "first frame ships StyleSpans + Decorations");
+        assert_eq!(
+            first.len(),
+            3,
+            "first frame ships StyleSpans + Decorations + FileStyleSummary"
+        );
         assert_semantic_only(&first);
         let (style_full, _) = style_segments(&first).expect("StyleSpans present");
         let (deco_full, decos) = decorations_of(&first).expect("Decorations present");
@@ -1469,5 +1588,93 @@ mod tests {
             AdornmentContent::Text { text, .. } => assert_eq!(text, ": String "),
             AdornmentContent::Resource { .. } => panic!("expected Text, got Resource"),
         }
+    }
+
+    // --- M1: FileStyleSummary (minimap producer, Open Q#2) ---
+
+    fn summary_of(msgs: &[InstanceMessage]) -> Option<(u64, Vec<Style>)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::FileStyleSummary {
+                generation, lines, ..
+            } => Some((*generation, lines.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn file_style_summary_emitted_on_first_frame_and_suppressed_thereafter() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // Tiny buffer with no LSP / grammar setup → no styled runs →
+        // per-line dominant style stays `Style::default()`. The point
+        // of this test is the emit / suppress lifecycle, not content.
+        {
+            let core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(bid)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"a\nb\nc\n",
+                })
+                .expect("seed");
+        }
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        let first = s.render_frame(&state);
+        assert_semantic_only(&first);
+        let (_gen, lines) = summary_of(&first).expect("first frame ships a summary");
+        // 4 lines: "a", "b", "c", "" (trailing empty after final \n).
+        assert_eq!(lines.len(), 4);
+        assert!(
+            lines.iter().all(|s| *s == Style::default()),
+            "no styled runs ⇒ every line takes the default style"
+        );
+
+        // Same generation → no re-emission.
+        let again = s.render_frame(&state);
+        assert!(
+            summary_of(&again).is_none(),
+            "unchanged generation suppresses the summary"
+        );
+    }
+
+    #[test]
+    fn file_style_summary_dominant_style_from_lsp_per_line() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // `.cpp` buffer (no tree-sitter grammar) so styling comes from
+        // the LSP semantic-token authority (policy A). Three lines;
+        // line 0 has a token spanning bytes 0..3, line 2 has one
+        // spanning bytes 8..11. Line 1 has no tokens.
+        //
+        // Buffer layout (newlines included):
+        //   bytes 0..4  "abc\n"   line 0 = [0,3)  ← token [0,3)
+        //   bytes 4..8  "def\n"   line 1 = [4,7)  ← no token
+        //   bytes 8..12 "ghi\n"   line 2 = [8,11) ← token [8,11)
+        let sid = seed_lsp_style(
+            &state,
+            bid,
+            b"abc\ndef\nghi\n",
+            vec![tok(0, 0, 3), tok(2, 0, 3)],
+        );
+        let _ = sid;
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        let msgs = s.render_frame(&state);
+        let (_, lines) = summary_of(&msgs).expect("summary emitted");
+        assert_eq!(lines.len(), 4, "three lines + trailing empty");
+        let kw_style = crate::cell::Style {
+            bold: true,
+            ..crate::cell::Style::default()
+        };
+        assert_eq!(lines[0], kw_style, "line 0 dominated by the LSP token");
+        assert_eq!(lines[1], Style::default(), "line 1 has no token → default");
+        assert_eq!(lines[2], kw_style, "line 2 dominated by the LSP token");
+        assert_eq!(lines[3], Style::default(), "trailing empty line → default");
     }
 }

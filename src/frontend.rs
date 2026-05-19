@@ -382,6 +382,7 @@ impl Frontend {
             | InstanceMessage::InlineAdornments { .. }
             | InstanceMessage::BlockAdornments { .. }
             | InstanceMessage::FoldState { .. }
+            | InstanceMessage::FileStyleSummary { .. }
             | InstanceMessage::ResourceOffer { .. } => {
                 // v0.1 TUI ignores these; v0.3 GUI consumes them.
             }
