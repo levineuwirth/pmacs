@@ -1092,9 +1092,13 @@ fn dispatcher_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        editor.tick_async();
+        // `tick_async` last: the M4.5 async bridge settles awaiters
+        // inside `tick_lsp` (via the message bus); draining + resuming
+        // in the same frame keeps LSP `:await()` latency at one frame
+        // instead of two. Mirrors the in-process loop in `editor::run`.
         editor.tick_processes();
         editor.tick_lsp();
+        editor.tick_async();
     }
 
     Ok(())

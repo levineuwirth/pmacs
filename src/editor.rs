@@ -938,10 +938,20 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
                 }
             }
         }
-        state.tick_async();
+        // `tick_async` runs *last*, after the supervisor/LSP/MCP
+        // ticks have absorbed this frame's inbound I/O. The async
+        // bridge (T M4.5) settles an awaiter inside `tick_lsp`/
+        // `tick_mcp` by posting to the message bus; `tick_async`
+        // drains that bus and resumes the parked coroutine. With
+        // `tick_async` last, settle→resume happens in the *same*
+        // frame; running it first would defer every LSP/MCP await
+        // resumption by a full frame. The documented invariant is
+        // only `tick_processes → tick_lsp → tick_mcp` (same-batch
+        // supervisor I/O ordering), which is preserved.
         state.tick_processes();
         state.tick_lsp();
         state.tick_mcp();
+        state.tick_async();
     }
     let _ = frontend.poll_event(Duration::from_millis(0));
     Ok(())
