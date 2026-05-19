@@ -7,10 +7,14 @@
 //! is its sibling for `semantic_render` sessions: it reads the same
 //! [`EditorState`] but exits the pipeline *earlier* — it emits the
 //! structured byte-range styling the cell painter would otherwise have
-//! consumed (tree-sitter spans from [`crate::syntax`] mapped through
-//! the active [`crate::highlight::Theme`]), without the grid-packing
-//! step. The frontend lays the styling out locally over rope text it
-//! already holds via its `crdt_replica` `BufferMirror`.
+//! consumed, mapped through the active [`crate::highlight::Theme`],
+//! without the grid-packing step. Styling has one authority per
+//! language (policy A): tree-sitter spans from [`crate::syntax`] for
+//! grammar-backed languages, LSP semantic tokens
+//! ([`crate::lsp::LspManager::semantic_style_context`]) for languages
+//! with no bundled grammar (C/C++, …). The frontend lays the styling
+//! out locally over rope text it already holds via its `crdt_replica`
+//! `BufferMirror`.
 //!
 //! Contract boundary (see `docs/semantic-frontend-protocol.md`): the
 //! instance never learns a pixel. The only spatial fact it consumes is
@@ -18,10 +22,10 @@
 //! [`crate::protocol::FrontendEvent::Viewport`]; styling is scoped to
 //! that range so a 100k-line file's styling is never shipped wholesale.
 //!
-//! M11.2 scope: `StyleSpans` only. `Decorations` / `InlineAdornments` /
-//! `BlockAdornments` / `FoldState` / `ResourceOffer` are M11.3; true
-//! span-granularity diffing (this module currently suppresses only
-//! byte-identical frames) is M11.4.
+//! Produced families: `StyleSpans` (M11.2; dual authority per above)
+//! and `Decorations` (M11.3), both span-granularity diffed (M11.4).
+//! `InlineAdornments` / `BlockAdornments` / `FoldState` /
+//! `ResourceOffer` remain wire-declared but unproduced.
 
 use std::collections::HashMap;
 
@@ -460,8 +464,16 @@ fn line_col_to_byte(line_starts: &[u64], source_len: u64, line: u32, col: u32) -
 /// style are dropped (wire economy, and consistent with the grid
 /// path, which skips default-style merges).
 fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSpan> {
+    // Policy A — per-language styling authority. A grammar-backed
+    // language (the registry hands out a view only for those) is
+    // styled *solely* by tree-sitter; a language with no bundled
+    // grammar (C/C++, …) is styled *solely* by LSP semantic tokens.
+    // Never both: this is why the no-view branch hands off to the LSP
+    // producer while a grammar-backed buffer whose parse isn't ready
+    // yet returns empty rather than briefly borrowing LSP styling
+    // (which would flicker two authorities on one buffer).
     let Some(handle) = state.syntax_registry.view(vp.buffer_id) else {
-        return Vec::new();
+        return lsp_scoped_style_spans(state, vp);
     };
     let Some(bundle) = handle.current() else {
         return Vec::new();
@@ -501,6 +513,104 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
         let style = theme.lookup(name);
         if style == Style::default() {
             continue; // Nothing to render — skip the wire byte.
+        }
+        out.push(StyleSpan {
+            range: ByteRange { start: s, end: e },
+            style,
+        });
+    }
+    out
+}
+
+/// Policy-A fallback for languages with no bundled tree-sitter
+/// grammar (C/C++, …): project the LSP semantic-token store into the
+/// same `StyleSpan` shape the tree-sitter path emits, so the existing
+/// M11.4 diff pipeline (`render_frame`) consumes it unchanged and the
+/// frontend never learns which producer fed it. The instance stays
+/// the single styling authority.
+///
+/// `SemanticToken` `start`/`length` are LSP encoding units (UTF-16
+/// for clangd's default) and — unlike inlay hints — are *not*
+/// byte-rewritten upstream, so this converts them per line via the
+/// owning server's negotiated encoding
+/// ([`crate::lsp::LspManager::semantic_style_context`]). Tokens are
+/// single-line by the LSP grammar, so per-line conversion is exact.
+fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSpan> {
+    let core = state.core.borrow();
+    let Some(path) = core.active_buffer_path() else {
+        return Vec::new();
+    };
+    let uri = crate::lsp::path_to_file_uri(&path);
+
+    // Styling context (encoding + legend) and the token set resolve
+    // the *same* server for `uri` (both via `for_uri`'s lowest-id
+    // rule), so they describe one coherent source.
+    let mgr = state.lsp_manager.borrow();
+    let Some(ctx) = mgr.semantic_style_context(&uri) else {
+        return Vec::new();
+    };
+    let tokens = {
+        let store = mgr.semantic_token_store();
+        let guard = store.lock().expect("semantic-token store mutex poisoned");
+        match guard.for_uri(&uri) {
+            Some((_, resp)) => resp.tokens.clone(),
+            None => return Vec::new(),
+        }
+    };
+    drop(mgr);
+
+    let registry = core.registry.clone();
+    let reg = registry.borrow();
+    let Ok(buf) = reg.get(vp.buffer_id) else {
+        return Vec::new();
+    };
+    let source = buffer_source_bytes(buf);
+    let source_len = source.len() as u64;
+    let vis_start = vp.visible.start.min(source_len);
+    let vis_end = vp.visible.end.min(source_len);
+    if vis_end <= vis_start {
+        return Vec::new();
+    }
+    let line_starts = line_start_offsets(&source);
+
+    let theme = state
+        .syntax_registry
+        .theme()
+        .lock()
+        .expect("theme mutex poisoned")
+        .clone();
+
+    let mut out = Vec::new();
+    for t in &tokens {
+        let li = t.line as usize;
+        let Some(&ls) = line_starts.get(li) else {
+            continue; // Token line past EOF (stale response) — skip.
+        };
+        let le = line_starts
+            .get(li + 1)
+            .map_or(source_len, |&n| n.saturating_sub(1));
+        let Ok(line_text) = std::str::from_utf8(&source[ls as usize..le as usize]) else {
+            continue; // Non-UTF-8 line — cannot do encoded conversion.
+        };
+        let start_b = ls + crate::lsp::char_to_byte(line_text, t.start, ctx.encoding) as u64;
+        let end_char = t.start.saturating_add(t.length);
+        let end_b = ls + crate::lsp::char_to_byte(line_text, end_char, ctx.encoding) as u64;
+        let s = start_b.max(vis_start);
+        let e = end_b.min(vis_end);
+        if e <= s {
+            continue; // Empty, or no overlap with the viewport.
+        }
+        let Some(name) = ctx
+            .legend
+            .as_ref()
+            .and_then(|lg| lg.type_name(t.token_type))
+        else {
+            continue; // No legend / unknown type ⇒ cannot name a style.
+        };
+        let style = theme.lookup(name);
+        if style == Style::default() {
+            continue; // Nothing to render — skip the wire byte (parity
+            // with the tree-sitter path's default-style drop).
         }
         out.push(StyleSpan {
             range: ByteRange { start: s, end: e },
@@ -897,6 +1007,218 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, InstanceMessage::CellDelta { .. })),
             "semantic projection never produces CellDelta"
+        );
+    }
+
+    // --- Step 2: LSP-semantic-token styling authority (policy A) ---
+
+    fn tok(line: u32, start: u32, length: u32) -> crate::semantic_tokens::SemanticToken {
+        crate::semantic_tokens::SemanticToken {
+            line,
+            start,
+            length,
+            token_type: 0, // index 0 in the seeded legend → "kw"
+            token_modifiers: 0,
+        }
+    }
+
+    /// Overwrite the semantic-token store entry for the test client
+    /// `sid` on the `/tmp/x.cpp` URI.
+    fn set_tokens(
+        state: &EditorState,
+        sid: crate::lsp::LspServerId,
+        tokens: Vec<crate::semantic_tokens::SemanticToken>,
+    ) {
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.cpp"));
+        let store = state.lsp_manager.borrow().semantic_token_store();
+        store.lock().expect("sem token store").set(
+            crate::semantic_tokens::SemanticTokenKey::new(sid.raw().to_string(), uri),
+            crate::semantic_tokens::SemanticTokensResponse {
+                tokens,
+                result_id: None,
+                raw: Vec::new(),
+            },
+        );
+    }
+
+    /// Seed a grammar-less (`.cpp`) buffer plus an Initialized test
+    /// LSP client advertising a one-entry legend (`["kw"]`, UTF-16),
+    /// a theme face for `kw`, and `tokens` in the store. Returns the
+    /// client id so a test can re-seed the same `(server, uri)`.
+    fn seed_lsp_style(
+        state: &EditorState,
+        buffer_id: BufferId,
+        text: &[u8],
+        tokens: Vec<crate::semantic_tokens::SemanticToken>,
+    ) -> crate::lsp::LspServerId {
+        {
+            let mut core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: text,
+                })
+                .expect("seed buffer text");
+            // `.cpp` has no bundled tree-sitter grammar → the registry
+            // yields no view → policy A routes to the LSP producer.
+            core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.cpp")));
+        }
+        state.syntax_registry.theme().lock().expect("theme").insert(
+            "kw",
+            crate::cell::Style {
+                bold: true,
+                ..crate::cell::Style::default()
+            },
+        );
+        let sid = state
+            .lsp_manager
+            .borrow_mut()
+            .insert_initialized_test_client(
+                serde_json::json!({
+                    "semanticTokensProvider": {
+                        "legend": { "tokenTypes": ["kw"], "tokenModifiers": [] }
+                    }
+                }),
+                crate::lsp::PositionEncoding::Utf16,
+            );
+        set_tokens(state, sid, tokens);
+        sid
+    }
+
+    #[test]
+    fn cpp_style_comes_from_lsp_when_no_tree_sitter_grammar() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // "int" on line 0, bytes [0,3).
+        seed_lsp_style(&state, bid, b"int x;\n", vec![tok(0, 0, 3)]);
+        s.set_viewport(
+            bid,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
+
+        let msgs = s.render_frame(&state);
+        assert_semantic_only(&msgs);
+        let spans = msgs
+            .iter()
+            .find_map(|m| match m {
+                InstanceMessage::StyleSpans { full, segments, .. } => {
+                    assert!(*full, "first frame is a full resync");
+                    Some(
+                        segments
+                            .iter()
+                            .flat_map(|seg| seg.spans.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            })
+            .expect("StyleSpans emitted from the LSP authority");
+        assert_eq!(spans.len(), 1, "the one LSP token → one span");
+        assert_eq!(spans[0].range, ByteRange { start: 0, end: 3 });
+        assert!(
+            spans[0].style.bold,
+            "token_type resolved through legend → theme face"
+        );
+    }
+
+    #[test]
+    fn lsp_style_suppressed_when_unchanged() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        seed_lsp_style(&state, bid, b"int x;\n", vec![tok(0, 0, 3)]);
+        s.set_viewport(
+            bid,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
+
+        let _ = s.render_frame(&state); // full baseline
+        let again = s.render_frame(&state);
+        assert!(
+            !again
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::StyleSpans { .. })),
+            "unchanged LSP styling reuses the M11.4 byte-identical suppression"
+        );
+    }
+
+    #[test]
+    fn lsp_style_incremental_on_token_change() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        let sid = seed_lsp_style(&state, bid, b"int x;\n", vec![tok(0, 0, 3)]);
+        s.set_viewport(
+            bid,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
+        let _ = s.render_frame(&state); // full baseline
+
+        // Token now covers a different range ([4,5) = "x").
+        set_tokens(&state, sid, vec![tok(0, 4, 1)]);
+        let delta = s.render_frame(&state);
+        let (full, _) = style_segments(&delta).expect("StyleSpans re-emitted");
+        assert!(!full, "a changed token set ships an incremental frame");
+    }
+
+    #[test]
+    fn lsp_style_empty_when_no_tokens_for_grammarless_buffer() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        {
+            let mut core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(bid)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"int x;\n",
+                })
+                .expect("seed text");
+            core.set_buffer_path(bid, Some(std::path::PathBuf::from("/tmp/x.cpp")));
+        }
+        s.set_viewport(
+            bid,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
+
+        let msgs = s.render_frame(&state);
+        // Still a full resync (the frontend must be told "nothing
+        // here"), but with no spans — no LSP store, no panic, honest
+        // empty rather than a fabricated style.
+        let styled = msgs.iter().find_map(|m| match m {
+            InstanceMessage::StyleSpans { full, segments, .. } => Some((*full, segments.clone())),
+            _ => None,
+        });
+        let (full, segments) = styled.expect("a full StyleSpans resync");
+        assert!(full);
+        assert!(
+            segments.iter().all(|sg| sg.spans.is_empty()),
+            "grammar-less buffer with no LSP tokens ⇒ zero spans"
         );
     }
 }

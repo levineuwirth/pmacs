@@ -563,7 +563,12 @@ fn floor_boundary(line: &str, mut byte: usize) -> usize {
 
 /// Inbound: server `character` (in `enc` units, line-relative) → the
 /// pmacs byte offset within `line`. Clamps past-EOL to `line.len()`.
-fn char_to_byte(line: &str, character: u32, enc: PositionEncoding) -> usize {
+///
+/// `pub(crate)` so the semantic-render producer can reuse the exact
+/// same encoding conversion for LSP semantic tokens (whose
+/// `start`/`length` are *not* byte-rewritten by the absorb path —
+/// see [`LspManager::semantic_style_context`]).
+pub(crate) fn char_to_byte(line: &str, character: u32, enc: PositionEncoding) -> usize {
     match enc {
         PositionEncoding::Utf8 => floor_boundary(line, character as usize),
         PositionEncoding::Utf16 => {
@@ -1145,6 +1150,31 @@ impl LspManager {
             encoding: self.position_encoding(sid),
             legend,
         })
+    }
+
+    /// Test-only: register a synthetic, already-`Initialized` client
+    /// (no child process) with the given `initialize` capabilities
+    /// and negotiated encoding; returns its id. Lets producer tests
+    /// drive the LSP-styling path — where `semantic_style_context`
+    /// must resolve a real client's legend + encoding — without a
+    /// live server. This is exactly the post-handshake client state
+    /// minus the process; nothing here can reach the wire.
+    #[cfg(test)]
+    pub(crate) fn insert_initialized_test_client(
+        &mut self,
+        capabilities: Value,
+        encoding: PositionEncoding,
+    ) -> LspServerId {
+        let id = LspServerId::next();
+        let mut client = LspClient::new(LspServerSpec::new("test", "test", "true"));
+        client.state = LspClientState::Initialized {
+            capabilities,
+            server_info: None,
+            initialized_at: Instant::now(),
+        };
+        client.position_encoding = encoding;
+        self.clients.insert(id, client);
+        id
     }
 
     /// T M4.8: per-server status snapshot, derived from the LSP event
