@@ -749,6 +749,10 @@ pub struct LspManager {
     /// implementation. Same Location shape as `definition`, keyed
     /// additionally by kind so the four don't collide.
     locations_store: crate::locations::SharedLocationsStore,
+    /// T M4.5: documentSymbol / workspace symbol, scope-keyed.
+    symbol_store: crate::symbol::SharedSymbolStore,
+    /// T M4.5: textDocument/documentHighlight, per `(server, uri)`.
+    document_highlight_store: crate::document_highlight::SharedDocumentHighlightStore,
     /// T M4.12 formatting store. Populated when a
     /// `textDocument/formatting` response lands.
     formatting_store: crate::formatting::SharedFormattingStore,
@@ -818,6 +822,26 @@ enum ResponseRoute {
         /// Which nav request this answers.
         kind: crate::locations::LocationKind,
     },
+    /// Absorb a `textDocument/documentSymbol` response into
+    /// [`crate::symbol::SymbolStore`] at `(server, document uri)`.
+    DocumentSymbol {
+        /// The requested document URI (also the codec doc key, and
+        /// the fallback URI for `DocumentSymbol` items which carry
+        /// none).
+        uri: String,
+    },
+    /// Absorb a `workspace/symbol` response into
+    /// [`crate::symbol::SymbolStore`] at `(server, query)`.
+    WorkspaceSymbol {
+        /// The query string this answers.
+        query: String,
+    },
+    /// Absorb a `textDocument/documentHighlight` response into
+    /// [`crate::document_highlight::DocumentHighlightStore`].
+    DocumentHighlight {
+        /// Document URI.
+        uri: String,
+    },
 }
 
 impl ResponseRoute {
@@ -830,7 +854,14 @@ impl ResponseRoute {
             | ResponseRoute::Signature { uri }
             | ResponseRoute::Definition { uri }
             | ResponseRoute::Formatting { uri }
-            | ResponseRoute::Locations { uri, .. } => uri,
+            | ResponseRoute::Locations { uri, .. }
+            | ResponseRoute::DocumentSymbol { uri }
+            | ResponseRoute::DocumentHighlight { uri } => uri,
+            // workspace/symbol results span arbitrary files we have
+            // not cached — no doc to convert against, so the inbound
+            // codec must pass coordinates through untouched (same
+            // non-destructive rule as cross-file definition).
+            ResponseRoute::WorkspaceSymbol { .. } => "",
         }
     }
 }
@@ -901,6 +932,8 @@ impl LspManager {
             signature_store: crate::signature::make_shared_store(),
             definition_store: crate::definition::make_shared_store(),
             locations_store: crate::locations::make_shared_store(),
+            symbol_store: crate::symbol::make_shared_store(),
+            document_highlight_store: crate::document_highlight::make_shared_store(),
             formatting_store: crate::formatting::make_shared_store(),
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
@@ -946,6 +979,20 @@ impl LspManager {
     #[must_use]
     pub fn locations_store(&self) -> crate::locations::SharedLocationsStore {
         self.locations_store.clone()
+    }
+
+    /// Shared symbol store — documentSymbol / workspace symbol (T M4.5).
+    #[must_use]
+    pub fn symbol_store(&self) -> crate::symbol::SharedSymbolStore {
+        self.symbol_store.clone()
+    }
+
+    /// Shared documentHighlight store (T M4.5).
+    #[must_use]
+    pub fn document_highlight_store(
+        &self,
+    ) -> crate::document_highlight::SharedDocumentHighlightStore {
+        self.document_highlight_store.clone()
     }
 
     /// Shared formatting store (T M4.12).
@@ -1590,6 +1637,63 @@ impl LspManager {
         )
     }
 
+    /// Send `textDocument/documentSymbol` (no position — whole doc).
+    /// Returns the async-runtime [`JobId`].
+    pub fn request_document_symbol(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({ "textDocument": { "uri": uri.clone() } });
+        let method = "textDocument/documentSymbol";
+        let req_id = self.send_request(sid, method, params)?;
+        let job_id = self.register_awaiter(sid, req_id, method, &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::DocumentSymbol { uri });
+        Ok(job_id)
+    }
+
+    /// Send `workspace/symbol` for `query`. Returns the [`JobId`].
+    pub fn request_workspace_symbol(
+        &mut self,
+        sid: LspServerId,
+        query: impl Into<String>,
+    ) -> Result<JobId, String> {
+        let query = query.into();
+        let params = json!({ "query": query.clone() });
+        let method = "workspace/symbol";
+        let req_id = self.send_request(sid, method, params)?;
+        // The query stands in for the doc URI in the supersede key:
+        // a newer query for the same string supersedes the prior.
+        let job_id = self.register_awaiter(sid, req_id, method, &query);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::WorkspaceSymbol { query });
+        Ok(job_id)
+    }
+
+    /// Send `textDocument/documentHighlight` at `(line, col)`.
+    /// Returns the [`JobId`].
+    pub fn request_document_highlight(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "position": self.outbound_position(sid, &uri, line, col)
+        });
+        let method = "textDocument/documentHighlight";
+        let req_id = self.send_request(sid, method, params)?;
+        let job_id = self.register_awaiter(sid, req_id, method, &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::DocumentHighlight { uri });
+        Ok(job_id)
+    }
+
     /// Send `textDocument/formatting` for `uri` with `tab_size` /
     /// `insert_spaces` formatting options. The response is absorbed
     /// into the formatting store at `(sid, uri)`. Returns the
@@ -2151,6 +2255,37 @@ impl LspManager {
                     .locations_store
                     .lock()
                     .expect("locations store mutex poisoned");
+                guard.set(key, resp);
+            }
+            ResponseRoute::DocumentSymbol { uri } => {
+                // DocumentSymbol items carry no URI — they belong to
+                // the requested document; pass it as the fallback.
+                let resp = crate::symbol::SymbolResponse::from_lsp_value(result, uri);
+                let key = crate::symbol::SymbolKey::document(server_key, uri.clone());
+                let mut guard = self
+                    .symbol_store
+                    .lock()
+                    .expect("symbol store mutex poisoned");
+                guard.set(key, resp);
+            }
+            ResponseRoute::WorkspaceSymbol { query } => {
+                let resp = crate::symbol::SymbolResponse::from_lsp_value(result, "");
+                let key = crate::symbol::SymbolKey::workspace(server_key, query.clone());
+                let mut guard = self
+                    .symbol_store
+                    .lock()
+                    .expect("symbol store mutex poisoned");
+                guard.set(key, resp);
+            }
+            ResponseRoute::DocumentHighlight { uri } => {
+                let resp =
+                    crate::document_highlight::DocumentHighlightResponse::from_lsp_value(result);
+                let key =
+                    crate::document_highlight::DocumentHighlightKey::new(server_key, uri.clone());
+                let mut guard = self
+                    .document_highlight_store
+                    .lock()
+                    .expect("document highlight store mutex poisoned");
                 guard.set(key, resp);
             }
             ResponseRoute::Formatting { uri } => {

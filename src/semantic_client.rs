@@ -332,10 +332,12 @@ impl SemanticClient {
     /// declared viewport, or no styling there).
     #[must_use]
     pub fn effective_style_at(&self, buffer_id: BufferId, byte: u64) -> Style {
-        self.styles.get(&buffer_id).map_or_else(Style::default, |m| {
-            m.items_at(byte)
-                .fold(Style::default(), |acc, s| merge_styles(acc, s.style))
-        })
+        self.styles
+            .get(&buffer_id)
+            .map_or_else(Style::default, |m| {
+                m.items_at(byte)
+                    .fold(Style::default(), |acc, s| merge_styles(acc, s.style))
+            })
     }
 
     /// The decoration kinds covering `byte`, in instance order
@@ -343,9 +345,9 @@ impl SemanticClient {
     /// selection and a diagnostic).
     #[must_use]
     pub fn decoration_kinds_at(&self, buffer_id: BufferId, byte: u64) -> Vec<DecorationKind> {
-        self.decos.get(&buffer_id).map_or_else(Vec::new, |m| {
-            m.items_at(byte).map(|d| d.kind).collect()
-        })
+        self.decos
+            .get(&buffer_id)
+            .map_or_else(Vec::new, |m| m.items_at(byte).map(|d| d.kind).collect())
     }
 
     /// Reconstructed styling tile ranges for `buffer_id` — for

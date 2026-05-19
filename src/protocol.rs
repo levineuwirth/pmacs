@@ -3943,13 +3943,19 @@ mod tests {
                 buffer_id: bid,
                 items: vec![BlockAdornment {
                     at: 64,
-                    replaces: Some(ByteRange { start: 64, end: 256 }),
+                    replaces: Some(ByteRange {
+                        start: 64,
+                        end: 256,
+                    }),
                     content: AdornmentContent::Resource { handle: 1 },
                 }],
             },
             InstanceMessage::FoldState {
                 buffer_id: bid,
-                folds: vec![ByteRange { start: 100, end: 400 }],
+                folds: vec![ByteRange {
+                    start: 100,
+                    end: 400,
+                }],
             },
             InstanceMessage::ResourceOffer {
                 handle: 1,

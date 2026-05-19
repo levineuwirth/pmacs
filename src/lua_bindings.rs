@@ -7267,6 +7267,50 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_document_symbol_raw",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let job_id = m
+                    .borrow_mut()
+                    .request_document_symbol(id.0, uri)
+                    .map_err(mlua::Error::external)?;
+                Ok(job_id)
+            })?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_workspace_symbol_raw",
+            lua.create_function(move |_, (id, query): (LspServerIdLua, String)| {
+                let job_id = m
+                    .borrow_mut()
+                    .request_workspace_symbol(id.0, query)
+                    .map_err(mlua::Error::external)?;
+                Ok(job_id)
+            })?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_document_highlight_raw",
+            lua.create_function(
+                move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_document_highlight(id.0, uri, line, col)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "_request_formatting_raw",
             lua.create_function(
                 move |_,
@@ -7518,6 +7562,8 @@ pub fn make_lsp_manager(
     install_signature(lua, &manager)?;
     install_definition(lua, &manager)?;
     install_locations(lua, &manager)?;
+    install_symbol(lua, &manager)?;
+    install_document_highlight(lua, &manager)?;
     install_formatting(lua, &manager)?;
     Ok(manager)
 }
@@ -8315,10 +8361,12 @@ pub fn install_diag(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
 
 use crate::completion::{CompletionItem, CompletionItemKind, CompletionKey, CompletionTriggers};
 use crate::definition::{DefinitionKey, DefinitionLocation, DefinitionResponse};
+use crate::document_highlight::{DocumentHighlightKey, Highlight};
 use crate::formatting::{FormattingKey, FormattingResponse, TextEdit};
 use crate::hover::{Hover, HoverKey};
 use crate::locations::{LocationKind, LocationsKey};
 use crate::signature::{Signature, SignatureHelp, SignatureKey, SignatureParameter};
+use crate::symbol::{Symbol as LspSymbol, SymbolKey};
 
 fn completion_item_to_lua(lua: &Lua, item: &CompletionItem) -> mlua::Result<Table> {
     let t = lua.create_table_with_capacity(0, 7)?;
@@ -8781,6 +8829,147 @@ pub fn install_locations(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<
         }
         pmacs.set(kind.label(), m)?;
     }
+    Ok(())
+}
+
+fn symbol_to_lua(lua: &Lua, s: &LspSymbol) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(0, 7)?;
+    t.set("name", s.name.as_str())?;
+    t.set("kind", s.kind)?;
+    t.set("uri", s.uri.as_str())?;
+    t.set("line", s.line)?;
+    t.set("col", s.col)?;
+    t.set("depth", s.depth)?;
+    if let Some(c) = &s.container {
+        t.set("container", c.as_str())?;
+    }
+    Ok(t)
+}
+
+fn highlight_to_lua(lua: &Lua, h: &Highlight) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(0, 5)?;
+    t.set("start_line", h.start_line)?;
+    t.set("start_col", h.start_col)?;
+    t.set("end_line", h.end_line)?;
+    t.set("end_col", h.end_col)?;
+    t.set("kind", h.kind)?;
+    Ok(t)
+}
+
+/// Install `pmacs.document_symbol` (`symbols(sid,uri)` / `clear`) and
+/// `pmacs.workspace_symbol` (`symbols(sid,query)` / `clear`) over the
+/// scope-keyed symbol store. T M4.5.
+pub fn install_symbol(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+
+    let doc = lua.create_table()?;
+    {
+        let mgr = manager.clone();
+        doc.set(
+            "symbols",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                let store = mgr.borrow().symbol_store();
+                let guard = store.lock().expect("symbol store mutex poisoned");
+                let key = SymbolKey::document(id.0.raw().to_string(), uri);
+                let out = lua.create_table()?;
+                if let Some(r) = guard.get(&key) {
+                    for (i, s) in r.symbols.iter().enumerate() {
+                        out.set(i + 1, symbol_to_lua(lua, s)?)?;
+                    }
+                }
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+    {
+        let mgr = manager.clone();
+        doc.set(
+            "clear",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store = mgr.borrow().symbol_store();
+                let mut guard = store.lock().expect("symbol store mutex poisoned");
+                guard.clear(&SymbolKey::document(id.0.raw().to_string(), uri));
+                Ok(())
+            })?,
+        )?;
+    }
+    pmacs.set("document_symbol", doc)?;
+
+    let ws = lua.create_table()?;
+    {
+        let mgr = manager.clone();
+        ws.set(
+            "symbols",
+            lua.create_function(move |lua, (id, query): (LspServerIdLua, String)| {
+                let store = mgr.borrow().symbol_store();
+                let guard = store.lock().expect("symbol store mutex poisoned");
+                let key = SymbolKey::workspace(id.0.raw().to_string(), query);
+                let out = lua.create_table()?;
+                if let Some(r) = guard.get(&key) {
+                    for (i, s) in r.symbols.iter().enumerate() {
+                        out.set(i + 1, symbol_to_lua(lua, s)?)?;
+                    }
+                }
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+    {
+        let mgr = manager.clone();
+        ws.set(
+            "clear",
+            lua.create_function(move |_, (id, query): (LspServerIdLua, String)| {
+                let store = mgr.borrow().symbol_store();
+                let mut guard = store.lock().expect("symbol store mutex poisoned");
+                guard.clear(&SymbolKey::workspace(id.0.raw().to_string(), query));
+                Ok(())
+            })?,
+        )?;
+    }
+    pmacs.set("workspace_symbol", ws)?;
+    Ok(())
+}
+
+/// Install `pmacs.document_highlight` (`highlights(sid,uri)` /
+/// `clear`). T M4.5.
+pub fn install_document_highlight(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    let m = lua.create_table()?;
+    {
+        let mgr = manager.clone();
+        m.set(
+            "highlights",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                let store = mgr.borrow().document_highlight_store();
+                let guard = store
+                    .lock()
+                    .expect("document highlight store mutex poisoned");
+                let key = DocumentHighlightKey::new(id.0.raw().to_string(), uri);
+                let out = lua.create_table()?;
+                if let Some(r) = guard.get(&key) {
+                    for (i, h) in r.highlights.iter().enumerate() {
+                        out.set(i + 1, highlight_to_lua(lua, h)?)?;
+                    }
+                }
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+    {
+        let mgr = manager.clone();
+        m.set(
+            "clear",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store = mgr.borrow().document_highlight_store();
+                let mut guard = store
+                    .lock()
+                    .expect("document highlight store mutex poisoned");
+                guard.clear(&DocumentHighlightKey::new(id.0.raw().to_string(), uri));
+                Ok(())
+            })?,
+        )?;
+    }
+    pmacs.set("document_highlight", m)?;
     Ok(())
 }
 

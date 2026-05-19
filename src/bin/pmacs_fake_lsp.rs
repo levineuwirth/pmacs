@@ -387,6 +387,54 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            // T M4.5 symbols/highlight. documentSymbol returns the
+            // *hierarchical* DocumentSymbol shape (exercises tree
+            // flatten + depth + parent); workspace/symbol the flat
+            // SymbolInformation shape (exercises location.uri);
+            // documentHighlight a two-occurrence list.
+            ("textDocument/documentSymbol", Some(idv)) => {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": [{
+                        "name": "Outer", "kind": 5,
+                        "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 9, "character": 0 } },
+                        "selectionRange": { "start": { "line": 1, "character": 6 }, "end": { "line": 1, "character": 11 } },
+                        "children": [{
+                            "name": "inner", "kind": 6,
+                            "range": { "start": { "line": 3, "character": 2 }, "end": { "line": 5, "character": 2 } },
+                            "selectionRange": { "start": { "line": 3, "character": 7 }, "end": { "line": 3, "character": 12 } }
+                        }]
+                    }]
+                });
+                write_frame(&mut stdout, &resp);
+            }
+            ("workspace/symbol", Some(idv)) => {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": [{
+                        "name": "WsThing", "kind": 12,
+                        "location": {
+                            "uri": "file:///ws.rs",
+                            "range": { "start": { "line": 7, "character": 3 }, "end": { "line": 7, "character": 10 } }
+                        },
+                        "containerName": "modw"
+                    }]
+                });
+                write_frame(&mut stdout, &resp);
+            }
+            ("textDocument/documentHighlight", Some(idv)) => {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": [
+                        { "range": { "start": { "line": 2, "character": 4 }, "end": { "line": 2, "character": 9 } }, "kind": 2 },
+                        { "range": { "start": { "line": 6, "character": 0 }, "end": { "line": 6, "character": 5 } } }
+                    ]
+                });
+                write_frame(&mut stdout, &resp);
+            }
             (_, Some(idv)) => {
                 // Generic echo response.
                 let resp = serde_json::json!({
