@@ -22,7 +22,7 @@
 //! caches synchronized.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::buffer::{Buffer, BufferId, EditOp};
 use crate::file_io::{FileMeta, save_atomic};
@@ -83,15 +83,6 @@ pub struct EditorCore {
     pub status: String,
     /// True iff the editor should exit at the next iteration.
     pub quit: bool,
-    /// File backing the active window's buffer, if any.
-    ///
-    /// Kept on the core (rather than per-buffer) for v0.1 single-
-    /// file workflows. Multi-file open will need this on the buffer
-    /// itself or in a side table; for now, M2.8 doesn't exercise the
-    /// distinction.
-    pub file_path: Option<PathBuf>,
-    /// File metadata at the last load or save.
-    pub file_meta: Option<FileMeta>,
     /// Universal minibuffer (T M2.7).
     pub minibuffer: Minibuffer,
     /// The frontend that produced the most recent input event
@@ -126,6 +117,16 @@ pub struct EditorCore {
     ///   active frontend's mirror would silently drift from daemon
     ///   state after every fallback / Key-path edit.
     pub pending_crdt_ops: Vec<(CrdtOpOrigin, BufferId, crate::rope::CrdtOp)>,
+    /// T M4.5 L1 — bounded jump ring. Cross-file navigation
+    /// (`go-to-definition`, references, symbol jumps) pushes the
+    /// pre-jump `(BufferId, Position)` here before moving the cursor;
+    /// `M-,` (`jump_back`) pops the most recent entry and restores
+    /// it. Bounded at [`Self::JUMP_RING_CAP`]: the oldest entry is
+    /// evicted when full, so a long navigation session can't grow
+    /// this without limit. Entries naming a now-removed buffer are
+    /// skipped on pop (stale-handle safe, mirrors the registry's
+    /// `Missing` contract).
+    pub jump_ring: Vec<(BufferId, Position)>,
 }
 
 impl EditorCore {
@@ -156,11 +157,10 @@ impl EditorCore {
             views,
             status: String::new(),
             quit: false,
-            file_path: None,
-            file_meta: None,
             minibuffer: Minibuffer::new(),
             active_frontend: FrontendId::LOCAL,
             pending_crdt_ops: Vec::new(),
+            jump_ring: Vec::new(),
         }
     }
 
@@ -306,6 +306,46 @@ impl EditorCore {
         self.active_window().buffer_id
     }
 
+    /// Path bound to the active window's buffer, if any. T M4.5 L1:
+    /// replaces the old `EditorCore.file_path` field — it now lives
+    /// per-buffer so cross-file navigation keeps each buffer's
+    /// identity straight.
+    #[must_use]
+    pub fn active_buffer_path(&self) -> Option<PathBuf> {
+        let id = self.active_buffer_id();
+        self.registry
+            .borrow()
+            .get(id)
+            .ok()
+            .and_then(|b| b.file_path().map(Path::to_path_buf))
+    }
+
+    /// Filesystem metadata recorded for the active window's buffer.
+    #[must_use]
+    pub fn active_file_meta(&self) -> Option<FileMeta> {
+        let id = self.active_buffer_id();
+        self.registry
+            .borrow()
+            .get(id)
+            .ok()
+            .and_then(|b| b.file_meta().cloned())
+    }
+
+    /// Bind a path (and clear metadata) on a specific buffer. Used by
+    /// file open / `pmacs.buffer.from_file`.
+    pub fn set_buffer_path(&mut self, id: BufferId, path: Option<PathBuf>) {
+        if let Ok(b) = self.registry.borrow_mut().get_mut(id) {
+            b.set_file_path(path);
+        }
+    }
+
+    /// Record filesystem metadata on a specific buffer.
+    pub fn set_buffer_meta(&mut self, id: BufferId, meta: Option<FileMeta>) {
+        if let Ok(b) = self.registry.borrow_mut().get_mut(id) {
+            b.set_file_meta(meta);
+        }
+    }
+
     /// Cursor of the active window (compatibility shim for callers
     /// migrated from pre-M2.8 code).
     #[must_use]
@@ -368,6 +408,54 @@ impl EditorCore {
         let aw = self.active_window_mut();
         aw.cursor = target;
         aw.goal_col = None;
+    }
+
+    // ---- jump ring (T M4.5 L1) ---------------------------------------------
+
+    /// Bound on [`Self::jump_ring`]. Large enough for a deep
+    /// cross-file dig (definition → definition → references …),
+    /// small enough that a stuck loop can't grow memory unbounded.
+    pub const JUMP_RING_CAP: usize = 64;
+
+    /// Record the active window's current `(buffer, cursor)` as a
+    /// jump origin. Call this *before* moving the cursor on a
+    /// navigation action (go-to-definition, references, symbol jump)
+    /// so `M-,` can return here.
+    ///
+    /// When the ring is at [`Self::JUMP_RING_CAP`], the oldest
+    /// origin is evicted (front drop) — the user keeps the most
+    /// recent trail, which is the one they're likely to unwind.
+    pub fn push_jump(&mut self) {
+        let entry = (self.active_buffer_id(), self.cursor());
+        if self.jump_ring.len() >= Self::JUMP_RING_CAP {
+            self.jump_ring.remove(0);
+        }
+        self.jump_ring.push(entry);
+    }
+
+    /// Pop the most recent jump origin and move there. Returns
+    /// `true` if a jump was performed.
+    ///
+    /// Stale entries — a recorded buffer that has since been removed
+    /// from the registry — are skipped (the loop keeps popping until
+    /// it finds a live target or the ring empties), so a jump-back
+    /// never lands on a missing buffer. The restored cursor is
+    /// clamped to the (possibly now shorter) buffer length.
+    pub fn jump_back(&mut self) -> bool {
+        while let Some((bid, pos)) = self.jump_ring.pop() {
+            if !self.registry.borrow().contains(bid) {
+                continue;
+            }
+            if self.active_buffer_id() != bid && self.switch_active_buffer(bid).is_err() {
+                continue;
+            }
+            let clamped = pos.min(self.active_buffer_len());
+            let aw = self.active_window_mut();
+            aw.cursor = clamped;
+            aw.goal_col = None;
+            return true;
+        }
+        false
     }
 
     // ---- editing primitives ------------------------------------------------
@@ -472,11 +560,11 @@ impl EditorCore {
     /// `buffer.save` Lua command) use the return value to gate
     /// `buffer.after-save` firing.
     pub fn save(&mut self) -> bool {
-        let Some(path) = self.file_path.clone() else {
+        let id = self.active_buffer_id();
+        let Some(path) = self.active_buffer_path() else {
             self.status = "no file (M1: open a file from argv)".into();
             return false;
         };
-        let id = self.active_buffer_id();
         let len_and_bytes = {
             let reg = self.registry.borrow();
             let buffer = match reg.get(id) {
@@ -496,8 +584,8 @@ impl EditorCore {
         let (_, content) = len_and_bytes;
         match save_atomic(&path, &content) {
             Ok(meta) => {
-                self.file_meta = Some(meta);
                 if let Ok(buf) = self.registry.borrow_mut().get_mut(id) {
+                    buf.set_file_meta(Some(meta));
                     buf.mark_clean();
                 }
                 self.status = format!("saved {}", path.display());
@@ -1782,5 +1870,83 @@ mod tests {
             s.pending_crdt_ops.is_empty(),
             "F27: undo on a non-CRDT buffer must not produce a phantom queue entry"
         );
+    }
+
+    // ---- jump ring (T M4.5 L1) -----------------------------------------
+
+    #[test]
+    fn jump_back_returns_false_on_empty_ring() {
+        let mut s = from_bytes(b"abc");
+        s.active_window_mut().cursor = 2;
+        assert!(!s.jump_back(), "empty ring must not move the cursor");
+        assert_eq!(s.cursor(), 2);
+    }
+
+    #[test]
+    fn push_then_jump_back_restores_cursor() {
+        let mut s = from_bytes(b"line one\nline two\nline three");
+        s.active_window_mut().cursor = 3;
+        s.push_jump();
+        s.active_window_mut().cursor = 20;
+        assert!(s.jump_back());
+        assert_eq!(s.cursor(), 3);
+        // Ring is now empty; a second pop is a no-op.
+        assert!(!s.jump_back());
+    }
+
+    #[test]
+    fn jump_back_clamps_to_shortened_buffer() {
+        let mut s = from_bytes(b"abcdefghij");
+        s.active_window_mut().cursor = 9;
+        s.push_jump();
+        // Truncate the buffer so the recorded position is past EOF.
+        s.apply_active_edit(crate::buffer::EditOp::Delete {
+            range: Range::new(2, 10),
+        })
+        .expect("delete");
+        assert!(s.jump_back());
+        assert_eq!(
+            s.cursor(),
+            s.active_buffer_len(),
+            "stale position must clamp to the current buffer length"
+        );
+    }
+
+    #[test]
+    fn jump_ring_is_bounded_and_evicts_oldest() {
+        let mut s = from_bytes(b"0123456789");
+        for i in 0..(EditorCore::JUMP_RING_CAP + 10) {
+            s.active_window_mut().cursor = (i % 10) as u64;
+            s.push_jump();
+        }
+        assert_eq!(
+            s.jump_ring.len(),
+            EditorCore::JUMP_RING_CAP,
+            "ring must stay bounded at JUMP_RING_CAP"
+        );
+    }
+
+    #[test]
+    fn jump_back_skips_removed_buffer() {
+        let mut s = from_bytes(b"original");
+        // Record a jump on a second buffer, then remove that buffer.
+        let doomed = s.registry.borrow_mut().create_from_bytes("doomed", b"x");
+        s.switch_active_buffer(doomed).expect("switch");
+        s.active_window_mut().cursor = 1;
+        s.push_jump();
+        // Switch back and record a live origin too.
+        let original = *s.registry.borrow().ids().first().expect("original id");
+        s.switch_active_buffer(original).expect("switch back");
+        s.active_window_mut().cursor = 4;
+        s.push_jump();
+        s.active_window_mut().cursor = 0;
+        // Drop the doomed buffer: its ring entry is now stale.
+        s.registry.borrow_mut().remove(doomed).expect("remove");
+        // First pop lands on the live `original` origin.
+        assert!(s.jump_back());
+        assert_eq!(s.active_buffer_id(), original);
+        assert_eq!(s.cursor(), 4);
+        // Next pop would be the stale `doomed` entry — skipped, ring empties.
+        assert!(!s.jump_back());
     }
 }

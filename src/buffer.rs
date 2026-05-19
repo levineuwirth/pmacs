@@ -26,8 +26,10 @@
 //! moves its view list out of `self` before iterating, so the views can
 //! observe `&Buffer` while the buffer's own `&mut self` is held.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::file_io::FileMeta;
 use crate::rope::{Edit, Position, Range, Rope, RopeError};
 use crate::view::{InterceptContext, View};
 
@@ -209,6 +211,16 @@ pub struct Buffer {
     undo: Vec<UndoEntry>,
     /// Redo stack. Cleared by any forward edit.
     redo: Vec<UndoEntry>,
+    /// Path this buffer is bound to on disk, if any (T M4.5 L1:
+    /// relocated here from `EditorCore` so cross-file navigation can
+    /// keep each buffer's identity straight — the v0.1 single-file
+    /// `EditorCore.file_path` shortcut no longer holds once multiple
+    /// files are open). `None` for scratch / unsaved buffers.
+    file_path: Option<PathBuf>,
+    /// Filesystem metadata captured at the last successful load/save,
+    /// used for external-change detection. Relocated alongside
+    /// [`Self::file_path`].
+    file_meta: Option<FileMeta>,
     /// True while an edit is in flight on this buffer (T M7.4).
     /// Set by [`Buffer::begin_edit`], cleared by [`Buffer::end_edit`].
     /// A re-entrant `apply_edit` / `apply_edit_skip_intercepts` while
@@ -267,10 +279,34 @@ impl Buffer {
             next_mark_id: 0,
             undo: Vec::new(),
             redo: Vec::new(),
+            file_path: None,
+            file_meta: None,
             editing_in_progress: false,
             #[cfg(feature = "crdt")]
             crdt: None,
         }
+    }
+
+    /// The path this buffer is bound to on disk, if any.
+    #[must_use]
+    pub fn file_path(&self) -> Option<&Path> {
+        self.file_path.as_deref()
+    }
+
+    /// Bind (or unbind, with `None`) this buffer to a disk path.
+    pub fn set_file_path(&mut self, path: Option<PathBuf>) {
+        self.file_path = path;
+    }
+
+    /// Filesystem metadata from the last load/save, if any.
+    #[must_use]
+    pub fn file_meta(&self) -> Option<&FileMeta> {
+        self.file_meta.as_ref()
+    }
+
+    /// Record filesystem metadata (after a successful load/save).
+    pub fn set_file_meta(&mut self, meta: Option<FileMeta>) {
+        self.file_meta = meta;
     }
 
     /// Construct an empty CRDT-backed buffer.

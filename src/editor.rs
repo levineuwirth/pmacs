@@ -387,8 +387,8 @@ impl EditorState {
                     .create_from_bytes(display_name, &bytes);
                 state.replace_active_buffer(new_id);
                 let mut core = state.core.borrow_mut();
-                core.file_path = Some(path);
-                core.file_meta = Some(meta);
+                core.set_buffer_path(new_id, Some(path));
+                core.set_buffer_meta(new_id, Some(meta));
                 fire_after_load = true;
                 Ok(())
             }
@@ -396,7 +396,7 @@ impl EditorState {
                 let new_id = state.lua_host.registry().borrow_mut().create(display_name);
                 state.replace_active_buffer(new_id);
                 let mut core = state.core.borrow_mut();
-                core.file_path = Some(path);
+                core.set_buffer_path(new_id, Some(path));
                 core.status = "[new file]".into();
                 Ok(())
             }
@@ -1838,8 +1838,8 @@ mod tests {
         let s = EditorState::open(path.clone()).expect("must succeed");
         let core = s.core.borrow();
         assert!(core.active_buffer_len() == 0);
-        assert_eq!(core.file_path.as_deref(), Some(path.as_path()));
-        assert!(core.file_meta.is_none());
+        assert_eq!(core.active_buffer_path().as_deref(), Some(path.as_path()));
+        assert!(core.active_file_meta().is_none());
         assert_eq!(core.status, "[new file]");
     }
 
@@ -1851,7 +1851,7 @@ mod tests {
         let s = EditorState::open(path.clone()).expect("must succeed");
         let core = s.core.borrow();
         assert_eq!(core.active_buffer_len(), 5);
-        assert!(core.file_meta.is_some());
+        assert!(core.active_file_meta().is_some());
         assert_eq!(core.status, "");
     }
 

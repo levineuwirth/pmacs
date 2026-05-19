@@ -162,6 +162,7 @@ local function ensure_server(language)
     language_id = language,
     command = cfg.command,
     args = cfg.args or {},
+    env = cfg.env,
     init_options = cfg.init_options,
     settings = cfg.settings,
   })
@@ -379,11 +380,37 @@ function pmacs.lsp.go_to_definition()
     end
     local first = locs[1]
     if first.uri == rec.uri then
+      -- Same file: record the origin so M-, returns here, then move.
+      pmacs.editor.push_jump()
       move_active_cursor_to(first.line, first.col)
       pmacs.editor.set_status(string.format(
         "LSP: definition at %d:%d", first.line + 1, first.col + 1))
     else
-      pmacs.editor.set_status("LSP: definition lives in " .. first.uri)
+      -- Cross-file (SP-4): decode the URI, record the jump origin
+      -- *before* switching away, open-or-reuse the target buffer,
+      -- then position the cursor. `find_or_open` switches the active
+      -- buffer and fires `buffer.after-load`, which attaches an LSP
+      -- to the newly opened file.
+      local path = pmacs.lsp.path_for_uri(first.uri)
+      if not path then
+        pmacs.editor.set_status(
+          "LSP: cannot open non-file definition " .. first.uri)
+        return
+      end
+      pmacs.editor.push_jump()
+      local ok2, oerr = pcall(pmacs.buffer.find_or_open, path)
+      if not ok2 then
+        -- Open failed: drop the origin we just pushed so M-, isn't
+        -- left pointing at a jump that never happened.
+        pmacs.editor.jump_back()
+        pmacs.editor.set_status(
+          "LSP: failed to open " .. path .. ": " .. tostring(oerr))
+        return
+      end
+      move_active_cursor_to(first.line, first.col)
+      pmacs.editor.set_status(string.format(
+        "LSP: definition at %s:%d:%d",
+        path, first.line + 1, first.col + 1))
     end
   end)
 end
@@ -571,12 +598,26 @@ pmacs.command.define {
   fn = pmacs.lsp.document_symbols,
 }
 
+-- T M4.5 L1 — unwind the cross-file jump ring. Pairs with the
+-- `pmacs.editor.push_jump()` every navigation action records before
+-- it moves the cursor.
+pmacs.command.define {
+  name = "lsp.jump-back",
+  description = "Return to the location before the last LSP navigation jump.",
+  fn = function()
+    if not pmacs.editor.jump_back() then
+      pmacs.editor.set_status("LSP: jump ring empty")
+    end
+  end,
+}
+
 -- Default chords. M-. follows the cross-editor convention for
 -- go-to-definition; the others sit on `C-c` to keep printable letters
 -- self-inserting. The user can override or unbind any of these from
 -- init.lua.
 pmacs.keymap.bind { scope = "global", sequence = "M-.",   command = "lsp.go-to-definition" }
 pmacs.keymap.bind { scope = "global", sequence = "M-?",   command = "lsp.find-references" }
+pmacs.keymap.bind { scope = "global", sequence = "M-,",   command = "lsp.jump-back" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c o", command = "lsp.document-symbols" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
