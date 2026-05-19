@@ -745,6 +745,10 @@ pub struct LspManager {
     /// T M4.12 definition store. Populated when a
     /// `textDocument/definition` response lands.
     definition_store: crate::definition::SharedDefinitionStore,
+    /// T M4.5: references / declaration / typeDefinition /
+    /// implementation. Same Location shape as `definition`, keyed
+    /// additionally by kind so the four don't collide.
+    locations_store: crate::locations::SharedLocationsStore,
     /// T M4.12 formatting store. Populated when a
     /// `textDocument/formatting` response lands.
     formatting_store: crate::formatting::SharedFormattingStore,
@@ -805,6 +809,15 @@ enum ResponseRoute {
     /// Absorb response into [`crate::formatting::FormattingStore`] at
     /// `(server, uri)`.
     Formatting { uri: String },
+    /// Absorb a Location-shaped nav response (references / declaration
+    /// / typeDefinition / implementation) into
+    /// [`crate::locations::LocationsStore`] at `(server, uri, kind)`.
+    Locations {
+        /// Document URI.
+        uri: String,
+        /// Which nav request this answers.
+        kind: crate::locations::LocationKind,
+    },
 }
 
 impl ResponseRoute {
@@ -816,7 +829,8 @@ impl ResponseRoute {
             | ResponseRoute::Hover { uri }
             | ResponseRoute::Signature { uri }
             | ResponseRoute::Definition { uri }
-            | ResponseRoute::Formatting { uri } => uri,
+            | ResponseRoute::Formatting { uri }
+            | ResponseRoute::Locations { uri, .. } => uri,
         }
     }
 }
@@ -886,6 +900,7 @@ impl LspManager {
             hover_store: crate::hover::make_shared_store(),
             signature_store: crate::signature::make_shared_store(),
             definition_store: crate::definition::make_shared_store(),
+            locations_store: crate::locations::make_shared_store(),
             formatting_store: crate::formatting::make_shared_store(),
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
@@ -924,6 +939,13 @@ impl LspManager {
     #[must_use]
     pub fn definition_store(&self) -> crate::definition::SharedDefinitionStore {
         self.definition_store.clone()
+    }
+
+    /// Shared locations store — references / declaration /
+    /// typeDefinition / implementation (T M4.5).
+    #[must_use]
+    pub fn locations_store(&self) -> crate::locations::SharedLocationsStore {
+        self.locations_store.clone()
     }
 
     /// Shared formatting store (T M4.12).
@@ -1459,6 +1481,113 @@ impl LspManager {
         self.pending_routes
             .insert((sid, req_id), ResponseRoute::Definition { uri });
         Ok(job_id)
+    }
+
+    /// Shared body for the Location-shaped nav requests. `extra` is
+    /// merged into the params object (only `references` uses it, for
+    /// `context.includeDeclaration`). The supersede key derives from
+    /// the kind's distinct method, so the four requests don't cancel
+    /// one another. Returns the async-runtime [`JobId`].
+    fn request_locations(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+        kind: crate::locations::LocationKind,
+        extra: Option<Value>,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let mut params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "position": self.outbound_position(sid, &uri, line, col)
+        });
+        if let Some(Value::Object(ex)) = extra
+            && let Some(obj) = params.as_object_mut()
+        {
+            for (k, v) in ex {
+                obj.insert(k, v);
+            }
+        }
+        let method = kind.method();
+        let req_id = self.send_request(sid, method, params)?;
+        let job_id = self.register_awaiter(sid, req_id, method, &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::Locations { uri, kind });
+        Ok(job_id)
+    }
+
+    /// Send `textDocument/references` (with `includeDeclaration`).
+    /// Returns the async-runtime [`JobId`].
+    pub fn request_references(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+    ) -> Result<JobId, String> {
+        self.request_locations(
+            sid,
+            uri,
+            line,
+            col,
+            crate::locations::LocationKind::References,
+            Some(json!({ "context": { "includeDeclaration": true } })),
+        )
+    }
+
+    /// Send `textDocument/declaration`. Returns the [`JobId`].
+    pub fn request_declaration(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+    ) -> Result<JobId, String> {
+        self.request_locations(
+            sid,
+            uri,
+            line,
+            col,
+            crate::locations::LocationKind::Declaration,
+            None,
+        )
+    }
+
+    /// Send `textDocument/typeDefinition`. Returns the [`JobId`].
+    pub fn request_type_definition(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+    ) -> Result<JobId, String> {
+        self.request_locations(
+            sid,
+            uri,
+            line,
+            col,
+            crate::locations::LocationKind::TypeDefinition,
+            None,
+        )
+    }
+
+    /// Send `textDocument/implementation`. Returns the [`JobId`].
+    pub fn request_implementation(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+    ) -> Result<JobId, String> {
+        self.request_locations(
+            sid,
+            uri,
+            line,
+            col,
+            crate::locations::LocationKind::Implementation,
+            None,
+        )
     }
 
     /// Send `textDocument/formatting` for `uri` with `tab_size` /
@@ -2011,6 +2140,17 @@ impl LspManager {
                     .definition_store
                     .lock()
                     .expect("definition store mutex poisoned");
+                guard.set(key, resp);
+            }
+            ResponseRoute::Locations { uri, kind } => {
+                // Same Location parser as definition; only the store
+                // key carries the kind discriminator.
+                let resp = crate::definition::DefinitionResponse::from_lsp_value(result);
+                let key = crate::locations::LocationsKey::new(server_key, uri.clone(), *kind);
+                let mut guard = self
+                    .locations_store
+                    .lock()
+                    .expect("locations store mutex poisoned");
                 guard.set(key, resp);
             }
             ResponseRoute::Formatting { uri } => {

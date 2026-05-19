@@ -7203,6 +7203,70 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_references_raw",
+            lua.create_function(
+                move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_references(id.0, uri, line, col)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_declaration_raw",
+            lua.create_function(
+                move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_declaration(id.0, uri, line, col)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_type_definition_raw",
+            lua.create_function(
+                move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_type_definition(id.0, uri, line, col)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_implementation_raw",
+            lua.create_function(
+                move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_implementation(id.0, uri, line, col)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "_request_formatting_raw",
             lua.create_function(
                 move |_,
@@ -7453,6 +7517,7 @@ pub fn make_lsp_manager(
     install_hover(lua, &manager)?;
     install_signature(lua, &manager)?;
     install_definition(lua, &manager)?;
+    install_locations(lua, &manager)?;
     install_formatting(lua, &manager)?;
     Ok(manager)
 }
@@ -8252,6 +8317,7 @@ use crate::completion::{CompletionItem, CompletionItemKind, CompletionKey, Compl
 use crate::definition::{DefinitionKey, DefinitionLocation, DefinitionResponse};
 use crate::formatting::{FormattingKey, FormattingResponse, TextEdit};
 use crate::hover::{Hover, HoverKey};
+use crate::locations::{LocationKind, LocationsKey};
 use crate::signature::{Signature, SignatureHelp, SignatureKey, SignatureParameter};
 
 fn completion_item_to_lua(lua: &Lua, item: &CompletionItem) -> mlua::Result<Table> {
@@ -8669,6 +8735,52 @@ pub fn install_definition(lua: &Lua, manager: &SharedLspManager) -> mlua::Result
     }
 
     pmacs.set("definition", m)?;
+    Ok(())
+}
+
+/// Install `pmacs.references` / `.declaration` / `.type_definition`
+/// / `.implementation`, each `{ locations(sid,uri), clear(sid,uri) }`,
+/// mirroring `pmacs.definition` (same Location-list shape, hence the
+/// reused `definition_response_to_lua`). T M4.5.
+pub fn install_locations(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    for kind in [
+        LocationKind::References,
+        LocationKind::Declaration,
+        LocationKind::TypeDefinition,
+        LocationKind::Implementation,
+    ] {
+        let m = lua.create_table()?;
+        {
+            let mgr = manager.clone();
+            m.set(
+                "locations",
+                lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                    let store_handle = mgr.borrow().locations_store();
+                    let guard = store_handle.lock().expect("locations store mutex poisoned");
+                    let key = LocationsKey::new(id.0.raw().to_string(), uri, kind);
+                    if let Some(r) = guard.get(&key) {
+                        Ok(Value::Table(definition_response_to_lua(lua, r)?))
+                    } else {
+                        Ok(Value::Table(lua.create_table_with_capacity(0, 0)?))
+                    }
+                })?,
+            )?;
+        }
+        {
+            let mgr = manager.clone();
+            m.set(
+                "clear",
+                lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                    let store_handle = mgr.borrow().locations_store();
+                    let mut guard = store_handle.lock().expect("locations store mutex poisoned");
+                    guard.clear(&LocationsKey::new(id.0.raw().to_string(), uri, kind));
+                    Ok(())
+                })?,
+            )?;
+        }
+        pmacs.set(kind.label(), m)?;
+    }
     Ok(())
 }
 

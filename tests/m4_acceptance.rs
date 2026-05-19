@@ -3963,3 +3963,55 @@ fn m4_5_workspace_configuration_answered_from_settings() {
          from the spec settings; got {got:?}"
     );
 }
+
+/// T M4.5 nav batch: references / declaration / typeDefinition /
+/// implementation each await end-to-end through the async bridge and
+/// land in their *own* kind-keyed slot (no collision on
+/// `(server, uri)` — the reason for the dedicated locations store).
+/// The fake returns a distinct line per method (11/21/31/41), so the
+/// per-kind Lua surfaces must read back exactly those.
+#[test]
+fn m4_5_location_nav_requests_route_by_kind() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, None);
+    state
+        .lua_host
+        .lua()
+        .load(
+            "local uri='file:///n.rs'
+             pmacs.lsp.did_open(_G._lsp, uri, 1, 'fn x() {}\\n')
+             _G._done=false
+             pmacs.async(function()
+               pmacs.lsp.request_references(_G._lsp, uri, 0, 3):await()
+               pmacs.lsp.request_declaration(_G._lsp, uri, 0, 3):await()
+               pmacs.lsp.request_type_definition(_G._lsp, uri, 0, 3):await()
+               pmacs.lsp.request_implementation(_G._lsp, uri, 0, 3):await()
+               local function l(t)
+                 local x = t.locations(_G._lsp, uri)
+                 return (x and x[1] and x[1].line) or -1
+               end
+               _G._refs = l(pmacs.references)
+               _G._decl = l(pmacs.declaration)
+               _G._tdef = l(pmacs.type_definition)
+               _G._impl = l(pmacs.implementation)
+               _G._done = true
+             end)",
+        )
+        .exec()
+        .expect("dispatch nav coroutine");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "nav coroutine never completed"
+    );
+    let (refs, decl, tdef, impl_): (i64, i64, i64, i64) = state
+        .lua_host
+        .lua()
+        .load("return _G._refs, _G._decl, _G._tdef, _G._impl")
+        .eval()
+        .expect("read kind lines");
+    assert_eq!(refs, 11, "references must route to its own slot");
+    assert_eq!(decl, 21, "declaration must route to its own slot");
+    assert_eq!(tdef, 31, "typeDefinition must route to its own slot");
+    assert_eq!(impl_, 41, "implementation must route to its own slot");
+}

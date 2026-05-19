@@ -66,6 +66,7 @@ pub mod instance_render;
 pub mod key;
 pub mod keymap_stack;
 pub mod keymap_tree;
+pub mod locations;
 pub mod lockfile;
 pub mod lsp;
 pub mod lsp_status;
