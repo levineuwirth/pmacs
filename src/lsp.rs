@@ -763,6 +763,10 @@ pub struct LspManager {
     /// `textDocument/codeAction` response lands, keyed by `(server,
     /// uri)`.
     code_action_store: crate::code_action::SharedCodeActionStore,
+    /// T M4.5 inlay-hint store. Populated when a
+    /// `textDocument/inlayHint` response lands, keyed by `(server,
+    /// uri)`.
+    inlay_hint_store: crate::inlay_hint::SharedInlayHintStore,
     /// Per-server request id → response routing target.
     /// `request_completion` etc. record an entry here; `handle_response`
     /// consumes it to absorb the response into the correct store.
@@ -826,6 +830,9 @@ enum ResponseRoute {
     /// Absorb a `textDocument/codeAction` response into
     /// [`crate::code_action::CodeActionStore`] at `(server, uri)`.
     CodeAction { uri: String },
+    /// Absorb a `textDocument/inlayHint` response into
+    /// [`crate::inlay_hint::InlayHintStore`] at `(server, uri)`.
+    InlayHint { uri: String },
     /// Absorb a Location-shaped nav response (references / declaration
     /// / typeDefinition / implementation) into
     /// [`crate::locations::LocationsStore`] at `(server, uri, kind)`.
@@ -869,6 +876,7 @@ impl ResponseRoute {
             | ResponseRoute::Formatting { uri }
             | ResponseRoute::Rename { uri }
             | ResponseRoute::CodeAction { uri }
+            | ResponseRoute::InlayHint { uri }
             | ResponseRoute::Locations { uri, .. }
             | ResponseRoute::DocumentSymbol { uri }
             | ResponseRoute::DocumentHighlight { uri } => uri,
@@ -952,6 +960,7 @@ impl LspManager {
             formatting_store: crate::formatting::make_shared_store(),
             rename_store: crate::rename::make_shared_store(),
             code_action_store: crate::code_action::make_shared_store(),
+            inlay_hint_store: crate::inlay_hint::make_shared_store(),
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
             project_servers: HashMap::new(),
@@ -1028,6 +1037,12 @@ impl LspManager {
     #[must_use]
     pub fn code_action_store(&self) -> crate::code_action::SharedCodeActionStore {
         self.code_action_store.clone()
+    }
+
+    /// Shared inlay-hint store (T M4.5).
+    #[must_use]
+    pub fn inlay_hint_store(&self) -> crate::inlay_hint::SharedInlayHintStore {
+        self.inlay_hint_store.clone()
     }
 
     /// T M4.8: per-server status snapshot, derived from the LSP event
@@ -1808,6 +1823,36 @@ impl LspManager {
         Ok(job_id)
     }
 
+    /// Send `textDocument/inlayHint` over `[start, end]` in `uri`
+    /// (the visible/whole-buffer range the caller wants annotated).
+    /// The response is absorbed into the inlay-hint store at `(sid,
+    /// uri)`. Returns the async-runtime [`JobId`] the response will
+    /// settle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_inlay_hint(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "range": {
+                "start": { "line": start_line, "character": start_col },
+                "end":   { "line": end_line,   "character": end_col   },
+            },
+        });
+        let req_id = self.send_request(sid, "textDocument/inlayHint", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/inlayHint", &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::InlayHint { uri });
+        Ok(job_id)
+    }
+
     /// Send `workspace/executeCommand`. No response route is
     /// registered: the command result is usually `null` and the real
     /// effect arrives as a server→client `workspace/applyEdit` (the
@@ -2426,6 +2471,15 @@ impl LspManager {
                     .expect("code action store mutex poisoned");
                 guard.set(key, resp);
             }
+            ResponseRoute::InlayHint { uri } => {
+                let resp = crate::inlay_hint::InlayHintResponse::from_lsp_value(result);
+                let key = crate::inlay_hint::InlayHintKey::new(server_key, uri.clone());
+                let mut guard = self
+                    .inlay_hint_store
+                    .lock()
+                    .expect("inlay hint store mutex poisoned");
+                guard.set(key, resp);
+            }
         }
     }
 
@@ -2870,6 +2924,13 @@ fn default_capabilities() -> Value {
                     },
                 },
             },
+            // T M4.5 inlay hints. No `resolveSupport` — pmacs
+            // requests full hints (label/tooltip already populated),
+            // not lazily-resolved stubs. `refreshSupport` is left
+            // false (default) so servers don't send
+            // `workspace/inlayHint/refresh`; on-demand re-query is
+            // the v1 model.
+            "inlayHint": { "dynamicRegistration": false },
             "publishDiagnostics": { "relatedInformation": true },
         },
     })

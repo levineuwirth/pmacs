@@ -5,7 +5,8 @@
 --   * Auto-attach + did_open / did_change / did_close on buffer events.
 --   * `pmacs.lsp.go_to_definition` / `pmacs.lsp.format_buffer` /
 --     `pmacs.lsp.hover_at_cursor` / `pmacs.lsp.signature_help_at_cursor`
---     / `pmacs.lsp.rename` / `pmacs.lsp.code_actions`, bound to
+--     / `pmacs.lsp.rename` / `pmacs.lsp.code_actions` /
+--     `pmacs.lsp.inlay_hints`, bound to
 --     default chords below.
 --
 -- Scope: one server per language across all buffers; async-await
@@ -14,8 +15,9 @@
 -- (L2), code actions + `workspace/executeCommand` + server→client
 -- `workspace/applyEdit` (L3), ordered resource-op edits
 -- (create/rename/delete file) with buffer-registry reconciliation
--- (L4). Inlay hints, semantic tokens, and file-watch capability
--- registration are later layers.
+-- (L4), and inlay hints (data + modeline; inline virtual-text
+-- rendering is a later milestone). Semantic tokens and file-watch
+-- capability registration are later layers.
 
 pmacs.lsp = pmacs.lsp or {}
 pmacs.lsp.config = pmacs.lsp.config or {}
@@ -270,6 +272,7 @@ pmacs.lsp.request_document_highlight = wrap_request(pmacs.lsp._request_document_
 pmacs.lsp.request_rename = wrap_request(pmacs.lsp._request_rename_raw)
 pmacs.lsp.request_code_action = wrap_request(pmacs.lsp._request_code_action_raw)
 pmacs.lsp.request_execute_command = wrap_request(pmacs.lsp._request_execute_command_raw)
+pmacs.lsp.request_inlay_hint = wrap_request(pmacs.lsp._request_inlay_hint_raw)
 
 -- Render an `:await()` failure into a modeline-friendly reason.
 -- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
@@ -620,6 +623,47 @@ function pmacs.lsp.document_symbols()
   end)
 end
 
+-- T M4.5 — inlay hints for the whole buffer. Requests over a range
+-- spanning the document, stores the parsed hints, and surfaces a
+-- modeline summary (count + first). Inline virtual-text rendering is
+-- a separate milestone (the cell-overlay model does not yet reflow
+-- real glyphs around inserted columns); a render layer subscribes to
+-- the same `pmacs.inlay_hint` store when it lands — same staged
+-- approach as the references list / hover panel.
+function pmacs.lsp.inlay_hints()
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  -- Whole-document range: (0,0) .. (one past the last line, 0). An
+  -- over-wide end line is fine — servers clamp to the document.
+  local text = active_buffer_text()
+  local nl = 0
+  for _ in text:gmatch("\n") do nl = nl + 1 end
+  pmacs.inlay_hint.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_inlay_hint(
+        rec.server, rec.uri, 0, 0, nl + 1, 0):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local hints = pmacs.inlay_hint.hints(rec.server, rec.uri)
+    if not hints or #hints == 0 then
+      pmacs.editor.set_status("LSP: no inlay hints")
+      return
+    end
+    local first = hints[1]
+    pmacs.editor.set_status(string.format(
+      "LSP: %d inlay hint%s; first '%s' at %d:%d",
+      #hints, (#hints == 1 and "" or "s"),
+      first.label, first.line + 1, first.col + 1))
+  end)
+end
+
 function pmacs.lsp.format_buffer()
   local rec = attached_for_active()
   if not rec then
@@ -871,6 +915,12 @@ pmacs.command.define {
   fn = pmacs.lsp.code_actions,
 }
 
+pmacs.command.define {
+  name = "lsp.inlay-hints",
+  description = "Fetch inlay hints (inferred types / parameter names) for the buffer (LSP).",
+  fn = pmacs.lsp.inlay_hints,
+}
+
 -- T M4.5 L1 — unwind the cross-file jump ring. Pairs with the
 -- `pmacs.editor.push_jump()` every navigation action records before
 -- it moves the cursor.
@@ -894,6 +944,7 @@ pmacs.keymap.bind { scope = "global", sequence = "M-,",   command = "lsp.jump-ba
 pmacs.keymap.bind { scope = "global", sequence = "C-c o", command = "lsp.document-symbols" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c r", command = "lsp.rename" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c a", command = "lsp.code-actions" }
+pmacs.keymap.bind { scope = "global", sequence = "C-c i", command = "lsp.inlay-hints" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }

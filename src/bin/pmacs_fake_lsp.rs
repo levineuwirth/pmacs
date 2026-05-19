@@ -584,6 +584,33 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            ("textDocument/inlayHint", Some(idv)) => {
+                // T M4.5: a type hint (string label, kind 1) and a
+                // parameter hint (label *parts*, kind 2) so both
+                // label shapes are exercised.
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": [
+                        {
+                            "position": { "line": 0, "character": 9 },
+                            "label": ": i32",
+                            "kind": 1,
+                            "paddingLeft": false,
+                            "paddingRight": false,
+                            "tooltip": "inferred type"
+                        },
+                        {
+                            "position": { "line": 1, "character": 4 },
+                            "label": [ { "value": "count" }, { "value": ":" } ],
+                            "kind": 2,
+                            "paddingLeft": false,
+                            "paddingRight": true
+                        }
+                    ]
+                });
+                write_frame(&mut stdout, &resp);
+            }
             // T M4.5 symbols/highlight. documentSymbol returns the
             // *hierarchical* DocumentSymbol shape (exercises tree
             // flatten + depth + parent); workspace/symbol the flat

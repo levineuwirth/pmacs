@@ -7532,6 +7532,30 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_inlay_hint_raw",
+            lua.create_function(
+                move |_,
+                      (id, uri, sl, sc, el, ec): (
+                    LspServerIdLua,
+                    String,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                )| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_inlay_hint(id.0, uri, sl, sc, el, ec)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "_request_execute_command_raw",
             lua.create_function(
                 move |_, (id, command, args): (LspServerIdLua, String, Option<Value>)| {
@@ -7804,6 +7828,7 @@ pub fn make_lsp_manager(
     install_formatting(lua, &manager)?;
     install_rename(lua, &manager)?;
     install_code_action(lua, &manager)?;
+    install_inlay_hint(lua, &manager)?;
     Ok(manager)
 }
 
@@ -8604,6 +8629,7 @@ use crate::definition::{DefinitionKey, DefinitionLocation, DefinitionResponse};
 use crate::document_highlight::{DocumentHighlightKey, Highlight};
 use crate::formatting::{FormattingKey, FormattingResponse, TextEdit};
 use crate::hover::{Hover, HoverKey};
+use crate::inlay_hint::{InlayHint as LspInlayHint, InlayHintKey};
 use crate::locations::{LocationKind, LocationsKey};
 use crate::rename::{RenameKey, WorkspaceEditResponse, WorkspaceOp};
 use crate::signature::{Signature, SignatureHelp, SignatureKey, SignatureParameter};
@@ -9480,6 +9506,71 @@ pub fn install_code_action(lua: &Lua, manager: &SharedLspManager) -> mlua::Resul
     }
 
     pmacs.set("code_action", m)?;
+    Ok(())
+}
+
+fn inlay_hint_to_lua(lua: &Lua, h: &LspInlayHint) -> mlua::Result<Table> {
+    let t = lua.create_table_with_capacity(0, 7)?;
+    t.set("line", h.line)?;
+    t.set("col", h.col)?;
+    t.set("label", h.label.as_str())?;
+    if let Some(k) = h.kind {
+        t.set("kind", k.as_str())?;
+    }
+    t.set("padding_left", h.padding_left)?;
+    t.set("padding_right", h.padding_right)?;
+    if let Some(tt) = h.tooltip.as_deref() {
+        t.set("tooltip", tt)?;
+    }
+    Ok(t)
+}
+
+/// Install `pmacs.inlay_hint.*` (T M4.5). `hints(sid, uri)` returns
+/// `{ { line, col, label, kind?, padding_left, padding_right,
+/// tooltip? }, … }` in server order; `clear(sid, uri)` drops the
+/// entry. No renderer here — that is a separate milestone; this is
+/// the data surface a render layer (or a list view) reads.
+pub fn install_inlay_hint(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    let m = lua.create_table()?;
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "hints",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().inlay_hint_store();
+                let guard = store_handle
+                    .lock()
+                    .expect("inlay hint store mutex poisoned");
+                let key = InlayHintKey::new(id.0.raw().to_string(), uri);
+                let out = lua.create_table()?;
+                if let Some(r) = guard.get(&key) {
+                    for (i, h) in r.hints.iter().enumerate() {
+                        out.set(i + 1, inlay_hint_to_lua(lua, h)?)?;
+                    }
+                }
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "clear",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().inlay_hint_store();
+                let mut guard = store_handle
+                    .lock()
+                    .expect("inlay hint store mutex poisoned");
+                guard.clear(&InlayHintKey::new(id.0.raw().to_string(), uri));
+                Ok(())
+            })?,
+        )?;
+    }
+
+    pmacs.set("inlay_hint", m)?;
     Ok(())
 }
 
