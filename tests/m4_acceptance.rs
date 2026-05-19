@@ -3424,6 +3424,136 @@ fn m4_12_cross_file_go_to_definition_and_jump_back() {
     );
 }
 
+/// T M4.5 L2 — cross-file rename end to end through the default
+/// bundle. The `rename` fake returns a `WorkspaceEdit` whose
+/// `documentChanges` touch *two* files (the origin plus an env-named
+/// second URI) and include one resource op. `pmacs.lsp.rename` must
+/// prompt, send `textDocument/rename`, await the `WorkspaceEdit`, then
+/// apply the per-file edits across both buffers, count the skipped
+/// resource op, and restore the origin buffer.
+#[test]
+fn m4_13_rename_applies_cross_file_workspace_edit() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    let b_path = dir.path().join("b.rs");
+    // The fake's edit replaces line-0 cols 3..6; "foo" sits there.
+    std::fs::write(&a_path, b"abcfooxyz\n").expect("write a");
+    std::fs::write(&b_path, b"abcfooxyz\n").expect("write b");
+    let a_disp = a_path.display().to_string();
+    let b_disp = b_path.display().to_string();
+    let b_uri = format!("file://{b_disp}");
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{
+                 PMACS_FAKE_LSP_MODE = 'rename',
+                 PMACS_FAKE_LSP_RENAME_URI = '{b_uri}',
+               }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    // Open the rename prompt, type the new name, accept it. `accept`
+    // invokes the `on_accept` callback, which spawns the async
+    // request/apply coroutine.
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.rename()")
+        .exec()
+        .expect("invoke rename");
+    assert!(
+        state
+            .lua_host
+            .lua()
+            .load("return pmacs.minibuffer.is_active()")
+            .eval::<bool>()
+            .unwrap(),
+        "rename should have opened a minibuffer prompt"
+    );
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.minibuffer.set_contents('BAR'); pmacs.minibuffer.accept()")
+        .exec()
+        .expect("accept rename name");
+
+    // Completion signal: the active (origin) buffer's text now carries
+    // the rename — proves the request landed, the edit applied, and
+    // the origin buffer was restored.
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() local b = pmacs.window.buffer() \
+               return b ~= nil and b:slice(0, b:len()):find('BAR', 1, true) ~= nil end)()",
+            5,
+        ),
+        "rename never applied to the origin buffer"
+    );
+
+    // Origin buffer restored.
+    let active: Option<String> = state
+        .lua_host
+        .lua()
+        .load("return pmacs.editor.file_path()")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        active.as_deref(),
+        Some(a_disp.as_str()),
+        "rename must restore the buffer it was invoked from"
+    );
+
+    // Origin file edited in place.
+    let a_text: String = state
+        .lua_host
+        .lua()
+        .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+        .eval()
+        .unwrap();
+    assert_eq!(a_text, "abcBARxyz\n", "a.rs should be renamed");
+
+    // The *second* file in the WorkspaceEdit was edited too.
+    let b_text: String = state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.buffer.find_or_open('{b_disp}') \
+             local b = pmacs.window.buffer() return b:slice(0, b:len())"
+        ))
+        .eval()
+        .unwrap();
+    assert_eq!(b_text, "abcBARxyz\n", "b.rs should be renamed cross-file");
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default

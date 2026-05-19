@@ -4,14 +4,15 @@
 --   * Declarative server config (`pmacs.lsp.config[language]`).
 --   * Auto-attach + did_open / did_change / did_close on buffer events.
 --   * `pmacs.lsp.go_to_definition` / `pmacs.lsp.format_buffer` /
---     `pmacs.lsp.hover_at_cursor` / `pmacs.lsp.signature_help_at_cursor`,
---     bound to default chords below.
+--     `pmacs.lsp.hover_at_cursor` / `pmacs.lsp.signature_help_at_cursor`
+--     / `pmacs.lsp.rename`, bound to default chords below.
 --
--- v0.1 scope: one server per language across all buffers; same-file
--- definition jumps only; synchronous request → poll → react cycle
--- (sub-second for hot servers). Cross-file navigation, async-await
--- coroutines, rename, code actions, inlay hints, semantic tokens, and
--- file-watch capability registration are all v0.2 work.
+-- Scope: one server per language across all buffers; async-await
+-- request/react (the editor never blocks). Cross-file go-to-definition
+-- and a multi-file rename / WorkspaceEdit applier have landed (L1/L2).
+-- Code actions, inlay hints, semantic tokens, resource-op edits
+-- (create/rename/delete file), and file-watch capability registration
+-- are later layers.
 
 pmacs.lsp = pmacs.lsp or {}
 pmacs.lsp.config = pmacs.lsp.config or {}
@@ -263,6 +264,7 @@ pmacs.lsp.request_implementation = wrap_request(pmacs.lsp._request_implementatio
 pmacs.lsp.request_document_symbol = wrap_request(pmacs.lsp._request_document_symbol_raw)
 pmacs.lsp.request_workspace_symbol = wrap_request(pmacs.lsp._request_workspace_symbol_raw)
 pmacs.lsp.request_document_highlight = wrap_request(pmacs.lsp._request_document_highlight_raw)
+pmacs.lsp.request_rename = wrap_request(pmacs.lsp._request_rename_raw)
 
 -- Render an `:await()` failure into a modeline-friendly reason.
 -- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
@@ -342,6 +344,46 @@ local function apply_text_edits(edits)
     end
   end
   return #resolved
+end
+
+-- T M4.5 L2 — apply a parsed LSP `WorkspaceEdit` (`pmacs.rename`'s
+-- per-file shape: `{ { uri = , edits = { … } }, … }`) across however
+-- many files it touches.
+--
+-- Atomicity: a true cross-buffer transaction is out of scope here, so
+-- the applier instead refuses to mutate *anything* unless every URI
+-- with edits resolves to a real file path first (`path_for_uri`). A
+-- rename that names an `untitled:`/non-file document aborts cleanly
+-- with the origin buffer untouched, rather than half-applying.
+--
+-- Per file the edits are applied through `apply_text_edits`, which
+-- resolves offsets against that buffer's *original* text and applies
+-- in reverse-start order — correct because each file's edits are
+-- independent and `find_or_open` makes the target the active buffer
+-- before its batch runs. The buffer the user invoked from is restored
+-- last. Returns `total_edits, file_count` on success, or
+-- `nil, message` if the preflight rejected the edit.
+local function apply_workspace_edit(file_edits)
+  local plan = {}
+  for _, fe in ipairs(file_edits or {}) do
+    if fe.edits and #fe.edits > 0 then
+      local path = pmacs.lsp.path_for_uri(fe.uri)
+      if not path then
+        return nil, "cannot resolve " .. tostring(fe.uri)
+      end
+      table.insert(plan, { path = path, edits = fe.edits })
+    end
+  end
+  if #plan == 0 then return 0, 0 end
+  local origin = active_buffer_path()
+  local total = 0
+  for _, item in ipairs(plan) do
+    pmacs.buffer.find_or_open(item.path)
+    total = total + apply_text_edits(item.edits)
+  end
+  -- Return the user to where they invoked rename from.
+  if origin then pmacs.buffer.find_or_open(origin) end
+  return total, #plan
 end
 
 -- Commands ----------------------------------------------------------------
@@ -503,6 +545,66 @@ function pmacs.lsp.format_buffer()
   end)
 end
 
+-- T M4.5 L2 — rename the symbol under the cursor. Prompts for the new
+-- name in the minibuffer; on accept, sends `textDocument/rename`,
+-- awaits the `WorkspaceEdit`, and drives it through the multi-file
+-- applier. The position is captured *before* the prompt opens so the
+-- request still targets the original symbol even though the minibuffer
+-- session moved focus.
+function pmacs.lsp.rename()
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
+  pmacs.minibuffer.read {
+    prompt = "Rename symbol to: ",
+    on_cancel = function()
+      pmacs.editor.set_status("LSP: rename cancelled")
+    end,
+    on_accept = function(new_name)
+      if not new_name or new_name == "" then
+        pmacs.editor.set_status("LSP: rename needs a new name")
+        return
+      end
+      pmacs.rename.clear(rec.server, rec.uri)
+      pmacs.async(function()
+        local ok, err = pcall(function()
+          pmacs.lsp.request_rename(rec.server, rec.uri, line, col, new_name):await()
+        end)
+        if not ok then
+          pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+          return
+        end
+        local fe = pmacs.rename.file_edits(rec.server, rec.uri)
+        local skipped = pmacs.rename.unsupported(rec.server, rec.uri)
+        if (not fe or #fe == 0) and skipped == 0 then
+          pmacs.editor.set_status("LSP: rename produced no edits")
+          return
+        end
+        local n, info = apply_workspace_edit(fe)
+        if not n then
+          -- Preflight rejected it; nothing was mutated.
+          pmacs.editor.set_status("LSP: rename aborted: " .. tostring(info))
+          return
+        end
+        local msg = string.format(
+          "LSP: renamed — %d edit%s across %d file%s",
+          n, (n == 1 and "" or "s"),
+          info, (info == 1 and "" or "s"))
+        if skipped > 0 then
+          msg = msg .. string.format(
+            " (%d unsupported op%s skipped)",
+            skipped, (skipped == 1 and "" or "s"))
+        end
+        pmacs.editor.set_status(msg)
+      end)
+    end,
+  }
+end
+
 function pmacs.lsp.hover_at_cursor()
   local rec = attached_for_active()
   if not rec then
@@ -598,6 +700,12 @@ pmacs.command.define {
   fn = pmacs.lsp.document_symbols,
 }
 
+pmacs.command.define {
+  name = "lsp.rename",
+  description = "Rename the symbol under the cursor across the workspace (LSP).",
+  fn = pmacs.lsp.rename,
+}
+
 -- T M4.5 L1 — unwind the cross-file jump ring. Pairs with the
 -- `pmacs.editor.push_jump()` every navigation action records before
 -- it moves the cursor.
@@ -619,6 +727,7 @@ pmacs.keymap.bind { scope = "global", sequence = "M-.",   command = "lsp.go-to-d
 pmacs.keymap.bind { scope = "global", sequence = "M-?",   command = "lsp.find-references" }
 pmacs.keymap.bind { scope = "global", sequence = "M-,",   command = "lsp.jump-back" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c o", command = "lsp.document-symbols" }
+pmacs.keymap.bind { scope = "global", sequence = "C-c r", command = "lsp.rename" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }
