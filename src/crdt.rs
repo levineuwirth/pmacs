@@ -204,6 +204,31 @@ impl CrdtState {
         self.doc.oplog_vv()
     }
 
+    /// T M11.2 — the oplog version projected to a single monotonic
+    /// scalar: the sum of every peer's op counter in the version
+    /// vector.
+    ///
+    /// This is the `generation` anchor for the semantic projection
+    /// (`InstanceMessage::StyleSpans::generation`). A loro counter is
+    /// per-peer non-decreasing and only ever grows as ops accrue, so
+    /// the sum is non-decreasing for the document as a whole — a
+    /// frontend can compare a received `generation` against the one
+    /// it computed locally and discard styling that predates an edit
+    /// it already applied optimistically. It is deliberately *not* a
+    /// causal clock: equal scalars do not imply equal states across
+    /// divergent replicas. It is only ever compared against itself on
+    /// one replica (the frontend's own mirror vs. the instance's
+    /// authoritative doc), where it is monotone, which is all the
+    /// staleness check needs.
+    #[must_use]
+    pub fn version_scalar(&self) -> u64 {
+        self.doc
+            .oplog_vv()
+            .values()
+            .map(|counter| u64::try_from(*counter).unwrap_or(0))
+            .sum()
+    }
+
     /// T M10.2 Day 3: export wire-format bytes for ops added since
     /// `from`.
     ///
@@ -458,6 +483,30 @@ mod tests {
         assert_eq!(s.len_unicode(), 0);
         assert_eq!(s.materialize_string(), "");
         assert_eq!(s.peer_id(), 1);
+    }
+
+    #[test]
+    fn version_scalar_is_monotonic_non_decreasing() {
+        // T M11.2 — the semantic projection's `generation` anchor.
+        // Empty doc is 0; each applied op only grows the scalar; a
+        // no-op delete does not shrink it.
+        let s = CrdtState::new(1).expect("new");
+        assert_eq!(s.version_scalar(), 0, "empty doc has generation 0");
+
+        s.insert(0, "hello").expect("insert");
+        let g1 = s.version_scalar();
+        assert!(g1 > 0, "an applied op must advance the generation");
+
+        s.insert(5, " world").expect("insert");
+        let g2 = s.version_scalar();
+        assert!(g2 >= g1, "generation must not decrease across ops");
+
+        s.delete(0, 1).expect("delete");
+        let g3 = s.version_scalar();
+        assert!(
+            g3 >= g2,
+            "a delete is still an op — the version vector only grows"
+        );
     }
 
     #[test]

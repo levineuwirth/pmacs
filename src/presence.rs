@@ -367,6 +367,7 @@ mod tests {
             NegotiatedCapabilities {
                 multi_frontend: true,
                 crdt_replica: false,
+                semantic_render: false,
             },
             0,
         )
@@ -382,6 +383,7 @@ mod tests {
             NegotiatedCapabilities {
                 multi_frontend: false,
                 crdt_replica: false,
+                semantic_render: false,
             },
             0,
         )
@@ -665,6 +667,7 @@ mod tests {
             NegotiatedCapabilities {
                 multi_frontend: true,
                 crdt_replica: true,
+                semantic_render: false,
             },
             0,
         )
@@ -677,6 +680,7 @@ mod tests {
             NegotiatedCapabilities {
                 multi_frontend: true,
                 crdt_replica: false,
+                semantic_render: false,
             },
             0,
         )

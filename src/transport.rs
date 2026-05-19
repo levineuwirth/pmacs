@@ -199,6 +199,7 @@ mod tests {
                 terminal_kind: Some("xterm-256color".into()),
                 multi_frontend: false,
                 crdt_replica: false,
+                semantic_render: false,
             },
             initial_size: crate::cell::CellSize::new(24, 80),
         };

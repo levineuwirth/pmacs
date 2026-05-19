@@ -230,6 +230,7 @@ pub fn build_default_caps() -> FrontendCapabilities {
         terminal_kind: Some("test".into()),
         multi_frontend: false,
         crdt_replica: false,
+        semantic_render: false,
     }
 }
 

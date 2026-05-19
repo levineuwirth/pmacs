@@ -574,6 +574,9 @@ fn cleanup(socket_path: &Path, lock: LockHandle) {
 /// anything else / absent → default `true`):
 /// - `PMACS_INSTANCE_MULTI_FRONTEND`
 /// - `PMACS_INSTANCE_CRDT_REPLICA`
+/// - `PMACS_INSTANCE_SEMANTIC_RENDER` (T M11.1; default `false`
+///   until the M11.2 projection seam lands, so this env var is the
+///   only way to advertise the bit for negotiation tests)
 ///
 /// Production daemons don't set these; tests do.
 fn instance_capabilities_with_env_override() -> InstanceCapabilities {
@@ -587,6 +590,7 @@ fn instance_capabilities_with_env_override() -> InstanceCapabilities {
     InstanceCapabilities {
         multi_frontend: env_bool("PMACS_INSTANCE_MULTI_FRONTEND", defaults.multi_frontend),
         crdt_replica: env_bool("PMACS_INSTANCE_CRDT_REPLICA", defaults.crdt_replica),
+        semantic_render: env_bool("PMACS_INSTANCE_SEMANTIC_RENDER", defaults.semantic_render),
     }
 }
 
@@ -823,6 +827,13 @@ fn dispatcher_loop(
 ) -> Result<(), DaemonError> {
     // Per-frontend dispatcher state.
     let mut render_states: HashMap<FrontendId, RenderState> = HashMap::new();
+    // T M11.2 — parallel to `render_states`, but for `semantic_render`
+    // sessions: the dispatcher selects the projection *per session*,
+    // so a frontend has exactly one of a `RenderState` (grid) or a
+    // `SemanticRenderState` (layout-local), never both. A grid and a
+    // semantic frontend can attach to the same buffer simultaneously.
+    let mut semantic_states: HashMap<FrontendId, crate::semantic_render::SemanticRenderState> =
+        HashMap::new();
     let mut streams: HashMap<FrontendId, UnixStream> = HashMap::new();
     let mut term_sizes: HashMap<FrontendId, CellSize> = HashMap::new();
     let mut session_registry = SessionRegistry::new();
@@ -841,7 +852,13 @@ fn dispatcher_loop(
         // loop to the last-dispatched value (Q11: tick-driven render
         // doesn't update active_frontend in the user-driving sense).
         let last_dispatched = editor.core.borrow().active_frontend;
-        let attached_fids: Vec<FrontendId> = render_states.keys().copied().collect();
+        // Union of grid + semantic sessions — each fid is in exactly
+        // one of the two maps (projection selected per session).
+        let attached_fids: Vec<FrontendId> = render_states
+            .keys()
+            .chain(semantic_states.keys())
+            .copied()
+            .collect();
 
         // T M10.10 post-audit-round-3 F18 — drain + broadcast pending
         // CRDT ops **before** the render pass. Otherwise frontends
@@ -936,15 +953,25 @@ fn dispatcher_loop(
                 let _ = ensure_active_buffer_crdt_backed(editor, *fid);
             }
 
-            // T M10.9 — gather other-frontend presences for the
-            // overlay paint. Reads `last_broadcast` (updated by the
-            // sweep below); other-frontend snapshots lag by at most
-            // one tick. Imperceptible at frame-rate cadence.
-            let other_presences = session_registry.other_presences_for(*fid);
-            let render_state = render_states
-                .get_mut(fid)
-                .expect("render_state present for attached fid");
-            let messages = render_state.render_frame(editor, &other_presences);
+            // Projection selected per session (T M11.2). A semantic
+            // session produces `StyleSpans` scoped to its declared
+            // viewport and NEVER `CellDelta` / grid `Cursor` (it lays
+            // out locally); it still receives `CursorByte` below
+            // (semantic implies `crdt_replica`) and participates in
+            // presence. A grid session takes the M5.2 cell path.
+            let messages = if let Some(sem) = semantic_states.get_mut(fid) {
+                sem.render_frame(editor)
+            } else {
+                // T M10.9 — gather other-frontend presences for the
+                // overlay paint. Reads `last_broadcast` (updated by
+                // the sweep below); other-frontend snapshots lag by
+                // at most one tick. Imperceptible at frame cadence.
+                let other_presences = session_registry.other_presences_for(*fid);
+                let render_state = render_states
+                    .get_mut(fid)
+                    .expect("render_state present for attached grid fid");
+                render_state.render_frame(editor, &other_presences)
+            };
 
             // T M10.6 per-frontend presence sweep. The snapshot is
             // computed from this frontend's view; the sweep then
@@ -1032,6 +1059,7 @@ fn dispatcher_loop(
                 // Drop the broken connection.
                 streams.remove(fid);
                 render_states.remove(fid);
+                semantic_states.remove(fid);
                 term_sizes.remove(fid);
                 session_registry.unregister_session(*fid);
                 editor.core.borrow_mut().unregister_frontend_view(*fid);
@@ -1069,6 +1097,7 @@ fn dispatcher_loop(
                     event,
                     editor,
                     &mut render_states,
+                    &mut semantic_states,
                     &mut streams,
                     &mut term_sizes,
                     &mut session_registry,
@@ -1082,6 +1111,7 @@ fn dispatcher_loop(
                         event,
                         editor,
                         &mut render_states,
+                        &mut semantic_states,
                         &mut streams,
                         &mut term_sizes,
                         &mut session_registry,
@@ -1106,10 +1136,84 @@ fn dispatcher_loop(
 
 /// Handle one `DispatcherEvent`. Extracted so the dispatcher loop
 /// can both timeout-recv and burst-drain via the same code path.
+/// T M11.2 — extracted from `handle_dispatcher_event`'s
+/// `SessionEstablished` arm (kept the parent under the 100-line
+/// clippy ceiling). Registers the frontend's view, bootstraps the
+/// `BufferMirror` via `BufferSnapshot` when `crdt_replica`, and
+/// selects the per-session projection: a `semantic_render` session
+/// gets a `SemanticRenderState` (no grid `RenderState`, no
+/// initial-full-grid analogue — it emits nothing until the frontend
+/// declares a viewport); every other session keeps the M5.3
+/// force-full-grid grid path.
+#[allow(clippy::too_many_arguments)]
+fn handle_session_established(
+    editor: &mut EditorState,
+    render_states: &mut HashMap<FrontendId, RenderState>,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    streams: &mut HashMap<FrontendId, UnixStream>,
+    term_sizes: &mut HashMap<FrontendId, CellSize>,
+    session_registry: &mut SessionRegistry,
+    frontend_id: FrontendId,
+    session_state: crate::presence::SessionState,
+    initial_size: CellSize,
+    mut write_stream: UnixStream,
+) {
+    // Register the frontend's view (M10.8 Day 3: fresh scratch
+    // buffer view; future milestones may clone LOCAL's view or
+    // take an explicit initial-buffer argument).
+    let scratch_view = build_fresh_frontend_view(editor);
+    editor
+        .core
+        .borrow_mut()
+        .register_frontend_view(frontend_id, scratch_view);
+
+    // T M10.10: bootstrap the new frontend's `BufferMirror` by
+    // sending one `BufferSnapshot` per CRDT-backed buffer. Gated on
+    // the negotiated `crdt_replica` capability — v0.1 / non-replica
+    // frontends never receive the variant (postcard would hard-error
+    // on the unknown variant; see M10.10-FRAMING.md Refinement 3).
+    // Ordering: snapshots are sent BEFORE any CellDelta flows (the
+    // next per-tick render is the first CellDelta source), so the
+    // mirror is initialized before any local-edit path can reference
+    // it.
+    let crdt_replica = session_state.negotiated_capabilities.crdt_replica;
+    // T M11.2 — a semantic session is always a text replica (the
+    // negotiation dependency rule guarantees `semantic_render ⇒
+    // crdt_replica`), so the `BufferSnapshot` bootstrap below still
+    // fires: the semantic frontend holds the rope locally and the
+    // semantic frame ships no text.
+    let semantic_render = session_state.negotiated_capabilities.semantic_render;
+    if crdt_replica {
+        send_buffer_snapshots(editor, &mut write_stream);
+    }
+
+    // Register the session in the registry (presence + capability
+    // filters).
+    session_registry.register_session(frontend_id, session_state);
+
+    if semantic_render {
+        semantic_states.insert(
+            frontend_id,
+            crate::semantic_render::SemanticRenderState::new(frontend_id),
+        );
+    } else {
+        let mut render_state = RenderState::new(initial_size);
+        render_state.force_full_grid_resync();
+        render_states.insert(frontend_id, render_state);
+    }
+    streams.insert(frontend_id, write_stream);
+    term_sizes.insert(frontend_id, initial_size);
+
+    // Stamp active_frontend so the initial render's Lua statusline
+    // code sees the right fid.
+    editor.core.borrow_mut().active_frontend = frontend_id;
+}
+
 fn handle_dispatcher_event(
     event: DispatcherEvent,
     editor: &mut EditorState,
     render_states: &mut HashMap<FrontendId, RenderState>,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
     streams: &mut HashMap<FrontendId, UnixStream>,
     term_sizes: &mut HashMap<FrontendId, CellSize>,
     session_registry: &mut SessionRegistry,
@@ -1119,48 +1223,20 @@ fn handle_dispatcher_event(
             frontend_id,
             session_state,
             initial_size,
-            mut write_stream,
+            write_stream,
         } => {
-            // Register the frontend's view (M10.8 Day 3: fresh
-            // scratch buffer view; future milestones may clone
-            // LOCAL's view or take an explicit initial-buffer
-            // argument).
-            let scratch_view = build_fresh_frontend_view(editor);
-            editor
-                .core
-                .borrow_mut()
-                .register_frontend_view(frontend_id, scratch_view);
-
-            // T M10.10: bootstrap the new frontend's `BufferMirror`
-            // by sending one `BufferSnapshot` per CRDT-backed buffer.
-            // Gated on the negotiated `crdt_replica` capability —
-            // v0.1 / non-replica frontends never receive the variant
-            // (postcard would hard-error on the unknown variant; see
-            // M10.10-FRAMING.md Refinement 3). Ordering: snapshots
-            // are sent BEFORE any CellDelta flows (the next per-tick
-            // render is the first CellDelta source), so the mirror
-            // is initialized before any local-edit path can
-            // reference it.
-            let crdt_replica = session_state.negotiated_capabilities.crdt_replica;
-            if crdt_replica {
-                send_buffer_snapshots(editor, &mut write_stream);
-            }
-
-            // Register the session in the registry (presence +
-            // capability filters).
-            session_registry.register_session(frontend_id, session_state);
-
-            // Allocate per-frontend RenderState; force initial
-            // full-grid sync so the first frame paints everything.
-            let mut render_state = RenderState::new(initial_size);
-            render_state.force_full_grid_resync();
-            render_states.insert(frontend_id, render_state);
-            streams.insert(frontend_id, write_stream);
-            term_sizes.insert(frontend_id, initial_size);
-
-            // Stamp active_frontend so the initial render's Lua
-            // statusline code sees the right fid.
-            editor.core.borrow_mut().active_frontend = frontend_id;
+            handle_session_established(
+                editor,
+                render_states,
+                semantic_states,
+                streams,
+                term_sizes,
+                session_registry,
+                frontend_id,
+                session_state,
+                initial_size,
+                write_stream,
+            );
         }
         DispatcherEvent::FrontendEvent { source, event } => {
             match event {
@@ -1214,21 +1290,51 @@ fn handle_dispatcher_event(
                         handle_remote_crdt_op(editor, source, buffer_id, op);
                     }
                 }
+                FrontendEvent::Viewport {
+                    buffer_id,
+                    visible,
+                    generation,
+                    ..
+                } => {
+                    // T M11.2 — feed the semantic projection the byte
+                    // range the frontend has on screen. Routed by the
+                    // authenticated `source` (the client-supplied
+                    // `frontend_id` field is not trusted, consistent
+                    // with the CrdtOp source-trust rule). A grid
+                    // session never sends this; if one does, there is
+                    // no `SemanticRenderState` to update and it is a
+                    // benign no-op.
+                    if let Some(sem) = semantic_states.get_mut(&source) {
+                        sem.set_viewport(buffer_id, visible, generation);
+                    }
+                }
                 _ => {
                     let term_size = *term_sizes
                         .get(&source)
                         .expect("term_size present for source");
-                    let render_state = render_states
-                        .get_mut(&source)
-                        .expect("render_state present for source");
                     let mut term_size = term_size;
-                    apply_event(editor, event, &mut term_size, render_state);
-                    term_sizes.insert(source, term_size);
+                    if let Some(render_state) = render_states.get_mut(&source) {
+                        apply_event(editor, event, &mut term_size, render_state);
+                        term_sizes.insert(source, term_size);
+                    } else {
+                        // T M11.2 — a semantic (grid-less) session has
+                        // no `RenderState`. Key/Mouse/Paste/Focus
+                        // command handling for semantic frontends is
+                        // M11.5 scope; until then these events are
+                        // dropped rather than panicking the
+                        // dispatcher on the absent grid state.
+                        debug_assert!(
+                            semantic_states.contains_key(&source),
+                            "fid with neither a render_state nor a semantic_state \
+                             sent a frontend event"
+                        );
+                    }
                 }
             }
         }
         DispatcherEvent::SessionDetached { frontend_id } => {
             render_states.remove(&frontend_id);
+            semantic_states.remove(&frontend_id);
             streams.remove(&frontend_id);
             term_sizes.remove(&frontend_id);
             session_registry.unregister_session(frontend_id);
@@ -1757,7 +1863,18 @@ fn apply_event(
         }
         FrontendEvent::Paste { .. }
         | FrontendEvent::FocusGained(_)
-        | FrontendEvent::FocusLost(_) => {
+        | FrontendEvent::FocusLost(_)
+        // T M11.1: the semantic-frontend viewport declaration. Its
+        // consumer is the instance-side projection seam
+        // (`SemanticRenderState`, M11.2), which scopes the
+        // SemanticFrame family to this byte range. M11.1 only
+        // declares the wire shape; no projection seam exists yet and
+        // the instance advertises `semantic_render: false`, so
+        // negotiation rejects any session that would emit this — it
+        // is unreachable in practice. Dropped silently until M11.2
+        // wires the consumer (same "declared, not yet wired" posture
+        // CrdtOp had between M10.5 and M10.8).
+        | FrontendEvent::Viewport { .. } => {
             // v0.1: silently ignored. Future work surfaces these
             // through Lua hooks (paste-text-fn, focus-changed-hook).
         }

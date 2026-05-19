@@ -5,6 +5,140 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Semantic-frontend protocol scaffolding (M11.1)
+
+First milestone of the M11 semantic-frontend arc (see
+`docs/semantic-frontend-protocol.md`). Wire-format scaffolding only —
+no producer or consumer yet; mechanically identical to the M10.5 CRDT
+wire declaration.
+
+- `PROTOCOL_VERSION` bumped 2 → 3; `SUPPORTED_PROTOCOL_VERSIONS` now
+  `[1, 2, 3]`. The slice-membership handshake keeps v0.1/v1.0 binaries
+  connecting to v1.1 binaries unchanged.
+- New `semantic_render` capability bit on `FrontendCapabilities`,
+  `InstanceCapabilities`, and `NegotiatedCapabilities`
+  (`#[serde(default)]`; instance default `false` until the M11.2
+  projection seam lands). `negotiate_capabilities` AND-combines it and
+  enforces the `semantic_render ⇒ crdt_replica` dependency (a semantic
+  session is also a text replica) — rejected as a
+  `CapabilityMismatch`, never silently degraded.
+- `InstanceMessage` gains the `SemanticFrame` family: `StyleSpans`,
+  `Decorations`, `InlineAdornments`, `BlockAdornments`, `FoldState`,
+  `ResourceOffer`; `FrontendEvent` gains `Viewport`. All anchored in
+  byte offsets — the instance never learns a pixel.
+- `PMACS_INSTANCE_SEMANTIC_RENDER` env override mirrors the existing
+  per-capability test overrides.
+
+#### Semantic projection seam (M11.2)
+
+The first real producer. The instance now projects syntax styling to
+`semantic_render` sessions without rasterizing to a cell grid.
+
+- New `SemanticRenderState` (`src/semantic_render.rs`), sibling of
+  `instance_render::RenderState`: reads the same `EditorState` but
+  emits `InstanceMessage::StyleSpans` — tree-sitter spans mapped
+  through the active `Theme`, scoped and clipped to the byte range the
+  frontend declared via `FrontendEvent::Viewport`. Emits nothing until
+  a viewport is declared; suppresses byte-identical frames (true
+  span-granularity diffing is M11.4).
+- `StyleSpans.generation` is anchored to `CrdtState::version_scalar()`
+  — the oplog version vector summed to one monotonic non-decreasing
+  scalar, letting a frontend discard styling that predates an edit it
+  already applied optimistically.
+- Dispatcher selects the projection **per session**: a semantic
+  session gets a `SemanticRenderState` and never `CellDelta`/grid
+  `Cursor` (it lays out locally) but still receives `CursorByte`,
+  `BufferSnapshot`, `CrdtOp`, and presence. A grid and a semantic
+  frontend can attach to the same buffer simultaneously.
+  `FrontendEvent::Viewport` is consumed (routed by authenticated
+  source, like `CrdtOp`).
+- `InstanceCapabilities` default `semantic_render` flipped to
+  `cfg!(feature = "crdt")` — the "M11.2 enables semantic" moment,
+  analogous to the M10.8 Day-4 `multi_frontend`/`crdt_replica` flip.
+
+#### Decorations projection (M11.3)
+
+`SemanticRenderState` now also projects `InstanceMessage::Decorations`
+from the editor state pmacs actually has instance-side:
+
+- **Selection** — per-window (per-frontend) byte-native state, scoped
+  to the session's active window for the declared buffer and clipped
+  to the viewport. `DecorationKind::Selection`.
+- **Diagnostics** — the shared `DiagnosticStore`, keyed by the file
+  URI the LSP glue opened the document under (`lsp::path_to_file_uri`
+  is now `pub(crate)`, byte-identical to the Lua `file_uri_for`).
+  LSP `(line, col)` is converted to a byte range against the buffer
+  source; severity maps to `DiagnosticError`/`Warning`/`Info`/`Hint`.
+- `StyleSpans` and `Decorations` suppress unchanged frames
+  independently — a selection move does not force a styling re-send.
+- `Decorations::SearchMatch`/`SearchMatchActive`/`CurrentLine` are not
+  emitted: pmacs has no instance-side search-hit store, and
+  current-line is a pure cursor derivation the frontend already owns
+  via `CursorByte` (emitting it would breach the contract boundary).
+- `InlineAdornments`/`BlockAdornments`/`FoldState` remain unproduced
+  by design — pmacs has no inlay-hint/blame/lens/fold/diff source
+  yet. The wire variants exist (M11.1); their producers are wired
+  when those features land. Honest stubs, not fabricated data.
+
+#### Segment diffing (M11.4)
+
+Coarse whole-payload re-sends replaced with a `CellDelta`-style diff,
+lifted from positional cells to byte-anchored ranges.
+
+- `StyleSpans`/`Decorations` refined: `{ buffer_id, generation,
+  full: bool, segments: Vec<…Segment> }`. `full = true` is a resync
+  (frontend discards prior state for the buffer); `full = false`
+  ships only the dirty byte regions, each `StyleSegment` /
+  `DecorationSegment` replacing styling within its range. Bytes in no
+  segment keep prior state; an unchanged span overlapping a dirty
+  range is faithfully reconstructed (segments carry *all* current
+  items intersecting the range, not only changed ones). `Decorations`
+  also gains `generation` for parity with `StyleSpans`.
+- The diff: symmetric difference of the previous/current ordered
+  item sets, changed ranges coalesced into maximal disjoint dirty
+  intervals. First frame and any viewport-region change force `full`;
+  an unchanged frame ships nothing. Byte offsets cascade on edits, so
+  an incremental frame after an edit dirties `[edit, viewport_end)` —
+  bounded; no-edit frames (cursor/scroll/selection) stay free.
+- `ResourceOffer` remains an honest stub (no resource-bearing
+  adornment producer exists yet) — same discipline as M11.3.
+
+#### Semantic frontend↔instance glue (M11.5)
+
+The arc's consumer side and end-to-end coverage. pmacs has no GUI
+toolkit, so — per the design note's testability strategy — the
+deliverable is the bounded testable glue, not a GPU renderer.
+
+- New headless `SemanticClient` (`src/semantic_client.rs`, `crdt`-
+  gated): composes the `BufferMirror` rope replica (M10.10) with a
+  tile-based `SemanticModel` that reconstructs styling/decorations
+  from the `full` + dirty-segment deltas (M11.4). Self-contained:
+  no terminal, no pixels. Emits `FrontendEvent::Viewport`; exposes
+  read-back accessors (`text`, `effective_style_at`,
+  `decoration_kinds_at`, tile ranges). The M11.4 contract (segments
+  carry every current item intersecting their range) makes a tile
+  self-contained, so incremental application is a clean per-tile
+  replacement with edge-clipping, not cross-span surgery.
+- `tests/m11_5_semantic_acceptance.rs`: (a) reconstruction-
+  equivalence — an incrementally-driven client is asserted byte-for-
+  byte identical to a fresh full projection across a scripted
+  viewport/edit/selection sequence including a viewport jump (the
+  golden discipline without a snapshot crate); (b) end-to-end —
+  a real daemon routes `StyleSpans`/`Decorations` to a semantic
+  session (after it declares a `Viewport`) and never to a grid
+  session, and `CellDelta` vice versa, validating the M11.2
+  per-session projection through the socket.
+
+This completes the M11 semantic-frontend arc (M11.1–M11.5): wire +
+capability scaffolding, the instance-side projection seam,
+decorations, segment diffing, and the consumer-side glue with
+end-to-end coverage. `InlineAdornments`/`BlockAdornments`/`FoldState`/
+`ResourceOffer` remain honest stubs pending their source features.
+
 ## [1.0.0] --- 2026-05-18
 
 First stable release. Builds on the 0.1.0 preview (M1–M6) with the

@@ -2452,7 +2452,13 @@ fn canonicalize_root_for_scope(root: &Path) -> PathBuf {
     root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
 }
 
-fn path_to_file_uri(path: &std::path::Path) -> String {
+/// `file://` URI encoder. Byte-identical to
+/// `builtin/runtime/lsp.lua`'s `file_uri_for` (same passthrough set),
+/// so a URI built here keys into the same `DiagnosticStore` entry the
+/// Lua LSP glue opened the document under. T M11.3 reuses this from
+/// `crate::semantic_render` for the diagnostics projection — hence
+/// `pub(crate)`.
+pub(crate) fn path_to_file_uri(path: &std::path::Path) -> String {
     // Minimal file:// URI encoder: percent-encode anything outside
     // the LSP-friendly set. Adequate for v0.1 (paths in a typical
     // project root); a fuller URL crate would be overkill here.

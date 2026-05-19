@@ -152,6 +152,7 @@ fn build_default_caps() -> FrontendCapabilities {
         terminal_kind: Some("perf-gate".into()),
         multi_frontend: false,
         crdt_replica: false,
+        semantic_render: false,
     }
 }
 
