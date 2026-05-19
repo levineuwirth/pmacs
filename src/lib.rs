@@ -63,6 +63,7 @@ pub mod help;
 pub mod highlight;
 pub mod hook;
 pub mod hover;
+pub mod inlay_hint;
 pub mod instance_buffer;
 pub mod instance_render;
 pub mod key;

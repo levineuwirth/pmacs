@@ -3746,6 +3746,64 @@ fn m4_15_workspace_edit_resource_ops_apply_in_order() {
     );
 }
 
+/// T M4.5 — inlay hints through the Lua surface. Drives
+/// `pmacs.lsp.request_inlay_hint` against the fake and asserts the
+/// typed `pmacs.inlay_hint` store parsed both label shapes (a
+/// string-label type hint and a label-parts parameter hint), the
+/// kinds, and `paddingRight`.
+#[test]
+fn m4_16_lua_surface_drives_inlay_hints() {
+    let mut s = pmacs::editor::EditorState::new();
+    spawn_lsp_and_init(&mut s, None);
+
+    let uri = "file:///tmp/m4_16_inlay.rs";
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.did_open(_G._lsp, '{uri}', 1, 'let x = 1\\nfn f() {{}}\\n')
+             pmacs.lsp.request_inlay_hint(_G._lsp, '{uri}', 0, 0, 5, 0)"
+        ))
+        .exec()
+        .expect("kick off inlay hint request");
+
+    assert!(
+        pump_lua_flag(
+            &mut s,
+            &format!("#pmacs.inlay_hint.hints(_G._lsp, '{uri}') > 0"),
+            5,
+        ),
+        "inlay hint response did not land in the store"
+    );
+
+    let (count, l0, c0, label0, kind0, label1, kind1, pad1): (
+        usize,
+        u32,
+        u32,
+        String,
+        String,
+        String,
+        String,
+        bool,
+    ) = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "local h = pmacs.inlay_hint.hints(_G._lsp, '{uri}')
+             return #h, h[1].line, h[1].col, h[1].label, h[1].kind,
+                    h[2].label, h[2].kind, h[2].padding_right"
+        ))
+        .eval()
+        .expect("read inlay hints back");
+    assert_eq!(count, 2);
+    assert_eq!((l0, c0), (0, 9));
+    assert_eq!(label0, ": i32");
+    assert_eq!(kind0, "type");
+    // Label parts were concatenated.
+    assert_eq!(label1, "count:");
+    assert_eq!(kind1, "parameter");
+    assert!(pad1, "second hint requested paddingRight");
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default
