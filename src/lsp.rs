@@ -666,6 +666,16 @@ pub struct LspClient {
     /// "response for unknown request id" `ProtocolError`. Mirrors
     /// `mcp.rs`'s `cancelled_rids`.
     cancelled_rids: HashSet<u64>,
+    /// Notifications issued before the server reached `Initialized`.
+    /// The LSP lifecycle requires `initialize` / `initialized` to
+    /// complete before any other notification; a strict server
+    /// (clangd) silently discards a pre-init `textDocument/didOpen`,
+    /// after which every later request fails with
+    /// `-32602 trying to get AST for non-added document`. These are
+    /// held in issue order while `Starting` / `Initializing` and
+    /// replayed the instant the server reaches `Initialized` (right
+    /// after the `initialized` notification is sent).
+    deferred_notifications: Vec<(String, Value)>,
     /// T M4.5 Option B: encoding the server negotiated for `Position`
     /// `character` counts. Set from the `initialize` response;
     /// defaults to the LSP spec default (UTF-16) until then.
@@ -684,6 +694,7 @@ impl LspClient {
             attempt: 0,
             next_restart_at: None,
             cancelled_rids: HashSet::new(),
+            deferred_notifications: Vec::new(),
             position_encoding: PositionEncoding::default(),
         }
     }
@@ -1193,6 +1204,11 @@ impl LspManager {
         // space; stale cancelled ids can never collide, so reset to
         // keep the set from growing across restarts.
         client.cancelled_rids.clear();
+        // Drop notifications buffered against the dead generation:
+        // they reference its (now-gone) document state, and the
+        // editor's reattach path issues fresh `did_open`s after the
+        // new generation finishes initializing.
+        client.deferred_notifications.clear();
         // T M4.7: drop any pending response routes for this server.
         // Their request ids belong to the previous generation; the
         // new server starts request id numbering fresh.
@@ -1286,9 +1302,7 @@ impl LspManager {
             .clients
             .get_mut(&id)
             .ok_or_else(|| format!("unknown server: {id}"))?;
-        // Notifications during init are allowed (the spec actually
-        // *requires* `initialized` during the initializing phase),
-        // but disallowed after Stopped/Crashed since stdin is gone.
+        // Disallowed after Stopped/Crashed since stdin is gone.
         if matches!(
             client.state,
             LspClientState::Stopped { .. } | LspClientState::Crashed { .. }
@@ -1298,9 +1312,45 @@ impl LspManager {
                 state_label(&client.state)
             ));
         }
+        // Before the `initialize` / `initialized` handshake completes
+        // the only notification the spec permits is `initialized`
+        // itself — and that one is sent directly by `handle_response`,
+        // never through here. Everything else issued this early
+        // (`textDocument/didOpen` from the editor's attach hook is the
+        // common one) is buffered and replayed in order once the
+        // server reaches `Initialized`; sending it now would be
+        // discarded by a strict server, breaking every later request
+        // with "non-added document".
+        if matches!(
+            client.state,
+            LspClientState::Starting | LspClientState::Initializing { .. }
+        ) {
+            client.deferred_notifications.push((method, params));
+            return Ok(());
+        }
         let body = make_notification(&method, params);
         send_frame_to(&self.supervisor, client, &body)?;
         Ok(())
+    }
+
+    /// Replay, in issue order, the notifications buffered by
+    /// [`Self::send_notification`] while `sid` was still initializing.
+    /// Called once, from the `initialize`-response handler, right
+    /// after the `initialized` notification is sent.
+    fn flush_deferred_notifications(&mut self, sid: LspServerId) {
+        let deferred = self
+            .clients
+            .get_mut(&sid)
+            .map(|c| std::mem::take(&mut c.deferred_notifications))
+            .unwrap_or_default();
+        if !deferred.is_empty()
+            && let Some(client) = self.clients.get(&sid)
+        {
+            for (method, params) in deferred {
+                let body = make_notification(&method, params);
+                let _ = send_frame_to(&self.supervisor, client, &body);
+            }
+        }
     }
 
     /// The position encoding `sid` negotiated, or the spec default
@@ -2326,6 +2376,10 @@ impl LspManager {
                     initialized_at: now,
                 };
             }
+            // The handshake is complete: replay every notification
+            // buffered while the server was still initializing, after
+            // the `initialized` notification that went out above.
+            self.flush_deferred_notifications(sid);
             self.push_event(sid, now, LspEventKind::Initialized { capabilities: caps });
             return;
         }
