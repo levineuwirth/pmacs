@@ -329,6 +329,39 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            // T M4.5 Location-shaped nav. Distinct line per method so
+            // a test can confirm each routes into its own kind slot.
+            (
+                m @ ("textDocument/references"
+                | "textDocument/declaration"
+                | "textDocument/typeDefinition"
+                | "textDocument/implementation"),
+                Some(idv),
+            ) => {
+                let uri = params
+                    .get("textDocument")
+                    .and_then(|t| t.get("uri"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let line = match m {
+                    "textDocument/references" => 11,
+                    "textDocument/declaration" => 21,
+                    "textDocument/typeDefinition" => 31,
+                    _ => 41, // implementation
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": [{
+                        "uri": uri,
+                        "range": {
+                            "start": { "line": line, "character": 2 },
+                            "end":   { "line": line, "character": 6 }
+                        }
+                    }]
+                });
+                write_frame(&mut stdout, &resp);
+            }
             ("textDocument/formatting", Some(idv)) => {
                 // Synthetic two-edit reply: trim leading whitespace on
                 // line 0 and append a semicolon at line 3, col 7.

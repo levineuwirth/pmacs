@@ -255,6 +255,10 @@ pmacs.lsp.request_hover = wrap_request(pmacs.lsp._request_hover_raw)
 pmacs.lsp.request_signature_help = wrap_request(pmacs.lsp._request_signature_help_raw)
 pmacs.lsp.request_definition = wrap_request(pmacs.lsp._request_definition_raw)
 pmacs.lsp.request_formatting = wrap_request(pmacs.lsp._request_formatting_raw)
+pmacs.lsp.request_references = wrap_request(pmacs.lsp._request_references_raw)
+pmacs.lsp.request_declaration = wrap_request(pmacs.lsp._request_declaration_raw)
+pmacs.lsp.request_type_definition = wrap_request(pmacs.lsp._request_type_definition_raw)
+pmacs.lsp.request_implementation = wrap_request(pmacs.lsp._request_implementation_raw)
 
 -- Render an `:await()` failure into a modeline-friendly reason.
 -- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
@@ -381,6 +385,38 @@ function pmacs.lsp.go_to_definition()
   end)
 end
 
+function pmacs.lsp.find_references()
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
+  pmacs.references.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_references(rec.server, rec.uri, line, col):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local locs = pmacs.references.locations(rec.server, rec.uri)
+    if not locs or #locs == 0 then
+      pmacs.editor.set_status("LSP: no references found")
+      return
+    end
+    -- v1 surfaces a modeline summary (count + first hit); a
+    -- references list buffer is future UX work, like the hover panel.
+    local first = locs[1]
+    pmacs.editor.set_status(string.format(
+      "LSP: %d reference%s; first at %s:%d:%d",
+      #locs, (#locs == 1 and "" or "s"),
+      first.uri, first.line + 1, first.col + 1))
+  end)
+end
+
 function pmacs.lsp.format_buffer()
   local rec = attached_for_active()
   if not rec then
@@ -489,11 +525,18 @@ pmacs.command.define {
   fn = pmacs.lsp.signature_help_at_cursor,
 }
 
+pmacs.command.define {
+  name = "lsp.find-references",
+  description = "Find references to the symbol under the cursor (LSP).",
+  fn = pmacs.lsp.find_references,
+}
+
 -- Default chords. M-. follows the cross-editor convention for
 -- go-to-definition; the others sit on `C-c` to keep printable letters
 -- self-inserting. The user can override or unbind any of these from
 -- init.lua.
 pmacs.keymap.bind { scope = "global", sequence = "M-.",   command = "lsp.go-to-definition" }
+pmacs.keymap.bind { scope = "global", sequence = "M-?",   command = "lsp.find-references" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }
