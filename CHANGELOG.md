@@ -107,6 +107,38 @@ lifted from positional cells to byte-anchored ranges.
 - `ResourceOffer` remains an honest stub (no resource-bearing
   adornment producer exists yet) — same discipline as M11.3.
 
+#### Semantic frontend↔instance glue (M11.5)
+
+The arc's consumer side and end-to-end coverage. pmacs has no GUI
+toolkit, so — per the design note's testability strategy — the
+deliverable is the bounded testable glue, not a GPU renderer.
+
+- New headless `SemanticClient` (`src/semantic_client.rs`, `crdt`-
+  gated): composes the `BufferMirror` rope replica (M10.10) with a
+  tile-based `SemanticModel` that reconstructs styling/decorations
+  from the `full` + dirty-segment deltas (M11.4). Self-contained:
+  no terminal, no pixels. Emits `FrontendEvent::Viewport`; exposes
+  read-back accessors (`text`, `effective_style_at`,
+  `decoration_kinds_at`, tile ranges). The M11.4 contract (segments
+  carry every current item intersecting their range) makes a tile
+  self-contained, so incremental application is a clean per-tile
+  replacement with edge-clipping, not cross-span surgery.
+- `tests/m11_5_semantic_acceptance.rs`: (a) reconstruction-
+  equivalence — an incrementally-driven client is asserted byte-for-
+  byte identical to a fresh full projection across a scripted
+  viewport/edit/selection sequence including a viewport jump (the
+  golden discipline without a snapshot crate); (b) end-to-end —
+  a real daemon routes `StyleSpans`/`Decorations` to a semantic
+  session (after it declares a `Viewport`) and never to a grid
+  session, and `CellDelta` vice versa, validating the M11.2
+  per-session projection through the socket.
+
+This completes the M11 semantic-frontend arc (M11.1–M11.5): wire +
+capability scaffolding, the instance-side projection seam,
+decorations, segment diffing, and the consumer-side glue with
+end-to-end coverage. `InlineAdornments`/`BlockAdornments`/`FoldState`/
+`ResourceOffer` remain honest stubs pending their source features.
+
 ## [1.0.0] --- 2026-05-18
 
 First stable release. Builds on the 0.1.0 preview (M1–M6) with the
