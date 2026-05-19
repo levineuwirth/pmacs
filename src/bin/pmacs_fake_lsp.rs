@@ -159,6 +159,29 @@ fn main() {
                 });
                 write_frame(&mut stdout, &req);
             }
+            // T M4.5 `inlayrefresh` / `semantictokensrefresh`: right
+            // after initialize, signal that cached inlay hints /
+            // semantic tokens are stale via the matching server→client
+            // refresh request. The client must answer (null) and
+            // re-pull the corresponding `textDocument/*`.
+            ("initialized", _) if mode == "inlayrefresh" => {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9200,
+                    "method": "workspace/inlayHint/refresh",
+                    "params": serde_json::Value::Null
+                });
+                write_frame(&mut stdout, &req);
+            }
+            ("initialized", _) if mode == "semantictokensrefresh" => {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9201,
+                    "method": "workspace/semanticTokens/refresh",
+                    "params": serde_json::Value::Null
+                });
+                write_frame(&mut stdout, &req);
+            }
             ("initialized", _) => {}
             ("shutdown", Some(idv)) => {
                 let resp = serde_json::json!({

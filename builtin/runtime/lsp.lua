@@ -16,8 +16,10 @@
 -- `workspace/applyEdit` (L3), ordered resource-op edits
 -- (create/rename/delete file) with buffer-registry reconciliation
 -- (L4), inlay hints, and semantic tokens (each data + modeline;
--- wiring them into rendering is a separate rendering milestone).
--- File-watch capability registration is a later layer.
+-- wiring them into rendering is a separate rendering milestone),
+-- incl. the server→client `workspace/inlayHint/refresh` and
+-- `workspace/semanticTokens/refresh` requests. File-watch
+-- capability registration is a later layer.
 
 pmacs.lsp = pmacs.lsp or {}
 pmacs.lsp.config = pmacs.lsp.config or {}
@@ -431,22 +433,42 @@ local function apply_workspace_edit(ops)
   return edit_total, files, res_ops
 end
 
--- T M4.5 L3 — server→client `workspace/applyEdit` pump.
+-- Re-pull a per-`(server, uri)` store for every buffer attached to
+-- `sid`. Fire-and-forget: the response absorbs into its store via the
+-- request's route, exactly like the explicit command path — no await
+-- needed. `request_fn(sid, uri)` issues the re-pull.
+local function repull_for_attachments(sid, request_fn)
+  for _, rec in pairs(attachments) do
+    if rec.server == sid and rec.uri then
+      pcall(request_fn, sid, rec.uri)
+    end
+  end
+end
+
+-- T M4.5 — server→client request pump.
 --
--- After a code action's `executeCommand`, servers (rust-analyzer,
--- gopls, …) deliver the actual change as a `workspace/applyEdit`
--- *request* — surfaced by the manager as a `request` event on the
--- server's event stream (the same "expose the request to the
--- consumer" path as `workspace/configuration`, minus the built-in
--- answer). We drain attachment servers' events each async tick, apply
--- any applyEdit through the shared applier, and reply `{ applied }`.
+-- Some server→client *requests* are surfaced by the manager as a
+-- `request` event on the server's event stream (the same "expose the
+-- request to the consumer" path as `workspace/configuration`, minus a
+-- built-in answer). Each async tick we drain attachment servers'
+-- events and handle:
+--
+--   * `workspace/applyEdit` (L3) — apply the edit through the shared
+--     applier, reply `{ applied }`. After a code action's
+--     `executeCommand`, servers (rust-analyzer, gopls, …) deliver the
+--     actual change this way.
+--   * `workspace/inlayHint/refresh` /
+--     `workspace/semanticTokens/refresh` — the server signals its
+--     cached hints/tokens are stale; reply `null` and re-pull that
+--     family for every attached document so the matching store
+--     (`pmacs.inlay_hint` / `pmacs.semantic_tokens`) stays fresh.
 --
 -- Only servers in `attachments` are drained, so a test (or package)
 -- that owns its own directly-spawned server and reads its events
 -- itself is unaffected. Server ids are snapshotted before the loop
 -- because `apply_workspace_edit` → `find_or_open` can attach a new
 -- buffer mid-iteration (mutating `attachments`).
-local function handle_apply_edit_requests()
+local function handle_server_requests()
   local sids, seen = {}, {}
   for _, rec in pairs(attachments) do
     local sid = rec.server
@@ -475,6 +497,18 @@ local function handle_apply_edit_requests()
           local result = { applied = applied }
           if not applied then result.failureReason = tostring(reason) end
           pcall(pmacs.lsp.send_response, sid, ev.request_id, result)
+        elseif ev.kind == "request"
+            and ev.method == "workspace/inlayHint/refresh" then
+          -- Result is `null` on success per the LSP spec; then
+          -- re-pull so the store reflects the server's new state.
+          pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
+          repull_for_attachments(sid, function(s, uri)
+            pmacs.lsp.request_inlay_hint(s, uri, 0, 0, 0xFFFFF, 0)
+          end)
+        elseif ev.kind == "request"
+            and ev.method == "workspace/semanticTokens/refresh" then
+          pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
+          repull_for_attachments(sid, pmacs.lsp.request_semantic_tokens)
         end
       end
     end
@@ -485,7 +519,7 @@ if pmacs._async and pmacs._async.tick then
   local _prior_async_tick = pmacs._async.tick
   pmacs._async.tick = function(...)
     local ret = _prior_async_tick(...)
-    pcall(handle_apply_edit_requests)
+    pcall(handle_server_requests)
     return ret
   end
 end
