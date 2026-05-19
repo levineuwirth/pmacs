@@ -1071,7 +1071,12 @@ fn lsp_position_from(range: Option<&serde_json::Value>) -> (u32, u32) {
     })
 }
 
-fn uri_to_path(uri: &str) -> Option<PathBuf> {
+/// Decode a `file://` URI into a filesystem path (authority dropped,
+/// percent-decoded). `None` for non-`file://` URIs. T M4.5 L1: the
+/// reverse of [`crate::lsp::path_to_file_uri`], reused by the Lua
+/// surface (`pmacs.lsp.path_for_uri`) to turn server-returned
+/// locations into openable files.
+pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // Drop the optional authority component (`//host/path`) by
     // skipping to the first '/' if the rest doesn't start with one.

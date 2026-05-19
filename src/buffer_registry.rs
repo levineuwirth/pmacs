@@ -160,6 +160,19 @@ impl BufferRegistry {
             .find(|id| self.buffers.get(id).is_some_and(|b| b.name() == name))
     }
 
+    /// First buffer bound to `path` on disk, in insertion order.
+    /// T M4.5 L1: matches on the per-buffer `file_path` (set at
+    /// load), so cross-file navigation reuses an already-open file
+    /// instead of creating a duplicate buffer.
+    #[must_use]
+    pub fn find_by_path(&self, path: &std::path::Path) -> Option<BufferId> {
+        self.order.iter().copied().find(|id| {
+            self.buffers
+                .get(id)
+                .is_some_and(|b| b.file_path() == Some(path))
+        })
+    }
+
     /// IDs in insertion order. Stable: preserved across non-removing
     /// operations.
     #[must_use]

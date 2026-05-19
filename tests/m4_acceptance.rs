@@ -3304,6 +3304,126 @@ fn m4_12_lua_surface_drives_definition_and_formatting() {
     assert_eq!(fmt_first_text, "");
 }
 
+/// T M4.5 L1 — cross-file go-to-definition end to end through the
+/// default bundle. The `defenv` fake returns a definition whose URI
+/// names a *different* file; `pmacs.lsp.go_to_definition` must decode
+/// it (`path_for_uri`), record the jump origin (`push_jump`),
+/// open-or-reuse that buffer (`find_or_open` — SP-4 Gap A), and
+/// reposition the cursor. `M-,` (`jump_back`) then returns to the
+/// originating file at the originating position.
+#[test]
+fn m4_12_cross_file_go_to_definition_and_jump_back() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    let b_path = dir.path().join("b.rs");
+    std::fs::write(&a_path, b"fn main() { helper(); }\n").expect("write a");
+    // line 0,1 padding so the fake's line-2 target is in range.
+    std::fs::write(&b_path, b"// b\n// b\nfn helper() {}\n").expect("write b");
+    let a_disp = a_path.display().to_string();
+    let b_disp = b_path.display().to_string();
+    let b_uri = format!("file://{b_disp}");
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+
+    // Point the default `rust` server at the fake, in `defenv` mode,
+    // with the cross-file target URI threaded through the spawn env
+    // (exercises the new `ensure_server` env passthrough too).
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{
+                 PMACS_FAKE_LSP_MODE = 'defenv',
+                 PMACS_FAKE_LSP_DEF_URI = '{b_uri}',
+               }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+
+    // Open the origin file: path-binds the buffer and fires
+    // `buffer.after-load`, which attaches & spawns the fake.
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    // Pump until the attached server is initialized.
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    // Sanity: we start on a.rs.
+    let start_path: Option<String> = state
+        .lua_host
+        .lua()
+        .load("return pmacs.editor.file_path()")
+        .eval()
+        .unwrap();
+    assert_eq!(start_path.as_deref(), Some(a_disp.as_str()));
+
+    // Invoke the command; the coroutine awaits the response.
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.go_to_definition()")
+        .exec()
+        .expect("invoke go-to-definition");
+
+    // Completion signal: the active buffer becomes b.rs.
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            &format!("pmacs.editor.file_path() == '{b_disp}'"),
+            5,
+        ),
+        "cross-file jump never landed on b.rs"
+    );
+
+    // Cursor sits on the fake's line-2 target in the new buffer.
+    let line: i64 = state
+        .lua_host
+        .lua()
+        .load("return pmacs.editor.cursor_line()")
+        .eval()
+        .unwrap();
+    assert_eq!(line, 2, "cursor should be on b.rs line 2 (0-based)");
+
+    // M-, returns to the origin file.
+    let jumped: bool = state
+        .lua_host
+        .lua()
+        .load("return pmacs.editor.jump_back()")
+        .eval()
+        .unwrap();
+    assert!(jumped, "jump_back should report a successful pop");
+    let back: Option<String> = state
+        .lua_host
+        .lua()
+        .load("return pmacs.editor.file_path()")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        back.as_deref(),
+        Some(a_disp.as_str()),
+        "jump_back must return to the originating file"
+    );
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default

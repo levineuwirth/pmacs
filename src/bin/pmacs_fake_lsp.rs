@@ -313,6 +313,19 @@ fn main() {
                         serde_json::Value::from(format!("pos:{ch}")),
                         serde_json::json!({ "start": pos, "end": pos }),
                     )
+                } else if mode == "defenv" {
+                    // T M4.5 L1 cross-file: point the definition at a
+                    // *different* file URI supplied via env, so the
+                    // client must decode the URI, open-or-reuse that
+                    // buffer, and reposition (SP-4 Gap A path).
+                    let target = std::env::var("PMACS_FAKE_LSP_DEF_URI").unwrap_or_default();
+                    (
+                        serde_json::Value::from(target),
+                        serde_json::json!({
+                            "start": { "line": 2, "character": 0 },
+                            "end":   { "line": 2, "character": 3 }
+                        }),
+                    )
                 } else {
                     (
                         uri,

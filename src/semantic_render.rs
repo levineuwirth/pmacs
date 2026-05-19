@@ -270,8 +270,8 @@ impl SemanticRenderState {
         // `path_to_file_uri` reproduces that exact key (the Lua
         // `file_uri_for` is byte-identical). A buffer with no file
         // path, or no diagnostics under its URI, contributes nothing.
-        if let Some(path) = core.file_path.as_ref() {
-            let uri = crate::lsp::path_to_file_uri(path);
+        if let Some(path) = core.active_buffer_path() {
+            let uri = crate::lsp::path_to_file_uri(&path);
             let diags = {
                 let store = state.lsp_manager.borrow().diag_store();
                 let guard = store.lock().expect("diag store mutex poisoned");
@@ -621,7 +621,7 @@ mod tests {
                 bytes: b"abc\nde",
             })
             .expect("seed buffer text");
-        core.file_path = Some(std::path::PathBuf::from("/tmp/m114.rs"));
+        core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/m114.rs")));
         drop(core);
         let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
         let store = state.lsp_manager.borrow().diag_store();

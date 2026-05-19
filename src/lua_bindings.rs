@@ -2326,8 +2326,47 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     let mut core = core.borrow_mut();
                     core.switch_active_buffer(id)
                         .map_err(mlua::Error::external)?;
-                    core.file_path = Some(path_buf);
-                    core.file_meta = Some(meta);
+                    core.set_buffer_path(id, Some(path_buf));
+                    core.set_buffer_meta(id, Some(meta));
+                }
+                run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
+                Ok(BufferIdLua(id))
+            })?,
+        )?;
+    }
+
+    {
+        // T M4.5 L1: find-or-open. If a buffer is already bound to
+        // `path`, switch to it (preserving unsaved edits — no
+        // reload); otherwise behave like `from_file`. The dedup is
+        // what makes cross-file navigation reuse an open file
+        // instead of spawning a duplicate buffer (SP-4 Gap A).
+        let reg = registry.clone();
+        buffer.set(
+            "find_or_open",
+            lua.create_function(move |lua, path: String| -> mlua::Result<BufferIdLua> {
+                let path_buf = std::path::PathBuf::from(&path);
+                if let Some(existing) = reg.borrow().find_by_path(&path_buf) {
+                    if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                        core.borrow_mut()
+                            .switch_active_buffer(existing)
+                            .map_err(mlua::Error::external)?;
+                    }
+                    return Ok(BufferIdLua(existing));
+                }
+                let (bytes, meta) = crate::file_io::load_file(&path_buf).map_err(|source| {
+                    mlua::Error::external(std::io::Error::new(
+                        source.kind(),
+                        format!("failed to load {path}: {source}"),
+                    ))
+                })?;
+                let id = reg.borrow_mut().create_from_bytes(path.clone(), &bytes);
+                if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                    let mut core = core.borrow_mut();
+                    core.switch_active_buffer(id)
+                        .map_err(mlua::Error::external)?;
+                    core.set_buffer_path(id, Some(path_buf));
+                    core.set_buffer_meta(id, Some(meta));
                 }
                 run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
                 Ok(BufferIdLua(id))
@@ -6988,6 +7027,17 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     let lsp_mod = lua.create_table()?;
 
     {
+        // T M4.5 L1: decode a server-returned `file://` URI to a
+        // filesystem path so cross-file navigation can open it.
+        lsp_mod.set(
+            "path_for_uri",
+            lua.create_function(|_, uri: String| {
+                Ok(crate::project_index::uri_to_path(&uri).map(|p| p.display().to_string()))
+            })?,
+        )?;
+    }
+
+    {
         let m = manager.clone();
         lsp_mod.set(
             "spawn",
@@ -10465,6 +10515,25 @@ fn install_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<
             })?,
         )?;
     }
+    // T M4.5 L1 — jump ring. Cross-file navigation records its
+    // origin via `push_jump`; `jump_back` (M-,) unwinds it.
+    {
+        let cc = core.clone();
+        editor.set(
+            "push_jump",
+            lua.create_function(move |_, ()| {
+                cc.borrow_mut().push_jump();
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let cc = core.clone();
+        editor.set(
+            "jump_back",
+            lua.create_function(move |_, ()| Ok(cc.borrow_mut().jump_back()))?,
+        )?;
+    }
     Ok(())
 }
 
@@ -10587,7 +10656,7 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             "file_path",
             lua.create_function(move |_, ()| {
                 let c = cc.borrow();
-                Ok(c.file_path.as_ref().map(|p| p.display().to_string()))
+                Ok(c.active_buffer_path().map(|p| p.display().to_string()))
             })?,
         )?;
     }
