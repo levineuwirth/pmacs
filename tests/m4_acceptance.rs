@@ -1190,6 +1190,70 @@ fn m4_5_basedpyright_initializes_and_negotiates_encoding() {
     let _ = mgr.borrow_mut().stop(sid);
 }
 
+/// Shared body for the PATH-gated real-server smoke tests: spawn,
+/// reach `Initialized`, and assert the server negotiated a
+/// `positionEncoding` pmacs can actually encode (absent ⇒ pmacs
+/// defaults to UTF-16, also fine; a third encoding must never slip
+/// through). Mirrors the basedpyright test for clangd / gopls —
+/// strict-by-default servers that exercise the Option B path against
+/// real implementations, not just the fake.
+fn assert_lsp_initializes_and_negotiates(
+    label: &str,
+    language_id: &str,
+    command: &str,
+    args: &[&str],
+) {
+    let (sup, mgr) = make_lsp_test_manager();
+    let mut spec = LspServerSpec::new(label, language_id, command);
+    spec.args = args.iter().map(|s| (*s).to_string()).collect();
+    spec.restart = LspRestartPolicy::Never;
+    let sid = mgr.borrow_mut().spawn(spec).expect("spawn server");
+    let evs = drain_lsp_until(&sup, &mgr, sid, Duration::from_secs(20), |evs| {
+        evs.iter()
+            .any(|e| matches!(e.kind, LspEventKind::Initialized { .. }))
+    });
+    let caps = evs
+        .iter()
+        .find_map(|e| match &e.kind {
+            LspEventKind::Initialized { capabilities } => Some(capabilities.clone()),
+            _ => None,
+        })
+        .expect("must observe Initialized event");
+    assert!(caps.is_object(), "capabilities should be a JSON object");
+    let enc = caps.get("positionEncoding").and_then(|v| v.as_str());
+    assert!(
+        matches!(enc, None | Some("utf-8" | "utf-16")),
+        "{label} negotiated an encoding pmacs cannot handle: {enc:?}"
+    );
+    let state = mgr.borrow().state(sid).cloned();
+    assert!(matches!(state, Some(LspClientState::Initialized { .. })));
+    let _ = mgr.borrow_mut().stop(sid);
+}
+
+/// C/C++ via clangd (PATH-gated). clangd defaults UTF-16 and also
+/// supports its own `offsetEncoding` extension; either way the
+/// negotiated encoding must be one pmacs encodes.
+#[test]
+fn m4_5_clangd_initializes_and_negotiates_encoding() {
+    let Ok(_) = which_binary("clangd") else {
+        eprintln!("clangd not on PATH; skipping");
+        return;
+    };
+    assert_lsp_initializes_and_negotiates("clangd", "cpp", "clangd", &["--background-index"]);
+}
+
+/// Go via gopls (PATH-gated). gopls implements LSP 3.17
+/// position-encoding, defaults UTF-16, and pulls config via
+/// `workspace/configuration` — exercises the full stack end to end.
+#[test]
+fn m4_5_gopls_initializes_and_negotiates_encoding() {
+    let Ok(_) = which_binary("gopls") else {
+        eprintln!("gopls not on PATH; skipping");
+        return;
+    };
+    assert_lsp_initializes_and_negotiates("gopls", "go", "gopls", &[]);
+}
+
 /// Helper: scan PATH for a binary by name. Returns the absolute
 /// path if found.
 fn which_binary(name: &str) -> std::io::Result<std::path::PathBuf> {
