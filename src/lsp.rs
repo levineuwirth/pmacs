@@ -477,6 +477,141 @@ pub fn encode_frame(body: &[u8]) -> Vec<u8> {
 // LspClient
 // ---------------------------------------------------------------------------
 
+/// Negotiated LSP position encoding (LSP 3.17 `general.positionEncoding`).
+/// The `character` field of every `Position` is counted in these
+/// units. pmacs works in UTF-8 byte offsets everywhere internally
+/// (rope, cursor, stores, Lua); this drives the one conversion at the
+/// request/response boundary so every consumer stays byte-uniform.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum PositionEncoding {
+    /// `character` counts UTF-8 code units (== bytes). Conversion is
+    /// identity — pmacs's native representation. Advertised first so
+    /// servers that support it (rust-analyzer, clangd) pick the
+    /// zero-cost path.
+    Utf8,
+    /// `character` counts UTF-16 code units. The LSP spec default
+    /// when a server does not negotiate (gopls / pyright / older
+    /// servers). Requires per-line code-unit walking.
+    #[default]
+    Utf16,
+}
+
+impl PositionEncoding {
+    /// Map a negotiated `general.positionEncoding` string to the
+    /// enum. Anything other than `"utf-8"` (including `"utf-16"`,
+    /// `"utf-32"` which we do not advertise, or absent/garbage)
+    /// resolves to the spec default, UTF-16.
+    fn from_negotiated(s: Option<&str>) -> Self {
+        match s {
+            Some("utf-8") => Self::Utf8,
+            _ => Self::Utf16,
+        }
+    }
+}
+
+/// The 0-based `line`-th `\n`-delimited slice of `text`, or `None`
+/// when `line` is past EOF. The distinction matters: a genuinely
+/// empty line (`Some("")`) is converted to byte 0, but a line we do
+/// not have (`None` — e.g. a cross-file definition into a document
+/// we never cached) must be left **unconverted** rather than
+/// collapsed to 0, so its coordinates are not corrupted. A trailing
+/// `\r` (CRLF) stays in the slice; both the pmacs byte offset and the
+/// server `character` are line-relative so the `\r` cancels out.
+fn nth_line(text: &str, line: u32) -> Option<&str> {
+    text.split('\n').nth(line as usize)
+}
+
+/// Snap `byte` down to the nearest char boundary of `line` (defensive
+/// against a server, in UTF-8 mode, reporting a mid-codepoint offset).
+fn floor_boundary(line: &str, mut byte: usize) -> usize {
+    if byte >= line.len() {
+        return line.len();
+    }
+    while byte > 0 && !line.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte
+}
+
+/// Inbound: server `character` (in `enc` units, line-relative) → the
+/// pmacs byte offset within `line`. Clamps past-EOL to `line.len()`.
+fn char_to_byte(line: &str, character: u32, enc: PositionEncoding) -> usize {
+    match enc {
+        PositionEncoding::Utf8 => floor_boundary(line, character as usize),
+        PositionEncoding::Utf16 => {
+            let mut units = 0u32;
+            for (byte_idx, ch) in line.char_indices() {
+                let cu = ch.len_utf16() as u32;
+                // If the target unit falls *within* this char (incl. a
+                // server pointing mid-surrogate-pair), clamp to the
+                // char's start rather than overshooting to the next.
+                if character < units + cu {
+                    return byte_idx;
+                }
+                units += cu;
+            }
+            line.len()
+        }
+    }
+}
+
+/// Outbound: pmacs byte offset within `line` → server `character` in
+/// `enc` units. `byte_col` is clamped to the line and snapped to a
+/// char boundary first.
+fn byte_to_char(line: &str, byte_col: usize, enc: PositionEncoding) -> u32 {
+    let byte_col = floor_boundary(line, byte_col);
+    match enc {
+        PositionEncoding::Utf8 => byte_col as u32,
+        PositionEncoding::Utf16 => {
+            let mut units = 0u32;
+            for (byte_idx, ch) in line.char_indices() {
+                if byte_idx >= byte_col {
+                    break;
+                }
+                units += ch.len_utf16() as u32;
+            }
+            units
+        }
+    }
+}
+
+/// Recursively rewrite every LSP `Position` (`{ line, character }`)
+/// in `value` so `character` becomes a pmacs byte offset instead of
+/// a count in `enc` units. In LSP the `(line, character)` key pair
+/// uniquely identifies a `Position` — no other structure carries
+/// both — so a structural walk is exact: `Range`s, `Location`s,
+/// `TextEdit`s, diagnostics, hover ranges all nest `Position`s and
+/// are converted uniformly. UTF-8 is a no-op fast path (the offsets
+/// already match), so the recursion is skipped entirely there.
+fn rewrite_positions_to_bytes(value: &mut Value, doc: &str, enc: PositionEncoding) {
+    if enc == PositionEncoding::Utf8 {
+        return;
+    }
+    match value {
+        Value::Object(map) => {
+            if let (Some(line), Some(character)) = (
+                map.get("line").and_then(Value::as_u64),
+                map.get("character").and_then(Value::as_u64),
+            ) && let Some(line_text) = nth_line(doc, line as u32)
+            {
+                // Line absent from the cached doc (cross-file /
+                // not-yet-opened) ⇒ leave the position untouched.
+                let byte = char_to_byte(line_text, character as u32, enc);
+                map.insert("character".into(), Value::from(byte));
+            }
+            for v in map.values_mut() {
+                rewrite_positions_to_bytes(v, doc, enc);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                rewrite_positions_to_bytes(v, doc, enc);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// One managed LSP server: process + JSON-RPC framing + state
 /// machine. Owned by [`LspManager`]; the supervisor handles process
 /// I/O underneath.
@@ -503,6 +638,10 @@ pub struct LspClient {
     /// "response for unknown request id" `ProtocolError`. Mirrors
     /// `mcp.rs`'s `cancelled_rids`.
     cancelled_rids: HashSet<u64>,
+    /// T M4.5 Option B: encoding the server negotiated for `Position`
+    /// `character` counts. Set from the `initialize` response;
+    /// defaults to the LSP spec default (UTF-16) until then.
+    position_encoding: PositionEncoding,
 }
 
 impl LspClient {
@@ -517,6 +656,7 @@ impl LspClient {
             attempt: 0,
             next_restart_at: None,
             cancelled_rids: HashSet::new(),
+            position_encoding: PositionEncoding::default(),
         }
     }
 
@@ -591,6 +731,12 @@ pub struct LspManager {
     /// for a server (restart / exit / forget) so a coroutine never
     /// parks forever on a server that went away.
     pending_external: HashMap<(LspServerId, u64), PendingExternal>,
+    /// T M4.5 Option B: latest full text per `(server, uri)`,
+    /// mirrored from the `did_open` / `did_change_full` we send. The
+    /// only thing that lets the position codec convert between the
+    /// server's `character` units and pmacs byte offsets per line.
+    /// Dropped on `did_close` and at every server-teardown site.
+    documents: HashMap<(LspServerId, String), String>,
     /// Async runtime handle. The bridge between the supervisor
     /// reader-thread response delivery and Lua-side `Handle:await()`
     /// resumption; mirrors [`crate::mcp::McpManager`]'s `runtime`.
@@ -631,6 +777,20 @@ enum ResponseRoute {
     /// Absorb response into [`crate::formatting::FormattingStore`] at
     /// `(server, uri)`.
     Formatting { uri: String },
+}
+
+impl ResponseRoute {
+    /// The document URI this route targets — the key for the position
+    /// codec's document/encoding lookup.
+    fn uri(&self) -> &str {
+        match self {
+            ResponseRoute::Completion { uri }
+            | ResponseRoute::Hover { uri }
+            | ResponseRoute::Signature { uri }
+            | ResponseRoute::Definition { uri }
+            | ResponseRoute::Formatting { uri } => uri,
+        }
+    }
 }
 
 /// One Lua-visible awaiter bound to an in-flight LSP request. Mirrors
@@ -690,6 +850,7 @@ impl LspManager {
             process_to_server: HashMap::new(),
             pending: HashMap::new(),
             pending_external: HashMap::new(),
+            documents: HashMap::new(),
             request_timeout: Duration::from_secs(10),
             restart_backoff: Duration::from_millis(500),
             diag_store: crate::diag::make_shared_store(),
@@ -883,6 +1044,9 @@ impl LspManager {
         // never get a response (new process, fresh id space) — wake
         // them cancelled before the restart.
         self.drain_external_cancelled(id);
+        // T M4.5 Option B: drop cached docs; the fresh server gets a
+        // new `did_open` from the editor's reattach path.
+        self.documents.retain(|(s, _), _| *s != id);
         client.state = LspClientState::Starting;
         let proc_spec = client.spec.to_process_spec();
         let pid = self.supervisor.borrow_mut().spawn(proc_spec)?;
@@ -980,6 +1144,48 @@ impl LspManager {
         let body = make_notification(&method, params);
         send_frame_to(&self.supervisor, client, &body)?;
         Ok(())
+    }
+
+    /// The position encoding `sid` negotiated, or the spec default
+    /// (UTF-16) if the server is unknown / not yet initialized.
+    fn position_encoding(&self, sid: LspServerId) -> PositionEncoding {
+        self.clients
+            .get(&sid)
+            .map_or(PositionEncoding::default(), |c| c.position_encoding)
+    }
+
+    /// Outbound: build the LSP `Position` for `(line, byte_col)`,
+    /// converting the pmacs byte offset into the server's negotiated
+    /// `character` units. If the document is not cached (no `did_open`
+    /// seen yet) the byte offset is sent as-is — correct for ASCII /
+    /// the UTF-8 fast path and the same behaviour pmacs had before
+    /// Option B, so the fallback never regresses the common case.
+    fn outbound_position(&self, sid: LspServerId, uri: &str, line: u32, byte_col: u32) -> Value {
+        let enc = self.position_encoding(sid);
+        let character = match self
+            .documents
+            .get(&(sid, uri.to_owned()))
+            .and_then(|doc| nth_line(doc, line))
+        {
+            Some(line_text) => byte_to_char(line_text, byte_col as usize, enc),
+            // No cached doc, or cursor line not in it ⇒ send the byte
+            // offset as-is (correct for ASCII / the UTF-8 path and the
+            // pre-Option-B behaviour).
+            None => byte_col,
+        };
+        json!({ "line": line, "character": character })
+    }
+
+    /// Inbound: clone `value` and rewrite every nested `Position` so
+    /// `character` is a pmacs byte offset. No cached document (or the
+    /// UTF-8 fast path) ⇒ returned unchanged.
+    fn inbound_converted(&self, sid: LspServerId, uri: &str, value: &Value) -> Value {
+        let enc = self.position_encoding(sid);
+        let mut owned = value.clone();
+        if let Some(doc) = self.documents.get(&(sid, uri.to_owned())) {
+            rewrite_positions_to_bytes(&mut owned, doc, enc);
+        }
+        owned
     }
 
     /// Register an async-runtime awaiter for the just-sent request
@@ -1154,7 +1360,7 @@ impl LspManager {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
-            "position": { "line": line, "character": col }
+            "position": self.outbound_position(sid, &uri, line, col)
         });
         let req_id = self.send_request(sid, "textDocument/completion", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/completion", &uri);
@@ -1175,7 +1381,7 @@ impl LspManager {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
-            "position": { "line": line, "character": col }
+            "position": self.outbound_position(sid, &uri, line, col)
         });
         let req_id = self.send_request(sid, "textDocument/hover", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/hover", &uri);
@@ -1196,7 +1402,7 @@ impl LspManager {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
-            "position": { "line": line, "character": col }
+            "position": self.outbound_position(sid, &uri, line, col)
         });
         let req_id = self.send_request(sid, "textDocument/signatureHelp", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/signatureHelp", &uri);
@@ -1218,7 +1424,7 @@ impl LspManager {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
-            "position": { "line": line, "character": col }
+            "position": self.outbound_position(sid, &uri, line, col)
         });
         let req_id = self.send_request(sid, "textDocument/definition", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/definition", &uri);
@@ -1486,6 +1692,7 @@ impl LspManager {
         // cancelled now — not at the eventual restart/forget, which
         // may never come under `LspRestartPolicy::Never`.
         self.drain_external_cancelled(sid);
+        self.documents.retain(|(s, _), _| *s != sid);
         if was_shutdown {
             self.push_event(sid, at, LspEventKind::Stopped);
         } else {
@@ -1654,7 +1861,16 @@ impl LspManager {
             if let Some(client) = self.clients.get(&sid) {
                 let _ = send_frame_to(&self.supervisor, client, &body);
             }
+            // T M4.5 Option B: honour the server's negotiated
+            // `general.positionEncoding`. Absent ⇒ LSP spec default
+            // (UTF-16). We advertised `["utf-8","utf-16"]`, so a
+            // 3.17 server echoes its pick here; pre-3.17 servers omit
+            // it and are correctly treated as UTF-16.
+            let negotiated = PositionEncoding::from_negotiated(
+                caps.get("positionEncoding").and_then(Value::as_str),
+            );
             if let Some(client) = self.clients.get_mut(&sid) {
+                client.position_encoding = negotiated;
                 client.state = LspClientState::Initialized {
                     capabilities: caps.clone(),
                     server_info,
@@ -1725,6 +1941,12 @@ impl LspManager {
     }
 
     fn absorb_routed_response(&self, sid: LspServerId, route: &ResponseRoute, result: &Value) {
+        // T M4.5 Option B: normalise every `Position` in the response
+        // to pmacs byte offsets *before* the typed store parses it, so
+        // the completion popup, diagnostics gutter, and lsp.lua all
+        // stay byte-uniform with zero per-consumer changes.
+        let converted = self.inbound_converted(sid, route.uri(), result);
+        let result = &converted;
         let server_key = sid.raw().to_string();
         match route {
             ResponseRoute::Completion { uri } => {
@@ -1813,7 +2035,7 @@ impl LspManager {
         // store from inside the same tick (e.g. a render observing
         // a fresh notification) sees the new diagnostics.
         if method == "textDocument/publishDiagnostics" {
-            self.absorb_publish_diagnostics(&params);
+            self.absorb_publish_diagnostics(sid, &params);
         }
         self.push_event(sid, now, LspEventKind::Notification { method, params });
     }
@@ -1822,11 +2044,15 @@ impl LspManager {
     /// update [`Self::diag_store`]. Malformed payloads (missing uri
     /// or non-array diagnostics) are ignored --- they're a
     /// server-side bug, not a fatal protocol error.
-    fn absorb_publish_diagnostics(&self, params: &Value) {
-        let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+    fn absorb_publish_diagnostics(&self, sid: LspServerId, params: &Value) {
+        let Some(uri) = params.get("uri").and_then(Value::as_str).map(str::to_owned) else {
             return;
         };
-        let Some(arr) = params.get("diagnostics").and_then(Value::as_array) else {
+        // T M4.5 Option B: byte-normalise diagnostic ranges before the
+        // store parses them, so the gutter renders correct spans on
+        // non-ASCII lines.
+        let converted = self.inbound_converted(sid, &uri, params);
+        let Some(arr) = converted.get("diagnostics").and_then(Value::as_array) else {
             return;
         };
         let parsed: Vec<crate::diag::Diagnostic> = arr
@@ -1834,7 +2060,7 @@ impl LspManager {
             .filter_map(crate::diag::Diagnostic::from_lsp_value)
             .collect();
         let mut guard = self.diag_store.lock().expect("diag store mutex poisoned");
-        guard.set(uri.to_owned(), parsed);
+        guard.set(uri, parsed);
     }
 
     fn maybe_restart(&mut self, sid: LspServerId) {
@@ -1951,6 +2177,7 @@ impl LspManager {
         // terminal transition; this catches any awaiter registered
         // between exit and forget. Idempotent.
         self.drain_external_cancelled(sid);
+        self.documents.retain(|(s, _), _| *s != sid);
         self.status_tracker.forget(sid);
         // T M4.9: drop the project scoping so the next
         // ensure_server_for_project call spawns a fresh server.
@@ -1971,12 +2198,18 @@ impl LspManager {
             .get(&sid)
             .map(|c| c.spec.language_id.clone())
             .ok_or_else(|| format!("unknown server: {sid}"))?;
+        let uri = uri.into();
+        let text = text.into();
+        // T M4.5 Option B: mirror the document so the position codec
+        // can convert per-line between the server's `character` units
+        // and pmacs byte offsets.
+        self.documents.insert((sid, uri.clone()), text.clone());
         let params = json!({
             "textDocument": {
-                "uri": uri.into(),
+                "uri": uri,
                 "languageId": language_id,
                 "version": version,
-                "text": text.into(),
+                "text": text,
             }
         });
         self.send_notification(sid, "textDocument/didOpen", params)
@@ -1992,13 +2225,16 @@ impl LspManager {
         version: i64,
         text: impl Into<String>,
     ) -> Result<(), String> {
+        let uri = uri.into();
+        let text = text.into();
+        self.documents.insert((sid, uri.clone()), text.clone());
         let params = json!({
             "textDocument": {
-                "uri": uri.into(),
+                "uri": uri,
                 "version": version,
             },
             "contentChanges": [{
-                "text": text.into(),
+                "text": text,
             }],
         });
         self.send_notification(sid, "textDocument/didChange", params)
@@ -2006,8 +2242,10 @@ impl LspManager {
 
     /// Convenience: send `textDocument/didClose` to `sid`.
     pub fn did_close(&mut self, sid: LspServerId, uri: impl Into<String>) -> Result<(), String> {
+        let uri = uri.into();
+        self.documents.remove(&(sid, uri.clone()));
         let params = json!({
-            "textDocument": { "uri": uri.into() },
+            "textDocument": { "uri": uri },
         });
         self.send_notification(sid, "textDocument/didClose", params)
     }
@@ -2110,6 +2348,12 @@ fn send_frame_to(
 /// hover, signature help, definition).
 fn default_capabilities() -> Value {
     json!({
+        // T M4.5 Option B: LSP 3.17 position-encoding negotiation.
+        // UTF-8 first (identity for pmacs's byte offsets); UTF-16 is
+        // the mandatory fallback every server understands.
+        "general": {
+            "positionEncodings": ["utf-8", "utf-16"],
+        },
         "workspace": {
             "applyEdit": false,
             "configuration": false,
@@ -2398,5 +2642,105 @@ mod tests {
             LspRestartPolicy::OnCrash,
             &signaled
         ));
+    }
+
+    // ---- T M4.5 Option B: position codec -------------------------------
+
+    #[test]
+    fn position_encoding_negotiation_defaults_to_utf16() {
+        assert_eq!(
+            PositionEncoding::from_negotiated(Some("utf-8")),
+            PositionEncoding::Utf8
+        );
+        assert_eq!(
+            PositionEncoding::from_negotiated(Some("utf-16")),
+            PositionEncoding::Utf16
+        );
+        // Absent or unrecognised ⇒ LSP spec default (UTF-16).
+        assert_eq!(
+            PositionEncoding::from_negotiated(None),
+            PositionEncoding::Utf16
+        );
+        assert_eq!(
+            PositionEncoding::from_negotiated(Some("utf-32")),
+            PositionEncoding::Utf16
+        );
+    }
+
+    #[test]
+    fn codec_utf8_is_identity_on_char_boundaries() {
+        // "é=x": é = 2 bytes (U+00E9), '=' , 'x'  → len 4.
+        let line = "é=x";
+        for &b in &[0usize, 2, 3, 4] {
+            assert_eq!(byte_to_char(line, b, PositionEncoding::Utf8), b as u32);
+            assert_eq!(char_to_byte(line, b as u32, PositionEncoding::Utf8), b);
+        }
+        // A mid-codepoint byte snaps down to the char boundary.
+        assert_eq!(byte_to_char(line, 1, PositionEncoding::Utf8), 0);
+        assert_eq!(char_to_byte(line, 1, PositionEncoding::Utf8), 0);
+    }
+
+    #[test]
+    fn codec_utf16_round_trips_through_non_ascii() {
+        // "é=x": UTF-16 units é=0 '='=1 'x'=2 ; bytes é=0..2 '='=2 'x'=3.
+        let line = "é=x";
+        // byte → utf16
+        assert_eq!(byte_to_char(line, 0, PositionEncoding::Utf16), 0);
+        assert_eq!(byte_to_char(line, 2, PositionEncoding::Utf16), 1); // '='
+        assert_eq!(byte_to_char(line, 3, PositionEncoding::Utf16), 2); // 'x'
+        // utf16 → byte
+        assert_eq!(char_to_byte(line, 0, PositionEncoding::Utf16), 0);
+        assert_eq!(char_to_byte(line, 1, PositionEncoding::Utf16), 2);
+        assert_eq!(char_to_byte(line, 2, PositionEncoding::Utf16), 3);
+        // Round-trip both directions over every boundary.
+        for &byte in &[0usize, 2, 3] {
+            let c = byte_to_char(line, byte, PositionEncoding::Utf16);
+            assert_eq!(char_to_byte(line, c, PositionEncoding::Utf16), byte);
+        }
+    }
+
+    #[test]
+    fn codec_utf16_handles_astral_surrogate_pair() {
+        // "🦀x": U+1F980 is 4 UTF-8 bytes and a UTF-16 surrogate pair
+        // (2 code units). 'x' is byte 4, UTF-16 unit 2.
+        let line = "🦀x";
+        assert_eq!(byte_to_char(line, 4, PositionEncoding::Utf16), 2);
+        assert_eq!(char_to_byte(line, 2, PositionEncoding::Utf16), 4);
+        // A server pointing inside the surrogate pair (unit 1) clamps
+        // to the start of the crab rather than splitting the codepoint.
+        assert_eq!(char_to_byte(line, 1, PositionEncoding::Utf16), 0);
+    }
+
+    #[test]
+    fn nth_line_picks_the_right_slice() {
+        let doc = "abc\nré\n\nx";
+        assert_eq!(nth_line(doc, 0), Some("abc"));
+        assert_eq!(nth_line(doc, 1), Some("ré"));
+        assert_eq!(nth_line(doc, 2), Some("")); // genuinely empty line
+        assert_eq!(nth_line(doc, 3), Some("x"));
+        assert_eq!(nth_line(doc, 9), None); // past EOF ⇒ leave unconverted
+    }
+
+    #[test]
+    fn rewrite_positions_recurses_ranges_and_skips_utf8() {
+        let doc = "é=x"; // line 0
+        // A definition-shaped Location[]: Range start/end are Positions.
+        let mut v = json!([{
+            "uri": "file:///x",
+            "range": {
+                "start": { "line": 0, "character": 1 },  // utf16 '=' → byte 2
+                "end":   { "line": 0, "character": 2 }    // utf16 'x' → byte 3
+            }
+        }]);
+        rewrite_positions_to_bytes(&mut v, doc, PositionEncoding::Utf16);
+        let r = &v[0]["range"];
+        assert_eq!(r["start"]["character"], json!(2));
+        assert_eq!(r["end"]["character"], json!(3));
+        assert_eq!(r["start"]["line"], json!(0)); // line untouched
+
+        // UTF-8 fast path: structurally identical input is unchanged.
+        let mut v2 = json!({ "line": 0, "character": 1 });
+        rewrite_positions_to_bytes(&mut v2, doc, PositionEncoding::Utf8);
+        assert_eq!(v2["character"], json!(1));
     }
 }

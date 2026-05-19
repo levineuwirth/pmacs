@@ -3724,3 +3724,71 @@ fn m4_5_await_resolves_same_frame_as_response_absorbed() {
          means tick_async ran before tick_lsp — the reorder regressed"
     );
 }
+
+/// T M4.5 Option B end-to-end: with a server that negotiates UTF-16,
+/// positions cross the wire in UTF-16 units but every pmacs consumer
+/// sees byte offsets. Fixture line 0 = `é=x` (é is 2 UTF-8 bytes / 1
+/// UTF-16 unit): byte offsets é=0 '='=2 'x'=3; UTF-16 units é=0 '='=1
+/// 'x'=2. The `posecho` fake advertises `positionEncoding:"utf-16"`,
+/// stamps the request's received `character` into the result `uri`
+/// (`pos:N`), and returns a fixed range at UTF-16 char 1.
+///
+/// The fake echoes the received position as the range, so the
+/// stored byte offset round-trips iff encode∘decode is correct, and
+/// stamps the wire `character` into the result `uri` as `pos:N`.
+/// Two independent, discriminating assertions:
+///  * outbound: cursor byte 3 ('x') must encode to UTF-16 char 2 on
+///    the wire → `uri == "pos:2"` (identity bug → `pos:3`);
+///  * inbound: the echoed UTF-16 char 2 must decode back to byte 3 →
+///    `col == 3` (identity bug → 2, since char 2 would be stored
+///    as-is). Together they prove encode and decode are correct
+///    inverses, not both no-ops.
+#[test]
+fn m4_5_position_encoding_utf16_round_trips_non_ascii() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, Some("posecho"));
+    state
+        .lua_host
+        .lua()
+        .load(
+            "local uri='file:///t.rs'
+             pmacs.lsp.did_open(_G._lsp, uri, 1, 'é=x')
+             _G._done=false
+             pmacs.async(function()
+               pmacs.lsp.request_definition(_G._lsp, uri, 0, 3):await()
+               local locs = pmacs.definition.locations(_G._lsp, uri)
+               _G._n = locs and #locs or 0
+               if _G._n > 0 then
+                 _G._line = locs[1].line
+                 _G._col  = locs[1].col
+                 _G._uri  = locs[1].uri
+               end
+               _G._done=true
+             end)",
+        )
+        .exec()
+        .expect("dispatch definition coroutine");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "definition await never completed"
+    );
+    let (n, line, col, uri): (i64, i64, i64, String) = state
+        .lua_host
+        .lua()
+        .load("return _G._n, (_G._line or -1), (_G._col or -1), (_G._uri or '')")
+        .eval()
+        .expect("read definition result");
+    assert_eq!(n, 1, "exactly one definition location");
+    assert_eq!(line, 0, "line is encoding-invariant");
+    assert_eq!(
+        uri, "pos:2",
+        "outbound: cursor byte 3 ('x', after the 2-byte é) must encode \
+         to UTF-16 char 2 on the wire; identity would send pos:3"
+    );
+    assert_eq!(
+        col, 3,
+        "inbound: the echoed UTF-16 char 2 must decode back to byte 3; \
+         identity would store 2"
+    );
+}

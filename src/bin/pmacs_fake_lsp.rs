@@ -93,7 +93,7 @@ fn main() {
         }
         match (method.as_str(), id) {
             ("initialize", Some(idv)) => {
-                let resp = serde_json::json!({
+                let mut resp = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": idv,
                     "result": {
@@ -108,6 +108,13 @@ fn main() {
                         "serverInfo": { "name": "pmacs-fake-lsp", "version": "0.1.0" }
                     }
                 });
+                // T M4.5 Option B: `posecho` negotiates UTF-16 and
+                // echoes request positions back (see definition arm)
+                // so a test can prove the byte↔UTF-16 round-trip.
+                if mode == "posecho" {
+                    resp["result"]["capabilities"]["positionEncoding"] =
+                        serde_json::Value::from("utf-16");
+                }
                 write_frame(&mut stdout, &resp);
                 if mode == "crash" {
                     crashed_after_init = true;
@@ -253,16 +260,40 @@ fn main() {
                     .and_then(|t| t.get("uri"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                // `posecho`: echo the request's own position back as
+                // the range (so the stored byte offset round-trips iff
+                // encode∘decode is correct) AND stamp the *wire*
+                // `character` the client sent into the result `uri` as
+                // `pos:N` (so the test can see the intermediate UTF-16
+                // value and prove the outbound encode was non-identity;
+                // the `uri` string is not a Position so the client's
+                // inbound rewrite leaves it untouched).
+                let (uri, range) = if mode == "posecho" {
+                    let pos = params
+                        .get("position")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let ch = pos
+                        .get("character")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    (
+                        serde_json::Value::from(format!("pos:{ch}")),
+                        serde_json::json!({ "start": pos, "end": pos }),
+                    )
+                } else {
+                    (
+                        uri,
+                        serde_json::json!({
+                            "start": { "line": 7, "character": 4 },
+                            "end":   { "line": 7, "character": 9 }
+                        }),
+                    )
+                };
                 let resp = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": idv,
-                    "result": [{
-                        "uri": uri,
-                        "range": {
-                            "start": { "line": 7, "character": 4 },
-                            "end":   { "line": 7, "character": 9 }
-                        }
-                    }]
+                    "result": [{ "uri": uri, "range": range }]
                 });
                 write_frame(&mut stdout, &resp);
             }
