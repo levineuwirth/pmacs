@@ -7505,6 +7505,22 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_prepare_rename_raw",
+            lua.create_function(
+                move |_, (id, uri, line, col): (LspServerIdLua, String, u32, u32)| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_prepare_rename(id.0, uri, line, col)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "_request_code_action_raw",
             lua.create_function(
                 move |_,
@@ -7881,6 +7897,7 @@ pub fn make_lsp_manager(
     install_document_highlight(lua, &manager)?;
     install_formatting(lua, &manager)?;
     install_rename(lua, &manager)?;
+    install_prepare_rename(lua, &manager)?;
     install_code_action(lua, &manager)?;
     install_inlay_hint(lua, &manager)?;
     install_semantic_tokens(lua, &manager)?;
@@ -8686,6 +8703,7 @@ use crate::formatting::{FormattingKey, FormattingResponse, TextEdit};
 use crate::hover::{Hover, HoverKey};
 use crate::inlay_hint::{InlayHint as LspInlayHint, InlayHintKey};
 use crate::locations::{LocationKind, LocationsKey};
+use crate::prepare_rename::PrepareRenameKey;
 use crate::rename::{RenameKey, WorkspaceEditResponse, WorkspaceOp};
 use crate::semantic_tokens::{
     SemanticToken as LspSemanticToken, SemanticTokenKey, SemanticTokensLegend,
@@ -9493,6 +9511,64 @@ pub fn install_rename(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()>
     }
 
     pmacs.set("rename", m)?;
+    Ok(())
+}
+
+/// Install `pmacs.prepare_rename.*` (T M4.5). `result(sid, uri)`
+/// returns `{ allowed, placeholder?, start_line?, start_col?,
+/// end_line?, end_col? }` for the last `textDocument/prepareRename`,
+/// or nil if none landed; `clear(sid, uri)` drops the entry. The
+/// rename flow reads `allowed` to gate the prompt and `placeholder`
+/// to pre-fill it.
+pub fn install_prepare_rename(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    let m = lua.create_table()?;
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "result",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().prepare_rename_store();
+                let guard = store_handle
+                    .lock()
+                    .expect("prepare rename store mutex poisoned");
+                let key = PrepareRenameKey::new(id.0.raw().to_string(), uri);
+                let Some(r) = guard.get(&key) else {
+                    return Ok(Value::Nil);
+                };
+                let t = lua.create_table_with_capacity(0, 6)?;
+                t.set("allowed", r.allowed)?;
+                if let Some(p) = r.placeholder.as_deref() {
+                    t.set("placeholder", p)?;
+                }
+                if let Some((sl, sc, el, ec)) = r.range {
+                    t.set("start_line", sl)?;
+                    t.set("start_col", sc)?;
+                    t.set("end_line", el)?;
+                    t.set("end_col", ec)?;
+                }
+                Ok(Value::Table(t))
+            })?,
+        )?;
+    }
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "clear",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().prepare_rename_store();
+                let mut guard = store_handle
+                    .lock()
+                    .expect("prepare rename store mutex poisoned");
+                guard.clear(&PrepareRenameKey::new(id.0.raw().to_string(), uri));
+                Ok(())
+            })?,
+        )?;
+    }
+
+    pmacs.set("prepare_rename", m)?;
     Ok(())
 }
 

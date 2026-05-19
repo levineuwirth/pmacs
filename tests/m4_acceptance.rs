@@ -4087,6 +4087,195 @@ fn m4_21_semantic_tokens_full_then_delta() {
     assert_eq!(third_delta, vec![3, 0, 9, 1, 0]);
 }
 
+/// T M4.5 — rename with `textDocument/prepareRename`. The `prepare`
+/// fake advertises `renameProvider.prepareProvider` and answers
+/// prepareRename with a `{ range, placeholder }`. `pmacs.lsp.rename`
+/// must do the prepare round-trip *before* the prompt opens (so the
+/// minibuffer isn't active synchronously), pre-fill the placeholder,
+/// then apply the rename on accept.
+#[test]
+fn m4_22_rename_prepare_gates_and_prefills() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"abcfooxyz\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'prepare' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.rename()")
+        .exec()
+        .expect("invoke rename");
+
+    // With prepareRename, the prompt is NOT open synchronously — it
+    // opens only after the async prepare round-trip resolves.
+    assert!(
+        !state
+            .lua_host
+            .lua()
+            .load("return pmacs.minibuffer.is_active()")
+            .eval::<bool>()
+            .unwrap(),
+        "prompt must wait for the prepareRename round-trip"
+    );
+    assert!(
+        pump_lua_flag(&mut state, "pmacs.minibuffer.is_active()", 5),
+        "prepareRename allowed → prompt should have opened"
+    );
+
+    // Placeholder pre-filled from the server's prepare response.
+    let initial: String = state
+        .lua_host
+        .lua()
+        .load("return pmacs.minibuffer.contents()")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        initial, "foo",
+        "prompt should be pre-filled with the placeholder"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.minibuffer.set_contents('BAR'); pmacs.minibuffer.accept()")
+        .exec()
+        .expect("accept rename");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() local b = pmacs.window.buffer() \
+               return b ~= nil and b:slice(0, b:len()):find('BAR', 1, true) ~= nil end)()",
+            5,
+        ),
+        "rename never applied after prepare"
+    );
+    let a_text: String = state
+        .lua_host
+        .lua()
+        .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+        .eval()
+        .unwrap();
+    assert_eq!(a_text, "abcBARxyz\n");
+}
+
+/// T M4.5 — prepareRename refusal. The `preprefuse` fake answers
+/// prepareRename with `null`; `pmacs.lsp.rename` must abort without
+/// ever opening a prompt and leave the buffer untouched.
+#[test]
+fn m4_23_rename_prepare_refusal_aborts() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"abcfooxyz\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'preprefuse' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.rename()")
+        .exec()
+        .expect("invoke rename");
+
+    // Wait until the refusal actually landed (allowed == false), so
+    // we're asserting after the abort path ran, not before.
+    let refused = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local pr = pmacs.prepare_rename.result(sid, 'file://{a_disp}') \
+           return pr ~= nil and pr.allowed == false \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &refused, 5),
+        "prepareRename refusal never landed"
+    );
+
+    assert!(
+        !state
+            .lua_host
+            .lua()
+            .load("return pmacs.minibuffer.is_active()")
+            .eval::<bool>()
+            .unwrap(),
+        "a refused prepareRename must not open the prompt"
+    );
+    let a_text: String = state
+        .lua_host
+        .lua()
+        .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+        .eval()
+        .unwrap();
+    assert_eq!(a_text, "abcfooxyz\n", "buffer must be untouched");
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default

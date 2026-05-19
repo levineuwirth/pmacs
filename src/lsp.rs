@@ -770,6 +770,10 @@ pub struct LspManager {
     /// T M4.5 L2 rename store. Populated when a `textDocument/rename`
     /// response (a `WorkspaceEdit`) lands, keyed by the origin uri.
     rename_store: crate::rename::SharedRenameStore,
+    /// T M4.5 prepareRename store. Populated when a
+    /// `textDocument/prepareRename` response lands, keyed by `(server,
+    /// uri)`.
+    prepare_rename_store: crate::prepare_rename::SharedPrepareRenameStore,
     /// T M4.5 L3 code-action store. Populated when a
     /// `textDocument/codeAction` response lands, keyed by `(server,
     /// uri)`.
@@ -842,6 +846,10 @@ enum ResponseRoute {
     /// Absorb a `textDocument/rename` `WorkspaceEdit` into
     /// [`crate::rename::RenameStore`] at `(server, origin uri)`.
     Rename { uri: String },
+    /// Absorb a `textDocument/prepareRename` response into
+    /// [`crate::prepare_rename::PrepareRenameStore`] at `(server,
+    /// uri)`.
+    PrepareRename { uri: String },
     /// Absorb a `textDocument/codeAction` response into
     /// [`crate::code_action::CodeActionStore`] at `(server, uri)`.
     CodeAction { uri: String },
@@ -898,6 +906,7 @@ impl ResponseRoute {
             | ResponseRoute::Definition { uri }
             | ResponseRoute::Formatting { uri }
             | ResponseRoute::Rename { uri }
+            | ResponseRoute::PrepareRename { uri }
             | ResponseRoute::CodeAction { uri }
             | ResponseRoute::InlayHint { uri }
             | ResponseRoute::SemanticTokens { uri }
@@ -984,6 +993,7 @@ impl LspManager {
             document_highlight_store: crate::document_highlight::make_shared_store(),
             formatting_store: crate::formatting::make_shared_store(),
             rename_store: crate::rename::make_shared_store(),
+            prepare_rename_store: crate::prepare_rename::make_shared_store(),
             code_action_store: crate::code_action::make_shared_store(),
             inlay_hint_store: crate::inlay_hint::make_shared_store(),
             semantic_token_store: crate::semantic_tokens::make_shared_store(),
@@ -1057,6 +1067,12 @@ impl LspManager {
     #[must_use]
     pub fn rename_store(&self) -> crate::rename::SharedRenameStore {
         self.rename_store.clone()
+    }
+
+    /// Shared prepareRename store (T M4.5).
+    #[must_use]
+    pub fn prepare_rename_store(&self) -> crate::prepare_rename::SharedPrepareRenameStore {
+        self.prepare_rename_store.clone()
     }
 
     /// Shared code-action store (T M4.5 L3).
@@ -1861,6 +1877,30 @@ impl LspManager {
         Ok(job_id)
     }
 
+    /// Send `textDocument/prepareRename` for the symbol at `(line,
+    /// col)` in `uri`. The response (renameable? + extent +
+    /// placeholder) is absorbed into the prepareRename store at
+    /// `(sid, uri)`. Returns the async-runtime [`JobId`] the response
+    /// will settle.
+    pub fn request_prepare_rename(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "position": { "line": line, "character": col },
+        });
+        let req_id = self.send_request(sid, "textDocument/prepareRename", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/prepareRename", &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::PrepareRename { uri });
+        Ok(job_id)
+    }
+
     /// Send `textDocument/codeAction` over `[start, end]` in `uri`.
     /// `context.diagnostics` is passed through verbatim (callers feed
     /// the overlapping diagnostics so quick-fixes resolve); an empty
@@ -2608,6 +2648,15 @@ impl LspManager {
                     .expect("rename store mutex poisoned");
                 guard.set(key, resp);
             }
+            ResponseRoute::PrepareRename { uri } => {
+                let resp = crate::prepare_rename::PrepareRenameResponse::from_lsp_value(result);
+                let key = crate::prepare_rename::PrepareRenameKey::new(server_key, uri.clone());
+                let mut guard = self
+                    .prepare_rename_store
+                    .lock()
+                    .expect("prepare rename store mutex poisoned");
+                guard.set(key, resp);
+            }
             ResponseRoute::CodeAction { uri } => {
                 let resp = crate::code_action::CodeActionResponse::from_lsp_value(result);
                 let key = crate::code_action::CodeActionKey::new(server_key, uri.clone());
@@ -3082,11 +3131,20 @@ fn default_capabilities() -> Value {
             "signatureHelp": { "dynamicRegistration": false },
             "definition": { "dynamicRegistration": false, "linkSupport": true },
             "formatting": { "dynamicRegistration": false },
-            // T M4.5 L2: client-side rename. `prepareSupport: false`
-            // — pmacs sends `textDocument/rename` directly without a
-            // `prepareRename` round-trip (L2 scope); the symbol range
-            // comes from the cursor position.
-            "rename": { "dynamicRegistration": false, "prepareSupport": false },
+            // T M4.5: client-side rename. `prepareSupport: true` —
+            // the rename flow does a `textDocument/prepareRename`
+            // round-trip first *when the server advertises
+            // `renameProvider.prepareProvider`* (it gates the prompt
+            // and pre-fills the placeholder); otherwise it sends
+            // `textDocument/rename` straight from the cursor.
+            // `prepareSupportDefaultBehavior: 1` (Identifier) tells
+            // the server we can handle the `{ defaultBehavior }`
+            // shape (compute the word range ourselves).
+            "rename": {
+                "dynamicRegistration": false,
+                "prepareSupport": true,
+                "prepareSupportDefaultBehavior": 1,
+            },
             // T M4.5 L3: code actions. `codeActionLiteralSupport`
             // tells servers we accept the richer `CodeAction` shape
             // (title/kind/edit/command), not just bare `Command`s.

@@ -12,7 +12,8 @@
 -- Scope: one server per language across all buffers; async-await
 -- request/react (the editor never blocks). Landed: cross-file
 -- go-to-definition (L1), multi-file rename / WorkspaceEdit applier
--- (L2), code actions + `workspace/executeCommand` + server→client
+-- (L2) with `textDocument/prepareRename` gating when the server
+-- supports it, code actions + `workspace/executeCommand` + server→client
 -- `workspace/applyEdit` (L3), ordered resource-op edits
 -- (create/rename/delete file) with buffer-registry reconciliation
 -- (L4), inlay hints, and semantic tokens (each data + modeline;
@@ -272,6 +273,7 @@ pmacs.lsp.request_document_symbol = wrap_request(pmacs.lsp._request_document_sym
 pmacs.lsp.request_workspace_symbol = wrap_request(pmacs.lsp._request_workspace_symbol_raw)
 pmacs.lsp.request_document_highlight = wrap_request(pmacs.lsp._request_document_highlight_raw)
 pmacs.lsp.request_rename = wrap_request(pmacs.lsp._request_rename_raw)
+pmacs.lsp.request_prepare_rename = wrap_request(pmacs.lsp._request_prepare_rename_raw)
 pmacs.lsp.request_code_action = wrap_request(pmacs.lsp._request_code_action_raw)
 pmacs.lsp.request_execute_command = wrap_request(pmacs.lsp._request_execute_command_raw)
 pmacs.lsp.request_inlay_hint = wrap_request(pmacs.lsp._request_inlay_hint_raw)
@@ -784,12 +786,17 @@ function pmacs.lsp.format_buffer()
   end)
 end
 
--- T M4.5 L2 — rename the symbol under the cursor. Prompts for the new
--- name in the minibuffer; on accept, sends `textDocument/rename`,
--- awaits the `WorkspaceEdit`, and drives it through the multi-file
--- applier. The position is captured *before* the prompt opens so the
--- request still targets the original symbol even though the minibuffer
--- session moved focus.
+-- T M4.5 — rename the symbol under the cursor.
+--
+-- When the server advertises `renameProvider.prepareProvider`, a
+-- `textDocument/prepareRename` round-trip runs first: it gates the
+-- prompt (a `null` result means "not renameable here" — abort with a
+-- status, never open the prompt) and pre-fills the placeholder the
+-- server suggests. Servers that don't advertise prepare (or advertise
+-- `renameProvider: true`) skip straight to the prompt — the original
+-- L2 behavior, unchanged. The cursor position is captured *before*
+-- the prompt opens so the request still targets the original symbol
+-- even though the minibuffer session moved focus.
 function pmacs.lsp.rename()
   local rec = attached_for_active()
   if not rec then
@@ -798,48 +805,78 @@ function pmacs.lsp.rename()
   end
   local line = pmacs.editor.cursor_line()
   local col = pmacs.editor.cursor_col()
-  pmacs.minibuffer.read {
-    prompt = "Rename symbol to: ",
-    on_cancel = function()
-      pmacs.editor.set_status("LSP: rename cancelled")
-    end,
-    on_accept = function(new_name)
-      if not new_name or new_name == "" then
-        pmacs.editor.set_status("LSP: rename needs a new name")
-        return
-      end
-      pmacs.rename.clear(rec.server, rec.uri)
-      pmacs.async(function()
-        local ok, err = pcall(function()
-          pmacs.lsp.request_rename(rec.server, rec.uri, line, col, new_name):await()
+
+  local function open_prompt(initial)
+    pmacs.minibuffer.read {
+      prompt = "Rename symbol to: ",
+      initial = initial,
+      on_cancel = function()
+        pmacs.editor.set_status("LSP: rename cancelled")
+      end,
+      on_accept = function(new_name)
+        if not new_name or new_name == "" then
+          pmacs.editor.set_status("LSP: rename needs a new name")
+          return
+        end
+        pmacs.rename.clear(rec.server, rec.uri)
+        pmacs.async(function()
+          local ok, err = pcall(function()
+            pmacs.lsp.request_rename(rec.server, rec.uri, line, col, new_name):await()
+          end)
+          if not ok then
+            pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+            return
+          end
+          local ops = pmacs.rename.ops(rec.server, rec.uri)
+          if not ops or #ops == 0 then
+            pmacs.editor.set_status("LSP: rename produced no edits")
+            return
+          end
+          local n, files, res = apply_workspace_edit(ops)
+          if not n then
+            -- Preflight rejected it; nothing was mutated.
+            pmacs.editor.set_status("LSP: rename aborted: " .. tostring(files))
+            return
+          end
+          local msg = string.format(
+            "LSP: renamed — %d edit%s across %d file%s",
+            n, (n == 1 and "" or "s"),
+            files, (files == 1 and "" or "s"))
+          if res and res > 0 then
+            msg = msg .. string.format(
+              " (+%d file op%s)", res, (res == 1 and "" or "s"))
+          end
+          pmacs.editor.set_status(msg)
         end)
-        if not ok then
-          pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
-          return
-        end
-        local ops = pmacs.rename.ops(rec.server, rec.uri)
-        if not ops or #ops == 0 then
-          pmacs.editor.set_status("LSP: rename produced no edits")
-          return
-        end
-        local n, files, res = apply_workspace_edit(ops)
-        if not n then
-          -- Preflight rejected it; nothing was mutated.
-          pmacs.editor.set_status("LSP: rename aborted: " .. tostring(files))
-          return
-        end
-        local msg = string.format(
-          "LSP: renamed — %d edit%s across %d file%s",
-          n, (n == 1 and "" or "s"),
-          files, (files == 1 and "" or "s"))
-        if res and res > 0 then
-          msg = msg .. string.format(
-            " (+%d file op%s)", res, (res == 1 and "" or "s"))
-        end
-        pmacs.editor.set_status(msg)
-      end)
-    end,
-  }
+      end,
+    }
+  end
+
+  -- Gate on the server advertising prepareRename. `renameProvider`
+  -- is `boolean | { prepareProvider?: boolean }`.
+  local caps = pmacs.lsp.capabilities(rec.server)
+  local rp = caps and caps.renameProvider
+  if not (type(rp) == "table" and rp.prepareProvider == true) then
+    open_prompt(nil)
+    return
+  end
+
+  pmacs.prepare_rename.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_prepare_rename(rec.server, rec.uri, line, col):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local pr = pmacs.prepare_rename.result(rec.server, rec.uri)
+    if not pr or not pr.allowed then
+      pmacs.editor.set_status("LSP: cannot rename here")
+      return
+    end
+    open_prompt(pr.placeholder)
+  end)
 end
 
 -- T M4.5 L3 — code actions at the cursor. Requests the actions,
