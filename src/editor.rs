@@ -187,6 +187,7 @@ impl EditorState {
             lua_host.lua(),
             process_supervisor.clone(),
             async_runtime.clone(),
+            &syntax_registry,
         )
         .expect("install pmacs.lsp");
         // T M9.1 MCP manager. Wires onto the same supervisor that LSP

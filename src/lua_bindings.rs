@@ -7120,7 +7120,11 @@ fn lua_to_lsp_error(value: Value) -> mlua::Result<LspError> {
     clippy::too_many_lines,
     reason = "linear list of raw bindings; splitting fragments a coherent surface"
 )]
-pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+pub fn install_lsp(
+    lua: &Lua,
+    manager: &SharedLspManager,
+    syntax: &SharedSyntaxRegistry,
+) -> mlua::Result<()> {
     lua.set_app_data(manager.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
     let lsp_mod = lua.create_table()?;
@@ -7891,6 +7895,39 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
         )?;
     }
 
+    // M_B1: TUI-side LSP styling. Sibling of
+    // `pmacs.parse._attach_highlight`: pushes an `LspStyleView` overlay
+    // on the active window so the grid renderer paints LSP semantic
+    // tokens as cell styles for buffers with no bundled tree-sitter
+    // grammar. Lua callers gate against the grammar-backed case (policy
+    // A: one styling authority per buffer); double-attach pushes a
+    // fresh overlay each call, so the Lua side is also responsible for
+    // dedup, matching `_attach_highlight`'s contract.
+    {
+        let m = manager.clone();
+        let s = syntax.clone();
+        lsp_mod.set(
+            "_attach_style",
+            lua.create_function(move |lua, id: BufferIdLua| {
+                let theme = s.theme();
+                let core = lua
+                    .app_data_ref::<SharedCore>()
+                    .ok_or_else(|| mlua::Error::external("editor core not yet installed"))?;
+                let mut core_borrow = core.borrow_mut();
+                let win = core_borrow.active_window_mut();
+                if win.buffer_id != id.0 {
+                    return Err(mlua::Error::external(format!(
+                        "active window's buffer is not {:?}",
+                        id.0
+                    )));
+                }
+                let overlay = crate::highlight::LspStyleView::new(m.clone(), theme);
+                win.push_overlay(Box::new(overlay));
+                Ok(true)
+            })?,
+        )?;
+    }
+
     pmacs.set("lsp", lsp_mod)?;
     Ok(())
 }
@@ -7901,9 +7938,10 @@ pub fn make_lsp_manager(
     lua: &Lua,
     supervisor: SharedProcessSupervisor,
     runtime: crate::async_runtime::SharedAsyncRuntime,
+    syntax: &SharedSyntaxRegistry,
 ) -> mlua::Result<SharedLspManager> {
     let manager = Rc::new(RefCell::new(LspManager::new(supervisor, runtime)));
-    install_lsp(lua, &manager)?;
+    install_lsp(lua, &manager, syntax)?;
     install_diag(lua, &manager)?;
     install_completion(lua, &manager)?;
     install_hover(lua, &manager)?;

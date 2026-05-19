@@ -37,6 +37,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::Buffer;
 use crate::cell::{CellCoord, CellGrid, Color, Style, UnderlineStyle};
+use crate::lsp::SharedLspManager;
 use crate::overlay::merge_styles;
 use crate::syntax::{HighlightSpan, ParseTreeBundle, ParseViewHandle, compute_highlight_spans};
 use crate::view::{View, Viewport};
@@ -493,6 +494,148 @@ pub fn is_default_style(style: Style) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// LspStyleView
+// ---------------------------------------------------------------------------
+
+/// View that paints LSP semantic-token styling into cells for buffers
+/// with **no bundled tree-sitter grammar** (C/C++, …). Sibling of
+/// [`SyntaxHighlightView`] for the same policy-A "one styling
+/// authority per language" rule that `SemanticRenderState` applies on
+/// the semantic-frontend side — but feeding the grid TUI's existing
+/// cell-painter pipeline instead. Closes the visible "no syntax
+/// coloring for grammar-less languages in the TUI" gap.
+///
+/// Holds shared handles only (`SharedLspManager` + `ThemeHandle`), so
+/// it survives buffer renames and LSP server restarts: every `render`
+/// re-derives the buffer's URI from `buf.file_path()` and re-queries
+/// the per-server encoding + legend via
+/// `LspManager::semantic_style_context`. If any of those are absent
+/// the render is a silent no-op — never spam, never panic.
+pub struct LspStyleView {
+    lsp: SharedLspManager,
+    theme: ThemeHandle,
+}
+
+impl LspStyleView {
+    /// Construct a view that paints LSP semantic-token styling using
+    /// `lsp` as the source of truth and `theme` as the capture-name →
+    /// style map. The view shares both handles; updates from elsewhere
+    /// (a new LSP response, a theme edit) are observable on the next
+    /// render.
+    #[must_use]
+    pub fn new(lsp: SharedLspManager, theme: ThemeHandle) -> Self {
+        Self { lsp, theme }
+    }
+}
+
+impl View for LspStyleView {
+    fn kind(&self) -> &'static str {
+        "lsp-style"
+    }
+
+    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+        let Some(path) = buf.file_path() else {
+            return; // No path ⇒ no URI ⇒ nothing to look up.
+        };
+        let uri = crate::lsp::path_to_file_uri(path);
+
+        // Pull encoding + legend, and clone the token vec so we can
+        // drop both the manager borrow and the store lock before
+        // walking the viewport (cheap: tokens are small structs).
+        let (ctx, tokens) = {
+            let mgr = self.lsp.borrow();
+            let Some(ctx) = mgr.semantic_style_context(&uri) else {
+                return; // No server has tokens for this URI.
+            };
+            let store = mgr.semantic_token_store();
+            let guard = store.lock().expect("semantic-token store mutex poisoned");
+            let Some((_, resp)) = guard.for_uri(&uri) else {
+                return;
+            };
+            (ctx, resp.tokens.clone())
+        };
+        if tokens.is_empty() {
+            return;
+        }
+        let theme = self.theme.lock().expect("theme mutex poisoned").clone();
+
+        // Buffer source bytes (cheap rope slice, mirrors
+        // `semantic_render::buffer_source_bytes`).
+        let source = {
+            let len = buf.len();
+            let mut bytes = vec![0u8; len as usize];
+            if !bytes.is_empty() {
+                buf.snapshot_rope().slice(0, len, &mut bytes);
+            }
+            bytes
+        };
+        let line_offsets = compute_line_offsets(&source);
+        if line_offsets.is_empty() {
+            return;
+        }
+
+        let start_line = line_at_offset(&line_offsets, viewport.buffer_start as u32);
+        let max_rows = viewport.cell_size.rows;
+        let max_cols = viewport.cell_size.cols;
+        let cell_origin = viewport.cell_origin;
+        let total_lines = line_offsets.len() as u32;
+
+        for row_offset in 0..max_rows {
+            let line_idx = start_line + row_offset;
+            if line_idx >= total_lines {
+                break;
+            }
+            let line_start = line_offsets[line_idx as usize];
+            let line_end = line_offsets
+                .get(line_idx as usize + 1)
+                .copied()
+                .unwrap_or(source.len() as u32);
+            let line_end_no_nl = if line_end > line_start
+                && source.get(line_end as usize - 1).copied() == Some(b'\n')
+            {
+                line_end - 1
+            } else {
+                line_end
+            };
+            let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
+            let Ok(line_str) = std::str::from_utf8(line_bytes) else {
+                continue; // Non-UTF-8 line ⇒ skip encoding conversion.
+            };
+
+            // O(tokens × visible_lines) — fine for the typical
+            // semantic-token set; if it ever becomes the bottleneck,
+            // pre-bucket tokens by line at the top of `render`.
+            for t in tokens.iter().filter(|t| t.line == line_idx) {
+                let Some(name) = ctx.legend.as_ref().and_then(|l| l.type_name(t.token_type)) else {
+                    continue; // No legend / unknown index.
+                };
+                let style = theme.lookup(name);
+                if is_default_style(style) {
+                    continue;
+                }
+                let start_b = crate::lsp::char_to_byte(line_str, t.start, ctx.encoding);
+                let end_char = t.start.saturating_add(t.length);
+                let end_b = crate::lsp::char_to_byte(line_str, end_char, ctx.encoding);
+                if end_b <= start_b {
+                    continue;
+                }
+                let (start_col, end_col) = byte_range_to_display_cols(line_bytes, start_b, end_b);
+                if end_col <= start_col {
+                    continue;
+                }
+                let cell_row = cell_origin.row + row_offset;
+                let clamped_start = start_col.min(max_cols);
+                let clamped_end = end_col.min(max_cols);
+                for col in clamped_start..clamped_end {
+                    let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
+                    cell.style = merge_styles(cell.style, style);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -593,5 +736,115 @@ mod tests {
             bold: true,
             ..Style::default()
         }));
+    }
+
+    // --- M_B1: LspStyleView render ---
+
+    #[test]
+    fn lsp_style_view_paints_cells_from_semantic_tokens() {
+        use crate::cell::{Cell, CellSize};
+        use crate::editor::EditorState;
+        use crate::lsp::PositionEncoding;
+        use crate::semantic_tokens::{SemanticToken, SemanticTokenKey, SemanticTokensResponse};
+
+        let state = EditorState::new();
+        let buffer_id = state.core.borrow().active_window().buffer_id;
+
+        // Seed the buffer: one line, `.cpp` path (no bundled grammar →
+        // SyntaxHighlightView never attaches, the LSP path owns the
+        // styling per policy A).
+        {
+            let mut core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"int main\n",
+                })
+                .expect("seed");
+            core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.cpp")));
+        }
+        // Theme face for the legend's lone type name.
+        state.syntax_registry.theme().lock().expect("theme").insert(
+            "kw",
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+        );
+        // Register an Initialized fake LSP client (no process) with a
+        // legend that maps token_type 0 → "kw", and UTF-16 encoding.
+        let sid = state
+            .lsp_manager
+            .borrow_mut()
+            .insert_initialized_test_client(
+                serde_json::json!({
+                    "semanticTokensProvider": {
+                        "legend": { "tokenTypes": ["kw"], "tokenModifiers": [] }
+                    }
+                }),
+                PositionEncoding::Utf16,
+            );
+        // Seed a single token at line 0, cols [0, 3) — covers "int".
+        // (Buffer's normalized path drives the URI; encode it the same
+        // way the producer does so the store lookup matches.)
+        let active_path = state
+            .core
+            .borrow()
+            .active_buffer_path()
+            .expect("path set above");
+        let uri = crate::lsp::path_to_file_uri(&active_path);
+        {
+            let mgr = state.lsp_manager.borrow();
+            let store = mgr.semantic_token_store();
+            store.lock().expect("store").set(
+                SemanticTokenKey::new(sid.raw().to_string(), uri),
+                SemanticTokensResponse {
+                    tokens: vec![SemanticToken {
+                        line: 0,
+                        start: 0,
+                        length: 3,
+                        token_type: 0,
+                        token_modifiers: 0,
+                    }],
+                    result_id: None,
+                    raw: Vec::new(),
+                },
+            );
+        }
+        // Render into a small grid.
+        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut backing: Vec<Cell> = vec![Cell::default(); 20];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 20,
+            size: CellSize::new(1, 20),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(1, 20),
+        };
+        let registry = state.core.borrow().registry.clone();
+        let reg = registry.borrow();
+        let buf = reg.get(buffer_id).expect("buffer");
+        view.render(buf, viewport, &mut grid);
+
+        // Cells [0,3) painted bold (the seeded theme face); cell 3
+        // (the space after "int") unchanged.
+        for col in 0..3 {
+            assert!(
+                grid.get(CellCoord::new(0, col)).style.bold,
+                "col {col} should be styled by the LSP token"
+            );
+        }
+        assert!(
+            !grid.get(CellCoord::new(0, 3)).style.bold,
+            "col 3 (space) is outside the token range"
+        );
     }
 }
