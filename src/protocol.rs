@@ -619,10 +619,29 @@ pub enum InstanceMessage {
     /// version so the frontend can discard styling that predates an
     /// edit it has already applied optimistically. Ships **no text** —
     /// the frontend holds the rope via the `crdt_replica` machinery
-    /// and interprets these spans over it. Diffs against the previous
-    /// frame the way `CellDelta` does today: changed spans only,
-    /// scoped to the range the frontend last declared via
-    /// `FrontendEvent::Viewport`.
+    /// and interprets these spans over it.
+    ///
+    /// # Diff shape (T M11.4)
+    ///
+    /// Mirrors `CellDelta`'s `full_grid` + changed-runs structure,
+    /// lifted from positional cells to byte-anchored ranges. `full =
+    /// true` is a resync: the frontend discards all prior styling for
+    /// `buffer_id` and the `segments` are authoritative for the whole
+    /// declared viewport (first frame after a `Viewport`, a viewport
+    /// jump, or a generation discontinuity). `full = false` is
+    /// incremental: each [`StyleSegment`] replaces styling **only**
+    /// within its `range`; bytes covered by no segment keep their
+    /// previously-applied style. A frame whose styling is unchanged
+    /// ships no `StyleSpans` at all.
+    ///
+    /// Because byte offsets cascade on edits (an insert shifts every
+    /// later span), an incremental frame after an edit dirties
+    /// `[edit, viewport_end)` — still bounded, and no-edit frames
+    /// (cursor move, scroll within the declared viewport, selection)
+    /// cost nothing. Each segment carries *all* current spans
+    /// intersecting its range (clipped), not only changed ones, so an
+    /// unchanged span overlapping a dirty range is faithfully
+    /// reconstructed.
     ///
     /// Gated on negotiated `semantic_render`; never sent to a grid
     /// session (the daemon's per-session outgoing filter — wired with
@@ -634,18 +653,31 @@ pub enum InstanceMessage {
         buffer_id: crate::buffer::BufferId,
         /// CRDT generation the spans were computed against.
         generation: u64,
-        /// Styled byte runs, scoped to the declared viewport.
-        spans: Vec<StyleSpan>,
+        /// `true` → discard all prior styling for `buffer_id` first;
+        /// `segments` are authoritative for the declared viewport.
+        full: bool,
+        /// Dirty byte regions and the styling now covering them.
+        segments: Vec<StyleSegment>,
     },
     /// T M11.1 — diagnostics, search hits, current-line, and any
     /// other "this region means something" overlay, as offset ranges
     /// plus a kind. Peer selection is **not** here — it stays on the
     /// existing `PresenceUpdate` path. Gated on `semantic_render`.
+    ///
+    /// T M11.4 — same `full` + segment diff shape as `StyleSpans`
+    /// (see its docs), and gains `generation` for parity: a frontend
+    /// wants the CRDT version decorations were computed against for
+    /// the same optimistic-edit race reason styling does.
     Decorations {
         /// Buffer these decorations apply to.
         buffer_id: crate::buffer::BufferId,
-        /// Decoration regions for the declared viewport.
-        decorations: Vec<Decoration>,
+        /// CRDT generation the decorations were computed against.
+        generation: u64,
+        /// `true` → discard all prior decorations for `buffer_id`
+        /// first; `segments` are authoritative for the viewport.
+        full: bool,
+        /// Dirty byte regions and the decorations now covering them.
+        segments: Vec<DecorationSegment>,
     },
     /// T M11.1 — inlay hints, blame, lens, virtual text. Anchored at
     /// a single offset with a placement; occupies no document bytes —
@@ -756,6 +788,20 @@ pub struct StyleSpan {
     pub style: crate::cell::Style,
 }
 
+/// T M11.4 — one dirty byte region of an `InstanceMessage::StyleSpans`
+/// frame and the styling now covering it. The semantic analog of a
+/// `CellDelta` changed-run: the frontend clears styling within
+/// `range` and applies `spans` (already clipped to `range`). `spans`
+/// is every current span intersecting `range`, not only changed ones,
+/// so an unchanged span overlapping the dirty region is preserved.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StyleSegment {
+    /// The byte region the frontend should clear and repaint.
+    pub range: ByteRange,
+    /// Spans intersecting `range`, each clipped to it.
+    pub spans: Vec<StyleSpan>,
+}
+
 /// What a [`Decoration`] region *means*. Provisional variant set (see
 /// the module-section note above). Peer selection is deliberately
 /// absent — it stays on the `PresenceUpdate` path.
@@ -788,6 +834,17 @@ pub struct Decoration {
     pub range: ByteRange,
     /// What the region signifies.
     pub kind: DecorationKind,
+}
+
+/// T M11.4 — `StyleSegment`'s analog for the `Decorations` family:
+/// one dirty byte region and the decorations now covering it (every
+/// current decoration intersecting `range`, clipped to it).
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DecorationSegment {
+    /// The byte region the frontend should clear and repaint.
+    pub range: ByteRange,
+    /// Decorations intersecting `range`, each clipped to it.
+    pub decorations: Vec<Decoration>,
 }
 
 /// Where an [`InlineAdornment`] sits relative to its anchor offset.
@@ -3844,23 +3901,32 @@ mod tests {
             InstanceMessage::StyleSpans {
                 buffer_id: bid,
                 generation: 7,
-                spans: vec![StyleSpan {
+                full: true,
+                segments: vec![StyleSegment {
                     range: ByteRange { start: 0, end: 12 },
-                    style: crate::cell::Style::default(),
+                    spans: vec![StyleSpan {
+                        range: ByteRange { start: 0, end: 12 },
+                        style: crate::cell::Style::default(),
+                    }],
                 }],
             },
             InstanceMessage::Decorations {
                 buffer_id: bid,
-                decorations: vec![
-                    Decoration {
-                        range: ByteRange { start: 3, end: 9 },
-                        kind: DecorationKind::DiagnosticError,
-                    },
-                    Decoration {
-                        range: ByteRange { start: 20, end: 20 },
-                        kind: DecorationKind::CurrentLine,
-                    },
-                ],
+                generation: 7,
+                full: false,
+                segments: vec![DecorationSegment {
+                    range: ByteRange { start: 3, end: 20 },
+                    decorations: vec![
+                        Decoration {
+                            range: ByteRange { start: 3, end: 9 },
+                            kind: DecorationKind::DiagnosticError,
+                        },
+                        Decoration {
+                            range: ByteRange { start: 20, end: 20 },
+                            kind: DecorationKind::CurrentLine,
+                        },
+                    ],
+                }],
             },
             InstanceMessage::InlineAdornments {
                 buffer_id: bid,

@@ -29,7 +29,8 @@ use crate::buffer::BufferId;
 use crate::cell::Style;
 use crate::editor::EditorState;
 use crate::protocol::{
-    ByteRange, Decoration, DecorationKind, FrontendId, InstanceMessage, StyleSpan,
+    ByteRange, Decoration, DecorationKind, DecorationSegment, FrontendId, InstanceMessage,
+    StyleSegment, StyleSpan,
 };
 
 /// The viewport a `semantic_render` frontend last declared.
@@ -44,10 +45,20 @@ struct DeclaredViewport {
     frontend_generation: u64,
 }
 
+/// The diff baseline for one family on one buffer: the
+/// declared-viewport region the set was computed for, and the full
+/// scoped item set last shipped. The next frame diffs against
+/// `items`; `visible` changing (or no entry) forces a `full` resync.
+/// The frame's `generation` is recomputed each tick and carried on
+/// the wire, so it is not retained here.
+struct LastFrame<T> {
+    visible: ByteRange,
+    items: Vec<T>,
+}
+
 /// Owns one `semantic_render` session's projection state: the last
-/// viewport the frontend declared, and the last `StyleSpans` /
-/// `Decorations` payloads shipped per buffer (for byte-identical-frame
-/// suppression).
+/// viewport the frontend declared, and the diff baseline per buffer
+/// for the `StyleSpans` and `Decorations` families.
 pub struct SemanticRenderState {
     /// The session this projection serves. Selection is per-window
     /// (per-frontend) state, so the decoration projection needs the
@@ -60,15 +71,14 @@ pub struct SemanticRenderState {
     /// bootstraps its rope from `BufferSnapshot`, declares what is on
     /// screen, and only then receives styling for exactly that range.
     viewport: Option<DeclaredViewport>,
-    /// Last `(generation, spans)` shipped, keyed by buffer. A frame
-    /// whose scoped span set and generation match the last send emits
-    /// nothing — the steady-state cost between edits is one map
-    /// lookup. True per-span delta encoding is M11.4.
-    last_sent: HashMap<BufferId, (u64, Vec<StyleSpan>)>,
-    /// Same unchanged-frame suppression for the `Decorations` family
-    /// (T M11.3), tracked independently of `last_sent` so a styling
-    /// change does not force a decorations re-send and vice versa.
-    last_decorations: HashMap<BufferId, (u64, Vec<Decoration>)>,
+    /// Styling diff baseline, keyed by buffer (T M11.4). An unchanged
+    /// frame ships nothing; a changed frame ships only the dirty
+    /// byte-range segments.
+    last_sent: HashMap<BufferId, LastFrame<StyleSpan>>,
+    /// Decorations diff baseline, tracked independently of `last_sent`
+    /// so a styling change does not force a decorations re-send and
+    /// vice versa.
+    last_decorations: HashMap<BufferId, LastFrame<Decoration>>,
 }
 
 impl SemanticRenderState {
@@ -121,40 +131,107 @@ impl SemanticRenderState {
         let generation = buffer_generation(state, vp.buffer_id);
         let mut out = Vec::new();
 
-        // --- StyleSpans (T M11.2) ---
+        // --- StyleSpans (T M11.2 producer, T M11.4 diff) ---
         let spans = scoped_style_spans(state, &vp);
-        // Unchanged-frame suppression (M11.4 replaces this with
-        // per-span delta encoding). A buffer with an empty scoped set
-        // still suppresses correctly: the first empty frame ships once
-        // (clearing any prior styling on the frontend), subsequent
-        // identical empty frames are squelched.
-        let style_unchanged = self
-            .last_sent
-            .get(&vp.buffer_id)
-            .is_some_and(|(g, s)| *g == generation && *s == spans);
-        if !style_unchanged {
-            self.last_sent
-                .insert(vp.buffer_id, (generation, spans.clone()));
+        let prev = self.last_sent.get(&vp.buffer_id);
+        // Resync when there is no baseline, or the declared viewport
+        // region moved (the scoping window changed, so prior styling
+        // is no longer positioned correctly).
+        let full = prev.is_none_or(|p| p.visible != vp.visible);
+        if full {
+            // The first frame for this buffer/viewport. One segment
+            // covering the declared viewport carries the whole scoped
+            // set (possibly empty → frontend clears the viewport).
+            self.last_sent.insert(
+                vp.buffer_id,
+                LastFrame {
+                    visible: vp.visible,
+                    items: spans.clone(),
+                },
+            );
             out.push(InstanceMessage::StyleSpans {
                 buffer_id: vp.buffer_id,
                 generation,
-                spans,
+                full: true,
+                segments: vec![StyleSegment {
+                    range: vp.visible,
+                    spans,
+                }],
             });
+        } else {
+            let prev = prev.expect("checked is_none_or above");
+            let intervals = changed_intervals(&prev.items, &spans, |s| s.range);
+            if !intervals.is_empty() {
+                let segments = intervals
+                    .into_iter()
+                    .map(|range| StyleSegment {
+                        range,
+                        spans: clip_style_spans(range, &spans),
+                    })
+                    .collect();
+                self.last_sent.insert(
+                    vp.buffer_id,
+                    LastFrame {
+                        visible: vp.visible,
+                        items: spans,
+                    },
+                );
+                out.push(InstanceMessage::StyleSpans {
+                    buffer_id: vp.buffer_id,
+                    generation,
+                    full: false,
+                    segments,
+                });
+            }
+            // No dirty interval → styling unchanged → emit nothing.
         }
 
-        // --- Decorations (T M11.3) ---
+        // --- Decorations (T M11.3 producer, T M11.4 diff) ---
         let decorations = self.scoped_decorations(state, &vp);
-        let deco_unchanged = self
-            .last_decorations
-            .get(&vp.buffer_id)
-            .is_some_and(|(g, d)| *g == generation && *d == decorations);
-        if !deco_unchanged {
-            self.last_decorations
-                .insert(vp.buffer_id, (generation, decorations.clone()));
+        let prev = self.last_decorations.get(&vp.buffer_id);
+        let full = prev.is_none_or(|p| p.visible != vp.visible);
+        if full {
+            self.last_decorations.insert(
+                vp.buffer_id,
+                LastFrame {
+                    visible: vp.visible,
+                    items: decorations.clone(),
+                },
+            );
             out.push(InstanceMessage::Decorations {
                 buffer_id: vp.buffer_id,
-                decorations,
+                generation,
+                full: true,
+                segments: vec![DecorationSegment {
+                    range: vp.visible,
+                    decorations,
+                }],
             });
+        } else {
+            let prev = prev.expect("checked is_none_or above");
+            let intervals = changed_intervals(&prev.items, &decorations, |d| d.range);
+            if !intervals.is_empty() {
+                let segments = intervals
+                    .into_iter()
+                    .map(|range| DecorationSegment {
+                        range,
+                        decorations: clip_decorations(range, &decorations),
+                    })
+                    .collect();
+                self.last_decorations.insert(
+                    vp.buffer_id,
+                    LastFrame {
+                        visible: vp.visible,
+                        items: decorations,
+                    },
+                );
+                out.push(InstanceMessage::Decorations {
+                    buffer_id: vp.buffer_id,
+                    generation,
+                    full: false,
+                    segments,
+                });
+            }
         }
 
         out
@@ -249,6 +326,86 @@ fn clip_to_viewport(lo: u64, hi: u64, vp: &DeclaredViewport) -> Option<ByteRange
         return None;
     }
     Some(ByteRange { start, end })
+}
+
+/// T M11.4 — the dirty byte intervals between two ordered item sets.
+///
+/// Items are byte-anchored (`range_of` extracts the range). The
+/// symmetric difference (items in exactly one set, by `==`) bounds
+/// every byte whose covering set changed; its ranges are coalesced
+/// into maximal disjoint intervals — the segments the frontend will
+/// clear and repaint. Empty result ⇒ unchanged ⇒ the caller emits
+/// nothing.
+///
+/// O(n·m) membership scans: a screenful is a few hundred items, far
+/// cheaper than re-shipping the whole viewport every frame, and only
+/// runs when the fast `prev == curr` slice check (caller side, via
+/// the order-stable producers) would have failed anyway.
+fn changed_intervals<T: PartialEq>(
+    prev: &[T],
+    curr: &[T],
+    range_of: impl Fn(&T) -> ByteRange,
+) -> Vec<ByteRange> {
+    let mut changed: Vec<ByteRange> = Vec::new();
+    for p in prev {
+        if !curr.contains(p) {
+            changed.push(range_of(p));
+        }
+    }
+    for c in curr {
+        if !prev.contains(c) {
+            changed.push(range_of(c));
+        }
+    }
+    coalesce_ranges(&mut changed)
+}
+
+/// Sort and merge overlapping or touching ranges into maximal
+/// disjoint intervals. Zero-width ranges are dropped (nothing to
+/// repaint). Consumes `ranges` (sorts in place).
+fn coalesce_ranges(ranges: &mut Vec<ByteRange>) -> Vec<ByteRange> {
+    ranges.retain(|r| r.end > r.start);
+    ranges.sort_by_key(|r| (r.start, r.end));
+    let mut out: Vec<ByteRange> = Vec::new();
+    for r in ranges.iter().copied() {
+        match out.last_mut() {
+            // Touching (`>=`) merges too: adjacent dirty ranges become
+            // one segment rather than two abutting clears.
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+/// Every span intersecting `iv`, clipped to it, order preserved.
+fn clip_style_spans(iv: ByteRange, spans: &[StyleSpan]) -> Vec<StyleSpan> {
+    spans
+        .iter()
+        .filter_map(|s| {
+            let start = s.range.start.max(iv.start);
+            let end = s.range.end.min(iv.end);
+            (end > start).then_some(StyleSpan {
+                range: ByteRange { start, end },
+                style: s.style,
+            })
+        })
+        .collect()
+}
+
+/// Every decoration intersecting `iv`, clipped to it, order preserved.
+fn clip_decorations(iv: ByteRange, decos: &[Decoration]) -> Vec<Decoration> {
+    decos
+        .iter()
+        .filter_map(|d| {
+            let start = d.range.start.max(iv.start);
+            let end = d.range.end.min(iv.end);
+            (end > start).then_some(Decoration {
+                range: ByteRange { start, end },
+                kind: d.kind,
+            })
+        })
+        .collect()
 }
 
 /// Map an LSP diagnostic severity onto the wire decoration kind.
@@ -422,6 +579,68 @@ mod tests {
         }
     }
 
+    /// Find the `Decorations` message and flatten its segments into
+    /// `(full, all decorations across segments)`.
+    fn decorations_of(msgs: &[InstanceMessage]) -> Option<(bool, Vec<Decoration>)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::Decorations { full, segments, .. } => Some((
+                *full,
+                segments.iter().flat_map(|s| s.decorations.clone()).collect(),
+            )),
+            _ => None,
+        })
+    }
+
+    /// Find the `StyleSpans` message: `(full, segment ranges)`.
+    fn style_segments(msgs: &[InstanceMessage]) -> Option<(bool, Vec<ByteRange>)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::StyleSpans { full, segments, .. } => {
+                Some((*full, segments.iter().map(|s| s.range).collect()))
+            }
+            _ => None,
+        })
+    }
+
+    fn set_selection(state: &EditorState, anchor: u64, cursor: u64) {
+        let mut core = state.core.borrow_mut();
+        let win = core
+            .active_window_mut_for(FrontendId::LOCAL)
+            .expect("LOCAL always has a window");
+        win.selection = Some(crate::window::Selection { anchor });
+        win.cursor = cursor;
+    }
+
+    fn seed_diagnostic(state: &EditorState, buffer_id: BufferId) {
+        let mut core = state.core.borrow_mut();
+        core.registry
+            .clone()
+            .borrow_mut()
+            .get_mut(buffer_id)
+            .expect("active buffer")
+            .apply_edit(crate::buffer::EditOp::Insert {
+                pos: 0,
+                bytes: b"abc\nde",
+            })
+            .expect("seed buffer text");
+        core.file_path = Some(std::path::PathBuf::from("/tmp/m114.rs"));
+        drop(core);
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
+        let store = state.lsp_manager.borrow().diag_store();
+        store.lock().expect("diag store").set(
+            &uri,
+            vec![crate::diag::Diagnostic {
+                start_line: 1,
+                start_col: 0,
+                end_line: 1,
+                end_col: 2,
+                severity: crate::diag::DiagnosticSeverity::Warning,
+                message: "x".into(),
+                source: None,
+                code: None,
+            }],
+        );
+    }
+
     #[test]
     fn emits_nothing_before_viewport_declared() {
         let mut s = local();
@@ -432,21 +651,23 @@ mod tests {
     }
 
     #[test]
-    fn first_post_viewport_frame_ships_styles_and_decorations_then_suppresses() {
+    fn first_post_viewport_frame_is_full_for_both_then_suppresses() {
         let state = empty_state();
         let mut s = local();
         let buffer_id = active_buffer(&state);
         s.set_viewport(buffer_id, ByteRange { start: 0, end: 4096 }, 0);
 
-        // Empty scratch buffer: no syntax spans, no selection, no
-        // diagnostics — but the first frame ships both messages once
-        // (each clears any prior frontend state), carrying empty sets.
+        // Empty scratch: no spans, no selection, no diagnostics — but
+        // the first frame is a `full` resync for both families (the
+        // frontend clears its viewport), carrying empty segments.
         let first = s.render_frame(&state);
         assert_eq!(first.len(), 2, "first frame ships StyleSpans + Decorations");
         assert_semantic_only(&first);
-        let has = |pred: fn(&InstanceMessage) -> bool| first.iter().any(pred);
-        assert!(has(|m| matches!(m, InstanceMessage::StyleSpans { generation: 0, .. })));
-        assert!(has(|m| matches!(m, InstanceMessage::Decorations { .. })));
+        let (style_full, _) = style_segments(&first).expect("StyleSpans present");
+        let (deco_full, decos) = decorations_of(&first).expect("Decorations present");
+        assert!(style_full, "first styling frame must be full");
+        assert!(deco_full, "first decorations frame must be full");
+        assert!(decos.is_empty(), "empty scratch has no decorations");
 
         // Nothing changed → both families suppressed.
         assert!(
@@ -459,115 +680,158 @@ mod tests {
     fn selection_projects_as_a_decoration_clipped_to_viewport() {
         let state = empty_state();
         let buffer_id = active_buffer(&state);
-        // Put a selection on LOCAL's active window: anchor 2, cursor
-        // 5 → region (2, 5). region() compares offsets only, so the
-        // empty scratch buffer is fine for this projection test.
-        {
-            let mut core = state.core.borrow_mut();
-            let win = core
-                .active_window_mut_for(FrontendId::LOCAL)
-                .expect("LOCAL always has a window");
-            win.selection = Some(crate::window::Selection { anchor: 2 });
-            win.cursor = 5;
-        }
+        // region (2,5) on LOCAL's window; region() compares offsets
+        // only, so the empty scratch buffer is fine here.
+        set_selection(&state, 2, 5);
         let mut s = local();
         s.set_viewport(buffer_id, ByteRange { start: 3, end: 64 }, 0);
 
         let msgs = s.render_frame(&state);
         assert_semantic_only(&msgs);
-        let deco = msgs
-            .iter()
-            .find_map(|m| match m {
-                InstanceMessage::Decorations { decorations, .. } => Some(decorations),
-                _ => None,
-            })
-            .expect("a Decorations message");
-        assert_eq!(deco.len(), 1, "exactly the selection decoration");
-        assert_eq!(deco[0].kind, DecorationKind::Selection);
+        let (full, decos) = decorations_of(&msgs).expect("a Decorations message");
+        assert!(full, "first frame is a full resync");
+        assert_eq!(decos.len(), 1, "exactly the selection decoration");
+        assert_eq!(decos[0].kind, DecorationKind::Selection);
         // region (2,5) clipped to viewport [3,64) → [3,5).
-        assert_eq!(deco[0].range, ByteRange { start: 3, end: 5 });
+        assert_eq!(decos[0].range, ByteRange { start: 3, end: 5 });
     }
 
     #[test]
     fn diagnostics_project_with_line_col_to_byte_and_severity() {
-        // Buffer with two short lines so line/col → byte is exercised.
-        // "abc\nde" → line 0 starts at byte 0, line 1 at byte 4.
+        // "abc\nde": line 0 at byte 0, line 1 at byte 4.
         let state = empty_state();
         let buffer_id = active_buffer(&state);
-        {
-            let mut core = state.core.borrow_mut();
-            let reg = core.registry.clone();
-            reg.borrow_mut()
-                .get_mut(buffer_id)
-                .expect("active buffer")
-                .apply_edit(crate::buffer::EditOp::Insert {
-                    pos: 0,
-                    bytes: b"abc\nde",
-                })
-                .expect("seed buffer text");
-            // The diag store is keyed by file URI; point the editor's
-            // active file path at one and seed a diagnostic there.
-            core.file_path = Some(std::path::PathBuf::from("/tmp/m113.rs"));
-        }
-        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m113.rs"));
-        {
-            let store = state.lsp_manager.borrow().diag_store();
-            let mut g = store.lock().expect("diag store");
-            g.set(
-                &uri,
-                vec![crate::diag::Diagnostic {
-                    start_line: 1,
-                    start_col: 0,
-                    end_line: 1,
-                    end_col: 2,
-                    severity: crate::diag::DiagnosticSeverity::Warning,
-                    message: "x".into(),
-                    source: None,
-                    code: None,
-                }],
-            );
-        }
+        seed_diagnostic(&state, buffer_id);
         let mut s = local();
         s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
 
-        let msgs = s.render_frame(&state);
-        let deco = msgs
-            .iter()
-            .find_map(|m| match m {
-                InstanceMessage::Decorations { decorations, .. } => Some(decorations),
-                _ => None,
-            })
-            .expect("a Decorations message");
-        assert_eq!(deco.len(), 1);
-        assert_eq!(deco[0].kind, DecorationKind::DiagnosticWarning);
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        assert_eq!(decos.len(), 1);
+        assert_eq!(decos[0].kind, DecorationKind::DiagnosticWarning);
         // line 1 starts at byte 4; cols [0,2) → bytes [4,6).
-        assert_eq!(deco[0].range, ByteRange { start: 4, end: 6 });
+        assert_eq!(decos[0].range, ByteRange { start: 4, end: 6 });
     }
 
     #[test]
     fn styles_and_decorations_suppress_independently() {
-        // A selection change must re-send Decorations without forcing
-        // a StyleSpans re-send (and the empty scratch styling stays
-        // suppressed).
         let state = empty_state();
         let buffer_id = active_buffer(&state);
         let mut s = local();
         s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
-        let _ = s.render_frame(&state); // first frame: both shipped
+        let _ = s.render_frame(&state); // first frame: both full
         assert!(s.render_frame(&state).is_empty(), "steady state silent");
 
-        // Introduce a selection → only Decorations should re-emit.
-        {
-            let mut core = state.core.borrow_mut();
-            let win = core
-                .active_window_mut_for(FrontendId::LOCAL)
-                .expect("LOCAL window");
-            win.selection = Some(crate::window::Selection { anchor: 1 });
-            win.cursor = 4;
-        }
+        // A selection appears → only Decorations re-emits, and as an
+        // incremental (full = false) frame since the viewport region
+        // did not move.
+        set_selection(&state, 1, 4);
         let msgs = s.render_frame(&state);
         assert_eq!(msgs.len(), 1, "only the changed family re-emits");
-        assert!(matches!(msgs[0], InstanceMessage::Decorations { .. }));
+        let (full, decos) = decorations_of(&msgs).expect("Decorations re-emitted");
+        assert!(!full, "viewport unchanged → incremental, not full");
+        assert_eq!(decos.len(), 1);
+        assert_eq!(decos[0].kind, DecorationKind::Selection);
+    }
+
+    #[test]
+    fn full_resync_on_viewport_region_change() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state); // full
+        assert!(s.render_frame(&state).is_empty(), "unchanged → silent");
+
+        // Declaring a different on-screen range forces a full resync:
+        // prior styling/decorations are positioned for the old window.
+        s.set_viewport(buffer_id, ByteRange { start: 200, end: 264 }, 0);
+        let msgs = s.render_frame(&state);
+        let (style_full, _) = style_segments(&msgs).expect("StyleSpans");
+        let (deco_full, _) = decorations_of(&msgs).expect("Decorations");
+        assert!(style_full && deco_full, "viewport jump must be a full resync");
+    }
+
+    #[test]
+    fn incremental_decoration_change_ships_only_dirty_intervals() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 256 }, 0);
+        set_selection(&state, 10, 12);
+        let _ = s.render_frame(&state); // full: selection [10,12)
+        assert!(s.render_frame(&state).is_empty());
+
+        // Move the selection far away. The symmetric difference is the
+        // old range [10,12) (removed) and the new [40,42) (added);
+        // they are disjoint and non-adjacent → two segments.
+        set_selection(&state, 40, 42);
+        let msgs = s.render_frame(&state);
+        let deco_msg = msgs
+            .iter()
+            .find_map(|m| match m {
+                InstanceMessage::Decorations { full, segments, .. } => Some((*full, segments)),
+                _ => None,
+            })
+            .expect("Decorations");
+        assert!(!deco_msg.0, "incremental");
+        let ranges: Vec<ByteRange> = deco_msg.1.iter().map(|s| s.range).collect();
+        assert_eq!(
+            ranges,
+            vec![
+                ByteRange { start: 10, end: 12 },
+                ByteRange { start: 40, end: 42 }
+            ],
+            "two disjoint dirty intervals: old (cleared) + new"
+        );
+        // The [10,12) segment carries no decorations (selection moved
+        // away → frontend clears it); [40,42) carries the new one.
+        let s1 = &deco_msg.1[0];
+        assert!(s1.decorations.is_empty(), "old selection range cleared");
+        let s2 = &deco_msg.1[1];
+        assert_eq!(s2.decorations.len(), 1);
+        assert_eq!(s2.decorations[0].kind, DecorationKind::Selection);
+    }
+
+    #[test]
+    fn unchanged_decoration_overlapping_a_dirty_interval_is_reconstructed() {
+        // A diagnostic at [4,6) never changes; the selection moves to
+        // overlap it. The dirty segment must still carry the (clipped)
+        // diagnostic so the frontend, replacing styling within the
+        // range, faithfully reconstructs the unchanged decoration.
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        seed_diagnostic(&state, buffer_id); // Warning [4,6)
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        set_selection(&state, 20, 22);
+        let _ = s.render_frame(&state); // full: Sel[20,22) + Warn[4,6)
+        assert!(s.render_frame(&state).is_empty());
+
+        // Selection moves to [5,7), overlapping the diagnostic.
+        set_selection(&state, 5, 7);
+        let msgs = s.render_frame(&state);
+        let (_full, segs) = msgs
+            .iter()
+            .find_map(|m| match m {
+                InstanceMessage::Decorations { full, segments, .. } => Some((*full, segments)),
+                _ => None,
+            })
+            .expect("Decorations");
+        // The segment covering [5,7) must include the unchanged,
+        // overlapping diagnostic (clipped into the dirty range),
+        // not just the moved selection.
+        let overlapping = segs
+            .iter()
+            .find(|s| s.range.start <= 5 && s.range.end >= 6)
+            .expect("a segment covering the diagnostic's bytes");
+        assert!(
+            overlapping
+                .decorations
+                .iter()
+                .any(|d| d.kind == DecorationKind::DiagnosticWarning),
+            "unchanged overlapping diagnostic must be reconstructed in the dirty segment"
+        );
     }
 
     #[test]

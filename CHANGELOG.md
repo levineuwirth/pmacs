@@ -84,6 +84,29 @@ from the editor state pmacs actually has instance-side:
   yet. The wire variants exist (M11.1); their producers are wired
   when those features land. Honest stubs, not fabricated data.
 
+#### Segment diffing (M11.4)
+
+Coarse whole-payload re-sends replaced with a `CellDelta`-style diff,
+lifted from positional cells to byte-anchored ranges.
+
+- `StyleSpans`/`Decorations` refined: `{ buffer_id, generation,
+  full: bool, segments: Vec<…Segment> }`. `full = true` is a resync
+  (frontend discards prior state for the buffer); `full = false`
+  ships only the dirty byte regions, each `StyleSegment` /
+  `DecorationSegment` replacing styling within its range. Bytes in no
+  segment keep prior state; an unchanged span overlapping a dirty
+  range is faithfully reconstructed (segments carry *all* current
+  items intersecting the range, not only changed ones). `Decorations`
+  also gains `generation` for parity with `StyleSpans`.
+- The diff: symmetric difference of the previous/current ordered
+  item sets, changed ranges coalesced into maximal disjoint dirty
+  intervals. First frame and any viewport-region change force `full`;
+  an unchanged frame ships nothing. Byte offsets cascade on edits, so
+  an incremental frame after an edit dirties `[edit, viewport_end)` —
+  bounded; no-edit frames (cursor/scroll/selection) stay free.
+- `ResourceOffer` remains an honest stub (no resource-bearing
+  adornment producer exists yet) — same discipline as M11.3.
+
 ## [1.0.0] --- 2026-05-18
 
 First stable release. Builds on the 0.1.0 preview (M1–M6) with the
