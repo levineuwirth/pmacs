@@ -7556,6 +7556,20 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_semantic_tokens_raw",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let job_id = m
+                    .borrow_mut()
+                    .request_semantic_tokens(id.0, uri)
+                    .map_err(mlua::Error::external)?;
+                Ok(job_id)
+            })?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "_request_execute_command_raw",
             lua.create_function(
                 move |_, (id, command, args): (LspServerIdLua, String, Option<Value>)| {
@@ -7829,6 +7843,7 @@ pub fn make_lsp_manager(
     install_rename(lua, &manager)?;
     install_code_action(lua, &manager)?;
     install_inlay_hint(lua, &manager)?;
+    install_semantic_tokens(lua, &manager)?;
     Ok(manager)
 }
 
@@ -8632,6 +8647,9 @@ use crate::hover::{Hover, HoverKey};
 use crate::inlay_hint::{InlayHint as LspInlayHint, InlayHintKey};
 use crate::locations::{LocationKind, LocationsKey};
 use crate::rename::{RenameKey, WorkspaceEditResponse, WorkspaceOp};
+use crate::semantic_tokens::{
+    SemanticToken as LspSemanticToken, SemanticTokenKey, SemanticTokensLegend,
+};
 use crate::signature::{Signature, SignatureHelp, SignatureKey, SignatureParameter};
 use crate::symbol::{Symbol as LspSymbol, SymbolKey};
 
@@ -9571,6 +9589,101 @@ pub fn install_inlay_hint(lua: &Lua, manager: &SharedLspManager) -> mlua::Result
     }
 
     pmacs.set("inlay_hint", m)?;
+    Ok(())
+}
+
+fn semantic_token_to_lua(lua: &Lua, t: &LspSemanticToken) -> mlua::Result<Table> {
+    let out = lua.create_table_with_capacity(0, 5)?;
+    out.set("line", t.line)?;
+    out.set("start", t.start)?;
+    out.set("length", t.length)?;
+    out.set("token_type", t.token_type)?;
+    out.set("token_modifiers", t.token_modifiers)?;
+    Ok(out)
+}
+
+/// Install `pmacs.semantic_tokens.*` (T M4.5). `tokens(sid, uri)`
+/// returns the decoded absolute tokens `{ { line, start, length,
+/// token_type, token_modifiers }, … }`; `legend(sid)` returns
+/// `{ token_types = {…}, token_modifiers = {…} }` from the server's
+/// advertised `semanticTokensProvider.legend` (or nil), so callers
+/// resolve the `token_type` index / `token_modifiers` bitset;
+/// `clear(sid, uri)` drops the entry. No renderer here — wiring LSP
+/// tokens into styling is a separate rendering milestone; this is the
+/// data surface that work reads.
+pub fn install_semantic_tokens(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    let m = lua.create_table()?;
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "tokens",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().semantic_token_store();
+                let guard = store_handle
+                    .lock()
+                    .expect("semantic token store mutex poisoned");
+                let key = SemanticTokenKey::new(id.0.raw().to_string(), uri);
+                let out = lua.create_table()?;
+                if let Some(r) = guard.get(&key) {
+                    for (i, t) in r.tokens.iter().enumerate() {
+                        out.set(i + 1, semantic_token_to_lua(lua, t)?)?;
+                    }
+                }
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "legend",
+            lua.create_function(move |lua, id: LspServerIdLua| {
+                // Parse out an owned legend inside the borrow, then
+                // build the Lua table once the manager borrow is
+                // dropped.
+                let parsed = {
+                    let guard = mgr.borrow();
+                    guard
+                        .capabilities(id.0)
+                        .and_then(SemanticTokensLegend::from_capabilities)
+                };
+                let Some(legend) = parsed else {
+                    return Ok(Value::Nil);
+                };
+                let to_arr = |names: &[String]| -> mlua::Result<Table> {
+                    let t = lua.create_table_with_capacity(names.len(), 0)?;
+                    for (i, n) in names.iter().enumerate() {
+                        t.set(i + 1, n.as_str())?;
+                    }
+                    Ok(t)
+                };
+                let out = lua.create_table_with_capacity(0, 2)?;
+                out.set("token_types", to_arr(&legend.token_types)?)?;
+                out.set("token_modifiers", to_arr(&legend.token_modifiers)?)?;
+                Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "clear",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().semantic_token_store();
+                let mut guard = store_handle
+                    .lock()
+                    .expect("semantic token store mutex poisoned");
+                guard.clear(&SemanticTokenKey::new(id.0.raw().to_string(), uri));
+                Ok(())
+            })?,
+        )?;
+    }
+
+    pmacs.set("semantic_tokens", m)?;
     Ok(())
 }
 

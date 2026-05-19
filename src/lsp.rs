@@ -767,6 +767,10 @@ pub struct LspManager {
     /// `textDocument/inlayHint` response lands, keyed by `(server,
     /// uri)`.
     inlay_hint_store: crate::inlay_hint::SharedInlayHintStore,
+    /// T M4.5 semantic-token store. Populated when a
+    /// `textDocument/semanticTokens/full` response lands, keyed by
+    /// `(server, uri)`.
+    semantic_token_store: crate::semantic_tokens::SharedSemanticTokenStore,
     /// Per-server request id → response routing target.
     /// `request_completion` etc. record an entry here; `handle_response`
     /// consumes it to absorb the response into the correct store.
@@ -833,6 +837,10 @@ enum ResponseRoute {
     /// Absorb a `textDocument/inlayHint` response into
     /// [`crate::inlay_hint::InlayHintStore`] at `(server, uri)`.
     InlayHint { uri: String },
+    /// Absorb a `textDocument/semanticTokens/full` response into
+    /// [`crate::semantic_tokens::SemanticTokenStore`] at `(server,
+    /// uri)`.
+    SemanticTokens { uri: String },
     /// Absorb a Location-shaped nav response (references / declaration
     /// / typeDefinition / implementation) into
     /// [`crate::locations::LocationsStore`] at `(server, uri, kind)`.
@@ -877,6 +885,7 @@ impl ResponseRoute {
             | ResponseRoute::Rename { uri }
             | ResponseRoute::CodeAction { uri }
             | ResponseRoute::InlayHint { uri }
+            | ResponseRoute::SemanticTokens { uri }
             | ResponseRoute::Locations { uri, .. }
             | ResponseRoute::DocumentSymbol { uri }
             | ResponseRoute::DocumentHighlight { uri } => uri,
@@ -961,6 +970,7 @@ impl LspManager {
             rename_store: crate::rename::make_shared_store(),
             code_action_store: crate::code_action::make_shared_store(),
             inlay_hint_store: crate::inlay_hint::make_shared_store(),
+            semantic_token_store: crate::semantic_tokens::make_shared_store(),
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
             project_servers: HashMap::new(),
@@ -1043,6 +1053,12 @@ impl LspManager {
     #[must_use]
     pub fn inlay_hint_store(&self) -> crate::inlay_hint::SharedInlayHintStore {
         self.inlay_hint_store.clone()
+    }
+
+    /// Shared semantic-token store (T M4.5).
+    #[must_use]
+    pub fn semantic_token_store(&self) -> crate::semantic_tokens::SharedSemanticTokenStore {
+        self.semantic_token_store.clone()
     }
 
     /// T M4.8: per-server status snapshot, derived from the LSP event
@@ -1853,6 +1869,25 @@ impl LspManager {
         Ok(job_id)
     }
 
+    /// Send `textDocument/semanticTokens/full` for `uri`. The response
+    /// (the relative-encoded `data` array) is decoded and absorbed
+    /// into the semantic-token store at `(sid, uri)`. v1 is full-only
+    /// — no `/range` or `/full/delta`. Returns the async-runtime
+    /// [`JobId`] the response will settle.
+    pub fn request_semantic_tokens(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({ "textDocument": { "uri": uri.clone() } });
+        let req_id = self.send_request(sid, "textDocument/semanticTokens/full", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/semanticTokens/full", &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::SemanticTokens { uri });
+        Ok(job_id)
+    }
+
     /// Send `workspace/executeCommand`. No response route is
     /// registered: the command result is usually `null` and the real
     /// effect arrives as a server→client `workspace/applyEdit` (the
@@ -2480,6 +2515,15 @@ impl LspManager {
                     .expect("inlay hint store mutex poisoned");
                 guard.set(key, resp);
             }
+            ResponseRoute::SemanticTokens { uri } => {
+                let resp = crate::semantic_tokens::SemanticTokensResponse::from_lsp_value(result);
+                let key = crate::semantic_tokens::SemanticTokenKey::new(server_key, uri.clone());
+                let mut guard = self
+                    .semantic_token_store
+                    .lock()
+                    .expect("semantic token store mutex poisoned");
+                guard.set(key, resp);
+            }
         }
     }
 
@@ -2931,6 +2975,30 @@ fn default_capabilities() -> Value {
             // `workspace/inlayHint/refresh`; on-demand re-query is
             // the v1 model.
             "inlayHint": { "dynamicRegistration": false },
+            // T M4.5 semantic tokens. v1 requests `full` only (no
+            // `/range`, no `/full/delta`). `formats: ["relative"]` is
+            // the only encoding LSP defines; the tokenTypes/
+            // tokenModifiers lists are the LSP-standard legend the
+            // client understands — the server intersects its legend
+            // with these and reports the agreed legend back via
+            // `semanticTokensProvider.legend`.
+            "semanticTokens": {
+                "dynamicRegistration": false,
+                "requests": { "full": true, "range": false },
+                "formats": ["relative"],
+                "tokenTypes": [
+                    "namespace", "type", "class", "enum", "interface",
+                    "struct", "typeParameter", "parameter", "variable",
+                    "property", "enumMember", "event", "function",
+                    "method", "macro", "keyword", "modifier", "comment",
+                    "string", "number", "regexp", "operator", "decorator"
+                ],
+                "tokenModifiers": [
+                    "declaration", "definition", "readonly", "static",
+                    "deprecated", "abstract", "async", "modification",
+                    "documentation", "defaultLibrary"
+                ],
+            },
             "publishDiagnostics": { "relatedInformation": true },
         },
     })

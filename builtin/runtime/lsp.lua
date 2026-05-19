@@ -6,7 +6,7 @@
 --   * `pmacs.lsp.go_to_definition` / `pmacs.lsp.format_buffer` /
 --     `pmacs.lsp.hover_at_cursor` / `pmacs.lsp.signature_help_at_cursor`
 --     / `pmacs.lsp.rename` / `pmacs.lsp.code_actions` /
---     `pmacs.lsp.inlay_hints`, bound to
+--     `pmacs.lsp.inlay_hints` / `pmacs.lsp.semantic_tokens`, bound to
 --     default chords below.
 --
 -- Scope: one server per language across all buffers; async-await
@@ -15,9 +15,9 @@
 -- (L2), code actions + `workspace/executeCommand` + server→client
 -- `workspace/applyEdit` (L3), ordered resource-op edits
 -- (create/rename/delete file) with buffer-registry reconciliation
--- (L4), and inlay hints (data + modeline; inline virtual-text
--- rendering is a later milestone). Semantic tokens and file-watch
--- capability registration are later layers.
+-- (L4), inlay hints, and semantic tokens (each data + modeline;
+-- wiring them into rendering is a separate rendering milestone).
+-- File-watch capability registration is a later layer.
 
 pmacs.lsp = pmacs.lsp or {}
 pmacs.lsp.config = pmacs.lsp.config or {}
@@ -273,6 +273,7 @@ pmacs.lsp.request_rename = wrap_request(pmacs.lsp._request_rename_raw)
 pmacs.lsp.request_code_action = wrap_request(pmacs.lsp._request_code_action_raw)
 pmacs.lsp.request_execute_command = wrap_request(pmacs.lsp._request_execute_command_raw)
 pmacs.lsp.request_inlay_hint = wrap_request(pmacs.lsp._request_inlay_hint_raw)
+pmacs.lsp.request_semantic_tokens = wrap_request(pmacs.lsp._request_semantic_tokens_raw)
 
 -- Render an `:await()` failure into a modeline-friendly reason.
 -- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
@@ -664,6 +665,47 @@ function pmacs.lsp.inlay_hints()
   end)
 end
 
+-- T M4.5 — semantic tokens for the whole buffer. Requests
+-- `textDocument/semanticTokens/full`, stores the decoded absolute
+-- tokens, and surfaces a modeline summary (count + first token's
+-- type, resolved through the server's legend). Data only: wiring
+-- LSP tokens into styling (a second authority alongside tree-sitter)
+-- is a separate rendering milestone — a render layer subscribes to
+-- the same `pmacs.semantic_tokens` store when it lands.
+function pmacs.lsp.semantic_tokens()
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  pmacs.semantic_tokens.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local toks = pmacs.semantic_tokens.tokens(rec.server, rec.uri)
+    if not toks or #toks == 0 then
+      pmacs.editor.set_status("LSP: no semantic tokens")
+      return
+    end
+    local first = toks[1]
+    -- Resolve the type index through the legend (0-based index ->
+    -- 1-based Lua array); fall back to the raw index if no legend.
+    local legend = pmacs.semantic_tokens.legend(rec.server)
+    local tname = legend and legend.token_types
+      and legend.token_types[first.token_type + 1]
+      or tostring(first.token_type)
+    pmacs.editor.set_status(string.format(
+      "LSP: %d semantic token%s; first '%s' at %d:%d",
+      #toks, (#toks == 1 and "" or "s"),
+      tname, first.line + 1, first.start + 1))
+  end)
+end
+
 function pmacs.lsp.format_buffer()
   local rec = attached_for_active()
   if not rec then
@@ -921,6 +963,12 @@ pmacs.command.define {
   fn = pmacs.lsp.inlay_hints,
 }
 
+pmacs.command.define {
+  name = "lsp.semantic-tokens",
+  description = "Fetch semantic tokens (type-aware classification) for the buffer (LSP).",
+  fn = pmacs.lsp.semantic_tokens,
+}
+
 -- T M4.5 L1 — unwind the cross-file jump ring. Pairs with the
 -- `pmacs.editor.push_jump()` every navigation action records before
 -- it moves the cursor.
@@ -945,6 +993,7 @@ pmacs.keymap.bind { scope = "global", sequence = "C-c o", command = "lsp.documen
 pmacs.keymap.bind { scope = "global", sequence = "C-c r", command = "lsp.rename" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c a", command = "lsp.code-actions" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c i", command = "lsp.inlay-hints" }
+pmacs.keymap.bind { scope = "global", sequence = "C-c y", command = "lsp.semantic-tokens" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }
