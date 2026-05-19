@@ -400,6 +400,60 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            ("textDocument/rename", Some(idv)) => {
+                // T M4.5 L2: reply with a `WorkspaceEdit`. The edit
+                // replaces the 3-char span at line 0, cols 3..6 with
+                // the requested `newName` (so the test can assert the
+                // buffer text changed). In `rename` mode a *second*
+                // file URI is taken from `PMACS_FAKE_LSP_RENAME_URI`
+                // and given the same edit, plus a `create` resource
+                // op — exercising the cross-file applier and the
+                // unsupported-op count. Otherwise the edit is
+                // single-file (the request's own document).
+                let uri = params
+                    .get("textDocument")
+                    .and_then(|t| t.get("uri"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let new_name = params
+                    .get("newName")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("renamed")
+                    .to_owned();
+                let edit = serde_json::json!([{
+                    "range": {
+                        "start": { "line": 0, "character": 3 },
+                        "end":   { "line": 0, "character": 6 }
+                    },
+                    "newText": new_name
+                }]);
+                let workspace_edit = if mode == "rename" {
+                    let second = std::env::var("PMACS_FAKE_LSP_RENAME_URI").unwrap_or_default();
+                    serde_json::json!({
+                        "documentChanges": [
+                            {
+                                "textDocument": { "uri": uri, "version": 1 },
+                                "edits": edit.clone()
+                            },
+                            {
+                                "textDocument": { "uri": second, "version": 1 },
+                                "edits": edit.clone()
+                            },
+                            { "kind": "create", "uri": "file:///tmp/pmacs-fake-created.rs" }
+                        ]
+                    })
+                } else {
+                    let mut changes = serde_json::Map::new();
+                    changes.insert(uri.as_str().unwrap_or("").to_owned(), edit);
+                    serde_json::json!({ "changes": changes })
+                };
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": workspace_edit
+                });
+                write_frame(&mut stdout, &resp);
+            }
             // T M4.5 symbols/highlight. documentSymbol returns the
             // *hierarchical* DocumentSymbol shape (exercises tree
             // flatten + depth + parent); workspace/symbol the flat

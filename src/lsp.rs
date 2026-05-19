@@ -756,6 +756,9 @@ pub struct LspManager {
     /// T M4.12 formatting store. Populated when a
     /// `textDocument/formatting` response lands.
     formatting_store: crate::formatting::SharedFormattingStore,
+    /// T M4.5 L2 rename store. Populated when a `textDocument/rename`
+    /// response (a `WorkspaceEdit`) lands, keyed by the origin uri.
+    rename_store: crate::rename::SharedRenameStore,
     /// Per-server request id → response routing target.
     /// `request_completion` etc. record an entry here; `handle_response`
     /// consumes it to absorb the response into the correct store.
@@ -813,6 +816,9 @@ enum ResponseRoute {
     /// Absorb response into [`crate::formatting::FormattingStore`] at
     /// `(server, uri)`.
     Formatting { uri: String },
+    /// Absorb a `textDocument/rename` `WorkspaceEdit` into
+    /// [`crate::rename::RenameStore`] at `(server, origin uri)`.
+    Rename { uri: String },
     /// Absorb a Location-shaped nav response (references / declaration
     /// / typeDefinition / implementation) into
     /// [`crate::locations::LocationsStore`] at `(server, uri, kind)`.
@@ -854,6 +860,7 @@ impl ResponseRoute {
             | ResponseRoute::Signature { uri }
             | ResponseRoute::Definition { uri }
             | ResponseRoute::Formatting { uri }
+            | ResponseRoute::Rename { uri }
             | ResponseRoute::Locations { uri, .. }
             | ResponseRoute::DocumentSymbol { uri }
             | ResponseRoute::DocumentHighlight { uri } => uri,
@@ -935,6 +942,7 @@ impl LspManager {
             symbol_store: crate::symbol::make_shared_store(),
             document_highlight_store: crate::document_highlight::make_shared_store(),
             formatting_store: crate::formatting::make_shared_store(),
+            rename_store: crate::rename::make_shared_store(),
             pending_routes: HashMap::new(),
             status_tracker: crate::lsp_status::LspStatusTracker::new(),
             project_servers: HashMap::new(),
@@ -999,6 +1007,12 @@ impl LspManager {
     #[must_use]
     pub fn formatting_store(&self) -> crate::formatting::SharedFormattingStore {
         self.formatting_store.clone()
+    }
+
+    /// Shared rename / `WorkspaceEdit` store (T M4.5 L2).
+    #[must_use]
+    pub fn rename_store(&self) -> crate::rename::SharedRenameStore {
+        self.rename_store.clone()
     }
 
     /// T M4.8: per-server status snapshot, derived from the LSP event
@@ -1720,6 +1734,32 @@ impl LspManager {
         Ok(job_id)
     }
 
+    /// Send `textDocument/rename` for the symbol at `(line, col)` in
+    /// `uri`, requesting `new_name`. The response is a `WorkspaceEdit`
+    /// (possibly multi-file); it is absorbed into the rename store
+    /// keyed by the *origin* `uri`. Returns the async-runtime
+    /// [`JobId`] the response will settle.
+    pub fn request_rename(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        line: u32,
+        col: u32,
+        new_name: impl Into<String>,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "position": { "line": line, "character": col },
+            "newName": new_name.into(),
+        });
+        let req_id = self.send_request(sid, "textDocument/rename", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/rename", &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::Rename { uri });
+        Ok(job_id)
+    }
+
     /// Reply to a server-initiated request.
     pub fn send_response(
         &mut self,
@@ -2297,6 +2337,15 @@ impl LspManager {
                     .expect("formatting store mutex poisoned");
                 guard.set(key, resp);
             }
+            ResponseRoute::Rename { uri } => {
+                let resp = crate::rename::WorkspaceEditResponse::from_lsp_value(result);
+                let key = crate::rename::RenameKey::new(server_key, uri.clone());
+                let mut guard = self
+                    .rename_store
+                    .lock()
+                    .expect("rename store mutex poisoned");
+                guard.set(key, resp);
+            }
         }
     }
 
@@ -2715,6 +2764,11 @@ fn default_capabilities() -> Value {
             "signatureHelp": { "dynamicRegistration": false },
             "definition": { "dynamicRegistration": false, "linkSupport": true },
             "formatting": { "dynamicRegistration": false },
+            // T M4.5 L2: client-side rename. `prepareSupport: false`
+            // — pmacs sends `textDocument/rename` directly without a
+            // `prepareRename` round-trip (L2 scope); the symbol range
+            // comes from the cursor position.
+            "rename": { "dynamicRegistration": false, "prepareSupport": false },
             "publishDiagnostics": { "relatedInformation": true },
         },
     })

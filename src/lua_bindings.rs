@@ -7383,6 +7383,29 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_rename_raw",
+            lua.create_function(
+                move |_,
+                      (id, uri, line, col, new_name): (
+                    LspServerIdLua,
+                    String,
+                    u32,
+                    u32,
+                    String,
+                )| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_rename(id.0, uri, line, col, new_name)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "status",
             lua.create_function(move |lua, id: LspServerIdLua| {
                 let mgr = m.borrow();
@@ -7615,6 +7638,7 @@ pub fn make_lsp_manager(
     install_symbol(lua, &manager)?;
     install_document_highlight(lua, &manager)?;
     install_formatting(lua, &manager)?;
+    install_rename(lua, &manager)?;
     Ok(manager)
 }
 
@@ -8415,6 +8439,7 @@ use crate::document_highlight::{DocumentHighlightKey, Highlight};
 use crate::formatting::{FormattingKey, FormattingResponse, TextEdit};
 use crate::hover::{Hover, HoverKey};
 use crate::locations::{LocationKind, LocationsKey};
+use crate::rename::{RenameKey, WorkspaceEditResponse};
 use crate::signature::{Signature, SignatureHelp, SignatureKey, SignatureParameter};
 use crate::symbol::{Symbol as LspSymbol, SymbolKey};
 
@@ -9083,6 +9108,77 @@ pub fn install_formatting(lua: &Lua, manager: &SharedLspManager) -> mlua::Result
     }
 
     pmacs.set("formatting", m)?;
+    Ok(())
+}
+
+fn workspace_edit_to_lua(lua: &Lua, r: &WorkspaceEditResponse) -> mlua::Result<Table> {
+    let files = lua.create_table_with_capacity(r.files.len(), 0)?;
+    for (i, f) in r.files.iter().enumerate() {
+        let entry = lua.create_table_with_capacity(0, 2)?;
+        entry.set("uri", f.uri.as_str())?;
+        let edits = lua.create_table_with_capacity(f.edits.len(), 0)?;
+        for (j, e) in f.edits.iter().enumerate() {
+            edits.set(j + 1, text_edit_to_lua(lua, e)?)?;
+        }
+        entry.set("edits", edits)?;
+        files.set(i + 1, entry)?;
+    }
+    Ok(files)
+}
+
+/// Install `pmacs.rename.*` (T M4.5 L2). `file_edits(sid, uri)`
+/// returns the parsed `WorkspaceEdit` as `{ { uri = , edits = { … } },
+/// … }` (per-file, deterministic order); `unsupported(sid, uri)` is
+/// the count of `create`/`rename`/`delete` file ops the L2 applier
+/// skips; `clear(sid, uri)` drops the entry.
+pub fn install_rename(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    let m = lua.create_table()?;
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "file_edits",
+            lua.create_function(move |lua, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().rename_store();
+                let guard = store_handle.lock().expect("rename store mutex poisoned");
+                let key = RenameKey::new(id.0.raw().to_string(), uri);
+                if let Some(r) = guard.get(&key) {
+                    Ok(Value::Table(workspace_edit_to_lua(lua, r)?))
+                } else {
+                    Ok(Value::Table(lua.create_table_with_capacity(0, 0)?))
+                }
+            })?,
+        )?;
+    }
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "unsupported",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().rename_store();
+                let guard = store_handle.lock().expect("rename store mutex poisoned");
+                let key = RenameKey::new(id.0.raw().to_string(), uri);
+                Ok(guard.get(&key).map_or(0, |r| r.unsupported_ops))
+            })?,
+        )?;
+    }
+
+    {
+        let mgr = manager.clone();
+        m.set(
+            "clear",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().rename_store();
+                let mut guard = store_handle.lock().expect("rename store mutex poisoned");
+                guard.clear(&RenameKey::new(id.0.raw().to_string(), uri));
+                Ok(())
+            })?,
+        )?;
+    }
+
+    pmacs.set("rename", m)?;
     Ok(())
 }
 
