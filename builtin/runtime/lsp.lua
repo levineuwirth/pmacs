@@ -28,6 +28,33 @@ pmacs.lsp.config.rust = pmacs.lsp.config.rust or {
   },
 }
 
+-- Default Python config: basedpyright (an MIT fork of pyright that
+-- re-enables inlay hints / semantic tokens in the open-source server,
+-- which upstream pyright withholds for Pylance). `--stdio` is the
+-- LSP transport. No `init_options`: basedpyright/pyright take their
+-- strictness from project config (`pyrightconfig.json` /
+-- `[tool.pyright]` in `pyproject.toml`), and pmacs does not yet
+-- advertise `workspace/configuration` (a deferred capability), so an
+-- editor-side `typeCheckingMode` would not be honoured anyway. Until
+-- the project pins it, basedpyright's stricter defaults can make the
+-- diagnostics gutter noisier than upstream pyright — documented, not
+-- a bug. Users override any field from init.lua before a .py opens;
+-- swapping to upstream pyright is just `command = "pyright-langserver"`.
+pmacs.lsp.config.python = pmacs.lsp.config.python or {
+  command = "basedpyright-langserver",
+  args = { "--stdio" },
+}
+
+-- LSP-side extension → language map, deliberately independent of the
+-- tree-sitter detection in `pmacs.parse` (which is grammar-gated:
+-- Python has an LSP server but no bundled grammar). Consulted only
+-- when `pmacs.parse.language_for_path` finds nothing, so grammar-
+-- backed languages keep their existing detection. Extensible from
+-- init.lua: `pmacs.lsp.filetypes.foo = "bar"`.
+pmacs.lsp.filetypes = pmacs.lsp.filetypes or {}
+pmacs.lsp.filetypes.py = pmacs.lsp.filetypes.py or "python"
+pmacs.lsp.filetypes.pyi = pmacs.lsp.filetypes.pyi or "python"
+
 -- Per-buffer attachment record: { language, server, uri, version }.
 -- Keyed by `tostring(BufferIdLua)` because BufferIdLua hands out fresh
 -- userdata each call (so two handles to the same buffer wouldn't hash
@@ -69,7 +96,13 @@ end
 local function active_buffer_language()
   local path = active_buffer_path()
   if not path then return nil end
-  return pmacs.parse.language_for_path(path)
+  -- Grammar-backed detection first (keeps rust/.rs etc. exactly as
+  -- before); fall back to the LSP-only filetype map so languages
+  -- with a server but no tree-sitter grammar (Python) still attach.
+  local lang = pmacs.parse.language_for_path(path)
+  if lang then return lang end
+  local ext = path:match("%.([%w_]+)$")
+  return ext and pmacs.lsp.filetypes[ext] or nil
 end
 
 local function ensure_server(language)

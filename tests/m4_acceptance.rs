@@ -1144,6 +1144,52 @@ fn m4_5_rust_analyzer_initializes() {
     let _ = mgr.borrow_mut().stop(sid);
 }
 
+/// PATH-gated, mirrors `m4_5_rust_analyzer_initializes` for the
+/// default Python server (basedpyright). Validates the whole stack
+/// against a real, strict-by-default server: the registry command +
+/// `--stdio` launches, the LSP handshake completes, and the server
+/// negotiates a `positionEncoding` against the
+/// `general.positionEncodings: ["utf-8","utf-16"]` we advertise
+/// (Option B) — proving negotiation round-trips with a real server,
+/// not only the fake. Skips cleanly when basedpyright is absent.
+#[test]
+fn m4_5_basedpyright_initializes_and_negotiates_encoding() {
+    let Ok(_) = which_binary("basedpyright-langserver") else {
+        eprintln!("basedpyright-langserver not on PATH; skipping");
+        return;
+    };
+    let (sup, mgr) = make_lsp_test_manager();
+    let mut spec = LspServerSpec::new("basedpyright", "python", "basedpyright-langserver");
+    spec.args = vec!["--stdio".into()];
+    spec.restart = LspRestartPolicy::Never;
+    let sid = mgr.borrow_mut().spawn(spec).expect("spawn basedpyright");
+    let evs = drain_lsp_until(&sup, &mgr, sid, Duration::from_secs(20), |evs| {
+        evs.iter()
+            .any(|e| matches!(e.kind, LspEventKind::Initialized { .. }))
+    });
+    let caps = evs
+        .iter()
+        .find_map(|e| match &e.kind {
+            LspEventKind::Initialized { capabilities } => Some(capabilities.clone()),
+            _ => None,
+        })
+        .expect("must observe Initialized event");
+    assert!(caps.is_object(), "capabilities should be a JSON object");
+    // If basedpyright implements LSP 3.17 position-encoding it echoes
+    // its choice, which must be one we can actually encode. A server
+    // predating 3.17 omits the field — correct too, since pmacs then
+    // defaults to UTF-16 (the spec default). What must never happen:
+    // a third encoding we don't handle.
+    let enc = caps.get("positionEncoding").and_then(|v| v.as_str());
+    assert!(
+        matches!(enc, None | Some("utf-8" | "utf-16")),
+        "basedpyright negotiated an encoding pmacs cannot handle: {enc:?}"
+    );
+    let state = mgr.borrow().state(sid).cloned();
+    assert!(matches!(state, Some(LspClientState::Initialized { .. })));
+    let _ = mgr.borrow_mut().stop(sid);
+}
+
 /// Helper: scan PATH for a binary by name. Returns the absolute
 /// path if found.
 fn which_binary(name: &str) -> std::io::Result<std::path::PathBuf> {
