@@ -45,59 +45,116 @@ pub struct SemanticToken {
     pub token_modifiers: u32,
 }
 
-/// Parsed `textDocument/semanticTokens` response.
+/// Parsed `textDocument/semanticTokens` (`/full`, `/range`, or a
+/// delta-applied `/full/delta`) response.
 #[derive(Clone, Debug, Default)]
 pub struct SemanticTokensResponse {
     /// Tokens in document order (decoded from the relative encoding).
     pub tokens: Vec<SemanticToken>,
-    /// Opaque server cursor for a future delta request (unused by the
-    /// v1 full-only path; surfaced for completeness).
+    /// Opaque server cursor. Pass back as `previousResultId` on the
+    /// next `/full/delta` request.
     pub result_id: Option<String>,
+    /// The raw relative-encoded int stream this response decoded
+    /// from. Retained so a subsequent `/full/delta` can splice its
+    /// edits against it (the delta is expressed over the *previous
+    /// data array*, not the decoded tokens).
+    pub raw: Vec<u32>,
+}
+
+/// Decode the flat relative-encoded int stream into absolute tokens.
+/// A trailing partial (<5) group is ignored rather than panicking.
+fn decode(ints: &[u32]) -> Vec<SemanticToken> {
+    let mut tokens = Vec::with_capacity(ints.len() / 5);
+    let mut line = 0u32;
+    let mut start = 0u32;
+    for chunk in ints.chunks_exact(5) {
+        let (d_line, d_start, length, tt, tm) = (chunk[0], chunk[1], chunk[2], chunk[3], chunk[4]);
+        // deltaLine is relative to the previous token's line;
+        // deltaStartChar is relative to the previous token's start
+        // *iff* on the same line, else absolute from col 0.
+        line += d_line;
+        start = if d_line == 0 {
+            start + d_start
+        } else {
+            d_start
+        };
+        tokens.push(SemanticToken {
+            line,
+            start,
+            length,
+            token_type: tt,
+            token_modifiers: tm,
+        });
+    }
+    tokens
+}
+
+fn ints_of(v: &Value, key: &str) -> Vec<u32> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|n| n.as_u64().unwrap_or(0) as u32).collect())
+        .unwrap_or_default()
 }
 
 impl SemanticTokensResponse {
-    /// Parse `SemanticTokens | null`.
-    ///
-    /// `data` must be a flat array whose length is a multiple of 5; a
-    /// trailing partial group (malformed server) is ignored rather
-    /// than panicking. A `null` / shapeless result yields no tokens.
+    /// Parse a `SemanticTokens | null` (the `/full` and `/range`
+    /// shape). A `null` / shapeless result yields no tokens.
     #[must_use]
     pub fn from_lsp_value(v: &Value) -> Self {
         let result_id = v.get("resultId").and_then(Value::as_str).map(str::to_owned);
-        let Some(data) = v.get("data").and_then(Value::as_array) else {
+        if v.get("data").and_then(Value::as_array).is_none() {
             return Self {
                 tokens: Vec::new(),
                 result_id,
+                raw: Vec::new(),
             };
-        };
-        let ints: Vec<u32> = data
-            .iter()
-            .map(|n| n.as_u64().unwrap_or(0) as u32)
-            .collect();
-        let mut tokens = Vec::with_capacity(ints.len() / 5);
-        let mut line = 0u32;
-        let mut start = 0u32;
-        for chunk in ints.chunks_exact(5) {
-            let (d_line, d_start, length, tt, tm) =
-                (chunk[0], chunk[1], chunk[2], chunk[3], chunk[4]);
-            // deltaLine is relative to the previous token's line;
-            // deltaStartChar is relative to the previous token's
-            // start *iff* on the same line, else absolute from col 0.
-            line += d_line;
-            start = if d_line == 0 {
-                start + d_start
-            } else {
-                d_start
-            };
-            tokens.push(SemanticToken {
-                line,
-                start,
-                length,
-                token_type: tt,
-                token_modifiers: tm,
-            });
         }
-        Self { tokens, result_id }
+        let raw = ints_of(v, "data");
+        Self {
+            tokens: decode(&raw),
+            result_id,
+            raw,
+        }
+    }
+
+    /// Apply a `/full/delta` response against the previous raw int
+    /// stream. The server is allowed by the spec to answer a delta
+    /// request with a *full* `SemanticTokens` instead — detected by a
+    /// `data` array and handled by [`Self::from_lsp_value`].
+    ///
+    /// A `SemanticTokensDelta` is `{ resultId?, edits: [{ start,
+    /// deleteCount, data? }] }`, each edit a splice over the previous
+    /// data array. Edits are applied in descending `start` order so
+    /// earlier indices stay valid regardless of server ordering, and
+    /// bounds are clamped defensively.
+    #[must_use]
+    pub fn apply_delta(prev_raw: &[u32], v: &Value) -> Self {
+        if v.get("data").and_then(Value::as_array).is_some() {
+            return Self::from_lsp_value(v);
+        }
+        let result_id = v.get("resultId").and_then(Value::as_str).map(str::to_owned);
+        let mut data = prev_raw.to_vec();
+        if let Some(edits) = v.get("edits").and_then(Value::as_array) {
+            let mut parsed: Vec<(usize, usize, Vec<u32>)> = edits
+                .iter()
+                .filter_map(|e| {
+                    let start = e.get("start")?.as_u64()? as usize;
+                    let delete = e.get("deleteCount")?.as_u64()? as usize;
+                    Some((start, delete, ints_of(e, "data")))
+                })
+                .collect();
+            parsed.sort_by_key(|e| std::cmp::Reverse(e.0));
+            for (start, delete, ins) in parsed {
+                let s = start.min(data.len());
+                let end = start.saturating_add(delete).min(data.len());
+                data.splice(s..end, ins);
+            }
+        }
+        Self {
+            tokens: decode(&data),
+            result_id,
+            raw: data,
+        }
     }
 
     /// True iff the server returned no tokens.
@@ -327,10 +384,71 @@ mod tests {
                     token_modifiers: 0,
                 }],
                 result_id: None,
+                raw: vec![0, 0, 1, 0, 0],
             },
         );
         assert_eq!(s.get(&key).unwrap().tokens.len(), 1);
         s.clear(&key);
         assert!(s.get(&key).is_none());
+    }
+
+    #[test]
+    fn from_lsp_value_retains_raw() {
+        let v = json!({ "resultId": "r1", "data": [0, 0, 4, 1, 1, 0, 5, 3, 2, 0] });
+        let r = SemanticTokensResponse::from_lsp_value(&v);
+        assert_eq!(r.raw, vec![0, 0, 4, 1, 1, 0, 5, 3, 2, 0]);
+        assert_eq!(r.tokens.len(), 2);
+        assert_eq!(r.result_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn apply_delta_splices_previous_raw() {
+        // prev: two tokens. Delta replaces the 2nd group (indices
+        // 5..10) with a different 5-int group and bumps resultId.
+        let prev = [0u32, 0, 4, 1, 1, 0, 5, 3, 2, 0];
+        let delta = json!({
+            "resultId": "r2",
+            "edits": [{ "start": 5, "deleteCount": 5, "data": [1, 2, 6, 0, 0] }]
+        });
+        let r = SemanticTokensResponse::apply_delta(&prev, &delta);
+        assert_eq!(r.result_id.as_deref(), Some("r2"));
+        assert_eq!(r.raw, vec![0, 0, 4, 1, 1, 1, 2, 6, 0, 0]);
+        // 2nd token: deltaLine 1 ⇒ line 1, start absolute 2, len 6.
+        assert_eq!(
+            r.tokens[1],
+            SemanticToken {
+                line: 1,
+                start: 2,
+                length: 6,
+                token_type: 0,
+                token_modifiers: 0
+            }
+        );
+    }
+
+    #[test]
+    fn apply_delta_multi_edit_descending_safe() {
+        // Two edits given in ascending order; applying ascending
+        // would invalidate the second's indices. Delete first group,
+        // insert a group after the (original) second.
+        let prev = [0u32, 0, 1, 0, 0, 0, 1, 1, 0, 0];
+        let delta = json!({ "edits": [
+            { "start": 0, "deleteCount": 5, "data": [] },
+            { "start": 10, "deleteCount": 0, "data": [2, 0, 3, 0, 0] }
+        ]});
+        let r = SemanticTokensResponse::apply_delta(&prev, &delta);
+        assert_eq!(r.raw, vec![0, 1, 1, 0, 0, 2, 0, 3, 0, 0]);
+    }
+
+    #[test]
+    fn apply_delta_accepts_full_fallback() {
+        // Server answered a delta request with a full result.
+        let r = SemanticTokensResponse::apply_delta(
+            &[9, 9, 9, 9, 9],
+            &json!({ "resultId": "f", "data": [0, 0, 2, 1, 0] }),
+        );
+        assert_eq!(r.raw, vec![0, 0, 2, 1, 0]);
+        assert_eq!(r.tokens.len(), 1);
+        assert_eq!(r.result_id.as_deref(), Some("f"));
     }
 }

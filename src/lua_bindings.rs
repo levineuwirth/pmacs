@@ -7570,6 +7570,46 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     {
         let m = manager.clone();
         lsp_mod.set(
+            "_request_semantic_tokens_range_raw",
+            lua.create_function(
+                move |_,
+                      (id, uri, sl, sc, el, ec): (
+                    LspServerIdLua,
+                    String,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                )| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_semantic_tokens_range(id.0, uri, sl, sc, el, ec)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
+            "_request_semantic_tokens_delta_raw",
+            lua.create_function(
+                move |_, (id, uri, prev): (LspServerIdLua, String, String)| {
+                    let job_id = m
+                        .borrow_mut()
+                        .request_semantic_tokens_delta(id.0, uri, prev)
+                        .map_err(mlua::Error::external)?;
+                    Ok(job_id)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let m = manager.clone();
+        lsp_mod.set(
             "_request_execute_command_raw",
             lua.create_function(
                 move |_, (id, command, args): (LspServerIdLua, String, Option<Value>)| {
@@ -9664,6 +9704,24 @@ pub fn install_semantic_tokens(lua: &Lua, manager: &SharedLspManager) -> mlua::R
                 out.set("token_types", to_arr(&legend.token_types)?)?;
                 out.set("token_modifiers", to_arr(&legend.token_modifiers)?)?;
                 Ok(Value::Table(out))
+            })?,
+        )?;
+    }
+
+    {
+        // The opaque server cursor from the last full/delta response,
+        // or nil. Pass it as the `previousResultId` of the next
+        // `/full/delta` request.
+        let mgr = manager.clone();
+        m.set(
+            "result_id",
+            lua.create_function(move |_, (id, uri): (LspServerIdLua, String)| {
+                let store_handle = mgr.borrow().semantic_token_store();
+                let guard = store_handle
+                    .lock()
+                    .expect("semantic token store mutex poisoned");
+                let key = SemanticTokenKey::new(id.0.raw().to_string(), uri);
+                Ok(guard.get(&key).and_then(|r| r.result_id.clone()))
             })?,
         )?;
     }
