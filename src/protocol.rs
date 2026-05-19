@@ -689,6 +689,34 @@ pub enum InstanceMessage {
         /// The adornment items for the declared viewport.
         items: Vec<InlineAdornment>,
     },
+    /// Coarse whole-file styling summary for a minimap / scrollbar
+    /// overview, resolving design-note Open Q#2. One [`Style`] per
+    /// source line (the *dominant* style for that line by byte count
+    /// across the producer's current spans); the frontend maps minimap
+    /// rows to one or more of these. Unlike [`Self::StyleSpans`], this
+    /// is **not** viewport-scoped — the minimap shows the whole file.
+    ///
+    /// Recomputed when the buffer's CRDT `generation` advances; an
+    /// unchanged buffer ships no further summary. A coarser
+    /// representation (fixed bands) or finer (run-length style runs)
+    /// is recorded in `docs/semantic-frontend-protocol.md` as future
+    /// refinements; per-line dominant style is the v1 choice because
+    /// minimap rows naturally correspond to code lines.
+    ///
+    /// Gated on negotiated `semantic_render`; the daemon emits it only
+    /// for sessions that have a [`crate::semantic_render::SemanticRenderState`]
+    /// (structural gating, same as every other semantic family).
+    FileStyleSummary {
+        /// Buffer this summary describes.
+        buffer_id: crate::buffer::BufferId,
+        /// CRDT generation the summary was computed against. The
+        /// frontend can discard a summary that predates an edit it
+        /// has already applied optimistically.
+        generation: u64,
+        /// One [`crate::cell::Style`] per source line, in line order
+        /// from line 0. Empty when the buffer is empty.
+        lines: Vec<crate::cell::Style>,
+    },
     /// T M11.1 — diff zones, folded-region placeholders, anything
     /// occupying its own vertical band. Anchored to the offset of the
     /// line it precedes or replaces; the frontend allocates the
@@ -3938,6 +3966,18 @@ mod tests {
                         style: crate::cell::Style::default(),
                     },
                 }],
+            },
+            InstanceMessage::FileStyleSummary {
+                buffer_id: bid,
+                generation: 7,
+                lines: vec![
+                    crate::cell::Style::default(),
+                    crate::cell::Style {
+                        bold: true,
+                        ..crate::cell::Style::default()
+                    },
+                    crate::cell::Style::default(),
+                ],
             },
             InstanceMessage::BlockAdornments {
                 buffer_id: bid,

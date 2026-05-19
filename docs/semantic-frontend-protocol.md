@@ -35,12 +35,20 @@ sources, so the "wire in when those features land" promise came due):
   `generation`/`full`/`segments`, so suppression is M11.2-level
   (whole-set re-send on change, nothing when byte-identical, never
   an empty frame).
+- **`FileStyleSummary`** — resolves Open Q#2 (minimap / whole-file
+  overview). Per-line dominant style for the whole buffer,
+  generation-keyed so an idle buffer pays nothing
+  (`file_style_summary_msg` / `scoped_file_summary`). Reuses
+  `scoped_style_spans`, so policy A's authority pick is inherited
+  automatically.
 
 `BlockAdornments` / `FoldState` / `ResourceOffer` remain declared
 but deliberately unproduced — pmacs still has no blame / lens /
 fold / diff source; their producers wire in when those features
-land (the same "declared, not yet wired" discipline). The "Open
-questions" section at the end remains open by design.
+land (the same "declared, not yet wired" discipline). Open
+questions #3–#5 remain open by design; #1 is consciously deferred
+(no real visual-motion command surface or semantic frontend
+consumer exists yet).
 
 The grid path (TUI, SSH, a future GPU terminal-grade frontend)
 is unaffected by everything here. This note describes a *second*
@@ -257,12 +265,17 @@ design work, not blockers, and none affect the v1.0 tag.
    irreducibly visual become frontend capabilities. Needs a Lua
    API story so package authors see one model, not two.
 
-2. **Minimap / whole-file overview.** The frontend only receives
-   styling for the viewport range. A Zed/VSCode-style minimap of
-   a 100k-line file needs either a coarse whole-file style
-   summary variant or frontend-side syntax. Unresolved; leaning
-   toward a coarse summary variant so the instance stays the
-   single syntax authority.
+2. **Minimap / whole-file overview.** *Resolved.* Implemented as
+   `InstanceMessage::FileStyleSummary { buffer_id, generation, lines:
+   Vec<Style> }` — one dominant style per source line, computed by
+   `SemanticRenderState::file_style_summary_msg` over whole-buffer
+   spans (policy A inherited from `scoped_style_spans`). Keyed on
+   CRDT generation so an idle buffer pays nothing; recomputed only
+   on edits. Per-line is the v1 choice because minimap rows
+   naturally correspond to code lines. Future refinements if a real
+   frontend prefers them: fixed-N bands (smaller wire, coarser) or
+   whole-file RLE style runs (highest detail); both straightforward
+   given the existing wire shape.
 
 3. **Testability strategy.** Recommended: golden-test
    `SemanticFrame` sequences instance-side (cleaner than golden
