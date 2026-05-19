@@ -129,6 +129,11 @@ pub struct LspServerSpec {
     /// request. Free-form per server; pmacs marshalls it into JSON
     /// from a Lua table.
     pub init_options: Option<Value>,
+    /// T M4.5: workspace settings answered to server→client
+    /// `workspace/configuration` pull requests. A JSON object;
+    /// requested `section`s (dotted paths, e.g. `python.analysis`)
+    /// resolve into it, unknown sections answer `null` per spec.
+    pub settings: Option<Value>,
     /// Optional client-side capabilities override sent in
     /// `initialize`. `None` falls back to a conservative built-in
     /// default (text-sync full, hover, completion, definition).
@@ -155,6 +160,7 @@ impl LspServerSpec {
             root_uri: None,
             env: Vec::new(),
             init_options: None,
+            settings: None,
             capabilities: None,
             restart: LspRestartPolicy::OnCrash,
         }
@@ -505,6 +511,28 @@ impl PositionEncoding {
         match s {
             Some("utf-8") => Self::Utf8,
             _ => Self::Utf16,
+        }
+    }
+}
+
+/// Resolve a `workspace/configuration` item's `section` against the
+/// server's `settings`. LSP semantics: a dotted `section`
+/// (`"python.analysis"`) walks nested objects; an absent/empty
+/// section asks for the whole settings object; a section that does
+/// not resolve answers `null` (the spec's "scope not configured"
+/// signal — distinct from a configured `null`/`false`).
+fn resolve_config_section(settings: &Value, section: Option<&str>) -> Value {
+    match section {
+        None | Some("") => settings.clone(),
+        Some(path) => {
+            let mut cur = settings;
+            for key in path.split('.') {
+                match cur.get(key) {
+                    Some(v) => cur = v,
+                    None => return Value::Null,
+                }
+            }
+            cur.clone()
         }
     }
 }
@@ -2005,12 +2033,39 @@ impl LspManager {
         params: Value,
         now: Instant,
     ) {
-        // We don't synthesize a default error here --- expose the
-        // request to the consumer (M4.6+ wires diagnostics, etc.)
-        // and let it choose to reply via `send_response`. Until M4.6
-        // ships replies for the requests we recognise, unknown
-        // requests will simply linger; the LSP spec tolerates
-        // delayed responses.
+        // T M4.5: answer `workspace/configuration` ourselves — it's a
+        // protocol-level pull (gopls/pyright/clangd issue it during
+        // startup and degrade without a reply), not something to defer
+        // to a Lua consumer. One array element per requested item;
+        // each `section` resolves against the server's `settings`,
+        // unknown sections answer `null` per spec.
+        if method == "workspace/configuration" {
+            let settings = self
+                .clients
+                .get(&sid)
+                .and_then(|c| c.spec.settings.clone())
+                .unwrap_or(Value::Null);
+            let answers: Vec<Value> = params
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            resolve_config_section(
+                                &settings,
+                                item.get("section").and_then(Value::as_str),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = self.send_response(sid, idv, Ok(Value::Array(answers)));
+            return;
+        }
+        // Everything else: expose the request to the consumer and let
+        // it reply via `send_response`. The LSP spec tolerates
+        // delayed responses; unrecognised requests simply linger.
         self.push_event(
             sid,
             now,
@@ -2356,7 +2411,11 @@ fn default_capabilities() -> Value {
         },
         "workspace": {
             "applyEdit": false,
-            "configuration": false,
+            // T M4.5: pmacs answers server→client `workspace/configuration`
+            // pull requests from the per-server `settings` (see
+            // `handle_request`). gopls / pyright / clangd all pull
+            // config this way and degrade without it.
+            "configuration": true,
             "workspaceFolders": true,
             "didChangeConfiguration": { "dynamicRegistration": false },
         },
@@ -2742,5 +2801,37 @@ mod tests {
         let mut v2 = json!({ "line": 0, "character": 1 });
         rewrite_positions_to_bytes(&mut v2, doc, PositionEncoding::Utf8);
         assert_eq!(v2["character"], json!(1));
+    }
+
+    // ---- T M4.5: workspace/configuration section resolution --------------
+
+    #[test]
+    fn resolve_config_section_semantics() {
+        let s = json!({
+            "python": { "analysis": { "typeCheckingMode": "basic" } },
+            "x": 1,
+            "nullable": null,
+        });
+        // Dotted path walks nested objects.
+        assert_eq!(
+            resolve_config_section(&s, Some("python.analysis.typeCheckingMode")),
+            json!("basic")
+        );
+        assert_eq!(
+            resolve_config_section(&s, Some("python.analysis")),
+            json!({ "typeCheckingMode": "basic" })
+        );
+        assert_eq!(resolve_config_section(&s, Some("x")), json!(1));
+        // A configured `null` is returned as-is (distinct from unknown).
+        assert_eq!(resolve_config_section(&s, Some("nullable")), Value::Null);
+        // Unknown section ⇒ null (the spec's "not configured" signal).
+        assert_eq!(
+            resolve_config_section(&s, Some("python.missing")),
+            Value::Null
+        );
+        assert_eq!(resolve_config_section(&s, Some("nope")), Value::Null);
+        // Absent / empty section ⇒ the whole settings object.
+        assert_eq!(resolve_config_section(&s, None), s);
+        assert_eq!(resolve_config_section(&s, Some("")), s);
     }
 }

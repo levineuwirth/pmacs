@@ -31,18 +31,20 @@ pmacs.lsp.config.rust = pmacs.lsp.config.rust or {
 -- Default Python config: basedpyright (an MIT fork of pyright that
 -- re-enables inlay hints / semantic tokens in the open-source server,
 -- which upstream pyright withholds for Pylance). `--stdio` is the
--- LSP transport. No `init_options`: basedpyright/pyright take their
--- strictness from project config (`pyrightconfig.json` /
--- `[tool.pyright]` in `pyproject.toml`), and pmacs does not yet
--- advertise `workspace/configuration` (a deferred capability), so an
--- editor-side `typeCheckingMode` would not be honoured anyway. Until
--- the project pins it, basedpyright's stricter defaults can make the
--- diagnostics gutter noisier than upstream pyright — documented, not
--- a bug. Users override any field from init.lua before a .py opens;
+-- LSP transport. `settings` is answered to basedpyright's
+-- `workspace/configuration` pull (pmacs now advertises that
+-- capability) — `basic` keeps the diagnostics gutter from being
+-- flooded by the fork's stricter defaults. A project's
+-- `pyrightconfig.json` / `[tool.pyright]` still wins where present.
+-- Users override any field from init.lua before a .py opens;
 -- swapping to upstream pyright is just `command = "pyright-langserver"`.
 pmacs.lsp.config.python = pmacs.lsp.config.python or {
   command = "basedpyright-langserver",
   args = { "--stdio" },
+  settings = {
+    python = { analysis = { typeCheckingMode = "basic" } },
+    basedpyright = { analysis = { typeCheckingMode = "basic" } },
+  },
 }
 
 -- LSP-side extension → language map, deliberately independent of the
@@ -124,6 +126,7 @@ local function ensure_server(language)
     command = cfg.command,
     args = cfg.args or {},
     init_options = cfg.init_options,
+    settings = cfg.settings,
   })
   if ok then return sid end
   return nil

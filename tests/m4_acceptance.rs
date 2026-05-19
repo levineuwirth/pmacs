@@ -3838,3 +3838,64 @@ fn m4_5_position_encoding_utf16_round_trips_non_ascii() {
          identity would store 2"
     );
 }
+
+/// T M4.5: pmacs answers the server→client `workspace/configuration`
+/// pull from the per-server `settings` (the capability gopls /
+/// pyright / clangd rely on). The `wsconfig` fake issues the request
+/// at `initialized` with items `[pmacs.probe, does.not.exist]`, then
+/// echoes pmacs's response array back as a `pmacs/wsconfig`
+/// notification. The configured section must resolve to its value;
+/// the unknown one to null (the null half is exhaustively covered by
+/// the `resolve_config_section_semantics` unit test — here we assert
+/// the end-to-end happy path: request intercepted + answered, not
+/// surfaced as an unhandled `Request` event).
+#[test]
+fn m4_5_workspace_configuration_answered_from_settings() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "_G._lsp = pmacs.lsp.spawn({{
+               label='wscfg', language_id='python', command='{fake}',
+               restart='never',
+               env={{ PMACS_FAKE_LSP_MODE='wsconfig' }},
+               settings={{ pmacs={{ probe='ok-42' }} }}
+             }})"
+        ))
+        .exec()
+        .expect("spawn wsconfig server");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut got: Option<String> = None;
+    while Instant::now() < deadline && got.is_none() {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        got = state
+            .lua_host
+            .lua()
+            .load(
+                "for _, ev in ipairs(pmacs.lsp.events_take(_G._lsp)) do
+                   if ev.kind=='notification' and ev.method=='pmacs/wsconfig' then
+                     local a = ev.params and ev.params.answer
+                     if type(a)=='table' then return tostring(a[1]) end
+                   end
+                 end
+                 return nil",
+            )
+            .eval::<Option<String>>()
+            .unwrap_or(None);
+        if got.is_none() {
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+    assert_eq!(
+        got.as_deref(),
+        Some("ok-42"),
+        "pmacs must answer workspace/configuration section 'pmacs.probe' \
+         from the spec settings; got {got:?}"
+    );
+}
