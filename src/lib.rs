@@ -102,6 +102,7 @@ pub mod rope;
 #[cfg(feature = "crdt")]
 pub mod semantic_client;
 pub mod semantic_render;
+pub mod semantic_tokens;
 pub mod signature;
 pub mod socket_path;
 pub mod symbol;

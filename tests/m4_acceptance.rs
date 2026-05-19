@@ -3804,6 +3804,70 @@ fn m4_16_lua_surface_drives_inlay_hints() {
     assert!(pad1, "second hint requested paddingRight");
 }
 
+/// T M4.5 — semantic tokens through the Lua surface. Drives
+/// `pmacs.lsp.request_semantic_tokens` against the fake and asserts
+/// the relative `data` encoding decoded to absolute tokens (incl. the
+/// multi-line delta where `deltaStartChar` becomes absolute), and
+/// that `pmacs.semantic_tokens.legend` exposes the server's legend so
+/// the `token_type` index resolves to a name.
+#[test]
+fn m4_17_lua_surface_drives_semantic_tokens() {
+    let mut s = pmacs::editor::EditorState::new();
+    spawn_lsp_and_init(&mut s, None);
+
+    let uri = "file:///tmp/m4_17_sem.rs";
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.did_open(_G._lsp, '{uri}', 1, 'fn a() {{}}\\n\\nlet b = 1\\n')
+             pmacs.lsp.request_semantic_tokens(_G._lsp, '{uri}')"
+        ))
+        .exec()
+        .expect("kick off semantic tokens request");
+
+    assert!(
+        pump_lua_flag(
+            &mut s,
+            &format!("#pmacs.semantic_tokens.tokens(_G._lsp, '{uri}') > 0"),
+            5,
+        ),
+        "semantic tokens response did not land in the store"
+    );
+
+    // data = [0,0,4,1,1, 0,5,3,2,0, 2,2,7,0,2]
+    //  t1: line 0 start 0 len 4 type 1 mods 1
+    //  t2: line 0 start 5 len 3 type 2 mods 0   (same-line delta)
+    //  t3: line 2 start 2 len 7 type 0 mods 2   (deltaLine!=0 ⇒
+    //                                            startChar absolute)
+    let (count, t1, t2, t3, type1_name, type0_name): (
+        usize,
+        Vec<u32>,
+        Vec<u32>,
+        Vec<u32>,
+        String,
+        String,
+    ) = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "local t = pmacs.semantic_tokens.tokens(_G._lsp, '{uri}')
+             local lg = pmacs.semantic_tokens.legend(_G._lsp)
+             local function tup(x) return {{ x.line, x.start, x.length,
+               x.token_type, x.token_modifiers }} end
+             return #t, tup(t[1]), tup(t[2]), tup(t[3]),
+                    lg.token_types[2], lg.token_types[1]"
+        ))
+        .eval()
+        .expect("read semantic tokens + legend back");
+    assert_eq!(count, 3);
+    assert_eq!(t1, vec![0, 0, 4, 1, 1]);
+    assert_eq!(t2, vec![0, 5, 3, 2, 0]);
+    assert_eq!(t3, vec![2, 2, 7, 0, 2]);
+    // Legend resolves the type index (0-based) → name (1-based Lua).
+    assert_eq!(type1_name, "function");
+    assert_eq!(type0_name, "namespace");
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default

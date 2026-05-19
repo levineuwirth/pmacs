@@ -121,7 +121,14 @@ fn main() {
                             "completionProvider": { "triggerCharacters": ["."] },
                             "definitionProvider": true,
                             "documentFormattingProvider": true,
-                            "diagnosticProvider": { "interFileDependencies": false, "workspaceDiagnostics": false }
+                            "diagnosticProvider": { "interFileDependencies": false, "workspaceDiagnostics": false },
+                            "semanticTokensProvider": {
+                                "legend": {
+                                    "tokenTypes": ["namespace", "function", "variable"],
+                                    "tokenModifiers": ["declaration", "readonly"]
+                                },
+                                "full": true
+                            }
                         },
                         "serverInfo": { "name": "pmacs-fake-lsp", "version": "0.1.0" }
                     }
@@ -581,6 +588,21 @@ fn main() {
                     "jsonrpc": "2.0",
                     "id": idv,
                     "result": serde_json::Value::Null
+                });
+                write_frame(&mut stdout, &resp);
+            }
+            ("textDocument/semanticTokens/full", Some(idv)) => {
+                // T M4.5: relative-encoded `data`. Three tokens:
+                //   [0,0,4,1,1]  line 0 col 0 len 4, function, decl
+                //   [0,5,3,2,0]  same line col 5 len 3, variable
+                //   [2,2,7,0,2]  +2 lines col 2 len 7, namespace, ro
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": {
+                        "resultId": "rid-1",
+                        "data": [0, 0, 4, 1, 1, 0, 5, 3, 2, 0, 2, 2, 7, 0, 2]
+                    }
                 });
                 write_frame(&mut stdout, &resp);
             }
