@@ -2926,6 +2926,14 @@ fn default_capabilities() -> Value {
             "configuration": true,
             "workspaceFolders": true,
             "didChangeConfiguration": { "dynamicRegistration": false },
+            // T M4.5 — let servers tell us cached inlay hints /
+            // semantic tokens are stale via a server→client
+            // `workspace/inlayHint/refresh` /
+            // `workspace/semanticTokens/refresh` request. The Lua
+            // server-request pump answers each and re-pulls the
+            // affected documents into the matching store.
+            "inlayHint": { "refreshSupport": true },
+            "semanticTokens": { "refreshSupport": true },
         },
         "textDocument": {
             "synchronization": {

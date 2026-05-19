@@ -3868,6 +3868,111 @@ fn m4_17_lua_surface_drives_semantic_tokens() {
     assert_eq!(type0_name, "namespace");
 }
 
+/// T M4.5 — server-driven inlay-hint refresh. The `inlayrefresh`
+/// fake sends a `workspace/inlayHint/refresh` request right after
+/// `initialized`. The bundle's server-request pump must answer it
+/// and *re-pull* inlay hints for the attached document — so the
+/// `pmacs.inlay_hint` store populates without anyone ever calling
+/// `pmacs.lsp.inlay_hints()`.
+#[test]
+fn m4_18_inlay_hint_refresh_repulls_via_server_request() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'inlayrefresh' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    // No explicit `pmacs.lsp.inlay_hints()` call: the store filling
+    // is driven purely by the server's refresh request.
+    let flag = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local h = pmacs.inlay_hint.hints(sid, 'file://{a_disp}') \
+           return h ~= nil and #h > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &flag, 5),
+        "server-driven inlayHint/refresh never re-pulled hints into the store"
+    );
+}
+
+/// T M4.5 — server-driven semantic-tokens refresh. The
+/// `semantictokensrefresh` fake sends `workspace/semanticTokens/
+/// refresh` right after `initialized`; the pump must answer it and
+/// re-pull, so `pmacs.semantic_tokens` populates with no explicit
+/// `pmacs.lsp.semantic_tokens()` call.
+#[test]
+fn m4_19_semantic_tokens_refresh_repulls_via_server_request() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'semantictokensrefresh' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    let flag = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local t = pmacs.semantic_tokens.tokens(sid, 'file://{a_disp}') \
+           return t ~= nil and #t > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &flag, 5),
+        "server-driven semanticTokens/refresh never re-pulled tokens into the store"
+    );
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default
