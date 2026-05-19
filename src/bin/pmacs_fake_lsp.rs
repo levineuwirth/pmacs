@@ -70,6 +70,24 @@ fn main() {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        // T M4.5 `wsconfig`: the client's reply to the
+        // `workspace/configuration` request we sent at `initialized`
+        // arrives here as a response (id 9001, has `result`, no
+        // method). Echo its result array back as a notification so
+        // the test can assert what pmacs answered.
+        if mode == "wsconfig"
+            && method.is_empty()
+            && msg.get("result").is_some()
+            && id.as_ref().and_then(serde_json::Value::as_u64) == Some(9001)
+        {
+            let echo = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "pmacs/wsconfig",
+                "params": { "answer": msg.get("result").cloned() }
+            });
+            write_frame(&mut stdout, &echo);
+            continue;
+        }
         // T M4.5 async-bridge failure-path test modes:
         //  * `error`  — answer every `textDocument/*` request with a
         //    JSON-RPC error object (drives `Handle:await()` -> failed).
@@ -119,6 +137,20 @@ fn main() {
                 if mode == "crash" {
                     crashed_after_init = true;
                 }
+            }
+            // T M4.5 `wsconfig`: pull config the way gopls / pyright
+            // / clangd do right after initialize.
+            ("initialized", _) if mode == "wsconfig" => {
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9001,
+                    "method": "workspace/configuration",
+                    "params": { "items": [
+                        { "section": "pmacs.probe" },
+                        { "section": "does.not.exist" }
+                    ] }
+                });
+                write_frame(&mut stdout, &req);
             }
             ("initialized", _) => {}
             ("shutdown", Some(idv)) => {

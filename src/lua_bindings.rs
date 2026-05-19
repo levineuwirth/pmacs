@@ -6817,6 +6817,10 @@ fn lua_to_lsp_spec(t: &Table) -> mlua::Result<LspServerSpec> {
         Some(Value::Nil) | None => None,
         Some(other) => Some(lua_to_json(other)?),
     };
+    let settings: Option<serde_json::Value> = match t.get::<Option<Value>>("settings")? {
+        Some(Value::Nil) | None => None,
+        Some(other) => Some(lua_to_json(other)?),
+    };
     let capabilities: Option<serde_json::Value> = match t.get::<Option<Value>>("capabilities")? {
         Some(Value::Nil) | None => None,
         Some(other) => Some(lua_to_json(other)?),
@@ -6834,6 +6838,7 @@ fn lua_to_lsp_spec(t: &Table) -> mlua::Result<LspServerSpec> {
         root_uri,
         env,
         init_options,
+        settings,
         capabilities,
         restart,
     })
