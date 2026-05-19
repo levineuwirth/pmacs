@@ -4276,6 +4276,94 @@ fn m4_23_rename_prepare_refusal_aborts() {
     assert_eq!(a_text, "abcfooxyz\n", "buffer must be untouched");
 }
 
+/// T M4.5 — dynamic `workspace/didChangeWatchedFiles`. The
+/// `filewatch` fake registers (via `client/registerCapability`) a
+/// `**/*.txt` watcher rooted at the tempdir. The bundle's
+/// snapshot-diff watcher must report create/change/delete events
+/// for matching files only; the fake logs received changes to
+/// `<base>/.received` as a disk side-channel (the protocol stream is
+/// drained by the server-request pump).
+#[test]
+fn m4_24_workspace_did_change_watched_files() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().to_path_buf();
+    let base_disp = base.display().to_string();
+    let a_path = base.join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+    let received = base.join(".received");
+    let foo_uri = format!("file://{}", base.join("foo.txt").display());
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{ command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'filewatch',
+                        PMACS_FAKE_LSP_WATCH_BASE = '{base_disp}' }} }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    // Let registerCapability be processed and the watcher establish
+    // an empty `.txt` baseline (≈3 poll intervals) before creating
+    // files, so the create is a CREATED event, not folded into the
+    // initial scan.
+    let warm = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < warm {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    std::fs::write(base.join("foo.txt"), b"one\n").expect("write foo.txt");
+    std::fs::write(base.join("bar.md"), b"md\n").expect("write bar.md");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("1 {foo_uri}"), 6),
+        "CREATED for foo.txt never reported; .received = {:?}",
+        std::fs::read_to_string(&received).unwrap_or_default()
+    );
+    assert!(
+        !std::fs::read_to_string(&received)
+            .unwrap_or_default()
+            .contains("bar.md"),
+        "non-matching .md must be filtered out"
+    );
+
+    std::fs::write(base.join("foo.txt"), b"two two\n").expect("modify foo.txt");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("2 {foo_uri}"), 6),
+        "CHANGED for foo.txt never reported"
+    );
+
+    std::fs::remove_file(base.join("foo.txt")).expect("delete foo.txt");
+    assert!(
+        pump_until_file_contains(&mut state, &received, &format!("3 {foo_uri}"), 6),
+        "DELETED for foo.txt never reported"
+    );
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default
@@ -4487,6 +4575,32 @@ fn pump_lua_flag(state: &mut pmacs::editor::EditorState, flag: &str, secs: u64) 
             return false;
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Tick the full frame order until `path`'s contents contain
+/// `needle`, or the deadline lapses.
+fn pump_until_file_contains(
+    state: &mut pmacs::editor::EditorState,
+    path: &std::path::Path,
+    needle: &str,
+    secs: u64,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        if std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .contains(needle)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(15));
     }
 }
 

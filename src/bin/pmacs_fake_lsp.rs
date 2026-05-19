@@ -189,7 +189,58 @@ fn main() {
                 });
                 write_frame(&mut stdout, &req);
             }
+            // T M4.5 `filewatch`: dynamically register a
+            // `workspace/didChangeWatchedFiles` watcher (RelativePattern
+            // rooted at PMACS_FAKE_LSP_WATCH_BASE, `**/*.txt`, all
+            // kinds). The client must reply null and start watching.
+            ("initialized", _) if mode == "filewatch" => {
+                let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 9300,
+                    "method": "client/registerCapability",
+                    "params": { "registrations": [{
+                        "id": "watch-1",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "registerOptions": { "watchers": [{
+                            "globPattern": {
+                                "baseUri": format!("file://{base}"),
+                                "pattern": "**/*.txt"
+                            },
+                            "kind": 7
+                        }] }
+                    }] }
+                });
+                write_frame(&mut stdout, &req);
+            }
             ("initialized", _) => {}
+            // T M4.5: the client's file-watch notifications. Append
+            // `type uri` lines to `<base>/.received` as a test
+            // side-channel (the protocol stream is drained by the Lua
+            // server-request pump, so a disk channel is observable).
+            ("workspace/didChangeWatchedFiles", _) => {
+                let base = std::env::var("PMACS_FAKE_LSP_WATCH_BASE").unwrap_or_default();
+                if !base.is_empty()
+                    && let Some(changes) = params.get("changes").and_then(|c| c.as_array())
+                    && let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(format!("{base}/.received"))
+                {
+                    use std::io::Write as _;
+                    for ch in changes {
+                        let t = ch
+                            .get("type")
+                            .and_then(serde_json::Value::as_i64)
+                            .unwrap_or(0);
+                        let u = ch
+                            .get("uri")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        let _ = writeln!(f, "{t} {u}");
+                    }
+                }
+            }
             ("shutdown", Some(idv)) => {
                 let resp = serde_json::json!({
                     "jsonrpc": "2.0",

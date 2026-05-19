@@ -7271,6 +7271,23 @@ pub fn install_lsp(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     }
 
     {
+        // T M4.5 file watching. `changes` is the Lua-built FileEvent
+        // array `{ { uri = , type = 1|2|3 }, … }`; converted to JSON
+        // and sent as `workspace/didChangeWatchedFiles`.
+        let m = manager.clone();
+        lsp_mod.set(
+            "did_change_watched_files",
+            lua.create_function(move |_, (id, changes): (LspServerIdLua, Value)| {
+                let changes = lua_to_json(changes)?;
+                m.borrow_mut()
+                    .did_change_watched_files(id.0, &changes)
+                    .map_err(mlua::Error::external)?;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
         // T M4.5 task #8: hard per-request timeout, tunable from
         // init.lua (e.g. raise it for a slow language server on a
         // cold cache, or lower it in tests).
