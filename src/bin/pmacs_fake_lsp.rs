@@ -28,6 +28,10 @@
 //! * If launched with `PMACS_FAKE_LSP_MODE=crash`: replies to
 //!   `initialize`, then exits with code 7 immediately, so the
 //!   client can verify crash + restart handling.
+//! * If launched with `PMACS_FAKE_LSP_MODE=rooturi`: writes the
+//!   `rootUri` received in `initialize` to the file named by
+//!   `PMACS_FAKE_LSP_ROOT_SINK`, so a test can assert the
+//!   auto-attach path derives the project root from the opened file.
 
 use std::io::{self, Read, Write};
 
@@ -146,6 +150,21 @@ fn main() {
                 if mode == "prepare" || mode == "preprefuse" {
                     resp["result"]["capabilities"]["renameProvider"] =
                         serde_json::json!({ "prepareProvider": true });
+                }
+                // T M4.5 hardening `rooturi`: record the `rootUri` the
+                // client sent in `initialize` to a side-channel file
+                // (env `PMACS_FAKE_LSP_ROOT_SINK`). Lets a test prove
+                // the auto-attach path derives the project root from
+                // the opened file, not the editor's cwd. Mirrors the
+                // `filewatch` mode's `.received` disk side-channel.
+                if mode == "rooturi"
+                    && let Ok(sink) = std::env::var("PMACS_FAKE_LSP_ROOT_SINK")
+                {
+                    let recorded = params
+                        .get("rootUri")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<null>");
+                    let _ = std::fs::write(&sink, recorded);
                 }
                 write_frame(&mut stdout, &resp);
                 if mode == "crash" {
