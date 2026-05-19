@@ -4364,6 +4364,92 @@ fn m4_24_workspace_did_change_watched_files() {
     );
 }
 
+/// Tier 1 single-binary language servers ship pre-configured in the
+/// default bundle. Binary-independent: we don't spawn anything, just
+/// assert the `pmacs.lsp.config` tables and the `pmacs.lsp.filetypes`
+/// extension→language map resolve to the documented values, so a user
+/// who installs `typescript-language-server` / `lua-language-server` /
+/// `bash-language-server` / `taplo` / `zls` gets attachment with no
+/// init.lua.
+#[test]
+fn m4_25_tier1_language_server_configs_and_filetypes() {
+    use pmacs::editor::EditorState;
+
+    let s = EditorState::new();
+    let probe: mlua::Table = s
+        .lua_host
+        .lua()
+        .load(
+            r#"
+            local out = {}
+            local c = pmacs.lsp.config
+            local ft = pmacs.lsp.filetypes
+
+            -- TypeScript / JavaScript family: one binary, four language
+            -- ids so didOpen reports the right one. --stdio transport.
+            local tsjs_ok = true
+            for _, lid in ipairs({ "typescript", "typescriptreact",
+                                   "javascript", "javascriptreact" }) do
+                local e = c[lid]
+                if not (e and e.command == "typescript-language-server"
+                        and e.args and e.args[1] == "--stdio") then
+                    tsjs_ok = false
+                end
+            end
+            out.tsjs = tsjs_ok
+
+            -- Lua: lua-language-server, no transport flag, settings.Lua
+            -- present-not-null for the workspace/configuration pull.
+            out.lua = c.lua ~= nil
+                and c.lua.command == "lua-language-server"
+                and type(c.lua.settings) == "table"
+                and type(c.lua.settings.Lua) == "table"
+
+            -- Bash: bash-language-server start.
+            out.bash = c.bash ~= nil
+                and c.bash.command == "bash-language-server"
+                and c.bash.args and c.bash.args[1] == "start"
+
+            -- TOML: taplo lsp stdio, settings.taplo present-not-null.
+            out.toml = c.toml ~= nil
+                and c.toml.command == "taplo"
+                and c.toml.args and c.toml.args[1] == "lsp"
+                and c.toml.args[2] == "stdio"
+                and type(c.toml.settings) == "table"
+                and type(c.toml.settings.taplo) == "table"
+
+            -- Zig: zls, no args.
+            out.zig = c.zig ~= nil and c.zig.command == "zls"
+
+            -- Extension → language map.
+            out.ft = ft.ts == "typescript"
+                and ft.mts == "typescript"
+                and ft.cts == "typescript"
+                and ft.tsx == "typescriptreact"
+                and ft.js == "javascript"
+                and ft.mjs == "javascript"
+                and ft.cjs == "javascript"
+                and ft.jsx == "javascriptreact"
+                and ft.sh == "bash"
+                and ft.bash == "bash"
+                and ft.toml == "toml"
+                and ft.zig == "zig"
+                and ft.zon == "zig"
+                and ft.lua == "lua"
+
+            return out
+            "#,
+        )
+        .eval()
+        .expect("probe tier1 config + filetypes");
+    assert!(probe.get::<bool>("tsjs").unwrap(), "ts/js family config");
+    assert!(probe.get::<bool>("lua").unwrap(), "lua config");
+    assert!(probe.get::<bool>("bash").unwrap(), "bash config");
+    assert!(probe.get::<bool>("toml").unwrap(), "toml config");
+    assert!(probe.get::<bool>("zig").unwrap(), "zig config");
+    assert!(probe.get::<bool>("ft").unwrap(), "filetype map");
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default

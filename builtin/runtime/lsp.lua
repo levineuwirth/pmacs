@@ -84,6 +84,65 @@ pmacs.lsp.config.go = pmacs.lsp.config.go or {
   settings = { gopls = {} },
 }
 
+-- TypeScript / JavaScript via typescript-language-server (the
+-- tsserver wrapper). One binary serves the whole family; like
+-- `c`/`cpp` these are separate config entries purely so the
+-- `language_id` sent in `didOpen` is accurate — tsserver keys
+-- diagnostics and some code actions off it (typescript /
+-- typescriptreact / javascript / javascriptreact). `--stdio` is the
+-- LSP transport. The project model comes from `tsconfig.json` /
+-- `jsconfig.json` (no `workspace/configuration` pull). Users
+-- override from init.lua before a TS/JS file opens; swapping to
+-- `vtsls` is just `command = "vtsls"`.
+for _, lid in ipairs({ "typescript", "typescriptreact", "javascript", "javascriptreact" }) do
+  pmacs.lsp.config[lid] = pmacs.lsp.config[lid] or {
+    command = "typescript-language-server",
+    args = { "--stdio" },
+  }
+end
+
+-- Lua via lua-language-server (sumneko). Speaks LSP over stdio with
+-- no transport flag. It pulls configuration via
+-- `workspace/configuration` under the `Lua` section; an empty table
+-- is "use defaults" — present, not null (same rationale as gopls).
+-- `.lua` is tree-sitter-grammar-backed, so `pmacs.parse` already
+-- resolves the `lua` language and this is the config that attaches.
+-- Users populate `settings.Lua` (runtime.version, workspace.library,
+-- diagnostics.globals = { "pmacs" }, …) from init.lua.
+pmacs.lsp.config.lua = pmacs.lsp.config.lua or {
+  command = "lua-language-server",
+  args = {},
+  settings = { Lua = {} },
+}
+
+-- Bash / shell via bash-language-server. `start` is its
+-- LSP-over-stdio subcommand. No project config; it shells out to
+-- `shellcheck` (diagnostics) and `shfmt` (formatting) when those are
+-- on PATH. Users override from init.lua before a shell file opens.
+pmacs.lsp.config.bash = pmacs.lsp.config.bash or {
+  command = "bash-language-server",
+  args = { "start" },
+}
+
+-- TOML via taplo. `taplo lsp stdio` serves LSP over stdio. taplo
+-- pulls configuration via `workspace/configuration` under the
+-- `taplo` section (empty ⇒ defaults, present not null); a project
+-- `.taplo.toml` still wins. Users populate it from init.lua.
+pmacs.lsp.config.toml = pmacs.lsp.config.toml or {
+  command = "taplo",
+  args = { "lsp", "stdio" },
+  settings = { taplo = {} },
+}
+
+-- Zig via zls. `zls` with no args serves LSP over stdio; it reads
+-- `zls.json` / `build.zig` for the project model (no
+-- `workspace/configuration` pull). Users override from init.lua
+-- before a `.zig` / `.zon` file opens.
+pmacs.lsp.config.zig = pmacs.lsp.config.zig or {
+  command = "zls",
+  args = {},
+}
+
 -- LSP-side extension → language map, deliberately independent of the
 -- tree-sitter detection in `pmacs.parse` (which is grammar-gated:
 -- Python has an LSP server but no bundled grammar). Consulted only
@@ -103,6 +162,28 @@ for _, ext in ipairs({ "cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "inl", "cp
 end
 -- Go.
 pmacs.lsp.filetypes.go = pmacs.lsp.filetypes.go or "go"
+-- Tier 1 single-binary servers. TypeScript / JavaScript distinguish
+-- the JSX variants so the server enables the JSX parser.
+for _, ext in ipairs({ "ts", "mts", "cts" }) do
+  pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "typescript"
+end
+pmacs.lsp.filetypes.tsx = pmacs.lsp.filetypes.tsx or "typescriptreact"
+for _, ext in ipairs({ "js", "mjs", "cjs" }) do
+  pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "javascript"
+end
+pmacs.lsp.filetypes.jsx = pmacs.lsp.filetypes.jsx or "javascriptreact"
+-- Lua (lua-language-server). pmacs bundles a Lua grammar, so
+-- `language_for_path` resolves `.lua` first; this entry is the LSP
+-- fallback and keeps the language id stable if that ever changes.
+pmacs.lsp.filetypes.lua = pmacs.lsp.filetypes.lua or "lua"
+-- Bash / shell (bash-language-server).
+pmacs.lsp.filetypes.sh = pmacs.lsp.filetypes.sh or "bash"
+pmacs.lsp.filetypes.bash = pmacs.lsp.filetypes.bash or "bash"
+-- TOML (taplo).
+pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
+-- Zig (zls). `.zon` is Zig Object Notation, handled by the same server.
+pmacs.lsp.filetypes.zig = pmacs.lsp.filetypes.zig or "zig"
+pmacs.lsp.filetypes.zon = pmacs.lsp.filetypes.zon or "zig"
 
 -- Per-buffer attachment record: { language, server, uri, version }.
 -- Keyed by `tostring(BufferIdLua)` because BufferIdLua hands out fresh
