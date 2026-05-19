@@ -197,6 +197,28 @@ impl InlayHintStore {
     pub fn get(&self, key: &InlayHintKey) -> Option<&InlayHintResponse> {
         self.by_key.get(key)
     }
+
+    /// Look up the entry for `uri` regardless of which server keyed
+    /// it. Mirrors [`crate::semantic_tokens::SemanticTokenStore::for_uri`]:
+    /// the lowest (numeric) server id wins for determinism across
+    /// `HashMap` order. No server is returned — unlike semantic
+    /// tokens, inlay-hint positions are already pmacs byte offsets by
+    /// the time they reach the store (the absorb path's
+    /// `inbound_converted` rewrites the `Position`-shaped
+    /// `InlayHint.position`), so the producer needs no per-server
+    /// encoding to place them.
+    #[must_use]
+    pub fn for_uri(&self, uri: &str) -> Option<&InlayHintResponse> {
+        self.by_key
+            .iter()
+            .filter(|(k, _)| k.uri == uri)
+            .min_by_key(|(k, _)| {
+                k.server
+                    .parse::<u64>()
+                    .map_or((u64::MAX, k.server.as_str()), |n| (n, ""))
+            })
+            .map(|(_, v)| v)
+    }
 }
 
 /// Cheaply-cloneable shared handle.
@@ -290,5 +312,30 @@ mod tests {
         assert_eq!(s.get(&key).unwrap().hints.len(), 1);
         s.clear(&key);
         assert!(s.get(&key).is_none());
+    }
+
+    #[test]
+    fn for_uri_filters_by_uri_and_picks_lowest_server() {
+        let mk = |label: &str| InlayHintResponse {
+            hints: vec![InlayHint {
+                line: 0,
+                col: 0,
+                label: label.into(),
+                kind: None,
+                padding_left: false,
+                padding_right: false,
+                tooltip: None,
+            }],
+        };
+        let mut s = InlayHintStore::new();
+        s.set(InlayHintKey::new("10", "file:///a"), mk("s10"));
+        s.set(InlayHintKey::new("9", "file:///a"), mk("s9"));
+        s.set(InlayHintKey::new("2", "file:///b"), mk("s2"));
+
+        // Lowest *numeric* server id wins ("9" < "10" numerically,
+        // not lexicographically).
+        assert_eq!(s.for_uri("file:///a").unwrap().hints[0].label, "s9");
+        assert_eq!(s.for_uri("file:///b").unwrap().hints[0].label, "s2");
+        assert!(s.for_uri("file:///nope").is_none());
     }
 }

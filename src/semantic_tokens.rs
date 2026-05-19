@@ -263,6 +263,39 @@ impl SemanticTokenStore {
     pub fn get(&self, key: &SemanticTokenKey) -> Option<&SemanticTokensResponse> {
         self.by_key.get(key)
     }
+
+    /// Look up the entry for `uri` regardless of which server keyed
+    /// it, returning `(server, response)`. The store keys by
+    /// `(server, uri)` but the semantic-render producer only knows the
+    /// document; this is the URI-only view the diagnostics store
+    /// (`DiagnosticStore`) offers natively.
+    ///
+    /// When more than one server has tokens for the same URI the
+    /// **lowest server id** wins, chosen by numeric value so the
+    /// result is deterministic across `HashMap` iteration order
+    /// (server ids are assigned monotonically, so the lowest is the
+    /// oldest / primary attachment). Blending styling from multiple
+    /// servers on one buffer is a deliberately deferred open question
+    /// — see `docs/semantic-frontend-protocol.md`.
+    #[must_use]
+    pub fn for_uri(&self, uri: &str) -> Option<(&str, &SemanticTokensResponse)> {
+        self.by_key
+            .iter()
+            .filter(|(k, _)| k.uri == uri)
+            .min_by_key(|(k, _)| server_sort_key(&k.server))
+            .map(|(k, v)| (k.server.as_str(), v))
+    }
+}
+
+/// Order key for picking a representative server: numeric if the id
+/// parses (the normal case — ids are decimal `LspServerId::raw`),
+/// else a max sentinel so unparsable ids sort last but the lookup
+/// still yields *something* rather than nothing.
+fn server_sort_key(server: &str) -> (u64, &str) {
+    match server.parse::<u64>() {
+        Ok(n) => (n, ""),
+        Err(_) => (u64::MAX, server),
+    }
 }
 
 /// Cheaply-cloneable shared handle.
@@ -390,6 +423,37 @@ mod tests {
         assert_eq!(s.get(&key).unwrap().tokens.len(), 1);
         s.clear(&key);
         assert!(s.get(&key).is_none());
+    }
+
+    #[test]
+    fn for_uri_filters_by_uri_and_picks_lowest_server() {
+        let mk = |tok_type: u32| SemanticTokensResponse {
+            tokens: vec![SemanticToken {
+                line: 0,
+                start: 0,
+                length: 1,
+                token_type: tok_type,
+                token_modifiers: 0,
+            }],
+            result_id: None,
+            raw: vec![0, 0, 1, tok_type, 0],
+        };
+        let mut s = SemanticTokenStore::new();
+        // Same URI under two servers; ids deliberately inserted so
+        // numeric (not lexicographic: "10" < "9" as strings) ordering
+        // is what makes the test meaningful.
+        s.set(SemanticTokenKey::new("10", "file:///a"), mk(10));
+        s.set(SemanticTokenKey::new("9", "file:///a"), mk(9));
+        s.set(SemanticTokenKey::new("2", "file:///b"), mk(2));
+
+        let (server, resp) = s.for_uri("file:///a").expect("entry for /a");
+        assert_eq!(server, "9", "lowest *numeric* server id wins");
+        assert_eq!(resp.tokens[0].token_type, 9);
+
+        let (server_b, _) = s.for_uri("file:///b").expect("entry for /b");
+        assert_eq!(server_b, "2");
+
+        assert!(s.for_uri("file:///nope").is_none());
     }
 
     #[test]
