@@ -4015,3 +4015,67 @@ fn m4_5_location_nav_requests_route_by_kind() {
     assert_eq!(tdef, 31, "typeDefinition must route to its own slot");
     assert_eq!(impl_, 41, "implementation must route to its own slot");
 }
+
+/// T M4.5 symbols/highlight: documentSymbol (hierarchical → flattened
+/// with depth + parent), workspace/symbol (flat, location.uri), and
+/// documentHighlight (range + kind, default 1) each await end-to-end
+/// and land in their store with the right shape.
+#[test]
+fn m4_5_symbols_and_highlight_round_trip() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, None);
+    state
+        .lua_host
+        .lua()
+        .load(
+            "local uri='file:///s.rs'
+             pmacs.lsp.did_open(_G._lsp, uri, 1, 'mod m {}\\n')
+             _G._done=false
+             pmacs.async(function()
+               pmacs.lsp.request_document_symbol(_G._lsp, uri):await()
+               pmacs.lsp.request_workspace_symbol(_G._lsp, 'q'):await()
+               pmacs.lsp.request_document_highlight(_G._lsp, uri, 0, 4):await()
+               local ds = pmacs.document_symbol.symbols(_G._lsp, uri)
+               local ws = pmacs.workspace_symbol.symbols(_G._lsp, 'q')
+               local dh = pmacs.document_highlight.highlights(_G._lsp, uri)
+               _G._ds_n   = ds and #ds or 0
+               _G._ds1    = ds and ds[1] and ds[1].name or ''
+               _G._ds2    = ds and ds[2] and ds[2].name or ''
+               _G._ds2d   = ds and ds[2] and ds[2].depth or -1
+               _G._ds2c   = ds and ds[2] and ds[2].container or ''
+               _G._ws_uri = ws and ws[1] and ws[1].uri or ''
+               _G._ws_ctr = ws and ws[1] and ws[1].container or ''
+               _G._dh_n   = dh and #dh or 0
+               _G._dh1k   = dh and dh[1] and dh[1].kind or -1
+               _G._dh2k   = dh and dh[2] and dh[2].kind or -1
+               _G._done=true
+             end)",
+        )
+        .exec()
+        .expect("dispatch symbols/highlight coroutine");
+    assert!(
+        pump_lua_flag(&mut state, "_G._done", 5),
+        "symbols/highlight coroutine never completed"
+    );
+    let lua = state.lua_host.lua();
+    let g = |k: &str| -> String {
+        lua.load(format!("return tostring(_G.{k})"))
+            .eval()
+            .unwrap_or_default()
+    };
+    assert_eq!(g("_ds_n"), "2", "documentSymbol flattens parent+child");
+    assert_eq!(g("_ds1"), "Outer");
+    assert_eq!(g("_ds2"), "inner");
+    assert_eq!(g("_ds2d"), "1", "child depth is 1");
+    assert_eq!(g("_ds2c"), "Outer", "child container is the parent");
+    assert_eq!(
+        g("_ws_uri"),
+        "file:///ws.rs",
+        "workspace symbol location.uri"
+    );
+    assert_eq!(g("_ws_ctr"), "modw");
+    assert_eq!(g("_dh_n"), "2");
+    assert_eq!(g("_dh1k"), "2", "explicit DocumentHighlightKind (Read)");
+    assert_eq!(g("_dh2k"), "1", "absent kind defaults to Text(1)");
+}

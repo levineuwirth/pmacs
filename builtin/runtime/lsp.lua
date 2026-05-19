@@ -259,6 +259,9 @@ pmacs.lsp.request_references = wrap_request(pmacs.lsp._request_references_raw)
 pmacs.lsp.request_declaration = wrap_request(pmacs.lsp._request_declaration_raw)
 pmacs.lsp.request_type_definition = wrap_request(pmacs.lsp._request_type_definition_raw)
 pmacs.lsp.request_implementation = wrap_request(pmacs.lsp._request_implementation_raw)
+pmacs.lsp.request_document_symbol = wrap_request(pmacs.lsp._request_document_symbol_raw)
+pmacs.lsp.request_workspace_symbol = wrap_request(pmacs.lsp._request_workspace_symbol_raw)
+pmacs.lsp.request_document_highlight = wrap_request(pmacs.lsp._request_document_highlight_raw)
 
 -- Render an `:await()` failure into a modeline-friendly reason.
 -- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
@@ -417,6 +420,37 @@ function pmacs.lsp.find_references()
   end)
 end
 
+function pmacs.lsp.document_symbols()
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  pmacs.document_symbol.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_document_symbol(rec.server, rec.uri):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local syms = pmacs.document_symbol.symbols(rec.server, rec.uri)
+    if not syms or #syms == 0 then
+      pmacs.editor.set_status("LSP: no symbols")
+      return
+    end
+    -- v1 modeline summary (count + first symbol); a structured
+    -- outline buffer driven off this store is future UX work, like
+    -- the references list and hover panel.
+    local first = syms[1]
+    pmacs.editor.set_status(string.format(
+      "LSP: %d symbol%s; first '%s' at %d:%d",
+      #syms, (#syms == 1 and "" or "s"),
+      first.name, first.line + 1, first.col + 1))
+  end)
+end
+
 function pmacs.lsp.format_buffer()
   local rec = attached_for_active()
   if not rec then
@@ -531,12 +565,19 @@ pmacs.command.define {
   fn = pmacs.lsp.find_references,
 }
 
+pmacs.command.define {
+  name = "lsp.document-symbols",
+  description = "List the symbols (outline) of the active buffer (LSP).",
+  fn = pmacs.lsp.document_symbols,
+}
+
 -- Default chords. M-. follows the cross-editor convention for
 -- go-to-definition; the others sit on `C-c` to keep printable letters
 -- self-inserting. The user can override or unbind any of these from
 -- init.lua.
 pmacs.keymap.bind { scope = "global", sequence = "M-.",   command = "lsp.go-to-definition" }
 pmacs.keymap.bind { scope = "global", sequence = "M-?",   command = "lsp.find-references" }
+pmacs.keymap.bind { scope = "global", sequence = "C-c o", command = "lsp.document-symbols" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }

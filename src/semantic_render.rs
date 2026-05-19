@@ -246,11 +246,7 @@ impl SemanticRenderState {
     /// frontend already owns (it has `CursorByte`) — emitting it would
     /// couple a visual-motion concern to the instance, against the
     /// contract boundary.
-    fn scoped_decorations(
-        &self,
-        state: &EditorState,
-        vp: &DeclaredViewport,
-    ) -> Vec<Decoration> {
+    fn scoped_decorations(&self, state: &EditorState, vp: &DeclaredViewport) -> Vec<Decoration> {
         let core = state.core.borrow();
         let mut out = Vec::new();
 
@@ -585,7 +581,10 @@ mod tests {
         msgs.iter().find_map(|m| match m {
             InstanceMessage::Decorations { full, segments, .. } => Some((
                 *full,
-                segments.iter().flat_map(|s| s.decorations.clone()).collect(),
+                segments
+                    .iter()
+                    .flat_map(|s| s.decorations.clone())
+                    .collect(),
             )),
             _ => None,
         })
@@ -655,7 +654,14 @@ mod tests {
         let state = empty_state();
         let mut s = local();
         let buffer_id = active_buffer(&state);
-        s.set_viewport(buffer_id, ByteRange { start: 0, end: 4096 }, 0);
+        s.set_viewport(
+            buffer_id,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
 
         // Empty scratch: no spans, no selection, no diagnostics — but
         // the first frame is a `full` resync for both families (the
@@ -745,11 +751,21 @@ mod tests {
 
         // Declaring a different on-screen range forces a full resync:
         // prior styling/decorations are positioned for the old window.
-        s.set_viewport(buffer_id, ByteRange { start: 200, end: 264 }, 0);
+        s.set_viewport(
+            buffer_id,
+            ByteRange {
+                start: 200,
+                end: 264,
+            },
+            0,
+        );
         let msgs = s.render_frame(&state);
         let (style_full, _) = style_segments(&msgs).expect("StyleSpans");
         let (deco_full, _) = decorations_of(&msgs).expect("Decorations");
-        assert!(style_full && deco_full, "viewport jump must be a full resync");
+        assert!(
+            style_full && deco_full,
+            "viewport jump must be a full resync"
+        );
     }
 
     #[test]
