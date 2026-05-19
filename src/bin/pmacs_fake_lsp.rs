@@ -629,6 +629,33 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            ("textDocument/semanticTokens/range", Some(idv)) => {
+                // T M4.5: same shape as /full, scoped to a range.
+                // One token: line 1 col 0 len 3, variable.
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": { "resultId": "rid-range", "data": [1, 0, 3, 2, 0] }
+                });
+                write_frame(&mut stdout, &resp);
+            }
+            ("textDocument/semanticTokens/full/delta", Some(idv)) => {
+                // T M4.5: a `SemanticTokensDelta` over the /full data
+                // `[0,0,4,1,1, 0,5,3,2,0, 2,2,7,0,2]` — replace the
+                // last 5-int group (idx 10..15) with [3,0,9,1,0], so
+                // token 3 becomes line 3 col 0 len 9, function.
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": idv,
+                    "result": {
+                        "resultId": "rid-2",
+                        "edits": [
+                            { "start": 10, "deleteCount": 5, "data": [3, 0, 9, 1, 0] }
+                        ]
+                    }
+                });
+                write_frame(&mut stdout, &resp);
+            }
             ("textDocument/inlayHint", Some(idv)) => {
                 // T M4.5: a type hint (string label, kind 1) and a
                 // parameter hint (label *parts*, kind 2) so both

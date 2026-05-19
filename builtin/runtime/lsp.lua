@@ -276,6 +276,10 @@ pmacs.lsp.request_code_action = wrap_request(pmacs.lsp._request_code_action_raw)
 pmacs.lsp.request_execute_command = wrap_request(pmacs.lsp._request_execute_command_raw)
 pmacs.lsp.request_inlay_hint = wrap_request(pmacs.lsp._request_inlay_hint_raw)
 pmacs.lsp.request_semantic_tokens = wrap_request(pmacs.lsp._request_semantic_tokens_raw)
+pmacs.lsp.request_semantic_tokens_range =
+  wrap_request(pmacs.lsp._request_semantic_tokens_range_raw)
+pmacs.lsp.request_semantic_tokens_delta =
+  wrap_request(pmacs.lsp._request_semantic_tokens_delta_raw)
 
 -- Render an `:await()` failure into a modeline-friendly reason.
 -- `Handle:await()` raises `{ tag = "cancelled", ... }` when the
@@ -699,23 +703,37 @@ function pmacs.lsp.inlay_hints()
   end)
 end
 
--- T M4.5 — semantic tokens for the whole buffer. Requests
--- `textDocument/semanticTokens/full`, stores the decoded absolute
--- tokens, and surfaces a modeline summary (count + first token's
--- type, resolved through the server's legend). Data only: wiring
--- LSP tokens into styling (a second authority alongside tree-sitter)
--- is a separate rendering milestone — a render layer subscribes to
--- the same `pmacs.semantic_tokens` store when it lands.
+-- T M4.5 — semantic tokens for the whole buffer. Incremental: if a
+-- prior result id exists for this buffer, request a
+-- `/full/delta` against it (the store keeps the raw int stream to
+-- splice on); otherwise a `/full` pull. Either way the store ends
+-- with the complete token set + a fresh result id, and a modeline
+-- summary (count + first token's type, resolved through the legend)
+-- is shown. Data only: wiring LSP tokens into styling (a second
+-- authority alongside tree-sitter) is a separate rendering
+-- milestone — a render layer subscribes to the same
+-- `pmacs.semantic_tokens` store when it lands.
+--
+-- `pmacs.lsp.request_semantic_tokens_range` is also exposed (no
+-- default command) for a future viewport-aware caller: the bundle
+-- has no on-screen-range source, so a "range" command here would
+-- just duplicate `/full`.
 function pmacs.lsp.semantic_tokens()
   local rec = attached_for_active()
   if not rec then
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
-  pmacs.semantic_tokens.clear(rec.server, rec.uri)
+  -- Don't clear: a delta splices against the retained raw stream.
+  local prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
   pmacs.async(function()
     local ok, err = pcall(function()
-      pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+      if prev then
+        pmacs.lsp.request_semantic_tokens_delta(
+          rec.server, rec.uri, prev):await()
+      else
+        pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+      end
     end)
     if not ok then
       pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
@@ -734,8 +752,9 @@ function pmacs.lsp.semantic_tokens()
       and legend.token_types[first.token_type + 1]
       or tostring(first.token_type)
     pmacs.editor.set_status(string.format(
-      "LSP: %d semantic token%s; first '%s' at %d:%d",
+      "LSP: %d semantic token%s%s; first '%s' at %d:%d",
       #toks, (#toks == 1 and "" or "s"),
+      (prev and " (delta)" or ""),
       tname, first.line + 1, first.start + 1))
   end)
 end

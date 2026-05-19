@@ -3973,6 +3973,120 @@ fn m4_19_semantic_tokens_refresh_repulls_via_server_request() {
     );
 }
 
+/// T M4.5 — `textDocument/semanticTokens/range` through the Lua
+/// surface. Same decode path as `/full`, scoped to a range; the
+/// fake returns one token.
+#[test]
+fn m4_20_semantic_tokens_range() {
+    let mut s = pmacs::editor::EditorState::new();
+    spawn_lsp_and_init(&mut s, None);
+
+    let uri = "file:///tmp/m4_20_sem.rs";
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.did_open(_G._lsp, '{uri}', 1, 'let x = 1\\nlet y = 2\\n')
+             pmacs.lsp.request_semantic_tokens_range(_G._lsp, '{uri}', 0, 0, 5, 0)"
+        ))
+        .exec()
+        .expect("kick off semantic tokens range request");
+
+    assert!(
+        pump_lua_flag(
+            &mut s,
+            &format!("#pmacs.semantic_tokens.tokens(_G._lsp, '{uri}') > 0"),
+            5,
+        ),
+        "range response did not land in the store"
+    );
+
+    let (count, tok): (usize, Vec<u32>) = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "local t = pmacs.semantic_tokens.tokens(_G._lsp, '{uri}')
+             local x = t[1]
+             return #t, {{ x.line, x.start, x.length, x.token_type,
+               x.token_modifiers }}"
+        ))
+        .eval()
+        .expect("read range tokens back");
+    assert_eq!(count, 1);
+    assert_eq!(tok, vec![1, 0, 3, 2, 0]);
+}
+
+/// T M4.5 — `/full` then `/full/delta`. The first pull seeds the
+/// store (3 tokens, `resultId` "rid-1"); the delta request (driven
+/// with that previous id) splices the server's edit over the
+/// retained raw stream, yielding the updated 3rd token and the new
+/// `resultId` "rid-2".
+#[test]
+fn m4_21_semantic_tokens_full_then_delta() {
+    let mut s = pmacs::editor::EditorState::new();
+    spawn_lsp_and_init(&mut s, None);
+
+    let uri = "file:///tmp/m4_21_sem.rs";
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.did_open(_G._lsp, '{uri}', 1, 'fn a() {{}}\\n')
+             pmacs.lsp.request_semantic_tokens(_G._lsp, '{uri}')"
+        ))
+        .exec()
+        .expect("kick off full request");
+    assert!(
+        pump_lua_flag(
+            &mut s,
+            &format!("pmacs.semantic_tokens.result_id(_G._lsp, '{uri}') == 'rid-1'"),
+            5,
+        ),
+        "full response did not seed the store"
+    );
+    let third_full: Vec<u32> = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "local t = pmacs.semantic_tokens.tokens(_G._lsp, '{uri}')
+             local x = t[3]
+             return {{ x.line, x.start, x.length, x.token_type,
+               x.token_modifiers }}"
+        ))
+        .eval()
+        .expect("read full token 3");
+    assert_eq!(third_full, vec![2, 2, 7, 0, 2]);
+
+    // Delta against the seeded result id.
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.request_semantic_tokens_delta(_G._lsp, '{uri}', 'rid-1')"
+        ))
+        .exec()
+        .expect("kick off delta request");
+    assert!(
+        pump_lua_flag(
+            &mut s,
+            &format!("pmacs.semantic_tokens.result_id(_G._lsp, '{uri}') == 'rid-2'"),
+            5,
+        ),
+        "delta response did not update the store"
+    );
+    let (count, third_delta): (usize, Vec<u32>) = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "local t = pmacs.semantic_tokens.tokens(_G._lsp, '{uri}')
+             local x = t[3]
+             return #t, {{ x.line, x.start, x.length, x.token_type,
+               x.token_modifiers }}"
+        ))
+        .eval()
+        .expect("read delta token 3");
+    assert_eq!(count, 3, "delta replaced one group, still 3 tokens");
+    // [3,0,9,1,0] spliced as the 3rd group: line 0+0+3, abs col 0.
+    assert_eq!(third_delta, vec![3, 0, 9, 1, 0]);
+}
+
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the
 /// hooks are defined, the namespace tables exist, the user-facing
 /// commands are registered with the command registry, and the default

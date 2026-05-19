@@ -837,10 +837,14 @@ enum ResponseRoute {
     /// Absorb a `textDocument/inlayHint` response into
     /// [`crate::inlay_hint::InlayHintStore`] at `(server, uri)`.
     InlayHint { uri: String },
-    /// Absorb a `textDocument/semanticTokens/full` response into
-    /// [`crate::semantic_tokens::SemanticTokenStore`] at `(server,
-    /// uri)`.
+    /// Absorb a `textDocument/semanticTokens/full` (or `/range`)
+    /// response into [`crate::semantic_tokens::SemanticTokenStore`]
+    /// at `(server, uri)`.
     SemanticTokens { uri: String },
+    /// Absorb a `textDocument/semanticTokens/full/delta` response —
+    /// spliced against the store's retained raw int stream at
+    /// `(server, uri)` — back into that same entry.
+    SemanticTokensDelta { uri: String },
     /// Absorb a Location-shaped nav response (references / declaration
     /// / typeDefinition / implementation) into
     /// [`crate::locations::LocationsStore`] at `(server, uri, kind)`.
@@ -886,6 +890,7 @@ impl ResponseRoute {
             | ResponseRoute::CodeAction { uri }
             | ResponseRoute::InlayHint { uri }
             | ResponseRoute::SemanticTokens { uri }
+            | ResponseRoute::SemanticTokensDelta { uri }
             | ResponseRoute::Locations { uri, .. }
             | ResponseRoute::DocumentSymbol { uri }
             | ResponseRoute::DocumentHighlight { uri } => uri,
@@ -1871,9 +1876,8 @@ impl LspManager {
 
     /// Send `textDocument/semanticTokens/full` for `uri`. The response
     /// (the relative-encoded `data` array) is decoded and absorbed
-    /// into the semantic-token store at `(sid, uri)`. v1 is full-only
-    /// — no `/range` or `/full/delta`. Returns the async-runtime
-    /// [`JobId`] the response will settle.
+    /// into the semantic-token store at `(sid, uri)`. Returns the
+    /// async-runtime [`JobId`] the response will settle.
     pub fn request_semantic_tokens(
         &mut self,
         sid: LspServerId,
@@ -1885,6 +1889,59 @@ impl LspManager {
         let job_id = self.register_awaiter(sid, req_id, "textDocument/semanticTokens/full", &uri);
         self.pending_routes
             .insert((sid, req_id), ResponseRoute::SemanticTokens { uri });
+        Ok(job_id)
+    }
+
+    /// Send `textDocument/semanticTokens/range` for the `[start, end]`
+    /// slice of `uri` (the visible viewport, for large files). The
+    /// response shape is identical to `/full` and shares the same
+    /// store entry / route.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_semantic_tokens_range(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        start_line: u32,
+        start_col: u32,
+        end_line: u32,
+        end_col: u32,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "range": {
+                "start": { "line": start_line, "character": start_col },
+                "end":   { "line": end_line,   "character": end_col   },
+            },
+        });
+        let req_id = self.send_request(sid, "textDocument/semanticTokens/range", params)?;
+        let job_id = self.register_awaiter(sid, req_id, "textDocument/semanticTokens/range", &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::SemanticTokens { uri });
+        Ok(job_id)
+    }
+
+    /// Send `textDocument/semanticTokens/full/delta` for `uri`,
+    /// passing the `previous_result_id` the last full/delta response
+    /// carried. The response (a `SemanticTokensDelta`, or a full
+    /// `SemanticTokens` if the server declined a delta) is spliced
+    /// against the store's retained raw int stream.
+    pub fn request_semantic_tokens_delta(
+        &mut self,
+        sid: LspServerId,
+        uri: impl Into<String>,
+        previous_result_id: impl Into<String>,
+    ) -> Result<JobId, String> {
+        let uri = uri.into();
+        let params = json!({
+            "textDocument": { "uri": uri.clone() },
+            "previousResultId": previous_result_id.into(),
+        });
+        let req_id = self.send_request(sid, "textDocument/semanticTokens/full/delta", params)?;
+        let job_id =
+            self.register_awaiter(sid, req_id, "textDocument/semanticTokens/full/delta", &uri);
+        self.pending_routes
+            .insert((sid, req_id), ResponseRoute::SemanticTokensDelta { uri });
         Ok(job_id)
     }
 
@@ -2524,6 +2581,21 @@ impl LspManager {
                     .expect("semantic token store mutex poisoned");
                 guard.set(key, resp);
             }
+            ResponseRoute::SemanticTokensDelta { uri } => {
+                let key = crate::semantic_tokens::SemanticTokenKey::new(server_key, uri.clone());
+                let mut guard = self
+                    .semantic_token_store
+                    .lock()
+                    .expect("semantic token store mutex poisoned");
+                // Splice against whatever raw stream the previous
+                // full/delta left here; empty if none (the server
+                // should then have answered full, which apply_delta
+                // detects and parses).
+                let prev_raw = guard.get(&key).map(|r| r.raw.clone()).unwrap_or_default();
+                let resp =
+                    crate::semantic_tokens::SemanticTokensResponse::apply_delta(&prev_raw, result);
+                guard.set(key, resp);
+            }
         }
     }
 
@@ -2983,16 +3055,16 @@ fn default_capabilities() -> Value {
             // `workspace/inlayHint/refresh`; on-demand re-query is
             // the v1 model.
             "inlayHint": { "dynamicRegistration": false },
-            // T M4.5 semantic tokens. v1 requests `full` only (no
-            // `/range`, no `/full/delta`). `formats: ["relative"]` is
-            // the only encoding LSP defines; the tokenTypes/
-            // tokenModifiers lists are the LSP-standard legend the
-            // client understands — the server intersects its legend
-            // with these and reports the agreed legend back via
-            // `semanticTokensProvider.legend`.
+            // T M4.5 semantic tokens. We support `/full`, the
+            // `/full/delta` follow-up, and the `/range` viewport
+            // request. `formats: ["relative"]` is the only encoding
+            // LSP defines; the tokenTypes/tokenModifiers lists are
+            // the LSP-standard legend the client understands — the
+            // server intersects its legend with these and reports the
+            // agreed legend back via `semanticTokensProvider.legend`.
             "semanticTokens": {
                 "dynamicRegistration": false,
-                "requests": { "full": true, "range": false },
+                "requests": { "full": { "delta": true }, "range": true },
                 "formats": ["relative"],
                 "tokenTypes": [
                     "namespace", "type", "class", "enum", "interface",
