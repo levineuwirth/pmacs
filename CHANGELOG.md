@@ -60,6 +60,30 @@ The first real producer. The instance now projects syntax styling to
   `cfg!(feature = "crdt")` — the "M11.2 enables semantic" moment,
   analogous to the M10.8 Day-4 `multi_frontend`/`crdt_replica` flip.
 
+#### Decorations projection (M11.3)
+
+`SemanticRenderState` now also projects `InstanceMessage::Decorations`
+from the editor state pmacs actually has instance-side:
+
+- **Selection** — per-window (per-frontend) byte-native state, scoped
+  to the session's active window for the declared buffer and clipped
+  to the viewport. `DecorationKind::Selection`.
+- **Diagnostics** — the shared `DiagnosticStore`, keyed by the file
+  URI the LSP glue opened the document under (`lsp::path_to_file_uri`
+  is now `pub(crate)`, byte-identical to the Lua `file_uri_for`).
+  LSP `(line, col)` is converted to a byte range against the buffer
+  source; severity maps to `DiagnosticError`/`Warning`/`Info`/`Hint`.
+- `StyleSpans` and `Decorations` suppress unchanged frames
+  independently — a selection move does not force a styling re-send.
+- `Decorations::SearchMatch`/`SearchMatchActive`/`CurrentLine` are not
+  emitted: pmacs has no instance-side search-hit store, and
+  current-line is a pure cursor derivation the frontend already owns
+  via `CursorByte` (emitting it would breach the contract boundary).
+- `InlineAdornments`/`BlockAdornments`/`FoldState` remain unproduced
+  by design — pmacs has no inlay-hint/blame/lens/fold/diff source
+  yet. The wire variants exist (M11.1); their producers are wired
+  when those features land. Honest stubs, not fabricated data.
+
 ## [1.0.0] --- 2026-05-18
 
 First stable release. Builds on the 0.1.0 preview (M1–M6) with the

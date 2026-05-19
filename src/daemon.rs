@@ -1190,7 +1190,7 @@ fn handle_session_established(
     if semantic_render {
         semantic_states.insert(
             frontend_id,
-            crate::semantic_render::SemanticRenderState::new(),
+            crate::semantic_render::SemanticRenderState::new(frontend_id),
         );
     } else {
         let mut render_state = RenderState::new(initial_size);
