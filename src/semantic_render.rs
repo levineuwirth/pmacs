@@ -33,8 +33,8 @@ use crate::buffer::BufferId;
 use crate::cell::Style;
 use crate::editor::EditorState;
 use crate::protocol::{
-    ByteRange, Decoration, DecorationKind, DecorationSegment, FrontendId, InstanceMessage,
-    StyleSegment, StyleSpan,
+    AdornmentContent, AdornmentPlacement, ByteRange, Decoration, DecorationKind, DecorationSegment,
+    FrontendId, InlineAdornment, InstanceMessage, StyleSegment, StyleSpan,
 };
 
 /// The viewport a `semantic_render` frontend last declared.
@@ -83,6 +83,13 @@ pub struct SemanticRenderState {
     /// so a styling change does not force a decorations re-send and
     /// vice versa.
     last_decorations: HashMap<BufferId, LastFrame<Decoration>>,
+    /// `InlineAdornments` baseline (T M11 producer arc, Step 3). The
+    /// wire variant carries no `generation`/`full`/`segments`, so
+    /// unlike the two families above this is only M11.2-level
+    /// suppression: a whole-set re-send on any change, nothing when
+    /// byte-identical. `LastFrame::items` reuse keeps the shape
+    /// uniform even though no segment diffing applies.
+    last_adornments: HashMap<BufferId, LastFrame<InlineAdornment>>,
 }
 
 impl SemanticRenderState {
@@ -95,6 +102,7 @@ impl SemanticRenderState {
             viewport: None,
             last_sent: HashMap::new(),
             last_decorations: HashMap::new(),
+            last_adornments: HashMap::new(),
         }
     }
 
@@ -112,20 +120,22 @@ impl SemanticRenderState {
 
     /// Project one frame.
     ///
-    /// Returns up to two messages — an [`InstanceMessage::StyleSpans`]
-    /// (T M11.2) and an [`InstanceMessage::Decorations`] (T M11.3) —
-    /// each scoped to the declared viewport and each suppressed
-    /// independently when byte-identical to its last send at the same
-    /// generation. Returns an empty vec before the frontend declares a
+    /// Returns up to three messages — [`InstanceMessage::StyleSpans`]
+    /// (T M11.2), [`InstanceMessage::Decorations`] (T M11.3), and
+    /// [`InstanceMessage::InlineAdornments`] (Step 3, from the LSP
+    /// inlay-hint store) — each scoped to the declared viewport and
+    /// each suppressed independently when byte-identical to its last
+    /// send. Returns an empty vec before the frontend declares a
     /// viewport.
     ///
-    /// `InlineAdornments` / `BlockAdornments` / `FoldState` are
-    /// deliberately *not* produced: pmacs has no instance-side inlay-
-    /// hint / blame / lens / fold / diff source yet. The wire variants
-    /// exist (T M11.1); their producers are wired when those features
-    /// land — the same "declared, not yet wired" discipline M11.1
-    /// applied to the whole family. Emitting empty messages every
-    /// frame would be waste, not honesty.
+    /// `BlockAdornments` / `FoldState` are still deliberately *not*
+    /// produced: pmacs has no instance-side blame / lens / fold / diff
+    /// source yet. Their wire variants exist (T M11.1); their
+    /// producers wire in when those features land — the same
+    /// "declared, not yet wired" discipline. Emitting an empty message
+    /// every frame would be waste, not honesty, so `InlineAdornments` is
+    /// suppressed both when unchanged and when there is simply nothing
+    /// to say (no hints, no prior non-empty send).
     pub fn render_frame(&mut self, state: &EditorState) -> Vec<InstanceMessage> {
         let Some(vp) = self.viewport.clone() else {
             // Emit nothing before the frontend declares a viewport.
@@ -238,7 +248,49 @@ impl SemanticRenderState {
             }
         }
 
+        // --- InlineAdornments (Step 3 producer) ---
+        out.extend(self.inline_adornments_msg(state, &vp));
         out
+    }
+
+    /// The `InlineAdornments` message for this frame, or `None` when
+    /// nothing should be sent. The wire variant has no
+    /// `generation`/`full`/`segments`, so this is M11.2-level
+    /// suppression only: the whole scoped set re-sends on any change,
+    /// nothing when byte-identical, and never an empty frame when
+    /// there is simply nothing to say. Updates the baseline on send.
+    fn inline_adornments_msg(
+        &mut self,
+        state: &EditorState,
+        vp: &DeclaredViewport,
+    ) -> Option<InstanceMessage> {
+        let adornments = scoped_inline_adornments(state, vp);
+        let should_emit = match self.last_adornments.get(&vp.buffer_id) {
+            // First sight of this buffer: speak only if there is
+            // something to show — no empty-frame spam.
+            None => !adornments.is_empty(),
+            // Re-send on a real change. `empty → empty` conveys
+            // nothing and is suppressed; `non-empty → empty` *is* a
+            // change worth sending so the frontend clears its overlay.
+            Some(p) => {
+                (p.visible != vp.visible || p.items != adornments)
+                    && !(adornments.is_empty() && p.items.is_empty())
+            }
+        };
+        if !should_emit {
+            return None;
+        }
+        self.last_adornments.insert(
+            vp.buffer_id,
+            LastFrame {
+                visible: vp.visible,
+                items: adornments.clone(),
+            },
+        );
+        Some(InstanceMessage::InlineAdornments {
+            buffer_id: vp.buffer_id,
+            items: adornments,
+        })
     }
 
     /// Project the [`Decoration`] set intersecting the declared
@@ -313,6 +365,78 @@ impl SemanticRenderState {
 
         out
     }
+}
+
+/// Project the LSP inlay-hint set intersecting the declared viewport
+/// into [`InlineAdornment`]s. Mirrors the diagnostics half of
+/// `scoped_decorations`: same path → URI → store (`for_uri`) lookup.
+/// Step 0 established inlay-hint columns are already pmacs byte
+/// offsets by the time they reach the store (the absorb path's
+/// `inbound_converted` rewrites the `Position`-shaped
+/// `InlayHint.position`), so `line_col_to_byte` — which treats the
+/// column as a byte offset — is exact here, no per-server encoding
+/// needed (unlike semantic-token styling). Takes no `self`: the
+/// session id is irrelevant (inlay hints are per-buffer, not
+/// per-window like selection), mirroring `scoped_style_spans`.
+///
+/// Every hint is `AtOffset` (inlay hints are inline by definition)
+/// carrying `Text` with the (padding-applied) label and the default
+/// style — the instance has no inlay-specific theme face yet, and a
+/// fabricated one would be dishonest.
+fn scoped_inline_adornments(state: &EditorState, vp: &DeclaredViewport) -> Vec<InlineAdornment> {
+    let core = state.core.borrow();
+    let Some(path) = core.active_buffer_path() else {
+        return Vec::new();
+    };
+    let uri = crate::lsp::path_to_file_uri(&path);
+    let hints = {
+        let store = state.lsp_manager.borrow().inlay_hint_store();
+        let guard = store.lock().expect("inlay-hint store mutex poisoned");
+        match guard.for_uri(&uri) {
+            Some(resp) => resp.hints.clone(),
+            None => return Vec::new(),
+        }
+    };
+    if hints.is_empty() {
+        return Vec::new();
+    }
+    let registry = core.registry.clone();
+    let reg = registry.borrow();
+    let Ok(buf) = reg.get(vp.buffer_id) else {
+        return Vec::new();
+    };
+    let source = buffer_source_bytes(buf);
+    let source_len = source.len() as u64;
+    let line_starts = line_start_offsets(&source);
+    let vis_start = vp.visible.start.min(source_len);
+    let vis_end = vp.visible.end.min(source_len);
+
+    let mut out = Vec::new();
+    for h in &hints {
+        let at = line_col_to_byte(&line_starts, source_len, h.line, h.col);
+        // An inlay hint occupies no bytes; include it when its anchor
+        // lies within the declared viewport (half-open).
+        if at < vis_start || at >= vis_end {
+            continue;
+        }
+        let mut text = String::new();
+        if h.padding_left {
+            text.push(' ');
+        }
+        text.push_str(&h.label);
+        if h.padding_right {
+            text.push(' ');
+        }
+        out.push(InlineAdornment {
+            at,
+            placement: AdornmentPlacement::AtOffset,
+            content: AdornmentContent::Text {
+                text,
+                style: Style::default(),
+            },
+        });
+    }
+    out
 }
 
 /// Intersect `[lo, hi)` with the declared viewport (itself clamped to
@@ -671,14 +795,17 @@ mod tests {
     }
 
     /// All `InstanceMessage` variants the semantic projection may
-    /// emit are `StyleSpans` or `Decorations` — never `CellDelta`,
-    /// grid `Cursor`, or the not-yet-wired adornment/fold families.
+    /// emit are `StyleSpans`, `Decorations`, or `InlineAdornments` —
+    /// never `CellDelta`, grid `Cursor`, or the still-unwired
+    /// `BlockAdornments` / `FoldState` families.
     fn assert_semantic_only(msgs: &[InstanceMessage]) {
         for m in msgs {
             assert!(
                 matches!(
                     m,
-                    InstanceMessage::StyleSpans { .. } | InstanceMessage::Decorations { .. }
+                    InstanceMessage::StyleSpans { .. }
+                        | InstanceMessage::Decorations { .. }
+                        | InstanceMessage::InlineAdornments { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
@@ -961,10 +1088,9 @@ mod tests {
     }
 
     #[test]
-    fn adornment_and_fold_families_are_never_emitted() {
-        // M11.3 honest-stub contract: InlineAdornments / BlockAdornments
-        // / FoldState have no instance-side source yet, so the
-        // projection never produces them (not even empty ones).
+    fn block_adornments_and_fold_state_still_never_emitted() {
+        // BlockAdornments / FoldState have no instance-side source
+        // yet, so the projection never produces them (not even empty).
         let state = empty_state();
         let buffer_id = active_buffer(&state);
         let mut s = local();
@@ -974,13 +1100,30 @@ mod tests {
                 assert!(
                     !matches!(
                         m,
-                        InstanceMessage::InlineAdornments { .. }
-                            | InstanceMessage::BlockAdornments { .. }
-                            | InstanceMessage::FoldState { .. }
+                        InstanceMessage::BlockAdornments { .. } | InstanceMessage::FoldState { .. }
                     ),
-                    "a not-yet-wired adornment/fold family was emitted: {m:?}"
+                    "a still-unwired block/fold family was emitted: {m:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn inline_adornments_not_emitted_without_hints() {
+        // Step 3: InlineAdornments IS wired, but a buffer with no LSP
+        // inlay-hint store entry must still never emit an (empty)
+        // InlineAdornments frame — no empty-frame spam.
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        for _ in 0..3 {
+            assert!(
+                !s.render_frame(&state)
+                    .iter()
+                    .any(|m| matches!(m, InstanceMessage::InlineAdornments { .. })),
+                "no inlay hints ⇒ no InlineAdornments message"
+            );
         }
     }
 
@@ -1220,5 +1363,111 @@ mod tests {
             segments.iter().all(|sg| sg.spans.is_empty()),
             "grammar-less buffer with no LSP tokens ⇒ zero spans"
         );
+    }
+
+    // --- Step 3: InlineAdornments from the LSP inlay-hint store ---
+
+    /// Seed buffer text + path and an inlay-hint store entry. Keyed by
+    /// `(server, uri)`; `for_uri` picks the lowest server, so a fixed
+    /// `"1"` is fine. No LSP client needed — the inlay path never
+    /// consults `semantic_style_context` (cols are already byte
+    /// offsets, Step 0).
+    fn seed_inlay(
+        state: &EditorState,
+        buffer_id: BufferId,
+        hints: Vec<crate::inlay_hint::InlayHint>,
+    ) {
+        {
+            let mut core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"let x = f();\n",
+                })
+                .expect("seed buffer text");
+            core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/h.rs")));
+        }
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/h.rs"));
+        let store = state.lsp_manager.borrow().inlay_hint_store();
+        store.lock().expect("inlay store").set(
+            crate::inlay_hint::InlayHintKey::new("1", uri),
+            crate::inlay_hint::InlayHintResponse { hints },
+        );
+    }
+
+    fn hint(line: u32, col: u32, label: &str) -> crate::inlay_hint::InlayHint {
+        crate::inlay_hint::InlayHint {
+            line,
+            col,
+            label: label.into(),
+            kind: None,
+            padding_left: false,
+            padding_right: true,
+            tooltip: None,
+        }
+    }
+
+    fn adornments_of(msgs: &[InstanceMessage]) -> Option<Vec<InlineAdornment>> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::InlineAdornments { items, .. } => Some(items.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn inlay_hints_project_as_inline_adornments_clipped_to_viewport() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // `: i32` after `x` (col 5, in-viewport) and a hint past the
+        // declared viewport that must be excluded.
+        seed_inlay(&state, bid, vec![hint(0, 5, ": i32"), hint(0, 11, "OUT")]);
+        s.set_viewport(bid, ByteRange { start: 0, end: 8 }, 0);
+
+        let msgs = s.render_frame(&state);
+        assert_semantic_only(&msgs);
+        let items = adornments_of(&msgs).expect("InlineAdornments emitted");
+        assert_eq!(items.len(), 1, "the out-of-viewport hint is clipped");
+        let a = &items[0];
+        assert_eq!(a.at, 5);
+        assert_eq!(a.placement, AdornmentPlacement::AtOffset);
+        match &a.content {
+            AdornmentContent::Text { text, style } => {
+                assert_eq!(text, ": i32 ", "padding_right adds a trailing space");
+                assert_eq!(*style, Style::default());
+            }
+            AdornmentContent::Resource { .. } => panic!("expected Text, got Resource"),
+        }
+    }
+
+    #[test]
+    fn inline_adornments_suppressed_then_resync_on_change() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        seed_inlay(&state, bid, vec![hint(0, 5, ": i32")]);
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        assert!(
+            adornments_of(&s.render_frame(&state)).is_some(),
+            "first frame ships the adornments"
+        );
+        assert!(
+            adornments_of(&s.render_frame(&state)).is_none(),
+            "byte-identical next frame is suppressed"
+        );
+
+        // Hint set changes → whole-set re-send (no segment diffing on
+        // this wire variant).
+        seed_inlay(&state, bid, vec![hint(0, 5, ": String")]);
+        let again = adornments_of(&s.render_frame(&state)).expect("re-sent on change");
+        match &again[0].content {
+            AdornmentContent::Text { text, .. } => assert_eq!(text, ": String "),
+            AdornmentContent::Resource { .. } => panic!("expected Text, got Resource"),
+        }
     }
 }

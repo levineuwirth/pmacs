@@ -21,11 +21,25 @@ against this design:
 - **M11.5** — the headless `SemanticClient` glue + reconstruction-
   equivalence and end-to-end tests.
 
-`InlineAdornments` / `BlockAdornments` / `FoldState` /
-`ResourceOffer` are declared but deliberately unproduced — pmacs has
-no inlay-hint / blame / lens / fold / diff source yet; their
-producers wire in when those features land (the same "declared, not
-yet wired" discipline this arc used throughout). The "Open
+Post-M11 producer arc (the LSP feature arc landed the missing data
+sources, so the "wire in when those features land" promise came due):
+
+- **`StyleSpans`, second authority** — policy A, *per-language*
+  styling authority. A grammar-backed language stays tree-sitter
+  only; a language with no bundled grammar (C/C++, …) is styled
+  from LSP semantic tokens (`lsp_scoped_style_spans`, encoding +
+  legend via `LspManager::semantic_style_context`). Never both on
+  one buffer. Reuses the M11.4 diff pipeline unchanged.
+- **`InlineAdornments`** — produced from the LSP inlay-hint store
+  (`scoped_inline_adornments`). The wire variant carries no
+  `generation`/`full`/`segments`, so suppression is M11.2-level
+  (whole-set re-send on change, nothing when byte-identical, never
+  an empty frame).
+
+`BlockAdornments` / `FoldState` / `ResourceOffer` remain declared
+but deliberately unproduced — pmacs still has no blame / lens /
+fold / diff source; their producers wire in when those features
+land (the same "declared, not yet wired" discipline). The "Open
 questions" section at the end remains open by design.
 
 The grid path (TUI, SSH, a future GPU terminal-grade frontend)
@@ -257,3 +271,19 @@ design work, not blockers, and none affect the v1.0 tag.
    untested surface to the frontend↔instance glue, not all
    rendering. The existing `audit/` + proptest discipline
    extends naturally to semantic-frame goldens.
+
+4. **Per-byte tree-sitter / LSP style blend.** The producer arc
+   chose policy A (per-language authority) deliberately: C/C++ has
+   *no* grammar so there is no overlap to resolve, and it reuses
+   the M11.4 diff pipeline untouched. A grammar-backed language
+   refined by LSP semantic precision (mutable-vs-const, etc.) would
+   need tree-sitter-base + LSP-overlay with a per-byte span merge —
+   more code and more async-LSP diff churn. Unresolved; deferred
+   until a concrete language motivates it.
+
+5. **Multiple servers, one URI.** `SemanticTokenStore::for_uri` and
+   `semantic_style_context` pick the lowest-id server when several
+   attach to the same document. Blending styling/adornments across
+   servers (e.g. a typo linter + a language server) is unresolved;
+   the single-representative-server rule is the v1 simplification,
+   not a final answer.
