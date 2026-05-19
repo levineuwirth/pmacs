@@ -1508,17 +1508,15 @@ pub struct InstanceCapabilities {
     /// family (`InstanceMessage::StyleSpans` … `ResourceOffer`) and
     /// consume `FrontendEvent::Viewport`.
     ///
-    /// Default is `false` — unlike `crdt_replica`, this does *not*
-    /// track the `crdt` Cargo feature. M11.1 declares the bit
-    /// position and the negotiation mechanics; the instance-side
-    /// projection seam (`SemanticRenderState`, the producer) is
-    /// M11.2. Advertising `true` before the producer exists would be
-    /// wire-protocol false advertising — the M10.5→M10.7 "bits false
-    /// until the path is wired" discipline, applied to M11. The
-    /// default flips to `cfg!(feature = "crdt")` when M11.2 lands the
-    /// projection seam (semantic sessions are also text replicas, so
-    /// the dependency on `crdt_replica` makes the feature gate the
-    /// natural ceiling).
+    /// T M11.1 declared the bit position + negotiation mechanics with
+    /// the default `false` (no producer yet). T M11.2 landed the
+    /// instance-side projection seam (`SemanticRenderState`) and
+    /// flipped the default to `cfg!(feature = "crdt")`: the instance
+    /// now advertises `semantic_render` on CRDT builds. It tracks the
+    /// `crdt` feature rather than being unconditional because the
+    /// negotiation dependency rule makes a semantic session
+    /// necessarily a text replica — a non-CRDT build can host
+    /// neither. See [`Default`] impl below.
     #[serde(default)]
     pub semantic_render: bool,
 }
@@ -1543,18 +1541,25 @@ impl Default for InstanceCapabilities {
         // keeps the daemon's advertised capabilities consistent
         // with what it can actually do.
         //
-        // T M11.1 — `semantic_render` defaults to `false`
-        // unconditionally (not gated on the `crdt` feature like the
-        // two bits above). There is no projection-seam producer yet;
-        // the producer and the feature-tracking default flip are
-        // M11.2 scope. Until then a frontend declaring
-        // `semantic_render: true` gets `Goodbye(CapabilityMismatch)`,
-        // exactly as `multi_frontend`/`crdt_replica` did between
-        // M10.5 and the M10.8 Day-4 flip.
+        // T M11.1 declared `semantic_render` defaulting to `false`
+        // unconditionally — no projection-seam producer existed, so
+        // advertising it would have been wire-protocol false
+        // advertising (the M10.5→M10.7 "bits false until the path is
+        // wired" discipline).
+        //
+        // T M11.2 — **the flip**: the instance-side projection seam
+        // (`SemanticRenderState`, the producer) has landed and the
+        // dispatcher selects it per session, so the instance now
+        // advertises `semantic_render`. It tracks `cfg!(feature =
+        // "crdt")` like `crdt_replica` because the negotiation
+        // dependency rule makes a semantic session necessarily a
+        // text replica; a non-CRDT build can host neither. This is
+        // the "M11.2 enables semantic" moment, exactly analogous to
+        // the M10.8 Day-4 multi_frontend/crdt_replica flip.
         Self {
             multi_frontend: cfg!(feature = "crdt"),
             crdt_replica: cfg!(feature = "crdt"),
-            semantic_render: false,
+            semantic_render: cfg!(feature = "crdt"),
         }
     }
 }
@@ -3809,15 +3814,23 @@ mod tests {
     }
 
     #[test]
-    fn negotiate_two_arg_helpers_default_semantic_render_false() {
-        // Regression: the M10.7 matrix uses the 2-arg helpers, which
-        // must keep semantic_render at its Default (false) so adding
-        // the bit did not perturb existing negotiation outcomes.
+    fn negotiate_two_arg_helpers_do_not_negotiate_semantic_render() {
+        // Regression: the M10.7 matrix uses the 2-arg helpers. After
+        // the T M11.2 flip the *instance* default is `cfg!(crdt)`
+        // (true under `--features crdt`), but the *frontend* 2-arg
+        // helper still defaults `semantic_render` to false — so the
+        // AND-rule yields `false` and existing M10.7 outcomes are
+        // unperturbed. (A frontend that wants the semantic projection
+        // opts in explicitly via the 3-arg helper.)
         let res =
             negotiate_capabilities(&front_caps(true, true), &inst_caps(true, true)).expect("ok");
         assert!(res.multi_frontend);
         assert!(res.crdt_replica);
-        assert!(!res.semantic_render);
+        assert!(
+            !res.semantic_render,
+            "frontend that didn't request semantic_render must not negotiate it, \
+             regardless of the instance default"
+        );
     }
 
     // T M11.1 — postcard round-trips for the SemanticFrame family and

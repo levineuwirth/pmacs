@@ -33,6 +33,33 @@ wire declaration.
 - `PMACS_INSTANCE_SEMANTIC_RENDER` env override mirrors the existing
   per-capability test overrides.
 
+#### Semantic projection seam (M11.2)
+
+The first real producer. The instance now projects syntax styling to
+`semantic_render` sessions without rasterizing to a cell grid.
+
+- New `SemanticRenderState` (`src/semantic_render.rs`), sibling of
+  `instance_render::RenderState`: reads the same `EditorState` but
+  emits `InstanceMessage::StyleSpans` — tree-sitter spans mapped
+  through the active `Theme`, scoped and clipped to the byte range the
+  frontend declared via `FrontendEvent::Viewport`. Emits nothing until
+  a viewport is declared; suppresses byte-identical frames (true
+  span-granularity diffing is M11.4).
+- `StyleSpans.generation` is anchored to `CrdtState::version_scalar()`
+  — the oplog version vector summed to one monotonic non-decreasing
+  scalar, letting a frontend discard styling that predates an edit it
+  already applied optimistically.
+- Dispatcher selects the projection **per session**: a semantic
+  session gets a `SemanticRenderState` and never `CellDelta`/grid
+  `Cursor` (it lays out locally) but still receives `CursorByte`,
+  `BufferSnapshot`, `CrdtOp`, and presence. A grid and a semantic
+  frontend can attach to the same buffer simultaneously.
+  `FrontendEvent::Viewport` is consumed (routed by authenticated
+  source, like `CrdtOp`).
+- `InstanceCapabilities` default `semantic_render` flipped to
+  `cfg!(feature = "crdt")` — the "M11.2 enables semantic" moment,
+  analogous to the M10.8 Day-4 `multi_frontend`/`crdt_replica` flip.
+
 ## [1.0.0] --- 2026-05-18
 
 First stable release. Builds on the 0.1.0 preview (M1–M6) with the

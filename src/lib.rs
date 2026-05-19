@@ -90,6 +90,7 @@ pub mod project;
 pub mod project_index;
 pub mod protocol;
 pub mod rope;
+pub mod semantic_render;
 pub mod signature;
 pub mod socket_path;
 pub mod syntax;
