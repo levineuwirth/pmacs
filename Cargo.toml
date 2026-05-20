@@ -1,10 +1,10 @@
 [workspace]
-# Session 1 of the pmacs-gpu arc: `pmacs-protocol` is the wire-types
-# crate the post-v1.0 frontend (`pmacs-gpu`) will consume directly. The
-# root `pmacs` package stays a workspace member (no file moves); the
-# new crate lives under `pmacs-protocol/`. See
-# `docs/pmacs-gpu-design.md`.
-members = [".", "pmacs-protocol"]
+# Session 1 of the pmacs-gpu arc landed `pmacs-protocol` as a workspace
+# member (the wire-types crate). Session 2 (this) adds `pmacs-gpu` as
+# the GPU/GUI frontend binary — wgpu/winit/cosmic-text/glyphon — with
+# hello-world rendering. Protocol consumption arrives in session 3.
+# See `docs/pmacs-gpu-design.md`.
+members = [".", "pmacs-protocol", "pmacs-gpu"]
 
 [workspace.dependencies]
 # Shared between `pmacs` and `pmacs-protocol`. Pinned here so both
