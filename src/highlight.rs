@@ -76,111 +76,78 @@ impl Theme {
     }
 
     /// A small built-in dark theme that picks up the most common
-    /// tree-sitter captures so opening a code file produces visible
-    /// highlighting without a user theme. Uses 8/16-color indexed
-    /// terminal colors for portability --- truecolor themes can be
-    /// pushed in from Lua.
+    /// tree-sitter captures **and** the LSP semantic-token type names
+    /// clangd / rust-analyzer / gopls actually emit, so opening a code
+    /// file produces visible highlighting without a user theme. Uses
+    /// 8/16-color indexed terminal colors for portability — truecolor
+    /// themes can be pushed in from Lua.
     ///
-    /// Capture coverage is intentionally limited: keyword,
-    /// function, type, string, comment, constant, number, operator,
-    /// variable. Themes that want more granularity layer on top via
-    /// [`Self::insert`] / Lua's `pmacs.theme.set`.
+    /// Themes that want more granularity layer on top via
+    /// [`Self::insert`] / Lua's `pmacs.theme.set`. The dotted-prefix
+    /// [`Self::lookup`] means a modifier-refined name like
+    /// `function.defaultLibrary` falls back to `function` if not
+    /// defined — safe to query unconditionally.
     #[must_use]
     pub fn default_dark() -> Self {
-        let mut by_capture = HashMap::new();
-        let bold = Style {
+        // Indexed terminal palette: 1 red, 2 green, 3 yellow, 4 blue,
+        // 5 magenta, 6 cyan, 8 bright black/gray; bright variants 9..14.
+        let fg = |c: u8| Style {
+            fg: Color::Indexed(c),
+            ..Style::default()
+        };
+        let fg_bold = |c: u8| Style {
+            fg: Color::Indexed(c),
             bold: true,
             ..Style::default()
         };
-        // 8-color indexed: 1 red, 2 green, 3 yellow, 4 blue,
-        // 5 magenta, 6 cyan; bright variants 9..14.
-        by_capture.insert(
-            "keyword".to_owned(),
-            Style {
-                fg: Color::Indexed(5),
-                ..bold
-            },
-        );
-        by_capture.insert(
-            "keyword.control".to_owned(),
-            Style {
-                fg: Color::Indexed(13),
-                ..bold
-            },
-        );
-        by_capture.insert(
-            "function".to_owned(),
-            Style {
-                fg: Color::Indexed(4),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "function.method".to_owned(),
-            Style {
-                fg: Color::Indexed(12),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "type".to_owned(),
-            Style {
-                fg: Color::Indexed(3),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "type.builtin".to_owned(),
-            Style {
-                fg: Color::Indexed(11),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "string".to_owned(),
-            Style {
-                fg: Color::Indexed(2),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "comment".to_owned(),
-            Style {
-                fg: Color::Indexed(8),
-                italic: true,
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "constant".to_owned(),
-            Style {
-                fg: Color::Indexed(1),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "constant.builtin".to_owned(),
-            Style {
-                fg: Color::Indexed(9),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "number".to_owned(),
-            Style {
-                fg: Color::Indexed(1),
-                ..Style::default()
-            },
-        );
-        by_capture.insert(
-            "operator".to_owned(),
-            Style {
-                fg: Color::Indexed(6),
-                ..Style::default()
-            },
-        );
-        by_capture.insert("variable".to_owned(), Style::default());
-        by_capture.insert("punctuation".to_owned(), Style::default());
+        let fg_italic = |c: u8| Style {
+            fg: Color::Indexed(c),
+            italic: true,
+            ..Style::default()
+        };
+        let italic_only = Style {
+            italic: true,
+            ..Style::default()
+        };
+
+        // (capture name, style). LSP semantic-token type names are the
+        // unprefixed entries (`macro`, `namespace`, `parameter`, …);
+        // tree-sitter captures are the dotted ones (`keyword.control`,
+        // `function.method`, `type.builtin`, `constant.builtin`).
+        let entries: &[(&str, Style)] = &[
+            ("keyword", fg_bold(5)),
+            ("keyword.control", fg_bold(13)),
+            ("function", fg(4)),
+            ("function.method", fg(12)),
+            ("type", fg(3)),
+            ("type.builtin", fg(11)),
+            ("string", fg(2)),
+            ("comment", fg_italic(8)),
+            ("constant", fg(1)),
+            ("constant.builtin", fg(9)),
+            ("number", fg(1)),
+            ("operator", fg(6)),
+            ("variable", Style::default()),
+            ("punctuation", Style::default()),
+            // LSP additions (no tree-sitter overlap).
+            ("macro", fg_bold(13)),
+            ("namespace", fg(11)),
+            ("parameter", italic_only),
+            ("property", fg(6)),
+            ("class", fg(3)),
+            ("struct", fg(3)),
+            ("enum", fg(3)),
+            ("interface", fg(3)),
+            ("enumMember", fg(1)),
+            ("modifier", fg_bold(5)),
+            ("decorator", fg(13)),
+            ("regexp", fg(2)),
+            ("typeParameter", fg_italic(11)),
+        ];
+        let by_capture = entries
+            .iter()
+            .map(|(name, style)| ((*name).to_owned(), *style))
+            .collect();
         Self {
             by_capture,
             default_style: Style::default(),
@@ -606,10 +573,26 @@ impl View for LspStyleView {
             // semantic-token set; if it ever becomes the bottleneck,
             // pre-bucket tokens by line at the top of `render`.
             for t in tokens.iter().filter(|t| t.line == line_idx) {
-                let Some(name) = ctx.legend.as_ref().and_then(|l| l.type_name(t.token_type)) else {
-                    continue; // No legend / unknown index.
+                let Some(legend) = ctx.legend.as_ref() else {
+                    continue; // No legend ⇒ cannot name a style.
                 };
-                let style = theme.lookup(name);
+                let Some(name) = legend.type_name(t.token_type) else {
+                    continue; // Unknown type index.
+                };
+                // Build the lookup name as `<type>.<first-modifier>`
+                // when modifiers are set, else just `<type>`. The
+                // theme's dotted-prefix `lookup` walks back to the
+                // base if a more specific entry isn't defined, so
+                // adding a modifier suffix is a strict refinement —
+                // never worse than the unmodified lookup. Allocation
+                // is skipped in the no-modifier case (the common one)
+                // via `Cow::Borrowed`.
+                let mods = legend.modifier_names(t.token_modifiers);
+                let lookup_name: std::borrow::Cow<'_, str> = match mods.first() {
+                    Some(m) => std::borrow::Cow::Owned(format!("{name}.{m}")),
+                    None => std::borrow::Cow::Borrowed(name),
+                };
+                let style = theme.lookup(&lookup_name);
                 if is_default_style(style) {
                     continue;
                 }
@@ -730,6 +713,36 @@ mod tests {
     }
 
     #[test]
+    fn default_dark_covers_lsp_token_types() {
+        // The LSP semantic-token type names clangd / rust-analyzer /
+        // gopls actually emit must resolve to a non-default style in
+        // the built-in theme — otherwise `LspStyleView` drops them as
+        // "default-styled, nothing to render". Regression guard so a
+        // future theme refactor doesn't silently lose coverage.
+        let t = Theme::default_dark();
+        for name in [
+            "macro",
+            "namespace",
+            "parameter",
+            "property",
+            "class",
+            "struct",
+            "enum",
+            "interface",
+            "enumMember",
+            "modifier",
+            "decorator",
+            "regexp",
+            "typeParameter",
+        ] {
+            assert!(
+                !is_default_style(t.lookup(name)),
+                "default_dark must color LSP token type `{name}`"
+            );
+        }
+    }
+
+    #[test]
     fn is_default_style_round_trips() {
         assert!(is_default_style(Style::default()));
         assert!(!is_default_style(Style {
@@ -846,5 +859,130 @@ mod tests {
             !grid.get(CellCoord::new(0, 3)).style.bold,
             "col 3 (space) is outside the token range"
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Scripted fixture; the headline
+    // test next door is similarly
+    // shaped. If a third lands, extract
+    // a shared helper.
+    fn lsp_style_view_uses_modifier_in_capture_lookup() {
+        use crate::cell::{Cell, CellSize};
+        use crate::editor::EditorState;
+        use crate::lsp::PositionEncoding;
+        use crate::semantic_tokens::{SemanticToken, SemanticTokenKey, SemanticTokensResponse};
+
+        let state = EditorState::new();
+        let buffer_id = state.core.borrow().active_window().buffer_id;
+        {
+            let mut core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"foo bar\n",
+                })
+                .expect("seed");
+            core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.cpp")));
+        }
+        // Theme: base `function` is bold; the modifier-refined
+        // `function.defaultLibrary` is italic (overrides bold).
+        {
+            let theme_handle = state.syntax_registry.theme();
+            let mut theme = theme_handle.lock().expect("theme");
+            theme.insert(
+                "function",
+                Style {
+                    bold: true,
+                    ..Style::default()
+                },
+            );
+            theme.insert(
+                "function.defaultLibrary",
+                Style {
+                    italic: true,
+                    ..Style::default()
+                },
+            );
+        }
+        // Legend: tokenTypes=["function"], tokenModifiers=["defaultLibrary"].
+        // Token 0: type=0, modifiers=0 (no bit set) ⇒ falls back to `function` (bold).
+        // Token 1: type=0, modifiers=1 (bit 0 ⇒ defaultLibrary) ⇒ matches
+        // `function.defaultLibrary` (italic, NOT bold).
+        let sid = state
+            .lsp_manager
+            .borrow_mut()
+            .insert_initialized_test_client(
+                serde_json::json!({
+                    "semanticTokensProvider": {
+                        "legend": {
+                            "tokenTypes": ["function"],
+                            "tokenModifiers": ["defaultLibrary"]
+                        }
+                    }
+                }),
+                PositionEncoding::Utf16,
+            );
+        let active_path = state.core.borrow().active_buffer_path().expect("path set");
+        let uri = crate::lsp::path_to_file_uri(&active_path);
+        {
+            let mgr = state.lsp_manager.borrow();
+            let store = mgr.semantic_token_store();
+            store.lock().expect("store").set(
+                SemanticTokenKey::new(sid.raw().to_string(), uri),
+                SemanticTokensResponse {
+                    tokens: vec![
+                        SemanticToken {
+                            line: 0,
+                            start: 0,
+                            length: 3,
+                            token_type: 0,
+                            token_modifiers: 0,
+                        },
+                        SemanticToken {
+                            line: 0,
+                            start: 4,
+                            length: 3,
+                            token_type: 0,
+                            token_modifiers: 1,
+                        },
+                    ],
+                    result_id: None,
+                    raw: Vec::new(),
+                },
+            );
+        }
+        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut backing: Vec<Cell> = vec![Cell::default(); 20];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 20,
+            size: CellSize::new(1, 20),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(1, 20),
+        };
+        let registry = state.core.borrow().registry.clone();
+        let reg = registry.borrow();
+        let buf = reg.get(buffer_id).expect("buffer");
+        view.render(buf, viewport, &mut grid);
+
+        // "foo" (cols 0..3) ⇒ base `function` ⇒ bold.
+        let c = grid.get(CellCoord::new(0, 0));
+        assert!(c.style.bold, "unmodified token uses base `function`");
+        assert!(!c.style.italic);
+        // "bar" (cols 4..7) ⇒ `function.defaultLibrary` ⇒ italic, no bold.
+        let c = grid.get(CellCoord::new(0, 4));
+        assert!(
+            c.style.italic,
+            "modifier-refined token uses `function.defaultLibrary`"
+        );
+        assert!(!c.style.bold);
     }
 }
