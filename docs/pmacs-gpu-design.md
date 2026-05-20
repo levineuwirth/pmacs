@@ -273,8 +273,15 @@ Out of scope:
 Stance (γ): **bundle JetBrains Mono as default; expose Lua hook for
 override.**
 
-- Bundled font: JetBrains Mono (Apache 2.0; broad glyph coverage;
-  designed for code; ~1.5MB; dwarfed by `wgpu`'s footprint).
+- Bundled font: JetBrains Mono (SIL Open Font License 1.1; broad
+  glyph coverage; designed for code; ~270 KB for the Regular weight,
+  dwarfed by `wgpu`'s footprint). **Correction:** the framing pass
+  recorded the license as Apache 2.0, but the actual license has
+  been OFL since the family's open-source release. Session 2
+  surfaced this when fetching the real asset for the bundle —
+  classified as a small finding under rule (iii) and absorbed; the
+  bundled `fonts/OFL.txt` is shipped alongside the TTF as required
+  by the OFL.
 - Lua override: `pmacs.gpu.set_font(path)` or similar (precise binding
   shape decided session 2).
 - Missing-glyph fallback: tofu (replacement character `U+FFFD`).
