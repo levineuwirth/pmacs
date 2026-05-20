@@ -35,12 +35,14 @@
 //! directly.
 
 pub mod cell;
+pub mod crdt;
 pub mod ids;
 
 pub use cell::{
     Attachment, Cell, CellCoord, CellSize, Color, DiffSpan, Glyph, Style, UnderlineStyle,
 };
+pub use crdt::CrdtOp;
 pub use ids::{BufferId, ByteRange, FrontendId, Position};
 
-// The `SemanticFrame` family, top-level message envelopes, and the
-// feature-gated `CrdtOp` follow in subsequent commits within this PR.
+// The `SemanticFrame` family and the top-level message envelopes
+// follow in the final commit within this PR.

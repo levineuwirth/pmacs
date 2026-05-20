@@ -32,13 +32,11 @@ cast_precision_loss = "allow"
 similar_names = "allow"
 multiple_crate_versions = "allow"
 
-[features]
-# Mirrors the `crdt` feature on the parent `pmacs` crate. When enabled,
-# the `InstanceMessage::CrdtOp` / `FrontendEvent::CrdtOp` variants exist
-# and the wire-level `CrdtOp` struct is in scope. When disabled, those
-# variants are compiled out so v0.1-era binaries built without `crdt`
-# match the pre-v1.0 wire surface byte-for-byte.
-crdt = []
+# No features — the wire type set is unconditional. `CrdtOp` is
+# always compiled (matching the original `pmacs::rope::CrdtOp`'s
+# "not `#[cfg]`-gated to avoid feature-flag proliferation through
+# every Edit consumer" decision); the parent `pmacs` crate's `crdt`
+# feature gates loro and op-application, not wire shape.
 
 [dependencies]
 serde = { workspace = true }
