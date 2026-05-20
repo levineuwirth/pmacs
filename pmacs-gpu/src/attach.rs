@@ -113,6 +113,17 @@ pub fn connect(
     // AttachRequest — declare the capabilities a semantic frontend
     // needs. `multi_frontend` is included because the existing daemon
     // gates `crdt_replica` behind it (M10.x dependency).
+    //
+    // **Daemon requirement**: the daemon must be built with the
+    // `crdt` feature (`cargo run --features crdt --bin pmacs --
+    // --daemon ...`). Without it the daemon's
+    // `InstanceCapabilities::default` returns `crdt_replica: false`,
+    // negotiation succeeds but no `BufferSnapshot` ever arrives, and
+    // the `pmacs-gpu` window sits on `(connecting...)` forever. This
+    // surfaced as a session-3 finding when manually validating the
+    // attach loop; classified as small under rule (iii) — recorded
+    // here so the next person attaching against a non-crdt daemon
+    // recognizes the symptom immediately.
     let req = AttachRequest {
         protocol_version: hello.protocol_version,
         frontend_capabilities: FrontendCapabilities {
