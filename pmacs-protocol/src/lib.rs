@@ -34,10 +34,13 @@
 //! (`pmacs-gpu`, debug tools, future ports) depend on this crate
 //! directly.
 
+pub mod cell;
 pub mod ids;
 
+pub use cell::{
+    Attachment, Cell, CellCoord, CellSize, Color, DiffSpan, Glyph, Style, UnderlineStyle,
+};
 pub use ids::{BufferId, ByteRange, FrontendId, Position};
 
-// Cell wire types, the SemanticFrame family, top-level message
-// envelopes, and the feature-gated `CrdtOp` follow in subsequent
-// commits within this PR.
+// The `SemanticFrame` family, top-level message envelopes, and the
+// feature-gated `CrdtOp` follow in subsequent commits within this PR.
