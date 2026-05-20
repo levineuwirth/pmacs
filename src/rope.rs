@@ -43,11 +43,11 @@ const MAX_CHILDREN: usize = 8;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Byte offset into a [`Rope`].
-///
-/// Not a codepoint index, not a grapheme index. Grapheme awareness is a
-/// view-layer concern.
-pub type Position = u64;
+// `Position` is re-exported from `pmacs-protocol` (session 1 of the
+// `pmacs-gpu` arc — see `docs/pmacs-gpu-design.md`). The type alias
+// is a `u64` byte offset into a [`Rope`]: not a codepoint index, not
+// a grapheme index. Grapheme awareness is a view-layer concern.
+pub use pmacs_protocol::Position;
 
 /// A persistent rope of bytes.
 ///
@@ -330,35 +330,10 @@ pub struct Edit {
     pub crdt_op: Option<Box<CrdtOp>>,
 }
 
-/// T M10.2 Day 3: CRDT-op metadata carried by [`Edit`] in CRDT mode.
-///
-/// Two fields:
-///
-/// * `peer_id` — the producing-frontend identity. M10.4's per-frontend
-///   undo reads this as the "is this op mine?" filter; saves the
-///   consumer from parsing the op bytes to extract identity.
-/// * `bytes` — wire-format serialization of the CRDT ops produced by
-///   the originating edit, as returned by loro's
-///   `ExportMode::updates_owned(pre_version)`. M10.5+ sends these
-///   over the wire; receiving frontends import them via loro's
-///   `import` to apply on their local CRDT.
-///
-/// Constructed by `Buffer::apply_edit` (and `undo` / `redo`) in CRDT
-/// mode; rope's edit constructors set `Edit::crdt_op` to `None` and
-/// the Buffer wraps after the rope returns.
-///
-/// T M10.5: serde derives added so this type can be the payload of
-/// `InstanceMessage::CrdtOp` and `FrontendEvent::CrdtOp` on the wire.
-/// `bytes` is opaque to the protocol layer — it's loro's incremental-
-/// update format; the receiving end's `CrdtState::import_updates`
-/// decodes it.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CrdtOp {
-    /// Producing frontend's identity (loro `PeerID`).
-    pub peer_id: u64,
-    /// Wire-format op bytes (loro `ExportMode::updates_owned` output).
-    pub bytes: Vec<u8>,
-}
+// `CrdtOp` moved to `pmacs-protocol::crdt` (session 1 of the
+// `pmacs-gpu` arc — see `docs/pmacs-gpu-design.md`). Re-exported here
+// so existing `crate::rope::CrdtOp` import paths continue to resolve.
+pub use pmacs_protocol::CrdtOp;
 
 /// A half-open byte range `[start, end)` into a rope.
 ///

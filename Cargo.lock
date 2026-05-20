@@ -1249,6 +1249,7 @@ dependencies = [
  "loro",
  "mlua",
  "nix 0.29.0",
+ "pmacs-protocol",
  "portable-pty",
  "postcard",
  "proptest",
@@ -1270,6 +1271,15 @@ dependencies = [
  "tree-sitter-md",
  "tree-sitter-rust",
  "unicode-width",
+]
+
+[[package]]
+name = "pmacs-protocol"
+version = "1.0.0"
+dependencies = [
+ "postcard",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

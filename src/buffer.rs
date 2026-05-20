@@ -27,7 +27,6 @@
 //! observe `&Buffer` while the buffer's own `&mut self` is held.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::file_io::FileMeta;
 use crate::rope::{Edit, Position, Range, Rope, RopeError};
@@ -37,40 +36,12 @@ use crate::view::{InterceptContext, View};
 // Identifiers
 // ---------------------------------------------------------------------------
 
-/// Opaque, per-process identifier for a buffer.
-///
-/// The internal representation is private (R22): callers cannot reach for
-/// `.0`; construction goes through [`BufferId::next`].
-///
-/// T M10.5: `Serialize` / `Deserialize` derived so `BufferId` can be the
-/// routing key on `InstanceMessage::CrdtOp` / `FrontendEvent::CrdtOp`.
-/// The serialized form is the bare `u64` (transparent newtype).
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, serde::Serialize, serde::Deserialize)]
-pub struct BufferId(u64);
-
-impl BufferId {
-    /// Allocate a fresh [`BufferId`] from the process-wide counter.
-    ///
-    /// Threading: any thread.
-    #[must_use]
-    pub fn next() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
-    }
-
-    /// Inspect the raw value. Useful for logging and FFI.
-    #[must_use]
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-
-    /// Rebuild an ID from a raw value for crate-internal references that
-    /// persist an already-issued buffer identity in generated text.
-    #[must_use]
-    pub(crate) const fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-}
+/// Re-export of `pmacs_protocol::BufferId` (moved there in session 1
+/// of the `pmacs-gpu` arc — see `docs/pmacs-gpu-design.md`). Existing
+/// `crate::buffer::BufferId` import paths continue to resolve through
+/// this re-export; new consumers (`pmacs-gpu`, debug tools) should
+/// depend on `pmacs-protocol` directly.
+pub use pmacs_protocol::BufferId;
 
 /// Opaque, per-buffer identifier for an attached view.
 ///

@@ -1,0 +1,48 @@
+[package]
+name = "pmacs-protocol"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Wire types for the pmacs daemon ↔ frontend protocol (the SemanticFrame family, capabilities, attach handshake)"
+license = "MIT OR Apache-2.0"
+authors = ["Pmacs contributors"]
+readme = "../README.md"
+repository = "https://git.levineuwirth.org/neuwirth/pmacs"
+homepage = "https://levineuwirth.org/essays/pmacs"
+keywords = ["editor", "emacs", "protocol", "ipc"]
+categories = ["text-editors", "data-structures"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Allows: same set as the root `pmacs` crate, mirrored so wire types
+# moved here don't trip lints the originals didn't.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+multiple_crate_versions = "allow"
+
+[features]
+# Mirrors the parent `pmacs` crate's `crdt` feature. The wire type
+# set is unconditional (`CrdtOp` is always compiled — see
+# `crdt.rs`); the feature exists so `cfg!(feature = "crdt")` checks
+# inside capability-default helpers (`InstanceCapabilities::default`,
+# `FrontendCapabilities::default`) evaluate to the same value here
+# as in the parent crate. The parent activates it via
+# `pmacs-protocol/crdt` from its own `crdt` feature.
+crdt = []
+
+[dependencies]
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
