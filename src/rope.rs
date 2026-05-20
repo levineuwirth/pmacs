@@ -43,11 +43,11 @@ const MAX_CHILDREN: usize = 8;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Byte offset into a [`Rope`].
-///
-/// Not a codepoint index, not a grapheme index. Grapheme awareness is a
-/// view-layer concern.
-pub type Position = u64;
+// `Position` is re-exported from `pmacs-protocol` (session 1 of the
+// `pmacs-gpu` arc — see `docs/pmacs-gpu-design.md`). The type alias
+// is a `u64` byte offset into a [`Rope`]: not a codepoint index, not
+// a grapheme index. Grapheme awareness is a view-layer concern.
+pub use pmacs_protocol::Position;
 
 /// A persistent rope of bytes.
 ///

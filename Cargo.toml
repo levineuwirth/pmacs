@@ -1,3 +1,19 @@
+[workspace]
+# Session 1 of the pmacs-gpu arc: `pmacs-protocol` is the wire-types
+# crate the post-v1.0 frontend (`pmacs-gpu`) will consume directly. The
+# root `pmacs` package stays a workspace member (no file moves); the
+# new crate lives under `pmacs-protocol/`. See
+# `docs/pmacs-gpu-design.md`.
+members = [".", "pmacs-protocol"]
+
+[workspace.dependencies]
+# Shared between `pmacs` and `pmacs-protocol`. Pinned here so both
+# crates use byte-identical postcard / serde versions — the wire
+# format depends on it.
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+thiserror = "2"
+
 [package]
 name = "pmacs"
 version = "1.0.0"
@@ -60,7 +76,7 @@ crdt = ["dep:loro"]
 
 [dependencies]
 crossterm = "0.28"
-thiserror = "2"
+thiserror = { workspace = true }
 unicode-width = "0.2"
 # Work-stealing deque, MPMC channels, and parking primitives for the
 # M3 worker pool (spec §6.3). The umbrella crate re-exports
@@ -70,8 +86,15 @@ crossbeam = "0.8"
 # trait, `rmp-serde` is the MessagePack codec the spec calls out by
 # name; in-process and out-of-process workers must look identical to
 # Lua, which means even the in-process bus encodes through MessagePack.
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 rmp-serde = "1"
+# Wire-types crate (session 1 of pmacs-gpu arc). Owns the
+# `InstanceMessage` / `FrontendEvent` / capability / `SemanticFrame`
+# family, plus the cell/buffer/rope wire types they reference. The
+# `pmacs` crate re-exports through `crate::protocol`, `crate::cell`,
+# `crate::buffer`, and `crate::rope` so existing internal imports keep
+# working unchanged.
+pmacs-protocol = { version = "1.0.0", path = "pmacs-protocol" }
 # Wire format for the M5 frontend ↔ instance protocol (T M5.5b).
 # Length-prefix framing wraps postcard-encoded payloads. Chosen for
 # compactness on the cell-stream traffic (60 Hz cell deltas dominate
@@ -81,7 +104,7 @@ rmp-serde = "1"
 # `src/protocol.rs::Hello`. The worker-protocol encoding (§5.5 spec)
 # remains MessagePack via `rmp-serde`; different subsystems with
 # different requirements (compactness vs schema evolution).
-postcard = { version = "1", features = ["use-std"] }
+postcard = { workspace = true }
 # Signal handling for the M5.5 daemon (T M5.5e). Provides a safe
 # wrapper for installing handlers that set an AtomicBool flag, which
 # our accept loop polls between iterations. Used for SIGTERM/SIGINT

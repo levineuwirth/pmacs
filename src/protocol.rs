@@ -44,24 +44,16 @@ use crate::cell::{Cell, CellCoord, CellSize, DiffSpan};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
-// Frontend identity
+// Frontend identity, byte ranges — re-exports from `pmacs-protocol`
 // ---------------------------------------------------------------------------
 
-/// Opaque identifier for a frontend attached to an instance.
-///
-/// Every input event carries a `FrontendId`. v0.1 uses one ID per
-/// instance ([`FrontendId::LOCAL`]); v0.3 generalizes to multi-frontend
-/// (multi-window, multi-user) without a protocol break.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FrontendId(pub u64);
-
-impl FrontendId {
-    /// The single frontend used in v0.1's local-attach mode.
-    ///
-    /// Future multi-frontend deployments allocate IDs from a counter
-    /// starting after this value; the constant is reserved.
-    pub const LOCAL: FrontendId = FrontendId(1);
-}
+// Session 1 of the `pmacs-gpu` arc moved the wire-types subset of
+// this module into the `pmacs-protocol` crate. See
+// `docs/pmacs-gpu-design.md`. Existing `crate::protocol::FrontendId`
+// / `crate::protocol::ByteRange` imports resolve through these
+// re-exports; new consumers (`pmacs-gpu`, debug tools) should depend
+// on `pmacs-protocol` directly.
+pub use pmacs_protocol::{ByteRange, FrontendId};
 
 // ---------------------------------------------------------------------------
 // Key encoding
@@ -793,15 +785,8 @@ pub struct SelectionSnapshot {
 // variants is mooted exactly as it is for `CursorByte`.
 // ---------------------------------------------------------------------------
 
-/// Half-open byte range `[start, end)` into a buffer's rope, matching
-/// the rope's own range convention.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ByteRange {
-    /// Inclusive start byte offset.
-    pub start: u64,
-    /// Exclusive end byte offset.
-    pub end: u64,
-}
+// `ByteRange` moved to `pmacs-protocol` (see the re-export near the
+// top of this file).
 
 /// One run of buffer bytes carrying a resolved visual style. The
 /// instance is the single syntax/face authority; the frontend lays

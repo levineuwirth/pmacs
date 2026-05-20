@@ -1,0 +1,46 @@
+[package]
+name = "pmacs-protocol"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Wire types for the pmacs daemon ↔ frontend protocol (the SemanticFrame family, capabilities, attach handshake)"
+license = "MIT OR Apache-2.0"
+authors = ["Pmacs contributors"]
+readme = "../README.md"
+repository = "https://git.levineuwirth.org/neuwirth/pmacs"
+homepage = "https://levineuwirth.org/essays/pmacs"
+keywords = ["editor", "emacs", "protocol", "ipc"]
+categories = ["text-editors", "data-structures"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Allows: same set as the root `pmacs` crate, mirrored so wire types
+# moved here don't trip lints the originals didn't.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+similar_names = "allow"
+multiple_crate_versions = "allow"
+
+[features]
+# Mirrors the `crdt` feature on the parent `pmacs` crate. When enabled,
+# the `InstanceMessage::CrdtOp` / `FrontendEvent::CrdtOp` variants exist
+# and the wire-level `CrdtOp` struct is in scope. When disabled, those
+# variants are compiled out so v0.1-era binaries built without `crdt`
+# match the pre-v1.0 wire surface byte-for-byte.
+crdt = []
+
+[dependencies]
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
