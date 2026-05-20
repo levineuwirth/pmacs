@@ -37,12 +37,18 @@
 pub mod cell;
 pub mod crdt;
 pub mod ids;
+pub mod message;
 
 pub use cell::{
     Attachment, Cell, CellCoord, CellSize, Color, DiffSpan, Glyph, Style, UnderlineStyle,
 };
 pub use crdt::CrdtOp;
 pub use ids::{BufferId, ByteRange, FrontendId, Position};
-
-// The `SemanticFrame` family and the top-level message envelopes
-// follow in the final commit within this PR.
+pub use message::{
+    AdornmentContent, AdornmentPlacement, AttachRequest, BlockAdornment, CursorState, Decoration,
+    DecorationKind, DecorationSegment, FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello,
+    InlineAdornment, InstanceCapabilities, InstanceIdentity, InstanceMessage, InstanceSignal, Key,
+    KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind, NegotiatedCapabilities,
+    PROTOCOL_VERSION, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, StyleSegment,
+    StyleSpan, is_supported_protocol_version, negotiate_capabilities,
+};

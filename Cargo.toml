@@ -72,7 +72,7 @@ lua54 = ["mlua/lua54", "mlua/vendored"]
 # field on the Buffer struct layout, no branch on apply_edit). v1.0
 # builds enable `crdt`; the rope-projection redirect from M10.1 means
 # the feature flip is invisible to v0.1 frontends and to workers.
-crdt = ["dep:loro"]
+crdt = ["dep:loro", "pmacs-protocol/crdt"]
 
 [dependencies]
 crossterm = "0.28"

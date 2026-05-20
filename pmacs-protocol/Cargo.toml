@@ -32,11 +32,15 @@ cast_precision_loss = "allow"
 similar_names = "allow"
 multiple_crate_versions = "allow"
 
-# No features — the wire type set is unconditional. `CrdtOp` is
-# always compiled (matching the original `pmacs::rope::CrdtOp`'s
-# "not `#[cfg]`-gated to avoid feature-flag proliferation through
-# every Edit consumer" decision); the parent `pmacs` crate's `crdt`
-# feature gates loro and op-application, not wire shape.
+[features]
+# Mirrors the parent `pmacs` crate's `crdt` feature. The wire type
+# set is unconditional (`CrdtOp` is always compiled — see
+# `crdt.rs`); the feature exists so `cfg!(feature = "crdt")` checks
+# inside capability-default helpers (`InstanceCapabilities::default`,
+# `FrontendCapabilities::default`) evaluate to the same value here
+# as in the parent crate. The parent activates it via
+# `pmacs-protocol/crdt` from its own `crdt` feature.
+crdt = []
 
 [dependencies]
 serde = { workspace = true }
