@@ -44,6 +44,7 @@ env_logger = "0.11.10"
 # rather than depending on `cosmic-text` directly so the build never
 # ends up with two cosmic-text versions resolving to the same name.
 glyphon = "0.11.0"
+loro = "=1.12.0"
 # Session 1's wire-types crate. Pulled in now so the dep graph is
 # settled from session 2 forward; protocol consumption itself lands
 # in session 3.

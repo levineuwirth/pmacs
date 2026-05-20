@@ -1,25 +1,34 @@
 //! pmacs-gpu — GPU/GUI frontend for pmacs.
 //!
-//! Session 2 of the pmacs-gpu arc (`docs/pmacs-gpu-design.md`):
-//! **hello-world binary**. Opens a window via `winit`, initializes
-//! `wgpu` against its surface, sets up `glyphon` text rendering with
-//! the bundled `JetBrains` Mono font, and renders "hello, pmacs" once
-//! per frame. No protocol consumption yet — that arrives in session
-//! 3 (the attach loop). No editor state, no input handling beyond
-//! close + Escape.
+//! Two run modes:
+//!
+//! - **Hello-world** (no `--attach` argument; session 2 default).
+//!   Opens a window and renders "hello, pmacs" in the bundled
+//!   `JetBrains` Mono. Used to confirm the wgpu/winit/glyphon stack
+//!   without depending on a daemon.
+//! - **Attach** (`--attach <unix-socket-path>`; session 3). Connects
+//!   to a running pmacs daemon, negotiates `semantic_render +
+//!   crdt_replica`, imports the daemon's `BufferSnapshot` into a
+//!   local loro replica, and renders the resulting rope text. Live
+//!   `CrdtOp` updates from the daemon are applied as they arrive.
+//!
+//! See `docs/pmacs-gpu-design.md` for the arc framing. Session 3's
+//! gate at close is "Daemon ↔ frontend handshake; rope reconstruction
+//! matches" — handled by the attach mode below.
 //!
 //! The bundled font is `JetBrains` Mono Regular, distributed under
-//! the SIL Open Font License 1.1 (see `fonts/OFL.txt`). The design
-//! note incorrectly recorded the license as Apache 2.0; the actual
-//! license has been OFL since the family's open-source release. The
-//! design-doc note will be corrected as part of this session.
+//! the SIL Open Font License 1.1 (see `fonts/OFL.txt`).
 
+mod attach;
+
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use pmacs_protocol::InstanceMessage;
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -27,11 +36,12 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::attach::{AttachClient, AttachEvent};
+
 /// Bundled font (SIL Open Font License 1.1 — see `fonts/OFL.txt`).
 const JETBRAINS_MONO: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 
-/// Initial window size in logical pixels. Session 2 is fixed-size for
-/// simplicity; resizes still work, this is just the boot dimension.
+/// Initial window size in logical pixels.
 const INITIAL_WIDTH: u32 = 800;
 const INITIAL_HEIGHT: u32 = 200;
 
@@ -43,60 +53,156 @@ const BG: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-/// Hello-world payload. Stays inert here — session 3 wires this to
-/// the daemon's `BufferSnapshot` instead.
+/// Text the hello-world (and attach-pre-snapshot / attach-failed)
+/// modes render. Once the daemon's `BufferSnapshot` arrives the
+/// rendered text becomes the rope contents instead.
 const HELLO_TEXT: &str = "hello, pmacs";
 
-fn main() {
-    // wgpu emits useful trace output on adapter selection / surface
-    // configuration. The default `RUST_LOG=info` is fine for
-    // development.
-    env_logger::init();
+/// Container id the daemon uses on its loro `LoroDoc` for the
+/// buffer's text. Must match `pmacs::crdt::CrdtState`'s container
+/// name (`"body"`).
+const LORO_TEXT_CONTAINER: &str = "body";
 
-    let event_loop = EventLoop::new().expect("create winit event loop");
-    let mut app = App { state: None };
+/// Custom events delivered to the winit event loop. The reader thread
+/// in `attach.rs` forwards each decoded `InstanceMessage` through the
+/// `EventLoopProxy<AppEvent>` it was handed by `connect()`; the main
+/// thread dispatches them in `user_event` below.
+#[derive(Debug)]
+pub enum AppEvent {
+    /// A message or disconnect notification from the attach reader
+    /// thread.
+    Attach(AttachEvent),
+}
+
+/// CLI mode derived from argv.
+#[derive(Debug, Clone)]
+enum Mode {
+    /// `pmacs-gpu` (no args): inert hello-world.
+    HelloWorld,
+    /// `pmacs-gpu --attach <socket>`: connect + render the daemon's
+    /// rope.
+    Attach { socket: PathBuf },
+}
+
+fn main() {
+    env_logger::init();
+    let mode = parse_args(std::env::args().skip(1).collect());
+    let event_loop = EventLoop::<AppEvent>::with_user_event()
+        .build()
+        .expect("create winit event loop");
+    let proxy = event_loop.create_proxy();
+    let mut app = App {
+        mode,
+        proxy: Some(proxy),
+        state: None,
+        attach_client: None,
+    };
     event_loop
         .run_app(&mut app)
         .expect("winit event loop run_app");
 }
 
-/// Top-level application handler. Holds an `Option<State>` because
-/// winit 0.30 requires the window + GPU resources to be created
-/// *after* `resumed()` fires, not at `main()` start.
-struct App {
-    state: Option<State>,
+/// Tiny argv parser. No `clap` because the surface is genuinely two
+/// shapes; full CLI parsing arrives when there's more to parse. The
+/// `for` ranges over a small set: at most one `--attach <socket>` or
+/// `--help` arrives, plus any stray unrecognized flag.
+fn parse_args(args: Vec<String>) -> Mode {
+    let mut iter = args.into_iter();
+    let Some(first) = iter.next() else {
+        return Mode::HelloWorld;
+    };
+    match first.as_str() {
+        "--attach" => {
+            let socket = iter.next().unwrap_or_else(|| {
+                eprintln!("pmacs-gpu: --attach requires a socket path");
+                std::process::exit(2);
+            });
+            Mode::Attach {
+                socket: PathBuf::from(socket),
+            }
+        }
+        "--help" | "-h" => {
+            eprintln!(
+                "pmacs-gpu — GPU/GUI frontend for pmacs\n\nUSAGE:\n  pmacs-gpu                       \
+                 hello-world (renders \"hello, pmacs\")\n  pmacs-gpu --attach <socket>     \
+                 connect to a daemon's Unix socket and render its rope\n"
+            );
+            std::process::exit(0);
+        }
+        other => {
+            eprintln!("pmacs-gpu: unrecognized argument: {other}");
+            std::process::exit(2);
+        }
+    }
 }
 
-/// All resources owned by a single running pmacs-gpu instance: the
-/// window, the wgpu device/queue/surface, the glyphon stack, and the
-/// shaped text buffer.
+/// Top-level application handler. `state` is `Option` because winit
+/// 0.30 builds the window in `resumed()`, not at `main()` start;
+/// `attach_client` is held so the write half of the Unix stream
+/// stays alive for as long as the window does.
+struct App {
+    mode: Mode,
+    /// The event-loop proxy is taken in `resumed()` and handed to the
+    /// reader thread. `Option` only because it can't be cloned out of
+    /// a non-Option in a borrow.
+    proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
+    state: Option<State>,
+    /// Held for lifetime; session 3 doesn't write back yet.
+    #[allow(dead_code)]
+    attach_client: Option<AttachClient>,
+}
+
+/// All resources owned by one running pmacs-gpu instance.
 struct State {
     window: Arc<Window>,
-
-    // wgpu plumbing.
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-
-    // glyphon plumbing.
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffer: Buffer,
+    /// What the buffer is currently shaped to. Held so we can detect
+    /// no-op updates and skip the re-shape.
+    current_text: String,
+    /// Local CRDT replica seeded by `BufferSnapshot`. `None` in
+    /// hello-world mode or before the first snapshot arrives in
+    /// attach mode.
+    loro_doc: Option<loro::LoroDoc>,
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
-            // `resumed` can fire more than once on platforms that
-            // suspend/restore (e.g. mobile). The hello-world doesn't
-            // reinitialize on resume; first call wins.
             return;
         }
-        self.state = Some(State::new(event_loop));
+        let initial_text = match &self.mode {
+            Mode::HelloWorld => HELLO_TEXT,
+            Mode::Attach { .. } => "(connecting...)",
+        };
+        self.state = Some(State::new(event_loop, initial_text));
+
+        // In attach mode, kick off the connection now that the event
+        // loop is running and a proxy is available. Failure logs and
+        // leaves the window showing its `(connecting...)` placeholder
+        // — better UX than killing the window during dev.
+        if let Mode::Attach { socket } = self.mode.clone() {
+            let proxy = self.proxy.take().expect("proxy taken twice");
+            match attach::connect(&socket, proxy) {
+                Ok(client) => {
+                    self.attach_client = Some(client);
+                }
+                Err(e) => {
+                    eprintln!("pmacs-gpu: attach failed: {e}");
+                    if let Some(state) = self.state.as_mut() {
+                        state.set_text("(attach failed; see stderr)");
+                    }
+                }
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -119,15 +225,28 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        match event {
+            AppEvent::Attach(AttachEvent::Message(msg)) => state.apply_attach_message(*msg),
+            AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
+                eprintln!("pmacs-gpu: daemon disconnected ({reason})");
+                state.set_text("(daemon disconnected)");
+            }
+        }
+    }
 }
 
 impl State {
-    fn new(event_loop: &ActiveEventLoop) -> Self {
+    fn new(event_loop: &ActiveEventLoop, initial_text: &str) -> Self {
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("pmacs-gpu hello-world")
+                        .with_title("pmacs-gpu")
                         .with_inner_size(winit::dpi::LogicalSize::new(
                             f64::from(INITIAL_WIDTH),
                             f64::from(INITIAL_HEIGHT),
@@ -136,22 +255,16 @@ impl State {
                 .expect("create window"),
         );
 
-        // wgpu instance + surface.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
-
-        // Pick an adapter that supports our surface. Power preference
-        // = LowPower because the hello-world has no GPU appetite;
-        // saves laptop battery during development.
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
         .expect("request_adapter");
-
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("pmacs-gpu device"),
             required_features: wgpu::Features::empty(),
@@ -160,10 +273,6 @@ impl State {
         }))
         .expect("request_device");
 
-        // Configure the surface. Pick the first format the surface
-        // and adapter both like; glyphon handles colorspace conversion
-        // internally, so sRGB vs UNORM is the renderer's concern, not
-        // ours at this layer.
         let inner_size = window.inner_size();
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
@@ -184,9 +293,6 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // glyphon plumbing — `FontSystem` owns the font database and
-        // shaper state; we register the bundled JetBrains Mono before
-        // anything tries to shape with it.
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(JETBRAINS_MONO.to_vec());
         let swash_cache = SwashCache::new();
@@ -203,12 +309,11 @@ impl State {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
 
-        // Shape "hello, pmacs" with JetBrains Mono at a comfortable
-        // hello-world size. cosmic-text 0.18 (glyphon's pinned
-        // version) threads `&mut FontSystem` through every Buffer
-        // mutator that needs to re-shape; the 5th `None` on `set_text`
-        // is the optional `Align` (we let cosmic-text default it).
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(48.0, 56.0));
+        // Smaller font in attach mode (file contents tend to be more
+        // than one line); larger only fits "hello, pmacs"-shaped
+        // strings. Picked metrics that look reasonable for code at
+        // 800px wide.
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
         buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
@@ -216,7 +321,7 @@ impl State {
         );
         buffer.set_text(
             &mut font_system,
-            HELLO_TEXT,
+            initial_text,
             &Attrs::new().family(Family::Name("JetBrains Mono")),
             Shaping::Advanced,
             None,
@@ -235,12 +340,73 @@ impl State {
             atlas,
             text_renderer,
             buffer,
+            current_text: initial_text.to_owned(),
+            loro_doc: None,
         }
     }
 
-    /// Reconfigure surface + glyphon viewport on window-size change.
-    /// The shaped text buffer also gets a new max-size so wrap and
-    /// scroll align with the new viewport.
+    /// Replace the rendered text with `text` and request a redraw.
+    /// No-op when `text` is byte-identical to the current rendering
+    /// (avoids the re-shape cost when an unchanged buffer ticks).
+    fn set_text(&mut self, text: &str) {
+        if self.current_text == text {
+            return;
+        }
+        self.current_text.clear();
+        self.current_text.push_str(text);
+        self.buffer.set_text(
+            &mut self.font_system,
+            &self.current_text,
+            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+            None,
+        );
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.window.request_redraw();
+    }
+
+    /// Apply one `InstanceMessage` to the local replica. Session 3
+    /// handles the two variants that matter for rope reconstruction:
+    /// `BufferSnapshot` (bootstrap) and `CrdtOp` (live updates). Every
+    /// other variant is ignored (logged at debug) — the `SemanticFrame`
+    /// family will be consumed in later sessions.
+    fn apply_attach_message(&mut self, msg: InstanceMessage) {
+        match msg {
+            InstanceMessage::BufferSnapshot { crdt_snapshot, .. } => {
+                let doc = loro::LoroDoc::new();
+                if let Err(e) = doc.import(&crdt_snapshot) {
+                    eprintln!("pmacs-gpu: BufferSnapshot import failed: {e:?}");
+                    return;
+                }
+                let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+                self.loro_doc = Some(doc);
+                self.set_text(&text);
+            }
+            InstanceMessage::CrdtOp { op, .. } => {
+                let Some(doc) = self.loro_doc.as_ref() else {
+                    // No snapshot yet — drop. The daemon's send order
+                    // is snapshot-then-ops, so this case is rare
+                    // (mid-attach race only). When the snapshot lands
+                    // it'll have the ops baked in anyway.
+                    return;
+                };
+                if let Err(e) = doc.import(&op.bytes) {
+                    eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
+                    return;
+                }
+                let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+                self.set_text(&text);
+            }
+            _ => {
+                // Other variants (Cursor, CellDelta, semantic frame
+                // family, presence, goodbye, etc.) are ignored in
+                // session 3. Goodbye in particular surfaces via the
+                // reader thread's clean-EOF path as a Disconnected
+                // event — not handled here.
+            }
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width;
         self.config.height = height;
@@ -255,16 +421,7 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// One frame: clear the surface to `BG`, render the text buffer,
-    /// present. Acquisition failures cause a re-configure and skip
-    /// the frame (a typical recovery for transient surface losses).
     fn render(&mut self) {
-        // wgpu 29 collapses success/error into a single enum
-        // (`CurrentSurfaceTexture`), not `Result<SurfaceTexture, SurfaceError>`
-        // as earlier versions did. Lost / Outdated trigger a
-        // re-configure and skip the frame; Suboptimal is rendered
-        // through but flagged for the next configure cycle (we don't
-        // act on it in the hello-world).
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -272,13 +429,7 @@ impl State {
                 self.surface.configure(&self.device, &self.config);
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                // `Timeout`: transient acquisition stall — drop this
-                // frame, try again next redraw.
-                // `Occluded`: window minimized / behind another
-                // window — skip the frame, save the GPU work.
-                return;
-            }
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
             wgpu::CurrentSurfaceTexture::Validation => {
                 eprintln!("surface acquisition raised a validation error");
                 return;
@@ -297,16 +448,12 @@ impl State {
                 &self.viewport,
                 [TextArea {
                     buffer: &self.buffer,
-                    left: 24.0,
-                    top: 60.0,
+                    left: 16.0,
+                    top: 16.0,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,
                         top: 0,
-                        // Surface dimensions are u32 but `TextBounds`
-                        // is i32; `cast_signed` keeps the bit pattern
-                        // and is correct for typical window sizes well
-                        // below 2^31.
                         right: self.config.width.cast_signed(),
                         bottom: self.config.height.cast_signed(),
                     },
@@ -324,7 +471,7 @@ impl State {
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pmacs-gpu hello-world pass"),
+                label: Some("pmacs-gpu pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,

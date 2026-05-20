@@ -38,6 +38,7 @@ pub mod cell;
 pub mod crdt;
 pub mod ids;
 pub mod message;
+pub mod transport;
 
 pub use cell::{
     Attachment, Cell, CellCoord, CellSize, Color, DiffSpan, Glyph, Style, UnderlineStyle,
@@ -52,3 +53,4 @@ pub use message::{
     PROTOCOL_VERSION, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, StyleSegment,
     StyleSpan, is_supported_protocol_version, negotiate_capabilities,
 };
+pub use transport::{MAX_FRAME_BYTES, TransportError, read_message, write_message};

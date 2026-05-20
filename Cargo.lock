@@ -2458,6 +2458,7 @@ version = "0.0.1"
 dependencies = [
  "env_logger",
  "glyphon",
+ "loro",
  "pmacs-protocol",
  "pollster",
  "wgpu",
