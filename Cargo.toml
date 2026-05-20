@@ -101,6 +101,14 @@ tree-sitter = "0.26"
 # `crate::syntax::BUILTIN_LANGUAGES`.
 tree-sitter-rust = "0.24"
 tree-sitter-lua = "0.5"
+# T M_B3 — C / C++. Bundled so opening a `.c`/`.cpp`/header file in
+# the grid TUI gets lexical highlighting (keywords/strings/operators)
+# via tree-sitter, with `LspStyleView` layered on top for semantic
+# refinement (functions/types/macros via clangd's semantic tokens).
+# `.h` is ambiguous C / C++; the `c` entry below claims it by default,
+# matching the LSP filetype map in `builtin/runtime/lsp.lua`.
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.

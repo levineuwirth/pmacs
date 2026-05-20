@@ -347,16 +347,17 @@ local function attach_buffer(buf)
   -- did_open is a notification; the manager queues it cleanly even
   -- while the server is in `starting` / `initializing`.
   pcall(pmacs.lsp.did_open, sid, uri, rec.version, active_buffer_text())
-  -- M_B1: policy A — when this buffer has no bundled tree-sitter
-  -- grammar (C/C++, …), push the LSP-driven style overlay onto the
-  -- active window so the grid TUI gets cell coloring from LSP
-  -- semantic tokens. Grammar-backed languages already have
-  -- `SyntaxHighlightView`; never both authorities on one buffer.
-  -- `language_for_path` returning nil is the grammar-less signal
-  -- (the LSP filetype map is consulted independently above).
-  if not styled_buffers[key]
-      and not pmacs.parse.language_for_path(path)
-  then
+  -- M_B3: dual-authority styling. Always push the LSP style overlay
+  -- when an LSP server is up — whether or not the buffer has a
+  -- bundled tree-sitter grammar. When the grammar exists too,
+  -- `SyntaxHighlightView` paints first (lexical: keywords, strings,
+  -- operators) and `LspStyleView` paints after (semantic: function /
+  -- type / macro / namespace identifiers from clangd's tokens); their
+  -- styles compose via `crate::overlay::merge_styles`, so the final
+  -- cell carries both authorities' contributions. This replaces
+  -- M_B1's policy-A exclusivity, which left grammar-backed languages
+  -- (Rust, C, C++) without LSP semantic refinement.
+  if not styled_buffers[key] then
     local ok, attached = pcall(pmacs.lsp._attach_style, buf)
     if ok and attached then styled_buffers[key] = true end
   end
