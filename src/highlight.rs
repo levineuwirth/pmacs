@@ -464,13 +464,28 @@ pub fn is_default_style(style: Style) -> bool {
 // LspStyleView
 // ---------------------------------------------------------------------------
 
-/// View that paints LSP semantic-token styling into cells for buffers
-/// with **no bundled tree-sitter grammar** (C/C++, …). Sibling of
-/// [`SyntaxHighlightView`] for the same policy-A "one styling
-/// authority per language" rule that `SemanticRenderState` applies on
-/// the semantic-frontend side — but feeding the grid TUI's existing
-/// cell-painter pipeline instead. Closes the visible "no syntax
-/// coloring for grammar-less languages in the TUI" gap.
+/// View that paints LSP semantic-token styling into cells, layered
+/// **alongside** [`SyntaxHighlightView`] when both exist for a
+/// buffer. The grid TUI's `View::render` composition stack means
+/// tree-sitter paints first (lexical: keywords, strings, operators,
+/// the things a parser identifies from the source's *shape*) and
+/// `LspStyleView` paints after (semantic: function vs variable,
+/// macro vs constant, the things a language server identifies from
+/// program *meaning*). Their styles compose through
+/// [`crate::overlay::merge_styles`], so the final cell carries both
+/// authorities' contributions — the `VSCode` / `Zed` "`TextMate` +
+/// LSP semantic tokens" model, on a terminal grid.
+///
+/// For languages with no bundled tree-sitter grammar (Python, Go,
+/// languages added later via LSP only), `LspStyleView` is the *sole*
+/// styling source and still works — the merge with an absent
+/// tree-sitter overlay is identity.
+///
+/// `M_B3` (this) dropped the earlier policy-A exclusivity gate in
+/// `lsp.lua` that restricted attachment to grammar-less buffers. The
+/// previous gate left grammar-backed languages (Rust, C, C++) without
+/// LSP semantic refinement; dual-authority delivers richer coloring
+/// without conflict.
 ///
 /// Holds shared handles only (`SharedLspManager` + `ThemeHandle`), so
 /// it survives buffer renames and LSP server restarts: every `render`
@@ -763,9 +778,11 @@ mod tests {
         let state = EditorState::new();
         let buffer_id = state.core.borrow().active_window().buffer_id;
 
-        // Seed the buffer: one line, `.cpp` path (no bundled grammar →
-        // SyntaxHighlightView never attaches, the LSP path owns the
-        // styling per policy A).
+        // Seed the buffer: one line, `.cpp` path. The test renders
+        // `LspStyleView` directly (no `SyntaxHighlightView` attached
+        // alongside in this fixture), so the asserted cells reflect
+        // the LSP authority alone — M_B3's dual-authority composition
+        // is exercised end-to-end by Lua's `attach_buffer`, not here.
         {
             let mut core = state.core.borrow_mut();
             core.registry

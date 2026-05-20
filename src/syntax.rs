@@ -377,6 +377,33 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         loader: || tree_sitter_md::LANGUAGE.into(),
         highlights_query: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
     },
+    // T M_B3 — C / C++. Lexical highlighting (keywords / strings /
+    // operators) so the grid TUI shows code-shaped C++ on first open.
+    // `LspStyleView` layers on top with semantic refinement
+    // (functions / types / macros / namespaces) from clangd's
+    // semantic tokens — the two views' styles merge via
+    // `crate::overlay::merge_styles`.
+    //
+    // `.h` is ambiguous C / C++; the `c` entry below claims it
+    // (matches the LSP filetype map's default in `lsp.lua`). Users
+    // who want `.h` parsed as C++ can override via Lua.
+    // Note the const names: `tree-sitter-c` and `tree-sitter-cpp`
+    // expose `HIGHLIGHT_QUERY` (singular), matching the `tree-sitter-md`
+    // crate's `HIGHLIGHT_QUERY_BLOCK` style; `tree-sitter-rust` and
+    // `tree-sitter-lua` use `HIGHLIGHTS_QUERY` (plural). No semantic
+    // difference — same bundled `highlights.scm` either way.
+    LanguageEntry {
+        name: "c",
+        extensions: &["c", "h"],
+        loader: || tree_sitter_c::LANGUAGE.into(),
+        highlights_query: tree_sitter_c::HIGHLIGHT_QUERY,
+    },
+    LanguageEntry {
+        name: "cpp",
+        extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "inl", "cppm"],
+        loader: || tree_sitter_cpp::LANGUAGE.into(),
+        highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
+    },
 ];
 
 /// Registry that the Lua surface ([`crate::lua_bindings::install_parse`])
@@ -710,6 +737,38 @@ mod tests {
         let bundle = Arc::new(run_parse(req).expect("parse succeeds"));
         handle.install(bundle.clone());
         bundle
+    }
+
+    #[test]
+    fn builtin_languages_include_c_and_cpp() {
+        // M_B3 regression guard: a future refactor must not silently
+        // drop C / C++ tree-sitter coverage — the dual-authority
+        // styling in the TUI depends on these entries existing and
+        // claiming their canonical extensions.
+        let c = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "c")
+            .expect("`c` language entry must be present");
+        assert!(c.extensions.contains(&"c"), "`c` claims `.c`");
+        assert!(
+            c.extensions.contains(&"h"),
+            "`c` claims `.h` (matches the LSP filetype map's default)"
+        );
+        assert!(
+            !c.highlights_query.is_empty(),
+            "`c` ships a non-empty highlights query"
+        );
+        let cpp = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "cpp")
+            .expect("`cpp` language entry must be present");
+        for ext in ["cpp", "cc", "cxx", "hpp", "hh", "hxx"] {
+            assert!(cpp.extensions.contains(&ext), "`cpp` claims `.{ext}`");
+        }
+        assert!(
+            !cpp.highlights_query.is_empty(),
+            "`cpp` ships a non-empty highlights query"
+        );
     }
 
     #[test]
