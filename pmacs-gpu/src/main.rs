@@ -6,15 +6,18 @@
 //!   Opens a window and renders "hello, pmacs" in the bundled
 //!   `JetBrains` Mono. Used to confirm the wgpu/winit/glyphon stack
 //!   without depending on a daemon.
-//! - **Attach** (`--attach <unix-socket-path>`; session 3). Connects
+//! - **Attach** (`--attach <unix-socket-path>`; session 3+). Connects
 //!   to a running pmacs daemon, negotiates `semantic_render +
 //!   crdt_replica`, imports the daemon's `BufferSnapshot` into a
-//!   local loro replica, and renders the resulting rope text. Live
-//!   `CrdtOp` updates from the daemon are applied as they arrive.
+//!   local loro replica, sends a `Viewport` back to request scoped
+//!   styling, and consumes the `StyleSpans` stream — rendering the
+//!   rope with per-span colors via cosmic-text's `set_rich_text`.
+//!   Live `CrdtOp` updates apply to the doc; subsequent `StyleSpans`
+//!   frames re-style.
 //!
-//! See `docs/pmacs-gpu-design.md` for the arc framing. Session 3's
-//! gate at close is "Daemon ↔ frontend handshake; rope reconstruction
-//! matches" — handled by the attach mode below.
+//! See `docs/pmacs-gpu-design.md` for the arc framing. Phase A's
+//! adversarial-verification framing applies from session 4 forward;
+//! findings classified per rule (iii) at surface-time.
 //!
 //! The bundled font is `JetBrains` Mono Regular, distributed under
 //! the SIL Open Font License 1.1 (see `fonts/OFL.txt`).
@@ -28,7 +31,9 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use pmacs_protocol::InstanceMessage;
+use pmacs_protocol::{
+    BufferId, ByteRange, InstanceMessage, StyleSegment, StyleSpan, cell::Color as CellColor,
+};
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -147,8 +152,9 @@ struct App {
     /// a non-Option in a borrow.
     proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     state: Option<State>,
-    /// Held for lifetime; session 3 doesn't write back yet.
-    #[allow(dead_code)]
+    /// Held both for stream lifetime and for the main loop's
+    /// `send_viewport` write-back path. Session 4 uses this; later
+    /// sessions will add cursor/edit/focus emissions.
     attach_client: Option<AttachClient>,
 }
 
@@ -172,6 +178,17 @@ struct State {
     /// hello-world mode or before the first snapshot arrives in
     /// attach mode.
     loro_doc: Option<loro::LoroDoc>,
+    /// Buffer the current rope text + spans interpret. Set when a
+    /// `BufferSnapshot` arrives; used as the routing key for
+    /// `StyleSpans` updates (drop those for other buffers).
+    current_buffer_id: Option<BufferId>,
+    /// Sorted-by-`range.start` styling spans for `current_buffer_id`.
+    /// Replaced wholesale on `StyleSpans { full: true, .. }`; merged
+    /// per the M11.4 dirty-segment rule on `full: false` (segments'
+    /// ranges authoritatively replace styling within them; spans
+    /// straddling a dirty edge get clipped to outside the dirty
+    /// range).
+    current_spans: Vec<StyleSpan>,
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -231,13 +248,39 @@ impl ApplicationHandler<AppEvent> for App {
             return;
         };
         match event {
-            AppEvent::Attach(AttachEvent::Message(msg)) => state.apply_attach_message(*msg),
+            AppEvent::Attach(AttachEvent::Message(msg)) => {
+                let follow_up = state.apply_attach_message(*msg);
+                // If the message triggered a follow-up Viewport
+                // (currently: every BufferSnapshot does), emit it back
+                // to the daemon. The daemon's `SemanticRenderState`
+                // produces no styling until a viewport is declared.
+                if let Some(ViewportSend {
+                    buffer_id,
+                    visible,
+                    generation,
+                }) = follow_up
+                    && let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_viewport(buffer_id, visible, generation)
+                {
+                    eprintln!("pmacs-gpu: send Viewport failed: {e}");
+                }
+            }
             AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
                 eprintln!("pmacs-gpu: daemon disconnected ({reason})");
                 state.set_text("(daemon disconnected)");
             }
         }
     }
+}
+
+/// Follow-up event the main loop fires back to the daemon after
+/// processing a message. Right now only Viewport (post-snapshot);
+/// later sessions extend this enum.
+#[derive(Debug, Clone, Copy)]
+struct ViewportSend {
+    buffer_id: BufferId,
+    visible: ByteRange,
+    generation: u64,
 }
 
 impl State {
@@ -342,69 +385,247 @@ impl State {
             buffer,
             current_text: initial_text.to_owned(),
             loro_doc: None,
+            current_buffer_id: None,
+            current_spans: Vec::new(),
         }
     }
 
     /// Replace the rendered text with `text` and request a redraw.
     /// No-op when `text` is byte-identical to the current rendering
     /// (avoids the re-shape cost when an unchanged buffer ticks).
+    ///
+    /// Replaces the rope text and routes through `reshape` so the
+    /// rich-text rendering uses the current `current_spans`. When
+    /// called from the `CrdtOp` path (text shifted under existing
+    /// spans) the spans are momentarily stale relative to the new
+    /// byte positions — `reshape` clamps via `range.end.min(text_len)`
+    /// so rendering is safe, but visual styling may be off until the
+    /// daemon's next `StyleSpans` frame catches up. A real artifact;
+    /// classified as a session-4 known limitation rather than a bug.
     fn set_text(&mut self, text: &str) {
         if self.current_text == text {
             return;
         }
         self.current_text.clear();
         self.current_text.push_str(text);
-        self.buffer.set_text(
+        self.reshape();
+    }
+
+    /// Apply one `InstanceMessage`; return a follow-up
+    /// `ViewportSend` if the message requires the main loop to fire
+    /// one back at the daemon.
+    ///
+    /// Session 4 handles four variants:
+    /// - `BufferSnapshot` — bootstrap a fresh `LoroDoc`, extract text,
+    ///   request the daemon scope styling to the new buffer (return a
+    ///   Viewport send-back).
+    /// - `CrdtOp` — apply incremental updates to the doc; text
+    ///   re-extracted.
+    /// - `StyleSpans` — replace or merge per the M11.4 dirty-segment
+    ///   rule; reshape the rich-text rendering.
+    /// - `Goodbye` — surfaced via the reader thread's clean-EOF path,
+    ///   not handled here.
+    ///
+    /// Other `SemanticFrame` variants (`Decorations`, `InlineAdornments`,
+    /// `FileStyleSummary`) plus the grid variants (`CellDelta`,
+    /// `Cursor`, `CursorByte`) and presence updates are ignored in
+    /// session 4 — they land in subsequent Phase A sessions.
+    fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
+        match msg {
+            InstanceMessage::BufferSnapshot {
+                buffer_id,
+                crdt_snapshot,
+            } => {
+                let doc = loro::LoroDoc::new();
+                if let Err(e) = doc.import(&crdt_snapshot) {
+                    eprintln!("pmacs-gpu: BufferSnapshot import failed: {e:?}");
+                    return None;
+                }
+                let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+                let text_len = text.len() as u64;
+                self.loro_doc = Some(doc);
+                self.current_buffer_id = Some(buffer_id);
+                // New buffer ⇒ drop any prior styling; the next
+                // StyleSpans frame for this buffer is authoritative.
+                self.current_spans.clear();
+                self.set_text(&text);
+                Some(ViewportSend {
+                    buffer_id,
+                    visible: ByteRange {
+                        start: 0,
+                        end: text_len,
+                    },
+                    generation: 0,
+                })
+            }
+            InstanceMessage::CrdtOp { buffer_id, op } => {
+                if self.current_buffer_id != Some(buffer_id) {
+                    // Edit op for a different buffer than we currently
+                    // render. Ignore for now (multi-buffer is a future
+                    // session); when buffer-switching lands we'll
+                    // index ops by buffer.
+                    return None;
+                }
+                let Some(doc) = self.loro_doc.as_ref() else {
+                    // Mid-attach race: ops before snapshot. The
+                    // snapshot will have the ops baked in.
+                    return None;
+                };
+                if let Err(e) = doc.import(&op.bytes) {
+                    eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
+                    return None;
+                }
+                let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+                self.set_text(&text);
+                None
+            }
+            InstanceMessage::StyleSpans {
+                buffer_id,
+                generation: _,
+                full,
+                segments,
+            } => {
+                if self.current_buffer_id != Some(buffer_id) {
+                    return None;
+                }
+                if full {
+                    self.replace_style_spans(segments);
+                } else {
+                    self.merge_style_spans(segments);
+                }
+                self.reshape();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// `full = true` path: discard prior styling, take the segments'
+    /// spans as authoritative for the declared viewport.
+    fn replace_style_spans(&mut self, segments: Vec<StyleSegment>) {
+        self.current_spans.clear();
+        for seg in segments {
+            self.current_spans.extend(seg.spans);
+        }
+        self.current_spans.sort_by_key(|s| s.range.start);
+    }
+
+    /// `full = false` path: each segment's `range` authoritatively
+    /// replaces styling within it. Spans fully inside any dirty range
+    /// drop; spans straddling a dirty edge get clipped to outside the
+    /// range; the new spans are appended; finally everything sorts.
+    ///
+    /// This is exactly the surface bet #1 from the framing pass
+    /// predicted ("dirty-segment edges at viewport boundaries —
+    /// headless-test-blind-spot probe"). Per-byte adversarial
+    /// behavior here lives in the user-side validation, not in unit
+    /// tests — that's the design-doc framing's whole point.
+    fn merge_style_spans(&mut self, segments: Vec<StyleSegment>) {
+        for seg in &segments {
+            let dirty = seg.range;
+            let mut kept = Vec::with_capacity(self.current_spans.len());
+            for sp in self.current_spans.drain(..) {
+                if sp.range.end <= dirty.start || sp.range.start >= dirty.end {
+                    // Outside the dirty range entirely — keep as-is.
+                    kept.push(sp);
+                } else if sp.range.start < dirty.start && sp.range.end > dirty.end {
+                    // Straddles both edges: split into two clipped halves.
+                    kept.push(StyleSpan {
+                        range: ByteRange {
+                            start: sp.range.start,
+                            end: dirty.start,
+                        },
+                        style: sp.style,
+                    });
+                    kept.push(StyleSpan {
+                        range: ByteRange {
+                            start: dirty.end,
+                            end: sp.range.end,
+                        },
+                        style: sp.style,
+                    });
+                } else if sp.range.start < dirty.start {
+                    // Straddles the left edge only — clip to the left.
+                    kept.push(StyleSpan {
+                        range: ByteRange {
+                            start: sp.range.start,
+                            end: dirty.start,
+                        },
+                        style: sp.style,
+                    });
+                } else if sp.range.end > dirty.end {
+                    // Straddles the right edge only — clip to the right.
+                    kept.push(StyleSpan {
+                        range: ByteRange {
+                            start: dirty.end,
+                            end: sp.range.end,
+                        },
+                        style: sp.style,
+                    });
+                }
+                // else: fully inside the dirty range ⇒ drop.
+            }
+            self.current_spans = kept;
+        }
+        for seg in segments {
+            self.current_spans.extend(seg.spans);
+        }
+        self.current_spans.sort_by_key(|s| s.range.start);
+    }
+
+    /// Re-build the cosmic-text Buffer from `current_text` +
+    /// `current_spans`. Walks the text byte-by-byte, emitting
+    /// `(substr, Attrs)` chunks at every span boundary — text not
+    /// covered by any span uses the default Attrs (terminal default
+    /// color). Final call: `set_rich_text` + `shape_until_scroll`.
+    fn reshape(&mut self) {
+        let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+        let text_len = self.current_text.len() as u64;
+        let mut chunks: Vec<(String, Attrs<'static>)> = Vec::new();
+        let mut pos: u64 = 0;
+        for sp in &self.current_spans {
+            // Unstyled gap before this span (could be empty).
+            if pos < sp.range.start {
+                let end = sp.range.start.min(text_len) as usize;
+                chunks.push((
+                    self.current_text[pos as usize..end].to_owned(),
+                    default_attrs.clone(),
+                ));
+                pos = sp.range.start;
+            }
+            // Styled run, clipped to text_len so a stale span past EOF
+            // can't index out.
+            let end = sp.range.end.min(text_len) as usize;
+            if end > pos as usize {
+                let mut attrs = default_attrs.clone();
+                if let Some(color) = cell_color_to_glyphon(sp.style.fg) {
+                    attrs = attrs.color(color);
+                }
+                chunks.push((self.current_text[pos as usize..end].to_owned(), attrs));
+                pos = sp.range.end;
+            }
+        }
+        // Trailing unstyled tail.
+        if pos < text_len {
+            chunks.push((
+                self.current_text[pos as usize..].to_owned(),
+                default_attrs.clone(),
+            ));
+        }
+        // No spans + empty text ⇒ feed one empty chunk so set_rich_text
+        // has something to draw.
+        if chunks.is_empty() {
+            chunks.push((String::new(), default_attrs.clone()));
+        }
+        self.buffer.set_rich_text(
             &mut self.font_system,
-            &self.current_text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            chunks.iter().map(|(s, a)| (s.as_str(), a.clone())),
+            &default_attrs,
             Shaping::Advanced,
             None,
         );
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.window.request_redraw();
-    }
-
-    /// Apply one `InstanceMessage` to the local replica. Session 3
-    /// handles the two variants that matter for rope reconstruction:
-    /// `BufferSnapshot` (bootstrap) and `CrdtOp` (live updates). Every
-    /// other variant is ignored (logged at debug) — the `SemanticFrame`
-    /// family will be consumed in later sessions.
-    fn apply_attach_message(&mut self, msg: InstanceMessage) {
-        match msg {
-            InstanceMessage::BufferSnapshot { crdt_snapshot, .. } => {
-                let doc = loro::LoroDoc::new();
-                if let Err(e) = doc.import(&crdt_snapshot) {
-                    eprintln!("pmacs-gpu: BufferSnapshot import failed: {e:?}");
-                    return;
-                }
-                let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
-                self.loro_doc = Some(doc);
-                self.set_text(&text);
-            }
-            InstanceMessage::CrdtOp { op, .. } => {
-                let Some(doc) = self.loro_doc.as_ref() else {
-                    // No snapshot yet — drop. The daemon's send order
-                    // is snapshot-then-ops, so this case is rare
-                    // (mid-attach race only). When the snapshot lands
-                    // it'll have the ops baked in anyway.
-                    return;
-                };
-                if let Err(e) = doc.import(&op.bytes) {
-                    eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
-                    return;
-                }
-                let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
-                self.set_text(&text);
-            }
-            _ => {
-                // Other variants (Cursor, CellDelta, semantic frame
-                // family, presence, goodbye, etc.) are ignored in
-                // session 3. Goodbye in particular surfaces via the
-                // reader thread's clean-EOF path as a Disconnected
-                // event — not handled here.
-            }
-        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -494,4 +715,63 @@ impl State {
         frame.present();
         self.atlas.trim();
     }
+}
+
+/// Convert a `pmacs-protocol::cell::Color` to a `glyphon::Color`.
+/// Returns `None` for `Default` so the renderer falls back to the
+/// `Attrs` default color (white-ish in our render) rather than
+/// stomping with an arbitrary RGB.
+///
+/// `Indexed` uses the standard ANSI 16-color + 256-color cube
+/// palette. The TUI interprets these via terminal-level color codes;
+/// the GPU has no equivalent layer, so the palette mapping lives
+/// here. Picked to roughly match `xterm-256color` defaults so
+/// existing pmacs themes look consistent across both frontends.
+fn cell_color_to_glyphon(c: CellColor) -> Option<glyphon::Color> {
+    match c {
+        CellColor::Default => None,
+        CellColor::Rgb(r, g, b) => Some(glyphon::Color::rgb(r, g, b)),
+        CellColor::Indexed(idx) => Some(indexed_to_glyphon(idx)),
+    }
+}
+
+/// Standard xterm-style 256-color palette: 16 base colors + 6×6×6
+/// RGB cube (16..=231) + 24-step grayscale (232..=255). Values
+/// pulled from the conventional xterm defaults; the 6×6×6 cube uses
+/// the standard step values {0, 95, 135, 175, 215, 255}.
+fn indexed_to_glyphon(idx: u8) -> glyphon::Color {
+    const ANSI16: [(u8, u8, u8); 16] = [
+        (0, 0, 0),       // 0 black
+        (205, 49, 49),   // 1 red
+        (13, 188, 121),  // 2 green
+        (229, 229, 16),  // 3 yellow
+        (36, 114, 200),  // 4 blue
+        (188, 63, 188),  // 5 magenta
+        (17, 168, 205),  // 6 cyan
+        (229, 229, 229), // 7 white
+        (102, 102, 102), // 8 bright black
+        (241, 76, 76),   // 9 bright red
+        (35, 209, 139),  // 10 bright green
+        (245, 245, 67),  // 11 bright yellow
+        (59, 142, 234),  // 12 bright blue
+        (214, 112, 214), // 13 bright magenta
+        (41, 184, 219),  // 14 bright cyan
+        (255, 255, 255), // 15 bright white
+    ];
+    if idx < 16 {
+        let (r, g, b) = ANSI16[idx as usize];
+        return glyphon::Color::rgb(r, g, b);
+    }
+    if (16..=231).contains(&idx) {
+        // 6×6×6 cube.
+        const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        let i = idx - 16;
+        let r = STEPS[(i / 36) as usize];
+        let g = STEPS[((i / 6) % 6) as usize];
+        let b = STEPS[(i % 6) as usize];
+        return glyphon::Color::rgb(r, g, b);
+    }
+    // 232..=255: 24-step grayscale, evenly spaced 8..=238.
+    let level = 8 + 10 * (idx - 232);
+    glyphon::Color::rgb(level, level, level)
 }

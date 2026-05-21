@@ -2,12 +2,13 @@
 //! socket, negotiate `semantic_render + crdt_replica`, then pump
 //! `InstanceMessage` frames onto the winit event loop.
 //!
-//! Session 3 of the pmacs-gpu arc — see `docs/pmacs-gpu-design.md`.
-//! Scope: handshake + decode the message stream. Importing the CRDT
-//! snapshot, applying live ops, and reconstructing the rope happen
-//! on the main thread, where the `LoroDoc` lives (it isn't trivially
-//! `Send`; cross-thread shipping is the *decoded* `InstanceMessage`,
-//! not the doc state).
+//! Session 3+ of the pmacs-gpu arc — see `docs/pmacs-gpu-design.md`.
+//! Scope: handshake + decode the message stream + send a few
+//! `FrontendEvent`s back (currently just `Viewport`; session 5+ adds
+//! cursor/edit/focus). Importing the CRDT snapshot, applying live
+//! ops, and reconstructing the rope happen on the main thread, where
+//! the `LoroDoc` lives (it isn't trivially `Send`; cross-thread
+//! shipping is the *decoded* `InstanceMessage`, not the doc state).
 //!
 //! The reader thread blocks on a single `read_message` per iteration;
 //! every received message becomes an [`AttachEvent`] forwarded
@@ -17,13 +18,13 @@
 
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use pmacs_protocol::{
-    AttachRequest, FrontendCapabilities, Hello, InstanceMessage, PROTOCOL_VERSION,
-    SUPPORTED_PROTOCOL_VERSIONS, TransportError, is_supported_protocol_version, read_message,
-    write_message,
+    AttachRequest, BufferId, ByteRange, FrontendCapabilities, FrontendEvent, FrontendId, Hello,
+    InstanceMessage, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, TransportError,
+    is_supported_protocol_version, read_message, write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -181,16 +182,50 @@ pub fn connect(
         .expect("spawn attach reader thread");
 
     Ok(AttachClient {
-        _write_stream: Arc::new(write_stream),
+        write_stream: Arc::new(Mutex::new(write_stream)),
+        frontend_id: hello.assigned_frontend_id,
     })
 }
 
-/// Handle the main loop keeps after `connect` returns. Session 3
-/// holds only the write half (unused yet — session 4 wires events
-/// back); the read half lives in the spawned reader thread. The
-/// `Arc` is so the handle is `Clone` for future per-window cloning,
-/// not because we need shared ownership today.
-#[allow(dead_code)]
+/// Handle the main loop keeps after `connect` returns. Session 4
+/// wires the write side for `FrontendEvent::Viewport` emission;
+/// future sessions will add cursor / edit / focus / detach.
+///
+/// The write half is wrapped in `Arc<Mutex<...>>` because, while
+/// pmacs-gpu's event loop is single-threaded, a future multi-window
+/// shape might emit events from several places concurrently. The
+/// lock cost is one mutex per emitted frame — negligible.
 pub struct AttachClient {
-    _write_stream: Arc<UnixStream>,
+    write_stream: Arc<Mutex<UnixStream>>,
+    /// Assigned by the daemon in the `Hello` response. Every
+    /// `FrontendEvent` carries this so the daemon can route input back
+    /// to the per-session `SemanticRenderState`.
+    frontend_id: FrontendId,
+}
+
+impl AttachClient {
+    /// Send a `FrontendEvent::Viewport` to the daemon. The daemon's
+    /// `SemanticRenderState::set_viewport` feeds the spans producer;
+    /// without this call the daemon ships no `StyleSpans` for the
+    /// buffer (no declared viewport ⇒ no scoped styling).
+    pub fn send_viewport(
+        &self,
+        buffer_id: BufferId,
+        visible: ByteRange,
+        generation: u64,
+    ) -> Result<(), TransportError> {
+        let mut stream = self
+            .write_stream
+            .lock()
+            .expect("attach write-stream mutex poisoned");
+        write_message(
+            &mut *stream,
+            &FrontendEvent::Viewport {
+                frontend_id: self.frontend_id,
+                buffer_id,
+                visible,
+                generation,
+            },
+        )
+    }
 }
