@@ -358,13 +358,10 @@ impl SemanticRenderState {
         }
 
         // Diagnostics — keyed in the shared store by the file URI the
-        // Lua LSP glue opened the document under. `core.file_path` is
-        // the editor's active file path; encoding it with the shared
-        // `path_to_file_uri` reproduces that exact key (the Lua
-        // `file_uri_for` is byte-identical). A buffer with no file
-        // path, or no diagnostics under its URI, contributes nothing.
-        if let Some(path) = core.active_buffer_path() {
-            let uri = crate::lsp::path_to_file_uri(&path);
+        // Lua LSP glue opened the document under. The URI is derived
+        // from `vp.buffer_id` (see [`buffer_file_uri`]'s docs for why
+        // not from `core.active_buffer_path()`).
+        if let Some(uri) = buffer_file_uri(&core, vp.buffer_id) {
             let diags = {
                 let store = state.lsp_manager.borrow().diag_store();
                 let guard = store.lock().expect("diag store mutex poisoned");
@@ -422,10 +419,9 @@ impl SemanticRenderState {
 /// fabricated one would be dishonest.
 fn scoped_inline_adornments(state: &EditorState, vp: &DeclaredViewport) -> Vec<InlineAdornment> {
     let core = state.core.borrow();
-    let Some(path) = core.active_buffer_path() else {
+    let Some(uri) = buffer_file_uri(&core, vp.buffer_id) else {
         return Vec::new();
     };
-    let uri = crate::lsp::path_to_file_uri(&path);
     let hints = {
         let store = state.lsp_manager.borrow().inlay_hint_store();
         let guard = store.lock().expect("inlay-hint store mutex poisoned");
@@ -580,6 +576,31 @@ fn severity_to_kind(sev: crate::diag::DiagnosticSeverity) -> DecorationKind {
     }
 }
 
+/// Resolve `buffer_id` → `file://…` URI, using the same encoding the
+/// Lua side uses in `file_uri_for` so the result is byte-identical to
+/// the diag-store / inlay-store / semantic-token-store keys.
+///
+/// **Bug-fix anchor (post-session-5 finding):** the producer used to
+/// derive this URI from `core.active_buffer_path()` — the *editor's*
+/// active buffer, not the buffer the frame is projecting. In multi-
+/// frontend setups (TUI + `pmacs-gpu`) those diverge: each frontend
+/// has its own active window, and when the daemon renders frontend B's
+/// frame it temporarily flips `active_frontend` to B but B's active
+/// buffer may be a scratch buffer with no file path. The diag /
+/// inlay / semantic-token lookups would then run against the wrong
+/// URI (or `None`) and return empty, so frontend B got no
+/// `Decorations` / `InlineAdornments` / LSP-driven `StyleSpans`.
+/// Routing the URI through `vp.buffer_id` fixes the multi-frontend
+/// case without disturbing the single-frontend one
+/// (`active_buffer_id == vp.buffer_id` there, so the resolved path is
+/// the same).
+fn buffer_file_uri(core: &crate::editor_core::EditorCore, buffer_id: BufferId) -> Option<String> {
+    let reg = core.registry.borrow();
+    let buf = reg.get(buffer_id).ok()?;
+    let path = buf.file_path()?;
+    Some(crate::lsp::path_to_file_uri(path))
+}
+
 /// Snapshot a buffer's bytes (refcount-cheap rope slice, mirroring
 /// `diag.rs`'s render-time snapshot).
 fn buffer_source_bytes(buf: &crate::buffer::Buffer) -> Vec<u8> {
@@ -698,10 +719,9 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
 /// single-line by the LSP grammar, so per-line conversion is exact.
 fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSpan> {
     let core = state.core.borrow();
-    let Some(path) = core.active_buffer_path() else {
+    let Some(uri) = buffer_file_uri(&core, vp.buffer_id) else {
         return Vec::new();
     };
-    let uri = crate::lsp::path_to_file_uri(&path);
 
     // Styling context (encoding + legend) and the token set resolve
     // the *same* server for `uri` (both via `for_uri`'s lowest-id
@@ -1072,6 +1092,78 @@ mod tests {
         assert_eq!(decos.len(), 1);
         assert_eq!(decos[0].kind, DecorationKind::DiagnosticWarning);
         // line 1 starts at byte 4; cols [0,2) → bytes [4,6).
+        assert_eq!(decos[0].range, ByteRange { start: 4, end: 6 });
+    }
+
+    /// Regression: in a multi-frontend setup the editor's *active*
+    /// buffer (set by `core.active_buffer_id()`, derived from the
+    /// active frontend's view) can differ from the buffer a given
+    /// frontend's `SemanticRenderState` is projecting. The producer
+    /// used to derive the diagnostic URI from `active_buffer_path()`,
+    /// which returned the wrong path (or `None`) in that case and
+    /// emitted empty decorations — the session-5 manual-validation
+    /// finding. Fix routes the URI lookup through `vp.buffer_id` via
+    /// `buffer_file_uri`.
+    #[test]
+    fn decorations_use_vp_buffer_not_active_buffer() {
+        let state = empty_state();
+        // The default LOCAL frontend's active buffer is a scratch
+        // with no file path. We seed text + a file path on a buffer
+        // that is NOT the active one, then project that buffer via
+        // a separate `SemanticRenderState`. Pre-fix: the producer
+        // looks up `active_buffer_path()` (the scratch, no path) and
+        // gets `None`, emitting empty decorations. Post-fix: it
+        // resolves the URI from `vp.buffer_id`, finds the diagnostic.
+        let scratch_id = active_buffer(&state);
+
+        // Create a second buffer with a real file path + a diagnostic.
+        let file_id = {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .create_from_bytes("secondary".to_owned(), b"abc\nde")
+        };
+        {
+            let mut core = state.core.borrow_mut();
+            core.set_buffer_path(file_id, Some(std::path::PathBuf::from("/tmp/multi-fid.rs")));
+        }
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/multi-fid.rs"));
+        state
+            .lsp_manager
+            .borrow()
+            .diag_store()
+            .lock()
+            .expect("diag store")
+            .set(
+                &uri,
+                vec![crate::diag::Diagnostic {
+                    start_line: 1,
+                    start_col: 0,
+                    end_line: 1,
+                    end_col: 2,
+                    severity: crate::diag::DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                    source: None,
+                    code: None,
+                }],
+            );
+
+        // Sanity: active buffer is still the scratch, not `file_id`.
+        assert_eq!(scratch_id, active_buffer(&state));
+        assert_ne!(scratch_id, file_id);
+
+        // Project the file buffer through the semantic renderer.
+        let mut s = local();
+        s.set_viewport(file_id, ByteRange { start: 0, end: 64 }, 0);
+
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        assert_eq!(
+            decos.len(),
+            1,
+            "decoration must surface for the projected buffer even when it's not the editor's active buffer"
+        );
+        assert_eq!(decos[0].kind, DecorationKind::DiagnosticError);
         assert_eq!(decos[0].range, ByteRange { start: 4, end: 6 });
     }
 
