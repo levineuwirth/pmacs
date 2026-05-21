@@ -3044,6 +3044,15 @@ impl LspManager {
         let uri = uri.into();
         let text = text.into();
         self.documents.insert((sid, uri.clone()), text.clone());
+        // T M11.8 — mark the diag-store entry stale so the
+        // semantic-frontend producer suppresses its emission until
+        // clangd's next `publishDiagnostics` re-establishes
+        // freshness via `set`. Closes the visible-stale-color
+        // window observed in session-5 manual validation.
+        self.diag_store
+            .lock()
+            .expect("diag store mutex poisoned")
+            .mark_stale(uri.clone());
         let params = json!({
             "textDocument": {
                 "uri": uri,
