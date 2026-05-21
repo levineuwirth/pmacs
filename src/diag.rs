@@ -167,9 +167,26 @@ impl Diagnostic {
 /// Per-URI diagnostic set. Mutated by [`crate::lsp::LspManager`]
 /// when handling `textDocument/publishDiagnostics`; read by
 /// [`DiagnosticView`] on every render.
+///
+/// **T M11.8 — `stale_uris` tracking.** Per-URI flag set by
+/// [`Self::mark_stale`] whenever the LSP layer ships a
+/// `textDocument/didChange` for that URI; cleared by [`Self::set`]
+/// when fresh diagnostics arrive. The semantic-frontend producer
+/// reads [`Self::is_stale`] and suppresses decorations during the
+/// window between an edit and clangd's republish, so a `pmacs-gpu`
+/// (or any `semantic_render`) frontend never paints diagnostic
+/// colors at byte positions that have since shifted under the
+/// document. Closes the LSP-re-analysis-gap surface that bet #1
+/// in the session-4 framing pass predicted.
 #[derive(Default)]
 pub struct DiagnosticStore {
     by_uri: HashMap<String, Vec<Diagnostic>>,
+    /// URIs whose stored diagnostics are known to be out of date
+    /// because a `textDocument/didChange` was issued after the last
+    /// `publishDiagnostics` was absorbed. `Self::set` clears entries
+    /// here on the assumption that a fresh `publishDiagnostics`
+    /// corresponds to the latest sent version.
+    stale_uris: std::collections::HashSet<String>,
 }
 
 impl DiagnosticStore {
@@ -182,9 +199,14 @@ impl DiagnosticStore {
     /// Replace the diagnostic set for `uri`. Sorts by start position
     /// so [`Self::next_after`] / [`Self::previous_before`] don't
     /// have to re-sort on each query.
+    ///
+    /// Also clears the URI's stale flag (T M11.8) — fresh
+    /// diagnostics imply the LSP has caught up to the current
+    /// document state.
     pub fn set(&mut self, uri: impl Into<String>, mut diags: Vec<Diagnostic>) {
         diags.sort_by(Diagnostic::compare_by_position);
         let uri = uri.into();
+        self.stale_uris.remove(&uri);
         if diags.is_empty() {
             self.by_uri.remove(&uri);
         } else {
@@ -192,9 +214,28 @@ impl DiagnosticStore {
         }
     }
 
-    /// Drop the diagnostics for `uri`.
+    /// Drop the diagnostics for `uri`. Also clears the stale flag —
+    /// no entry to be stale about.
     pub fn clear(&mut self, uri: &str) {
         self.by_uri.remove(uri);
+        self.stale_uris.remove(uri);
+    }
+
+    /// Mark `uri`'s stored diagnostics as stale (T M11.8). Called
+    /// by the LSP layer on each `textDocument/didChange` so the
+    /// `semantic_render` producer can suppress emission during the
+    /// LSP-re-analysis gap. The next [`Self::set`] (or
+    /// [`Self::clear`]) clears the flag.
+    pub fn mark_stale(&mut self, uri: impl Into<String>) {
+        self.stale_uris.insert(uri.into());
+    }
+
+    /// `true` iff the URI's stored diagnostics are stale (the
+    /// document has been edited since the last `publishDiagnostics`
+    /// absorption). T M11.8.
+    #[must_use]
+    pub fn is_stale(&self, uri: &str) -> bool {
+        self.stale_uris.contains(uri)
     }
 
     /// All diagnostics for `uri`, in start-position order.
@@ -683,6 +724,51 @@ mod tests {
         s.set("a", Vec::new());
         assert!(s.for_uri("a").is_empty());
         assert_eq!(s.uris().count(), 0);
+    }
+
+    // ---- T M11.8 stale-flag ----
+
+    #[test]
+    fn stale_flag_default_false() {
+        let s = DiagnosticStore::new();
+        assert!(!s.is_stale("file:///a"));
+    }
+
+    #[test]
+    fn mark_stale_sets_flag() {
+        let mut s = DiagnosticStore::new();
+        s.mark_stale("file:///a");
+        assert!(s.is_stale("file:///a"));
+        assert!(!s.is_stale("file:///b"), "stale flag is per-URI");
+    }
+
+    #[test]
+    fn set_clears_stale_flag() {
+        let mut s = DiagnosticStore::new();
+        s.mark_stale("file:///a");
+        assert!(s.is_stale("file:///a"));
+        s.set("file:///a", vec![diag(0, DiagnosticSeverity::Error, "x")]);
+        assert!(!s.is_stale("file:///a"));
+    }
+
+    #[test]
+    fn empty_set_clears_stale_flag_too() {
+        // Empty diags after an edit means "LSP has caught up and
+        // there are no issues" — clear stale to allow rendering an
+        // empty decoration set.
+        let mut s = DiagnosticStore::new();
+        s.mark_stale("file:///a");
+        s.set("file:///a", Vec::new());
+        assert!(!s.is_stale("file:///a"));
+    }
+
+    #[test]
+    fn clear_drops_stale_flag() {
+        let mut s = DiagnosticStore::new();
+        s.set("file:///a", vec![diag(0, DiagnosticSeverity::Error, "x")]);
+        s.mark_stale("file:///a");
+        s.clear("file:///a");
+        assert!(!s.is_stale("file:///a"));
     }
 
     #[test]

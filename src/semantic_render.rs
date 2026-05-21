@@ -390,13 +390,21 @@ impl SemanticRenderState {
         // Lua LSP glue opened the document under. The URI is derived
         // from `vp.buffer_id` (see [`buffer_file_uri`]'s docs for why
         // not from `core.active_buffer_path()`).
+        //
+        // T M11.8 — skip emission while the store is stale (the
+        // document has been edited since the last `publishDiagnostics`
+        // absorption). Without this, the producer ships diagnostics
+        // whose byte positions point at pre-edit text — the visible
+        // wrong-position color artifact session-5 validation surfaced.
+        // The LSP layer's `did_change_full` marks the URI stale; the
+        // next `publishDiagnostics` absorbs and clears the flag.
         if let Some(uri) = buffer_file_uri(&core, vp.buffer_id) {
-            let diags = {
+            let (diags, is_stale) = {
                 let store = state.lsp_manager.borrow().diag_store();
                 let guard = store.lock().expect("diag store mutex poisoned");
-                guard.for_uri(&uri).to_vec()
+                (guard.for_uri(&uri).to_vec(), guard.is_stale(&uri))
             };
-            if !diags.is_empty() {
+            if !is_stale && !diags.is_empty() {
                 let registry = core.registry.clone();
                 let reg = registry.borrow();
                 if let Ok(buf) = reg.get(vp.buffer_id) {
@@ -1122,6 +1130,76 @@ mod tests {
         assert_eq!(decos[0].kind, DecorationKind::DiagnosticWarning);
         // line 1 starts at byte 4; cols [0,2) → bytes [4,6).
         assert_eq!(decos[0].range, ByteRange { start: 4, end: 6 });
+    }
+
+    /// T M11.8 regression: when the diag store's entry for the URI
+    /// is marked stale (an edit has been issued since the last
+    /// `publishDiagnostics`), the producer must suppress diagnostic
+    /// emission so the frontend doesn't paint colors at pre-edit
+    /// byte positions over post-edit text. Closes the bet-#1
+    /// surface that session-5 validation exposed.
+    #[test]
+    fn diagnostics_suppressed_while_diag_store_stale() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        seed_diagnostic(&state, buffer_id);
+
+        // Mark the diag store stale for the seeded URI. The producer
+        // should now emit zero diagnostic decorations.
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
+        state
+            .lsp_manager
+            .borrow()
+            .diag_store()
+            .lock()
+            .expect("diag store")
+            .mark_stale(uri.clone());
+
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        assert!(
+            decos.iter().all(|d| !matches!(
+                d.kind,
+                DecorationKind::DiagnosticError
+                    | DecorationKind::DiagnosticWarning
+                    | DecorationKind::DiagnosticInfo
+                    | DecorationKind::DiagnosticHint
+            )),
+            "stale diag store ⇒ no diagnostic decorations emitted; got {decos:?}"
+        );
+
+        // Once a fresh `set` clears the stale flag, the decoration
+        // re-appears on the next render frame.
+        state
+            .lsp_manager
+            .borrow()
+            .diag_store()
+            .lock()
+            .expect("diag store")
+            .set(
+                &uri,
+                vec![crate::diag::Diagnostic {
+                    start_line: 1,
+                    start_col: 0,
+                    end_line: 1,
+                    end_col: 2,
+                    severity: crate::diag::DiagnosticSeverity::Warning,
+                    message: "x".into(),
+                    source: None,
+                    code: None,
+                }],
+            );
+
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        assert!(
+            decos
+                .iter()
+                .any(|d| d.kind == DecorationKind::DiagnosticWarning),
+            "fresh set ⇒ stale flag cleared ⇒ decoration re-emitted; got {decos:?}"
+        );
     }
 
     /// Regression: in a multi-frontend setup the editor's *active*
