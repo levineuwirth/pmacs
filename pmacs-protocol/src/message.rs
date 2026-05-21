@@ -705,6 +705,43 @@ pub enum InstanceMessage {
         /// Inline bytes or a URI the frontend resolves itself.
         body: ResourceBody,
     },
+    /// Daemon-side input-dispatcher idleness signal. Tells a
+    /// `crdt_replica` frontend whether the next key event would be
+    /// **intercepted** by the daemon (minibuffer prompt active or
+    /// dispatcher holds a pending multi-key prefix) versus would
+    /// self-insert into the active buffer.
+    ///
+    /// Frontends running the optimistic-apply layer (`src/optimistic.rs`)
+    /// gate the local apply on `idle == true`: when the daemon is not
+    /// idle, plain-char keystrokes must round-trip as
+    /// [`FrontendEvent::Key`] so the daemon's minibuffer / prefix
+    /// dispatcher receives them. Without this signal, characters typed
+    /// into a minibuffer prompt would be applied as `CrdtOp`s to the
+    /// previously-active document instead — the surfacing of which
+    /// motivated this wire addition.
+    ///
+    /// Emission contract (daemon side):
+    ///
+    /// - Once after `AttachRequest` is accepted, before any other
+    ///   non-handshake message, so a fresh frontend starts from a
+    ///   known idle state regardless of the daemon's current input
+    ///   condition.
+    /// - At every transition: minibuffer begin / dismiss; dispatcher
+    ///   `pending` empty↔non-empty.
+    /// - Coalesced where consecutive transitions land on the same
+    ///   value (no spurious back-to-back identical signals).
+    ///
+    /// Gated on negotiated `crdt_replica` — frontends without the
+    /// optimistic-apply layer have no use for this signal and the
+    /// daemon's per-session filter drops it for them.
+    DispatchIdle {
+        /// `true` → the next key event would self-insert into the
+        /// active buffer (no minibuffer, no pending prefix); optimistic
+        /// apply is correct.
+        /// `false` → the daemon would intercept the next key; the
+        /// frontend must round-trip via [`FrontendEvent::Key`].
+        idle: bool,
+    },
 }
 
 /// Flat selection state for the wire.
@@ -922,7 +959,15 @@ pub enum ResourceBody {
 /// unchanged, and the new variants simply existing in the enums is
 /// not a wire-compat issue for non-semantic sessions because the
 /// daemon never emits them to those sessions.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// T M11.6: bumped from 3 to 4. v1, v2, v3 wires remain accepted;
+/// [`InstanceMessage::DispatchIdle`] is filtered per-session for
+/// sessions whose negotiated wire is `<= 3`. Same gating shape as the
+/// `CrdtOp` / semantic-frontend bumps: the daemon's per-tick emission
+/// checks the session's negotiated version and skips the variant for
+/// older peers. An old peer would hard-error on decode of an unknown
+/// postcard variant; gating prevents that.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -938,7 +983,11 @@ pub const PROTOCOL_VERSION: u32 = 3;
 /// `InstanceMessage::CrdtOp` / `PresenceUpdate` messages even from
 /// a v3 daemon, and only sessions that negotiated `semantic_render`
 /// receive the `SemanticFrame` variant family.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2, 3];
+///
+/// T M11.6: extended to `[1, 2, 3, 4]`. v4 sessions receive
+/// `InstanceMessage::DispatchIdle`; older sessions are filtered out
+/// of that emission.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2, 3, 4];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

@@ -836,6 +836,11 @@ fn dispatcher_loop(
         HashMap::new();
     let mut streams: HashMap<FrontendId, UnixStream> = HashMap::new();
     let mut term_sizes: HashMap<FrontendId, CellSize> = HashMap::new();
+    // T M11.6 — last `DispatchIdle` value broadcast per `crdt_replica`
+    // frontend. Absence means "never sent" — the first tick after
+    // attach emits an initial `DispatchIdle` so the frontend starts
+    // from a known idle state (its default is pessimistic-`false`).
+    let mut last_dispatch_idle_sent: HashMap<FrontendId, bool> = HashMap::new();
     let mut session_registry = SessionRegistry::new();
     // T M10.11 Q8 — jitter PRNG, seeded once so the
     // convergence-under-jitter scenario is deterministically
@@ -979,9 +984,37 @@ fn dispatcher_loop(
             let snapshot = build_presence_snapshot(editor, *fid);
             let broadcasts = session_registry.sweep(&[(*fid, snapshot)]);
 
-            // Write frame messages to this frontend's stream.
+            // T M11.6 — DispatchIdle signal. `crdt_replica` frontends
+            // gate their optimistic-apply path on this; we ship it
+            // before the frame's other messages so a frontend that
+            // wakes mid-tick sees the gate flip first. Diff-suppressed
+            // — initial-after-attach (`last_dispatch_idle_sent` absent)
+            // and value-change emissions only.
             let mut write_failed = false;
-            if let Some(stream) = streams.get_mut(fid) {
+            if session_registry.session_state(*fid).is_some_and(|s| {
+                // Filter on both the `crdt_replica` capability (only
+                // optimistic-apply frontends care) and the negotiated
+                // wire version (>= 4 means peer knows the variant).
+                s.negotiated_capabilities.crdt_replica && s.negotiated_protocol_version >= 4
+            }) && let Some(stream) = streams.get_mut(fid)
+            {
+                let idle_now = editor.dispatch_idle();
+                if last_dispatch_idle_sent.get(fid) != Some(&idle_now) {
+                    if let Err(e) =
+                        write_message(stream, &InstanceMessage::DispatchIdle { idle: idle_now })
+                    {
+                        eprintln!("pmacs: write DispatchIdle for {fid:?} failed: {e}");
+                        write_failed = true;
+                    } else {
+                        last_dispatch_idle_sent.insert(*fid, idle_now);
+                    }
+                }
+            }
+
+            // Write frame messages to this frontend's stream.
+            if let Some(stream) = streams.get_mut(fid)
+                && !write_failed
+            {
                 for msg in &messages {
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
                     // jitter site: render-write latency.
@@ -1061,6 +1094,7 @@ fn dispatcher_loop(
                 render_states.remove(fid);
                 semantic_states.remove(fid);
                 term_sizes.remove(fid);
+                last_dispatch_idle_sent.remove(fid);
                 session_registry.unregister_session(*fid);
                 editor.core.borrow_mut().unregister_frontend_view(*fid);
             }
@@ -1100,6 +1134,7 @@ fn dispatcher_loop(
                     &mut semantic_states,
                     &mut streams,
                     &mut term_sizes,
+                    &mut last_dispatch_idle_sent,
                     &mut session_registry,
                 );
                 // Drain a burst of immediately-available events to
@@ -1114,6 +1149,7 @@ fn dispatcher_loop(
                         &mut semantic_states,
                         &mut streams,
                         &mut term_sizes,
+                        &mut last_dispatch_idle_sent,
                         &mut session_registry,
                     );
                 }
@@ -1209,6 +1245,7 @@ fn handle_session_established(
     editor.core.borrow_mut().active_frontend = frontend_id;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_dispatcher_event(
     event: DispatcherEvent,
     editor: &mut EditorState,
@@ -1216,6 +1253,7 @@ fn handle_dispatcher_event(
     semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
     streams: &mut HashMap<FrontendId, UnixStream>,
     term_sizes: &mut HashMap<FrontendId, CellSize>,
+    last_dispatch_idle_sent: &mut HashMap<FrontendId, bool>,
     session_registry: &mut SessionRegistry,
 ) {
     match event {
@@ -1337,6 +1375,7 @@ fn handle_dispatcher_event(
             semantic_states.remove(&frontend_id);
             streams.remove(&frontend_id);
             term_sizes.remove(&frontend_id);
+            last_dispatch_idle_sent.remove(&frontend_id);
             session_registry.unregister_session(frontend_id);
             editor
                 .core

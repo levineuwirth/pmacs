@@ -383,7 +383,11 @@ impl Frontend {
             | InstanceMessage::BlockAdornments { .. }
             | InstanceMessage::FoldState { .. }
             | InstanceMessage::FileStyleSummary { .. }
-            | InstanceMessage::ResourceOffer { .. } => {
+            | InstanceMessage::ResourceOffer { .. }
+            // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
+            // optimistic-apply gate; if any reaches this render path
+            // (shouldn't, given the attach drain), drop silently.
+            | InstanceMessage::DispatchIdle { .. } => {
                 // v0.1 TUI ignores these; v0.3 GUI consumes them.
             }
         }
