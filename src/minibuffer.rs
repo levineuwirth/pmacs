@@ -463,6 +463,7 @@ impl MinibufferAction {
         if !ctrl && !alt {
             match chord.code {
                 KeyCode::Enter => return Self::Accept,
+                KeyCode::Esc => return Self::Cancel,
                 KeyCode::Tab => return Self::Complete,
                 KeyCode::Up => return Self::HistoryPrev,
                 KeyCode::Down => return Self::HistoryNext,
@@ -853,6 +854,58 @@ mod tests {
         let mb = Minibuffer::new();
         assert_eq!(mb.buffer.name(), MINIBUFFER_NAME);
         assert_eq!(mb.buffer.len(), 0);
+    }
+
+    #[test]
+    fn from_chord_escape_cancels() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let esc = Chord {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(
+            MinibufferAction::from_chord(esc),
+            MinibufferAction::Cancel
+        ));
+    }
+
+    #[test]
+    fn from_chord_ctrl_g_cancels() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let cg = Chord {
+            code: KeyCode::Char('g'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert!(matches!(
+            MinibufferAction::from_chord(cg),
+            MinibufferAction::Cancel
+        ));
+    }
+
+    #[test]
+    fn from_chord_enter_accepts() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let ret = Chord {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(matches!(
+            MinibufferAction::from_chord(ret),
+            MinibufferAction::Accept
+        ));
+    }
+
+    #[test]
+    fn from_chord_char_self_inserts() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let a = Chord {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::NONE,
+        };
+        match MinibufferAction::from_chord(a) {
+            MinibufferAction::SelfInsert('a') => {}
+            other => panic!("expected SelfInsert('a'), got {other:?}"),
+        }
     }
 
     #[test]
