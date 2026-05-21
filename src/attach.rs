@@ -670,6 +670,18 @@ pub(crate) fn run_attach_pair(
     #[cfg(feature = "crdt")]
     let mut buffer_mirror = crate::buffer_mirror::BufferMirror::new(assigned_id);
 
+    // T M11.6 — daemon-side input-dispatcher idleness. `false` =
+    // pessimistic default before the first `DispatchIdle` arrives;
+    // the daemon emits an initial value once per attach so this
+    // converges to the true state on the first frame. While `false`,
+    // every keystroke round-trips as `FrontendEvent::Key` regardless
+    // of optimistic-apply eligibility — this is the fix for the
+    // M10.10-era latent bug where chars typed into a minibuffer
+    // prompt were optimistically applied to the previously-active
+    // document.
+    #[cfg(feature = "crdt")]
+    let mut dispatch_idle = false;
+
     // Closure-and-call: any `return` from this closure still falls
     // through to `kick()` and `reader_handle.join()` below. Without
     // this wrapping a writer-side IO error inside the loop would skip
@@ -763,6 +775,14 @@ pub(crate) fn run_attach_pair(
                             }
                         }
                     }
+                    #[cfg(feature = "crdt")]
+                    Ok(InstanceMessage::DispatchIdle { idle }) => {
+                        // T M11.6 — daemon's input-dispatcher state.
+                        // Consumed *here only*: no frontend rendering
+                        // depends on the value; the optimistic-apply
+                        // gate reads `dispatch_idle` below.
+                        dispatch_idle = idle;
+                    }
                     Ok(msg) => batch.push(msg),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -813,7 +833,16 @@ pub(crate) fn run_attach_pair(
             // keys) fall through to the existing forward_event path.
             #[cfg(feature = "crdt")]
             let optimistic_handled = if let Event::Key(k) = &ev {
-                if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                // T M11.6 — gate on daemon idleness. When the daemon
+                // would intercept this key (minibuffer prompt active
+                // or dispatcher holds a pending prefix), force the
+                // keystroke to round-trip via `FrontendEvent::Key`
+                // regardless of its optimistic-apply classification.
+                // The orchestrator below still runs for non-key
+                // events; only the Press/Repeat→CrdtOp path is gated.
+                if !dispatch_idle {
+                    false
+                } else if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                     let timestamp_ns = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(0));

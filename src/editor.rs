@@ -427,6 +427,32 @@ impl EditorState {
     /// dispatcher, and invoke the resolved command (or the
     /// self-insert fallback for an unbound printable chord).
     ///
+    /// Whether the daemon's key-dispatch path is currently "idle" in
+    /// the sense that the *next* key event would self-insert into the
+    /// active buffer rather than being intercepted.
+    ///
+    /// `false` when either:
+    ///
+    /// - the dispatcher holds a pending multi-key prefix (e.g. the
+    ///   user has typed `C-x` and the daemon is waiting for the next
+    ///   chord), or
+    /// - a minibuffer prompt is active and absorbing keys.
+    ///
+    /// Used by the daemon to drive the `InstanceMessage::DispatchIdle`
+    /// wire signal that gates `crdt_replica` frontends' optimistic-apply
+    /// path. Without this signal the optimistic layer would Insert a
+    /// plain-char keystroke into the active document while the
+    /// daemon's actual intent is to route the keystroke into the
+    /// minibuffer prompt — the M10.10 "documented limitation" that
+    /// surfaced during session-5 manual validation.
+    #[must_use]
+    pub fn dispatch_idle(&self) -> bool {
+        if !self.dispatcher.pending().is_empty() {
+            return false;
+        }
+        !self.core.borrow().minibuffer.is_active()
+    }
+
     /// `frontend_id` records which frontend produced the event. v0.1
     /// uses [`FrontendId::LOCAL`] uniformly; the parameter is
     /// load-bearing for v0.3 multi-frontend scenarios where the
@@ -1580,6 +1606,71 @@ mod tests {
         s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
         s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
         assert!(s.core.borrow().status.contains("no file"));
+    }
+
+    // ---- T M11.6 — DispatchIdle ---------------------------------------------
+
+    #[test]
+    fn dispatch_idle_true_on_fresh_editor() {
+        let s = fresh_with(b"");
+        assert!(s.dispatch_idle());
+    }
+
+    #[test]
+    fn dispatch_idle_false_while_prefix_pending() {
+        let mut s = fresh_with(b"");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
+        assert!(
+            !s.dispatch_idle(),
+            "C-x prefix should put dispatcher in non-idle state"
+        );
+    }
+
+    #[test]
+    fn dispatch_idle_true_after_prefix_resolves() {
+        let mut s = fresh_with(b"");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
+        assert!(!s.dispatch_idle());
+        // C-x C-c resolves the prefix into the quit command. After
+        // the second chord arrives the dispatcher's `pending` is
+        // cleared regardless of whether the command succeeded.
+        s.dispatch_key(FrontendId::LOCAL, ctrl('c'));
+        assert!(s.dispatch_idle(), "prefix cleared ⇒ idle again");
+    }
+
+    #[test]
+    fn dispatch_idle_false_while_minibuffer_active() {
+        use crate::minibuffer::{CompletionSource, MinibufferSession};
+
+        let s = fresh_with(b"");
+        assert!(s.dispatch_idle());
+
+        // Open a synthetic minibuffer session — same shape Lua's
+        // `pmacs.minibuffer.read` produces.
+        let lua = mlua::Lua::new();
+        let on_accept: mlua::Function = lua
+            .create_function(|_, _: String| Ok(()))
+            .expect("create on_accept");
+        s.core.borrow_mut().minibuffer.begin(MinibufferSession {
+            prompt: "test: ".into(),
+            initial: String::new(),
+            history_bucket: String::new(),
+            source: CompletionSource::None,
+            on_accept,
+            on_cancel: None,
+            candidates: Vec::new(),
+            selected: None,
+            history_index: None,
+            typed_before_history_nav: None,
+        });
+        assert!(
+            !s.dispatch_idle(),
+            "active minibuffer prompt should put dispatcher in non-idle state"
+        );
+
+        // Dismissing returns to idle.
+        let _ = s.core.borrow_mut().minibuffer.cancel();
+        assert!(s.dispatch_idle(), "dismissed minibuffer ⇒ idle again");
     }
 
     #[test]

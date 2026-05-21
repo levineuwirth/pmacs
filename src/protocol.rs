@@ -1683,27 +1683,29 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_three_for_v11() {
+    fn protocol_version_is_four_for_dispatch_idle() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
-        // SemanticFrame family + FrontendEvent::Viewport). The v1.1
-        // binary serves v1, v2, and v3 sessions — the slice-membership
-        // handshake makes the relaxation symmetric, exactly as M10.5
-        // did for §sec:m10-backward-compat.
-        assert_eq!(PROTOCOL_VERSION, 3);
+        // SemanticFrame family + FrontendEvent::Viewport). T M11.6
+        // bumped 3→4 (DispatchIdle for the optimistic-apply gate).
+        // The current binary serves v1..=v4 sessions — the slice-
+        // membership handshake makes the relaxation symmetric.
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]
-    fn supported_protocol_versions_includes_one_two_three() {
+    fn supported_protocol_versions_includes_one_through_four() {
         // T M10.5: v1.0 binaries accept v1+v2. T M11.1: v1.1 binaries
-        // accept v1+v2+v3. The check is slice membership, not strict
-        // equality, so v0.1/v1.0 binaries keep connecting to v1.1
-        // binaries unchanged. v4+ is rejected until the next bump.
+        // accept v1+v2+v3. T M11.6: v4 binaries accept v1+v2+v3+v4.
+        // The check is slice membership, not strict equality, so
+        // older binaries keep connecting to current binaries
+        // unchanged. v5+ is rejected until the next bump.
         assert!(is_supported_protocol_version(1));
         assert!(is_supported_protocol_version(2));
         assert!(is_supported_protocol_version(3));
+        assert!(is_supported_protocol_version(4));
         assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(4));
+        assert!(!is_supported_protocol_version(5));
         assert!(!is_supported_protocol_version(u32::MAX));
     }
 
@@ -1848,6 +1850,21 @@ mod tests {
                 assert_eq!(k.timestamp_ns, 1_700_000_000_000_000_000);
             }
             other => panic!("expected Key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_idle_round_trips_through_postcard() {
+        // T M11.6 — the wire variant. Round-trip both polarities so
+        // the postcard encoding of bool is verified in both states.
+        for idle in [true, false] {
+            let msg = InstanceMessage::DispatchIdle { idle };
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            match decoded {
+                InstanceMessage::DispatchIdle { idle: got } => assert_eq!(got, idle),
+                other => panic!("expected DispatchIdle, got {other:?}"),
+            }
         }
     }
 
@@ -2056,11 +2073,11 @@ mod tests {
     #[test]
     fn m10_5_handshake_matrix_versions_outside_range_rejected() {
         // v1 daemon's strict-equality behavior is documented at the
-        // v0.1 code level (different binary); the v1.1 daemon's range
-        // check accepts v1/v2/v3 (T M11.1 added v3) and rejects v4+
-        // until the next protocol bump.
+        // v0.1 code level (different binary); the current daemon's
+        // range check accepts v1/v2/v3/v4 (T M11.1 added v3; T M11.6
+        // added v4) and rejects v5+ until the next protocol bump.
         assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(4));
+        assert!(!is_supported_protocol_version(5));
         assert!(!is_supported_protocol_version(u32::MAX));
     }
 
