@@ -410,13 +410,13 @@ impl State {
     /// (avoids the re-shape cost when an unchanged buffer ticks).
     ///
     /// Replaces the rope text and routes through `reshape` so the
-    /// rich-text rendering uses the current `current_spans`. When
-    /// called from the `CrdtOp` path (text shifted under existing
-    /// spans) the spans are momentarily stale relative to the new
-    /// byte positions — `reshape` clamps via `range.end.min(text_len)`
-    /// so rendering is safe, but visual styling may be off until the
-    /// daemon's next `StyleSpans` frame catches up. A real artifact;
-    /// classified as a session-4 known limitation rather than a bug.
+    /// rich-text rendering uses the current `current_spans` and
+    /// `current_decorations`. The `CrdtOp` arm of
+    /// [`Self::apply_attach_message`] clears both vectors before
+    /// calling `set_text`, so post-edit text never renders with
+    /// pre-edit-position colors. Brief uncolored window between an
+    /// edit and the daemon's next styling frame is the accepted
+    /// tradeoff (see that arm's doc comment for the rationale).
     fn set_text(&mut self, text: &str) {
         if self.current_text == text {
             return;
@@ -498,6 +498,28 @@ impl State {
                     eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
                     return None;
                 }
+                // **Invalidate styling on text-shift.** The current
+                // spans + decorations index into byte positions of
+                // the *pre-edit* text. Once `set_text` swaps in the
+                // post-edit text, those positions no longer
+                // correspond to the right characters, so painting
+                // them produces wrong-character-colored fragments
+                // (the session-5 manual-validation finding: probe
+                // #3, "edit at a diagnostic boundary leaves stale
+                // color fragments"). The session-4 PR documented
+                // this as a "one-frame stale" artifact; in practice
+                // it stretches to the full LSP re-analysis cycle
+                // (100ms–5s), making the wrong-color period
+                // visible for human-perceptible durations.
+                //
+                // The fix is to drop both vectors here. Tree-sitter
+                // re-emits StyleSpans almost immediately (one
+                // frame after CrdtOp lands daemon-side); LSP
+                // decorations re-emit when clangd republishes.
+                // Cost: a brief uncolored window after each edit;
+                // gain: no wrong-position color persists.
+                self.current_spans.clear();
+                self.current_decorations.clear();
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
                 self.set_text(&text);
                 None
