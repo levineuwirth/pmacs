@@ -1777,6 +1777,29 @@ fn handle_remote_crdt_op(
         }
 
         core.notify_buffer_edit(buffer_id, edit);
+        // T M11.9 — temporarily switch active_frontend to source so
+        // the `buffer.after-edit` hook's Lua observers (notably the
+        // LSP `did_change` glue in `builtin/runtime/lsp.lua`) read
+        // the right buffer via `pmacs.window.buffer()`. Matches the
+        // pattern `dispatch_key` uses (it assigns `active_frontend`
+        // before running its hook).
+        core.active_frontend = source;
+        drop(core);
+
+        // T M11.9 — fire `buffer.after-edit` for replicated edits.
+        // Without this, LSP `textDocument/didChange` is never sent
+        // for keystrokes the M10.10 optimistic-apply layer routed as
+        // `FrontendEvent::CrdtOp` (the bulk of plain-char typing),
+        // so clangd's view of the document drifts behind reality.
+        // Diagnostics, semantic tokens, and inlay hints all silently
+        // freeze at the byte positions they last had when an edit
+        // happened to fall back to the Key path. Closes the actual
+        // root cause of the session-5 wrong-position-color
+        // artifact; the diag-store stale-flag from T M11.8 finally
+        // gets reached.
+        editor
+            .lua_host
+            .run_hook("buffer.after-edit", mlua::MultiValue::new());
     }
 
     // Effect 4: queue for broadcast. The source frontend's mirror
@@ -1980,5 +2003,101 @@ mod tests {
         // Just verify it's set (or empty if cwd was non-UTF-8).
         // Test environments are UTF-8, so this should be non-empty.
         assert!(!id.working_directory.is_empty());
+    }
+
+    /// T M11.9 regression: `handle_remote_crdt_op` fires the
+    /// `buffer.after-edit` Lua hook. Without this, the M10.10
+    /// optimistic-apply path's `FrontendEvent::CrdtOp` route
+    /// bypasses every Lua observer of buffer mutations — most
+    /// importantly the LSP `did_change` notification, which means
+    /// clangd never re-analyzes documents edited via the optimistic
+    /// path. The session-5 wrong-position-color artifact was the
+    /// downstream symptom: diagnostics frozen at pre-edit byte
+    /// positions because clangd had never been told about the edit.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn handle_remote_crdt_op_fires_after_edit_hook() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+
+        let mut editor = EditorState::new();
+
+        // Install an after-edit hook that bumps a global counter
+        // we can read back from Lua.
+        editor
+            .lua_host
+            .eval(
+                Some("test"),
+                r#"
+                _G.PMACS_TEST_AFTER_EDIT_FIRED = 0
+                pmacs.hook.add("buffer.after-edit", function()
+                    _G.PMACS_TEST_AFTER_EDIT_FIRED = (_G.PMACS_TEST_AFTER_EDIT_FIRED or 0) + 1
+                end)
+                "#,
+            )
+            .expect("install after-edit hook");
+
+        // Upgrade the active buffer to CRDT-backed so
+        // `handle_remote_crdt_op` finds a `CrdtState` to apply
+        // against (the non-CRDT path is not exercised here).
+        let buffer_id = editor.core.borrow().active_window().buffer_id;
+        {
+            let core = editor.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(2)
+                .expect("upgrade to crdt");
+        }
+
+        // Build a peer CRDT doc from the buffer's snapshot, perform
+        // an edit on the peer, export the op bytes. This is the
+        // shape `optimistic::apply_local_insert` produces in the
+        // attach loop's optimistic-apply branch.
+        let snapshot_bytes = {
+            let core = editor.core.borrow();
+            let reg = core.registry.borrow();
+            let buf = reg.get(buffer_id).expect("buffer");
+            buf.crdt_state()
+                .expect("crdt-backed")
+                .export_snapshot()
+                .expect("export snapshot")
+        };
+        let peer = loro::LoroDoc::new();
+        peer.set_peer_id(99).expect("set peer id");
+        peer.import(&snapshot_bytes).expect("import snapshot");
+        let v_before = peer.oplog_vv();
+        peer.get_text("body").insert(0, "x").expect("peer insert");
+        let op_bytes = peer
+            .export(loro::ExportMode::updates(&v_before))
+            .expect("export op");
+
+        // Apply the op via `handle_remote_crdt_op`.
+        super::handle_remote_crdt_op(
+            &mut editor,
+            FrontendId(99),
+            buffer_id,
+            crate::rope::CrdtOp {
+                peer_id: 99,
+                bytes: op_bytes,
+            },
+        );
+
+        // The hook should have fired exactly once.
+        let count_val = editor
+            .lua_host
+            .eval(
+                Some("test-readback"),
+                "return _G.PMACS_TEST_AFTER_EDIT_FIRED",
+            )
+            .expect("read counter");
+        let count = match count_val {
+            mlua::Value::Integer(n) => n,
+            other => panic!("expected counter integer, got {other:?}"),
+        };
+        assert_eq!(
+            count, 1,
+            "buffer.after-edit must fire when handle_remote_crdt_op produces a text Edit"
+        );
     }
 }
