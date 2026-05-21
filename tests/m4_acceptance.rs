@@ -1754,6 +1754,80 @@ fn m4_6_lua_surface_reads_diagnostics() {
     );
 }
 
+/// Task #23: `pmacs.diag._attach_view` pushes a `DiagnosticView` onto
+/// the active window's overlay stack so the TUI grid renderer paints
+/// diagnostic underlines. Verifies the binding lands and that the
+/// overlay advertises the stable `"diagnostic"` kind that callers
+/// (`builtin/runtime/lsp.lua`'s dedup table, future tests) key on.
+#[test]
+fn m4_6_diag_attach_view_pushes_diagnostic_overlay() {
+    use pmacs::editor::EditorState;
+
+    let state = EditorState::new();
+    let attached: bool = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local buf = pmacs.window.buffer()
+            return pmacs.diag._attach_view(buf, 'file:///fake.rs')
+            ",
+        )
+        .eval()
+        .expect("_attach_view");
+    assert!(attached, "_attach_view should return true on success");
+
+    let has_diag_overlay: bool = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            for _, k in ipairs(pmacs.window._overlay_kinds()) do
+                if k == 'diagnostic' then return true end
+            end
+            return false
+            ",
+        )
+        .eval()
+        .expect("overlay_kinds query");
+    assert!(
+        has_diag_overlay,
+        "active window must carry a 'diagnostic' overlay after _attach_view"
+    );
+
+    // Mirroring `_attach_style` / `_attach_highlight`: the binding
+    // itself does not dedup; callers (lsp.lua's `diag_viewed_buffers`)
+    // are responsible. Calling twice stacks two overlays.
+    state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            pmacs.diag._attach_view(pmacs.window.buffer(), 'file:///fake.rs')
+            ",
+        )
+        .exec()
+        .expect("second attach");
+    let diag_count: i64 = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local n = 0
+            for _, k in ipairs(pmacs.window._overlay_kinds()) do
+                if k == 'diagnostic' then n = n + 1 end
+            end
+            return n
+            ",
+        )
+        .eval()
+        .expect("overlay count");
+    assert_eq!(
+        diag_count, 2,
+        "binding does not dedup; two calls = two overlays"
+    );
+}
+
 // ===========================================================================
 // T M4.7 --- LSP-backed views: completion, hover, signature
 // ===========================================================================

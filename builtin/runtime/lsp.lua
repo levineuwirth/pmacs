@@ -327,6 +327,12 @@ end
 -- is keyed by the same `tostring(buf)` the attachments table uses.
 local styled_buffers = {}
 
+-- M4.6 (task #23): buffers that already had a `DiagnosticView`
+-- overlay pushed. Same dedup discipline as `styled_buffers` —
+-- `pmacs.diag._attach_view` stacks a fresh overlay on every call,
+-- so the after-load path must gate itself.
+local diag_viewed_buffers = {}
+
 local function attach_buffer(buf)
   if not buf then return nil end
   local key = tostring(buf)
@@ -360,6 +366,15 @@ local function attach_buffer(buf)
   if not styled_buffers[key] then
     local ok, attached = pcall(pmacs.lsp._attach_style, buf)
     if ok and attached then styled_buffers[key] = true end
+  end
+  -- M4.6 (task #23): attach the DiagnosticView so the TUI grid
+  -- renderer underlines bytes covered by published diagnostics.
+  -- Keyed by `uri` to match the diag store; the view re-reads the
+  -- store on every render, so no further wiring is needed when
+  -- diagnostics update.
+  if not diag_viewed_buffers[key] then
+    local ok, attached = pcall(pmacs.diag._attach_view, buf, uri)
+    if ok and attached then diag_viewed_buffers[key] = true end
   end
   return rec
 end

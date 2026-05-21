@@ -409,6 +409,10 @@ impl DiagnosticView {
 }
 
 impl View for DiagnosticView {
+    fn kind(&self) -> &'static str {
+        "diagnostic"
+    }
+
     fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
         // Snapshot the diagnostics under the lock and drop it
         // immediately so we don't hold the lock through rendering
@@ -782,5 +786,14 @@ mod tests {
             assert_eq!(s.label(), lbl);
             assert_eq!(s.gutter_glyph(), gl);
         }
+    }
+
+    #[test]
+    fn view_advertises_diagnostic_kind() {
+        // `pmacs.window._overlay_kinds()` introspection (task #23 wire-up,
+        // mirroring "syntax-highlight" / LspStyleView) relies on this.
+        let store = make_shared_store();
+        let view = DiagnosticView::new("file:///a", store);
+        assert_eq!(view.kind(), "diagnostic");
     }
 }
