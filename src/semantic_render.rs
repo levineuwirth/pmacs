@@ -53,14 +53,27 @@ struct DeclaredViewport {
 }
 
 /// The diff baseline for one family on one buffer: the
-/// declared-viewport region the set was computed for, and the full
-/// scoped item set last shipped. The next frame diffs against
-/// `items`; `visible` changing (or no entry) forces a `full` resync.
-/// The frame's `generation` is recomputed each tick and carried on
-/// the wire, so it is not retained here.
+/// declared-viewport region the set was computed for, the full
+/// scoped item set last shipped, and the CRDT generation that set
+/// was computed against. The next frame diffs against `items`;
+/// `visible` changing (or no entry) forces a `full` resync, and
+/// `generation` changing also forces a `full` — see T M11.7.
+///
+/// **T M11.7 — `generation`-tracked full-resync.** Without this,
+/// edits broke the consumer's incremental-update contract:
+/// `changed_intervals` only ships dirty-range items on `full=false`
+/// frames, but after a text-shift the frontend's cached spans
+/// (indexed by *pre-edit* byte positions) need to be replaced
+/// wholesale — the post-edit positions have shifted under them.
+/// Forcing `full=true` on every generation transition makes the
+/// next emission a `replace_*` on the frontend side, which is the
+/// correct behavior. Cost: one extra full-viewport ship per edit;
+/// negligible on a local Unix socket and bounded by the viewport
+/// size.
 struct LastFrame<T> {
     visible: ByteRange,
     items: Vec<T>,
+    generation: u64,
 }
 
 /// Owns one `semantic_render` session's projection state: the last
@@ -148,6 +161,7 @@ impl SemanticRenderState {
     /// every frame would be waste, not honesty, so `InlineAdornments` is
     /// suppressed both when unchanged and when there is simply nothing
     /// to say (no hints, no prior non-empty send).
+    #[allow(clippy::too_many_lines)]
     pub fn render_frame(&mut self, state: &EditorState) -> Vec<InstanceMessage> {
         let Some(vp) = self.viewport.clone() else {
             // Emit nothing before the frontend declares a viewport.
@@ -160,10 +174,13 @@ impl SemanticRenderState {
         // --- StyleSpans (T M11.2 producer, T M11.4 diff) ---
         let spans = scoped_style_spans(state, &vp);
         let prev = self.last_sent.get(&vp.buffer_id);
-        // Resync when there is no baseline, or the declared viewport
-        // region moved (the scoping window changed, so prior styling
-        // is no longer positioned correctly).
-        let full = prev.is_none_or(|p| p.visible != vp.visible);
+        // Resync when there is no baseline, the declared viewport
+        // region moved (scoping window changed), OR the CRDT
+        // generation advanced (T M11.7: text edits shift byte
+        // positions, so prior spans are stale and incremental
+        // updates can't restore the full viewport — see
+        // `LastFrame`'s doc comment).
+        let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
         if full {
             // The first frame for this buffer/viewport. One segment
             // covering the declared viewport carries the whole scoped
@@ -173,6 +190,7 @@ impl SemanticRenderState {
                 LastFrame {
                     visible: vp.visible,
                     items: spans.clone(),
+                    generation,
                 },
             );
             out.push(InstanceMessage::StyleSpans {
@@ -200,6 +218,7 @@ impl SemanticRenderState {
                     LastFrame {
                         visible: vp.visible,
                         items: spans,
+                        generation,
                     },
                 );
                 out.push(InstanceMessage::StyleSpans {
@@ -215,13 +234,14 @@ impl SemanticRenderState {
         // --- Decorations (T M11.3 producer, T M11.4 diff) ---
         let decorations = self.scoped_decorations(state, &vp);
         let prev = self.last_decorations.get(&vp.buffer_id);
-        let full = prev.is_none_or(|p| p.visible != vp.visible);
+        let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
         if full {
             self.last_decorations.insert(
                 vp.buffer_id,
                 LastFrame {
                     visible: vp.visible,
                     items: decorations.clone(),
+                    generation,
                 },
             );
             out.push(InstanceMessage::Decorations {
@@ -249,6 +269,7 @@ impl SemanticRenderState {
                     LastFrame {
                         visible: vp.visible,
                         items: decorations,
+                        generation,
                     },
                 );
                 out.push(InstanceMessage::Decorations {
@@ -294,11 +315,19 @@ impl SemanticRenderState {
         if !should_emit {
             return None;
         }
+        // Adornments use the same `LastFrame` struct as
+        // StyleSpans / Decorations, so we populate `generation` for
+        // consistency. Adornments' diff predicate doesn't consult
+        // it — the whole-set comparison at line 310 catches post-
+        // edit position shifts directly — but tracking it keeps
+        // the struct shape uniform.
+        let generation = buffer_generation(state, vp.buffer_id);
         self.last_adornments.insert(
             vp.buffer_id,
             LastFrame {
                 visible: vp.visible,
                 items: adornments.clone(),
+                generation,
             },
         );
         Some(InstanceMessage::InlineAdornments {
@@ -1213,6 +1242,59 @@ mod tests {
         assert!(
             style_full && deco_full,
             "viewport jump must be a full resync"
+        );
+    }
+
+    /// T M11.7 regression: a CRDT generation transition forces a
+    /// `full=true` resync on the next frame for both `StyleSpans`
+    /// and `Decorations`, even when the declared viewport is
+    /// unchanged. Without this, an edit at byte position N would
+    /// leave the frontend with stale spans/decorations indexed at
+    /// pre-edit byte positions while only a small dirty-range
+    /// increment ships — which violates the incremental contract
+    /// (the increment expects the frontend to retain non-dirty
+    /// items). The bet-#1 surface for `pmacs-gpu`.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn full_resync_on_generation_transition() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state); // initial full
+        assert!(
+            s.render_frame(&state).is_empty(),
+            "unchanged frame → silent"
+        );
+
+        // Upgrade the buffer to CRDT-backed so `buffer_generation`
+        // tracks edits — without this, version_scalar stays 0 for a
+        // v0.1-style buffer and the producer can't detect transitions.
+        // Then bump the buffer's generation by editing it.
+        {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            let buf = reg.get_mut(buffer_id).expect("active buffer");
+            buf.upgrade_to_crdt(1).expect("upgrade to crdt");
+            buf.apply_edit(crate::buffer::EditOp::Insert {
+                pos: 0,
+                bytes: b"x",
+            })
+            .expect("buffer edit");
+        }
+
+        // Generation transitioned → next frame must be full for both
+        // diff-shaped families.
+        let msgs = s.render_frame(&state);
+        let (style_full, _) = style_segments(&msgs).expect("StyleSpans re-emitted");
+        let (deco_full, _) = decorations_of(&msgs).expect("Decorations re-emitted");
+        assert!(
+            style_full,
+            "post-edit StyleSpans must be full=true (positions shifted)"
+        );
+        assert!(
+            deco_full,
+            "post-edit Decorations must be full=true (positions shifted)"
         );
     }
 
