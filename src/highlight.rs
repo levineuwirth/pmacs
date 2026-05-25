@@ -260,12 +260,15 @@ impl SyntaxHighlightView {
 
     /// Refresh `self.cache` if the parse view's current bundle
     /// differs from the cached one. No-op when the bundle pointer
-    /// is unchanged --- the steady-state cost between parses. When
-    /// the parse view has pending edits and no fresh bundle yet, clear
-    /// the cache so stale byte ranges are not painted over new text.
+    /// is unchanged --- the steady-state cost between parses. Uses
+    /// `current()` (not `current_fresh()`) so the in-process TUI
+    /// overlay keeps painting the most recent bundle even while a
+    /// new parse is in flight. The producer-side `current_fresh()`
+    /// gating in `semantic_render.rs` is what protects pmacs-gpu
+    /// against stale spans on the wire; the local overlay reaches
+    /// fresh state on its own as soon as the next parse installs.
     fn refresh_cache_if_stale(&mut self) {
-        let Some(bundle) = self.parse.current_fresh() else {
-            self.cache = HighlightCache::empty();
+        let Some(bundle) = self.parse.current() else {
             return;
         };
         let stale = self
