@@ -1950,6 +1950,143 @@ fn m4_6_lua_surface_reads_diagnostics() {
     );
 }
 
+/// Task #23 follow-up: `lsp.lua` registers `diag.next` / `diag.previous`
+/// commands and binds them under `M-g n` / `M-g p`. The bindings cover
+/// the most-common Emacs convention for navigate-to-next-error.
+#[test]
+fn m4_6_diag_navigate_commands_and_bindings_are_registered() {
+    use pmacs::editor::EditorState;
+
+    let state = EditorState::new();
+    let lua = state.lua_host.lua();
+
+    let commands: Vec<String> = lua
+        .load("return pmacs.command.list()")
+        .eval()
+        .expect("command.list");
+    assert!(
+        commands.iter().any(|c| c == "diag.next"),
+        "diag.next must be registered; got: {commands:?}"
+    );
+    assert!(
+        commands.iter().any(|c| c == "diag.previous"),
+        "diag.previous must be registered; got: {commands:?}"
+    );
+
+    // Each binding is a row `{ scope, sequence, command }`. Project
+    // those into a sortable string set so we can assert specific
+    // bindings exist regardless of insertion order.
+    let bindings: Vec<String> = lua
+        .load(
+            r"
+            local out = {}
+            for _, e in ipairs(pmacs.keymap.list()) do
+                table.insert(out, e.sequence .. '=>' .. e.command)
+            end
+            return out
+            ",
+        )
+        .eval()
+        .expect("keymap.list");
+    assert!(
+        bindings.iter().any(|b| b == "M-g n=>diag.next"),
+        "M-g n must bind to diag.next; got: {bindings:?}"
+    );
+    assert!(
+        bindings.iter().any(|b| b == "M-g p=>diag.previous"),
+        "M-g p must bind to diag.previous; got: {bindings:?}"
+    );
+
+    // Without an LSP attachment, the command should surface a status
+    // message rather than fault or jump anywhere. (The scratch buffer
+    // has no file path → no URI → `attached_for_active` returns nil.)
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.command.invoke('diag.next')")
+        .exec()
+        .expect("diag.next invoke");
+    let status = state.core.borrow().status.clone();
+    assert!(
+        status.contains("no LSP server") || status.contains("no diagnostics"),
+        "expected a diag-related status, got: {status:?}"
+    );
+}
+
+/// Task #23: `pmacs.diag._attach_view` pushes a `DiagnosticView` onto
+/// the active window's overlay stack so the TUI grid renderer paints
+/// diagnostic underlines. Verifies the binding lands and that the
+/// overlay advertises the stable `"diagnostic"` kind that callers
+/// (`builtin/runtime/lsp.lua`'s dedup table, future tests) key on.
+#[test]
+fn m4_6_diag_attach_view_pushes_diagnostic_overlay() {
+    use pmacs::editor::EditorState;
+
+    let state = EditorState::new();
+    let attached: bool = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local buf = pmacs.window.buffer()
+            return pmacs.diag._attach_view(buf, 'file:///fake.rs')
+            ",
+        )
+        .eval()
+        .expect("_attach_view");
+    assert!(attached, "_attach_view should return true on success");
+
+    let has_diag_overlay: bool = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            for _, k in ipairs(pmacs.window._overlay_kinds()) do
+                if k == 'diagnostic' then return true end
+            end
+            return false
+            ",
+        )
+        .eval()
+        .expect("overlay_kinds query");
+    assert!(
+        has_diag_overlay,
+        "active window must carry a 'diagnostic' overlay after _attach_view"
+    );
+
+    // Mirroring `_attach_style` / `_attach_highlight`: the binding
+    // itself does not dedup; callers (lsp.lua's `diag_viewed_buffers`)
+    // are responsible. Calling twice stacks two overlays.
+    state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            pmacs.diag._attach_view(pmacs.window.buffer(), 'file:///fake.rs')
+            ",
+        )
+        .exec()
+        .expect("second attach");
+    let diag_count: i64 = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local n = 0
+            for _, k in ipairs(pmacs.window._overlay_kinds()) do
+                if k == 'diagnostic' then n = n + 1 end
+            end
+            return n
+            ",
+        )
+        .eval()
+        .expect("overlay count");
+    assert_eq!(
+        diag_count, 2,
+        "binding does not dedup; two calls = two overlays"
+    );
+}
+
 // ===========================================================================
 // T M4.7 --- LSP-backed views: completion, hover, signature
 // ===========================================================================

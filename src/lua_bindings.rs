@@ -8752,6 +8752,36 @@ pub fn install_diag(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
         })?;
     }
 
+    // Sibling of `pmacs.lsp._attach_style` and
+    // `pmacs.parse._attach_highlight`: pushes a `DiagnosticView`
+    // overlay on the active window keyed under `uri`, so the TUI
+    // grid renderer paints diagnostic underlines for buffers that
+    // have an LSP server publishing diagnostics. Lua callers dedup
+    // per buffer; double-attach stacks duplicate overlays.
+    {
+        let m = manager.clone();
+        diag_mod.set(
+            "_attach_view",
+            lua.create_function(move |lua, (id, uri): (BufferIdLua, String)| {
+                let store_handle = m.borrow().diag_store();
+                let core = lua
+                    .app_data_ref::<SharedCore>()
+                    .ok_or_else(|| mlua::Error::external("editor core not yet installed"))?;
+                let mut core_borrow = core.borrow_mut();
+                let win = core_borrow.active_window_mut();
+                if win.buffer_id != id.0 {
+                    return Err(mlua::Error::external(format!(
+                        "active window's buffer is not {:?}",
+                        id.0
+                    )));
+                }
+                let overlay = crate::diag::DiagnosticView::new(uri, store_handle);
+                win.push_overlay(Box::new(overlay));
+                Ok(true)
+            })?,
+        )?;
+    }
+
     pmacs.set("diag", diag_mod)?;
     Ok(())
 }

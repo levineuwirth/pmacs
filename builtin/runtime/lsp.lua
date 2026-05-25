@@ -331,6 +331,12 @@ end
 -- is keyed by the same `tostring(buf)` the attachments table uses.
 local styled_buffers = {}
 
+-- M4.6 (task #23): buffers that already had a `DiagnosticView`
+-- overlay pushed. Same dedup discipline as `styled_buffers` —
+-- `pmacs.diag._attach_view` stacks a fresh overlay on every call,
+-- so the after-load path must gate itself.
+local diag_viewed_buffers = {}
+
 local function attach_buffer(buf)
   if not buf then return nil end
   local key = tostring(buf)
@@ -364,6 +370,15 @@ local function attach_buffer(buf)
   if not styled_buffers[key] then
     local ok, attached = pcall(pmacs.lsp._attach_style, buf)
     if ok and attached then styled_buffers[key] = true end
+  end
+  -- M4.6 (task #23): attach the DiagnosticView so the TUI grid
+  -- renderer underlines bytes covered by published diagnostics.
+  -- Keyed by `uri` to match the diag store; the view re-reads the
+  -- store on every render, so no further wiring is needed when
+  -- diagnostics update.
+  if not diag_viewed_buffers[key] then
+    local ok, attached = pcall(pmacs.diag._attach_view, buf, uri)
+    if ok and attached then diag_viewed_buffers[key] = true end
   end
   return rec
 end
@@ -1492,3 +1507,48 @@ pmacs.keymap.bind { scope = "global", sequence = "C-c y", command = "lsp.semanti
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }
+
+-- Diagnostic navigation (task #23, M4.6 surface) -----------------------------
+--
+-- Emacs's `M-g n` / `M-g p` jump between compile/next-error locations. We
+-- reuse the chord for LSP diagnostics: walk the diag store for the active
+-- buffer's URI and move the cursor to the next/previous diagnostic. Wraps
+-- around (`pmacs.diag.next`'s default), so repeated taps cycle.
+local function navigate_diagnostic(direction)
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("diag: no LSP server for active buffer")
+    return
+  end
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
+  local found
+  if direction == "next" then
+    found = pmacs.diag.next(rec.uri, line, col)
+  else
+    found = pmacs.diag.previous(rec.uri, line, col)
+  end
+  if not found then
+    pmacs.editor.set_status("diag: no diagnostics in buffer")
+    return
+  end
+  pmacs.editor.push_jump()
+  move_active_cursor_to(found.start_line, found.start_col)
+  pmacs.editor.set_status(string.format("diag (%s): %s",
+    found.severity or "?", found.message or ""))
+end
+
+pmacs.command.define {
+  name = "diag.next",
+  description = "Jump to the next diagnostic in the active buffer (wraps).",
+  fn = function() navigate_diagnostic("next") end,
+}
+
+pmacs.command.define {
+  name = "diag.previous",
+  description = "Jump to the previous diagnostic in the active buffer (wraps).",
+  fn = function() navigate_diagnostic("previous") end,
+}
+
+pmacs.keymap.bind { scope = "global", sequence = "M-g n", command = "diag.next" }
+pmacs.keymap.bind { scope = "global", sequence = "M-g p", command = "diag.previous" }
