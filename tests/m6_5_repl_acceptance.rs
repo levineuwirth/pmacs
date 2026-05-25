@@ -284,6 +284,10 @@ fn m6_5_ctrl_d_on_nonempty_input_deletes_char_forward() {
 /// parallel test load (the M6.1 PTY suite has a similar flake
 /// profile under `cargo test`'s default parallelism).
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS hosted PTYs do not reliably surface this non-interactive SIGINT marker"
+)]
 fn m6_5_ctrl_c_sends_sigint() {
     let Some(sleep) = locate_shell("sleep") else {
         eprintln!("skipping: sleep not on PATH (set PMACS_TEST_SLEEP to override)");
@@ -334,6 +338,10 @@ fn m6_5_ctrl_c_sends_sigint() {
 /// stays readable), and uses symbolic signal names. Verified by
 /// spawning `false`, which exits with code 1.
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "macOS hosted PTYs do not reliably surface this non-interactive exit marker"
+)]
 fn m6_5_exit_marker_uses_basename_with_leading_newline() {
     let Some(false_bin) = locate_shell("false") else {
         eprintln!("skipping: false not on PATH (set PMACS_TEST_FALSE to override)");
