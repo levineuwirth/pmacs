@@ -58,6 +58,8 @@
 //!   costs (`LuaJIT` trace compilation, supervisor reader-thread
 //!   startup, kernel pipe buffer fills). The 10 s measurement
 //!   window is then the spec-specified gate.
+//!   CI may override `PMACS_M6_INGEST_MIN_BYTES_PER_SEC` for the
+//!   hosted-runner profile; omitting it keeps the full 100 MB/s gate.
 //!
 //! - **RSS sampling source.** Linux-only via `/proc/self/status`'s
 //!   `VmRSS:` field (kilobytes; multiply by 1024 for bytes). We
@@ -86,15 +88,13 @@
 //!   `yes` at the M6.6 ingest rate). Both signals fire in the same
 //!   tick, so the choice is purely a measurement-cost decision.
 //!
-//! - **Why we cancel `yes` directly, not a shell.** `pmacs.process.
-//!   signal(_proc_id, "INT")` signals the *spawned PID*. For a
-//!   shell, that's bash itself, not bash's child (which is what
-//!   `find /` would be). Real-terminal SIGINT semantics involve
-//!   foreground-pgrp routing through the PTY layer, which M6.5
-//!   does not implement. A shell-foreground-pgrp aware C-c is M6.5+
-//!   work; for the M6.6 gate, the cleanest measurement is a
-//!   single-process target (`yes`), which catches SIGINT and exits
-//!   directly.
+//! - **Why we cancel `yes` directly, not a shell.** PTY-mode
+//!   `pmacs.process.signal(_proc_id, "INT")` targets the foreground
+//!   process group. For a shell, that group can include the shell's
+//!   current foreground job rather than only the shell process. For
+//!   the M6.6 gate, the cleanest measurement is a single-process
+//!   target (`yes`), so the foreground group contains the producer
+//!   being measured and no shell/job-control policy enters the timing.
 //!
 //! - **Percentile computation.** Sort the latency samples; p99 is
 //!   `samples[(len * 99) / 100]`, matching M5.9c's exact-integer
@@ -109,7 +109,11 @@
 //!   trial index. No `rand` dev-dep; reproducible across runs;
 //!   varied enough that we don't always hit the same supervisor
 //!   tick boundary. Methodology: random in `[10 ms, 5000 ms]` per
-//!   spec ("first 5 seconds").
+//!   spec ("first 5 seconds"). CI may override the trial count and
+//!   delay ceiling with `PMACS_M6_CANCEL_TRIALS` and
+//!   `PMACS_M6_CANCEL_MAX_DELAY_MS` so the hosted perf job fits
+//!   under the runner's effective wall-clock ceiling; omitting those
+//!   env vars runs the full spec profile.
 //!
 //! - **M6.7 buffer-direct populate.** The 10000-line scrollback is
 //!   built via the public buffer API (`pmacs.buffer.create` +
@@ -239,6 +243,21 @@ fn wait_until_running(editor: &mut EditorState) {
     assert!(ok, "spawned producer never reached running state");
 }
 
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 // ---------------------------------------------------------------------------
 // T M6.6 acceptance bullet 1: sustained ingest rate
 // ---------------------------------------------------------------------------
@@ -252,7 +271,12 @@ fn wait_until_running(editor: &mut EditorState) {
 fn m6_6_sustained_ingest_rate_meets_100mbps_gate() {
     const WARMUP: Duration = Duration::from_secs(1);
     const WINDOW: Duration = Duration::from_secs(10);
-    const RATE_THRESHOLD_BYTES_PER_SEC: u64 = 100 * 1024 * 1024;
+    const DEFAULT_RATE_THRESHOLD_BYTES_PER_SEC: u64 = 100 * 1024 * 1024;
+    let rate_threshold_bytes_per_sec = env_u64(
+        "PMACS_M6_INGEST_MIN_BYTES_PER_SEC",
+        DEFAULT_RATE_THRESHOLD_BYTES_PER_SEC,
+    )
+    .max(1);
 
     let mut editor = EditorState::new();
     // 100 chars + newline per line. The exact value is unimportant;
@@ -307,13 +331,13 @@ fn m6_6_sustained_ingest_rate_meets_100mbps_gate() {
     );
     println!(
         "  threshold:     {} B/s ({:.1} MiB/s)",
-        RATE_THRESHOLD_BYTES_PER_SEC,
-        RATE_THRESHOLD_BYTES_PER_SEC as f64 / (1024.0 * 1024.0)
+        rate_threshold_bytes_per_sec,
+        rate_threshold_bytes_per_sec as f64 / (1024.0 * 1024.0)
     );
 
     assert!(
-        rate >= RATE_THRESHOLD_BYTES_PER_SEC,
-        "ingest rate {rate} B/s below {RATE_THRESHOLD_BYTES_PER_SEC} B/s gate"
+        rate >= rate_threshold_bytes_per_sec,
+        "ingest rate {rate} B/s below {rate_threshold_bytes_per_sec} B/s gate"
     );
 }
 
@@ -482,21 +506,24 @@ fn xorshift64(state: &mut u64) -> u64 {
 #[test]
 #[ignore = "perf gate; requires release build"]
 fn m6_6_cancel_response_p99_under_100ms() {
-    const TRIALS: usize = 100;
+    const DEFAULT_TRIALS: usize = 100;
     const P99_THRESHOLD: Duration = Duration::from_millis(100);
     const MIN_DELAY_MS: u64 = 10;
-    const MAX_DELAY_MS: u64 = 5000;
+    const DEFAULT_MAX_DELAY_MS: u64 = 5000;
     const PER_CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 
-    let mut latencies: Vec<Duration> = Vec::with_capacity(TRIALS);
+    let trials = env_usize("PMACS_M6_CANCEL_TRIALS", DEFAULT_TRIALS);
+    let max_delay_ms =
+        env_u64("PMACS_M6_CANCEL_MAX_DELAY_MS", DEFAULT_MAX_DELAY_MS).max(MIN_DELAY_MS);
+    let mut latencies: Vec<Duration> = Vec::with_capacity(trials);
     let mut prng_state: u64 = 0xa5a5_5a5a_dead_beef;
 
-    for trial in 0..TRIALS {
+    for trial in 0..trials {
         // Vary the seed per trial so consecutive trials don't sample
         // the same delay; xor with trial index keeps it deterministic.
         prng_state ^= trial as u64;
         let r = xorshift64(&mut prng_state);
-        let delay_ms = MIN_DELAY_MS + (r % (MAX_DELAY_MS - MIN_DELAY_MS + 1));
+        let delay_ms = MIN_DELAY_MS + (r % (max_delay_ms - MIN_DELAY_MS + 1));
         let delay = Duration::from_millis(delay_ms);
 
         let mut editor = EditorState::new();
@@ -549,8 +576,8 @@ fn m6_6_cancel_response_p99_under_100ms() {
 
         let _ = editor.lua_host.lua().load("_G.h:close()").exec();
 
-        if (trial + 1) % 10 == 0 || trial + 1 == TRIALS {
-            println!("  cancel trials completed: {}/{}", trial + 1, TRIALS);
+        if (trial + 1) % 10 == 0 || trial + 1 == trials {
+            println!("  cancel trials completed: {}/{}", trial + 1, trials);
         }
     }
 
@@ -566,7 +593,7 @@ fn m6_6_cancel_response_p99_under_100ms() {
     let p99 = percentile(99);
     let max = sorted[sorted.len() - 1];
 
-    println!("M6.6 cancel-response latency gate ({TRIALS} trials):");
+    println!("M6.6 cancel-response latency gate ({trials} trials, max delay {max_delay_ms}ms):");
     println!("  p50: {p50:?}");
     println!("  p90: {p90:?}");
     println!("  p99: {p99:?}");

@@ -32,7 +32,8 @@ use glyphon::{
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use pmacs_protocol::{
-    BufferId, ByteRange, InstanceMessage, StyleSegment, StyleSpan, cell::Color as CellColor,
+    BufferId, ByteRange, Decoration, DecorationKind, DecorationSegment, InstanceMessage,
+    StyleSegment, StyleSpan, cell::Color as CellColor,
 };
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
@@ -189,6 +190,19 @@ struct State {
     /// straddling a dirty edge get clipped to outside the dirty
     /// range).
     current_spans: Vec<StyleSpan>,
+    /// Sorted-by-`range.start` decorations for `current_buffer_id`.
+    /// Same M11.4 dirty-merge semantics as `current_spans`: `Decorations
+    /// { full: true, .. }` replaces; `full: false` clips/replaces per
+    /// segment range.
+    ///
+    /// Composition with `current_spans` in `reshape`: a decoration's
+    /// color override beats the span's `style.fg` for the bytes it
+    /// covers (semantic signal — a diagnostic — outranks syntactic
+    /// signal). Decoration kinds whose visual is a background
+    /// (`Selection`, `SearchMatch`, `SearchMatchActive`, `CurrentLine`)
+    /// are not rendered in session 5; see the session-5 design note
+    /// for the deferred quad-pipeline finding.
+    current_decorations: Vec<Decoration>,
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -387,6 +401,7 @@ impl State {
             loro_doc: None,
             current_buffer_id: None,
             current_spans: Vec::new(),
+            current_decorations: Vec::new(),
         }
     }
 
@@ -415,7 +430,8 @@ impl State {
     /// `ViewportSend` if the message requires the main loop to fire
     /// one back at the daemon.
     ///
-    /// Session 4 handles four variants:
+    /// Session 4 introduced four variants; session 5 adds
+    /// `Decorations`:
     /// - `BufferSnapshot` — bootstrap a fresh `LoroDoc`, extract text,
     ///   request the daemon scope styling to the new buffer (return a
     ///   Viewport send-back).
@@ -423,13 +439,18 @@ impl State {
     ///   re-extracted.
     /// - `StyleSpans` — replace or merge per the M11.4 dirty-segment
     ///   rule; reshape the rich-text rendering.
+    /// - `Decorations` — same M11.4 shape as `StyleSpans` but for the
+    ///   `DecorationKind` set (diagnostics, selection, current line,
+    ///   search match). Session 5 renders diagnostic kinds as fg color
+    ///   overrides; background-kind decorations are accumulated but
+    ///   not painted (see session 5's deferred quad-pipeline finding).
     /// - `Goodbye` — surfaced via the reader thread's clean-EOF path,
     ///   not handled here.
     ///
-    /// Other `SemanticFrame` variants (`Decorations`, `InlineAdornments`,
+    /// Remaining `SemanticFrame` variants (`InlineAdornments`,
     /// `FileStyleSummary`) plus the grid variants (`CellDelta`,
     /// `Cursor`, `CursorByte`) and presence updates are ignored in
-    /// session 4 — they land in subsequent Phase A sessions.
+    /// session 5 — they land in subsequent Phase A sessions.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
             InstanceMessage::BufferSnapshot {
@@ -445,9 +466,11 @@ impl State {
                 let text_len = text.len() as u64;
                 self.loro_doc = Some(doc);
                 self.current_buffer_id = Some(buffer_id);
-                // New buffer ⇒ drop any prior styling; the next
-                // StyleSpans frame for this buffer is authoritative.
+                // New buffer ⇒ drop any prior styling/decorations;
+                // the next StyleSpans / Decorations frame for this
+                // buffer is authoritative.
                 self.current_spans.clear();
+                self.current_decorations.clear();
                 self.set_text(&text);
                 Some(ViewportSend {
                     buffer_id,
@@ -475,6 +498,22 @@ impl State {
                     eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
                     return None;
                 }
+                // NOTE: `current_spans` / `current_decorations` index
+                // into the *pre-edit* byte positions. The producer's
+                // next render frame (in pmacs core, post-T M11.7
+                // generation-transition fix) ships `full=true`
+                // styling for buffers whose generation advanced, so
+                // the next message replaces the stale items
+                // wholesale via `replace_style_spans` /
+                // `replace_decorations`. The single-frame gap
+                // between CrdtOp arrival and that next frame paints
+                // styling at stale byte positions — the session-4
+                // documented "one-frame stale" artifact. A previous
+                // attempt to fix it by clearing both vectors here
+                // (`49785c4`) was reverted because the producer's
+                // *incremental* updates ship dirty-range spans only,
+                // and an emptied cache loses the non-dirty viewport
+                // styling entirely.
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
                 self.set_text(&text);
                 None
@@ -492,6 +531,23 @@ impl State {
                     self.replace_style_spans(segments);
                 } else {
                     self.merge_style_spans(segments);
+                }
+                self.reshape();
+                None
+            }
+            InstanceMessage::Decorations {
+                buffer_id,
+                generation: _,
+                full,
+                segments,
+            } => {
+                if self.current_buffer_id != Some(buffer_id) {
+                    return None;
+                }
+                if full {
+                    self.replace_decorations(segments);
+                } else {
+                    self.merge_decorations(segments);
                 }
                 self.reshape();
                 None
@@ -573,47 +629,150 @@ impl State {
         self.current_spans.sort_by_key(|s| s.range.start);
     }
 
+    /// `Decorations { full: true, .. }` path — exactly the
+    /// `replace_style_spans` shape for decorations. The wire structure
+    /// is intentionally symmetric (`DecorationSegment` ↔ `StyleSegment`).
+    fn replace_decorations(&mut self, segments: Vec<DecorationSegment>) {
+        self.current_decorations.clear();
+        for seg in segments {
+            self.current_decorations.extend(seg.decorations);
+        }
+        self.current_decorations.sort_by_key(|d| d.range.start);
+    }
+
+    /// `Decorations { full: false, .. }` path — M11.4 dirty-merge for
+    /// decorations. Structurally identical to [`Self::merge_style_spans`]
+    /// — same edge-clip/drop/split logic, same trailing append +
+    /// re-sort.
+    ///
+    /// **Recorded session-5 finding (rule iii, deferred):** this
+    /// duplication of the M11.4 merge algorithm across two
+    /// `(range, T)`-shaped types invites a generic
+    /// `merge_dirty_segments<T: HasRange>` helper. The refactor is
+    /// minor in lines but touches a load-bearing invariant; deferring
+    /// until at least a third instance arrives (e.g. peer-cursor
+    /// decorations from `PresenceUpdate`) so the abstraction is
+    /// inducted from three points rather than two.
+    fn merge_decorations(&mut self, segments: Vec<DecorationSegment>) {
+        for seg in &segments {
+            let dirty = seg.range;
+            let mut kept = Vec::with_capacity(self.current_decorations.len());
+            for d in self.current_decorations.drain(..) {
+                if d.range.end <= dirty.start || d.range.start >= dirty.end {
+                    kept.push(d);
+                } else if d.range.start < dirty.start && d.range.end > dirty.end {
+                    kept.push(Decoration {
+                        range: ByteRange {
+                            start: d.range.start,
+                            end: dirty.start,
+                        },
+                        kind: d.kind,
+                    });
+                    kept.push(Decoration {
+                        range: ByteRange {
+                            start: dirty.end,
+                            end: d.range.end,
+                        },
+                        kind: d.kind,
+                    });
+                } else if d.range.start < dirty.start {
+                    kept.push(Decoration {
+                        range: ByteRange {
+                            start: d.range.start,
+                            end: dirty.start,
+                        },
+                        kind: d.kind,
+                    });
+                } else if d.range.end > dirty.end {
+                    kept.push(Decoration {
+                        range: ByteRange {
+                            start: dirty.end,
+                            end: d.range.end,
+                        },
+                        kind: d.kind,
+                    });
+                }
+            }
+            self.current_decorations = kept;
+        }
+        for seg in segments {
+            self.current_decorations.extend(seg.decorations);
+        }
+        self.current_decorations.sort_by_key(|d| d.range.start);
+    }
+
     /// Re-build the cosmic-text Buffer from `current_text` +
-    /// `current_spans`. Walks the text byte-by-byte, emitting
-    /// `(substr, Attrs)` chunks at every span boundary — text not
-    /// covered by any span uses the default Attrs (terminal default
-    /// color). Final call: `set_rich_text` + `shape_until_scroll`.
+    /// `current_spans` + `current_decorations`. Computes a sorted
+    /// boundary list (every span and decoration edge, plus 0 and
+    /// `text_len`) and emits one chunk per `[boundary_i, boundary_{i+1})`
+    /// interval. Effective color picks the first matching decoration
+    /// kind with a renderable color (diagnostics in session 5; the
+    /// background-needing kinds — `Selection` / `SearchMatch` /
+    /// `SearchMatchActive` / `CurrentLine` — produce `None` and fall
+    /// through to span color). The decoration override means a
+    /// diagnostic squiggle's color beats syntax color for the bytes
+    /// it covers, which matches user expectation across both
+    /// reference editors and the pmacs TUI.
+    ///
+    /// Complexity is O(B × (S + D)) per reshape where B is the boundary
+    /// count and S+D is spans+decorations. For viewport-scoped data
+    /// this is bounded by visible bytes. A sweep-line refactor with
+    /// active-set pointers is the obvious upgrade if reshape cost
+    /// surfaces in profile data — recorded but not done in session 5.
     fn reshape(&mut self) {
         let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
         let text_len = self.current_text.len() as u64;
-        let mut chunks: Vec<(String, Attrs<'static>)> = Vec::new();
-        let mut pos: u64 = 0;
+
+        // Collect every interesting byte position. Clamp to text_len
+        // so a stale span/decoration past EOF (CrdtOp→next-frame race)
+        // can't index out.
+        let mut boundaries: Vec<u64> = vec![0, text_len];
         for sp in &self.current_spans {
-            // Unstyled gap before this span (could be empty).
-            if pos < sp.range.start {
-                let end = sp.range.start.min(text_len) as usize;
-                chunks.push((
-                    self.current_text[pos as usize..end].to_owned(),
-                    default_attrs.clone(),
-                ));
-                pos = sp.range.start;
+            boundaries.push(sp.range.start.min(text_len));
+            boundaries.push(sp.range.end.min(text_len));
+        }
+        for d in &self.current_decorations {
+            boundaries.push(d.range.start.min(text_len));
+            boundaries.push(d.range.end.min(text_len));
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let mut chunks: Vec<(String, Attrs<'static>)> = Vec::new();
+        for w in boundaries.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if a >= b {
+                continue;
             }
-            // Styled run, clipped to text_len so a stale span past EOF
-            // can't index out.
-            let end = sp.range.end.min(text_len) as usize;
-            if end > pos as usize {
-                let mut attrs = default_attrs.clone();
-                if let Some(color) = cell_color_to_glyphon(sp.style.fg) {
-                    attrs = attrs.color(color);
+            // Pick the effective color at byte `a` (which is also the
+            // color for every byte in `[a, b)` since boundaries
+            // bracket every coverage change).
+            let mut color: Option<glyphon::Color> = None;
+            for d in &self.current_decorations {
+                if d.range.start <= a
+                    && a < d.range.end
+                    && let Some(c) = decoration_kind_to_color(d.kind)
+                {
+                    color = Some(c);
+                    break;
                 }
-                chunks.push((self.current_text[pos as usize..end].to_owned(), attrs));
-                pos = sp.range.end;
             }
+            if color.is_none() {
+                for sp in &self.current_spans {
+                    if sp.range.start <= a && a < sp.range.end {
+                        color = cell_color_to_glyphon(sp.style.fg);
+                        break;
+                    }
+                }
+            }
+            let mut attrs = default_attrs.clone();
+            if let Some(c) = color {
+                attrs = attrs.color(c);
+            }
+            chunks.push((self.current_text[a as usize..b as usize].to_owned(), attrs));
         }
-        // Trailing unstyled tail.
-        if pos < text_len {
-            chunks.push((
-                self.current_text[pos as usize..].to_owned(),
-                default_attrs.clone(),
-            ));
-        }
-        // No spans + empty text ⇒ feed one empty chunk so set_rich_text
-        // has something to draw.
+        // No spans / decorations + empty text ⇒ feed one empty chunk
+        // so set_rich_text has something to draw.
         if chunks.is_empty() {
             chunks.push((String::new(), default_attrs.clone()));
         }
@@ -774,4 +933,39 @@ fn indexed_to_glyphon(idx: u8) -> glyphon::Color {
     // 232..=255: 24-step grayscale, evenly spaced 8..=238.
     let level = 8 + 10 * (idx - 232);
     glyphon::Color::rgb(level, level, level)
+}
+
+/// Map a [`DecorationKind`] to a foreground color override, or `None`
+/// for kinds whose visual is a background and can't be expressed in
+/// the current `Attrs`-only rendering pipeline.
+///
+/// Session 5 ships **fg-only** decoration rendering. The four
+/// background-needing kinds (`Selection`, `SearchMatch`,
+/// `SearchMatchActive`, `CurrentLine`) accumulate in
+/// `current_decorations` but produce `None` here — they're recorded
+/// for the future quad-pipeline session. This is the rule-(iii)
+/// structural finding documented at session-5 framing: rendering
+/// backgrounds needs a wgpu quad pipeline + composition story, which
+/// is its own session, not absorbed into Phase A.
+///
+/// Color choices match the conventional editor palette (red errors,
+/// yellow warnings, light blue info, dim hints) so the GPU window's
+/// visual matches what the pmacs TUI paints via terminal color codes.
+fn decoration_kind_to_color(kind: DecorationKind) -> Option<glyphon::Color> {
+    match kind {
+        // ANSI bright red — matches TUI diagnostic-error palette.
+        DecorationKind::DiagnosticError => Some(glyphon::Color::rgb(241, 76, 76)),
+        // ANSI bright yellow.
+        DecorationKind::DiagnosticWarning => Some(glyphon::Color::rgb(245, 245, 67)),
+        // ANSI bright blue.
+        DecorationKind::DiagnosticInfo => Some(glyphon::Color::rgb(59, 142, 234)),
+        // ANSI bright black (dim gray — hints should be visible but
+        // visually quietest of the diagnostic four).
+        DecorationKind::DiagnosticHint => Some(glyphon::Color::rgb(102, 102, 102)),
+        // Background-needing kinds — deferred until quad pipeline.
+        DecorationKind::Selection
+        | DecorationKind::SearchMatch
+        | DecorationKind::SearchMatchActive
+        | DecorationKind::CurrentLine => None,
+    }
 }

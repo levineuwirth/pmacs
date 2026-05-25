@@ -507,6 +507,21 @@ impl ChildHandle {
     }
 }
 
+fn signal_target(proc: &ManagedProcess, pid: u32) -> Result<Pid, String> {
+    if let Some(runtime) = proc.runtime.as_ref()
+        && let ChildHandle::Pty {
+            _master: master, ..
+        } = &runtime.child
+        && let Some(pgrp) = master.process_group_leader()
+        && pgrp > 0
+    {
+        return Ok(Pid::from_raw(-pgrp));
+    }
+    Ok(Pid::from_raw(
+        i32::try_from(pid).map_err(|e| e.to_string())?,
+    ))
+}
+
 /// Termination status of one generation. Internal --- the supervisor
 /// translates this into a [`Termination`] with timing.
 enum TermStatus {
@@ -673,8 +688,10 @@ impl ProcessSupervisor {
     }
 
     /// Send `signal` to `id`. Errors if the id is unknown or the
-    /// process is not currently running. The signal is applied to
-    /// the OS pid via [`nix::sys::signal::kill`]; nothing about the
+    /// process is not currently running. Pipe-mode children are
+    /// signaled by OS pid; PTY-mode children are signaled via the
+    /// foreground process group when the kernel reports one, matching
+    /// terminal C-c behavior for shells and REPLs. Nothing about the
     /// supervisor's state changes synchronously --- the lifecycle
     /// transition happens when the supervisor next observes the
     /// child's exit through `tick`.
@@ -687,8 +704,8 @@ impl ProcessSupervisor {
         else {
             return Err(format!("process {id} is not running"));
         };
-        let nix_pid = Pid::from_raw(i32::try_from(pid).map_err(|e| e.to_string())?);
-        nix::sys::signal::kill(nix_pid, Some(signal)).map_err(|e| format!("kill: {e}"))?;
+        let target = signal_target(proc, pid)?;
+        nix::sys::signal::kill(target, Some(signal)).map_err(|e| format!("kill: {e}"))?;
         if matches!(signal, Signal::SIGTERM | Signal::SIGKILL | Signal::SIGHUP) {
             proc.state = ProcessState::Exiting {
                 pid,

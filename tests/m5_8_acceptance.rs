@@ -15,7 +15,7 @@
 //!    within milliseconds and the cap is observable via a counter
 //!    file the fake SSH updates on each invocation.
 //! 2. **Backoff timing scales with env var.** Same fake SSH, but
-//!    `PMACS_TEST_BACKOFF_SCALE_MS=50` makes each sleep observable
+//!    `PMACS_TEST_BACKOFF_SCALE_MS=200` makes each sleep observable
 //!    in wall-clock — verifies the env var actually feeds through
 //!    to the loop, not just the unit-tested helper.
 //! 3. **SSH stderr from each handshake attempt reaches the user.** A
@@ -179,10 +179,10 @@ fn handshake_retry_cap_fires_after_three_failed_handshakes() {
 /// `PMACS_TEST_BACKOFF_SCALE_MS` should change the loop's wait
 /// behavior in wall-clock — proving the env var feeds through the
 /// production code path, not just the unit-tested helper. With
-/// scale=50ms the schedule yields 50 + 100 = 150ms of sleep across
+/// scale=200ms the schedule yields 200 + 400 = 600ms of sleep across
 /// 3 attempts; with scale=1ms it's ~3ms. The two runs share the
 /// same fixed spawn/handshake overhead, so the *difference*
-/// (≈147ms) — not their ratio — is the overhead-independent signal
+/// (≈597ms) — not their ratio — is the overhead-independent signal
 /// that the env var fed through.
 #[test]
 fn backoff_scaling_observable_in_wall_clock_runtime() {
@@ -208,7 +208,7 @@ fn backoff_scaling_observable_in_wall_clock_runtime() {
     };
 
     let fast = run("1");
-    let slow = run("50");
+    let slow = run("200");
 
     // Fast must complete within a generous CI ceiling — three SSH
     // spawns + handshake EOFs + ~3ms of total sleep should fit
@@ -218,13 +218,13 @@ fn backoff_scaling_observable_in_wall_clock_runtime() {
         "scale=1 should be near-instant, got {fast:?}"
     );
 
-    // Slow should have at least 100ms of measurable sleep
-    // (50 + 100 = 150ms minimum, allowing some slop for missed
-    // wakeups). A 100ms floor catches the "env var ignored"
+    // Slow should have at least 400ms of measurable sleep
+    // (200 + 400 = 600ms minimum, allowing some slop for missed
+    // wakeups). A 400ms floor catches the "env var ignored"
     // regression without being flaky on slow runners.
     assert!(
-        slow >= Duration::from_millis(100),
-        "scale=50 should sleep at least 100ms, got {slow:?}"
+        slow >= Duration::from_millis(400),
+        "scale=200 should sleep at least 400ms, got {slow:?}"
     );
 
     // The "env var actually feeds through" guard. A ratio
@@ -234,14 +234,13 @@ fn backoff_scaling_observable_in_wall_clock_runtime() {
     // runs — so on a loaded runner slow/fast stays well under 3x even
     // though the scaled sleep is working. The *difference* cancels
     // that constant overhead and isolates exactly the scaled sleep:
-    // theoretically (50+100) − (1+2) ≈ 147ms. A 75ms floor is far
-    // above scheduler jitter yet collapses to ~0 if the env var were
-    // ignored, so it still catches the regression — without the
-    // overhead-sensitivity that made the ratio flaky.
+    // theoretically (200+400) − (1+2) ≈ 597ms. A 300ms floor is far
+    // above scheduler jitter yet still leaves room for hosted-runner
+    // process-spawn variance.
     let delta = slow.saturating_sub(fast);
     assert!(
-        delta >= Duration::from_millis(75),
-        "scale=50 should add ≥75ms of scaled sleep over scale=1; \
+        delta >= Duration::from_millis(300),
+        "scale=200 should add >=300ms of scaled sleep over scale=1; \
          got slow={slow:?}, fast={fast:?}, delta={delta:?}"
     );
 }
