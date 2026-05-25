@@ -58,6 +58,8 @@
 //!   costs (`LuaJIT` trace compilation, supervisor reader-thread
 //!   startup, kernel pipe buffer fills). The 10 s measurement
 //!   window is then the spec-specified gate.
+//!   CI may override `PMACS_M6_INGEST_MIN_BYTES_PER_SEC` for the
+//!   hosted-runner profile; omitting it keeps the full 100 MB/s gate.
 //!
 //! - **RSS sampling source.** Linux-only via `/proc/self/status`'s
 //!   `VmRSS:` field (kilobytes; multiply by 1024 for bytes). We
@@ -269,7 +271,12 @@ fn env_u64(name: &str, default: u64) -> u64 {
 fn m6_6_sustained_ingest_rate_meets_100mbps_gate() {
     const WARMUP: Duration = Duration::from_secs(1);
     const WINDOW: Duration = Duration::from_secs(10);
-    const RATE_THRESHOLD_BYTES_PER_SEC: u64 = 100 * 1024 * 1024;
+    const DEFAULT_RATE_THRESHOLD_BYTES_PER_SEC: u64 = 100 * 1024 * 1024;
+    let rate_threshold_bytes_per_sec = env_u64(
+        "PMACS_M6_INGEST_MIN_BYTES_PER_SEC",
+        DEFAULT_RATE_THRESHOLD_BYTES_PER_SEC,
+    )
+    .max(1);
 
     let mut editor = EditorState::new();
     // 100 chars + newline per line. The exact value is unimportant;
@@ -324,13 +331,13 @@ fn m6_6_sustained_ingest_rate_meets_100mbps_gate() {
     );
     println!(
         "  threshold:     {} B/s ({:.1} MiB/s)",
-        RATE_THRESHOLD_BYTES_PER_SEC,
-        RATE_THRESHOLD_BYTES_PER_SEC as f64 / (1024.0 * 1024.0)
+        rate_threshold_bytes_per_sec,
+        rate_threshold_bytes_per_sec as f64 / (1024.0 * 1024.0)
     );
 
     assert!(
-        rate >= RATE_THRESHOLD_BYTES_PER_SEC,
-        "ingest rate {rate} B/s below {RATE_THRESHOLD_BYTES_PER_SEC} B/s gate"
+        rate >= rate_threshold_bytes_per_sec,
+        "ingest rate {rate} B/s below {rate_threshold_bytes_per_sec} B/s gate"
     );
 }
 
