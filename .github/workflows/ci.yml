@@ -116,4 +116,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: ingest rate, RSS ceiling, cancel p99, navigation p99, search p99
+        env:
+          # Full cancel profile remains the test default. Hosted CI has
+          # an effective five-minute ceiling for this job, so keep the
+          # per-PR gate short enough to reach the later M6.7 gates.
+          PMACS_M6_CANCEL_TRIALS: "30"
+          PMACS_M6_CANCEL_MAX_DELAY_MS: "500"
         run: cargo test --release --test m6_perf_acceptance -- --ignored --nocapture --test-threads=1

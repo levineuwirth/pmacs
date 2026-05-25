@@ -107,7 +107,11 @@
 //!   trial index. No `rand` dev-dep; reproducible across runs;
 //!   varied enough that we don't always hit the same supervisor
 //!   tick boundary. Methodology: random in `[10 ms, 5000 ms]` per
-//!   spec ("first 5 seconds").
+//!   spec ("first 5 seconds"). CI may override the trial count and
+//!   delay ceiling with `PMACS_M6_CANCEL_TRIALS` and
+//!   `PMACS_M6_CANCEL_MAX_DELAY_MS` so the hosted perf job fits
+//!   under the runner's effective wall-clock ceiling; omitting those
+//!   env vars runs the full spec profile.
 //!
 //! - **M6.7 buffer-direct populate.** The 10000-line scrollback is
 //!   built via the public buffer API (`pmacs.buffer.create` +
@@ -235,6 +239,21 @@ fn wait_until_running(editor: &mut EditorState) {
         Duration::from_secs(5),
     );
     assert!(ok, "spawned producer never reached running state");
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 // ---------------------------------------------------------------------------
@@ -480,21 +499,24 @@ fn xorshift64(state: &mut u64) -> u64 {
 #[test]
 #[ignore = "perf gate; requires release build"]
 fn m6_6_cancel_response_p99_under_100ms() {
-    const TRIALS: usize = 100;
+    const DEFAULT_TRIALS: usize = 100;
     const P99_THRESHOLD: Duration = Duration::from_millis(100);
     const MIN_DELAY_MS: u64 = 10;
-    const MAX_DELAY_MS: u64 = 5000;
+    const DEFAULT_MAX_DELAY_MS: u64 = 5000;
     const PER_CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 
-    let mut latencies: Vec<Duration> = Vec::with_capacity(TRIALS);
+    let trials = env_usize("PMACS_M6_CANCEL_TRIALS", DEFAULT_TRIALS);
+    let max_delay_ms =
+        env_u64("PMACS_M6_CANCEL_MAX_DELAY_MS", DEFAULT_MAX_DELAY_MS).max(MIN_DELAY_MS);
+    let mut latencies: Vec<Duration> = Vec::with_capacity(trials);
     let mut prng_state: u64 = 0xa5a5_5a5a_dead_beef;
 
-    for trial in 0..TRIALS {
+    for trial in 0..trials {
         // Vary the seed per trial so consecutive trials don't sample
         // the same delay; xor with trial index keeps it deterministic.
         prng_state ^= trial as u64;
         let r = xorshift64(&mut prng_state);
-        let delay_ms = MIN_DELAY_MS + (r % (MAX_DELAY_MS - MIN_DELAY_MS + 1));
+        let delay_ms = MIN_DELAY_MS + (r % (max_delay_ms - MIN_DELAY_MS + 1));
         let delay = Duration::from_millis(delay_ms);
 
         let mut editor = EditorState::new();
@@ -547,8 +569,8 @@ fn m6_6_cancel_response_p99_under_100ms() {
 
         let _ = editor.lua_host.lua().load("_G.h:close()").exec();
 
-        if (trial + 1) % 10 == 0 || trial + 1 == TRIALS {
-            println!("  cancel trials completed: {}/{}", trial + 1, TRIALS);
+        if (trial + 1) % 10 == 0 || trial + 1 == trials {
+            println!("  cancel trials completed: {}/{}", trial + 1, trials);
         }
     }
 
@@ -564,7 +586,7 @@ fn m6_6_cancel_response_p99_under_100ms() {
     let p99 = percentile(99);
     let max = sorted[sorted.len() - 1];
 
-    println!("M6.6 cancel-response latency gate ({TRIALS} trials):");
+    println!("M6.6 cancel-response latency gate ({trials} trials, max delay {max_delay_ms}ms):");
     println!("  p50: {p50:?}");
     println!("  p90: {p90:?}");
     println!("  p99: {p99:?}");
