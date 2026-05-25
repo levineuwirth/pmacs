@@ -123,6 +123,7 @@ fn m4_1_initial_parse_of_5000_line_file_under_100ms() {
         language_name: "rust".to_owned(),
         prior_tree: None,
         edits: Vec::new(),
+        source_revision: 0,
     };
     let bundle = syntax::run_parse(req).expect("parse succeeds");
     assert_eq!(bundle.tree.root_node().kind(), "source_file");
@@ -224,6 +225,7 @@ fn m4_1_dispatch_parse_round_trips_via_runtime() {
         language_name: "rust".to_owned(),
         prior_tree: None,
         edits: Vec::new(),
+        source_revision: 0,
     };
     let id = rt.dispatch_parse(req, None);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -361,6 +363,75 @@ fn m4_2_opening_a_rust_file_produces_a_parse_tree() {
     assert_eq!(root_kind, "source_file");
 }
 
+#[test]
+fn m4_2_editing_a_rust_file_schedules_a_fresh_parse() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hello.rs");
+    std::fs::write(&path, b"fn main() { let x = 1 + 2; }\n").expect("write");
+
+    let mut state = pmacs::editor::EditorState::open(path).expect("open .rs");
+    pump_async(&mut state, |s| current_tree_language(s).is_some());
+    pump_async(&mut state, |s| {
+        s.lua_host
+            .lua()
+            .load(
+                r"
+                local buf = pmacs.window.buffer()
+                return pmacs.parse._current_is_fresh(buf)
+            ",
+            )
+            .eval::<bool>()
+            .expect("current fresh query")
+    });
+
+    state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local buf = pmacs.window.buffer()
+            buf:replace(20, 25, '0xCAFE')
+        ",
+        )
+        .exec()
+        .expect("Lua-side replace");
+    state
+        .lua_host
+        .run_hook("buffer.after-edit", mlua::MultiValue::new());
+
+    let after_edit: (Option<u64>, bool) = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local buf = pmacs.window.buffer()
+            return pmacs.parse._pending_edits(buf),
+                   pmacs.parse._current_is_fresh(buf)
+        ",
+        )
+        .eval()
+        .expect("parse state after edit");
+    assert_eq!(after_edit.0, Some(1));
+    assert!(
+        !after_edit.1,
+        "a parse bundle produced before the edit must not render as fresh"
+    );
+
+    pump_async(&mut state, |s| {
+        s.lua_host
+            .lua()
+            .load(
+                r"
+                local buf = pmacs.window.buffer()
+                return pmacs.parse._pending_edits(buf) == 0
+                   and pmacs.parse._current_is_fresh(buf)
+            ",
+            )
+            .eval::<bool>()
+            .expect("current fresh after edit")
+    });
+}
+
 /// Same as the rust test, with a `.lua` file. Together they
 /// exercise both bundled grammars and verify the lazy-loader path
 /// (each language's `tree_sitter::Language` is materialized only
@@ -492,6 +563,18 @@ fn render_active_window_to_grid(
     backing
 }
 
+fn line_col_for_offset(source: &[u8], offset: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut line_start = 0usize;
+    for (idx, b) in source.iter().enumerate().take(offset) {
+        if *b == b'\n' {
+            row += 1;
+            line_start = idx + 1;
+        }
+    }
+    (row, offset - line_start)
+}
+
 /// Helper: open `path` in a fresh editor and pump async ticks until
 /// either the parse settles (so highlights can attach) or the
 /// timeout deadline hits.
@@ -499,6 +582,106 @@ fn open_and_wait_for_parse(path: std::path::PathBuf) -> pmacs::editor::EditorSta
     let mut state = pmacs::editor::EditorState::open(path).expect("open file");
     pump_async(&mut state, |s| current_tree_language(s).is_some());
     state
+}
+
+#[test]
+fn m4_3_c_highlights_survive_comment_toggle_and_fresh_reparse() {
+    use pmacs::cell::Color;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("severity_test.c");
+    let source = b"#include <stdio.h>\n\nint error_zone(void) {\n    nonexistent_function();\n    return 1;\n}\n";
+    std::fs::write(&path, source).expect("write");
+
+    let mut state = open_and_wait_for_parse(path);
+    assert_eq!(current_tree_language(&state).as_deref(), Some("c"));
+
+    let call_offset = source
+        .windows(b"nonexistent_function".len())
+        .position(|w| w == b"nonexistent_function")
+        .expect("call offset");
+    let (call_row, call_col) = line_col_for_offset(source, call_offset);
+    let cells = render_active_window_to_grid(&mut state, 8, 80);
+    assert_eq!(
+        cells[call_row * 80 + call_col].style.fg,
+        Color::Indexed(4),
+        "C function call should start with function syntax color"
+    );
+
+    let line_start = source[..call_offset]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |idx| idx + 1);
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            r"
+            local buf = pmacs.window.buffer()
+            buf:replace({line_start}, {line_start}, '// ')
+            "
+        ))
+        .exec()
+        .expect("comment line");
+    state
+        .lua_host
+        .run_hook("buffer.after-edit", mlua::MultiValue::new());
+    pump_async(&mut state, |s| {
+        s.lua_host
+            .lua()
+            .load(
+                r"
+                local buf = pmacs.window.buffer()
+                return pmacs.parse._pending_edits(buf) == 0
+                   and pmacs.parse._current_is_fresh(buf)
+            ",
+            )
+            .eval::<bool>()
+            .unwrap_or(false)
+    });
+
+    let commented_cells = render_active_window_to_grid(&mut state, 8, 80);
+    assert_eq!(
+        commented_cells[call_row * 80 + call_col].style.fg,
+        Color::Indexed(8),
+        "commented-out call should render as comment, not stale function/number color"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            r"
+            local buf = pmacs.window.buffer()
+            buf:replace({line_start}, {line_start_plus}, '')
+            ",
+            line_start_plus = line_start + 3
+        ))
+        .exec()
+        .expect("uncomment line");
+    state
+        .lua_host
+        .run_hook("buffer.after-edit", mlua::MultiValue::new());
+    pump_async(&mut state, |s| {
+        s.lua_host
+            .lua()
+            .load(
+                r"
+                local buf = pmacs.window.buffer()
+                return pmacs.parse._pending_edits(buf) == 0
+                   and pmacs.parse._current_is_fresh(buf)
+            ",
+            )
+            .eval::<bool>()
+            .unwrap_or(false)
+    });
+
+    let restored_cells = render_active_window_to_grid(&mut state, 8, 80);
+    assert_eq!(
+        restored_cells[call_row * 80 + call_col].style.fg,
+        Color::Indexed(4),
+        "uncommented call should regain function syntax color after fresh parse"
+    );
 }
 
 /// Cold parse + highlight-spans extraction for a 4000-line synthetic
@@ -525,6 +708,7 @@ fn m4_3_open_rust_file_highlights_under_100ms() {
         language_name: "rust".to_owned(),
         prior_tree: None,
         edits: Vec::new(),
+        source_revision: 0,
     };
     let bundle = syntax::run_parse(req).expect("parse succeeds");
     let spans = syntax::compute_highlight_spans(&query, &bundle);
@@ -594,27 +778,39 @@ fn m4_3_highlight_updates_within_one_frame_after_parse() {
         )
         .exec()
         .expect("Lua-side replace");
-    // Re-dispatch via Lua and pump ticks until the new parse settles.
     state
+        .lua_host
+        .run_hook("buffer.after-edit", mlua::MultiValue::new());
+    let pending_after_edit: Option<u64> = state
         .lua_host
         .lua()
         .load(
             r"
             local buf = pmacs.window.buffer()
-            pmacs.parse._dispatch(buf, 'rust')
+            return pmacs.parse._pending_edits(buf)
         ",
         )
-        .exec()
-        .expect("re-dispatch after edit");
+        .eval()
+        .expect("pending edit count");
+    assert_eq!(
+        pending_after_edit,
+        Some(1),
+        "buffer.after-edit should leave one parse edit queued before the scheduler tick"
+    );
+
     let before = render_active_window_to_grid(&mut state, 3, 60);
     pump_async(&mut state, |s| {
-        // Pump until the visible row 0 differs from `before` ---
-        // i.e., the new parse has settled and the next render
-        // reflects updated highlights.
-        // We render fresh on each tick to drive any in-Lua-side
-        // settle path (the after-tick step inside async.lua).
-        let _ = s; // borrow-check: predicate runs without &mut
-        true
+        s.lua_host
+            .lua()
+            .load(
+                r"
+                local buf = pmacs.window.buffer()
+                return pmacs.parse._pending_edits(buf) == 0
+                   and pmacs.parse._current_is_fresh(buf)
+            ",
+            )
+            .eval::<bool>()
+            .unwrap_or(false)
     });
     // One more tick to drain settle, then render again.
     state.tick_async();

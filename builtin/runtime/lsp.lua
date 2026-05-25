@@ -222,10 +222,14 @@ local function file_uri_for(path)
   return out
 end
 
-local function active_buffer_text()
-  local b = pmacs.window.buffer()
+local function buffer_text(buf)
+  local b = buf or pmacs.window.buffer()
   if not b then return "" end
   return b:slice(0, b:len())
+end
+
+local function active_buffer_text()
+  return buffer_text(nil)
 end
 
 local function active_buffer_path()
@@ -376,13 +380,13 @@ pmacs.hook.add("buffer.after-load", function()
   pcall(attach_buffer, pmacs.window.buffer())
 end)
 
-pmacs.hook.add("buffer.after-edit", function()
-  local buf = pmacs.window.buffer()
+pmacs.hook.add("buffer.after-edit", function(buf)
+  buf = buf or pmacs.window.buffer()
   if not buf then return end
   local rec = attachments[tostring(buf)]
   if not rec then return end
   rec.version = rec.version + 1
-  pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, active_buffer_text())
+  pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, buffer_text(buf))
 end)
 
 -- Async request surface (T M4.5 async bridge). The Rust manager

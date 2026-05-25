@@ -71,6 +71,10 @@ pub struct ParseRequest {
     /// produced. Empty for cold parses; non-empty drives incremental
     /// re-parse.
     pub edits: Vec<tree_sitter::InputEdit>,
+    /// Monotonic source-mirror revision this request was built from.
+    /// Renderers use the matching value on the installed bundle to
+    /// avoid painting a parse tree produced for pre-edit bytes.
+    pub source_revision: u64,
 }
 
 /// Output of [`run_parse`]. The runtime's parse-handoff side map
@@ -92,6 +96,8 @@ pub struct ParseTreeBundle {
     /// queueing, source materialization, and bus delivery). T M4.1
     /// acceptance criteria are stated in this metric.
     pub parse_duration: Duration,
+    /// Source-mirror revision parsed into `tree`.
+    pub source_revision: u64,
 }
 
 /// Run a parse. This is the worker-side body that the runtime's
@@ -124,6 +130,7 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
         source: req.source,
         language_name: req.language_name,
         parse_duration,
+        source_revision: req.source_revision,
     })
 }
 
@@ -162,10 +169,15 @@ struct ParseViewInner {
     /// inside `on_edit`.
     source: Vec<u8>,
     /// Edits accumulated since `current` was produced. Drained on
-    /// `make_request`; cleared on `install`.
+    /// `make_request`. If more edits arrive while that request is
+    /// in flight, they remain here for the next dispatch.
     pending: Vec<tree_sitter::InputEdit>,
+    /// Monotonic revision of the mirrored `source` bytes.
+    source_revision: u64,
     /// Most recent settled parse, or `None` if no parse has run yet.
     current: Option<Arc<ParseTreeBundle>>,
+    /// Revision represented by `current`.
+    current_revision: Option<u64>,
 }
 
 /// Per-buffer parse-tree state. Attached to a [`Buffer`] as a
@@ -210,7 +222,9 @@ impl ParseView {
             language_name,
             source,
             pending: Vec::new(),
+            source_revision: 0,
             current: None,
+            current_revision: None,
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -257,6 +271,16 @@ impl ParseViewHandle {
             .clone()
     }
 
+    /// Most recent parse only if it was produced for the current
+    /// source mirror revision. A stale bundle may still be retained as
+    /// the next incremental base, but renderers must not paint it.
+    #[must_use]
+    pub fn current_fresh(&self) -> Option<Arc<ParseTreeBundle>> {
+        let inner = self.inner.lock().expect("ParseView mutex poisoned");
+        let bundle = inner.current.as_ref()?;
+        (inner.current_revision == Some(inner.source_revision)).then(|| bundle.clone())
+    }
+
     /// Number of pending edits waiting for the next parse dispatch.
     #[must_use]
     pub fn pending_edit_count(&self) -> usize {
@@ -292,6 +316,7 @@ impl ParseViewHandle {
             language_name: inner.language_name.clone(),
             prior_tree,
             edits,
+            source_revision: inner.source_revision,
         }
     }
 
@@ -300,7 +325,14 @@ impl ParseViewHandle {
     /// installing a stale bundle would desynchronize the source
     /// mirror from the tree.
     pub fn install(&self, bundle: Arc<ParseTreeBundle>) {
-        self.inner.lock().expect("ParseView mutex poisoned").current = Some(bundle);
+        let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
+        if inner
+            .current_revision
+            .is_none_or(|current| bundle.source_revision >= current)
+        {
+            inner.current_revision = Some(bundle.source_revision);
+            inner.current = Some(bundle);
+        }
     }
 }
 
@@ -636,6 +668,7 @@ impl View for ParseView {
                 .slice(start_byte as u64, new_end_byte as u64, &mut new_bytes);
         }
         inner.source.splice(start_byte..old_end_byte, new_bytes);
+        inner.source_revision = inner.source_revision.wrapping_add(1);
 
         // Now compute the new_end Point against the updated source.
         let new_end_position = byte_to_point(&inner.source, new_end_byte);
@@ -850,5 +883,43 @@ mod tests {
         );
         // Pending list cleared on make_request.
         assert_eq!(handle.pending_edit_count(), 0);
+    }
+
+    #[test]
+    fn current_fresh_suppresses_parse_bundle_after_edit_until_reparse() {
+        let mut buf = fresh_buffer("scratch.rs");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"fn main() {}\n",
+        })
+        .unwrap();
+        let (view, handle) = rust_view(&buf);
+        let _vid = buf.attach_view(Box::new(view));
+
+        let first = parse_synchronously(&handle);
+        assert_eq!(first.source_revision, 0);
+        assert!(handle.current().is_some());
+        assert!(handle.current_fresh().is_some());
+
+        buf.apply_edit(EditOp::Insert {
+            pos: 11,
+            bytes: b" let _x = 1;",
+        })
+        .unwrap();
+
+        assert_eq!(handle.pending_edit_count(), 1);
+        assert!(
+            handle.current().is_some(),
+            "stale bundle remains available as the incremental base"
+        );
+        assert!(
+            handle.current_fresh().is_none(),
+            "renderers must not paint a bundle parsed before the edit"
+        );
+
+        let second = parse_synchronously(&handle);
+        assert_eq!(second.source_revision, 1);
+        assert_eq!(second.source.as_ref(), b"fn main() { let _x = 1;}\n");
+        assert!(handle.current_fresh().is_some());
     }
 }

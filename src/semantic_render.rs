@@ -12,7 +12,7 @@
 //! language (policy A): tree-sitter spans from [`crate::syntax`] for
 //! grammar-backed languages, LSP semantic tokens
 //! ([`crate::lsp::LspManager::semantic_style_context`]) for languages
-//! with no bundled grammar (C/C++, …). The frontend lays the styling
+//! with no bundled grammar. The frontend lays the styling
 //! out locally over rope text it already holds via its `crdt_replica`
 //! `BufferMirror`.
 //!
@@ -686,7 +686,7 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     // Policy A — per-language styling authority. A grammar-backed
     // language (the registry hands out a view only for those) is
     // styled *solely* by tree-sitter; a language with no bundled
-    // grammar (C/C++, …) is styled *solely* by LSP semantic tokens.
+    // grammar is styled *solely* by LSP semantic tokens.
     // Never both: this is why the no-view branch hands off to the LSP
     // producer while a grammar-backed buffer whose parse isn't ready
     // yet returns empty rather than briefly borrowing LSP styling
@@ -694,7 +694,7 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     let Some(handle) = state.syntax_registry.view(vp.buffer_id) else {
         return lsp_scoped_style_spans(state, vp);
     };
-    let Some(bundle) = handle.current() else {
+    let Some(bundle) = handle.current_fresh() else {
         return Vec::new();
     };
     let Some(query) = state
@@ -742,7 +742,7 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
 }
 
 /// Policy-A fallback for languages with no bundled tree-sitter
-/// grammar (C/C++, …): project the LSP semantic-token store into the
+/// grammar: project the LSP semantic-token store into the
 /// same `StyleSpan` shape the tree-sitter path emits, so the existing
 /// M11.4 diff pipeline (`render_frame`) consumes it unchanged and the
 /// frontend never learns which producer fed it. The instance stays
@@ -1045,6 +1045,35 @@ mod tests {
                 code: None,
             }],
         );
+    }
+
+    #[cfg(feature = "crdt")]
+    fn pump_async_until<F: Fn(&EditorState) -> bool>(state: &mut EditorState, predicate: F) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !predicate(state) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "async pump deadline exceeded"
+            );
+            state.tick_async();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[cfg(feature = "crdt")]
+    fn active_parse_is_fresh(state: &EditorState) -> bool {
+        state
+            .lua_host
+            .lua()
+            .load(
+                r"
+                local buf = pmacs.window.buffer()
+                return pmacs.parse._pending_edits(buf) == 0
+                   and pmacs.parse._current_is_fresh(buf)
+                ",
+            )
+            .eval::<bool>()
+            .unwrap_or(false)
     }
 
     #[test]
@@ -1373,6 +1402,110 @@ mod tests {
         assert!(
             deco_full,
             "post-edit Decorations must be full=true (positions shifted)"
+        );
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn style_spans_clear_while_parse_stale_then_repaint_after_fresh_reparse() {
+        use crate::buffer::EditOp;
+        use crate::cell::Color;
+        use crate::protocol::FrontendId;
+        use crate::semantic_client::SemanticClient;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("severity_test.c");
+        let source =
+            b"#include <stdio.h>\n\nint error_zone(void) {\n    nonexistent_function();\n    return 1;\n}\n";
+        std::fs::write(&path, source).expect("write");
+
+        let mut state = EditorState::open(path).expect("open .c");
+        pump_async_until(&mut state, active_parse_is_fresh);
+        let buffer_id = active_buffer(&state);
+        {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(crate::crdt::peer_id_from_frontend(FrontendId::LOCAL))
+                .expect("upgrade to crdt");
+        }
+
+        let call_offset = source
+            .windows(b"nonexistent_function".len())
+            .position(|w| w == b"nonexistent_function")
+            .expect("call offset") as u64;
+        let line_start = source[..call_offset as usize]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |idx| idx + 1);
+        let visible = ByteRange {
+            start: 0,
+            end: source.len() as u64 + 3,
+        };
+        let mut sem = local();
+        sem.set_viewport(buffer_id, visible, buffer_generation(&state, buffer_id));
+        let mut client = SemanticClient::new(FrontendId::LOCAL);
+        for msg in sem.render_frame(&state) {
+            client.apply(&msg);
+        }
+        assert_eq!(
+            client.effective_style_at(buffer_id, call_offset).fg,
+            Color::Indexed(4),
+            "initial semantic style at call should be function color"
+        );
+
+        {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(EditOp::Insert {
+                    pos: line_start as u64,
+                    bytes: b"// ",
+                })
+                .expect("comment insert");
+        }
+        state
+            .lua_host
+            .run_hook("buffer.after-edit", mlua::MultiValue::new());
+
+        let stale_frame = sem.render_frame(&state);
+        assert!(
+            stale_frame.iter().any(|msg| matches!(
+                msg,
+                InstanceMessage::StyleSpans {
+                    full: true,
+                    segments,
+                    ..
+                } if segments.iter().all(|seg| seg.spans.is_empty())
+            )),
+            "generation transition with no fresh parse should clear stale styles"
+        );
+        for msg in stale_frame {
+            client.apply(&msg);
+        }
+        assert_eq!(
+            client.effective_style_at(buffer_id, call_offset + 3),
+            Style::default(),
+            "clearing frame should remove old function style while parse is stale"
+        );
+
+        pump_async_until(&mut state, active_parse_is_fresh);
+        let fresh_frame = sem.render_frame(&state);
+        assert!(
+            fresh_frame
+                .iter()
+                .any(|msg| matches!(msg, InstanceMessage::StyleSpans { .. })),
+            "fresh reparse should emit replacement StyleSpans"
+        );
+        for msg in fresh_frame {
+            client.apply(&msg);
+        }
+        assert_eq!(
+            client.effective_style_at(buffer_id, call_offset + 3).fg,
+            Color::Indexed(8),
+            "commented call should repaint as comment after fresh parse"
         );
     }
 

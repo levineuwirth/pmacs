@@ -529,8 +529,9 @@ impl EditorState {
 
         let post_revision = self.active_buffer_revision();
         if pre_revision != post_revision {
-            self.lua_host
-                .run_hook("buffer.after-edit", mlua::MultiValue::new());
+            let buffer_id = self.core.borrow().active_buffer_id();
+            let args = buffer_after_edit_args(self.lua_host.lua(), buffer_id);
+            self.lua_host.run_hook("buffer.after-edit", args);
         }
     }
 
@@ -819,6 +820,14 @@ impl EditorState {
             aw.goal_col = None;
         }
     }
+}
+
+fn buffer_after_edit_args(lua: &mlua::Lua, buffer_id: crate::buffer::BufferId) -> mlua::MultiValue {
+    let mut args = mlua::MultiValue::new();
+    if let Ok(ud) = lua.create_userdata(crate::lua_bindings::BufferIdLua(buffer_id)) {
+        args.push_back(mlua::Value::UserData(ud));
+    }
+    args
 }
 
 /// Lines to scroll per mouse-wheel notch. Three matches the GNU
@@ -2355,8 +2364,12 @@ mod tests {
                 Some("test"),
                 r#"
                 _G.edit_count = 0
-                pmacs.hook.add("buffer.after-edit", function()
+                _G.edit_text = nil
+                pmacs.hook.add("buffer.after-edit", function(buf)
                   _G.edit_count = _G.edit_count + 1
+                  if buf then
+                    _G.edit_text = buf:slice(0, buf:len())
+                  end
                 end)
                 "#,
             )
@@ -2372,6 +2385,8 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(n, 1, "expected 1 after-edit per typed char, got {n}");
+        let text: String = s.lua_host.lua().load("return _G.edit_text").eval().unwrap();
+        assert_eq!(text, "a", "after-edit should receive the edited buffer");
     }
 
     /// Cursor motion does not fire `buffer.after-edit`.

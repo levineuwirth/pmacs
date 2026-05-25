@@ -1797,9 +1797,8 @@ fn handle_remote_crdt_op(
         // root cause of the session-5 wrong-position-color
         // artifact; the diag-store stale-flag from T M11.8 finally
         // gets reached.
-        editor
-            .lua_host
-            .run_hook("buffer.after-edit", mlua::MultiValue::new());
+        let args = buffer_after_edit_args(editor.lua_host.lua(), buffer_id);
+        editor.lua_host.run_hook("buffer.after-edit", args);
     }
 
     // Effect 4: queue for broadcast. The source frontend's mirror
@@ -1813,6 +1812,15 @@ fn handle_remote_crdt_op(
         buffer_id,
         op,
     ));
+}
+
+#[cfg(feature = "crdt")]
+fn buffer_after_edit_args(lua: &mlua::Lua, buffer_id: crate::buffer::BufferId) -> mlua::MultiValue {
+    let mut args = mlua::MultiValue::new();
+    if let Ok(ud) = lua.create_userdata(crate::lua_bindings::BufferIdLua(buffer_id)) {
+        args.push_back(mlua::Value::UserData(ud));
+    }
+    args
 }
 
 // Non-CRDT build: the call site in `handle_dispatcher_event` is
@@ -1839,33 +1847,56 @@ fn handle_remote_crdt_op(
 fn build_fresh_frontend_view(editor: &mut EditorState) -> crate::window::FrontendView {
     use crate::text_view::TextView;
     use crate::window::{FrontendView, Layout, Window, WindowId};
-    let mut core = editor.core.borrow_mut();
     // T M10.9 — share LOCAL's buffer (don't create a fresh
     // scratch). M10.8's fresh-scratch behavior made overlays
     // never fire because attaching frontends were in distinct
     // buffers.
-    let local_view = core
-        .views
-        .get(&FrontendId::LOCAL)
-        .expect("LOCAL view present");
-    let local_active_win_id = local_view.active;
-    let buffer_id = core
-        .windows
-        .get(&local_active_win_id)
-        .expect("LOCAL's active window present in core.windows")
-        .buffer_id;
-    let text_view = {
+    let (buffer_id, text_view) = {
+        let core = editor.core.borrow();
+        let local_view = core
+            .views
+            .get(&FrontendId::LOCAL)
+            .expect("LOCAL view present");
+        let local_active_win_id = local_view.active;
+        let buffer_id = core
+            .windows
+            .get(&local_active_win_id)
+            .expect("LOCAL's active window present in core.windows")
+            .buffer_id;
         let reg = core.registry.borrow();
         let buf = reg.get(buffer_id).expect("shared buffer present");
-        TextView::new(buf)
+        (buffer_id, TextView::new(buf))
     };
     let id = WindowId::next();
-    let window = Window::new(id, buffer_id, text_view);
+    let mut window = Window::new(id, buffer_id, text_view);
+    attach_existing_syntax_highlight_overlay(editor, &mut window);
+    let mut core = editor.core.borrow_mut();
     core.windows.insert(id, window);
     FrontendView {
         layout: Layout::single(id),
         active: id,
     }
+}
+
+/// Attach the same syntax-highlight renderer shape a file load would
+/// have attached, but to a newly-created per-frontend window that is
+/// sharing an already-open buffer. The parse view is buffer-owned and
+/// shared; the highlight overlay is window-owned and must be fresh per
+/// window because it carries render-local caches.
+fn attach_existing_syntax_highlight_overlay(
+    editor: &EditorState,
+    window: &mut crate::window::Window,
+) {
+    let Some(handle) = editor.syntax_registry.view(window.buffer_id) else {
+        return;
+    };
+    let lang = handle.language_name();
+    let Some(query) = editor.syntax_registry.highlights_query(&lang) else {
+        return;
+    };
+    let theme = editor.syntax_registry.theme();
+    let overlay = crate::highlight::SyntaxHighlightView::new(handle, query, theme);
+    window.push_overlay(Box::new(overlay));
 }
 
 /// Snapshot one frontend's presence (cursor + selection +
@@ -1968,6 +1999,87 @@ fn apply_event(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "crdt")]
+    fn pump_async_until<F: Fn(&EditorState) -> bool>(editor: &mut EditorState, predicate: F) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !predicate(editor) {
+            assert!(Instant::now() < deadline, "async pump deadline exceeded");
+            editor.tick_async();
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[cfg(feature = "crdt")]
+    fn active_parse_is_fresh(editor: &EditorState) -> bool {
+        editor
+            .lua_host
+            .lua()
+            .load(
+                r"
+                local buf = pmacs.window.buffer()
+                return pmacs.parse._pending_edits(buf) == 0
+                   and pmacs.parse._current_is_fresh(buf)
+                ",
+            )
+            .eval::<bool>()
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "crdt")]
+    fn render_frontend_to_grid(
+        editor: &mut EditorState,
+        fid: FrontendId,
+        rows: u32,
+        cols: u32,
+    ) -> Vec<crate::cell::Cell> {
+        use crate::cell::{Cell, CellGrid, CellSize};
+        use crate::view::{View, Viewport};
+        use crate::window::Rect;
+
+        let prior = editor.core.borrow().active_frontend;
+        editor.core.borrow_mut().active_frontend = fid;
+        let mut core = editor.core.borrow_mut();
+        let active = core.active_window_id();
+        let registry = core.registry.clone();
+        let win = core.windows.get_mut(&active).expect("active window");
+        let rect = Rect::new(0, 0, rows, cols);
+        let mut backing = vec![Cell::default(); (rows * cols) as usize];
+        let reg = registry.borrow();
+        let buf = reg.get(win.buffer_id).expect("buffer in registry");
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: buf.len(),
+            cell_origin: rect.origin,
+            cell_size: CellSize::new(rows, cols),
+        };
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        win.text_view.render(buf, viewport, &mut grid);
+        for overlay in &mut win.overlays {
+            overlay.render(buf, viewport, &mut grid);
+        }
+        drop(reg);
+        drop(core);
+        editor.core.borrow_mut().active_frontend = prior;
+        backing
+    }
+
+    #[cfg(feature = "crdt")]
+    fn line_col_for_offset(source: &[u8], offset: usize) -> (usize, usize) {
+        let mut row = 0usize;
+        let mut line_start = 0usize;
+        for (idx, b) in source.iter().enumerate().take(offset) {
+            if *b == b'\n' {
+                row += 1;
+                line_start = idx + 1;
+            }
+        }
+        (row, offset - line_start)
+    }
+
     #[test]
     fn daemon_state_starts_frontend_id_at_two() {
         let s = DaemonState::new(None);
@@ -2030,8 +2142,12 @@ mod tests {
                 Some("test"),
                 r#"
                 _G.PMACS_TEST_AFTER_EDIT_FIRED = 0
-                pmacs.hook.add("buffer.after-edit", function()
+                _G.PMACS_TEST_AFTER_EDIT_TEXT = nil
+                pmacs.hook.add("buffer.after-edit", function(buf)
                     _G.PMACS_TEST_AFTER_EDIT_FIRED = (_G.PMACS_TEST_AFTER_EDIT_FIRED or 0) + 1
+                    if buf then
+                        _G.PMACS_TEST_AFTER_EDIT_TEXT = buf:slice(0, buf:len())
+                    end
                 end)
                 "#,
             )
@@ -2098,6 +2214,140 @@ mod tests {
         assert_eq!(
             count, 1,
             "buffer.after-edit must fire when handle_remote_crdt_op produces a text Edit"
+        );
+        let hook_text = editor
+            .lua_host
+            .eval(
+                Some("test-readback-buffer-text"),
+                "return _G.PMACS_TEST_AFTER_EDIT_TEXT",
+            )
+            .expect("read hook buffer text");
+        let text = match hook_text {
+            mlua::Value::String(s) => s.to_string_lossy(),
+            other => panic!("expected hook text string, got {other:?}"),
+        };
+        assert_eq!(
+            text, "x",
+            "buffer.after-edit must receive the edited buffer"
+        );
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn attached_frontend_inherits_syntax_highlight_overlay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("severity_test.c");
+        std::fs::write(
+            &path,
+            b"#include <stdio.h>\n\nint error_zone(void) {\n    nonexistent_function();\n}\n",
+        )
+        .expect("write");
+
+        let mut editor = EditorState::open(path).expect("open .c");
+        pump_async_until(&mut editor, active_parse_is_fresh);
+
+        let fid = FrontendId(99);
+        let view = build_fresh_frontend_view(&mut editor);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        let kinds = {
+            let mut core = editor.core.borrow_mut();
+            core.active_frontend = fid;
+            core.active_window().overlay_kinds()
+        };
+
+        assert!(
+            kinds.contains(&"syntax-highlight"),
+            "attached frontend windows sharing a highlighted buffer must render syntax too"
+        );
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn remote_crdt_comment_toggle_reparses_attached_frontend_highlights() {
+        use crate::cell::Color;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("severity_test.c");
+        let source =
+            b"#include <stdio.h>\n\nint error_zone(void) {\n    nonexistent_function();\n    return 1;\n}\n";
+        std::fs::write(&path, source).expect("write");
+
+        let mut editor = EditorState::open(path).expect("open .c");
+        pump_async_until(&mut editor, active_parse_is_fresh);
+
+        let fid = FrontendId(99);
+        let view = build_fresh_frontend_view(&mut editor);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        let buffer_id = editor
+            .core
+            .borrow()
+            .active_window_for(fid)
+            .unwrap()
+            .buffer_id;
+        {
+            let core = editor.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(crate::crdt::peer_id_from_frontend(FrontendId::LOCAL))
+                .expect("upgrade to crdt");
+        }
+
+        let call_offset = source
+            .windows(b"nonexistent_function".len())
+            .position(|w| w == b"nonexistent_function")
+            .expect("call offset");
+        let (call_row, call_col) = line_col_for_offset(source, call_offset);
+        let before = render_frontend_to_grid(&mut editor, fid, 8, 80);
+        assert_eq!(
+            before[call_row * 80 + call_col].style.fg,
+            Color::Indexed(4),
+            "attached frontend should start with function syntax color"
+        );
+
+        let line_start = source[..call_offset]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |idx| idx + 1);
+        let snapshot_bytes = {
+            let core = editor.core.borrow();
+            let reg = core.registry.borrow();
+            let buf = reg.get(buffer_id).expect("buffer");
+            buf.crdt_state()
+                .expect("crdt-backed")
+                .export_snapshot()
+                .expect("export snapshot")
+        };
+        let peer = loro::LoroDoc::new();
+        peer.set_peer_id(crate::crdt::peer_id_from_frontend(fid))
+            .expect("set peer id");
+        peer.import(&snapshot_bytes).expect("import snapshot");
+        let v_before = peer.oplog_vv();
+        peer.get_text("body")
+            .insert(line_start, "// ")
+            .expect("peer comment insert");
+        let op_bytes = peer
+            .export(loro::ExportMode::updates(&v_before))
+            .expect("export op");
+
+        handle_remote_crdt_op(
+            &mut editor,
+            fid,
+            buffer_id,
+            crate::rope::CrdtOp {
+                peer_id: crate::crdt::peer_id_from_frontend(fid),
+                bytes: op_bytes,
+            },
+        );
+
+        editor.core.borrow_mut().active_frontend = fid;
+        pump_async_until(&mut editor, active_parse_is_fresh);
+
+        let after = render_frontend_to_grid(&mut editor, fid, 8, 80);
+        assert_eq!(
+            after[call_row * 80 + call_col].style.fg,
+            Color::Indexed(8),
+            "CRDT comment insert should repaint attached frontend from fresh parse"
         );
     }
 }

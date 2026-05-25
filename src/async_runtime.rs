@@ -2686,6 +2686,7 @@ mod tests {
             language_name: "rust".to_owned(),
             prior_tree: None,
             edits: Vec::new(),
+            source_revision: 0,
         };
         let id = rt.dispatch_parse(req, None);
         pump_until(&rt, || rt.is_complete(id));
@@ -2715,6 +2716,7 @@ mod tests {
             language_name: "rust".to_owned(),
             prior_tree: None,
             edits: Vec::new(),
+            source_revision: 0,
         };
         let id = rt.dispatch_parse(req, None);
         pump_until(&rt, || rt.is_complete(id));

@@ -6020,6 +6020,16 @@ pub fn install_parse(
     {
         let s = syntax.clone();
         parse_mod.set(
+            "_current_is_fresh",
+            lua.create_function(move |_, id: BufferIdLua| {
+                Ok(s.view(id.0).is_some_and(|h| h.current_fresh().is_some()))
+            })?,
+        )?;
+    }
+
+    {
+        let s = syntax.clone();
+        parse_mod.set(
             "tree",
             lua.create_function(move |_, id: BufferIdLua| {
                 Ok(s.view(id.0).and_then(|h| h.current()).map(ParseTreeLua))

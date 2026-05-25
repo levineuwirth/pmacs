@@ -260,9 +260,12 @@ impl SyntaxHighlightView {
 
     /// Refresh `self.cache` if the parse view's current bundle
     /// differs from the cached one. No-op when the bundle pointer
-    /// is unchanged --- the steady-state cost between parses.
+    /// is unchanged --- the steady-state cost between parses. When
+    /// the parse view has pending edits and no fresh bundle yet, clear
+    /// the cache so stale byte ranges are not painted over new text.
     fn refresh_cache_if_stale(&mut self) {
-        let Some(bundle) = self.parse.current() else {
+        let Some(bundle) = self.parse.current_fresh() else {
+            self.cache = HighlightCache::empty();
             return;
         };
         let stale = self

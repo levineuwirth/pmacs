@@ -32,7 +32,8 @@ use glyphon::{
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use pmacs_protocol::{
-    BufferId, ByteRange, InstanceMessage, StyleSegment, StyleSpan, cell::Color as CellColor,
+    BufferId, ByteRange, InstanceMessage, StyleSegment, StyleSpan,
+    cell::{Color as CellColor, Style, UnderlineStyle},
 };
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
@@ -178,10 +179,16 @@ struct State {
     /// hello-world mode or before the first snapshot arrives in
     /// attach mode.
     loro_doc: Option<loro::LoroDoc>,
+    /// Local CRDT generation for `loro_doc`, projected the same way
+    /// the daemon projects `StyleSpans::generation`.
+    current_generation: u64,
     /// Buffer the current rope text + spans interpret. Set when a
     /// `BufferSnapshot` arrives; used as the routing key for
     /// `StyleSpans` updates (drop those for other buffers).
     current_buffer_id: Option<BufferId>,
+    /// Generation represented by `current_spans`. `None` means no
+    /// authoritative style frame has been applied to the current text.
+    style_generation: Option<u64>,
     /// Sorted-by-`range.start` styling spans for `current_buffer_id`.
     /// Replaced wholesale on `StyleSpans { full: true, .. }`; merged
     /// per the M11.4 dirty-segment rule on `full: false` (segments'
@@ -385,7 +392,9 @@ impl State {
             buffer,
             current_text: initial_text.to_owned(),
             loro_doc: None,
+            current_generation: 0,
             current_buffer_id: None,
+            style_generation: None,
             current_spans: Vec::new(),
         }
     }
@@ -394,20 +403,21 @@ impl State {
     /// No-op when `text` is byte-identical to the current rendering
     /// (avoids the re-shape cost when an unchanged buffer ticks).
     ///
-    /// Replaces the rope text and routes through `reshape` so the
-    /// rich-text rendering uses the current `current_spans`. When
-    /// called from the `CrdtOp` path (text shifted under existing
-    /// spans) the spans are momentarily stale relative to the new
-    /// byte positions — `reshape` clamps via `range.end.min(text_len)`
-    /// so rendering is safe, but visual styling may be off until the
-    /// daemon's next `StyleSpans` frame catches up. A real artifact;
-    /// classified as a session-4 known limitation rather than a bug.
+    /// Replaces the rope text and routes through `reshape`. If the
+    /// text generation has advanced beyond the applied style
+    /// generation, clear spans first so stale byte ranges are never
+    /// painted onto shifted text while the daemon computes the fresh
+    /// style frame.
     fn set_text(&mut self, text: &str) {
         if self.current_text == text {
             return;
         }
         self.current_text.clear();
         self.current_text.push_str(text);
+        if self.style_generation != Some(self.current_generation) {
+            self.current_spans.clear();
+            self.style_generation = None;
+        }
         self.reshape();
     }
 
@@ -443,11 +453,14 @@ impl State {
                 }
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
                 let text_len = text.len() as u64;
+                let generation = doc_generation(&doc);
                 self.loro_doc = Some(doc);
+                self.current_generation = generation;
                 self.current_buffer_id = Some(buffer_id);
                 // New buffer ⇒ drop any prior styling; the next
                 // StyleSpans frame for this buffer is authoritative.
                 self.current_spans.clear();
+                self.style_generation = None;
                 self.set_text(&text);
                 Some(ViewportSend {
                     buffer_id,
@@ -455,7 +468,7 @@ impl State {
                         start: 0,
                         end: text_len,
                     },
-                    generation: 0,
+                    generation,
                 })
             }
             InstanceMessage::CrdtOp { buffer_id, op } => {
@@ -476,16 +489,28 @@ impl State {
                     return None;
                 }
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+                self.current_generation = doc_generation(doc);
+                let text_len = text.len() as u64;
                 self.set_text(&text);
-                None
+                Some(ViewportSend {
+                    buffer_id,
+                    visible: ByteRange {
+                        start: 0,
+                        end: text_len,
+                    },
+                    generation: self.current_generation,
+                })
             }
             InstanceMessage::StyleSpans {
                 buffer_id,
-                generation: _,
+                generation,
                 full,
                 segments,
             } => {
                 if self.current_buffer_id != Some(buffer_id) {
+                    return None;
+                }
+                if generation != self.current_generation {
                     return None;
                 }
                 if full {
@@ -493,6 +518,7 @@ impl State {
                 } else {
                     self.merge_style_spans(segments);
                 }
+                self.style_generation = Some(generation);
                 self.reshape();
                 None
             }
@@ -574,49 +600,23 @@ impl State {
     }
 
     /// Re-build the cosmic-text Buffer from `current_text` +
-    /// `current_spans`. Walks the text byte-by-byte, emitting
-    /// `(substr, Attrs)` chunks at every span boundary — text not
-    /// covered by any span uses the default Attrs (terminal default
-    /// color). Final call: `set_rich_text` + `shape_until_scroll`.
+    /// `current_spans`. Flattens possibly-overlapping protocol spans
+    /// into non-overlapping rich-text chunks using the same style
+    /// composition rule as the grid overlay path. Final call:
+    /// `set_rich_text` + `shape_until_scroll`.
     fn reshape(&mut self) {
         let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
-        let text_len = self.current_text.len() as u64;
-        let mut chunks: Vec<(String, Attrs<'static>)> = Vec::new();
-        let mut pos: u64 = 0;
-        for sp in &self.current_spans {
-            // Unstyled gap before this span (could be empty).
-            if pos < sp.range.start {
-                let end = sp.range.start.min(text_len) as usize;
-                chunks.push((
-                    self.current_text[pos as usize..end].to_owned(),
-                    default_attrs.clone(),
-                ));
-                pos = sp.range.start;
-            }
-            // Styled run, clipped to text_len so a stale span past EOF
-            // can't index out.
-            let end = sp.range.end.min(text_len) as usize;
-            if end > pos as usize {
-                let mut attrs = default_attrs.clone();
-                if let Some(color) = cell_color_to_glyphon(sp.style.fg) {
-                    attrs = attrs.color(color);
-                }
-                chunks.push((self.current_text[pos as usize..end].to_owned(), attrs));
-                pos = sp.range.end;
-            }
-        }
-        // Trailing unstyled tail.
-        if pos < text_len {
-            chunks.push((
-                self.current_text[pos as usize..].to_owned(),
-                default_attrs.clone(),
-            ));
-        }
-        // No spans + empty text ⇒ feed one empty chunk so set_rich_text
-        // has something to draw.
-        if chunks.is_empty() {
-            chunks.push((String::new(), default_attrs.clone()));
-        }
+        let chunks: Vec<(String, Attrs<'static>)> =
+            style_runs_for_text(&self.current_text, &self.current_spans)
+                .into_iter()
+                .map(|(text, style)| {
+                    let mut attrs = default_attrs.clone();
+                    if let Some(color) = cell_color_to_glyphon(style.fg) {
+                        attrs = attrs.color(color);
+                    }
+                    (text, attrs)
+                })
+                .collect();
         self.buffer.set_rich_text(
             &mut self.font_system,
             chunks.iter().map(|(s, a)| (s.as_str(), a.clone())),
@@ -717,6 +717,97 @@ impl State {
     }
 }
 
+fn doc_generation(doc: &loro::LoroDoc) -> u64 {
+    doc.oplog_vv()
+        .values()
+        .map(|counter| u64::try_from(*counter).unwrap_or(0))
+        .sum()
+}
+
+/// Flatten byte-range style spans into non-overlapping text runs.
+///
+/// Tree-sitter captures naturally overlap (for example a function
+/// definition and the identifier inside it). The TUI grid paints those
+/// spans sequentially with later/narrower spans composing over earlier
+/// ones. Cosmic text wants a single Attrs value per text chunk, so the
+/// GPU path must first split at every span boundary and merge every
+/// covering style for each interval.
+fn style_runs_for_text(text: &str, spans: &[StyleSpan]) -> Vec<(String, Style)> {
+    let text_len = text.len() as u64;
+    if text_len == 0 {
+        return vec![(String::new(), Style::default())];
+    }
+
+    let mut boundaries = vec![0, text_len];
+    for sp in spans {
+        let start = sp.range.start.min(text_len);
+        let end = sp.range.end.min(text_len);
+        if end <= start {
+            continue;
+        }
+        let start_usize = start as usize;
+        let end_usize = end as usize;
+        if text.is_char_boundary(start_usize) && text.is_char_boundary(end_usize) {
+            boundaries.push(start);
+            boundaries.push(end);
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut runs: Vec<(String, Style)> = Vec::new();
+    for pair in boundaries.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+        if end <= start {
+            continue;
+        }
+        let mut style = Style::default();
+        for sp in spans {
+            if sp.range.start <= start && end <= sp.range.end {
+                style = merge_cell_styles(style, sp.style);
+            }
+        }
+        let text = text[start as usize..end as usize].to_owned();
+        if let Some((prev_text, prev_style)) = runs.last_mut()
+            && *prev_style == style
+        {
+            prev_text.push_str(&text);
+            continue;
+        }
+        runs.push((text, style));
+    }
+
+    if runs.is_empty() {
+        vec![(String::new(), Style::default())]
+    } else {
+        runs
+    }
+}
+
+fn merge_cell_styles(base: Style, overlay: Style) -> Style {
+    Style {
+        fg: if overlay.fg == CellColor::Default {
+            base.fg
+        } else {
+            overlay.fg
+        },
+        bg: if overlay.bg == CellColor::Default {
+            base.bg
+        } else {
+            overlay.bg
+        },
+        bold: base.bold || overlay.bold,
+        italic: base.italic || overlay.italic,
+        underline: if overlay.underline == UnderlineStyle::None {
+            base.underline
+        } else {
+            overlay.underline
+        },
+        reverse: base.reverse || overlay.reverse,
+    }
+}
+
 /// Convert a `pmacs-protocol::cell::Color` to a `glyphon::Color`.
 /// Returns `None` for `Default` so the renderer falls back to the
 /// `Attrs` default color (white-ish in our render) rather than
@@ -774,4 +865,84 @@ fn indexed_to_glyphon(idx: u8) -> glyphon::Color {
     // 232..=255: 24-step grayscale, evenly spaced 8..=238.
     let level = 8 + 10 * (idx - 232);
     glyphon::Color::rgb(level, level, level)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style(fg: CellColor) -> Style {
+        Style {
+            fg,
+            ..Style::default()
+        }
+    }
+
+    fn span(start: u64, end: u64, fg: CellColor) -> StyleSpan {
+        StyleSpan {
+            range: ByteRange { start, end },
+            style: style(fg),
+        }
+    }
+
+    #[test]
+    fn doc_generation_tracks_imported_loro_updates() {
+        let doc = loro::LoroDoc::new();
+        let text = doc.get_text(LORO_TEXT_CONTAINER);
+        assert_eq!(doc_generation(&doc), 0);
+
+        text.insert(0, "x").expect("insert");
+        assert!(
+            doc_generation(&doc) > 0,
+            "local text edits should advance the generation scalar"
+        );
+    }
+
+    #[test]
+    fn style_runs_flatten_overlapping_spans_without_shifting_later_text() {
+        let runs = style_runs_for_text(
+            "abcdefghijZZ",
+            &[
+                span(0, 10, CellColor::Indexed(4)),
+                span(4, 6, CellColor::Indexed(3)),
+            ],
+        );
+
+        let simplified: Vec<(String, CellColor)> = runs
+            .into_iter()
+            .map(|(text, style)| (text, style.fg))
+            .collect();
+        assert_eq!(
+            simplified,
+            vec![
+                ("abcd".to_owned(), CellColor::Indexed(4)),
+                ("ef".to_owned(), CellColor::Indexed(3)),
+                ("ghij".to_owned(), CellColor::Indexed(4)),
+                ("ZZ".to_owned(), CellColor::Default),
+            ]
+        );
+    }
+
+    #[test]
+    fn style_runs_merge_adjacent_equal_style_chunks() {
+        let runs = style_runs_for_text(
+            "abcdef",
+            &[
+                span(0, 2, CellColor::Indexed(4)),
+                span(2, 4, CellColor::Indexed(4)),
+            ],
+        );
+
+        let simplified: Vec<(String, CellColor)> = runs
+            .into_iter()
+            .map(|(text, style)| (text, style.fg))
+            .collect();
+        assert_eq!(
+            simplified,
+            vec![
+                ("abcd".to_owned(), CellColor::Indexed(4)),
+                ("ef".to_owned(), CellColor::Default),
+            ]
+        );
+    }
 }
