@@ -86,15 +86,13 @@
 //!   `yes` at the M6.6 ingest rate). Both signals fire in the same
 //!   tick, so the choice is purely a measurement-cost decision.
 //!
-//! - **Why we cancel `yes` directly, not a shell.** `pmacs.process.
-//!   signal(_proc_id, "INT")` signals the *spawned PID*. For a
-//!   shell, that's bash itself, not bash's child (which is what
-//!   `find /` would be). Real-terminal SIGINT semantics involve
-//!   foreground-pgrp routing through the PTY layer, which M6.5
-//!   does not implement. A shell-foreground-pgrp aware C-c is M6.5+
-//!   work; for the M6.6 gate, the cleanest measurement is a
-//!   single-process target (`yes`), which catches SIGINT and exits
-//!   directly.
+//! - **Why we cancel `yes` directly, not a shell.** PTY-mode
+//!   `pmacs.process.signal(_proc_id, "INT")` targets the foreground
+//!   process group. For a shell, that group can include the shell's
+//!   current foreground job rather than only the shell process. For
+//!   the M6.6 gate, the cleanest measurement is a single-process
+//!   target (`yes`), so the foreground group contains the producer
+//!   being measured and no shell/job-control policy enters the timing.
 //!
 //! - **Percentile computation.** Sort the latency samples; p99 is
 //!   `samples[(len * 99) / 100]`, matching M5.9c's exact-integer

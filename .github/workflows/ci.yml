@@ -110,6 +110,7 @@ jobs:
   m6-perf-gates:
     name: M6 Perf Gates
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -273,7 +273,7 @@ fn m6_5_ctrl_d_on_nonempty_input_deletes_char_forward() {
     "#);
 }
 
-/// Acceptance bullet 3: C-c sends SIGINT. We spawn `cat` (which
+/// Acceptance bullet 3: C-c sends SIGINT. We spawn `sleep` (which
 /// terminates on SIGINT) and verify the exit marker reports the
 /// expected signal. The signal name in the marker is symbolic
 /// ("SIGINT") rather than a number, per the M6.5 design (the libc
@@ -285,12 +285,20 @@ fn m6_5_ctrl_d_on_nonempty_input_deletes_char_forward() {
 /// profile under `cargo test`'s default parallelism).
 #[test]
 fn m6_5_ctrl_c_sends_sigint() {
-    run_with_pump(
+    let Some(sleep) = locate_shell("sleep") else {
+        eprintln!("skipping: sleep not on PATH (set PMACS_TEST_SLEEP to override)");
+        return;
+    };
+    let setup = format!(
         r#"
-            _G.h = pmacs.repl.spawn { argv = { "cat" } }
+            _G.h = pmacs.repl.spawn {{ argv = {{ "{sleep}", "30" }} }}
             _G.sigint_sent = false
             _G.first_seen_running_at = nil
         "#,
+        sleep = sleep.display(),
+    );
+    run_with_pump(
+        &setup,
         r#"
             local h = _G.h
             if not _G.sigint_sent then
@@ -324,13 +332,21 @@ fn m6_5_ctrl_c_sends_sigint() {
 /// The exit marker uses `basename(argv[0])` (so `/usr/bin/cat`
 /// renders as `cat`), leads with `\n` (so a process exiting mid-line
 /// stays readable), and uses symbolic signal names. Verified by
-/// spawning `/bin/false`, which exits with code 1.
+/// spawning `false`, which exits with code 1.
 #[test]
 fn m6_5_exit_marker_uses_basename_with_leading_newline() {
-    run_with_pump(
+    let Some(false_bin) = locate_shell("false") else {
+        eprintln!("skipping: false not on PATH (set PMACS_TEST_FALSE to override)");
+        return;
+    };
+    let setup = format!(
         r#"
-            _G.h = pmacs.repl.spawn { argv = { "/bin/false" } }
+            _G.h = pmacs.repl.spawn {{ argv = {{ "{false_bin}" }} }}
         "#,
+        false_bin = false_bin.display(),
+    );
+    run_with_pump(
+        &setup,
         r#"
             local h = _G.h
             local buf = h:buffer_id()
