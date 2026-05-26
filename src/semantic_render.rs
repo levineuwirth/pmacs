@@ -770,6 +770,9 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
     let tokens = {
         let store = mgr.semantic_token_store();
         let guard = store.lock().expect("semantic-token store mutex poisoned");
+        if guard.is_stale(&uri) {
+            return Vec::new();
+        }
         match guard.for_uri(&uri) {
             Some((_, resp)) => resp.tokens.clone(),
             None => return Vec::new(),

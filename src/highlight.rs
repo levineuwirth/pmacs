@@ -531,6 +531,9 @@ impl View for LspStyleView {
             };
             let store = mgr.semantic_token_store();
             let guard = store.lock().expect("semantic-token store mutex poisoned");
+            if guard.is_stale(&uri) {
+                return;
+            }
             let Some((_, resp)) = guard.for_uri(&uri) else {
                 return;
             };
@@ -875,6 +878,94 @@ mod tests {
         assert!(
             !grid.get(CellCoord::new(0, 3)).style.bold,
             "col 3 (space) is outside the token range"
+        );
+    }
+
+    #[test]
+    fn lsp_style_view_suppresses_stale_semantic_tokens() {
+        use crate::cell::{Cell, CellSize};
+        use crate::editor::EditorState;
+        use crate::lsp::PositionEncoding;
+        use crate::semantic_tokens::{SemanticToken, SemanticTokenKey, SemanticTokensResponse};
+
+        let state = EditorState::new();
+        let buffer_id = state.core.borrow().active_window().buffer_id;
+        {
+            let mut core = state.core.borrow_mut();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"foo\n",
+                })
+                .expect("seed");
+            core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.c")));
+        }
+        state.syntax_registry.theme().lock().expect("theme").insert(
+            "function",
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+        );
+        let sid = state
+            .lsp_manager
+            .borrow_mut()
+            .insert_initialized_test_client(
+                serde_json::json!({
+                    "semanticTokensProvider": {
+                        "legend": { "tokenTypes": ["function"], "tokenModifiers": [] }
+                    }
+                }),
+                PositionEncoding::Utf16,
+            );
+        let active_path = state.core.borrow().active_buffer_path().expect("path set");
+        let uri = crate::lsp::path_to_file_uri(&active_path);
+        {
+            let mgr = state.lsp_manager.borrow();
+            let store = mgr.semantic_token_store();
+            let mut guard = store.lock().expect("store");
+            guard.set(
+                SemanticTokenKey::new(sid.raw().to_string(), uri.clone()),
+                SemanticTokensResponse {
+                    tokens: vec![SemanticToken {
+                        line: 0,
+                        start: 0,
+                        length: 3,
+                        token_type: 0,
+                        token_modifiers: 0,
+                    }],
+                    result_id: None,
+                    raw: Vec::new(),
+                },
+            );
+            guard.mark_stale(uri);
+        }
+
+        let mut view = LspStyleView::new(state.lsp_manager.clone(), state.syntax_registry.theme());
+        let mut backing: Vec<Cell> = vec![Cell::default(); 20];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 20,
+            size: CellSize::new(1, 20),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(1, 20),
+        };
+        let registry = state.core.borrow().registry.clone();
+        let reg = registry.borrow();
+        let buf = reg.get(buffer_id).expect("buffer");
+        view.render(buf, viewport, &mut grid);
+
+        assert!(
+            !grid.get(CellCoord::new(0, 0)).style.bold,
+            "stale semantic tokens must not paint over current syntax/text"
         );
     }
 
