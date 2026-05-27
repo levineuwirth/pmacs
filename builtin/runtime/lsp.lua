@@ -228,6 +228,24 @@ local function active_buffer_text()
   return b:slice(0, b:len())
 end
 
+local function buffer_text(buf)
+  if not buf then return "" end
+  return buf:slice(0, buf:len())
+end
+
+local function document_end_position(text)
+  local line, col = 0, 0
+  for i = 1, #text do
+    if text:byte(i) == 10 then
+      line = line + 1
+      col = 0
+    else
+      col = col + 1
+    end
+  end
+  return line, col
+end
+
 local function active_buffer_path()
   return pmacs.editor.file_path()
 end
@@ -321,6 +339,29 @@ local function server_is_live(sid)
   return false
 end
 
+local function server_is_initialized(sid)
+  local ok, state = pcall(pmacs.lsp.status, sid)
+  return ok and state and state.kind == "initialized"
+end
+
+local function server_supports_inlay_hints(sid)
+  local ok, caps = pcall(pmacs.lsp.capabilities, sid)
+  if not ok or not caps then return false end
+  return caps.inlayHintProvider ~= nil and caps.inlayHintProvider ~= false
+end
+
+local function pull_inlay_hints_quiet(rec)
+  if not rec or not server_is_initialized(rec.server) then return end
+  if not server_supports_inlay_hints(rec.server) then return end
+  local end_line, end_col = document_end_position(buffer_text(rec.buffer))
+  pmacs.async(function()
+    pcall(function()
+      pmacs.lsp.request_inlay_hint(
+        rec.server, rec.uri, 0, 0, end_line, end_col):await()
+    end)
+  end)
+end
+
 -- M_B1: buffers that already had an `LspStyleView` overlay pushed,
 -- so the after-load / on-demand attach paths don't stack duplicate
 -- overlays. Mirrors `highlighted_buffers` in `syntax.lua`; the entry
@@ -348,7 +389,13 @@ local function attach_buffer(buf)
   if not sid then return nil end
   local uri = file_uri_for(path)
   if not uri then return nil end
-  local rec = { language = language, server = sid, uri = uri, version = 1 }
+  local rec = {
+    buffer = buf,
+    language = language,
+    server = sid,
+    uri = uri,
+    version = 1,
+  }
   attachments[key] = rec
   -- did_open is a notification; the manager queues it cleanly even
   -- while the server is in `starting` / `initializing`.
@@ -376,6 +423,7 @@ local function attach_buffer(buf)
     local ok, attached = pcall(pmacs.diag._attach_view, buf, uri)
     if ok and attached then diag_viewed_buffers[key] = true end
   end
+  pull_inlay_hints_quiet(rec)
   return rec
 end
 
@@ -610,7 +658,7 @@ end
 local function repull_for_attachments(sid, request_fn)
   for _, rec in pairs(attachments) do
     if rec.server == sid and rec.uri then
-      pcall(request_fn, sid, rec.uri)
+      pcall(request_fn, sid, rec.uri, rec)
     end
   end
 end
@@ -913,8 +961,8 @@ local function handle_server_requests()
           -- Result is `null` on success per the LSP spec; then
           -- re-pull so the store reflects the server's new state.
           pcall(pmacs.lsp.send_response, sid, ev.request_id, nil)
-          repull_for_attachments(sid, function(s, uri)
-            pmacs.lsp.request_inlay_hint(s, uri, 0, 0, 0xFFFFF, 0)
+          repull_for_attachments(sid, function(_, _, rec)
+            pull_inlay_hints_quiet(rec)
           end)
         elseif ev.kind == "request"
             and ev.method == "workspace/semanticTokens/refresh" then
@@ -931,6 +979,10 @@ local function handle_server_requests()
           -- LSP spells the field "unregisterations".
           pcall(unregister_file_watchers, sid,
             ev.params and ev.params.unregisterations)
+        elseif ev.kind == "initialized" then
+          repull_for_attachments(sid, function(_, _, rec)
+            pull_inlay_hints_quiet(rec)
+          end)
         end
       end
     end
@@ -1093,16 +1145,16 @@ function pmacs.lsp.inlay_hints()
     pmacs.editor.set_status("LSP: no server for active buffer")
     return
   end
-  -- Whole-document range: (0,0) .. (one past the last line, 0). An
-  -- over-wide end line is fine — servers clamp to the document.
+  -- Whole-document range: (0,0) .. exact document end. Some servers,
+  -- including rust-analyzer, reject one-past or otherwise over-wide
+  -- line numbers instead of clamping.
   local text = active_buffer_text()
-  local nl = 0
-  for _ in text:gmatch("\n") do nl = nl + 1 end
+  local end_line, end_col = document_end_position(text)
   pmacs.inlay_hint.clear(rec.server, rec.uri)
   pmacs.async(function()
     local ok, err = pcall(function()
       pmacs.lsp.request_inlay_hint(
-        rec.server, rec.uri, 0, 0, nl + 1, 0):await()
+        rec.server, rec.uri, 0, 0, end_line, end_col):await()
     end)
     if not ok then
       pmacs.editor.set_status("LSP: " .. lsp_await_error(err))

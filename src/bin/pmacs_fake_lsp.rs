@@ -33,6 +33,7 @@
 //!   `PMACS_FAKE_LSP_ROOT_SINK`, so a test can assert the
 //!   auto-attach path derives the project root from the opened file.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
 #[allow(
@@ -48,6 +49,7 @@ fn main() {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let mut crashed_after_init = false;
+    let mut open_docs: HashMap<String, String> = HashMap::new();
     loop {
         let body = match read_frame(&mut stdin) {
             Ok(Some(b)) => b,
@@ -124,6 +126,7 @@ fn main() {
                             "hoverProvider": true,
                             "completionProvider": { "triggerCharacters": ["."] },
                             "definitionProvider": true,
+                            "inlayHintProvider": true,
                             "documentFormattingProvider": true,
                             "diagnosticProvider": { "interFileDependencies": false, "workspaceDiagnostics": false },
                             "semanticTokensProvider": {
@@ -348,6 +351,24 @@ fn main() {
                     .and_then(|t| t.get("uri"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+                if let Some(uri_s) = uri.as_str() {
+                    let text = if method == "textDocument/didOpen" {
+                        params
+                            .get("textDocument")
+                            .and_then(|t| t.get("text"))
+                            .and_then(serde_json::Value::as_str)
+                    } else {
+                        params
+                            .get("contentChanges")
+                            .and_then(serde_json::Value::as_array)
+                            .and_then(|a| a.first())
+                            .and_then(|c| c.get("text"))
+                            .and_then(serde_json::Value::as_str)
+                    };
+                    if let Some(text) = text {
+                        open_docs.insert(uri_s.to_owned(), text.to_owned());
+                    }
+                }
                 let echo = serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "pmacs/echo",
@@ -756,6 +777,17 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/inlayHint", Some(idv)) => {
+                if mode == "inlaybounds"
+                    && let Some(message) = inlay_range_error(&params, &open_docs)
+                {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": { "code": -32603, "message": message }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5: a type hint (string label, kind 1) and a
                 // parameter hint (label *parts*, kind 2) so both
                 // label shapes are exercised.
@@ -905,4 +937,40 @@ fn write_garbage() {
     let mut stdout = io::stdout().lock();
     let _ = stdout.write_all(b"NotAValidLspFrame\r\nGarbageHeader\r\n\r\n{}");
     let _ = stdout.flush();
+}
+
+fn document_end_position(text: &str) -> (u64, u64) {
+    let mut line = 0;
+    let mut col = 0;
+    for byte in text.bytes() {
+        if byte == b'\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn inlay_range_error(
+    params: &serde_json::Value,
+    open_docs: &HashMap<String, String>,
+) -> Option<String> {
+    let uri = params
+        .get("textDocument")
+        .and_then(|t| t.get("uri"))
+        .and_then(serde_json::Value::as_str)?;
+    let text = open_docs.get(uri)?;
+    let (last_line, last_col) = document_end_position(text);
+    let end = params.get("range")?.get("end")?;
+    let line = end.get("line")?.as_u64()?;
+    let col = end.get("character")?.as_u64()?;
+    if line > last_line || (line == last_line && col > last_col) {
+        Some(format!(
+            "invalid inlay range end {line}:{col}; document ends at {last_line}:{last_col}"
+        ))
+    } else {
+        None
+    }
 }
