@@ -34,9 +34,10 @@ use glyphon::{
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, Decoration, DecorationKind,
     DecorationSegment, InlineAdornment, InstanceMessage, StyleSegment, StyleSpan,
-    cell::Color as CellColor,
+    cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
+use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -59,6 +60,51 @@ const BG: wgpu::Color = wgpu::Color {
     b: 0.07,
     a: 1.0,
 };
+
+const TEXT_LEFT: f32 = 16.0;
+const TEXT_TOP: f32 = 16.0;
+const TEXT_RIGHT_GAP: f32 = 10.0;
+const MINIMAP_WIDTH: f32 = 48.0;
+const MINIMAP_RIGHT: f32 = 12.0;
+const MINIMAP_TOP: f32 = 12.0;
+const MINIMAP_BOTTOM: f32 = 12.0;
+const MINIMAP_MIN_SURFACE_WIDTH: u32 = 180;
+const MINIMAP_MIN_THUMB_HEIGHT: f32 = 18.0;
+const MINIMAP_H_PAD: f32 = 3.0;
+const MINIMAP_CODE_COLS: f32 = 100.0;
+const MINIMAP_MIN_STROKE_WIDTH: f32 = 1.5;
+const MINIMAP_MAX_LINE_STROKE_HEIGHT: f32 = 2.0;
+const CODE_LINE_HEIGHT: f32 = 22.0;
+const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
+const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
+const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
+const MINIMAP_THUMB_BORDER: [f32; 4] = [0.86, 0.86, 0.96, 0.7];
+const QUAD_SHADER: &str = r"
+struct VertexOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(
+    @location(0) pos: vec2<f32>,
+    @location(1) color: vec4<f32>,
+) -> VertexOut {
+    var out: VertexOut;
+    out.pos = vec4<f32>(pos, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+";
+
+const QUAD_VERTEX_STRIDE: wgpu::BufferAddress = 24;
+const QUAD_VERTEX_ATTRS: [wgpu::VertexAttribute; 2] =
+    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
 /// Text the hello-world (and attach-pre-snapshot / attach-failed)
 /// modes render. Once the daemon's `BufferSnapshot` arrives the
@@ -172,10 +218,15 @@ struct State {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    quad_renderer: QuadRenderer,
     buffer: Buffer,
     /// What the buffer is currently shaped to. Held so we can detect
     /// no-op updates and skip the re-shape.
     current_text: String,
+    /// Code-shape data derived from `current_text`, used to give the
+    /// minimap horizontal structure even though `FileStyleSummary`
+    /// carries only one dominant style per line.
+    current_line_shapes: Vec<MinimapLineShape>,
     /// Local CRDT replica seeded by `BufferSnapshot`. `None` in
     /// hello-world mode or before the first snapshot arrives in
     /// attach mode.
@@ -211,6 +262,22 @@ struct State {
     /// bytes into `current_text`; source byte ranges for style spans and
     /// decorations therefore remain source-relative.
     current_adornments: Vec<InlineAdornment>,
+    /// Whole-file per-line dominant styles for the minimap (session 7).
+    /// The daemon emits this summary on first frame and after CRDT
+    /// generation changes. We keep the latest summary until a newer one
+    /// arrives, matching the ownership rule used by style spans,
+    /// decorations, and inline adornments.
+    current_summary: Option<FileStyleSummaryState>,
+}
+
+struct QuadRenderer {
+    pipeline: wgpu::RenderPipeline,
+}
+
+#[derive(Clone, Debug)]
+struct FileStyleSummaryState {
+    generation: u64,
+    lines: Vec<CellStyle>,
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -305,6 +372,61 @@ struct ViewportSend {
     generation: u64,
 }
 
+impl QuadRenderer {
+    fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pmacs-gpu quad shader"),
+            source: wgpu::ShaderSource::Wgsl(QUAD_SHADER.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pmacs-gpu quad pipeline layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pmacs-gpu quad pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: QUAD_VERTEX_STRIDE,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &QUAD_VERTEX_ATTRS,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline }
+    }
+
+    fn render<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        vertex_buffer: &'pass wgpu::Buffer,
+        vertex_count: u32,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.draw(0..vertex_count, 0..1);
+    }
+}
+
 impl State {
     fn new(event_loop: &ActiveEventLoop, initial_text: &str) -> Self {
         let window = Arc::new(
@@ -373,6 +495,7 @@ impl State {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, surface_format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        let quad_renderer = QuadRenderer::new(&device, surface_format);
 
         // Smaller font in attach mode (file contents tend to be more
         // than one line); larger only fits "hello, pmacs"-shaped
@@ -404,13 +527,16 @@ impl State {
             viewport,
             atlas,
             text_renderer,
+            quad_renderer,
             buffer,
             current_text: initial_text.to_owned(),
+            current_line_shapes: minimap_line_shapes(initial_text),
             loro_doc: None,
             current_buffer_id: None,
             current_spans: Vec::new(),
             current_decorations: Vec::new(),
             current_adornments: Vec::new(),
+            current_summary: None,
         }
     }
 
@@ -434,6 +560,7 @@ impl State {
         }
         self.current_text.clear();
         self.current_text.push_str(text);
+        self.current_line_shapes = minimap_line_shapes(text);
         self.reshape();
         true
     }
@@ -460,13 +587,15 @@ impl State {
     ///   reshape the display projection. Session 6 consumes `AtOffset`
     ///   text adornments (LSP inlay hints); other placements/content
     ///   remain explicitly deferred.
+    /// - `FileStyleSummary` — replace the whole-file minimap summary.
+    ///   Session 7 renders it as a right-side per-line style overview
+    ///   plus a visible-window affordance.
     /// - `Goodbye` — surfaced via the reader thread's clean-EOF path,
     ///   not handled here.
     ///
-    /// Remaining `SemanticFrame` variants (`FileStyleSummary`) plus
-    /// the grid variants (`CellDelta`, `Cursor`, `CursorByte`) and
-    /// presence updates are ignored in session 6 — they land in
-    /// subsequent Phase A sessions.
+    /// Remaining semantic variants plus the grid variants (`CellDelta`,
+    /// `Cursor`, `CursorByte`) and presence updates are ignored in
+    /// session 7 — they land in subsequent Phase A sessions.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
             InstanceMessage::BufferSnapshot {
@@ -488,6 +617,7 @@ impl State {
                 self.current_spans.clear();
                 self.current_decorations.clear();
                 self.current_adornments.clear();
+                self.current_summary = None;
                 if !self.set_text(&text) {
                     self.reshape();
                 }
@@ -586,8 +716,36 @@ impl State {
                 self.reshape();
                 None
             }
+            InstanceMessage::FileStyleSummary {
+                buffer_id,
+                generation,
+                lines,
+            } => {
+                self.apply_file_style_summary(buffer_id, generation, lines);
+                None
+            }
             _ => None,
         }
+    }
+
+    fn apply_file_style_summary(
+        &mut self,
+        buffer_id: BufferId,
+        generation: u64,
+        lines: Vec<CellStyle>,
+    ) {
+        if self.current_buffer_id != Some(buffer_id) {
+            return;
+        }
+        if self
+            .current_summary
+            .as_ref()
+            .is_some_and(|summary| generation < summary.generation)
+        {
+            return;
+        }
+        self.current_summary = Some(FileStyleSummaryState { generation, lines });
+        self.window.request_redraw();
     }
 
     /// `full = true` path: discard prior styling, take the segments'
@@ -808,6 +966,17 @@ impl State {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let minimap_vertices = self.minimap_vertex_bytes();
+        let minimap_vertex_count = (minimap_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let minimap_buffer = (!minimap_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("pmacs-gpu minimap vertices"),
+                    contents: &minimap_vertices,
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let text_bounds_right = self.text_bounds_right();
 
         self.text_renderer
             .prepare(
@@ -818,13 +987,13 @@ impl State {
                 &self.viewport,
                 [TextArea {
                     buffer: &self.buffer,
-                    left: 16.0,
-                    top: 16.0,
+                    left: TEXT_LEFT,
+                    top: TEXT_TOP,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,
                         top: 0,
-                        right: self.config.width.cast_signed(),
+                        right: text_bounds_right,
                         bottom: self.config.height.cast_signed(),
                     },
                     default_color: Color::rgb(230, 230, 235),
@@ -859,17 +1028,367 @@ impl State {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text_renderer render");
+            if let Some(vertex_buffer) = minimap_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, minimap_vertex_count);
+            }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         self.atlas.trim();
     }
+
+    fn text_bounds_right(&self) -> i32 {
+        if self.has_minimap() {
+            minimap_left(self.config.width).map_or(self.config.width.cast_signed(), |left| {
+                (left - TEXT_RIGHT_GAP).max(TEXT_LEFT + 1.0).round() as i32
+            })
+        } else {
+            self.config.width.cast_signed()
+        }
+    }
+
+    fn has_minimap(&self) -> bool {
+        self.current_summary
+            .as_ref()
+            .is_some_and(|summary| !summary.lines.is_empty())
+            && minimap_left(self.config.width).is_some()
+    }
+
+    fn minimap_vertex_bytes(&self) -> Vec<u8> {
+        let Some(summary) = self.current_summary.as_ref() else {
+            return Vec::new();
+        };
+        let visible_lines = estimated_visible_lines(self.config.height);
+        let rects = minimap_rects(
+            &summary.lines,
+            &self.current_line_shapes,
+            self.config.width,
+            self.config.height,
+            0,
+            visible_lines,
+        );
+        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MinimapRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MinimapLineShape {
+    indent_cols: usize,
+    content_cols: usize,
 }
 
 #[derive(Clone, Debug)]
 struct RichChunk {
     text: String,
     color: Option<glyphon::Color>,
+}
+
+fn minimap_left(surface_width: u32) -> Option<f32> {
+    if surface_width < MINIMAP_MIN_SURFACE_WIDTH {
+        return None;
+    }
+    let x = surface_width as f32 - MINIMAP_RIGHT - MINIMAP_WIDTH;
+    (x > TEXT_LEFT + TEXT_RIGHT_GAP).then_some(x)
+}
+
+fn estimated_visible_lines(surface_height: u32) -> usize {
+    ((surface_height as f32 - TEXT_TOP.max(0.0)) / CODE_LINE_HEIGHT)
+        .ceil()
+        .max(1.0) as usize
+}
+
+fn minimap_rects(
+    lines: &[CellStyle],
+    shapes: &[MinimapLineShape],
+    surface_width: u32,
+    surface_height: u32,
+    first_visible_line: usize,
+    visible_lines: usize,
+) -> Vec<MinimapRect> {
+    let Some(x) = minimap_left(surface_width) else {
+        return Vec::new();
+    };
+    if lines.is_empty() || surface_height as f32 <= MINIMAP_TOP + MINIMAP_BOTTOM {
+        return Vec::new();
+    }
+    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    let pixel_rows = height.round().max(1.0) as usize;
+    let mut rects = Vec::new();
+    rects.push(MinimapRect {
+        x,
+        y: MINIMAP_TOP,
+        w: MINIMAP_WIDTH,
+        h: height,
+        color: MINIMAP_BG,
+    });
+
+    if lines.len() <= pixel_rows {
+        for (idx, style) in lines.iter().copied().enumerate() {
+            let y0 = MINIMAP_TOP + idx as f32 * height / lines.len() as f32;
+            let y1 = MINIMAP_TOP + (idx + 1) as f32 * height / lines.len() as f32;
+            if let Some(shape) = shapes
+                .get(idx)
+                .copied()
+                .filter(MinimapLineShape::has_content)
+            {
+                push_minimap_line_stroke(
+                    &mut rects,
+                    x,
+                    y0,
+                    (y1 - y0).clamp(1.0, MINIMAP_MAX_LINE_STROKE_HEIGHT),
+                    minimap_style_color(style),
+                    shape,
+                );
+            }
+        }
+    } else {
+        for row in 0..pixel_rows {
+            let line_start = row * lines.len() / pixel_rows;
+            let line_end = ((row + 1) * lines.len())
+                .div_ceil(pixel_rows)
+                .min(lines.len());
+            let y0 = MINIMAP_TOP + row as f32 * height / pixel_rows as f32;
+            let y1 = MINIMAP_TOP + (row + 1) as f32 * height / pixel_rows as f32;
+            if let Some(shape) = dominant_line_shape(shapes, line_start, line_end) {
+                push_minimap_line_stroke(
+                    &mut rects,
+                    x,
+                    y0,
+                    (y1 - y0).max(1.0),
+                    minimap_style_color(dominant_line_style(&lines[line_start..line_end])),
+                    shape,
+                );
+            }
+        }
+    }
+
+    push_minimap_thumb(
+        &mut rects,
+        x,
+        height,
+        lines.len(),
+        first_visible_line,
+        visible_lines,
+    );
+    rects
+}
+
+impl MinimapLineShape {
+    fn has_content(&self) -> bool {
+        self.content_cols > 0
+    }
+}
+
+fn push_minimap_line_stroke(
+    rects: &mut Vec<MinimapRect>,
+    x: f32,
+    y: f32,
+    h: f32,
+    color: [f32; 4],
+    shape: MinimapLineShape,
+) {
+    if !shape.has_content() {
+        return;
+    }
+    let available = (MINIMAP_WIDTH - MINIMAP_H_PAD * 2.0).max(MINIMAP_MIN_STROKE_WIDTH);
+    let indent = (shape.indent_cols as f32 / MINIMAP_CODE_COLS * available)
+        .min((available - MINIMAP_MIN_STROKE_WIDTH).max(0.0));
+    let width = (shape.content_cols as f32 / MINIMAP_CODE_COLS * available).clamp(
+        MINIMAP_MIN_STROKE_WIDTH,
+        (available - indent).max(MINIMAP_MIN_STROKE_WIDTH),
+    );
+    rects.push(MinimapRect {
+        x: x + MINIMAP_H_PAD + indent,
+        y,
+        w: width,
+        h,
+        color,
+    });
+}
+
+fn push_minimap_thumb(
+    rects: &mut Vec<MinimapRect>,
+    x: f32,
+    minimap_height: f32,
+    line_count: usize,
+    first_visible_line: usize,
+    visible_lines: usize,
+) {
+    let start_line = first_visible_line.min(line_count);
+    let end_line = start_line
+        .saturating_add(visible_lines.max(1))
+        .min(line_count);
+    let mut y0 = MINIMAP_TOP + start_line as f32 * minimap_height / line_count as f32;
+    let mut y1 = MINIMAP_TOP + end_line as f32 * minimap_height / line_count as f32;
+    if y1 - y0 < MINIMAP_MIN_THUMB_HEIGHT {
+        let mid = (y0 + y1) * 0.5;
+        y0 = (mid - MINIMAP_MIN_THUMB_HEIGHT * 0.5).max(MINIMAP_TOP);
+        y1 = (y0 + MINIMAP_MIN_THUMB_HEIGHT).min(MINIMAP_TOP + minimap_height);
+        y0 = (y1 - MINIMAP_MIN_THUMB_HEIGHT).max(MINIMAP_TOP);
+    }
+    let h = (y1 - y0).max(1.0);
+    rects.push(MinimapRect {
+        x,
+        y: y0,
+        w: MINIMAP_WIDTH,
+        h,
+        color: MINIMAP_THUMB_FILL,
+    });
+    rects.push(MinimapRect {
+        x,
+        y: y0,
+        w: 1.0,
+        h,
+        color: MINIMAP_THUMB_BORDER,
+    });
+    rects.push(MinimapRect {
+        x: x + MINIMAP_WIDTH - 1.0,
+        y: y0,
+        w: 1.0,
+        h,
+        color: MINIMAP_THUMB_BORDER,
+    });
+}
+
+fn dominant_line_style(lines: &[CellStyle]) -> CellStyle {
+    if lines.is_empty() {
+        return CellStyle::default();
+    }
+    let mut tally: Vec<(CellStyle, usize)> = Vec::new();
+    for style in lines {
+        if let Some((_, count)) = tally.iter_mut().find(|(candidate, _)| candidate == style) {
+            *count += 1;
+        } else {
+            tally.push((*style, 1));
+        }
+    }
+    tally
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map_or(CellStyle::default(), |(style, _)| style)
+}
+
+fn dominant_line_shape(
+    shapes: &[MinimapLineShape],
+    line_start: usize,
+    line_end: usize,
+) -> Option<MinimapLineShape> {
+    let slice = shapes.get(line_start.min(shapes.len())..line_end.min(shapes.len()))?;
+    let mut count = 0usize;
+    let mut indent_sum = 0usize;
+    let mut content_sum = 0usize;
+    for shape in slice.iter().filter(|shape| shape.has_content()) {
+        count += 1;
+        indent_sum += shape.indent_cols;
+        content_sum += shape.content_cols;
+    }
+    (count > 0).then_some(MinimapLineShape {
+        indent_cols: indent_sum / count,
+        content_cols: content_sum.div_ceil(count),
+    })
+}
+
+fn minimap_line_shapes(text: &str) -> Vec<MinimapLineShape> {
+    text.split('\n').map(minimap_line_shape).collect()
+}
+
+fn minimap_line_shape(line: &str) -> MinimapLineShape {
+    let mut total_cols = 0usize;
+    let mut indent_cols = 0usize;
+    let mut in_indent = true;
+    for ch in line.trim_end_matches('\r').chars() {
+        let next_col = advance_minimap_col(total_cols, ch);
+        if in_indent && (ch == ' ' || ch == '\t') {
+            indent_cols = next_col;
+        } else {
+            in_indent = false;
+        }
+        total_cols = next_col;
+    }
+    MinimapLineShape {
+        indent_cols,
+        content_cols: total_cols.saturating_sub(indent_cols),
+    }
+}
+
+fn advance_minimap_col(col: usize, ch: char) -> usize {
+    if ch == '\t' {
+        ((col / 4) + 1) * 4
+    } else {
+        col + 1
+    }
+}
+
+fn minimap_style_color(style: CellStyle) -> [f32; 4] {
+    match style.fg {
+        CellColor::Default => MINIMAP_DEFAULT_LINE,
+        CellColor::Rgb(r, g, b) => rgb_to_minimap_color(r, g, b),
+        CellColor::Indexed(idx) => {
+            let c = indexed_to_glyphon(idx);
+            rgb_to_minimap_color(c.r(), c.g(), c.b())
+        }
+    }
+}
+
+fn rgb_to_minimap_color(r: u8, g: u8, b: u8) -> [f32; 4] {
+    [
+        f32::from(r) / 255.0,
+        f32::from(g) / 255.0,
+        f32::from(b) / 255.0,
+        0.9,
+    ]
+}
+
+fn rects_to_vertex_bytes(
+    rects: &[MinimapRect],
+    surface_width: u32,
+    surface_height: u32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(rects.len() * 6 * QUAD_VERTEX_STRIDE as usize);
+    for rect in rects {
+        push_rect_vertices(&mut bytes, *rect, surface_width, surface_height);
+    }
+    bytes
+}
+
+fn push_rect_vertices(bytes: &mut Vec<u8>, rect: MinimapRect, width: u32, height: u32) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || width == 0 || height == 0 {
+        return;
+    }
+    let x0 = px_to_ndc_x(rect.x, width);
+    let x1 = px_to_ndc_x(rect.x + rect.w, width);
+    let y0 = px_to_ndc_y(rect.y, height);
+    let y1 = px_to_ndc_y(rect.y + rect.h, height);
+    push_quad_vertex(bytes, x0, y0, rect.color);
+    push_quad_vertex(bytes, x1, y0, rect.color);
+    push_quad_vertex(bytes, x1, y1, rect.color);
+    push_quad_vertex(bytes, x0, y0, rect.color);
+    push_quad_vertex(bytes, x1, y1, rect.color);
+    push_quad_vertex(bytes, x0, y1, rect.color);
+}
+
+fn push_quad_vertex(bytes: &mut Vec<u8>, x: f32, y: f32, color: [f32; 4]) {
+    for value in [x, y, color[0], color[1], color[2], color[3]] {
+        bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+}
+
+fn px_to_ndc_x(x: f32, width: u32) -> f32 {
+    x / width as f32 * 2.0 - 1.0
+}
+
+fn px_to_ndc_y(y: f32, height: u32) -> f32 {
+    1.0 - y / height as f32 * 2.0
 }
 
 /// Build the rich-text chunks fed to glyphon. Source chunks come from
@@ -1094,6 +1613,21 @@ mod tests {
         }
     }
 
+    fn color_close(a: [f32; 4], b: [f32; 4]) -> bool {
+        a.into_iter()
+            .zip(b)
+            .all(|(left, right)| (left - right).abs() < 0.001)
+    }
+
+    fn f32_at(bytes: &[u8], index: usize) -> f32 {
+        let start = index * std::mem::size_of::<f32>();
+        f32::from_ne_bytes(
+            bytes[start..start + std::mem::size_of::<f32>()]
+                .try_into()
+                .expect("f32 bytes"),
+        )
+    }
+
     fn span(start: u64, end: u64, fg: CellColor) -> StyleSpan {
         StyleSpan {
             range: ByteRange { start, end },
@@ -1209,5 +1743,132 @@ mod tests {
         );
 
         assert_eq!(chunk_texts(&chunks), vec!["abcd", "X"]);
+    }
+
+    #[test]
+    fn minimap_rects_project_line_styles_as_right_side_bands() {
+        let red = style_with_fg(CellColor::Rgb(255, 0, 0));
+        let blue = style_with_fg(CellColor::Rgb(0, 0, 255));
+        let shapes = minimap_line_shapes("alpha\nbeta\ngamma\ndelta");
+        let rects = minimap_rects(&[red, red, blue, blue], &shapes, 240, 80, 0, 2);
+
+        assert!(
+            rects
+                .iter()
+                .any(|r| color_close(r.color, rgb_to_minimap_color(255, 0, 0))),
+            "red line summary band should render"
+        );
+        assert!(
+            rects
+                .iter()
+                .any(|r| color_close(r.color, rgb_to_minimap_color(0, 0, 255))),
+            "blue line summary band should render"
+        );
+        assert!(
+            rects
+                .iter()
+                .any(|r| color_close(r.color, MINIMAP_THUMB_FILL)),
+            "visible-window affordance should render"
+        );
+    }
+
+    #[test]
+    fn minimap_rects_bucket_large_files_to_pixel_rows() {
+        let red = style_with_fg(CellColor::Rgb(255, 0, 0));
+        let blue = style_with_fg(CellColor::Rgb(0, 0, 255));
+        let lines: Vec<_> = (0..10_000)
+            .map(|idx| if idx % 2 == 0 { red } else { blue })
+            .collect();
+        let shapes = vec![
+            MinimapLineShape {
+                indent_cols: 0,
+                content_cols: 40,
+            };
+            lines.len()
+        ];
+
+        let rects = minimap_rects(&lines, &shapes, 240, 120, 0, 30);
+
+        let pixel_rows = (120.0 - MINIMAP_TOP - MINIMAP_BOTTOM).round() as usize;
+        assert!(
+            rects.len() <= pixel_rows + 4,
+            "minimap must bucket by visible rows, not emit per source line"
+        );
+    }
+
+    #[test]
+    fn minimap_hidden_when_surface_is_too_narrow() {
+        let lines = [style_with_fg(CellColor::Rgb(255, 0, 0))];
+        let shapes = [MinimapLineShape {
+            indent_cols: 0,
+            content_cols: 10,
+        }];
+
+        assert!(minimap_rects(&lines, &shapes, 120, 120, 0, 1).is_empty());
+    }
+
+    #[test]
+    fn minimap_rects_use_line_shape_for_indent_and_length() {
+        let red = style_with_fg(CellColor::Rgb(255, 0, 0));
+        let shapes = [
+            MinimapLineShape {
+                indent_cols: 0,
+                content_cols: 80,
+            },
+            MinimapLineShape {
+                indent_cols: 24,
+                content_cols: 12,
+            },
+        ];
+
+        let rects = minimap_rects(&[red, red], &shapes, 240, 80, 0, 2);
+        let strokes: Vec<_> = rects
+            .iter()
+            .filter(|r| color_close(r.color, rgb_to_minimap_color(255, 0, 0)))
+            .collect();
+
+        assert_eq!(strokes.len(), 2);
+        assert!(
+            strokes[1].x > strokes[0].x,
+            "indented source line should shift right in the minimap"
+        );
+        assert!(
+            strokes[1].w < strokes[0].w,
+            "shorter source line should draw a shorter minimap stroke"
+        );
+    }
+
+    #[test]
+    fn minimap_line_shapes_preserve_trailing_empty_line() {
+        let shapes = minimap_line_shapes("a\n");
+
+        assert_eq!(
+            shapes,
+            vec![
+                MinimapLineShape {
+                    indent_cols: 0,
+                    content_cols: 1,
+                },
+                MinimapLineShape::default(),
+            ]
+        );
+    }
+
+    #[test]
+    fn minimap_rects_encode_six_vertices_per_quad() {
+        let rect = MinimapRect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            color: rgb_to_minimap_color(255, 0, 0),
+        };
+
+        let bytes = rects_to_vertex_bytes(&[rect], 100, 100);
+
+        assert_eq!(bytes.len(), 6 * QUAD_VERTEX_STRIDE as usize);
+        assert!((f32_at(&bytes, 0) + 1.0).abs() < 0.001);
+        assert!((f32_at(&bytes, 1) - 1.0).abs() < 0.001);
+        assert!((f32_at(&bytes, 2) - 1.0).abs() < 0.001);
     }
 }
