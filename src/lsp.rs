@@ -3053,6 +3053,10 @@ impl LspManager {
             .lock()
             .expect("diag store mutex poisoned")
             .mark_stale(uri.clone());
+        self.semantic_token_store
+            .lock()
+            .expect("semantic token store mutex poisoned")
+            .mark_stale(uri.clone());
         let params = json!({
             "textDocument": {
                 "uri": uri,

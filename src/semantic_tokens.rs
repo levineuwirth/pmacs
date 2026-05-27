@@ -25,7 +25,7 @@
 //! priority vs. tree-sitter) is a separate rendering milestone; like
 //! the other LSP features, nothing here paints — Lua reads the store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -219,6 +219,10 @@ impl SemanticTokensLegend {
 #[derive(Default)]
 pub struct SemanticTokenStore {
     by_key: HashMap<SemanticTokenKey, SemanticTokensResponse>,
+    /// URIs whose stored semantic tokens are known to be stale
+    /// because the document changed after the last full/delta token
+    /// response was absorbed.
+    stale_uris: HashSet<String>,
 }
 
 /// Key into [`SemanticTokenStore`].
@@ -250,12 +254,31 @@ impl SemanticTokenStore {
 
     /// Replace the response at `key`.
     pub fn set(&mut self, key: SemanticTokenKey, response: SemanticTokensResponse) {
+        self.stale_uris.remove(&key.uri);
         self.by_key.insert(key, response);
     }
 
-    /// Drop the entry at `key`.
+    /// Drop the entry at `key`. Also clears the stale flag for that
+    /// URI when no other server has token data for it.
     pub fn clear(&mut self, key: &SemanticTokenKey) {
         self.by_key.remove(key);
+        if !self.by_key.keys().any(|k| k.uri == key.uri) {
+            self.stale_uris.remove(&key.uri);
+        }
+    }
+
+    /// Mark all semantic-token entries for `uri` stale. Called when
+    /// a `textDocument/didChange` is sent so renderers do not paint
+    /// byte ranges from a pre-edit token set.
+    pub fn mark_stale(&mut self, uri: impl Into<String>) {
+        self.stale_uris.insert(uri.into());
+    }
+
+    /// `true` iff `uri` has semantic-token data that should not be
+    /// rendered against the current buffer text.
+    #[must_use]
+    pub fn is_stale(&self, uri: &str) -> bool {
+        self.stale_uris.contains(uri)
     }
 
     /// Look up the entry at `key`.
@@ -423,6 +446,40 @@ mod tests {
         assert_eq!(s.get(&key).unwrap().tokens.len(), 1);
         s.clear(&key);
         assert!(s.get(&key).is_none());
+    }
+
+    #[test]
+    fn stale_flag_clears_on_set_and_final_clear() {
+        let mut s = SemanticTokenStore::new();
+        let key = SemanticTokenKey::new("1", "file:///a");
+        let response = SemanticTokensResponse {
+            tokens: vec![SemanticToken {
+                line: 0,
+                start: 0,
+                length: 1,
+                token_type: 0,
+                token_modifiers: 0,
+            }],
+            result_id: None,
+            raw: vec![0, 0, 1, 0, 0],
+        };
+
+        s.set(key.clone(), response.clone());
+        s.mark_stale("file:///a");
+        assert!(s.is_stale("file:///a"));
+
+        s.set(key.clone(), response);
+        assert!(
+            !s.is_stale("file:///a"),
+            "fresh semantic tokens clear stale flag"
+        );
+
+        s.mark_stale("file:///a");
+        s.clear(&key);
+        assert!(
+            !s.is_stale("file:///a"),
+            "clearing final token entry clears stale flag"
+        );
     }
 
     #[test]

@@ -421,6 +421,9 @@ impl View for DiagnosticView {
         // doesn't today, but the discipline is cheap).
         let diags: Vec<Diagnostic> = {
             let guard = self.store.lock().expect("diag store mutex poisoned");
+            if guard.is_stale(&self.uri) {
+                return;
+            }
             guard.for_uri(&self.uri).to_vec()
         };
         if diags.is_empty() {
@@ -795,5 +798,51 @@ mod tests {
         let store = make_shared_store();
         let view = DiagnosticView::new("file:///a", store);
         assert_eq!(view.kind(), "diagnostic");
+    }
+
+    #[test]
+    fn diagnostic_view_suppresses_stale_store_entries() {
+        use crate::cell::{Cell, CellSize, UnderlineStyle};
+
+        let store = make_shared_store();
+        {
+            let mut guard = store.lock().expect("diag store");
+            guard.set(
+                "file:///a",
+                vec![diag(0, DiagnosticSeverity::Error, "stale")],
+            );
+            guard.mark_stale("file:///a");
+        }
+
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "test.c");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"hello\n",
+        })
+        .expect("seed buffer");
+
+        let mut view = DiagnosticView::new("file:///a", store);
+        let mut backing = vec![Cell::default(); 10];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 10,
+            size: CellSize::new(1, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(1, 10),
+            },
+            &mut grid,
+        );
+
+        assert_eq!(
+            grid.get(CellCoord::new(0, 0)).style.underline,
+            UnderlineStyle::None,
+            "stale diagnostics must not underline shifted TUI bytes"
+        );
     }
 }

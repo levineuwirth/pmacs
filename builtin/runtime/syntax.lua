@@ -17,6 +17,11 @@
 -- when `pmacs.parse._dispatch` is called below; drained by the tick
 -- step.
 local pending_parse_jobs = {}
+local parse_job_buffer_keys = {}
+local inflight_parse_by_buffer = {}
+local parse_buffer_by_key = {}
+local parse_lang_by_buffer = {}
+local reparse_requested_by_buffer = {}
 
 local raw_dispatch = pmacs.parse._dispatch
 
@@ -24,8 +29,18 @@ local raw_dispatch = pmacs.parse._dispatch
 -- pending set. Calls into `_dispatch` from outside this file (e.g.
 -- a hand-rolled user script) get the same tracking for free.
 function pmacs.parse._dispatch(buf, lang)
+  local key = tostring(buf)
+  parse_buffer_by_key[key] = buf
+  parse_lang_by_buffer[key] = lang
+  local inflight = inflight_parse_by_buffer[key]
+  if inflight then
+    reparse_requested_by_buffer[key] = true
+    return inflight
+  end
   local job_id = raw_dispatch(buf, lang)
   pending_parse_jobs[job_id] = true
+  parse_job_buffer_keys[job_id] = key
+  inflight_parse_by_buffer[key] = job_id
   return job_id
 end
 
@@ -68,6 +83,40 @@ pmacs.hook.add("buffer.after-load", function()
   end
 end)
 
+local function reparse_active_buffer_after_edit()
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  if not pmacs.parse._has_view(buf) then return end
+  local pending = pmacs.parse._pending_edits(buf)
+  if not pending or pending == 0 then return end
+  local path = buf:name()
+  if not path then return end
+  local lang = pmacs.parse.language_for_path(path)
+  if not lang then return end
+  pmacs.parse._dispatch(buf, lang)
+end
+
+pmacs.hook.add("buffer.after-edit", function()
+  -- `ParseView:on_edit` records incremental edits synchronously, but
+  -- highlight overlays only see new spans after a fresh parse settles.
+  local ok, err = pcall(reparse_active_buffer_after_edit)
+  if not ok and pmacs.error then
+    pmacs.error("syntax.after-edit: " .. tostring(err))
+  end
+end)
+
+local function dispatch_follow_up_if_dirty(key)
+  local buf = parse_buffer_by_key[key]
+  local lang = parse_lang_by_buffer[key]
+  if not buf or not lang then return end
+  local pending = pmacs.parse._pending_edits(buf)
+  local requested = reparse_requested_by_buffer[key]
+  reparse_requested_by_buffer[key] = nil
+  if requested or (pending and pending > 0) then
+    pmacs.parse._dispatch(buf, lang)
+  end
+end
+
 -- After-tick step: any parse job that has settled gets its bundle
 -- installed into the buffer's view (and its pending entry drained).
 -- Extension hook on top of the async runtime's tick rather than a
@@ -78,8 +127,14 @@ pmacs._async.tick = function(...)
   local ret = prior_tick(...)
   for job_id in pairs(pending_parse_jobs) do
     if pmacs._async._is_complete(job_id) then
+      local key = parse_job_buffer_keys[job_id]
       pmacs.parse._install_settled(job_id)
       pending_parse_jobs[job_id] = nil
+      parse_job_buffer_keys[job_id] = nil
+      if key and inflight_parse_by_buffer[key] == job_id then
+        inflight_parse_by_buffer[key] = nil
+        dispatch_follow_up_if_dirty(key)
+      end
     end
   end
   return ret

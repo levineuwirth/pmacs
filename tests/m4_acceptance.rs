@@ -87,8 +87,10 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use pmacs::async_runtime::{AsyncRuntime, JobOutcome, JobResult};
 use pmacs::buffer::{Buffer, BufferId, EditOp};
+use pmacs::protocol::FrontendId;
 use pmacs::syntax::{self, ParseRequest, ParseView};
 
 /// Synthetic Rust source: `n` lines of plausible-but-trivial code.
@@ -326,6 +328,20 @@ fn current_tree_language(state: &pmacs::editor::EditorState) -> Option<String> {
         local tree = pmacs.parse.tree(buf)
         if not tree then return nil end
         return tree:language()
+    ";
+    lua.load(chunk).eval::<Option<String>>().ok().flatten()
+}
+
+/// Returns the source snapshot attached to the active buffer's most
+/// recently installed parse tree.
+fn current_tree_text(state: &pmacs::editor::EditorState) -> Option<String> {
+    let lua = state.lua_host.lua();
+    let chunk = r"
+        local buf = pmacs.window.buffer()
+        if not buf then return nil end
+        local tree = pmacs.parse.tree(buf)
+        if not tree then return nil end
+        return tree:text()
     ";
     lua.load(chunk).eval::<Option<String>>().ok().flatten()
 }
@@ -622,6 +638,75 @@ fn m4_3_highlight_updates_within_one_frame_after_parse() {
     assert!(
         before != after || highlighted,
         "edit+reparse should change rendered cells (or the original highlight is already valid)"
+    );
+}
+
+/// Regression for task #25: an edit delivered through the normal
+/// key-dispatch path must trigger the syntax runtime to dispatch a
+/// fresh parse. Without the `buffer.after-edit` hook in
+/// `builtin/runtime/syntax.lua`, `ParseView:on_edit` accumulates a
+/// pending edit but `pmacs.parse.tree(buf)` remains the old source
+/// indefinitely, which leaves syntax colors pinned to stale byte
+/// offsets in both frontends.
+#[test]
+fn m4_3_key_edit_reparses_active_buffer_without_manual_dispatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("after_edit.rs");
+    std::fs::write(&path, b"fn main() {}\n").expect("write");
+
+    let mut state = open_and_wait_for_parse(path);
+    assert_eq!(current_tree_text(&state).as_deref(), Some("fn main() {}\n"));
+
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    );
+
+    let pending_after_key: Option<usize> = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local buf = pmacs.window.buffer()
+            return pmacs.parse._pending_edits(buf)
+        ",
+        )
+        .eval()
+        .expect("pending edit count");
+    assert_eq!(
+        pending_after_key,
+        Some(0),
+        "after-edit syntax hook should dispatch and drain pending parse edits"
+    );
+
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+    );
+
+    let pending_after_second_key: Option<usize> = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local buf = pmacs.window.buffer()
+            return pmacs.parse._pending_edits(buf)
+        ",
+        )
+        .eval()
+        .expect("pending edit count after queued edit");
+    assert_eq!(
+        pending_after_second_key,
+        Some(1),
+        "edits made while a parse is in flight should wait for a follow-up parse"
+    );
+
+    pump_async(&mut state, |s| {
+        current_tree_text(s).as_deref() == Some("xyfn main() {}\n")
+    });
+    assert_eq!(
+        current_tree_text(&state).as_deref(),
+        Some("xyfn main() {}\n")
     );
 }
 
@@ -1294,6 +1379,13 @@ fn m4_5_did_change_notifications_go_out_after_edits() {
         mgr.borrow_mut()
             .did_change_full(sid, uri, v, text)
             .expect("didChange");
+    }
+    {
+        let store = mgr.borrow().semantic_token_store();
+        assert!(
+            store.lock().expect("semantic token store").is_stale(uri),
+            "didChange must mark semantic tokens stale so stale TUI LSP styles are suppressed"
+        );
     }
     // The fake LSP replies with a `pmacs/echo` notification per
     // didOpen/didChange (5 total).
