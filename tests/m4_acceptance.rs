@@ -3983,14 +3983,14 @@ fn m4_15_workspace_edit_resource_ops_apply_in_order() {
 #[test]
 fn m4_16_lua_surface_drives_inlay_hints() {
     let mut s = pmacs::editor::EditorState::new();
-    spawn_lsp_and_init(&mut s, None);
+    spawn_lsp_and_init(&mut s, Some("inlaybounds"));
 
     let uri = "file:///tmp/m4_16_inlay.rs";
     s.lua_host
         .lua()
         .load(format!(
             "pmacs.lsp.did_open(_G._lsp, '{uri}', 1, 'let x = 1\\nfn f() {{}}\\n')
-             pmacs.lsp.request_inlay_hint(_G._lsp, '{uri}', 0, 0, 5, 0)"
+             pmacs.lsp.request_inlay_hint(_G._lsp, '{uri}', 0, 0, 2, 0)"
         ))
         .exec()
         .expect("kick off inlay hint request");
@@ -4148,6 +4148,57 @@ fn m4_18_inlay_hint_refresh_repulls_via_server_request() {
     assert!(
         pump_lua_flag(&mut state, &flag, 5),
         "server-driven inlayHint/refresh never re-pulled hints into the store"
+    );
+}
+
+/// Session 6 follow-up: the GPU consumer can only render
+/// `InlineAdornments` once the LSP inlay-hint store has data. A
+/// server is not required to send `workspace/inlayHint/refresh` after
+/// initialize, so the default LSP runtime should pull hints once for
+/// an attached document when the server reaches `initialized`.
+#[test]
+fn m4_18b_inlay_hints_auto_pull_after_initialize() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'inlaybounds' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    let flag = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local h = pmacs.inlay_hint.hints(sid, 'file://{a_disp}') \
+           return h ~= nil and #h > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &flag, 5),
+        "initialized inlay-capable server did not auto-pull hints into the store"
     );
 }
 
@@ -4963,6 +5014,73 @@ fn m4_28_real_clangd_diagnostics_and_semantic_tokens_via_auto_attach() {
         "real clangd returned no documentSymbols via auto-attach"
     );
     assert_no_lsp_crash(&mut state, "clangd");
+}
+
+/// PATH-gated real-server hardening for Session 6: rust-analyzer
+/// rejects over-wide `textDocument/inlayHint` ranges instead of
+/// clamping them. The default-bundle auto-attach path must therefore
+/// pull inlay hints over the exact document end, otherwise
+/// `pmacs-gpu` receives no `InlineAdornments` for ordinary Rust files.
+#[test]
+fn m4_29_real_rust_analyzer_inlay_hints_via_auto_attach() {
+    use pmacs::editor::EditorState;
+
+    let Ok(rust_analyzer) = which_binary("rust-analyzer") else {
+        eprintln!("rust-analyzer not on PATH; skipping");
+        return;
+    };
+    let rust_analyzer = rust_analyzer.display().to_string();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    std::fs::create_dir(root.join("src")).expect("mkdir src");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        b"[package]\nname = \"pmacs_ra_inlay_hardening\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("Cargo.toml");
+    let src = "use std::collections::HashMap;\n\
+               \n\
+               fn main() {\n\
+               \tlet answer = 42;\n\
+               \tlet pi = 3.14;\n\
+               \tlet mut counts = HashMap::new();\n\
+               \tcounts.insert(\"a\", 1);\n\
+               \tlet _g = format_pair(answer, pi);\n\
+               }\n\
+               \n\
+               fn format_pair(n: i32, x: f64) -> String {\n\
+               \tformat!(\"{n}-{x}\")\n\
+               }\n";
+    let file = root.join("src/main.rs");
+    std::fs::write(&file, src).expect("main.rs");
+
+    let root_disp = root.display().to_string();
+    let file_disp = file.display().to_string();
+    let uri = format!("file://{file_disp}");
+
+    let mut state = EditorState::new();
+    real_server_open_and_init(&mut state, "rust", &rust_analyzer, &root_disp, &file_disp);
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            &format!(
+                "(function() \
+                   local sid \
+                   for _,r in ipairs(pmacs.lsp.list()) do \
+                     if r.state and r.state.kind=='initialized' then sid=r.id end \
+                   end \
+                   if not sid then return false end \
+                   local h = pmacs.inlay_hint.hints(sid, '{uri}') \
+                   return h ~= nil and #h > 0 \
+                 end)()"
+            ),
+            30,
+        ),
+        "real rust-analyzer returned no inlay hints via auto-attach"
+    );
+    assert_no_lsp_crash(&mut state, "rust-analyzer");
 }
 
 /// Default LSP bundle (`builtin/runtime/lsp.lua`) is wired in: the

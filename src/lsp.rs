@@ -2037,8 +2037,8 @@ impl LspManager {
         let params = json!({
             "textDocument": { "uri": uri.clone() },
             "range": {
-                "start": { "line": start_line, "character": start_col },
-                "end":   { "line": end_line,   "character": end_col   },
+                "start": self.outbound_position(sid, &uri, start_line, start_col),
+                "end":   self.outbound_position(sid, &uri, end_line, end_col),
             },
         });
         let req_id = self.send_request(sid, "textDocument/inlayHint", params)?;

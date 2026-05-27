@@ -32,8 +32,9 @@ use glyphon::{
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use pmacs_protocol::{
-    BufferId, ByteRange, Decoration, DecorationKind, DecorationSegment, InstanceMessage,
-    StyleSegment, StyleSpan, cell::Color as CellColor,
+    AdornmentContent, AdornmentPlacement, BufferId, ByteRange, Decoration, DecorationKind,
+    DecorationSegment, InlineAdornment, InstanceMessage, StyleSegment, StyleSpan,
+    cell::Color as CellColor,
 };
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
@@ -203,6 +204,13 @@ struct State {
     /// are not rendered in session 5; see the session-5 design note
     /// for the deferred quad-pipeline finding.
     current_decorations: Vec<Decoration>,
+    /// Inline virtual text for `current_buffer_id` (session 6).
+    /// Producer-side Phase A currently emits LSP inlay hints as
+    /// `AtOffset` text adornments only. The GUI stores the whole scoped
+    /// set and projects it into the shaped rich text without inserting
+    /// bytes into `current_text`; source byte ranges for style spans and
+    /// decorations therefore remain source-relative.
+    current_adornments: Vec<InlineAdornment>,
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -402,28 +410,32 @@ impl State {
             current_buffer_id: None,
             current_spans: Vec::new(),
             current_decorations: Vec::new(),
+            current_adornments: Vec::new(),
         }
     }
 
     /// Replace the rendered text with `text` and request a redraw.
-    /// No-op when `text` is byte-identical to the current rendering
-    /// (avoids the re-shape cost when an unchanged buffer ticks).
+    /// Returns `false` when `text` is byte-identical to the current
+    /// rendering (avoids the re-shape cost when an unchanged buffer
+    /// ticks).
     ///
     /// Replaces the rope text and routes through `reshape` so the
-    /// rich-text rendering uses the current `current_spans`. When
-    /// called from the `CrdtOp` path (text shifted under existing
-    /// spans) the spans are momentarily stale relative to the new
-    /// byte positions — `reshape` clamps via `range.end.min(text_len)`
-    /// so rendering is safe, but visual styling may be off until the
-    /// daemon's next `StyleSpans` frame catches up. A real artifact;
-    /// classified as a session-4 known limitation rather than a bug.
-    fn set_text(&mut self, text: &str) {
+    /// rich-text rendering uses the current spans, decorations, and
+    /// inline adornments. When called from the `CrdtOp` path (text
+    /// shifted under existing source anchors) those anchors are
+    /// momentarily stale relative to the new byte positions —
+    /// `reshape` clamps via `range.end.min(text_len)` so rendering is
+    /// safe, but visual styling may be off until the daemon's next
+    /// semantic frame catches up. A real artifact; classified as a
+    /// known Phase A limitation rather than a bug.
+    fn set_text(&mut self, text: &str) -> bool {
         if self.current_text == text {
-            return;
+            return false;
         }
         self.current_text.clear();
         self.current_text.push_str(text);
         self.reshape();
+        true
     }
 
     /// Apply one `InstanceMessage`; return a follow-up
@@ -444,13 +456,17 @@ impl State {
     ///   search match). Session 5 renders diagnostic kinds as fg color
     ///   overrides; background-kind decorations are accumulated but
     ///   not painted (see session 5's deferred quad-pipeline finding).
+    /// - `InlineAdornments` — replace the scoped virtual-text set and
+    ///   reshape the display projection. Session 6 consumes `AtOffset`
+    ///   text adornments (LSP inlay hints); other placements/content
+    ///   remain explicitly deferred.
     /// - `Goodbye` — surfaced via the reader thread's clean-EOF path,
     ///   not handled here.
     ///
-    /// Remaining `SemanticFrame` variants (`InlineAdornments`,
-    /// `FileStyleSummary`) plus the grid variants (`CellDelta`,
-    /// `Cursor`, `CursorByte`) and presence updates are ignored in
-    /// session 5 — they land in subsequent Phase A sessions.
+    /// Remaining `SemanticFrame` variants (`FileStyleSummary`) plus
+    /// the grid variants (`CellDelta`, `Cursor`, `CursorByte`) and
+    /// presence updates are ignored in session 6 — they land in
+    /// subsequent Phase A sessions.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
             InstanceMessage::BufferSnapshot {
@@ -471,7 +487,10 @@ impl State {
                 // buffer is authoritative.
                 self.current_spans.clear();
                 self.current_decorations.clear();
-                self.set_text(&text);
+                self.current_adornments.clear();
+                if !self.set_text(&text) {
+                    self.reshape();
+                }
                 Some(ViewportSend {
                     buffer_id,
                     visible: ByteRange {
@@ -514,6 +533,12 @@ impl State {
                 // *incremental* updates ship dirty-range spans only,
                 // and an emptied cache loses the non-dirty viewport
                 // styling entirely.
+                //
+                // InlineAdornments use whole-set suppression rather
+                // than dirty segments, so the same ownership rule
+                // applies here: keep the last set until the producer
+                // sends a replacement. Session 8's temporal probe is
+                // where visible edit-flicker/staleness gets scored.
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
                 self.set_text(&text);
                 None
@@ -549,6 +574,15 @@ impl State {
                 } else {
                     self.merge_decorations(segments);
                 }
+                self.reshape();
+                None
+            }
+            InstanceMessage::InlineAdornments { buffer_id, items } => {
+                if self.current_buffer_id != Some(buffer_id) {
+                    return None;
+                }
+                self.current_adornments = items;
+                self.current_adornments.sort_by_key(|a| a.at);
                 self.reshape();
                 None
             }
@@ -702,17 +736,13 @@ impl State {
     }
 
     /// Re-build the cosmic-text Buffer from `current_text` +
-    /// `current_spans` + `current_decorations`. Computes a sorted
-    /// boundary list (every span and decoration edge, plus 0 and
-    /// `text_len`) and emits one chunk per `[boundary_i, boundary_{i+1})`
-    /// interval. Effective color picks the first matching decoration
-    /// kind with a renderable color (diagnostics in session 5; the
-    /// background-needing kinds — `Selection` / `SearchMatch` /
-    /// `SearchMatchActive` / `CurrentLine` — produce `None` and fall
-    /// through to span color). The decoration override means a
-    /// diagnostic squiggle's color beats syntax color for the bytes
-    /// it covers, which matches user expectation across both
-    /// reference editors and the pmacs TUI.
+    /// `current_spans` + `current_decorations` +
+    /// `current_adornments`. Source styling/decorations remain
+    /// byte-indexed into `current_text`; adornments contribute extra
+    /// rich-text chunks at their anchors without mutating the source
+    /// string. That display projection is the central session-6
+    /// invariant: virtual text must not shift the source-byte ranges
+    /// used by `StyleSpans` / `Decorations`.
     ///
     /// Complexity is O(B × (S + D)) per reshape where B is the boundary
     /// count and S+D is spans+decorations. For viewport-scoped data
@@ -721,61 +751,21 @@ impl State {
     /// surfaces in profile data — recorded but not done in session 5.
     fn reshape(&mut self) {
         let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
-        let text_len = self.current_text.len() as u64;
-
-        // Collect every interesting byte position. Clamp to text_len
-        // so a stale span/decoration past EOF (CrdtOp→next-frame race)
-        // can't index out.
-        let mut boundaries: Vec<u64> = vec![0, text_len];
-        for sp in &self.current_spans {
-            boundaries.push(sp.range.start.min(text_len));
-            boundaries.push(sp.range.end.min(text_len));
-        }
-        for d in &self.current_decorations {
-            boundaries.push(d.range.start.min(text_len));
-            boundaries.push(d.range.end.min(text_len));
-        }
-        boundaries.sort_unstable();
-        boundaries.dedup();
-
-        let mut chunks: Vec<(String, Attrs<'static>)> = Vec::new();
-        for w in boundaries.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            if a >= b {
-                continue;
-            }
-            // Pick the effective color at byte `a` (which is also the
-            // color for every byte in `[a, b)` since boundaries
-            // bracket every coverage change).
-            let mut color: Option<glyphon::Color> = None;
-            for d in &self.current_decorations {
-                if d.range.start <= a
-                    && a < d.range.end
-                    && let Some(c) = decoration_kind_to_color(d.kind)
-                {
-                    color = Some(c);
-                    break;
-                }
-            }
-            if color.is_none() {
-                for sp in &self.current_spans {
-                    if sp.range.start <= a && a < sp.range.end {
-                        color = cell_color_to_glyphon(sp.style.fg);
-                        break;
-                    }
-                }
-            }
+        let chunks: Vec<(String, Attrs<'static>)> = projected_rich_chunks(
+            &self.current_text,
+            &self.current_spans,
+            &self.current_decorations,
+            &self.current_adornments,
+        )
+        .into_iter()
+        .map(|chunk| {
             let mut attrs = default_attrs.clone();
-            if let Some(c) = color {
+            if let Some(c) = chunk.color {
                 attrs = attrs.color(c);
             }
-            chunks.push((self.current_text[a as usize..b as usize].to_owned(), attrs));
-        }
-        // No spans / decorations + empty text ⇒ feed one empty chunk
-        // so set_rich_text has something to draw.
-        if chunks.is_empty() {
-            chunks.push((String::new(), default_attrs.clone()));
-        }
+            (chunk.text, attrs)
+        })
+        .collect();
         self.buffer.set_rich_text(
             &mut self.font_system,
             chunks.iter().map(|(s, a)| (s.as_str(), a.clone())),
@@ -876,6 +866,128 @@ impl State {
     }
 }
 
+#[derive(Clone, Debug)]
+struct RichChunk {
+    text: String,
+    color: Option<glyphon::Color>,
+}
+
+/// Build the rich-text chunks fed to glyphon. Source chunks come from
+/// `text` and retain source-byte styling; inline adornments create
+/// extra chunks at their anchors and therefore do not shift any source
+/// span/decoration range.
+fn projected_rich_chunks(
+    text: &str,
+    spans: &[StyleSpan],
+    decorations: &[Decoration],
+    adornments: &[InlineAdornment],
+) -> Vec<RichChunk> {
+    let text_len = text.len() as u64;
+    let mut boundaries: Vec<u64> = vec![0, text_len];
+    for sp in spans {
+        boundaries.push(sp.range.start.min(text_len));
+        boundaries.push(sp.range.end.min(text_len));
+    }
+    for d in decorations {
+        boundaries.push(d.range.start.min(text_len));
+        boundaries.push(d.range.end.min(text_len));
+    }
+    let mut renderable_adornments: Vec<(usize, u64, &InlineAdornment)> = adornments
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, a)| renderable_adornment_anchor(a, text_len).map(|at| (idx, at, a)))
+        .collect();
+    for (_, at, _) in &renderable_adornments {
+        boundaries.push(*at);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    renderable_adornments.sort_by_key(|(idx, at, _)| (*at, *idx));
+
+    let mut chunks = Vec::new();
+    let mut adorn_idx = 0usize;
+    for w in boundaries.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        push_adornments_at(&mut chunks, &renderable_adornments, &mut adorn_idx, a);
+        if a < b {
+            chunks.push(RichChunk {
+                text: text[a as usize..b as usize].to_owned(),
+                color: source_color_at(a, spans, decorations),
+            });
+        }
+    }
+    push_adornments_at(
+        &mut chunks,
+        &renderable_adornments,
+        &mut adorn_idx,
+        text_len,
+    );
+    if chunks.is_empty() {
+        chunks.push(RichChunk {
+            text: String::new(),
+            color: None,
+        });
+    }
+    chunks
+}
+
+fn renderable_adornment_anchor(adornment: &InlineAdornment, text_len: u64) -> Option<u64> {
+    match (&adornment.placement, &adornment.content) {
+        (AdornmentPlacement::AtOffset, AdornmentContent::Text { .. }) => {
+            Some(adornment.at.min(text_len))
+        }
+        // Session 6 consumes the inlay-hint producer surface only.
+        // Other placements and resource handles need layout/resource
+        // policy, so silently ignore them until their sessions land.
+        _ => None,
+    }
+}
+
+fn push_adornments_at(
+    chunks: &mut Vec<RichChunk>,
+    adornments: &[(usize, u64, &InlineAdornment)],
+    next: &mut usize,
+    at: u64,
+) {
+    while let Some((_, anchor, adornment)) = adornments.get(*next).copied() {
+        if anchor != at {
+            break;
+        }
+        if let AdornmentContent::Text { text, style } = &adornment.content {
+            chunks.push(RichChunk {
+                text: text.clone(),
+                color: Some(adornment_text_color(style.fg)),
+            });
+        }
+        *next += 1;
+    }
+}
+
+fn adornment_text_color(fg: CellColor) -> glyphon::Color {
+    cell_color_to_glyphon(fg).unwrap_or_else(|| glyphon::Color::rgb(130, 130, 140))
+}
+
+fn source_color_at(
+    byte: u64,
+    spans: &[StyleSpan],
+    decorations: &[Decoration],
+) -> Option<glyphon::Color> {
+    for d in decorations {
+        if d.range.start <= byte
+            && byte < d.range.end
+            && let Some(c) = decoration_kind_to_color(d.kind)
+        {
+            return Some(c);
+        }
+    }
+    for sp in spans {
+        if sp.range.start <= byte && byte < sp.range.end {
+            return cell_color_to_glyphon(sp.style.fg);
+        }
+    }
+    None
+}
+
 /// Convert a `pmacs-protocol::cell::Color` to a `glyphon::Color`.
 /// Returns `None` for `Default` so the renderer falls back to the
 /// `Attrs` default color (white-ish in our render) rather than
@@ -967,5 +1079,135 @@ fn decoration_kind_to_color(kind: DecorationKind) -> Option<glyphon::Color> {
         | DecorationKind::SearchMatch
         | DecorationKind::SearchMatchActive
         | DecorationKind::CurrentLine => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pmacs_protocol::cell::Style;
+
+    fn style_with_fg(fg: CellColor) -> Style {
+        Style {
+            fg,
+            ..Style::default()
+        }
+    }
+
+    fn span(start: u64, end: u64, fg: CellColor) -> StyleSpan {
+        StyleSpan {
+            range: ByteRange { start, end },
+            style: style_with_fg(fg),
+        }
+    }
+
+    fn adornment(at: u64, placement: AdornmentPlacement, text: &str) -> InlineAdornment {
+        InlineAdornment {
+            at,
+            placement,
+            content: AdornmentContent::Text {
+                text: text.to_owned(),
+                style: Style::default(),
+            },
+        }
+    }
+
+    fn resource_adornment(at: u64, placement: AdornmentPlacement) -> InlineAdornment {
+        InlineAdornment {
+            at,
+            placement,
+            content: AdornmentContent::Resource { handle: 7 },
+        }
+    }
+
+    fn chunk_texts(chunks: &[RichChunk]) -> Vec<&str> {
+        chunks.iter().map(|chunk| chunk.text.as_str()).collect()
+    }
+
+    #[test]
+    fn projected_rich_chunks_inserts_at_offset_without_source_bytes() {
+        let chunks = projected_rich_chunks(
+            "abcd",
+            &[],
+            &[],
+            &[adornment(2, AdornmentPlacement::AtOffset, "X")],
+        );
+
+        assert_eq!(chunk_texts(&chunks), vec!["ab", "X", "cd"]);
+        let rendered: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+        assert_eq!(rendered, "abXcd");
+    }
+
+    #[test]
+    fn inline_adornment_does_not_shift_source_style_ranges() {
+        let chunks = projected_rich_chunks(
+            "abcd",
+            &[span(2, 4, CellColor::Indexed(1))],
+            &[],
+            &[adornment(2, AdornmentPlacement::AtOffset, "X")],
+        );
+
+        assert_eq!(chunk_texts(&chunks), vec!["ab", "X", "cd"]);
+        assert!(chunks[0].color.is_none());
+        assert!(
+            chunks[1].color.is_some(),
+            "default-styled virtual text should render as muted adornment text"
+        );
+        assert!(
+            chunks[2].color.is_some(),
+            "source styling must still begin at source byte 2"
+        );
+    }
+
+    #[test]
+    fn inline_adornment_does_not_shift_source_decoration_ranges() {
+        let chunks = projected_rich_chunks(
+            "abcd",
+            &[],
+            &[Decoration {
+                range: ByteRange { start: 2, end: 4 },
+                kind: DecorationKind::DiagnosticError,
+            }],
+            &[adornment(2, AdornmentPlacement::AtOffset, "X")],
+        );
+
+        assert_eq!(chunk_texts(&chunks), vec!["ab", "X", "cd"]);
+        assert!(chunks[0].color.is_none());
+        assert!(
+            chunks[1].color.is_some(),
+            "default-styled virtual text should render as muted adornment text"
+        );
+        assert!(
+            chunks[2].color.is_some(),
+            "diagnostic fg override must still begin at source byte 2"
+        );
+    }
+
+    #[test]
+    fn unsupported_adornment_placements_are_ignored_for_session_6() {
+        let chunks = projected_rich_chunks(
+            "abcd",
+            &[],
+            &[],
+            &[
+                adornment(0, AdornmentPlacement::BeforeLine, "before"),
+                adornment(4, AdornmentPlacement::EndOfLine, "end"),
+                resource_adornment(2, AdornmentPlacement::AtOffset),
+            ],
+        );
+
+        assert_eq!(chunk_texts(&chunks), vec!["abcd"]);
+    }
+
+    #[test]
+    fn adornment_anchor_past_end_clamps_to_end() {
+        let chunks = projected_rich_chunks(
+            "abcd",
+            &[],
+            &[],
+            &[adornment(99, AdornmentPlacement::AtOffset, "X")],
+        );
+
+        assert_eq!(chunk_texts(&chunks), vec!["abcd", "X"]);
     }
 }
