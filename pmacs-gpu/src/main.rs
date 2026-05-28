@@ -969,6 +969,16 @@ impl State {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let bg_vertices = self.decoration_background_vertex_bytes();
+        let bg_vertex_count = (bg_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let bg_buffer = (!bg_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("pmacs-gpu decoration backgrounds"),
+                    contents: &bg_vertices,
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let minimap_vertices = self.minimap_vertex_bytes();
         let minimap_vertex_count = (minimap_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let minimap_buffer = (!minimap_vertices.is_empty()).then(|| {
@@ -1028,6 +1038,15 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+            // Q#2 stance (α): single render pass, three draws. Quad
+            // backgrounds first (Selection today; CurrentLine in 9.2)
+            // so their translucent fills sit under the glyphs; text
+            // second so source/inlay color shows on top; minimap last
+            // so it draws over the right-margin text region.
+            if let Some(vertex_buffer) = bg_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, bg_vertex_count);
+            }
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text_renderer render");
@@ -1072,6 +1091,60 @@ impl State {
             visible_lines,
         );
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
+    /// Vertex bytes for quad-pipeline background rectangles covering
+    /// every background-bearing decoration in `current_decorations`.
+    /// Walks `cosmic_text::Buffer::layout_runs()` to map each
+    /// decoration's `ByteRange` into per-visual-line pixel rectangles:
+    /// a multi-line selection produces one rect per layout run that
+    /// carries at least one glyph whose `[start, end)` overlaps the
+    /// decoration. Returns an empty `Vec` when no background-bearing
+    /// decoration intersects any laid-out glyph.
+    fn decoration_background_vertex_bytes(&self) -> Vec<u8> {
+        let rects = self.decoration_background_rects();
+        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
+    fn decoration_background_rects(&self) -> Vec<MinimapRect> {
+        let mut rects = Vec::new();
+        for d in &self.current_decorations {
+            let Some(color) = decoration_kind_to_bg_color(d.kind) else {
+                continue;
+            };
+            let lo = d.range.start;
+            let hi = d.range.end;
+            if hi <= lo {
+                continue;
+            }
+            for run in self.buffer.layout_runs() {
+                let mut min_x: Option<f32> = None;
+                let mut max_x: Option<f32> = None;
+                for glyph in run.glyphs {
+                    let g_start = glyph.start as u64;
+                    let g_end = glyph.end as u64;
+                    if g_end <= lo || g_start >= hi {
+                        continue;
+                    }
+                    let x0 = glyph.x;
+                    let x1 = glyph.x + glyph.w;
+                    min_x = Some(min_x.map_or(x0, |v| v.min(x0)));
+                    max_x = Some(max_x.map_or(x1, |v| v.max(x1)));
+                }
+                if let (Some(x0), Some(x1)) = (min_x, max_x)
+                    && x1 > x0
+                {
+                    rects.push(MinimapRect {
+                        x: TEXT_LEFT + x0,
+                        y: TEXT_TOP + run.line_top,
+                        w: x1 - x0,
+                        h: run.line_height,
+                        color,
+                    });
+                }
+            }
+        }
+        rects
     }
 }
 
@@ -1575,12 +1648,9 @@ fn indexed_to_glyphon(idx: u8) -> glyphon::Color {
 ///
 /// Session 5 ships **fg-only** decoration rendering. The four
 /// background-needing kinds (`Selection`, `SearchMatch`,
-/// `SearchMatchActive`, `CurrentLine`) accumulate in
-/// `current_decorations` but produce `None` here — they're recorded
-/// for the future quad-pipeline session. This is the rule-(iii)
-/// structural finding documented at session-5 framing: rendering
-/// backgrounds needs a wgpu quad pipeline + composition story, which
-/// is its own session, not absorbed into Phase A.
+/// `SearchMatchActive`, `CurrentLine`) return `None` here because the
+/// glyph-color path can only render foregrounds; they route through
+/// [`decoration_kind_to_bg_color`] and the quad pipeline instead.
 ///
 /// Color choices match the conventional editor palette (red errors,
 /// yellow warnings, light blue info, dim hints) so the GPU window's
@@ -1596,11 +1666,43 @@ fn decoration_kind_to_color(kind: DecorationKind) -> Option<glyphon::Color> {
         // ANSI bright black (dim gray — hints should be visible but
         // visually quietest of the diagnostic four).
         DecorationKind::DiagnosticHint => Some(glyphon::Color::rgb(102, 102, 102)),
-        // Background-needing kinds — deferred until quad pipeline.
+        // Background-needing kinds route through the quad pipeline.
         DecorationKind::Selection
         | DecorationKind::SearchMatch
         | DecorationKind::SearchMatchActive
         | DecorationKind::CurrentLine => None,
+    }
+}
+
+/// Background-bearing companion to [`decoration_kind_to_color`]: maps
+/// each background-needing `DecorationKind` to its quad-pipeline color
+/// as an RGBA tuple in 0..=1 space. Returns `None` for foreground-only
+/// kinds (the four diagnostic severities) so the two helpers form a
+/// total cover with no overlap.
+///
+/// Session 9.1 ships `Selection` only. `CurrentLine` is wired in 9.2
+/// (this helper will return its color then); `SearchMatch` /
+/// `SearchMatchActive` wait on a search feature in pmacs core
+/// (Q#4 in `docs/pmacs-gpu-quad-backgrounds-framing.md`), so they
+/// continue to return `None` here.
+#[allow(clippy::match_same_arms)] // each `None` arm has a distinct rationale comment.
+fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
+    match kind {
+        // Translucent blue, similar to the conventional editor
+        // selection background. The 0.30 alpha lets the underlying
+        // glyph color show through unmodified — text remains readable
+        // because the text render pass runs after this one in the same
+        // render pass (Q#2 stance α).
+        DecorationKind::Selection => Some([0.31, 0.42, 0.82, 0.30]),
+        // 9.2 will fill this in.
+        DecorationKind::CurrentLine => None,
+        // Deferred to the search-feature arc.
+        DecorationKind::SearchMatch | DecorationKind::SearchMatchActive => None,
+        // Foreground-only — handled by [`decoration_kind_to_color`].
+        DecorationKind::DiagnosticError
+        | DecorationKind::DiagnosticWarning
+        | DecorationKind::DiagnosticInfo
+        | DecorationKind::DiagnosticHint => None,
     }
 }
 
@@ -1659,6 +1761,65 @@ mod tests {
 
     fn chunk_texts(chunks: &[RichChunk]) -> Vec<&str> {
         chunks.iter().map(|chunk| chunk.text.as_str()).collect()
+    }
+
+    #[test]
+    fn bg_color_helper_covers_selection_and_returns_none_for_unrendered_kinds() {
+        // Session 9.1 ships `Selection` only.
+        assert!(decoration_kind_to_bg_color(DecorationKind::Selection).is_some());
+
+        // CurrentLine is wired in session 9.2.
+        assert!(decoration_kind_to_bg_color(DecorationKind::CurrentLine).is_none());
+
+        // Search-feature arc.
+        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_none());
+        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_none());
+
+        // Foreground-only kinds belong to the fg helper.
+        for kind in [
+            DecorationKind::DiagnosticError,
+            DecorationKind::DiagnosticWarning,
+            DecorationKind::DiagnosticInfo,
+            DecorationKind::DiagnosticHint,
+        ] {
+            assert!(decoration_kind_to_bg_color(kind).is_none());
+            assert!(decoration_kind_to_color(kind).is_some());
+        }
+    }
+
+    #[test]
+    fn fg_and_bg_helpers_are_disjoint_total_cover() {
+        // Every DecorationKind is renderable by exactly one helper.
+        // Adding a new kind without updating one of the helpers should
+        // fail this assertion.
+        for kind in [
+            DecorationKind::Selection,
+            DecorationKind::SearchMatch,
+            DecorationKind::SearchMatchActive,
+            DecorationKind::CurrentLine,
+            DecorationKind::DiagnosticError,
+            DecorationKind::DiagnosticWarning,
+            DecorationKind::DiagnosticInfo,
+            DecorationKind::DiagnosticHint,
+        ] {
+            let fg = decoration_kind_to_color(kind).is_some();
+            let bg = decoration_kind_to_bg_color(kind).is_some();
+            // Background helper returns None for kinds that 9.1
+            // deliberately defers (CurrentLine, the search pair); for
+            // each of those, decoration_kind_to_color is also None.
+            // That is the "neither yet" state — the
+            // exclusive-or test exempts it.
+            let deferred = matches!(
+                kind,
+                DecorationKind::CurrentLine
+                    | DecorationKind::SearchMatch
+                    | DecorationKind::SearchMatchActive
+            );
+            assert!(
+                deferred || (fg ^ bg),
+                "{kind:?}: fg={fg} bg={bg} — should be exactly one (unless deferred)"
+            );
+        }
     }
 
     #[test]
