@@ -17,7 +17,7 @@
 //! Lua reads [`InlayHintStore`] and surfaces hints; a render layer can
 //! subscribe to the same store when it lands.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -153,6 +153,7 @@ fn parse_hint(v: &Value) -> Option<InlayHint> {
 #[derive(Default)]
 pub struct InlayHintStore {
     by_key: HashMap<InlayHintKey, InlayHintResponse>,
+    stale_uris: HashSet<String>,
 }
 
 /// Key into [`InlayHintStore`].
@@ -184,12 +185,31 @@ impl InlayHintStore {
 
     /// Replace the response at `key`.
     pub fn set(&mut self, key: InlayHintKey, response: InlayHintResponse) {
+        self.stale_uris.remove(&key.uri);
         self.by_key.insert(key, response);
     }
 
-    /// Drop the entry at `key`.
+    /// Drop the entry at `key`. Also clears the stale flag for that
+    /// URI when no other server has hint data for it.
     pub fn clear(&mut self, key: &InlayHintKey) {
         self.by_key.remove(key);
+        if !self.by_key.keys().any(|k| k.uri == key.uri) {
+            self.stale_uris.remove(&key.uri);
+        }
+    }
+
+    /// Mark all inlay-hint entries for `uri` stale. Called when a
+    /// `textDocument/didChange` is sent so renderers do not paint
+    /// zero-width adornments at byte anchors from pre-edit text.
+    pub fn mark_stale(&mut self, uri: impl Into<String>) {
+        self.stale_uris.insert(uri.into());
+    }
+
+    /// `true` iff `uri` has inlay-hint data that should not be
+    /// rendered against the current buffer text.
+    #[must_use]
+    pub fn is_stale(&self, uri: &str) -> bool {
+        self.stale_uris.contains(uri)
     }
 
     /// Look up the entry at `key`.
@@ -312,6 +332,40 @@ mod tests {
         assert_eq!(s.get(&key).unwrap().hints.len(), 1);
         s.clear(&key);
         assert!(s.get(&key).is_none());
+    }
+
+    #[test]
+    fn stale_flag_clears_on_set_and_final_clear() {
+        let mut s = InlayHintStore::new();
+        let key = InlayHintKey::new("1", "file:///a");
+        let response = InlayHintResponse {
+            hints: vec![InlayHint {
+                line: 0,
+                col: 0,
+                label: "h".into(),
+                kind: None,
+                padding_left: false,
+                padding_right: false,
+                tooltip: None,
+            }],
+        };
+
+        s.set(key.clone(), response.clone());
+        s.mark_stale("file:///a");
+        assert!(s.is_stale("file:///a"));
+
+        s.set(key.clone(), response);
+        assert!(
+            !s.is_stale("file:///a"),
+            "fresh inlay hints clear stale flag"
+        );
+
+        s.mark_stale("file:///a");
+        s.clear(&key);
+        assert!(
+            !s.is_stale("file:///a"),
+            "clearing final hint entry clears stale flag"
+        );
     }
 
     #[test]

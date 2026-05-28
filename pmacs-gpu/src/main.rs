@@ -667,8 +667,11 @@ impl State {
                 // InlineAdornments use whole-set suppression rather
                 // than dirty segments, so the same ownership rule
                 // applies here: keep the last set until the producer
-                // sends a replacement. Session 8's temporal probe is
-                // where visible edit-flicker/staleness gets scored.
+                // sends a replacement. Session 8 closed the stale
+                // inlay case producer-side: `didChange` marks the
+                // inlay store stale, and the producer sends one empty
+                // replacement to clear cached virtual text until a
+                // fresh `textDocument/inlayHint` response arrives.
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
                 self.set_text(&text);
                 None
