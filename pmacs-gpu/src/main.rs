@@ -772,6 +772,18 @@ impl State {
                 cursor,
                 selection,
             } => {
+                // Run with `PMACS_GPU_DEBUG_PRESENCE=1` to confirm peer
+                // presence is arriving and routed to the right buffer.
+                // A `buf != current` line means the peer is on a buffer
+                // this mirror isn't displaying (no wash expected); no
+                // line at all means the message isn't reaching us.
+                if std::env::var_os("PMACS_GPU_DEBUG_PRESENCE").is_some() {
+                    eprintln!(
+                        "pmacs-gpu presence: fid={frontend_id:?} buf={buffer_id:?} \
+                         current={:?} cursor={cursor} sel={selection:?}",
+                        self.current_buffer_id
+                    );
+                }
                 self.peer_presences.insert(
                     frontend_id,
                     PeerPresence {
@@ -1798,12 +1810,13 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
         // because the text render pass runs after this one in the same
         // render pass (Q#2 stance α).
         DecorationKind::Selection => Some([0.31, 0.42, 0.82, 0.30]),
-        // Very subtle blue-grey wash. CurrentLine is always on, so it
-        // wants to be visually quietest of the four background kinds:
-        // just enough tint to track which line carries the cursor,
-        // not enough to compete with Selection or syntax color when
-        // both cover the same bytes (bet #2 overlap surface).
-        DecorationKind::CurrentLine => Some([0.55, 0.60, 0.75, 0.08]),
+        // Blue-grey wash, quietest of the background kinds (it's always
+        // on) but still visible. The first 9.2/9.3 value (alpha 0.08)
+        // computed to ~10/255 above the dark clear color and was
+        // swamped by glyphs on a text line — invisible in practice.
+        // 0.22 keeps it subtle vs Selection's 0.30 while actually
+        // reading as a current-line band.
+        DecorationKind::CurrentLine => Some([0.55, 0.60, 0.75, 0.22]),
         // Deferred to the search-feature arc.
         DecorationKind::SearchMatch | DecorationKind::SearchMatchActive => None,
         // Foreground-only — handled by [`decoration_kind_to_color`].
