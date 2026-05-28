@@ -372,18 +372,41 @@ impl SemanticRenderState {
         let core = state.core.borrow();
         let mut out = Vec::new();
 
-        // Selection — per-window (per-frontend) state, already byte
-        // offsets. Only this session's active window for the declared
-        // buffer contributes.
+        // Selection + CurrentLine — per-window (per-frontend) state.
+        // Only this session's active window for the declared buffer
+        // contributes either kind.
+        //
+        // Q#3 (per-line CurrentLine cadence, stance β) falls out of the
+        // existing M11.4 diff: `render_frame` compares the new
+        // decoration Vec against the last sent one and emits only on
+        // change. Horizontal cursor motion within a single line
+        // produces an identical `CurrentLine` range and an identical
+        // overall Vec, so `changed_intervals` returns empty and nothing
+        // ships. No `last_cursor_line` cache is needed at this layer.
         if let Some(win) = core.active_window_for(self.frontend_id)
             && win.buffer_id == vp.buffer_id
-            && let Some((lo, hi)) = win.region()
-            && let Some(range) = clip_to_viewport(lo, hi, vp)
         {
-            out.push(Decoration {
-                range,
-                kind: DecorationKind::Selection,
-            });
+            if let Some((lo, hi)) = win.region()
+                && let Some(range) = clip_to_viewport(lo, hi, vp)
+            {
+                out.push(Decoration {
+                    range,
+                    kind: DecorationKind::Selection,
+                });
+            }
+            let registry = core.registry.clone();
+            let reg = registry.borrow();
+            if let Ok(buf) = reg.get(vp.buffer_id) {
+                let source = buffer_source_bytes(buf);
+                let line_starts = line_start_offsets(&source);
+                let (lo, hi) = current_line_range(&line_starts, source.len() as u64, win.cursor);
+                if let Some(range) = clip_to_viewport(lo, hi, vp) {
+                    out.push(Decoration {
+                        range,
+                        kind: DecorationKind::CurrentLine,
+                    });
+                }
+            }
         }
 
         // Diagnostics — keyed in the shared store by the file URI the
@@ -653,6 +676,31 @@ fn buffer_source_bytes(buf: &crate::buffer::Buffer) -> Vec<u8> {
         buf.snapshot_rope().slice(0, len, &mut bytes);
     }
     bytes
+}
+
+/// Byte range `(start, end)` of the line containing `cursor`, where
+/// `start` is the position right after the previous `\n` (or 0 for the
+/// first line) and `end` is the position of the next `\n` (or
+/// `source_len` for the last line). Used by `scoped_decorations` to
+/// emit `DecorationKind::CurrentLine`; clamps so a cursor at or past
+/// `source_len` returns the last line's range rather than indexing
+/// out.
+fn current_line_range(line_starts: &[u64], source_len: u64, cursor: u64) -> (u64, u64) {
+    // `partition_point` returns the count of leading elements satisfying
+    // the predicate, i.e. the index of the first `line_start > cursor`.
+    // Subtracting 1 yields the index of the largest `line_start <=
+    // cursor`. `line_starts` always starts with 0, so the saturating
+    // sub is defensive against an empty `line_starts`.
+    let idx = line_starts
+        .partition_point(|&start| start <= cursor)
+        .saturating_sub(1);
+    let lo = line_starts.get(idx).copied().unwrap_or(0);
+    let hi = line_starts
+        .get(idx + 1)
+        .copied()
+        .unwrap_or(source_len)
+        .min(source_len);
+    (lo, hi)
 }
 
 /// Byte offset of the start of each line (index 0 = byte 0; one entry
@@ -1125,6 +1173,132 @@ mod tests {
     }
 
     #[test]
+    fn current_line_range_finds_enclosing_line() {
+        // "abc\nde\nfgh": line_starts = [0, 4, 7]; source_len = 10.
+        let line_starts = vec![0u64, 4, 7];
+        let len = 10u64;
+
+        // Cursor at byte 0 → line 0 = [0, 4).
+        assert_eq!(current_line_range(&line_starts, len, 0), (0, 4));
+        // Cursor anywhere within line 0 → still line 0.
+        assert_eq!(current_line_range(&line_starts, len, 3), (0, 4));
+        // Cursor on the newline byte still belongs to the line it
+        // terminates.
+        assert_eq!(current_line_range(&line_starts, len, 3), (0, 4));
+        // Cursor at line 1 start → line 1 = [4, 7).
+        assert_eq!(current_line_range(&line_starts, len, 4), (4, 7));
+        // Cursor in last line → [7, len).
+        assert_eq!(current_line_range(&line_starts, len, 8), (7, 10));
+        // Cursor at exactly source_len (past last byte) → still last
+        // line; clamps cleanly without indexing out.
+        assert_eq!(current_line_range(&line_starts, len, len), (7, 10));
+    }
+
+    #[test]
+    fn current_line_projects_as_a_decoration_for_cursor_on_seed() {
+        // "abc\nde": cursor at byte 0 → CurrentLine = [0, 4).
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        seed_diagnostic(&state, buffer_id);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        let current = decos
+            .iter()
+            .find(|d| d.kind == DecorationKind::CurrentLine)
+            .expect("CurrentLine present (cursor on line 0)");
+        assert_eq!(
+            current.range,
+            ByteRange { start: 0, end: 4 },
+            "line 0 of \"abc\\nde\" spans bytes [0, 4)"
+        );
+    }
+
+    #[test]
+    fn current_line_skipped_when_active_window_is_a_different_buffer() {
+        // Producer must only emit per-window state for windows whose
+        // active buffer matches the projected viewport. The vp.buffer_id
+        // regression test (decorations_use_vp_buffer_not_active_buffer)
+        // exercises this for Selection; assert it for CurrentLine too.
+        let state = empty_state();
+        let scratch_id = active_buffer(&state);
+        let file_id = {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .create_from_bytes("secondary".to_owned(), b"abc\nde")
+        };
+        assert_ne!(scratch_id, file_id);
+
+        let mut s = local();
+        // Project the *non-active* file buffer.
+        s.set_viewport(file_id, ByteRange { start: 0, end: 64 }, 0);
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        assert!(
+            decos.iter().all(|d| d.kind != DecorationKind::CurrentLine),
+            "CurrentLine must not project against a viewport whose buffer is not the active window's buffer; got {decos:?}"
+        );
+    }
+
+    #[test]
+    fn same_line_cursor_motion_does_not_re_emit_decorations() {
+        // Q#3 stance β: horizontal cursor motion within the same line
+        // must not re-ship a Decorations frame. The existing M11.4
+        // changed_intervals diff gives this for free — same line means
+        // identical decoration ranges means an empty interval list
+        // means no emission.
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"abcdefghij\nklmno",
+                })
+                .expect("seed");
+        }
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _first = s.render_frame(&state); // initial full
+        assert!(
+            s.render_frame(&state).is_empty(),
+            "steady state must be silent"
+        );
+
+        // Move cursor from byte 0 to byte 5 (same line).
+        {
+            let mut core = state.core.borrow_mut();
+            core.active_window_mut().cursor = 5;
+        }
+        assert!(
+            s.render_frame(&state).is_empty(),
+            "same-line cursor motion must not re-emit Decorations"
+        );
+
+        // Cross a `\n` (byte 10) → line changes → re-emission.
+        {
+            let mut core = state.core.borrow_mut();
+            core.active_window_mut().cursor = 12;
+        }
+        let msgs = s.render_frame(&state);
+        let (_full, decos) =
+            decorations_of(&msgs).expect("line-change must ship a Decorations frame");
+        let current = decos
+            .iter()
+            .find(|d| d.kind == DecorationKind::CurrentLine)
+            .expect("CurrentLine present");
+        // Line 1 of "abcdefghij\nklmno" starts at byte 11.
+        assert_eq!(current.range, ByteRange { start: 11, end: 16 });
+    }
+
+    #[test]
     fn diagnostics_project_with_line_col_to_byte_and_severity() {
         // "abc\nde": line 0 at byte 0, line 1 at byte 4.
         let state = empty_state();
@@ -1135,10 +1309,17 @@ mod tests {
 
         let (_full, decos) =
             decorations_of(&s.render_frame(&state)).expect("a Decorations message");
-        assert_eq!(decos.len(), 1);
-        assert_eq!(decos[0].kind, DecorationKind::DiagnosticWarning);
+        // Session 9.2 added `CurrentLine` to the projection: line 0
+        // (cursor at byte 0) emits as a `CurrentLine` decoration in
+        // addition to the seeded warning. This test pins the
+        // diagnostic projection's byte math; assert that decoration's
+        // shape rather than the total count.
+        let warning = decos
+            .iter()
+            .find(|d| d.kind == DecorationKind::DiagnosticWarning)
+            .expect("the seeded warning");
         // line 1 starts at byte 4; cols [0,2) → bytes [4,6).
-        assert_eq!(decos[0].range, ByteRange { start: 4, end: 6 });
+        assert_eq!(warning.range, ByteRange { start: 4, end: 6 });
     }
 
     /// T M11.8 regression: when the diag store's entry for the URI

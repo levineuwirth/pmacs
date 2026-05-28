@@ -1680,11 +1680,10 @@ fn decoration_kind_to_color(kind: DecorationKind) -> Option<glyphon::Color> {
 /// kinds (the four diagnostic severities) so the two helpers form a
 /// total cover with no overlap.
 ///
-/// Session 9.1 ships `Selection` only. `CurrentLine` is wired in 9.2
-/// (this helper will return its color then); `SearchMatch` /
-/// `SearchMatchActive` wait on a search feature in pmacs core
-/// (Q#4 in `docs/pmacs-gpu-quad-backgrounds-framing.md`), so they
-/// continue to return `None` here.
+/// Session 9.1 shipped `Selection`; session 9.2 adds `CurrentLine`.
+/// `SearchMatch` / `SearchMatchActive` wait on a search feature in
+/// pmacs core (Q#4 in `docs/pmacs-gpu-quad-backgrounds-framing.md`),
+/// so they continue to return `None` here.
 #[allow(clippy::match_same_arms)] // each `None` arm has a distinct rationale comment.
 fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
     match kind {
@@ -1694,8 +1693,12 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
         // because the text render pass runs after this one in the same
         // render pass (Q#2 stance α).
         DecorationKind::Selection => Some([0.31, 0.42, 0.82, 0.30]),
-        // 9.2 will fill this in.
-        DecorationKind::CurrentLine => None,
+        // Very subtle blue-grey wash. CurrentLine is always on, so it
+        // wants to be visually quietest of the four background kinds:
+        // just enough tint to track which line carries the cursor,
+        // not enough to compete with Selection or syntax color when
+        // both cover the same bytes (bet #2 overlap surface).
+        DecorationKind::CurrentLine => Some([0.55, 0.60, 0.75, 0.08]),
         // Deferred to the search-feature arc.
         DecorationKind::SearchMatch | DecorationKind::SearchMatchActive => None,
         // Foreground-only — handled by [`decoration_kind_to_color`].
@@ -1764,14 +1767,12 @@ mod tests {
     }
 
     #[test]
-    fn bg_color_helper_covers_selection_and_returns_none_for_unrendered_kinds() {
-        // Session 9.1 ships `Selection` only.
+    fn bg_color_helper_covers_selection_and_current_line() {
+        // Sessions 9.1 + 9.2: Selection and CurrentLine paint.
         assert!(decoration_kind_to_bg_color(DecorationKind::Selection).is_some());
+        assert!(decoration_kind_to_bg_color(DecorationKind::CurrentLine).is_some());
 
-        // CurrentLine is wired in session 9.2.
-        assert!(decoration_kind_to_bg_color(DecorationKind::CurrentLine).is_none());
-
-        // Search-feature arc.
+        // Search-feature arc — still deferred.
         assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_none());
         assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_none());
 
@@ -1804,16 +1805,13 @@ mod tests {
         ] {
             let fg = decoration_kind_to_color(kind).is_some();
             let bg = decoration_kind_to_bg_color(kind).is_some();
-            // Background helper returns None for kinds that 9.1
-            // deliberately defers (CurrentLine, the search pair); for
-            // each of those, decoration_kind_to_color is also None.
-            // That is the "neither yet" state — the
-            // exclusive-or test exempts it.
+            // Background helper returns None for the search pair —
+            // deferred to the search-feature arc. For both of those,
+            // decoration_kind_to_color is also None. That is the
+            // "neither yet" state — the exclusive-or test exempts it.
             let deferred = matches!(
                 kind,
-                DecorationKind::CurrentLine
-                    | DecorationKind::SearchMatch
-                    | DecorationKind::SearchMatchActive
+                DecorationKind::SearchMatch | DecorationKind::SearchMatchActive
             );
             assert!(
                 deferred || (fg ^ bg),
