@@ -188,6 +188,59 @@ Phase A finalization closes with `SearchMatch{,Active}` rendering
 documented-but-not-implemented; the rule-(iii) classification is "small
 finding deferred awaiting upstream feature."
 
+### Q#5 — read-only mirror cursor source: stance (peer-presence)
+
+**Surfaced during 9.2 manual validation (structural finding QB1).**
+Sessions 9.1 and 9.2 emit `Selection` / `CurrentLine` from the
+*viewing* frontend's own window
+(`scoped_decorations` reads `active_window_for(self.frontend_id)`).
+pmacs-gpu is a read-only viewer with no input path: it never sends
+`Key`/cursor events, so its own window's `cursor` stays pinned at 0
+and its `selection` stays `None`. The two per-window decoration kinds
+are therefore **inert** in pmacs-gpu — `CurrentLine` paints a static
+line-0 wash and `Selection` never appears. Every other rendered
+family (`StyleSpans`, diagnostics, inlay hints, minimap) is keyed to
+the *buffer* (shared), which is why only these two are affected.
+
+**Stance: peer presence is the authoritative cursor/selection source
+for a read-only mirror.** What the user watches in pmacs-gpu is the
+*editing* frontend's (their TUI's) cursor and selection. That is
+`PresenceUpdate` — already on the wire (`InstanceMessage::PresenceUpdate
+{ frontend_id, buffer_id, cursor, selection }`), already broadcast by
+the daemon to every `multi_frontend` recipient, and pmacs-gpu already
+negotiates `multi_frontend: true`. It simply drops the message at its
+`_ => None` catch-all today.
+
+The fix is **consumer-only** — no producer or protocol change:
+
+- pmacs-gpu consumes `PresenceUpdate`, storing per-peer
+  `(buffer_id, cursor, selection)`.
+- The quad-background path renders `Selection` / `CurrentLine` washes
+  from peer presence (the editing peer's cursor line + selection)
+  rather than from the inert own-window `current_decorations` of those
+  two kinds. Diagnostic (foreground) decorations are buffer-keyed and
+  unaffected.
+- The producer keeps emitting own-window `Selection` / `CurrentLine`
+  (9.1/9.2) unchanged — correct and forward-looking for when pmacs-gpu
+  gains its own input in Phase B; simply unconsumed-for-backgrounds by
+  the mirror today.
+
+Deliberately deferred within this stance:
+
+- **Per-peer stable colors** (the audit's `PresenceUpdate`
+  color-stability item). The single-peer mirror reuses the `Selection`
+  / `CurrentLine` colors so the visual reads as "my editing, mirrored."
+  Multiple distinct peers each getting a stable color is a later
+  refinement.
+- **Peer caret glyph + label** ("user N editing here"). This session
+  renders the line/selection *backgrounds* only; the caret bar and
+  name label are future presence work.
+- **Own-cursor vs peer-cursor merge.** Once pmacs-gpu has input, its
+  own `CurrentLine` (now meaningful) and peer presences coexist with
+  distinct colors. Out of scope until input lands.
+
+This is session 9.3.
+
 ## Finding feedback loop
 
 Rule (iii) from `pmacs-gpu-design.md` carries forward unchanged:

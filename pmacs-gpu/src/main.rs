@@ -24,6 +24,7 @@
 
 mod attach;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,7 +34,8 @@ use glyphon::{
 };
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, Decoration, DecorationKind,
-    DecorationSegment, InlineAdornment, InstanceMessage, StyleSegment, StyleSpan,
+    DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, SelectionSnapshot,
+    StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
@@ -268,6 +270,28 @@ struct State {
     /// arrives, matching the ownership rule used by style spans,
     /// decorations, and inline adornments.
     current_summary: Option<FileStyleSummaryState>,
+    /// Peer presence (session 9.3), keyed by source frontend id. Each
+    /// entry is one *other* attached frontend's cursor + selection,
+    /// delivered via `InstanceMessage::PresenceUpdate`. A read-only
+    /// mirror has no cursor of its own (no input path), so its own
+    /// `Selection` / `CurrentLine` decorations are inert; the editing
+    /// peer's presence is what the user actually watches. The quad-
+    /// background path renders `Selection` / `CurrentLine` washes from
+    /// these entries rather than from `current_decorations`. Sender
+    /// exclusion at the daemon means our own id never appears here.
+    peer_presences: HashMap<FrontendId, PeerPresence>,
+}
+
+/// One peer frontend's cursor + selection in a buffer, from
+/// `InstanceMessage::PresenceUpdate`. Byte offsets are in the buffer's
+/// coordinate space; the renderer maps them to glyph rectangles via
+/// the local layout and clamps to text length, so a presence that
+/// briefly lags an edit can never index out.
+#[derive(Clone, Copy, Debug)]
+struct PeerPresence {
+    buffer_id: BufferId,
+    cursor: u64,
+    selection: Option<SelectionSnapshot>,
 }
 
 struct QuadRenderer {
@@ -428,6 +452,7 @@ impl QuadRenderer {
 }
 
 impl State {
+    #[allow(clippy::too_many_lines)] // linear GPU/font/surface setup; splitting would obscure ordering.
     fn new(event_loop: &ActiveEventLoop, initial_text: &str) -> Self {
         let window = Arc::new(
             event_loop
@@ -537,6 +562,7 @@ impl State {
             current_decorations: Vec::new(),
             current_adornments: Vec::new(),
             current_summary: None,
+            peer_presences: HashMap::new(),
         }
     }
 
@@ -593,9 +619,11 @@ impl State {
     /// - `Goodbye` — surfaced via the reader thread's clean-EOF path,
     ///   not handled here.
     ///
-    /// Remaining semantic variants plus the grid variants (`CellDelta`,
-    /// `Cursor`, `CursorByte`) and presence updates are ignored in
-    /// session 7 — they land in subsequent Phase A sessions.
+    /// The grid variants (`CellDelta`, `Cursor`, `CursorByte`) are
+    /// ignored — pmacs-gpu lays out locally and tracks the cursor via
+    /// `PresenceUpdate` (session 9.3). Remaining semantic variants land
+    /// in subsequent Phase A sessions.
+    #[allow(clippy::too_many_lines)] // per-variant match dispatcher; one arm per InstanceMessage.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
             InstanceMessage::BufferSnapshot {
@@ -618,6 +646,11 @@ impl State {
                 self.current_decorations.clear();
                 self.current_adornments.clear();
                 self.current_summary = None;
+                // Peer cursors are anchored in the prior buffer's
+                // coordinate space; drop them so a stale offset can't
+                // paint against the new rope before the next
+                // PresenceUpdate arrives.
+                self.peer_presences.clear();
                 if !self.set_text(&text) {
                     self.reshape();
                 }
@@ -725,6 +758,29 @@ impl State {
                 lines,
             } => {
                 self.apply_file_style_summary(buffer_id, generation, lines);
+                None
+            }
+            // Session 9.3 — peer presence. The editing frontend's
+            // cursor + selection drive the `CurrentLine` / `Selection`
+            // washes for this read-only mirror (finding QB1). Store
+            // per source frontend; a redraw recomputes the background
+            // rects from `peer_presences`. We never receive our own
+            // (daemon sender exclusion).
+            InstanceMessage::PresenceUpdate {
+                frontend_id,
+                buffer_id,
+                cursor,
+                selection,
+            } => {
+                self.peer_presences.insert(
+                    frontend_id,
+                    PeerPresence {
+                        buffer_id,
+                        cursor,
+                        selection,
+                    },
+                );
+                self.window.request_redraw();
                 None
             }
             _ => None,
@@ -1093,58 +1149,94 @@ impl State {
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
-    /// Vertex bytes for quad-pipeline background rectangles covering
-    /// every background-bearing decoration in `current_decorations`.
-    /// Walks `cosmic_text::Buffer::layout_runs()` to map each
-    /// decoration's `ByteRange` into per-visual-line pixel rectangles:
-    /// a multi-line selection produces one rect per layout run that
-    /// carries at least one glyph whose `[start, end)` overlaps the
-    /// decoration. Returns an empty `Vec` when no background-bearing
-    /// decoration intersects any laid-out glyph.
+    /// Vertex bytes for quad-pipeline background rectangles. Session
+    /// 9.3 sources `CurrentLine` / `Selection` washes from peer
+    /// presence (the editing frontend's cursor + selection) rather
+    /// than from `current_decorations`: this is a read-only mirror, so
+    /// its own per-window `Selection` / `CurrentLine` decorations are
+    /// inert (cursor pinned at 0, no selection). See finding QB1 in
+    /// `docs/pmacs-gpu-quad-backgrounds-framing.md`.
     fn decoration_background_vertex_bytes(&self) -> Vec<u8> {
-        let rects = self.decoration_background_rects();
+        let rects = self.peer_background_rects();
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
-    fn decoration_background_rects(&self) -> Vec<MinimapRect> {
+    /// Background rectangles for every peer's cursor line + selection
+    /// in the current buffer. `CurrentLine` covers the source line
+    /// holding the peer cursor; `Selection` covers the peer's selected
+    /// byte range. Both map byte ranges to per-visual-line glyph
+    /// extents via `peer_glyph_extent_rects`. Single-peer mirrors reuse
+    /// the `Selection` / `CurrentLine` colors so the visual reads as
+    /// "my editing, mirrored"; per-peer distinct colors are deferred.
+    fn peer_background_rects(&self) -> Vec<MinimapRect> {
+        let Some(buffer_id) = self.current_buffer_id else {
+            return Vec::new();
+        };
+        let text_len = self.current_text.len() as u64;
         let mut rects = Vec::new();
-        for d in &self.current_decorations {
-            let Some(color) = decoration_kind_to_bg_color(d.kind) else {
-                continue;
-            };
-            let lo = d.range.start;
-            let hi = d.range.end;
-            if hi <= lo {
+        for presence in self.peer_presences.values() {
+            if presence.buffer_id != buffer_id {
                 continue;
             }
-            for run in self.buffer.layout_runs() {
-                let mut min_x: Option<f32> = None;
-                let mut max_x: Option<f32> = None;
-                for glyph in run.glyphs {
-                    let g_start = glyph.start as u64;
-                    let g_end = glyph.end as u64;
-                    if g_end <= lo || g_start >= hi {
-                        continue;
-                    }
-                    let x0 = glyph.x;
-                    let x1 = glyph.x + glyph.w;
-                    min_x = Some(min_x.map_or(x0, |v| v.min(x0)));
-                    max_x = Some(max_x.map_or(x1, |v| v.max(x1)));
-                }
-                if let (Some(x0), Some(x1)) = (min_x, max_x)
-                    && x1 > x0
-                {
-                    rects.push(MinimapRect {
-                        x: TEXT_LEFT + x0,
-                        y: TEXT_TOP + run.line_top,
-                        w: x1 - x0,
-                        h: run.line_height,
-                        color,
-                    });
+            // CurrentLine: the source line containing the peer cursor.
+            if let Some(color) = decoration_kind_to_bg_color(DecorationKind::CurrentLine) {
+                let (lo, hi) = source_line_range(&self.current_text, presence.cursor);
+                self.push_glyph_extent_rects(&mut rects, lo, hi, color);
+            }
+            // Selection: the peer's selected byte range, normalized.
+            if let Some(sel) = presence.selection
+                && let Some(color) = decoration_kind_to_bg_color(DecorationKind::Selection)
+            {
+                let lo = sel.anchor.min(sel.active).min(text_len);
+                let hi = sel.anchor.max(sel.active).min(text_len);
+                if hi > lo {
+                    self.push_glyph_extent_rects(&mut rects, lo, hi, color);
                 }
             }
         }
         rects
+    }
+
+    /// Push one rect per visual line whose glyphs overlap the byte
+    /// range `[lo, hi)`, spanning the matching glyphs' horizontal
+    /// extent. A range crossing visual-line boundaries (wrapped or
+    /// multi-line) fans out into one rect per run.
+    fn push_glyph_extent_rects(
+        &self,
+        rects: &mut Vec<MinimapRect>,
+        lo: u64,
+        hi: u64,
+        color: [f32; 4],
+    ) {
+        if hi <= lo {
+            return;
+        }
+        for run in self.buffer.layout_runs() {
+            let mut min_x: Option<f32> = None;
+            let mut max_x: Option<f32> = None;
+            for glyph in run.glyphs {
+                let g_start = glyph.start as u64;
+                let g_end = glyph.end as u64;
+                if g_end <= lo || g_start >= hi {
+                    continue;
+                }
+                let x0 = glyph.x;
+                let x1 = glyph.x + glyph.w;
+                min_x = Some(min_x.map_or(x0, |v| v.min(x0)));
+                max_x = Some(max_x.map_or(x1, |v| v.max(x1)));
+            }
+            if let (Some(x0), Some(x1)) = (min_x, max_x)
+                && x1 > x0
+            {
+                rects.push(MinimapRect {
+                    x: TEXT_LEFT + x0,
+                    y: TEXT_TOP + run.line_top,
+                    w: x1 - x0,
+                    h: run.line_height,
+                    color,
+                });
+            }
+        }
     }
 }
 
@@ -1423,6 +1515,19 @@ fn rgb_to_minimap_color(r: u8, g: u8, b: u8) -> [f32; 4] {
         f32::from(b) / 255.0,
         0.9,
     ]
+}
+
+/// Byte range `[start, end)` of the source line containing `cursor`:
+/// `start` is just after the previous `\n` (or 0), `end` is just after
+/// the next `\n` (or text length). Mirrors the producer's
+/// `current_line_range` so the rendered `CurrentLine` wash covers the
+/// same bytes the producer would. `cursor` is clamped to the text
+/// length so a peer presence that briefly lags an edit is safe.
+fn source_line_range(text: &str, cursor: u64) -> (u64, u64) {
+    let c = (cursor as usize).min(text.len());
+    let start = text[..c].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[c..].find('\n').map_or(text.len(), |i| c + i + 1);
+    (start as u64, end as u64)
 }
 
 fn rects_to_vertex_bytes(
@@ -1764,6 +1869,31 @@ mod tests {
 
     fn chunk_texts(chunks: &[RichChunk]) -> Vec<&str> {
         chunks.iter().map(|chunk| chunk.text.as_str()).collect()
+    }
+
+    #[test]
+    fn source_line_range_locates_enclosing_line() {
+        // "abc\nde\nfgh": newlines at byte 3 and 6; len = 10.
+        let text = "abc\nde\nfgh";
+        // Cursor on line 0 → [0, 4) (includes the trailing \n).
+        assert_eq!(source_line_range(text, 0), (0, 4));
+        assert_eq!(source_line_range(text, 2), (0, 4));
+        // Start of line 1 → [4, 7).
+        assert_eq!(source_line_range(text, 4), (4, 7));
+        assert_eq!(source_line_range(text, 5), (4, 7));
+        // Last line has no trailing \n → [7, 10).
+        assert_eq!(source_line_range(text, 8), (7, 10));
+        // Cursor past end clamps to the last line, never indexes out.
+        assert_eq!(source_line_range(text, 99), (7, 10));
+    }
+
+    #[test]
+    fn source_line_range_handles_empty_and_leading_newline() {
+        assert_eq!(source_line_range("", 0), (0, 0));
+        // "\nx": cursor 0 is on the empty first line [0, 1).
+        assert_eq!(source_line_range("\nx", 0), (0, 1));
+        // cursor 1 is on line 1 → [1, 2).
+        assert_eq!(source_line_range("\nx", 1), (1, 2));
     }
 
     #[test]
