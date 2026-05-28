@@ -1387,6 +1387,13 @@ fn m4_5_did_change_notifications_go_out_after_edits() {
             "didChange must mark semantic tokens stale so stale TUI LSP styles are suppressed"
         );
     }
+    {
+        let store = mgr.borrow().inlay_hint_store();
+        assert!(
+            store.lock().expect("inlay hint store").is_stale(uri),
+            "didChange must mark inlay hints stale so stale semantic frontend virtual text is suppressed"
+        );
+    }
     // The fake LSP replies with a `pmacs/echo` notification per
     // didOpen/didChange (5 total).
     let evs = drain_lsp_until(&sup, &mgr, sid, Duration::from_secs(5), |evs| {

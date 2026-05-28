@@ -3044,11 +3044,12 @@ impl LspManager {
         let uri = uri.into();
         let text = text.into();
         self.documents.insert((sid, uri.clone()), text.clone());
-        // T M11.8 — mark the diag-store entry stale so the
-        // semantic-frontend producer suppresses its emission until
-        // clangd's next `publishDiagnostics` re-establishes
-        // freshness via `set`. Closes the visible-stale-color
-        // window observed in session-5 manual validation.
+        // T M11.8 / Session 8 — mark cached LSP-derived render
+        // families stale so semantic frontends suppress byte ranges
+        // anchored to pre-edit text until the server refreshes them.
+        // Diagnostics clear on `publishDiagnostics`, semantic tokens
+        // on `textDocument/semanticTokens`, and inlay hints on
+        // `textDocument/inlayHint`.
         self.diag_store
             .lock()
             .expect("diag store mutex poisoned")
@@ -3056,6 +3057,10 @@ impl LspManager {
         self.semantic_token_store
             .lock()
             .expect("semantic token store mutex poisoned")
+            .mark_stale(uri.clone());
+        self.inlay_hint_store
+            .lock()
+            .expect("inlay hint store mutex poisoned")
             .mark_stale(uri.clone());
         let params = json!({
             "textDocument": {

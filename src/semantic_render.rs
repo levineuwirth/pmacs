@@ -453,7 +453,10 @@ impl SemanticRenderState {
 /// Every hint is `AtOffset` (inlay hints are inline by definition)
 /// carrying `Text` with the (padding-applied) label and the default
 /// style — the instance has no inlay-specific theme face yet, and a
-/// fabricated one would be dishonest.
+/// fabricated one would be dishonest. Stale store entries are
+/// suppressed the same way stale diagnostics / semantic tokens are:
+/// a zero-width hint anchored to pre-edit text is still a byte range
+/// bug, even though it has no source-byte width of its own.
 fn scoped_inline_adornments(state: &EditorState, vp: &DeclaredViewport) -> Vec<InlineAdornment> {
     let core = state.core.borrow();
     let Some(uri) = buffer_file_uri(&core, vp.buffer_id) else {
@@ -462,6 +465,9 @@ fn scoped_inline_adornments(state: &EditorState, vp: &DeclaredViewport) -> Vec<I
     let hints = {
         let store = state.lsp_manager.borrow().inlay_hint_store();
         let guard = store.lock().expect("inlay-hint store mutex poisoned");
+        if guard.is_stale(&uri) {
+            return Vec::new();
+        }
         match guard.for_uri(&uri) {
             Some(resp) => resp.hints.clone(),
             None => return Vec::new(),
@@ -1741,11 +1747,23 @@ mod tests {
 
     // --- Step 3: InlineAdornments from the LSP inlay-hint store ---
 
-    /// Seed buffer text + path and an inlay-hint store entry. Keyed by
-    /// `(server, uri)`; `for_uri` picks the lowest server, so a fixed
-    /// `"1"` is fine. No LSP client needed — the inlay path never
-    /// consults `semantic_style_context` (cols are already byte
-    /// offsets, Step 0).
+    fn inlay_uri() -> String {
+        crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/h.rs"))
+    }
+
+    /// Seed the inlay-hint store. Keyed by `(server, uri)`; `for_uri`
+    /// picks the lowest server, so a fixed `"1"` is fine. No LSP
+    /// client needed — the inlay path never consults
+    /// `semantic_style_context` (cols are already byte offsets, Step 0).
+    fn set_inlay_store(state: &EditorState, uri: &str, hints: Vec<crate::inlay_hint::InlayHint>) {
+        let store = state.lsp_manager.borrow().inlay_hint_store();
+        store.lock().expect("inlay store").set(
+            crate::inlay_hint::InlayHintKey::new("1", uri),
+            crate::inlay_hint::InlayHintResponse { hints },
+        );
+    }
+
+    /// Seed buffer text + path and an inlay-hint store entry.
     fn seed_inlay(
         state: &EditorState,
         buffer_id: BufferId,
@@ -1765,12 +1783,7 @@ mod tests {
                 .expect("seed buffer text");
             core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/h.rs")));
         }
-        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/h.rs"));
-        let store = state.lsp_manager.borrow().inlay_hint_store();
-        store.lock().expect("inlay store").set(
-            crate::inlay_hint::InlayHintKey::new("1", uri),
-            crate::inlay_hint::InlayHintResponse { hints },
-        );
+        set_inlay_store(state, &inlay_uri(), hints);
     }
 
     fn hint(line: u32, col: u32, label: &str) -> crate::inlay_hint::InlayHint {
@@ -1843,6 +1856,133 @@ mod tests {
             AdornmentContent::Text { text, .. } => assert_eq!(text, ": String "),
             AdornmentContent::Resource { .. } => panic!("expected Text, got Resource"),
         }
+    }
+
+    #[test]
+    fn inline_adornments_emit_empty_clear_while_inlay_store_stale() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        seed_inlay(&state, bid, vec![hint(0, 5, ": i32")]);
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        assert!(
+            adornments_of(&s.render_frame(&state)).is_some(),
+            "first frame ships the adornments"
+        );
+
+        let uri = inlay_uri();
+        let store = state.lsp_manager.borrow().inlay_hint_store();
+        store.lock().expect("inlay store").mark_stale(uri.clone());
+
+        let clear =
+            adornments_of(&s.render_frame(&state)).expect("stale transition clears adornments");
+        assert!(
+            clear.is_empty(),
+            "stale hints must clear the frontend's cached virtual text"
+        );
+        assert!(
+            adornments_of(&s.render_frame(&state)).is_none(),
+            "unchanged stale-empty state is suppressed after the clear"
+        );
+
+        set_inlay_store(&state, &uri, vec![hint(0, 5, ": i32")]);
+        let refreshed = adornments_of(&s.render_frame(&state)).expect("fresh hints re-emit");
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].at, 5);
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn session8_temporal_probe_sustained_edits_clear_stale_inlays_until_refresh() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        let path = std::path::PathBuf::from("/tmp/session8-inlay.txt");
+        let uri = crate::lsp::path_to_file_uri(&path);
+
+        {
+            let mut core = state.core.borrow_mut();
+            let mut reg = core.registry.borrow_mut();
+            let buf = reg.get_mut(bid).expect("active buffer");
+            buf.apply_edit(crate::buffer::EditOp::Insert {
+                pos: 0,
+                bytes: b"let x = f();\n",
+            })
+            .expect("seed buffer text");
+            buf.upgrade_to_crdt(1).expect("upgrade to crdt");
+            drop(reg);
+            core.set_buffer_path(bid, Some(path));
+        }
+
+        set_inlay_store(&state, &uri, vec![hint(0, 5, ": i32")]);
+        s.set_viewport(
+            bid,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
+        assert!(
+            adornments_of(&s.render_frame(&state)).is_some(),
+            "baseline emits the fresh inlay hint"
+        );
+
+        let mut clear_frames = 0;
+        let mut full_style_frames = 0;
+        let mut full_deco_frames = 0;
+        for _ in 0..1000 {
+            {
+                let core = state.core.borrow();
+                let mut reg = core.registry.borrow_mut();
+                let buf = reg.get_mut(bid).expect("active buffer");
+                buf.apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"x",
+                })
+                .expect("typing edit");
+            }
+            let store = state.lsp_manager.borrow().inlay_hint_store();
+            store.lock().expect("inlay store").mark_stale(uri.clone());
+
+            let msgs = s.render_frame(&state);
+            if let Some((full, _)) = style_segments(&msgs)
+                && full
+            {
+                full_style_frames += 1;
+            }
+            if let Some((full, _)) = decorations_of(&msgs)
+                && full
+            {
+                full_deco_frames += 1;
+            }
+            if let Some(items) = adornments_of(&msgs) {
+                assert!(
+                    items.is_empty(),
+                    "stale inlay hints must not render during sustained typing"
+                );
+                clear_frames += 1;
+            }
+        }
+
+        assert_eq!(
+            clear_frames, 1,
+            "first stale frame clears cached hints; later stale frames stay silent"
+        );
+        assert_eq!(
+            full_style_frames, 1000,
+            "each CRDT generation transition forces a StyleSpans full resync"
+        );
+        assert_eq!(
+            full_deco_frames, 1000,
+            "each CRDT generation transition forces a Decorations full resync"
+        );
+
+        set_inlay_store(&state, &uri, vec![hint(0, 1005, ": i32")]);
+        let refreshed = adornments_of(&s.render_frame(&state)).expect("fresh hints re-emit");
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].at, 1005);
     }
 
     // --- M1: FileStyleSummary (minimap producer, Open Q#2) ---
