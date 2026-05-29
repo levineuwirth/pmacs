@@ -23,8 +23,8 @@ use std::thread;
 
 use pmacs_protocol::{
     AttachRequest, BufferId, ByteRange, FrontendCapabilities, FrontendEvent, FrontendId, Hello,
-    InstanceMessage, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, TransportError,
-    is_supported_protocol_version, read_message, write_message,
+    InstanceMessage, Key, KeyEvent, Modifiers, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
+    TransportError, is_supported_protocol_version, read_message, write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -226,6 +226,29 @@ impl AttachClient {
                 visible,
                 generation,
             },
+        )
+    }
+
+    /// Send a `FrontendEvent::Key` to the daemon (session B1). The
+    /// daemon routes it through `dispatch_key` — the same keymap +
+    /// command + Lua stack the TUI drives — so cursor motion and (in
+    /// later sessions) edits are produced entirely instance-side; the
+    /// resulting `CursorByte` / `CrdtOp` come back over the attach
+    /// stream. `timestamp_ns` is 0 (no capture clock plumbed yet; the
+    /// daemon does not depend on it).
+    pub fn send_key(&self, key: Key, mods: Modifiers) -> Result<(), TransportError> {
+        let mut stream = self
+            .write_stream
+            .lock()
+            .expect("attach write-stream mutex poisoned");
+        write_message(
+            &mut *stream,
+            &FrontendEvent::Key(KeyEvent {
+                frontend_id: self.frontend_id,
+                key,
+                mods,
+                timestamp_ns: 0,
+            }),
         )
     }
 }

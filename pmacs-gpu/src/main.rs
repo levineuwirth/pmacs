@@ -34,14 +34,14 @@ use glyphon::{
 };
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, Decoration, DecorationKind,
-    DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, SelectionSnapshot,
-    StyleSegment, StyleSpan,
+    DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, Key as ProtocolKey, Modifiers,
+    SelectionSnapshot, StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -65,6 +65,11 @@ const BG: wgpu::Color = wgpu::Color {
 
 const TEXT_LEFT: f32 = 16.0;
 const TEXT_TOP: f32 = 16.0;
+/// Caret bar width in px, and its color (bright, near-opaque — drawn
+/// over the text so it reads as the active insertion point). Session
+/// B1.
+const CARET_WIDTH: f32 = 2.0;
+const CARET_COLOR: [f32; 4] = [0.90, 0.90, 0.96, 0.90];
 const TEXT_RIGHT_GAP: f32 = 10.0;
 const MINIMAP_WIDTH: f32 = 48.0;
 const MINIMAP_RIGHT: f32 = 12.0;
@@ -151,6 +156,7 @@ fn main() {
         proxy: Some(proxy),
         state: None,
         attach_client: None,
+        modifiers: winit::keyboard::ModifiersState::empty(),
     };
     event_loop
         .run_app(&mut app)
@@ -203,9 +209,12 @@ struct App {
     proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     state: Option<State>,
     /// Held both for stream lifetime and for the main loop's
-    /// `send_viewport` write-back path. Session 4 uses this; later
-    /// sessions will add cursor/edit/focus emissions.
+    /// `send_viewport` / `send_key` write-back path.
     attach_client: Option<AttachClient>,
+    /// Latest modifier state from winit (`ModifiersChanged`). winit
+    /// delivers modifiers separately from key presses, so we track the
+    /// current set and apply it when a key is sent (session B1).
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 /// All resources owned by one running pmacs-gpu instance.
@@ -280,6 +289,20 @@ struct State {
     /// these entries rather than from `current_decorations`. Sender
     /// exclusion at the daemon means our own id never appears here.
     peer_presences: HashMap<FrontendId, PeerPresence>,
+    /// This frontend's own cursor (session B1), from the daemon's
+    /// `CursorByte`. pmacs-gpu sends `Key` events; the daemon moves the
+    /// authoritative window cursor and reports it back here (Q#B3), so
+    /// the caret follows whatever the daemon decided — including motion
+    /// from commands this frontend never interprets locally. `None`
+    /// until the first `CursorByte`.
+    own_cursor: Option<OwnCursor>,
+}
+
+/// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
+#[derive(Clone, Copy, Debug)]
+struct OwnCursor {
+    buffer_id: BufferId,
+    byte: u64,
 }
 
 /// One peer frontend's cursor + selection in a buffer, from
@@ -336,22 +359,40 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
         match event {
-            WindowEvent::CloseRequested
-            | WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key: Key::Named(NamedKey::Escape),
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                ..
-            } => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size.width.max(1), size.height.max(1)),
-            WindowEvent::RedrawRequested => state.render(),
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::KeyboardInput { event: key, .. } => {
+                if key.state != ElementState::Pressed {
+                    return;
+                }
+                // Escape stays a local quit (no daemon round trip).
+                if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
+                    event_loop.exit();
+                    return;
+                }
+                // Session B1 forwards cursor-motion keys only; editing
+                // keys (chars, Backspace, Enter, Delete) open in B2.
+                // `translate_key` handles the full set so B2 just drops
+                // the `is_motion_key` gate.
+                if let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers)
+                    && is_motion_key(pkey)
+                    && let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_key(pkey, pmods)
+                {
+                    eprintln!("pmacs-gpu: send_key failed: {e}");
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(state) = self.state.as_mut() {
+                    state.resize(size.width.max(1), size.height.max(1));
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                if let Some(state) = self.state.as_mut() {
+                    state.render();
+                }
+            }
             _ => {}
         }
     }
@@ -563,6 +604,7 @@ impl State {
             current_adornments: Vec::new(),
             current_summary: None,
             peer_presences: HashMap::new(),
+            own_cursor: None,
         }
     }
 
@@ -646,11 +688,12 @@ impl State {
                 self.current_decorations.clear();
                 self.current_adornments.clear();
                 self.current_summary = None;
-                // Peer cursors are anchored in the prior buffer's
-                // coordinate space; drop them so a stale offset can't
-                // paint against the new rope before the next
-                // PresenceUpdate arrives.
+                // Peer cursors and our own cursor are anchored in the
+                // prior buffer's coordinate space; drop them so a stale
+                // offset can't paint against the new rope before the
+                // next PresenceUpdate / CursorByte arrives.
                 self.peer_presences.clear();
+                self.own_cursor = None;
                 if !self.set_text(&text) {
                     self.reshape();
                 }
@@ -792,6 +835,21 @@ impl State {
                         selection,
                     },
                 );
+                self.window.request_redraw();
+                None
+            }
+            // Session B1 — our own cursor. The daemon emits this per
+            // tick for the replica; the caret + own-window decorations
+            // follow it. Only meaningful once we send Key events that
+            // move it.
+            InstanceMessage::CursorByte {
+                buffer_id,
+                byte_pos,
+            } => {
+                self.own_cursor = Some(OwnCursor {
+                    buffer_id,
+                    byte: byte_pos,
+                });
                 self.window.request_redraw();
                 None
             }
@@ -1049,6 +1107,16 @@ impl State {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let caret_vertices = self.caret_vertex_bytes();
+        let caret_vertex_count = (caret_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let caret_buffer = (!caret_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("pmacs-gpu caret"),
+                    contents: &caret_vertices,
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let after_bg = debug_frame().then(std::time::Instant::now);
         let minimap_vertices = self.minimap_vertex_bytes();
         let minimap_vertex_count = (minimap_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
@@ -1122,6 +1190,12 @@ impl State {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text_renderer render");
+            // Caret over the text so the insertion point reads on top
+            // of the glyph it sits before (session B1).
+            if let Some(vertex_buffer) = caret_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, caret_vertex_count);
+            }
             if let Some(vertex_buffer) = minimap_buffer.as_ref() {
                 self.quad_renderer
                     .render(&mut pass, vertex_buffer, minimap_vertex_count);
@@ -1180,58 +1254,120 @@ impl State {
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
-    /// Vertex bytes for quad-pipeline background rectangles. Session
-    /// 9.3 sources `CurrentLine` / `Selection` washes from peer
-    /// presence (the editing frontend's cursor + selection) rather
-    /// than from `current_decorations`: this is a read-only mirror, so
-    /// its own per-window `Selection` / `CurrentLine` decorations are
-    /// inert (cursor pinned at 0, no selection). See finding QB1 in
-    /// `docs/pmacs-gpu-quad-backgrounds-framing.md`.
+    /// Vertex bytes for quad-pipeline background washes (drawn *under*
+    /// the text). Two sources, both `Selection` / `CurrentLine`: this
+    /// frontend's *own* window decorations from `current_decorations`
+    /// (live again since session B1 reactivated the own cursor — Q#B4;
+    /// QB1 had suppressed them while the mirror was read-only), and
+    /// *peer* presence from `PresenceUpdate` (session 9.3). Both reuse
+    /// the same `\n`-line offset table to rebase cosmic-text's
+    /// line-relative glyph offsets (QB3). The caret is separate (drawn
+    /// *over* text) — see [`Self::caret_vertex_bytes`].
     fn decoration_background_vertex_bytes(&self) -> Vec<u8> {
-        let rects = self.peer_background_rects();
-        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
-    }
-
-    /// Background rectangles for every peer's cursor line + selection
-    /// in the current buffer. `CurrentLine` covers the source line
-    /// holding the peer cursor; `Selection` covers the peer's selected
-    /// byte range. Both map byte ranges to per-visual-line glyph
-    /// extents via `peer_glyph_extent_rects`. Single-peer mirrors reuse
-    /// the `Selection` / `CurrentLine` colors so the visual reads as
-    /// "my editing, mirrored"; per-peer distinct colors are deferred.
-    fn peer_background_rects(&self) -> Vec<MinimapRect> {
         let Some(buffer_id) = self.current_buffer_id else {
             return Vec::new();
         };
-        let text_len = self.current_text.len() as u64;
-        // Buffer-absolute byte offset of each `\n`-delimited line,
-        // indexed by `LayoutRun::line_i`. `LayoutGlyph::{start,end}` are
-        // offsets within the *original line*, not the whole buffer, so
-        // every byte range below must be rebased per line before it can
-        // be matched against glyph offsets.
         let line_offsets = line_byte_offsets(&self.current_text);
         let mut rects = Vec::new();
+        self.collect_own_decoration_rects(&mut rects, &line_offsets);
+        self.collect_peer_rects(buffer_id, &line_offsets, &mut rects);
+        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
+    /// Own-window `Selection` / `CurrentLine` washes from
+    /// `current_decorations` (Q#B4). The producer emits these for this
+    /// frontend's window; they become non-trivial once B1's cursor
+    /// motion moves the window cursor off byte 0.
+    fn collect_own_decoration_rects(&self, rects: &mut Vec<MinimapRect>, line_offsets: &[u64]) {
+        for d in &self.current_decorations {
+            if let Some(color) = decoration_kind_to_bg_color(d.kind) {
+                self.push_glyph_extent_rects(
+                    rects,
+                    line_offsets,
+                    d.range.start,
+                    d.range.end,
+                    color,
+                );
+            }
+        }
+    }
+
+    /// Peer cursor-line + selection washes from `PresenceUpdate`
+    /// (session 9.3). Single-peer mirrors reuse the `Selection` /
+    /// `CurrentLine` colors; per-peer distinct colors are deferred.
+    fn collect_peer_rects(
+        &self,
+        buffer_id: BufferId,
+        line_offsets: &[u64],
+        rects: &mut Vec<MinimapRect>,
+    ) {
+        let text_len = self.current_text.len() as u64;
         for presence in self.peer_presences.values() {
             if presence.buffer_id != buffer_id {
                 continue;
             }
-            // CurrentLine: the source line containing the peer cursor.
             if let Some(color) = decoration_kind_to_bg_color(DecorationKind::CurrentLine) {
                 let (lo, hi) = source_line_range(&self.current_text, presence.cursor);
-                self.push_glyph_extent_rects(&mut rects, &line_offsets, lo, hi, color);
+                self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
             }
-            // Selection: the peer's selected byte range, normalized.
             if let Some(sel) = presence.selection
                 && let Some(color) = decoration_kind_to_bg_color(DecorationKind::Selection)
             {
                 let lo = sel.anchor.min(sel.active).min(text_len);
                 let hi = sel.anchor.max(sel.active).min(text_len);
                 if hi > lo {
-                    self.push_glyph_extent_rects(&mut rects, &line_offsets, lo, hi, color);
+                    self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
                 }
             }
         }
-        rects
+    }
+
+    /// Vertex bytes for the caret quad, drawn *over* the text (B1).
+    /// Empty when no own cursor is known or it's in another buffer.
+    fn caret_vertex_bytes(&self) -> Vec<u8> {
+        let line_offsets = line_byte_offsets(&self.current_text);
+        let Some(rect) = self.caret_rect(&line_offsets) else {
+            return Vec::new();
+        };
+        rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
+    }
+
+    /// The caret rectangle for the own cursor: a thin bar at the left
+    /// edge of the glyph the cursor sits before (or the right edge of
+    /// the last glyph when the cursor is at line end). Byte→glyph
+    /// mapping rebases per line (QB3) and keys off the cursor's source
+    /// line via [`source_line_range`].
+    fn caret_rect(&self, line_offsets: &[u64]) -> Option<MinimapRect> {
+        let own = self.own_cursor?;
+        if self.current_buffer_id != Some(own.buffer_id) {
+            return None;
+        }
+        let cursor = own.byte.min(self.current_text.len() as u64);
+        let (line_lo, _) = source_line_range(&self.current_text, cursor);
+        for run in self.buffer.layout_runs() {
+            if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
+                continue;
+            }
+            let line_base = line_lo;
+            let mut x = TEXT_LEFT;
+            for glyph in run.glyphs {
+                if line_base + glyph.start as u64 >= cursor {
+                    x = TEXT_LEFT + glyph.x;
+                    break;
+                }
+                // Cursor is past this glyph; track its right edge so a
+                // cursor at line end lands after the final glyph.
+                x = TEXT_LEFT + glyph.x + glyph.w;
+            }
+            return Some(MinimapRect {
+                x,
+                y: TEXT_TOP + run.line_top,
+                w: CARET_WIDTH,
+                h: run.line_height,
+                color: CARET_COLOR,
+            });
+        }
+        None
     }
 
     /// Push one rect per visual line whose glyphs overlap the
@@ -1573,6 +1709,70 @@ fn debug_presence() -> bool {
 fn debug_frame() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_FRAME").is_some())
+}
+
+/// Translate a winit logical key + current modifier state into a
+/// protocol `(Key, Modifiers)`. Returns `None` for keys the protocol
+/// has no representation for (the daemon ignores `Key::Unknown`, so
+/// there's no value in forwarding them). `translate_key` covers the
+/// full editing set; session B1 gates the send on [`is_motion_key`].
+fn translate_key(
+    logical: &Key,
+    mods: winit::keyboard::ModifiersState,
+) -> Option<(ProtocolKey, Modifiers)> {
+    let mut bits = 0u8;
+    if mods.shift_key() {
+        bits |= Modifiers::SHIFT.bits();
+    }
+    if mods.control_key() {
+        bits |= Modifiers::CTRL.bits();
+    }
+    if mods.alt_key() {
+        bits |= Modifiers::ALT.bits();
+    }
+    if mods.super_key() {
+        bits |= Modifiers::META.bits();
+    }
+    let pmods = Modifiers::from_bits_truncate(bits);
+
+    let pkey = match logical {
+        Key::Named(named) => match named {
+            NamedKey::ArrowLeft => ProtocolKey::Left,
+            NamedKey::ArrowRight => ProtocolKey::Right,
+            NamedKey::ArrowUp => ProtocolKey::Up,
+            NamedKey::ArrowDown => ProtocolKey::Down,
+            NamedKey::Home => ProtocolKey::Home,
+            NamedKey::End => ProtocolKey::End,
+            NamedKey::PageUp => ProtocolKey::PageUp,
+            NamedKey::PageDown => ProtocolKey::PageDown,
+            NamedKey::Backspace => ProtocolKey::Backspace,
+            NamedKey::Enter => ProtocolKey::Enter,
+            NamedKey::Delete => ProtocolKey::Delete,
+            NamedKey::Insert => ProtocolKey::Insert,
+            NamedKey::Tab => ProtocolKey::Tab,
+            _ => return None,
+        },
+        Key::Character(s) => ProtocolKey::Char(s.chars().next()?),
+        _ => return None,
+    };
+    Some((pkey, pmods))
+}
+
+/// Session B1 forwards cursor-motion keys only; editing keys wait for
+/// B2. Keeping the gate as a single predicate means B2 removes one
+/// call site, not a translation rewrite.
+fn is_motion_key(key: ProtocolKey) -> bool {
+    matches!(
+        key,
+        ProtocolKey::Left
+            | ProtocolKey::Right
+            | ProtocolKey::Up
+            | ProtocolKey::Down
+            | ProtocolKey::Home
+            | ProtocolKey::End
+            | ProtocolKey::PageUp
+            | ProtocolKey::PageDown
+    )
 }
 
 /// Buffer-absolute byte offset of the start of each `\n`-delimited
@@ -1957,6 +2157,51 @@ mod tests {
         assert_eq!(source_line_range(text, 8), (7, 10));
         // Cursor past end clamps to the last line, never indexes out.
         assert_eq!(source_line_range(text, 99), (7, 10));
+    }
+
+    #[test]
+    fn translate_key_maps_motion_named_keys_and_chars() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey, SmolStr};
+
+        let none = ModifiersState::empty();
+        // Motion named keys translate and are gated as motion.
+        for (named, expected) in [
+            (NamedKey::ArrowLeft, ProtocolKey::Left),
+            (NamedKey::ArrowRight, ProtocolKey::Right),
+            (NamedKey::ArrowUp, ProtocolKey::Up),
+            (NamedKey::ArrowDown, ProtocolKey::Down),
+            (NamedKey::Home, ProtocolKey::Home),
+            (NamedKey::End, ProtocolKey::End),
+            (NamedKey::PageUp, ProtocolKey::PageUp),
+            (NamedKey::PageDown, ProtocolKey::PageDown),
+        ] {
+            let (k, m) = translate_key(&WKey::Named(named), none).expect("named maps");
+            assert_eq!(k, expected);
+            assert!(m.is_empty());
+            assert!(is_motion_key(k), "{expected:?} should gate as motion");
+        }
+
+        // A character key maps to Char but is NOT a motion key (B1
+        // gates it out; B2 opens it).
+        let (k, _) = translate_key(&WKey::Character(SmolStr::new("a")), none).expect("char maps");
+        assert_eq!(k, ProtocolKey::Char('a'));
+        assert!(!is_motion_key(k));
+
+        // Editing named keys translate (for B2) but don't gate as motion.
+        let (bk, _) = translate_key(&WKey::Named(NamedKey::Backspace), none).expect("bksp maps");
+        assert_eq!(bk, ProtocolKey::Backspace);
+        assert!(!is_motion_key(bk));
+    }
+
+    #[test]
+    fn translate_key_carries_modifiers() {
+        use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
+
+        let ctrl = ModifiersState::CONTROL;
+        let (k, m) = translate_key(&WKey::Named(NamedKey::ArrowLeft), ctrl).expect("maps");
+        assert_eq!(k, ProtocolKey::Left);
+        assert!(m.contains(Modifiers::CTRL));
+        assert!(!m.contains(Modifiers::SHIFT));
     }
 
     #[test]
