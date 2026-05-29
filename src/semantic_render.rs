@@ -370,7 +370,17 @@ impl SemanticRenderState {
     /// contract boundary.
     fn scoped_decorations(&self, state: &EditorState, vp: &DeclaredViewport) -> Vec<Decoration> {
         let core = state.core.borrow();
+        let registry = core.registry.clone();
+        let reg = registry.borrow();
         let mut out = Vec::new();
+
+        // Byte<->line mapping is needed by both the CurrentLine
+        // derivation and the diagnostics projection, and
+        // `buffer_source_bytes` is an O(n) rope copy. This runs every
+        // tick in the daemon's hot loop, so materialize at most once
+        // per call and reuse — never twice (the pre-9.2 shape copied
+        // separately in each branch).
+        let mut line_info: Option<(Vec<u8>, Vec<u64>)> = None;
 
         // Selection + CurrentLine — per-window (per-frontend) state.
         // Only this session's active window for the declared buffer
@@ -394,12 +404,13 @@ impl SemanticRenderState {
                     kind: DecorationKind::Selection,
                 });
             }
-            let registry = core.registry.clone();
-            let reg = registry.borrow();
             if let Ok(buf) = reg.get(vp.buffer_id) {
-                let source = buffer_source_bytes(buf);
-                let line_starts = line_start_offsets(&source);
-                let (lo, hi) = current_line_range(&line_starts, source.len() as u64, win.cursor);
+                let (source, line_starts) = line_info.get_or_insert_with(|| {
+                    let s = buffer_source_bytes(buf);
+                    let ls = line_start_offsets(&s);
+                    (s, ls)
+                });
+                let (lo, hi) = current_line_range(line_starts, source.len() as u64, win.cursor);
                 if let Some(range) = clip_to_viewport(lo, hi, vp) {
                     out.push(Decoration {
                         range,
@@ -427,31 +438,24 @@ impl SemanticRenderState {
                 let guard = store.lock().expect("diag store mutex poisoned");
                 (guard.for_uri(&uri).to_vec(), guard.is_stale(&uri))
             };
-            if !is_stale && !diags.is_empty() {
-                let registry = core.registry.clone();
-                let reg = registry.borrow();
-                if let Ok(buf) = reg.get(vp.buffer_id) {
-                    let source = buffer_source_bytes(buf);
-                    let line_starts = line_start_offsets(&source);
-                    for d in &diags {
-                        let lo = line_col_to_byte(
-                            &line_starts,
-                            source.len() as u64,
-                            d.start_line,
-                            d.start_col,
-                        );
-                        let hi = line_col_to_byte(
-                            &line_starts,
-                            source.len() as u64,
-                            d.end_line,
-                            d.end_col,
-                        );
-                        if let Some(range) = clip_to_viewport(lo, hi, vp) {
-                            out.push(Decoration {
-                                range,
-                                kind: severity_to_kind(d.severity),
-                            });
-                        }
+            if !is_stale
+                && !diags.is_empty()
+                && let Ok(buf) = reg.get(vp.buffer_id)
+            {
+                let (source, line_starts) = line_info.get_or_insert_with(|| {
+                    let s = buffer_source_bytes(buf);
+                    let ls = line_start_offsets(&s);
+                    (s, ls)
+                });
+                let source_len = source.len() as u64;
+                for d in &diags {
+                    let lo = line_col_to_byte(line_starts, source_len, d.start_line, d.start_col);
+                    let hi = line_col_to_byte(line_starts, source_len, d.end_line, d.end_col);
+                    if let Some(range) = clip_to_viewport(lo, hi, vp) {
+                        out.push(Decoration {
+                            range,
+                            kind: severity_to_kind(d.severity),
+                        });
                     }
                 }
             }

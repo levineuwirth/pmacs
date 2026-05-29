@@ -777,7 +777,7 @@ impl State {
                 // A `buf != current` line means the peer is on a buffer
                 // this mirror isn't displaying (no wash expected); no
                 // line at all means the message isn't reaching us.
-                if std::env::var_os("PMACS_GPU_DEBUG_PRESENCE").is_some() {
+                if debug_presence() {
                     eprintln!(
                         "pmacs-gpu presence: fid={frontend_id:?} buf={buffer_id:?} \
                          current={:?} cursor={cursor} sel={selection:?}",
@@ -1020,6 +1020,7 @@ impl State {
         self.window.request_redraw();
     }
 
+    #[allow(clippy::too_many_lines)] // linear per-frame GPU sequence + optional timing.
     fn render(&mut self) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -1037,6 +1038,7 @@ impl State {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let frame_start = debug_frame().then(std::time::Instant::now);
         let bg_vertices = self.decoration_background_vertex_bytes();
         let bg_vertex_count = (bg_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let bg_buffer = (!bg_vertices.is_empty()).then(|| {
@@ -1047,6 +1049,7 @@ impl State {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let after_bg = debug_frame().then(std::time::Instant::now);
         let minimap_vertices = self.minimap_vertex_bytes();
         let minimap_vertex_count = (minimap_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let minimap_buffer = (!minimap_vertices.is_empty()).then(|| {
@@ -1057,6 +1060,7 @@ impl State {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let after_minimap = debug_frame().then(std::time::Instant::now);
         let text_bounds_right = self.text_bounds_right();
 
         self.text_renderer
@@ -1126,6 +1130,21 @@ impl State {
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         self.atlas.trim();
+
+        if let (Some(start), Some(after_bg), Some(after_minimap)) =
+            (frame_start, after_bg, after_minimap)
+        {
+            let end = std::time::Instant::now();
+            let us = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_micros();
+            eprintln!(
+                "pmacs-gpu frame: bg={}us minimap={}us prepare+submit={}us total={}us peers={}",
+                us(start, after_bg),
+                us(after_bg, after_minimap),
+                us(after_minimap, end),
+                us(start, end),
+                self.peer_presences.len(),
+            );
+        }
     }
 
     fn text_bounds_right(&self) -> i32 {
@@ -1527,6 +1546,23 @@ fn rgb_to_minimap_color(r: u8, g: u8, b: u8) -> [f32; 4] {
         f32::from(b) / 255.0,
         0.9,
     ]
+}
+
+/// One-shot env flag: `PMACS_GPU_DEBUG_PRESENCE=1` logs each received
+/// `PresenceUpdate`. Read once (the env lock is not free per call) and
+/// cached for the process lifetime.
+fn debug_presence() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_PRESENCE").is_some())
+}
+
+/// One-shot env flag: `PMACS_GPU_DEBUG_FRAME=1` logs per-`render()`
+/// sub-phase timings (background rects, minimap rects, glyph prepare,
+/// total) so a perceived cursor-tracking slowdown can be localized to
+/// a specific phase.
+fn debug_frame() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_FRAME").is_some())
 }
 
 /// Byte range `[start, end)` of the source line containing `cursor`:
