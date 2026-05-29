@@ -24,6 +24,7 @@
 
 mod attach;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,7 +34,8 @@ use glyphon::{
 };
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, Decoration, DecorationKind,
-    DecorationSegment, InlineAdornment, InstanceMessage, StyleSegment, StyleSpan,
+    DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, SelectionSnapshot,
+    StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
@@ -268,6 +270,28 @@ struct State {
     /// arrives, matching the ownership rule used by style spans,
     /// decorations, and inline adornments.
     current_summary: Option<FileStyleSummaryState>,
+    /// Peer presence (session 9.3), keyed by source frontend id. Each
+    /// entry is one *other* attached frontend's cursor + selection,
+    /// delivered via `InstanceMessage::PresenceUpdate`. A read-only
+    /// mirror has no cursor of its own (no input path), so its own
+    /// `Selection` / `CurrentLine` decorations are inert; the editing
+    /// peer's presence is what the user actually watches. The quad-
+    /// background path renders `Selection` / `CurrentLine` washes from
+    /// these entries rather than from `current_decorations`. Sender
+    /// exclusion at the daemon means our own id never appears here.
+    peer_presences: HashMap<FrontendId, PeerPresence>,
+}
+
+/// One peer frontend's cursor + selection in a buffer, from
+/// `InstanceMessage::PresenceUpdate`. Byte offsets are in the buffer's
+/// coordinate space; the renderer maps them to glyph rectangles via
+/// the local layout and clamps to text length, so a presence that
+/// briefly lags an edit can never index out.
+#[derive(Clone, Copy, Debug)]
+struct PeerPresence {
+    buffer_id: BufferId,
+    cursor: u64,
+    selection: Option<SelectionSnapshot>,
 }
 
 struct QuadRenderer {
@@ -428,6 +452,7 @@ impl QuadRenderer {
 }
 
 impl State {
+    #[allow(clippy::too_many_lines)] // linear GPU/font/surface setup; splitting would obscure ordering.
     fn new(event_loop: &ActiveEventLoop, initial_text: &str) -> Self {
         let window = Arc::new(
             event_loop
@@ -537,6 +562,7 @@ impl State {
             current_decorations: Vec::new(),
             current_adornments: Vec::new(),
             current_summary: None,
+            peer_presences: HashMap::new(),
         }
     }
 
@@ -593,9 +619,11 @@ impl State {
     /// - `Goodbye` — surfaced via the reader thread's clean-EOF path,
     ///   not handled here.
     ///
-    /// Remaining semantic variants plus the grid variants (`CellDelta`,
-    /// `Cursor`, `CursorByte`) and presence updates are ignored in
-    /// session 7 — they land in subsequent Phase A sessions.
+    /// The grid variants (`CellDelta`, `Cursor`, `CursorByte`) are
+    /// ignored — pmacs-gpu lays out locally and tracks the cursor via
+    /// `PresenceUpdate` (session 9.3). Remaining semantic variants land
+    /// in subsequent Phase A sessions.
+    #[allow(clippy::too_many_lines)] // per-variant match dispatcher; one arm per InstanceMessage.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
             InstanceMessage::BufferSnapshot {
@@ -618,6 +646,11 @@ impl State {
                 self.current_decorations.clear();
                 self.current_adornments.clear();
                 self.current_summary = None;
+                // Peer cursors are anchored in the prior buffer's
+                // coordinate space; drop them so a stale offset can't
+                // paint against the new rope before the next
+                // PresenceUpdate arrives.
+                self.peer_presences.clear();
                 if !self.set_text(&text) {
                     self.reshape();
                 }
@@ -725,6 +758,41 @@ impl State {
                 lines,
             } => {
                 self.apply_file_style_summary(buffer_id, generation, lines);
+                None
+            }
+            // Session 9.3 — peer presence. The editing frontend's
+            // cursor + selection drive the `CurrentLine` / `Selection`
+            // washes for this read-only mirror (finding QB1). Store
+            // per source frontend; a redraw recomputes the background
+            // rects from `peer_presences`. We never receive our own
+            // (daemon sender exclusion).
+            InstanceMessage::PresenceUpdate {
+                frontend_id,
+                buffer_id,
+                cursor,
+                selection,
+            } => {
+                // Run with `PMACS_GPU_DEBUG_PRESENCE=1` to confirm peer
+                // presence is arriving and routed to the right buffer.
+                // A `buf != current` line means the peer is on a buffer
+                // this mirror isn't displaying (no wash expected); no
+                // line at all means the message isn't reaching us.
+                if debug_presence() {
+                    eprintln!(
+                        "pmacs-gpu presence: fid={frontend_id:?} buf={buffer_id:?} \
+                         current={:?} cursor={cursor} sel={selection:?}",
+                        self.current_buffer_id
+                    );
+                }
+                self.peer_presences.insert(
+                    frontend_id,
+                    PeerPresence {
+                        buffer_id,
+                        cursor,
+                        selection,
+                    },
+                );
+                self.window.request_redraw();
                 None
             }
             _ => None,
@@ -952,6 +1020,7 @@ impl State {
         self.window.request_redraw();
     }
 
+    #[allow(clippy::too_many_lines)] // linear per-frame GPU sequence + optional timing.
     fn render(&mut self) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -969,6 +1038,7 @@ impl State {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let frame_start = debug_frame().then(std::time::Instant::now);
         let bg_vertices = self.decoration_background_vertex_bytes();
         let bg_vertex_count = (bg_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let bg_buffer = (!bg_vertices.is_empty()).then(|| {
@@ -979,6 +1049,7 @@ impl State {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let after_bg = debug_frame().then(std::time::Instant::now);
         let minimap_vertices = self.minimap_vertex_bytes();
         let minimap_vertex_count = (minimap_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let minimap_buffer = (!minimap_vertices.is_empty()).then(|| {
@@ -989,6 +1060,7 @@ impl State {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let after_minimap = debug_frame().then(std::time::Instant::now);
         let text_bounds_right = self.text_bounds_right();
 
         self.text_renderer
@@ -1058,6 +1130,21 @@ impl State {
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         self.atlas.trim();
+
+        if let (Some(start), Some(after_bg), Some(after_minimap)) =
+            (frame_start, after_bg, after_minimap)
+        {
+            let end = std::time::Instant::now();
+            let us = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_micros();
+            eprintln!(
+                "pmacs-gpu frame: bg={}us minimap={}us prepare+submit={}us total={}us peers={}",
+                us(start, after_bg),
+                us(after_bg, after_minimap),
+                us(after_minimap, end),
+                us(start, end),
+                self.peer_presences.len(),
+            );
+        }
     }
 
     fn text_bounds_right(&self) -> i32 {
@@ -1093,58 +1180,104 @@ impl State {
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
-    /// Vertex bytes for quad-pipeline background rectangles covering
-    /// every background-bearing decoration in `current_decorations`.
-    /// Walks `cosmic_text::Buffer::layout_runs()` to map each
-    /// decoration's `ByteRange` into per-visual-line pixel rectangles:
-    /// a multi-line selection produces one rect per layout run that
-    /// carries at least one glyph whose `[start, end)` overlaps the
-    /// decoration. Returns an empty `Vec` when no background-bearing
-    /// decoration intersects any laid-out glyph.
+    /// Vertex bytes for quad-pipeline background rectangles. Session
+    /// 9.3 sources `CurrentLine` / `Selection` washes from peer
+    /// presence (the editing frontend's cursor + selection) rather
+    /// than from `current_decorations`: this is a read-only mirror, so
+    /// its own per-window `Selection` / `CurrentLine` decorations are
+    /// inert (cursor pinned at 0, no selection). See finding QB1 in
+    /// `docs/pmacs-gpu-quad-backgrounds-framing.md`.
     fn decoration_background_vertex_bytes(&self) -> Vec<u8> {
-        let rects = self.decoration_background_rects();
+        let rects = self.peer_background_rects();
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
-    fn decoration_background_rects(&self) -> Vec<MinimapRect> {
+    /// Background rectangles for every peer's cursor line + selection
+    /// in the current buffer. `CurrentLine` covers the source line
+    /// holding the peer cursor; `Selection` covers the peer's selected
+    /// byte range. Both map byte ranges to per-visual-line glyph
+    /// extents via `peer_glyph_extent_rects`. Single-peer mirrors reuse
+    /// the `Selection` / `CurrentLine` colors so the visual reads as
+    /// "my editing, mirrored"; per-peer distinct colors are deferred.
+    fn peer_background_rects(&self) -> Vec<MinimapRect> {
+        let Some(buffer_id) = self.current_buffer_id else {
+            return Vec::new();
+        };
+        let text_len = self.current_text.len() as u64;
+        // Buffer-absolute byte offset of each `\n`-delimited line,
+        // indexed by `LayoutRun::line_i`. `LayoutGlyph::{start,end}` are
+        // offsets within the *original line*, not the whole buffer, so
+        // every byte range below must be rebased per line before it can
+        // be matched against glyph offsets.
+        let line_offsets = line_byte_offsets(&self.current_text);
         let mut rects = Vec::new();
-        for d in &self.current_decorations {
-            let Some(color) = decoration_kind_to_bg_color(d.kind) else {
-                continue;
-            };
-            let lo = d.range.start;
-            let hi = d.range.end;
-            if hi <= lo {
+        for presence in self.peer_presences.values() {
+            if presence.buffer_id != buffer_id {
                 continue;
             }
-            for run in self.buffer.layout_runs() {
-                let mut min_x: Option<f32> = None;
-                let mut max_x: Option<f32> = None;
-                for glyph in run.glyphs {
-                    let g_start = glyph.start as u64;
-                    let g_end = glyph.end as u64;
-                    if g_end <= lo || g_start >= hi {
-                        continue;
-                    }
-                    let x0 = glyph.x;
-                    let x1 = glyph.x + glyph.w;
-                    min_x = Some(min_x.map_or(x0, |v| v.min(x0)));
-                    max_x = Some(max_x.map_or(x1, |v| v.max(x1)));
-                }
-                if let (Some(x0), Some(x1)) = (min_x, max_x)
-                    && x1 > x0
-                {
-                    rects.push(MinimapRect {
-                        x: TEXT_LEFT + x0,
-                        y: TEXT_TOP + run.line_top,
-                        w: x1 - x0,
-                        h: run.line_height,
-                        color,
-                    });
+            // CurrentLine: the source line containing the peer cursor.
+            if let Some(color) = decoration_kind_to_bg_color(DecorationKind::CurrentLine) {
+                let (lo, hi) = source_line_range(&self.current_text, presence.cursor);
+                self.push_glyph_extent_rects(&mut rects, &line_offsets, lo, hi, color);
+            }
+            // Selection: the peer's selected byte range, normalized.
+            if let Some(sel) = presence.selection
+                && let Some(color) = decoration_kind_to_bg_color(DecorationKind::Selection)
+            {
+                let lo = sel.anchor.min(sel.active).min(text_len);
+                let hi = sel.anchor.max(sel.active).min(text_len);
+                if hi > lo {
+                    self.push_glyph_extent_rects(&mut rects, &line_offsets, lo, hi, color);
                 }
             }
         }
         rects
+    }
+
+    /// Push one rect per visual line whose glyphs overlap the
+    /// buffer-absolute byte range `[lo, hi)`, spanning the matching
+    /// glyphs' horizontal extent. A range crossing visual-line
+    /// boundaries (wrapped or multi-line) fans out into one rect per
+    /// run. `line_offsets[run.line_i]` rebases the run's line-relative
+    /// glyph offsets into buffer-absolute space for the comparison.
+    fn push_glyph_extent_rects(
+        &self,
+        rects: &mut Vec<MinimapRect>,
+        line_offsets: &[u64],
+        lo: u64,
+        hi: u64,
+        color: [f32; 4],
+    ) {
+        if hi <= lo {
+            return;
+        }
+        for run in self.buffer.layout_runs() {
+            let line_base = line_offsets.get(run.line_i).copied().unwrap_or(0);
+            let mut min_x: Option<f32> = None;
+            let mut max_x: Option<f32> = None;
+            for glyph in run.glyphs {
+                let g_start = line_base + glyph.start as u64;
+                let g_end = line_base + glyph.end as u64;
+                if g_end <= lo || g_start >= hi {
+                    continue;
+                }
+                let x0 = glyph.x;
+                let x1 = glyph.x + glyph.w;
+                min_x = Some(min_x.map_or(x0, |v| v.min(x0)));
+                max_x = Some(max_x.map_or(x1, |v| v.max(x1)));
+            }
+            if let (Some(x0), Some(x1)) = (min_x, max_x)
+                && x1 > x0
+            {
+                rects.push(MinimapRect {
+                    x: TEXT_LEFT + x0,
+                    y: TEXT_TOP + run.line_top,
+                    w: x1 - x0,
+                    h: run.line_height,
+                    color,
+                });
+            }
+        }
     }
 }
 
@@ -1425,6 +1558,49 @@ fn rgb_to_minimap_color(r: u8, g: u8, b: u8) -> [f32; 4] {
     ]
 }
 
+/// One-shot env flag: `PMACS_GPU_DEBUG_PRESENCE=1` logs each received
+/// `PresenceUpdate`. Read once (the env lock is not free per call) and
+/// cached for the process lifetime.
+fn debug_presence() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_PRESENCE").is_some())
+}
+
+/// One-shot env flag: `PMACS_GPU_DEBUG_FRAME=1` logs per-`render()`
+/// sub-phase timings (background rects, minimap rects, glyph prepare,
+/// total) so a perceived cursor-tracking slowdown can be localized to
+/// a specific phase.
+fn debug_frame() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_FRAME").is_some())
+}
+
+/// Buffer-absolute byte offset of the start of each `\n`-delimited
+/// line (index 0 = byte 0). Indexed by cosmic-text's
+/// `LayoutRun::line_i` to rebase line-relative glyph offsets.
+fn line_byte_offsets(text: &str) -> Vec<u64> {
+    let mut starts = vec![0u64];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i as u64 + 1);
+        }
+    }
+    starts
+}
+
+/// Byte range `[start, end)` of the source line containing `cursor`:
+/// `start` is just after the previous `\n` (or 0), `end` is just after
+/// the next `\n` (or text length). Mirrors the producer's
+/// `current_line_range` so the rendered `CurrentLine` wash covers the
+/// same bytes the producer would. `cursor` is clamped to the text
+/// length so a peer presence that briefly lags an edit is safe.
+fn source_line_range(text: &str, cursor: u64) -> (u64, u64) {
+    let c = (cursor as usize).min(text.len());
+    let start = text[..c].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[c..].find('\n').map_or(text.len(), |i| c + i + 1);
+    (start as u64, end as u64)
+}
+
 fn rects_to_vertex_bytes(
     rects: &[MinimapRect],
     surface_width: u32,
@@ -1680,11 +1856,10 @@ fn decoration_kind_to_color(kind: DecorationKind) -> Option<glyphon::Color> {
 /// kinds (the four diagnostic severities) so the two helpers form a
 /// total cover with no overlap.
 ///
-/// Session 9.1 ships `Selection` only. `CurrentLine` is wired in 9.2
-/// (this helper will return its color then); `SearchMatch` /
-/// `SearchMatchActive` wait on a search feature in pmacs core
-/// (Q#4 in `docs/pmacs-gpu-quad-backgrounds-framing.md`), so they
-/// continue to return `None` here.
+/// Session 9.1 shipped `Selection`; session 9.2 adds `CurrentLine`.
+/// `SearchMatch` / `SearchMatchActive` wait on a search feature in
+/// pmacs core (Q#4 in `docs/pmacs-gpu-quad-backgrounds-framing.md`),
+/// so they continue to return `None` here.
 #[allow(clippy::match_same_arms)] // each `None` arm has a distinct rationale comment.
 fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
     match kind {
@@ -1694,8 +1869,13 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
         // because the text render pass runs after this one in the same
         // render pass (Q#2 stance α).
         DecorationKind::Selection => Some([0.31, 0.42, 0.82, 0.30]),
-        // 9.2 will fill this in.
-        DecorationKind::CurrentLine => None,
+        // Blue-grey wash, quietest of the background kinds (it's always
+        // on) but still visible. The first 9.2/9.3 value (alpha 0.08)
+        // computed to ~10/255 above the dark clear color and was
+        // swamped by glyphs on a text line — invisible in practice.
+        // 0.22 keeps it subtle vs Selection's 0.30 while actually
+        // reading as a current-line band.
+        DecorationKind::CurrentLine => Some([0.55, 0.60, 0.75, 0.22]),
         // Deferred to the search-feature arc.
         DecorationKind::SearchMatch | DecorationKind::SearchMatchActive => None,
         // Foreground-only — handled by [`decoration_kind_to_color`].
@@ -1764,14 +1944,49 @@ mod tests {
     }
 
     #[test]
-    fn bg_color_helper_covers_selection_and_returns_none_for_unrendered_kinds() {
-        // Session 9.1 ships `Selection` only.
+    fn source_line_range_locates_enclosing_line() {
+        // "abc\nde\nfgh": newlines at byte 3 and 6; len = 10.
+        let text = "abc\nde\nfgh";
+        // Cursor on line 0 → [0, 4) (includes the trailing \n).
+        assert_eq!(source_line_range(text, 0), (0, 4));
+        assert_eq!(source_line_range(text, 2), (0, 4));
+        // Start of line 1 → [4, 7).
+        assert_eq!(source_line_range(text, 4), (4, 7));
+        assert_eq!(source_line_range(text, 5), (4, 7));
+        // Last line has no trailing \n → [7, 10).
+        assert_eq!(source_line_range(text, 8), (7, 10));
+        // Cursor past end clamps to the last line, never indexes out.
+        assert_eq!(source_line_range(text, 99), (7, 10));
+    }
+
+    #[test]
+    fn line_byte_offsets_indexes_each_logical_line() {
+        // "abc\nde\nfgh": lines start at bytes 0, 4, 7. Indexed by
+        // LayoutRun::line_i to rebase line-relative glyph offsets.
+        assert_eq!(line_byte_offsets("abc\nde\nfgh"), vec![0, 4, 7]);
+        // Trailing newline yields a final empty line at byte len.
+        assert_eq!(line_byte_offsets("a\nb\n"), vec![0, 2, 4]);
+        // No newline: one line at 0.
+        assert_eq!(line_byte_offsets("abc"), vec![0]);
+        assert_eq!(line_byte_offsets(""), vec![0]);
+    }
+
+    #[test]
+    fn source_line_range_handles_empty_and_leading_newline() {
+        assert_eq!(source_line_range("", 0), (0, 0));
+        // "\nx": cursor 0 is on the empty first line [0, 1).
+        assert_eq!(source_line_range("\nx", 0), (0, 1));
+        // cursor 1 is on line 1 → [1, 2).
+        assert_eq!(source_line_range("\nx", 1), (1, 2));
+    }
+
+    #[test]
+    fn bg_color_helper_covers_selection_and_current_line() {
+        // Sessions 9.1 + 9.2: Selection and CurrentLine paint.
         assert!(decoration_kind_to_bg_color(DecorationKind::Selection).is_some());
+        assert!(decoration_kind_to_bg_color(DecorationKind::CurrentLine).is_some());
 
-        // CurrentLine is wired in session 9.2.
-        assert!(decoration_kind_to_bg_color(DecorationKind::CurrentLine).is_none());
-
-        // Search-feature arc.
+        // Search-feature arc — still deferred.
         assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_none());
         assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_none());
 
@@ -1804,16 +2019,13 @@ mod tests {
         ] {
             let fg = decoration_kind_to_color(kind).is_some();
             let bg = decoration_kind_to_bg_color(kind).is_some();
-            // Background helper returns None for kinds that 9.1
-            // deliberately defers (CurrentLine, the search pair); for
-            // each of those, decoration_kind_to_color is also None.
-            // That is the "neither yet" state — the
-            // exclusive-or test exempts it.
+            // Background helper returns None for the search pair —
+            // deferred to the search-feature arc. For both of those,
+            // decoration_kind_to_color is also None. That is the
+            // "neither yet" state — the exclusive-or test exempts it.
             let deferred = matches!(
                 kind,
-                DecorationKind::CurrentLine
-                    | DecorationKind::SearchMatch
-                    | DecorationKind::SearchMatchActive
+                DecorationKind::SearchMatch | DecorationKind::SearchMatchActive
             );
             assert!(
                 deferred || (fg ^ bg),

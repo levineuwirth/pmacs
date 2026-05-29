@@ -114,6 +114,46 @@ pub struct SemanticRenderState {
     /// already has and emits nothing. First emission happens on the
     /// first frame for a buffer; further emissions only after edits.
     last_summary: HashMap<BufferId, u64>,
+    /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
+    /// the tree-sitter highlights query over the *whole declared
+    /// viewport* (which the GPU frontend sets to the entire buffer)
+    /// and clones the theme — too expensive to repeat on every tick.
+    /// The styling depends only on the parse bundle, the CRDT
+    /// generation, and the viewport — never the cursor — so a gate
+    /// built from those lets cursor-only ticks skip the query entirely.
+    /// Only the grammar (tree-sitter) path is gated; the LSP-token path
+    /// has no comparably cheap handle and recomputes as before.
+    last_style_gate: HashMap<BufferId, StyleGate>,
+}
+
+/// Recompute gate for [`scoped_style_spans`] on a grammar-backed
+/// buffer. Holds the current parse bundle `Arc` so its address stays
+/// stable while cached — comparing by `Arc::ptr_eq` then can't be
+/// fooled by a freed bundle's address being reused (ABA). Equal gates
+/// ⇒ identical spans ⇒ the tree-sitter query can be skipped.
+/// `generation` is included so a CRDT edit still forces the M11.7
+/// full-resync even when the parse bundle hasn't re-landed yet.
+#[derive(Clone)]
+struct StyleGate {
+    /// Current parse bundle, or `None` when none has landed yet.
+    bundle: Option<std::sync::Arc<crate::syntax::ParseTreeBundle>>,
+    /// CRDT generation of the buffer.
+    generation: u64,
+    /// Declared viewport.
+    visible: ByteRange,
+}
+
+impl StyleGate {
+    /// True when both gates would produce identical style spans.
+    fn matches(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.visible == other.visible
+            && match (&self.bundle, &other.bundle) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 impl SemanticRenderState {
@@ -128,6 +168,7 @@ impl SemanticRenderState {
             last_decorations: HashMap::new(),
             last_adornments: HashMap::new(),
             last_summary: HashMap::new(),
+            last_style_gate: HashMap::new(),
         }
     }
 
@@ -172,63 +213,31 @@ impl SemanticRenderState {
         let mut out = Vec::new();
 
         // --- StyleSpans (T M11.2 producer, T M11.4 diff) ---
-        let spans = scoped_style_spans(state, &vp);
-        let prev = self.last_sent.get(&vp.buffer_id);
-        // Resync when there is no baseline, the declared viewport
-        // region moved (scoping window changed), OR the CRDT
-        // generation advanced (T M11.7: text edits shift byte
-        // positions, so prior spans are stale and incremental
-        // updates can't restore the full viewport — see
-        // `LastFrame`'s doc comment).
-        let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
-        if full {
-            // The first frame for this buffer/viewport. One segment
-            // covering the declared viewport carries the whole scoped
-            // set (possibly empty → frontend clears the viewport).
-            self.last_sent.insert(
-                vp.buffer_id,
-                LastFrame {
-                    visible: vp.visible,
-                    items: spans.clone(),
-                    generation,
-                },
-            );
-            out.push(InstanceMessage::StyleSpans {
-                buffer_id: vp.buffer_id,
-                generation,
-                full: true,
-                segments: vec![StyleSegment {
-                    range: vp.visible,
-                    spans,
-                }],
-            });
+        // Perf gate: `scoped_style_spans` runs the tree-sitter query
+        // over the whole viewport + clones the theme. For a grammar-
+        // backed buffer it's a pure function of (bundle revision,
+        // generation, viewport), so a cursor-only tick — same key,
+        // already-sent baseline — can skip the whole block. The LSP-
+        // token path returns `None` (no cheap revision) and recomputes
+        // every tick as before.
+        let style_gate = grammar_style_key(state, &vp, generation);
+        let style_unchanged = match (&style_gate, self.last_style_gate.get(&vp.buffer_id)) {
+            (Some(g), Some(prev)) => g.matches(prev) && self.last_sent.contains_key(&vp.buffer_id),
+            _ => false,
+        };
+        if style_unchanged {
+            // Styling cannot have changed since the last computation;
+            // emit nothing and skip the query.
         } else {
-            let prev = prev.expect("checked is_none_or above");
-            let intervals = changed_intervals(&prev.items, &spans, |s| s.range);
-            if !intervals.is_empty() {
-                let segments = intervals
-                    .into_iter()
-                    .map(|range| StyleSegment {
-                        range,
-                        spans: clip_style_spans(range, &spans),
-                    })
-                    .collect();
-                self.last_sent.insert(
-                    vp.buffer_id,
-                    LastFrame {
-                        visible: vp.visible,
-                        items: spans,
-                        generation,
-                    },
-                );
-                out.push(InstanceMessage::StyleSpans {
-                    buffer_id: vp.buffer_id,
-                    generation,
-                    full: false,
-                    segments,
-                });
+            match style_gate {
+                Some(g) => {
+                    self.last_style_gate.insert(vp.buffer_id, g);
+                }
+                None => {
+                    self.last_style_gate.remove(&vp.buffer_id);
+                }
             }
-            // No dirty interval → styling unchanged → emit nothing.
+            self.emit_style_spans(state, &vp, generation, &mut out);
         }
 
         // --- Decorations (T M11.3 producer, T M11.4 diff) ---
@@ -368,22 +377,123 @@ impl SemanticRenderState {
     /// frontend already owns (it has `CursorByte`) — emitting it would
     /// couple a visual-motion concern to the instance, against the
     /// contract boundary.
+    /// Compute the scoped style spans and push a `StyleSpans` message
+    /// (full resync or M11.4 incremental) when they differ from the
+    /// last sent baseline. Extracted from `render_frame` so the perf
+    /// gate there can skip it wholesale on unchanged ticks.
+    fn emit_style_spans(
+        &mut self,
+        state: &EditorState,
+        vp: &DeclaredViewport,
+        generation: u64,
+        out: &mut Vec<InstanceMessage>,
+    ) {
+        let spans = scoped_style_spans(state, vp);
+        let prev = self.last_sent.get(&vp.buffer_id);
+        // Resync when there is no baseline, the declared viewport
+        // region moved (scoping window changed), OR the CRDT
+        // generation advanced (T M11.7: text edits shift byte
+        // positions, so prior spans are stale and incremental
+        // updates can't restore the full viewport).
+        let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
+        if full {
+            self.last_sent.insert(
+                vp.buffer_id,
+                LastFrame {
+                    visible: vp.visible,
+                    items: spans.clone(),
+                    generation,
+                },
+            );
+            out.push(InstanceMessage::StyleSpans {
+                buffer_id: vp.buffer_id,
+                generation,
+                full: true,
+                segments: vec![StyleSegment {
+                    range: vp.visible,
+                    spans,
+                }],
+            });
+        } else {
+            let prev = prev.expect("checked is_none_or above");
+            let intervals = changed_intervals(&prev.items, &spans, |s| s.range);
+            if !intervals.is_empty() {
+                let segments = intervals
+                    .into_iter()
+                    .map(|range| StyleSegment {
+                        range,
+                        spans: clip_style_spans(range, &spans),
+                    })
+                    .collect();
+                self.last_sent.insert(
+                    vp.buffer_id,
+                    LastFrame {
+                        visible: vp.visible,
+                        items: spans,
+                        generation,
+                    },
+                );
+                out.push(InstanceMessage::StyleSpans {
+                    buffer_id: vp.buffer_id,
+                    generation,
+                    full: false,
+                    segments,
+                });
+            }
+            // No dirty interval → styling unchanged → emit nothing.
+        }
+    }
+
     fn scoped_decorations(&self, state: &EditorState, vp: &DeclaredViewport) -> Vec<Decoration> {
         let core = state.core.borrow();
+        let registry = core.registry.clone();
+        let reg = registry.borrow();
         let mut out = Vec::new();
 
-        // Selection — per-window (per-frontend) state, already byte
-        // offsets. Only this session's active window for the declared
-        // buffer contributes.
+        // Byte<->line mapping is needed by both the CurrentLine
+        // derivation and the diagnostics projection, and
+        // `buffer_source_bytes` is an O(n) rope copy. This runs every
+        // tick in the daemon's hot loop, so materialize at most once
+        // per call and reuse — never twice (the pre-9.2 shape copied
+        // separately in each branch).
+        let mut line_info: Option<(Vec<u8>, Vec<u64>)> = None;
+
+        // Selection + CurrentLine — per-window (per-frontend) state.
+        // Only this session's active window for the declared buffer
+        // contributes either kind.
+        //
+        // Q#3 (per-line CurrentLine cadence, stance β) falls out of the
+        // existing M11.4 diff: `render_frame` compares the new
+        // decoration Vec against the last sent one and emits only on
+        // change. Horizontal cursor motion within a single line
+        // produces an identical `CurrentLine` range and an identical
+        // overall Vec, so `changed_intervals` returns empty and nothing
+        // ships. No `last_cursor_line` cache is needed at this layer.
         if let Some(win) = core.active_window_for(self.frontend_id)
             && win.buffer_id == vp.buffer_id
-            && let Some((lo, hi)) = win.region()
-            && let Some(range) = clip_to_viewport(lo, hi, vp)
         {
-            out.push(Decoration {
-                range,
-                kind: DecorationKind::Selection,
-            });
+            if let Some((lo, hi)) = win.region()
+                && let Some(range) = clip_to_viewport(lo, hi, vp)
+            {
+                out.push(Decoration {
+                    range,
+                    kind: DecorationKind::Selection,
+                });
+            }
+            if let Ok(buf) = reg.get(vp.buffer_id) {
+                let (source, line_starts) = line_info.get_or_insert_with(|| {
+                    let s = buffer_source_bytes(buf);
+                    let ls = line_start_offsets(&s);
+                    (s, ls)
+                });
+                let (lo, hi) = current_line_range(line_starts, source.len() as u64, win.cursor);
+                if let Some(range) = clip_to_viewport(lo, hi, vp) {
+                    out.push(Decoration {
+                        range,
+                        kind: DecorationKind::CurrentLine,
+                    });
+                }
+            }
         }
 
         // Diagnostics — keyed in the shared store by the file URI the
@@ -404,31 +514,24 @@ impl SemanticRenderState {
                 let guard = store.lock().expect("diag store mutex poisoned");
                 (guard.for_uri(&uri).to_vec(), guard.is_stale(&uri))
             };
-            if !is_stale && !diags.is_empty() {
-                let registry = core.registry.clone();
-                let reg = registry.borrow();
-                if let Ok(buf) = reg.get(vp.buffer_id) {
-                    let source = buffer_source_bytes(buf);
-                    let line_starts = line_start_offsets(&source);
-                    for d in &diags {
-                        let lo = line_col_to_byte(
-                            &line_starts,
-                            source.len() as u64,
-                            d.start_line,
-                            d.start_col,
-                        );
-                        let hi = line_col_to_byte(
-                            &line_starts,
-                            source.len() as u64,
-                            d.end_line,
-                            d.end_col,
-                        );
-                        if let Some(range) = clip_to_viewport(lo, hi, vp) {
-                            out.push(Decoration {
-                                range,
-                                kind: severity_to_kind(d.severity),
-                            });
-                        }
+            if !is_stale
+                && !diags.is_empty()
+                && let Ok(buf) = reg.get(vp.buffer_id)
+            {
+                let (source, line_starts) = line_info.get_or_insert_with(|| {
+                    let s = buffer_source_bytes(buf);
+                    let ls = line_start_offsets(&s);
+                    (s, ls)
+                });
+                let source_len = source.len() as u64;
+                for d in &diags {
+                    let lo = line_col_to_byte(line_starts, source_len, d.start_line, d.start_col);
+                    let hi = line_col_to_byte(line_starts, source_len, d.end_line, d.end_col);
+                    if let Some(range) = clip_to_viewport(lo, hi, vp) {
+                        out.push(Decoration {
+                            range,
+                            kind: severity_to_kind(d.severity),
+                        });
                     }
                 }
             }
@@ -655,6 +758,31 @@ fn buffer_source_bytes(buf: &crate::buffer::Buffer) -> Vec<u8> {
     bytes
 }
 
+/// Byte range `(start, end)` of the line containing `cursor`, where
+/// `start` is the position right after the previous `\n` (or 0 for the
+/// first line) and `end` is the position of the next `\n` (or
+/// `source_len` for the last line). Used by `scoped_decorations` to
+/// emit `DecorationKind::CurrentLine`; clamps so a cursor at or past
+/// `source_len` returns the last line's range rather than indexing
+/// out.
+fn current_line_range(line_starts: &[u64], source_len: u64, cursor: u64) -> (u64, u64) {
+    // `partition_point` returns the count of leading elements satisfying
+    // the predicate, i.e. the index of the first `line_start > cursor`.
+    // Subtracting 1 yields the index of the largest `line_start <=
+    // cursor`. `line_starts` always starts with 0, so the saturating
+    // sub is defensive against an empty `line_starts`.
+    let idx = line_starts
+        .partition_point(|&start| start <= cursor)
+        .saturating_sub(1);
+    let lo = line_starts.get(idx).copied().unwrap_or(0);
+    let hi = line_starts
+        .get(idx + 1)
+        .copied()
+        .unwrap_or(source_len)
+        .min(source_len);
+    (lo, hi)
+}
+
 /// Byte offset of the start of each line (index 0 = byte 0; one entry
 /// per line, where a line is a maximal run ended by `\n`).
 fn line_start_offsets(source: &[u8]) -> Vec<u64> {
@@ -681,6 +809,25 @@ fn line_col_to_byte(line_starts: &[u64], source_len: u64, line: u32, col: u32) -
         .get(li + 1)
         .map_or(source_len, |&next| next.saturating_sub(1));
     (line_start + u64::from(col)).min(line_end).min(source_len)
+}
+
+/// Cheap recompute-gate key for [`scoped_style_spans`] on a grammar-
+/// backed buffer. Returns `None` for buffers with no tree-sitter view
+/// (the LSP-token path), which has no comparably cheap revision handle
+/// and therefore is never gated. `bundle.source_revision` is read via
+/// the same `current()` accessor `scoped_style_spans` uses, so the key
+/// flips exactly when the spans it would produce can change.
+fn grammar_style_key(
+    state: &EditorState,
+    vp: &DeclaredViewport,
+    generation: u64,
+) -> Option<StyleGate> {
+    let handle = state.syntax_registry.view(vp.buffer_id)?;
+    Some(StyleGate {
+        bundle: handle.current(),
+        generation,
+        visible: vp.visible,
+    })
 }
 
 /// Compute the styled byte runs intersecting the declared viewport,
@@ -1125,6 +1272,132 @@ mod tests {
     }
 
     #[test]
+    fn current_line_range_finds_enclosing_line() {
+        // "abc\nde\nfgh": line_starts = [0, 4, 7]; source_len = 10.
+        let line_starts = vec![0u64, 4, 7];
+        let len = 10u64;
+
+        // Cursor at byte 0 → line 0 = [0, 4).
+        assert_eq!(current_line_range(&line_starts, len, 0), (0, 4));
+        // Cursor anywhere within line 0 → still line 0.
+        assert_eq!(current_line_range(&line_starts, len, 3), (0, 4));
+        // Cursor on the newline byte still belongs to the line it
+        // terminates.
+        assert_eq!(current_line_range(&line_starts, len, 3), (0, 4));
+        // Cursor at line 1 start → line 1 = [4, 7).
+        assert_eq!(current_line_range(&line_starts, len, 4), (4, 7));
+        // Cursor in last line → [7, len).
+        assert_eq!(current_line_range(&line_starts, len, 8), (7, 10));
+        // Cursor at exactly source_len (past last byte) → still last
+        // line; clamps cleanly without indexing out.
+        assert_eq!(current_line_range(&line_starts, len, len), (7, 10));
+    }
+
+    #[test]
+    fn current_line_projects_as_a_decoration_for_cursor_on_seed() {
+        // "abc\nde": cursor at byte 0 → CurrentLine = [0, 4).
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        seed_diagnostic(&state, buffer_id);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        let current = decos
+            .iter()
+            .find(|d| d.kind == DecorationKind::CurrentLine)
+            .expect("CurrentLine present (cursor on line 0)");
+        assert_eq!(
+            current.range,
+            ByteRange { start: 0, end: 4 },
+            "line 0 of \"abc\\nde\" spans bytes [0, 4)"
+        );
+    }
+
+    #[test]
+    fn current_line_skipped_when_active_window_is_a_different_buffer() {
+        // Producer must only emit per-window state for windows whose
+        // active buffer matches the projected viewport. The vp.buffer_id
+        // regression test (decorations_use_vp_buffer_not_active_buffer)
+        // exercises this for Selection; assert it for CurrentLine too.
+        let state = empty_state();
+        let scratch_id = active_buffer(&state);
+        let file_id = {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .create_from_bytes("secondary".to_owned(), b"abc\nde")
+        };
+        assert_ne!(scratch_id, file_id);
+
+        let mut s = local();
+        // Project the *non-active* file buffer.
+        s.set_viewport(file_id, ByteRange { start: 0, end: 64 }, 0);
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("a Decorations message");
+        assert!(
+            decos.iter().all(|d| d.kind != DecorationKind::CurrentLine),
+            "CurrentLine must not project against a viewport whose buffer is not the active window's buffer; got {decos:?}"
+        );
+    }
+
+    #[test]
+    fn same_line_cursor_motion_does_not_re_emit_decorations() {
+        // Q#3 stance β: horizontal cursor motion within the same line
+        // must not re-ship a Decorations frame. The existing M11.4
+        // changed_intervals diff gives this for free — same line means
+        // identical decoration ranges means an empty interval list
+        // means no emission.
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .get_mut(buffer_id)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"abcdefghij\nklmno",
+                })
+                .expect("seed");
+        }
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _first = s.render_frame(&state); // initial full
+        assert!(
+            s.render_frame(&state).is_empty(),
+            "steady state must be silent"
+        );
+
+        // Move cursor from byte 0 to byte 5 (same line).
+        {
+            let mut core = state.core.borrow_mut();
+            core.active_window_mut().cursor = 5;
+        }
+        assert!(
+            s.render_frame(&state).is_empty(),
+            "same-line cursor motion must not re-emit Decorations"
+        );
+
+        // Cross a `\n` (byte 10) → line changes → re-emission.
+        {
+            let mut core = state.core.borrow_mut();
+            core.active_window_mut().cursor = 12;
+        }
+        let msgs = s.render_frame(&state);
+        let (_full, decos) =
+            decorations_of(&msgs).expect("line-change must ship a Decorations frame");
+        let current = decos
+            .iter()
+            .find(|d| d.kind == DecorationKind::CurrentLine)
+            .expect("CurrentLine present");
+        // Line 1 of "abcdefghij\nklmno" starts at byte 11.
+        assert_eq!(current.range, ByteRange { start: 11, end: 16 });
+    }
+
+    #[test]
     fn diagnostics_project_with_line_col_to_byte_and_severity() {
         // "abc\nde": line 0 at byte 0, line 1 at byte 4.
         let state = empty_state();
@@ -1135,10 +1408,17 @@ mod tests {
 
         let (_full, decos) =
             decorations_of(&s.render_frame(&state)).expect("a Decorations message");
-        assert_eq!(decos.len(), 1);
-        assert_eq!(decos[0].kind, DecorationKind::DiagnosticWarning);
+        // Session 9.2 added `CurrentLine` to the projection: line 0
+        // (cursor at byte 0) emits as a `CurrentLine` decoration in
+        // addition to the seeded warning. This test pins the
+        // diagnostic projection's byte math; assert that decoration's
+        // shape rather than the total count.
+        let warning = decos
+            .iter()
+            .find(|d| d.kind == DecorationKind::DiagnosticWarning)
+            .expect("the seeded warning");
         // line 1 starts at byte 4; cols [0,2) → bytes [4,6).
-        assert_eq!(decos[0].range, ByteRange { start: 4, end: 6 });
+        assert_eq!(warning.range, ByteRange { start: 4, end: 6 });
     }
 
     /// T M11.8 regression: when the diag store's entry for the URI
