@@ -1,9 +1,11 @@
 # pmacs-gpu — quad-background framing
 
-**Status: framing pass; pre-implementation.** Retires Phase A finding
-A8 (background-bearing decoration kinds storable but unrenderable).
-Sessions queued: 9.1 = `Selection` backgrounds; 9.2 = `CurrentLine`
-backgrounds; search backgrounds deferred to a later arc.
+**Status: CLOSED 2026-05-29.** Sessions 9.1 (`Selection`), 9.2
+(`CurrentLine`), 9.3 (peer-presence sourcing) all merged; finding A8
+retired. Scoring + the QB1–QB3 follow-on findings are in
+[`pmacs-gpu-quad-backgrounds-audit.md`](pmacs-gpu-quad-backgrounds-audit.md).
+Search backgrounds (Q#4) remain deferred to a later arc. The sections
+below are the original framing pass, preserved.
 
 This is the per-milestone framing artifact for the quad-pipeline work
 that closes Phase A's one deferred structural finding. It inherits the
