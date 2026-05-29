@@ -1354,15 +1354,22 @@ fn handle_dispatcher_event(
                     if let Some(render_state) = render_states.get_mut(&source) {
                         apply_event(editor, event, &mut term_size, render_state);
                         term_sizes.insert(source, term_size);
+                    } else if semantic_states.contains_key(&source) {
+                        // Phase B (session B1) — a semantic (grid-less)
+                        // session has no `RenderState`, but its keyboard
+                        // input still drives the shared editor core. The
+                        // input events that don't need grid state
+                        // (`Key`, `Mouse`) dispatch through the same
+                        // `dispatch_key` / `dispatch_mouse` path the TUI
+                        // uses; the resulting cursor move / edit flows
+                        // back as `CursorByte` / `CrdtOp`. (Earlier this
+                        // arm dropped these events — the "M11.5 scope"
+                        // posture — which is why typing in pmacs-gpu did
+                        // nothing before B1.)
+                        apply_semantic_input_event(editor, event, term_size);
                     } else {
-                        // T M11.2 — a semantic (grid-less) session has
-                        // no `RenderState`. Key/Mouse/Paste/Focus
-                        // command handling for semantic frontends is
-                        // M11.5 scope; until then these events are
-                        // dropped rather than panicking the
-                        // dispatcher on the absent grid state.
                         debug_assert!(
-                            semantic_states.contains_key(&source),
+                            false,
                             "fid with neither a render_state nor a semantic_state \
                              sent a frontend event"
                         );
@@ -1897,6 +1904,30 @@ fn build_presence_snapshot(editor: &EditorState, frontend_id: FrontendId) -> Pre
     }
 }
 
+/// Dispatch a semantic (grid-less) frontend's input event into the
+/// shared editor core (Phase B, session B1). Mirrors the `Key` / `Mouse`
+/// arms of [`apply_event`] but takes no `RenderState` — a semantic
+/// frontend lays out locally, so the only state these events touch is
+/// the editor core (cursor, buffer, commands), which `dispatch_key` /
+/// `dispatch_mouse` operate on directly. `Resize` / `Paste` / `Focus`
+/// have no grid-less effect yet and are dropped; `Viewport` / `CrdtOp`
+/// are handled in their own dispatcher arms and never reach here.
+#[allow(clippy::needless_pass_by_value)] // consumes the event, mirroring `apply_event`.
+fn apply_semantic_input_event(editor: &mut EditorState, ev: FrontendEvent, term_size: CellSize) {
+    match ev {
+        FrontendEvent::Key(pmacs_key) => {
+            if let Some(ct_key) = key_to_crossterm(&pmacs_key) {
+                editor.dispatch_key(pmacs_key.frontend_id, ct_key);
+            }
+        }
+        FrontendEvent::Mouse(pmacs_mouse) => {
+            let ct_mouse = mouse_to_crossterm(&pmacs_mouse);
+            editor.dispatch_mouse(pmacs_mouse.frontend_id, ct_mouse, term_size);
+        }
+        _ => {}
+    }
+}
+
 // Takes `ev` by value because it semantically consumes the event;
 // the caller pulls events out of the channel one at a time and never
 // needs to look at them again.
@@ -2098,6 +2129,57 @@ mod tests {
         assert_eq!(
             count, 1,
             "buffer.after-edit must fire when handle_remote_crdt_op produces a text Edit"
+        );
+    }
+
+    /// Session B1 regression: a `Key` event from a *semantic*
+    /// (grid-less) frontend must reach the editor core. Before B1 the
+    /// dispatcher's catch-all only called `apply_event` when the
+    /// frontend had a `RenderState`, so a semantic frontend's keys were
+    /// silently dropped — typing in pmacs-gpu did nothing. The routing
+    /// now goes through `apply_semantic_input_event`; a printable char
+    /// must self-insert at the frontend's window cursor.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn semantic_frontend_key_event_reaches_the_core() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use pmacs_protocol::{Key, KeyEvent, Modifiers};
+
+        let mut editor = EditorState::new();
+        let fid = FrontendId(99);
+        let view = build_fresh_frontend_view(&mut editor);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        let before = editor
+            .core
+            .borrow()
+            .active_window_for(fid)
+            .expect("fid window")
+            .cursor;
+
+        apply_semantic_input_event(
+            &mut editor,
+            FrontendEvent::Key(KeyEvent {
+                frontend_id: fid,
+                key: Key::Char('X'),
+                mods: Modifiers::NONE,
+                timestamp_ns: 0,
+            }),
+            CellSize::new(24, 80),
+        );
+
+        let after = editor
+            .core
+            .borrow()
+            .active_window_for(fid)
+            .expect("fid window")
+            .cursor;
+        assert_eq!(
+            after,
+            before + 1,
+            "a semantic frontend's printable Key must self-insert and advance its window cursor \
+             (pre-B1 the dispatcher dropped it)"
         );
     }
 }
