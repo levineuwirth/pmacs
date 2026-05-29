@@ -114,6 +114,46 @@ pub struct SemanticRenderState {
     /// already has and emits nothing. First emission happens on the
     /// first frame for a buffer; further emissions only after edits.
     last_summary: HashMap<BufferId, u64>,
+    /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
+    /// the tree-sitter highlights query over the *whole declared
+    /// viewport* (which the GPU frontend sets to the entire buffer)
+    /// and clones the theme — too expensive to repeat on every tick.
+    /// The styling depends only on the parse bundle, the CRDT
+    /// generation, and the viewport — never the cursor — so a gate
+    /// built from those lets cursor-only ticks skip the query entirely.
+    /// Only the grammar (tree-sitter) path is gated; the LSP-token path
+    /// has no comparably cheap handle and recomputes as before.
+    last_style_gate: HashMap<BufferId, StyleGate>,
+}
+
+/// Recompute gate for [`scoped_style_spans`] on a grammar-backed
+/// buffer. Holds the current parse bundle `Arc` so its address stays
+/// stable while cached — comparing by `Arc::ptr_eq` then can't be
+/// fooled by a freed bundle's address being reused (ABA). Equal gates
+/// ⇒ identical spans ⇒ the tree-sitter query can be skipped.
+/// `generation` is included so a CRDT edit still forces the M11.7
+/// full-resync even when the parse bundle hasn't re-landed yet.
+#[derive(Clone)]
+struct StyleGate {
+    /// Current parse bundle, or `None` when none has landed yet.
+    bundle: Option<std::sync::Arc<crate::syntax::ParseTreeBundle>>,
+    /// CRDT generation of the buffer.
+    generation: u64,
+    /// Declared viewport.
+    visible: ByteRange,
+}
+
+impl StyleGate {
+    /// True when both gates would produce identical style spans.
+    fn matches(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.visible == other.visible
+            && match (&self.bundle, &other.bundle) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 impl SemanticRenderState {
@@ -128,6 +168,7 @@ impl SemanticRenderState {
             last_decorations: HashMap::new(),
             last_adornments: HashMap::new(),
             last_summary: HashMap::new(),
+            last_style_gate: HashMap::new(),
         }
     }
 
@@ -172,63 +213,31 @@ impl SemanticRenderState {
         let mut out = Vec::new();
 
         // --- StyleSpans (T M11.2 producer, T M11.4 diff) ---
-        let spans = scoped_style_spans(state, &vp);
-        let prev = self.last_sent.get(&vp.buffer_id);
-        // Resync when there is no baseline, the declared viewport
-        // region moved (scoping window changed), OR the CRDT
-        // generation advanced (T M11.7: text edits shift byte
-        // positions, so prior spans are stale and incremental
-        // updates can't restore the full viewport — see
-        // `LastFrame`'s doc comment).
-        let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
-        if full {
-            // The first frame for this buffer/viewport. One segment
-            // covering the declared viewport carries the whole scoped
-            // set (possibly empty → frontend clears the viewport).
-            self.last_sent.insert(
-                vp.buffer_id,
-                LastFrame {
-                    visible: vp.visible,
-                    items: spans.clone(),
-                    generation,
-                },
-            );
-            out.push(InstanceMessage::StyleSpans {
-                buffer_id: vp.buffer_id,
-                generation,
-                full: true,
-                segments: vec![StyleSegment {
-                    range: vp.visible,
-                    spans,
-                }],
-            });
+        // Perf gate: `scoped_style_spans` runs the tree-sitter query
+        // over the whole viewport + clones the theme. For a grammar-
+        // backed buffer it's a pure function of (bundle revision,
+        // generation, viewport), so a cursor-only tick — same key,
+        // already-sent baseline — can skip the whole block. The LSP-
+        // token path returns `None` (no cheap revision) and recomputes
+        // every tick as before.
+        let style_gate = grammar_style_key(state, &vp, generation);
+        let style_unchanged = match (&style_gate, self.last_style_gate.get(&vp.buffer_id)) {
+            (Some(g), Some(prev)) => g.matches(prev) && self.last_sent.contains_key(&vp.buffer_id),
+            _ => false,
+        };
+        if style_unchanged {
+            // Styling cannot have changed since the last computation;
+            // emit nothing and skip the query.
         } else {
-            let prev = prev.expect("checked is_none_or above");
-            let intervals = changed_intervals(&prev.items, &spans, |s| s.range);
-            if !intervals.is_empty() {
-                let segments = intervals
-                    .into_iter()
-                    .map(|range| StyleSegment {
-                        range,
-                        spans: clip_style_spans(range, &spans),
-                    })
-                    .collect();
-                self.last_sent.insert(
-                    vp.buffer_id,
-                    LastFrame {
-                        visible: vp.visible,
-                        items: spans,
-                        generation,
-                    },
-                );
-                out.push(InstanceMessage::StyleSpans {
-                    buffer_id: vp.buffer_id,
-                    generation,
-                    full: false,
-                    segments,
-                });
+            match style_gate {
+                Some(g) => {
+                    self.last_style_gate.insert(vp.buffer_id, g);
+                }
+                None => {
+                    self.last_style_gate.remove(&vp.buffer_id);
+                }
             }
-            // No dirty interval → styling unchanged → emit nothing.
+            self.emit_style_spans(state, &vp, generation, &mut out);
         }
 
         // --- Decorations (T M11.3 producer, T M11.4 diff) ---
@@ -368,6 +377,73 @@ impl SemanticRenderState {
     /// frontend already owns (it has `CursorByte`) — emitting it would
     /// couple a visual-motion concern to the instance, against the
     /// contract boundary.
+    /// Compute the scoped style spans and push a `StyleSpans` message
+    /// (full resync or M11.4 incremental) when they differ from the
+    /// last sent baseline. Extracted from `render_frame` so the perf
+    /// gate there can skip it wholesale on unchanged ticks.
+    fn emit_style_spans(
+        &mut self,
+        state: &EditorState,
+        vp: &DeclaredViewport,
+        generation: u64,
+        out: &mut Vec<InstanceMessage>,
+    ) {
+        let spans = scoped_style_spans(state, vp);
+        let prev = self.last_sent.get(&vp.buffer_id);
+        // Resync when there is no baseline, the declared viewport
+        // region moved (scoping window changed), OR the CRDT
+        // generation advanced (T M11.7: text edits shift byte
+        // positions, so prior spans are stale and incremental
+        // updates can't restore the full viewport).
+        let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
+        if full {
+            self.last_sent.insert(
+                vp.buffer_id,
+                LastFrame {
+                    visible: vp.visible,
+                    items: spans.clone(),
+                    generation,
+                },
+            );
+            out.push(InstanceMessage::StyleSpans {
+                buffer_id: vp.buffer_id,
+                generation,
+                full: true,
+                segments: vec![StyleSegment {
+                    range: vp.visible,
+                    spans,
+                }],
+            });
+        } else {
+            let prev = prev.expect("checked is_none_or above");
+            let intervals = changed_intervals(&prev.items, &spans, |s| s.range);
+            if !intervals.is_empty() {
+                let segments = intervals
+                    .into_iter()
+                    .map(|range| StyleSegment {
+                        range,
+                        spans: clip_style_spans(range, &spans),
+                    })
+                    .collect();
+                self.last_sent.insert(
+                    vp.buffer_id,
+                    LastFrame {
+                        visible: vp.visible,
+                        items: spans,
+                        generation,
+                    },
+                );
+                out.push(InstanceMessage::StyleSpans {
+                    buffer_id: vp.buffer_id,
+                    generation,
+                    full: false,
+                    segments,
+                });
+            }
+            // No dirty interval → styling unchanged → emit nothing.
+        }
+    }
+
     fn scoped_decorations(&self, state: &EditorState, vp: &DeclaredViewport) -> Vec<Decoration> {
         let core = state.core.borrow();
         let registry = core.registry.clone();
@@ -733,6 +809,25 @@ fn line_col_to_byte(line_starts: &[u64], source_len: u64, line: u32, col: u32) -
         .get(li + 1)
         .map_or(source_len, |&next| next.saturating_sub(1));
     (line_start + u64::from(col)).min(line_end).min(source_len)
+}
+
+/// Cheap recompute-gate key for [`scoped_style_spans`] on a grammar-
+/// backed buffer. Returns `None` for buffers with no tree-sitter view
+/// (the LSP-token path), which has no comparably cheap revision handle
+/// and therefore is never gated. `bundle.source_revision` is read via
+/// the same `current()` accessor `scoped_style_spans` uses, so the key
+/// flips exactly when the spans it would produce can change.
+fn grammar_style_key(
+    state: &EditorState,
+    vp: &DeclaredViewport,
+    generation: u64,
+) -> Option<StyleGate> {
+    let handle = state.syntax_registry.view(vp.buffer_id)?;
+    Some(StyleGate {
+        bundle: handle.current(),
+        generation,
+        visible: vp.visible,
+    })
 }
 
 /// Compute the styled byte runs intersecting the declared viewport,
