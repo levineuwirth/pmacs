@@ -1204,6 +1204,12 @@ impl State {
             return Vec::new();
         };
         let text_len = self.current_text.len() as u64;
+        // Buffer-absolute byte offset of each `\n`-delimited line,
+        // indexed by `LayoutRun::line_i`. `LayoutGlyph::{start,end}` are
+        // offsets within the *original line*, not the whole buffer, so
+        // every byte range below must be rebased per line before it can
+        // be matched against glyph offsets.
+        let line_offsets = line_byte_offsets(&self.current_text);
         let mut rects = Vec::new();
         for presence in self.peer_presences.values() {
             if presence.buffer_id != buffer_id {
@@ -1212,7 +1218,7 @@ impl State {
             // CurrentLine: the source line containing the peer cursor.
             if let Some(color) = decoration_kind_to_bg_color(DecorationKind::CurrentLine) {
                 let (lo, hi) = source_line_range(&self.current_text, presence.cursor);
-                self.push_glyph_extent_rects(&mut rects, lo, hi, color);
+                self.push_glyph_extent_rects(&mut rects, &line_offsets, lo, hi, color);
             }
             // Selection: the peer's selected byte range, normalized.
             if let Some(sel) = presence.selection
@@ -1221,20 +1227,23 @@ impl State {
                 let lo = sel.anchor.min(sel.active).min(text_len);
                 let hi = sel.anchor.max(sel.active).min(text_len);
                 if hi > lo {
-                    self.push_glyph_extent_rects(&mut rects, lo, hi, color);
+                    self.push_glyph_extent_rects(&mut rects, &line_offsets, lo, hi, color);
                 }
             }
         }
         rects
     }
 
-    /// Push one rect per visual line whose glyphs overlap the byte
-    /// range `[lo, hi)`, spanning the matching glyphs' horizontal
-    /// extent. A range crossing visual-line boundaries (wrapped or
-    /// multi-line) fans out into one rect per run.
+    /// Push one rect per visual line whose glyphs overlap the
+    /// buffer-absolute byte range `[lo, hi)`, spanning the matching
+    /// glyphs' horizontal extent. A range crossing visual-line
+    /// boundaries (wrapped or multi-line) fans out into one rect per
+    /// run. `line_offsets[run.line_i]` rebases the run's line-relative
+    /// glyph offsets into buffer-absolute space for the comparison.
     fn push_glyph_extent_rects(
         &self,
         rects: &mut Vec<MinimapRect>,
+        line_offsets: &[u64],
         lo: u64,
         hi: u64,
         color: [f32; 4],
@@ -1243,11 +1252,12 @@ impl State {
             return;
         }
         for run in self.buffer.layout_runs() {
+            let line_base = line_offsets.get(run.line_i).copied().unwrap_or(0);
             let mut min_x: Option<f32> = None;
             let mut max_x: Option<f32> = None;
             for glyph in run.glyphs {
-                let g_start = glyph.start as u64;
-                let g_end = glyph.end as u64;
+                let g_start = line_base + glyph.start as u64;
+                let g_end = line_base + glyph.end as u64;
                 if g_end <= lo || g_start >= hi {
                     continue;
                 }
@@ -1563,6 +1573,19 @@ fn debug_presence() -> bool {
 fn debug_frame() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_FRAME").is_some())
+}
+
+/// Buffer-absolute byte offset of the start of each `\n`-delimited
+/// line (index 0 = byte 0). Indexed by cosmic-text's
+/// `LayoutRun::line_i` to rebase line-relative glyph offsets.
+fn line_byte_offsets(text: &str) -> Vec<u64> {
+    let mut starts = vec![0u64];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i as u64 + 1);
+        }
+    }
+    starts
 }
 
 /// Byte range `[start, end)` of the source line containing `cursor`:
@@ -1934,6 +1957,18 @@ mod tests {
         assert_eq!(source_line_range(text, 8), (7, 10));
         // Cursor past end clamps to the last line, never indexes out.
         assert_eq!(source_line_range(text, 99), (7, 10));
+    }
+
+    #[test]
+    fn line_byte_offsets_indexes_each_logical_line() {
+        // "abc\nde\nfgh": lines start at bytes 0, 4, 7. Indexed by
+        // LayoutRun::line_i to rebase line-relative glyph offsets.
+        assert_eq!(line_byte_offsets("abc\nde\nfgh"), vec![0, 4, 7]);
+        // Trailing newline yields a final empty line at byte len.
+        assert_eq!(line_byte_offsets("a\nb\n"), vec![0, 2, 4]);
+        // No newline: one line at 0.
+        assert_eq!(line_byte_offsets("abc"), vec![0]);
+        assert_eq!(line_byte_offsets(""), vec![0]);
     }
 
     #[test]
