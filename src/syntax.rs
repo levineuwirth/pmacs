@@ -692,8 +692,26 @@ pub fn compute_highlight_spans(
     query: &tree_sitter::Query,
     bundle: &ParseTreeBundle,
 ) -> Vec<HighlightSpan> {
+    compute_highlight_spans_in_range(query, bundle, None)
+}
+
+/// Like [`compute_highlight_spans`], but restricts the query to nodes
+/// intersecting `byte_range` when `Some`. tree-sitter's
+/// `QueryCursor::set_byte_range` makes the capture walk proportional to
+/// the range, not the whole tree — the semantic producer passes the
+/// declared viewport so styling a screenful of a huge file is
+/// O(visible), not O(file) (the per-edit typing cost; framing Q#S6).
+#[must_use]
+pub fn compute_highlight_spans_in_range(
+    query: &tree_sitter::Query,
+    bundle: &ParseTreeBundle,
+    byte_range: Option<std::ops::Range<usize>>,
+) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
+    if let Some(range) = byte_range {
+        cursor.set_byte_range(range);
+    }
     let source: &[u8] = bundle.source.as_ref();
     let root = bundle.tree.root_node();
     let mut iter = cursor.captures(query, root, source);

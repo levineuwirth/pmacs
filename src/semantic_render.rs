@@ -356,6 +356,18 @@ impl SemanticRenderState {
         buffer_id: BufferId,
         generation: u64,
     ) -> Option<InstanceMessage> {
+        // The summary is a *whole-file* tree-sitter pass (the minimap
+        // needs every line). Recomputing it on every edit's generation
+        // bump was a per-keystroke O(file) cost — a major part of the
+        // typing slowness. For a grammar-backed buffer, debounce it to
+        // reparse-completion: skip while a reparse is in flight
+        // (`current_fresh` is `None`), so during continuous typing the
+        // whole-file pass runs at reparse rate, not keystroke rate.
+        if let Some(handle) = state.syntax_registry.view(buffer_id)
+            && handle.pending_edit_count() > 0
+        {
+            return None;
+        }
         if self.last_summary.get(&buffer_id).copied() == Some(generation) {
             return None;
         }
@@ -871,7 +883,15 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     }
 
     let capture_names = query.capture_names();
-    let highlights = crate::syntax::compute_highlight_spans(&query, &bundle);
+    // Scope the tree-sitter capture walk to the visible byte range so
+    // re-styling on each edit is O(visible), not O(file) — the typing
+    // bottleneck on large files (framing Q#S6). Captures whose nodes
+    // intersect the range are returned, then clipped exactly below.
+    let highlights = crate::syntax::compute_highlight_spans_in_range(
+        &query,
+        &bundle,
+        Some(vis_start as usize..vis_end as usize),
+    );
     let mut out = Vec::new();
     for hs in highlights {
         let s = u64::from(hs.start_byte).max(vis_start);
