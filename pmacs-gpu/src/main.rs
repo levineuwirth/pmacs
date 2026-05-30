@@ -70,6 +70,10 @@ const TEXT_TOP: f32 = 16.0;
 /// B1.
 const CARET_WIDTH: f32 = 2.0;
 const CARET_COLOR: [f32; 4] = [0.90, 0.90, 0.96, 0.90];
+/// Extra source lines shaped beyond the visible window so a 1-line
+/// scroll doesn't always re-slice and the bottom partial line renders
+/// (Q#S3). Kept small — overscan is wasted shaping.
+const SCROLL_OVERSCAN: usize = 2;
 const TEXT_RIGHT_GAP: f32 = 10.0;
 const MINIMAP_WIDTH: f32 = 48.0;
 const MINIMAP_RIGHT: f32 = 12.0;
@@ -296,6 +300,23 @@ struct State {
     /// from commands this frontend never interprets locally. `None`
     /// until the first `CursorByte`.
     own_cursor: Option<OwnCursor>,
+    /// Top visible *source line* (0-based). Scroll is line-based
+    /// (Q#S1). `reshape` shapes only the lines from here through the
+    /// visible window; `view_range` records the byte span actually fed
+    /// to cosmic-text so caret/wash byte offsets can be rebased onto
+    /// it.
+    scroll_top: usize,
+    /// Whole-file byte range `[vstart, vend)` of the slice the
+    /// cosmic-text `buffer` currently holds (session S1). Everything
+    /// the buffer renders is in slice coordinates (`file_byte -
+    /// vstart`); this is the rebasing origin for the caret and the
+    /// background washes.
+    view_range: (u64, u64),
+    /// Last `[vstart, vend)` declared to the daemon via a `Viewport`
+    /// event. Re-declared only when it changes (scroll, edit that
+    /// shifts visible bytes, buffer switch) so the producer scopes
+    /// `StyleSpans` to what's on screen without per-frame churn (Q#S5).
+    last_viewport_sent: Option<(u64, u64)>,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -389,8 +410,15 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::Resized(size) => {
-                if let Some(state) = self.state.as_mut() {
-                    state.resize(size.width.max(1), size.height.max(1));
+                let vp = self
+                    .state
+                    .as_mut()
+                    .and_then(|state| state.resize(size.width.max(1), size.height.max(1)));
+                if let Some(vp) = vp
+                    && let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                {
+                    eprintln!("pmacs-gpu: resize send_viewport failed: {e}");
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -610,6 +638,9 @@ impl State {
             current_summary: None,
             peer_presences: HashMap::new(),
             own_cursor: None,
+            scroll_top: 0,
+            view_range: (0, 0),
+            last_viewport_sent: None,
         }
     }
 
@@ -699,17 +730,15 @@ impl State {
                 // next PresenceUpdate / CursorByte arrives.
                 self.peer_presences.clear();
                 self.own_cursor = None;
+                // New buffer ⇒ back to the top, and force a viewport
+                // re-declaration for the new buffer's scoped range.
+                self.scroll_top = 0;
+                self.last_viewport_sent = None;
+                let _ = text_len;
                 if !self.set_text(&text) {
                     self.reshape();
                 }
-                Some(ViewportSend {
-                    buffer_id,
-                    visible: ByteRange {
-                        start: 0,
-                        end: text_len,
-                    },
-                    generation: 0,
-                })
+                self.viewport_send_if_changed(buffer_id)
             }
             InstanceMessage::CrdtOp { buffer_id, op } => {
                 if self.current_buffer_id != Some(buffer_id) {
@@ -755,7 +784,12 @@ impl State {
                 // fresh `textDocument/inlayHint` response arrives.
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
                 self.set_text(&text);
-                None
+                // An edit shifts byte positions, so the scoped viewport's
+                // byte range moves even at the same scroll position;
+                // re-declare it so the producer styles the right bytes
+                // (the generation bump already forces a full resync, so
+                // this is no extra round trip).
+                self.viewport_send_if_changed(buffer_id)
             }
             InstanceMessage::StyleSpans {
                 buffer_id,
@@ -877,11 +911,65 @@ impl State {
                     buffer_id,
                     byte: byte_pos,
                 });
+                // Session S1 — keep the caret on screen (Q#S2). When the
+                // cursor leaves the visible slice (arrows past an edge,
+                // PageUp/Down), scroll to follow it, re-shape the new
+                // slice, and re-declare the scoped Viewport so the
+                // producer ships spans for what's now visible.
+                if self.scroll_to_cursor() {
+                    self.reshape();
+                    if let Some(vp) = self.viewport_send_if_changed(buffer_id) {
+                        return Some(vp);
+                    }
+                }
                 self.window.request_redraw();
                 None
             }
             _ => None,
         }
+    }
+
+    /// A `ViewportSend` for the current `view_range` if it differs from
+    /// the last one declared, else `None` (Q#S5 coalescing). `generation`
+    /// is 0 — the producer's full-resync triggers on the visible-range
+    /// change and on the CRDT generation bump, not this field.
+    fn viewport_send_if_changed(&mut self, buffer_id: BufferId) -> Option<ViewportSend> {
+        if self.last_viewport_sent == Some(self.view_range) {
+            return None;
+        }
+        self.last_viewport_sent = Some(self.view_range);
+        let (start, end) = self.view_range;
+        Some(ViewportSend {
+            buffer_id,
+            visible: ByteRange { start, end },
+            generation: 0,
+        })
+    }
+
+    /// Adjust `scroll_top` so the own cursor's source line is within the
+    /// visible window (Q#S2). Returns whether `scroll_top` changed (in
+    /// which case the caller re-shapes + re-declares the viewport).
+    fn scroll_to_cursor(&mut self) -> bool {
+        let Some(own) = self.own_cursor else {
+            return false;
+        };
+        if self.current_buffer_id != Some(own.buffer_id) {
+            return false;
+        }
+        let line_starts = line_byte_offsets(&self.current_text);
+        let cursor = own.byte.min(self.current_text.len() as u64);
+        // Cursor's source line = largest i with line_starts[i] <= cursor.
+        let cursor_line = line_starts
+            .partition_point(|&s| s <= cursor)
+            .saturating_sub(1);
+        let visible = estimated_visible_lines(self.config.height).max(1);
+        let old = self.scroll_top;
+        if cursor_line < self.scroll_top {
+            self.scroll_top = cursor_line;
+        } else if cursor_line >= self.scroll_top + visible {
+            self.scroll_top = cursor_line + 1 - visible;
+        }
+        self.scroll_top != old
     }
 
     fn apply_file_style_summary(
@@ -1063,23 +1151,84 @@ impl State {
     /// this is bounded by visible bytes. A sweep-line refactor with
     /// active-set pointers is the obvious upgrade if reshape cost
     /// surfaces in profile data — recorded but not done in session 5.
+    /// Whole-file byte range `[vstart, vend)` of the source lines that
+    /// should be shaped: from `scroll_top` through the visible window
+    /// plus a small overscan (Q#S1/S3). Both ends fall on line
+    /// boundaries (cosmic-text splits `BufferLine`s on `\n`, so a
+    /// mid-line slice would corrupt the first/last line).
+    fn visible_byte_range(&self) -> (u64, u64) {
+        let line_starts = line_byte_offsets(&self.current_text);
+        let n = line_starts.len();
+        let top = self.scroll_top.min(n.saturating_sub(1));
+        let span = estimated_visible_lines(self.config.height).max(1) + SCROLL_OVERSCAN;
+        let vstart = line_starts[top];
+        let bottom = top.saturating_add(span).min(n);
+        let vend = if bottom < n {
+            line_starts[bottom]
+        } else {
+            self.current_text.len() as u64
+        };
+        (vstart, vend)
+    }
+
     fn reshape(&mut self) {
+        // Session S1 — shape only the visible byte slice. Feeding the
+        // whole rope to `set_rich_text` (a BufferLine per source line)
+        // made large-file editing O(file) per keystroke; cosmic-text
+        // touches only `current_text[vstart..vend]` now. Spans /
+        // decorations / adornments arrive in whole-file coordinates and
+        // are clipped + rebased onto the slice (subtract `vstart`).
+        let (vstart, vend) = self.visible_byte_range();
+        self.view_range = (vstart, vend);
+        let slice = &self.current_text[vstart as usize..vend as usize];
+
+        let spans: Vec<StyleSpan> = self
+            .current_spans
+            .iter()
+            .filter_map(|sp| {
+                clip_rebase_range(sp.range.start, sp.range.end, vstart, vend).map(|(s, e)| {
+                    StyleSpan {
+                        range: ByteRange { start: s, end: e },
+                        style: sp.style,
+                    }
+                })
+            })
+            .collect();
+        let decorations: Vec<Decoration> = self
+            .current_decorations
+            .iter()
+            .filter_map(|d| {
+                clip_rebase_range(d.range.start, d.range.end, vstart, vend).map(|(s, e)| {
+                    Decoration {
+                        range: ByteRange { start: s, end: e },
+                        kind: d.kind,
+                    }
+                })
+            })
+            .collect();
+        let adornments: Vec<InlineAdornment> = self
+            .current_adornments
+            .iter()
+            .filter(|a| a.at >= vstart && a.at <= vend)
+            .map(|a| {
+                let mut a = a.clone();
+                a.at -= vstart;
+                a
+            })
+            .collect();
+
         let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
-        let chunks: Vec<(String, Attrs<'static>)> = projected_rich_chunks(
-            &self.current_text,
-            &self.current_spans,
-            &self.current_decorations,
-            &self.current_adornments,
-        )
-        .into_iter()
-        .map(|chunk| {
-            let mut attrs = default_attrs.clone();
-            if let Some(c) = chunk.color {
-                attrs = attrs.color(c);
-            }
-            (chunk.text, attrs)
-        })
-        .collect();
+        let chunks: Vec<(String, Attrs<'static>)> =
+            projected_rich_chunks(slice, &spans, &decorations, &adornments)
+                .into_iter()
+                .map(|chunk| {
+                    let mut attrs = default_attrs.clone();
+                    if let Some(c) = chunk.color {
+                        attrs = attrs.color(c);
+                    }
+                    (chunk.text, attrs)
+                })
+                .collect();
         self.buffer.set_rich_text(
             &mut self.font_system,
             chunks.iter().map(|(s, a)| (s.as_str(), a.clone())),
@@ -1091,7 +1240,7 @@ impl State {
         self.window.request_redraw();
     }
 
-    fn resize(&mut self, width: u32, height: u32) {
+    fn resize(&mut self, width: u32, height: u32) -> Option<ViewportSend> {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
@@ -1102,7 +1251,12 @@ impl State {
             Some(width as f32),
             Some(height as f32),
         );
+        // A taller/shorter window changes the visible line count, so the
+        // slice + scoped viewport change (session S1).
+        self.reshape();
         self.window.request_redraw();
+        self.current_buffer_id
+            .and_then(|bid| self.viewport_send_if_changed(bid))
     }
 
     #[allow(clippy::too_many_lines)] // linear per-frame GPU sequence + optional timing.
@@ -1294,10 +1448,18 @@ impl State {
         let Some(buffer_id) = self.current_buffer_id else {
             return Vec::new();
         };
-        let line_offsets = line_byte_offsets(&self.current_text);
+        let (vstart, vend) = self.view_range;
+        if vend <= vstart {
+            return Vec::new();
+        }
+        // Glyph offsets are relative to the *slice* the buffer holds
+        // (session S1), so the line table is computed on the slice and
+        // every whole-file byte range is clip-rebased onto it.
+        let slice = &self.current_text[vstart as usize..vend as usize];
+        let line_offsets = line_byte_offsets(slice);
         let mut rects = Vec::new();
-        self.collect_own_decoration_rects(&mut rects, &line_offsets);
-        self.collect_peer_rects(buffer_id, &line_offsets, &mut rects);
+        self.collect_own_decoration_rects(&mut rects, &line_offsets, vstart, vend);
+        self.collect_peer_rects(buffer_id, &line_offsets, vstart, vend, &mut rects);
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
@@ -1308,19 +1470,21 @@ impl State {
     /// wanted as default editor behavior (revising Q#B4: the caret is
     /// the own-cursor indicator; the line wash isn't). Peer presence
     /// still shows other frontends' lines via `collect_peer_rects`.
-    fn collect_own_decoration_rects(&self, rects: &mut Vec<MinimapRect>, line_offsets: &[u64]) {
+    fn collect_own_decoration_rects(
+        &self,
+        rects: &mut Vec<MinimapRect>,
+        line_offsets: &[u64],
+        vstart: u64,
+        vend: u64,
+    ) {
         for d in &self.current_decorations {
             if d.kind == DecorationKind::CurrentLine {
                 continue;
             }
-            if let Some(color) = decoration_kind_to_bg_color(d.kind) {
-                self.push_glyph_extent_rects(
-                    rects,
-                    line_offsets,
-                    d.range.start,
-                    d.range.end,
-                    color,
-                );
+            if let Some(color) = decoration_kind_to_bg_color(d.kind)
+                && let Some((lo, hi)) = clip_rebase_range(d.range.start, d.range.end, vstart, vend)
+            {
+                self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
             }
         }
     }
@@ -1332,6 +1496,8 @@ impl State {
         &self,
         buffer_id: BufferId,
         line_offsets: &[u64],
+        vstart: u64,
+        vend: u64,
         rects: &mut Vec<MinimapRect>,
     ) {
         let text_len = self.current_text.len() as u64;
@@ -1341,14 +1507,16 @@ impl State {
             }
             if let Some(color) = decoration_kind_to_bg_color(DecorationKind::CurrentLine) {
                 let (lo, hi) = source_line_range(&self.current_text, presence.cursor);
-                self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
+                if let Some((lo, hi)) = clip_rebase_range(lo, hi, vstart, vend) {
+                    self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
+                }
             }
             if let Some(sel) = presence.selection
                 && let Some(color) = decoration_kind_to_bg_color(DecorationKind::Selection)
             {
                 let lo = sel.anchor.min(sel.active).min(text_len);
                 let hi = sel.anchor.max(sel.active).min(text_len);
-                if hi > lo {
+                if let Some((lo, hi)) = clip_rebase_range(lo, hi, vstart, vend) {
                     self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
                 }
             }
@@ -1356,27 +1524,43 @@ impl State {
     }
 
     /// Vertex bytes for the caret quad, drawn *over* the text (B1).
-    /// Empty when no own cursor is known or it's in another buffer.
+    /// Empty when no own cursor is known, it's in another buffer, or it
+    /// is scrolled out of the visible slice.
     fn caret_vertex_bytes(&self) -> Vec<u8> {
-        let line_offsets = line_byte_offsets(&self.current_text);
-        let Some(rect) = self.caret_rect(&line_offsets) else {
+        let (vstart, vend) = self.view_range;
+        if vend <= vstart {
+            return Vec::new();
+        }
+        let slice = &self.current_text[vstart as usize..vend as usize];
+        let line_offsets = line_byte_offsets(slice);
+        let Some(rect) = self.caret_rect(slice, &line_offsets, vstart, vend) else {
             return Vec::new();
         };
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
     }
 
-    /// The caret rectangle for the own cursor: a thin bar at the left
-    /// edge of the glyph the cursor sits before (or the right edge of
-    /// the last glyph when the cursor is at line end). Byte→glyph
-    /// mapping rebases per line (QB3) and keys off the cursor's source
-    /// line via [`source_line_range`].
-    fn caret_rect(&self, line_offsets: &[u64]) -> Option<MinimapRect> {
+    /// The caret rectangle for the own cursor, in slice coordinates: a
+    /// thin bar at the left edge of the glyph the cursor sits before (or
+    /// the right edge of the last glyph at line end). `None` when the
+    /// cursor is outside the visible slice. Byte→glyph mapping rebases
+    /// per line (QB3); the cursor is rebased onto the slice first (S1).
+    fn caret_rect(
+        &self,
+        slice: &str,
+        line_offsets: &[u64],
+        vstart: u64,
+        vend: u64,
+    ) -> Option<MinimapRect> {
         let own = self.own_cursor?;
         if self.current_buffer_id != Some(own.buffer_id) {
             return None;
         }
-        let cursor = own.byte.min(self.current_text.len() as u64);
-        let (line_lo, _) = source_line_range(&self.current_text, cursor);
+        let cursor = own.byte;
+        if cursor < vstart || cursor > vend {
+            return None; // scrolled off-screen
+        }
+        let slice_cursor = cursor - vstart;
+        let (line_lo, _) = source_line_range(slice, slice_cursor);
         for run in self.buffer.layout_runs() {
             if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
                 continue;
@@ -1384,7 +1568,7 @@ impl State {
             let line_base = line_lo;
             let mut x = TEXT_LEFT;
             for glyph in run.glyphs {
-                if line_base + glyph.start as u64 >= cursor {
+                if line_base + glyph.start as u64 >= slice_cursor {
                     x = TEXT_LEFT + glyph.x;
                     break;
                 }
@@ -1844,6 +2028,20 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
             | ProtocolKey::Delete
             | ProtocolKey::Tab
     )
+}
+
+/// Clip a whole-file byte range `[start, end)` to the visible slice
+/// `[vstart, vend)` and rebase it into slice coordinates (subtract
+/// `vstart`). Returns `None` when the range is disjoint from the slice.
+/// The single rebasing primitive for session S1 — caret and washes
+/// route through it (Q#S4).
+fn clip_rebase_range(start: u64, end: u64, vstart: u64, vend: u64) -> Option<(u64, u64)> {
+    let s = start.max(vstart);
+    let e = end.min(vend);
+    if e <= s {
+        return None;
+    }
+    Some((s - vstart, e - vstart))
 }
 
 /// Largest char-boundary `<= index` (stable equivalent of the unstable
@@ -2470,6 +2668,20 @@ mod tests {
         );
         let rendered: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
         assert_eq!(rendered, text, "chunks must reassemble the original text");
+    }
+
+    #[test]
+    fn clip_rebase_range_clips_to_slice_and_subtracts_vstart() {
+        // Visible slice is whole-file bytes [10, 20).
+        assert_eq!(clip_rebase_range(12, 18, 10, 20), Some((2, 8))); // inside
+        assert_eq!(clip_rebase_range(5, 15, 10, 20), Some((0, 5))); // clipped left
+        assert_eq!(clip_rebase_range(15, 25, 10, 20), Some((5, 10))); // clipped right
+        assert_eq!(clip_rebase_range(10, 20, 10, 20), Some((0, 10))); // exact
+        assert_eq!(clip_rebase_range(0, 8, 10, 20), None); // entirely before
+        assert_eq!(clip_rebase_range(20, 30, 10, 20), None); // entirely after
+        assert_eq!(clip_rebase_range(14, 14, 10, 20), None); // empty range
+        // vstart 0 is the unscrolled identity case.
+        assert_eq!(clip_rebase_range(3, 7, 0, 100), Some((3, 7)));
     }
 
     #[test]
