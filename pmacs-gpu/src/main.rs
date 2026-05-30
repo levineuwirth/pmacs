@@ -371,12 +371,13 @@ impl ApplicationHandler<AppEvent> for App {
                     event_loop.exit();
                     return;
                 }
-                // Session B1 forwards cursor-motion keys only; editing
-                // keys (chars, Backspace, Enter, Delete) open in B2.
-                // `translate_key` handles the full set so B2 just drops
-                // the `is_motion_key` gate.
+                // Session B2 forwards cursor motion + plain text editing
+                // (Char / Backspace / Enter / Delete / Tab). Ctrl/Alt/
+                // Meta chords are withheld — they drive commands and
+                // minibuffer flows the GUI can't render or interact with
+                // yet (a later session adds GUI minibuffer + chords).
                 if let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers)
-                    && is_motion_key(pkey)
+                    && should_forward_key(pkey, pmods)
                     && let Some(client) = self.attach_client.as_ref()
                 {
                     if debug_input() {
@@ -1801,9 +1802,9 @@ fn translate_key(
     Some((pkey, pmods))
 }
 
-/// Session B1 forwards cursor-motion keys only; editing keys wait for
-/// B2. Keeping the gate as a single predicate means B2 removes one
-/// call site, not a translation rewrite.
+/// Cursor-motion keys — forwarded with any modifier set (e.g. `C-Left`
+/// is word-motion, `S-Down` extends a selection; the daemon's keymap
+/// decides).
 fn is_motion_key(key: ProtocolKey) -> bool {
     matches!(
         key,
@@ -1815,6 +1816,33 @@ fn is_motion_key(key: ProtocolKey) -> bool {
             | ProtocolKey::End
             | ProtocolKey::PageUp
             | ProtocolKey::PageDown
+    )
+}
+
+/// Whether to forward a translated key to the daemon (session B2).
+/// Motion keys go through with any modifiers. Plain text-editing keys
+/// (`Char` / `Backspace` / `Enter` / `Delete` / `Tab`) go through only
+/// *without* a Ctrl/Alt/Meta chord modifier: a bare key edits text,
+/// but a chord drives commands and minibuffer flows the GUI can't
+/// render or interact with yet (deferred to a later session). Shift is
+/// not a chord modifier — `Shift`+a already arrives as `Char('A')`.
+fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
+    if is_motion_key(key) {
+        return true;
+    }
+    let chord = mods.contains(Modifiers::CTRL)
+        || mods.contains(Modifiers::ALT)
+        || mods.contains(Modifiers::META);
+    if chord {
+        return false;
+    }
+    matches!(
+        key,
+        ProtocolKey::Char(_)
+            | ProtocolKey::Backspace
+            | ProtocolKey::Enter
+            | ProtocolKey::Delete
+            | ProtocolKey::Tab
     )
 }
 
@@ -2249,6 +2277,36 @@ mod tests {
         let (bk, _) = translate_key(&WKey::Named(NamedKey::Backspace), none).expect("bksp maps");
         assert_eq!(bk, ProtocolKey::Backspace);
         assert!(!is_motion_key(bk));
+    }
+
+    #[test]
+    fn should_forward_key_gates_editing_keys_and_excludes_chords() {
+        let none = Modifiers::NONE;
+        let ctrl = Modifiers::CTRL;
+        let shift = Modifiers::SHIFT;
+
+        // Plain text-editing keys forward.
+        for key in [
+            ProtocolKey::Char('a'),
+            ProtocolKey::Char('A'),
+            ProtocolKey::Backspace,
+            ProtocolKey::Enter,
+            ProtocolKey::Delete,
+            ProtocolKey::Tab,
+        ] {
+            assert!(should_forward_key(key, none), "{key:?} should forward");
+        }
+        // Shift is not a chord modifier (Shift+a already arrives as 'A').
+        assert!(should_forward_key(ProtocolKey::Char('A'), shift));
+
+        // Ctrl/Alt/Meta + a non-motion key is a chord — withheld in B2.
+        assert!(!should_forward_key(ProtocolKey::Char('x'), ctrl));
+        assert!(!should_forward_key(ProtocolKey::Char('f'), Modifiers::ALT));
+
+        // Motion keys forward regardless of modifiers (C-Left = word-left).
+        assert!(should_forward_key(ProtocolKey::Left, ctrl));
+        assert!(should_forward_key(ProtocolKey::Down, shift));
+        assert!(should_forward_key(ProtocolKey::PageUp, none));
     }
 
     #[test]
