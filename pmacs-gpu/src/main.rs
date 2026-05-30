@@ -1846,6 +1846,21 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
     )
 }
 
+/// Largest char-boundary `<= index` (stable equivalent of the unstable
+/// `str::floor_char_boundary`). Used to snap externally-supplied byte
+/// offsets to valid slice points so a stale, mid-codepoint offset can't
+/// panic a `text[..]` slice.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let mut i = index;
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Buffer-absolute byte offset of the start of each `\n`-delimited
 /// line (index 0 = byte 0). Indexed by cosmic-text's
 /// `LayoutRun::line_i` to rebase line-relative glyph offsets.
@@ -1925,14 +1940,22 @@ fn projected_rich_chunks(
     adornments: &[InlineAdornment],
 ) -> Vec<RichChunk> {
     let text_len = text.len() as u64;
+    // Every boundary used to slice `text` must be snapped to a UTF-8
+    // char boundary. Span / decoration / adornment offsets come from
+    // the daemon for a possibly-earlier generation than the rope this
+    // frame holds (the one-frame edit race), so a raw offset can land
+    // inside a multi-byte char and panic the slice. Flooring to the
+    // previous char boundary is safe: it only shifts a chunk edge left
+    // to the start of the codepoint it fell inside.
+    let snap = |b: u64| floor_char_boundary(text, b.min(text_len) as usize) as u64;
     let mut boundaries: Vec<u64> = vec![0, text_len];
     for sp in spans {
-        boundaries.push(sp.range.start.min(text_len));
-        boundaries.push(sp.range.end.min(text_len));
+        boundaries.push(snap(sp.range.start));
+        boundaries.push(snap(sp.range.end));
     }
     for d in decorations {
-        boundaries.push(d.range.start.min(text_len));
-        boundaries.push(d.range.end.min(text_len));
+        boundaries.push(snap(d.range.start));
+        boundaries.push(snap(d.range.end));
     }
     let mut renderable_adornments: Vec<(usize, u64, &InlineAdornment)> = adornments
         .iter()
@@ -1940,7 +1963,7 @@ fn projected_rich_chunks(
         .filter_map(|(idx, a)| renderable_adornment_anchor(a, text_len).map(|at| (idx, at, a)))
         .collect();
     for (_, at, _) in &renderable_adornments {
-        boundaries.push(*at);
+        boundaries.push(snap(*at));
     }
     boundaries.sort_unstable();
     boundaries.dedup();
@@ -2427,6 +2450,37 @@ mod tests {
                 "{kind:?}: fg={fg} bg={bg} — should be exactly one (unless deferred)"
             );
         }
+    }
+
+    #[test]
+    fn projected_rich_chunks_tolerates_mid_codepoint_boundaries() {
+        // Stale span offsets (from a prior generation) can land inside a
+        // multi-byte char after an edit. "ab→cd": '→' is the 3 bytes
+        // [2,5); a span ending at byte 3 is mid-codepoint and must not
+        // panic the slice — it floors to the char start.
+        let text = "ab→cd";
+        let chunks = projected_rich_chunks(
+            text,
+            &[span(0, 3, CellColor::Indexed(1))],
+            &[Decoration {
+                range: ByteRange { start: 4, end: 9 },
+                kind: DecorationKind::DiagnosticError,
+            }],
+            &[],
+        );
+        let rendered: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+        assert_eq!(rendered, text, "chunks must reassemble the original text");
+    }
+
+    #[test]
+    fn floor_char_boundary_snaps_into_multibyte_char() {
+        let text = "ab→cd"; // '→' = bytes [2,5)
+        assert_eq!(floor_char_boundary(text, 0), 0);
+        assert_eq!(floor_char_boundary(text, 2), 2);
+        assert_eq!(floor_char_boundary(text, 3), 2); // inside '→' → floor to 2
+        assert_eq!(floor_char_boundary(text, 4), 2);
+        assert_eq!(floor_char_boundary(text, 5), 5);
+        assert_eq!(floor_char_boundary(text, 99), text.len());
     }
 
     #[test]
