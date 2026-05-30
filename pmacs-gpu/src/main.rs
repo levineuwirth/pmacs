@@ -378,9 +378,13 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers)
                     && is_motion_key(pkey)
                     && let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_key(pkey, pmods)
                 {
-                    eprintln!("pmacs-gpu: send_key failed: {e}");
+                    if debug_input() {
+                        eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
+                    }
+                    if let Err(e) = client.send_key(pkey, pmods) {
+                        eprintln!("pmacs-gpu: send_key failed: {e}");
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
@@ -846,6 +850,14 @@ impl State {
                 buffer_id,
                 byte_pos,
             } => {
+                if debug_input() {
+                    eprintln!(
+                        "pmacs-gpu cursor: buf={buffer_id:?} byte={byte_pos} \
+                         current={:?} match={}",
+                        self.current_buffer_id,
+                        self.current_buffer_id == Some(buffer_id)
+                    );
+                }
                 self.own_cursor = Some(OwnCursor {
                     buffer_id,
                     byte: byte_pos,
@@ -1709,6 +1721,17 @@ fn debug_presence() -> bool {
 fn debug_frame() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_FRAME").is_some())
+}
+
+/// One-shot env flag: `PMACS_GPU_DEBUG_INPUT=1` logs the input path —
+/// keys sent and `CursorByte` received (with the buffer it targets vs
+/// the buffer being displayed). The buffer comparison is the B1
+/// diagnostic: if `CursorByte` targets a different buffer than
+/// `current`, the caret won't track (the displayed/edited buffers are
+/// out of sync).
+fn debug_input() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_INPUT").is_some())
 }
 
 /// Translate a winit logical key + current modifier state into a

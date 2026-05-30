@@ -1246,6 +1246,7 @@ fn handle_session_established(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // per-variant dispatcher match.
 fn handle_dispatcher_event(
     event: DispatcherEvent,
     editor: &mut EditorState,
@@ -1342,8 +1343,20 @@ fn handle_dispatcher_event(
                     // session never sends this; if one does, there is
                     // no `SemanticRenderState` to update and it is a
                     // benign no-op.
-                    if let Some(sem) = semantic_states.get_mut(&source) {
-                        sem.set_viewport(buffer_id, visible, generation);
+                    if semantic_states.contains_key(&source) {
+                        // Phase B (B1) — the Viewport declares *which
+                        // buffer this frontend is displaying*. Align its
+                        // editor window to that buffer so keyboard input
+                        // (`dispatch_key`) and the `CursorByte` it emits
+                        // target the displayed buffer. Without this, a
+                        // semantic frontend's window stays bound to
+                        // LOCAL's attach-time buffer (often a scratch the
+                        // user isn't viewing), so arrow keys moved an
+                        // off-screen cursor and the caret never tracked.
+                        align_semantic_window_to_buffer(editor, source, buffer_id);
+                        if let Some(sem) = semantic_states.get_mut(&source) {
+                            sem.set_viewport(buffer_id, visible, generation);
+                        }
                     }
                 }
                 _ => {
@@ -1843,6 +1856,53 @@ fn handle_remote_crdt_op(
 /// `pmacs.editor.open(path)` to switch their window to a different
 /// buffer; the per-frontend window-tree refactor (M10.8 Q1) makes
 /// this independent.
+/// Re-point a semantic frontend's active window at `buffer_id` — the
+/// buffer it just declared (via `FrontendEvent::Viewport`) that it is
+/// displaying. No-op when the window is already on that buffer or the
+/// buffer is gone.
+///
+/// A semantic frontend renders from the wire (`StyleSpans` + its local
+/// CRDT replica), so its daemon-side window holds only the cursor and
+/// the buffer identity — no grid overlays to migrate. Rebuilding the
+/// `TextView` (a cheap line index) and resetting the cursor is the
+/// whole switch. This is the input/display alignment fix for B1: the
+/// frontend's *declared* buffer becomes the buffer its keys edit and
+/// its `CursorByte` reports.
+fn align_semantic_window_to_buffer(
+    editor: &mut EditorState,
+    fid: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+) {
+    use crate::text_view::TextView;
+
+    let text_view = {
+        let core = editor.core.borrow();
+        let Some(win_id) = core.views.get(&fid).map(|v| v.active) else {
+            return;
+        };
+        if core.windows.get(&win_id).map(|w| w.buffer_id) == Some(buffer_id) {
+            return; // Already displaying this buffer.
+        }
+        let reg = core.registry.borrow();
+        let Ok(buf) = reg.get(buffer_id) else {
+            return; // Unknown buffer — leave the window as-is.
+        };
+        TextView::new(buf)
+    };
+
+    let mut core = editor.core.borrow_mut();
+    let Some(win_id) = core.views.get(&fid).map(|v| v.active) else {
+        return;
+    };
+    if let Some(win) = core.windows.get_mut(&win_id) {
+        win.buffer_id = buffer_id;
+        win.text_view = text_view;
+        win.cursor = 0;
+        win.selection = None;
+        win.overlays.clear();
+    }
+}
+
 fn build_fresh_frontend_view(editor: &mut EditorState) -> crate::window::FrontendView {
     use crate::text_view::TextView;
     use crate::window::{FrontendView, Layout, Window, WindowId};
@@ -2180,6 +2240,74 @@ mod tests {
             before + 1,
             "a semantic frontend's printable Key must self-insert and advance its window cursor \
              (pre-B1 the dispatcher dropped it)"
+        );
+    }
+
+    /// B1 input/display alignment: a semantic frontend's window is bound
+    /// to LOCAL's attach-time buffer, but the buffer it *displays* is
+    /// the one it declares via `Viewport`. `align_semantic_window_to_buffer`
+    /// re-points the window so keys edit the displayed buffer — without
+    /// it, arrow keys moved an off-screen cursor in the wrong buffer and
+    /// the caret never tracked.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn viewport_aligns_semantic_window_to_displayed_buffer() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use pmacs_protocol::{Key, KeyEvent, Modifiers};
+
+        let mut editor = EditorState::new();
+        let scratch = editor.core.borrow().active_window().buffer_id;
+        let file = {
+            let core = editor.core.borrow();
+            core.registry
+                .borrow_mut()
+                .create_from_bytes("file".to_owned(), b"hello\nworld\n")
+        };
+        assert_ne!(scratch, file);
+
+        // Attach: window shares LOCAL's active (scratch).
+        let fid = FrontendId(99);
+        let view = build_fresh_frontend_view(&mut editor);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        assert_eq!(
+            editor
+                .core
+                .borrow()
+                .active_window_for(fid)
+                .unwrap()
+                .buffer_id,
+            scratch
+        );
+
+        // The frontend declares it is displaying the file buffer.
+        align_semantic_window_to_buffer(&mut editor, fid, file);
+        assert_eq!(
+            editor
+                .core
+                .borrow()
+                .active_window_for(fid)
+                .unwrap()
+                .buffer_id,
+            file,
+            "Viewport must re-point the window at the displayed buffer"
+        );
+
+        // A key now edits the *displayed* buffer, advancing its cursor.
+        apply_semantic_input_event(
+            &mut editor,
+            FrontendEvent::Key(KeyEvent {
+                frontend_id: fid,
+                key: Key::Char('Z'),
+                mods: Modifiers::NONE,
+                timestamp_ns: 0,
+            }),
+            CellSize::new(24, 80),
+        );
+        assert_eq!(
+            editor.core.borrow().active_window_for(fid).unwrap().cursor,
+            1,
+            "key must self-insert into the displayed buffer, not the attach-time scratch"
         );
     }
 }
