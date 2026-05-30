@@ -782,12 +782,26 @@ impl State {
                 if self.current_buffer_id != Some(buffer_id) {
                     return None;
                 }
+                // Only diagnostic decorations affect the *rich text*
+                // (they override glyph fg in `projected_rich_chunks`);
+                // background kinds (Selection / CurrentLine / Search)
+                // are quads rebuilt cheaply in `render()`. A full
+                // `reshape()` (set_rich_text + shape_until_scroll) on
+                // every decoration change made cursor motion crawl —
+                // B1's own `CurrentLine` changes on every up/down move.
+                // Reshape only when the fg-affecting set changed; else
+                // just repaint the quads.
+                let fg_before = fg_decoration_fingerprint(&self.current_decorations);
                 if full {
                     self.replace_decorations(segments);
                 } else {
                     self.merge_decorations(segments);
                 }
-                self.reshape();
+                if fg_before == fg_decoration_fingerprint(&self.current_decorations) {
+                    self.window.request_redraw();
+                } else {
+                    self.reshape();
+                }
                 None
             }
             InstanceMessage::InlineAdornments { buffer_id, items } => {
@@ -1286,12 +1300,18 @@ impl State {
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
-    /// Own-window `Selection` / `CurrentLine` washes from
-    /// `current_decorations` (Q#B4). The producer emits these for this
-    /// frontend's window; they become non-trivial once B1's cursor
-    /// motion moves the window cursor off byte 0.
+    /// Own-window `Selection` washes from `current_decorations`. The
+    /// caret already marks the own cursor, so the own *`CurrentLine`*
+    /// wash is deliberately NOT rendered — a whole-line highlight on
+    /// every cursor line reads as a persistent selection, which is not
+    /// wanted as default editor behavior (revising Q#B4: the caret is
+    /// the own-cursor indicator; the line wash isn't). Peer presence
+    /// still shows other frontends' lines via `collect_peer_rects`.
     fn collect_own_decoration_rects(&self, rects: &mut Vec<MinimapRect>, line_offsets: &[u64]) {
         for d in &self.current_decorations {
+            if d.kind == DecorationKind::CurrentLine {
+                continue;
+            }
             if let Some(color) = decoration_kind_to_bg_color(d.kind) {
                 self.push_glyph_extent_rects(
                     rects,
@@ -2041,6 +2061,21 @@ fn indexed_to_glyphon(idx: u8) -> glyphon::Color {
     glyphon::Color::rgb(level, level, level)
 }
 
+/// The decorations that affect the *rich text* (a glyph fg override in
+/// `projected_rich_chunks`), as an ordered `(range, kind)` set. Only
+/// kinds with a foreground color qualify — i.e. the diagnostic
+/// severities; background kinds (`Selection` / `CurrentLine` / search)
+/// are quads. Equal fingerprints across a `Decorations` update mean the
+/// shaped text is unaffected and a `reshape()` can be skipped (the perf
+/// fix for cursor-motion-driven `CurrentLine` churn).
+fn fg_decoration_fingerprint(decos: &[Decoration]) -> Vec<(ByteRange, DecorationKind)> {
+    decos
+        .iter()
+        .filter(|d| decoration_kind_to_color(d.kind).is_some())
+        .map(|d| (d.range, d.kind))
+        .collect()
+}
+
 /// Map a [`DecorationKind`] to a foreground color override, or `None`
 /// for kinds whose visual is a background and can't be expressed in
 /// the current `Attrs`-only rendering pipeline.
@@ -2225,6 +2260,40 @@ mod tests {
         assert_eq!(k, ProtocolKey::Left);
         assert!(m.contains(Modifiers::CTRL));
         assert!(!m.contains(Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn fg_fingerprint_ignores_background_decoration_changes() {
+        let deco = |start, end, kind| Decoration {
+            range: ByteRange { start, end },
+            kind,
+        };
+        // A diagnostic (fg) decoration + a CurrentLine (bg) decoration.
+        let before = vec![
+            deco(10, 14, DecorationKind::DiagnosticError),
+            deco(0, 20, DecorationKind::CurrentLine),
+        ];
+        // The cursor moved: CurrentLine now spans a different line, the
+        // diagnostic is unchanged.
+        let after = vec![
+            deco(10, 14, DecorationKind::DiagnosticError),
+            deco(40, 60, DecorationKind::CurrentLine),
+        ];
+        assert_eq!(
+            fg_decoration_fingerprint(&before),
+            fg_decoration_fingerprint(&after),
+            "a CurrentLine-only change must not change the fg fingerprint (no reshape)"
+        );
+
+        // A diagnostic change DOES alter the fingerprint (reshape needed).
+        let after_diag = vec![
+            deco(10, 18, DecorationKind::DiagnosticError),
+            deco(0, 20, DecorationKind::CurrentLine),
+        ];
+        assert_ne!(
+            fg_decoration_fingerprint(&before),
+            fg_decoration_fingerprint(&after_diag)
+        );
     }
 
     #[test]
