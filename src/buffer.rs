@@ -765,7 +765,25 @@ impl Buffer {
             return result.map(Some);
         }
 
-        // Conservative fallback for deletes, compound updates, and
+        // Single-delete hot path (optimistic Backspace/Delete). The
+        // deletion's *start* converts through the post-import doc —
+        // the prefix is untouched, so the byte offset is identical
+        // pre- and post-import. The *end* byte cannot (those chars
+        // are gone from the doc); it comes from walking the still
+        // pre-import rope over the deleted codepoint count.
+        if let Some((unicode_pos, deleted_chars)) = single_remote_text_delete(&text_deltas)
+            && let Some(byte_start) = crdt.unicode_to_utf8_pos(unicode_pos)
+            && let Some(byte_end) =
+                rope_byte_end_after_chars(&self.rope, byte_start as Position, deleted_chars)
+        {
+            let byte_start = byte_start as Position;
+            let mut views = std::mem::take(&mut self.views);
+            let result = self.run_remote_rope_stages(&mut views, byte_start, byte_end, b"");
+            self.views = views;
+            return result.map(Some);
+        }
+
+        // Conservative fallback for compound updates and
         // already-integrated ops. The rope is still the pre-import
         // projection, so it remains the source for the old bytes.
         let old_len = self.rope.len();
@@ -1488,6 +1506,72 @@ fn single_remote_text_insert(deltas: &[Vec<loro::TextDelta>]) -> Option<(usize, 
         }
     }
     found
+}
+
+/// Recognize the hot-path projection delta produced by one remote
+/// deletion: an optional leading `Retain` followed by exactly one
+/// `Delete`, nothing else. Returns `(unicode_start, deleted_chars)`
+/// in Unicode scalar units.
+#[cfg(feature = "crdt")]
+fn single_remote_text_delete(deltas: &[Vec<loro::TextDelta>]) -> Option<(usize, usize)> {
+    let [delta] = deltas else {
+        return None;
+    };
+    let mut cursor = 0usize;
+    let mut found = None;
+    for op in delta {
+        match op {
+            loro::TextDelta::Retain { retain, .. } => {
+                cursor = cursor.checked_add(*retain)?;
+            }
+            loro::TextDelta::Insert { insert, .. } if insert.is_empty() => {}
+            loro::TextDelta::Insert { .. } => return None,
+            loro::TextDelta::Delete { delete } if *delete == 0 => {}
+            loro::TextDelta::Delete { delete } => {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((cursor, *delete));
+            }
+        }
+    }
+    found
+}
+
+/// Byte offset just past `chars` codepoints starting at `byte_start`
+/// in `rope`. Reads at most `chars * 4` bytes (one UTF-8 max-width
+/// each), so a Backspace-sized walk touches a handful of bytes, not
+/// the file. `None` when the rope runs out (or a boundary is off) —
+/// callers fall back to the materialize-and-diff path.
+#[cfg(feature = "crdt")]
+fn rope_byte_end_after_chars(
+    rope: &crate::rope::Rope,
+    byte_start: Position,
+    chars: usize,
+) -> Option<Position> {
+    let len = rope.len();
+    if byte_start > len || chars == 0 {
+        return None;
+    }
+    let take = (chars as Position).saturating_mul(4).min(len - byte_start);
+    let mut buf = vec![0u8; take as usize];
+    rope.slice(byte_start, byte_start + take, &mut buf);
+    let s = match std::str::from_utf8(&buf) {
+        Ok(s) => s,
+        // The 4*chars window can cut a trailing codepoint that we
+        // don't need anyway; keep the valid prefix.
+        Err(e) => std::str::from_utf8(&buf[..e.valid_up_to()]).ok()?,
+    };
+    let mut remaining = chars;
+    let mut offset = 0usize;
+    for ch in s.chars() {
+        if remaining == 0 {
+            break;
+        }
+        offset += ch.len_utf8();
+        remaining -= 1;
+    }
+    (remaining == 0).then(|| byte_start + offset as Position)
 }
 
 /// T M10.4: derive a fine-grained `(range, inserted_len)` Edit
@@ -2949,6 +3033,41 @@ mod tests {
         assert_eq!(rope_string(&buf), "é!x");
         assert_eq!(edit.range, Range::new("é".len() as u64, "é".len() as u64));
         assert_eq!(edit.inserted_len, 1);
+        assert_invariant(&buf);
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn apply_remote_crdt_op_single_delete_uses_pre_import_rope_for_end_byte() {
+        let donor = crate::crdt::CrdtState::new(2).expect("donor");
+        donor.insert(0, "aéx").expect("seed");
+
+        let mut buf = Buffer::new_with_crdt(BufferId::next(), "*utf8-delete*", 1).expect("buf");
+        let donor_snap = donor.export_snapshot().expect("snap");
+        buf.crdt
+            .as_ref()
+            .expect("crdt")
+            .import_snapshot(&donor_snap)
+            .expect("init from snap");
+        buf.rope = crate::rope::Rope::from_bytes("aéx".as_bytes());
+
+        // Delete the 2-byte 'é' (CrdtState::delete takes UTF-8 byte
+        // offsets; the wire delta reports it as 1 Unicode scalar).
+        let v_before = donor.version();
+        donor.delete(1, "é".len()).expect("delete");
+        let op_bytes = donor.export_updates_since(&v_before).expect("export");
+        let edit = buf
+            .apply_remote_crdt_op(&op_bytes)
+            .expect("apply")
+            .expect("non-empty edit");
+
+        assert_eq!(rope_string(&buf), "ax");
+        assert_eq!(
+            edit.range,
+            Range::new(1, 1 + "é".len() as u64),
+            "byte range covers the multibyte codepoint exactly"
+        );
+        assert_eq!(edit.inserted_len, 0);
         assert_invariant(&buf);
     }
 

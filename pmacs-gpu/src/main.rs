@@ -366,6 +366,13 @@ struct State {
     /// the floor is acknowledged would make its legitimate cursor
     /// result indistinguishable from an older in-flight frame.
     deferred_round_trip_keys: Vec<(ProtocolKey, Modifiers)>,
+    /// When the current `optimistic_cursor_floor` was armed. If the
+    /// daemon never confirms the prediction (op dropped by
+    /// validation, a peer racing our window cursor), an unbounded
+    /// floor would wedge deferred round-trip keys forever; after
+    /// [`FLOOR_CONFIRM_TIMEOUT`] the floor releases, `cursor_fresh`
+    /// drops, and the next `CursorByte` resynchronizes.
+    optimistic_floor_set_at: Option<std::time::Instant>,
     /// Optimistic local edits not yet known to be reflected in
     /// incoming producer frames. Each entry pairs the version scalar
     /// of this replica's doc *after* the edit applied (computed by
@@ -471,11 +478,11 @@ impl ApplicationHandler<AppEvent> for App {
                     && should_forward_key(pkey, pmods)
                     && let Some(client) = self.attach_client.as_ref()
                 {
-                    if let Some(op) = self
-                        .state
-                        .as_mut()
-                        .and_then(|state| state.optimistic_crdt_insert(pkey, pmods))
-                    {
+                    if let Some(op) = self.state.as_mut().and_then(|state| {
+                        state
+                            .optimistic_crdt_insert(pkey, pmods)
+                            .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
+                    }) {
                         if debug_input() {
                             eprintln!(
                                 "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
@@ -568,6 +575,7 @@ impl ApplicationHandler<AppEvent> for App {
                 {
                     eprintln!("pmacs-gpu: send Viewport failed: {e}");
                 }
+                state.release_timed_out_floor();
                 let ready_keys = state.take_ready_round_trip_keys();
                 if let Some(client) = self.attach_client.as_ref() {
                     for (key, mods) in ready_keys {
@@ -606,6 +614,45 @@ struct CrdtOpSend {
     /// scrolled the view (Enter on the bottom visible line). Sent
     /// after the op so the producer styles the newly visible range.
     viewport: Option<ViewportSend>,
+}
+
+/// How long an unconfirmed optimistic-cursor prediction may gate
+/// `CursorByte` acceptance and defer round-trip keys before the
+/// escape hatch releases it. Generous against a busy daemon tick;
+/// tiny against a human noticing wedged keys.
+const FLOOR_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Byte range an optimistic Backspace/Delete removes at `cursor`, or
+/// `None` when it can't be predicted locally: buffer edge (the
+/// daemon's behavior is a no-op there anyway), a modifier variant
+/// (C-BS word-delete and friends are separate bindings), or a stale
+/// mid-codepoint cursor. The range is exactly one codepoint, matching
+/// `buffer.delete-backward` / `buffer.delete-forward`'s no-region
+/// behavior; region deletes are excluded upstream by the selection
+/// gate (they round-trip into `delete_region`).
+fn optimistic_delete_range(
+    text: &str,
+    cursor: usize,
+    key: ProtocolKey,
+    mods: Modifiers,
+) -> Option<(usize, usize)> {
+    if !mods.is_empty() {
+        return None;
+    }
+    if cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+    match key {
+        ProtocolKey::Backspace => {
+            let (start, _) = text[..cursor].char_indices().next_back()?;
+            Some((start, cursor))
+        }
+        ProtocolKey::Delete => {
+            let ch = text[cursor..].chars().next()?;
+            Some((cursor, cursor + ch.len_utf8()))
+        }
+        _ => None,
+    }
 }
 
 /// The literal text `key` inserts when handled optimistically, or
@@ -813,6 +860,7 @@ impl State {
             cursor_fresh: false,
             optimistic_cursor_floor: None,
             deferred_round_trip_keys: Vec::new(),
+            optimistic_floor_set_at: None,
             unconfirmed_edits: Vec::new(),
         }
     }
@@ -826,19 +874,22 @@ impl State {
         }
     }
 
-    fn optimistic_crdt_insert(&mut self, key: ProtocolKey, mods: Modifiers) -> Option<CrdtOpSend> {
+    /// Shared eligibility gates for the optimistic edit paths
+    /// (insert + delete). `None` ⇒ the key must round-trip:
+    /// - dispatcher busy (minibuffer/prefix flows own the keys), or
+    ///   the cursor isn't authoritative;
+    /// - CUA region semantics: an own-window selection means typing
+    ///   replaces and Backspace/Delete consume the region — those
+    ///   semantics live in the daemon's region-aware commands, which
+    ///   a raw `CrdtOp` bypasses. (Our own selection arrives as a
+    ///   `Selection` decoration; peer selections live in
+    ///   `peer_presences` and don't gate.)
+    /// - bookkeeping: no frontend id / cursor / matching buffer /
+    ///   replica doc, or the peer id can't be set.
+    fn optimistic_edit_eligible(&self) -> Option<(OwnCursor, u64)> {
         if !self.dispatch_idle || !self.cursor_fresh {
             return None;
         }
-        // CUA type-over: with an active selection, typing replaces the
-        // region. Those semantics live in the daemon's region-aware
-        // insert commands (`buffer.self-insert` / `newline` / `tab`),
-        // which a raw CrdtOp insert would bypass — so an own-window
-        // selection sends the key round-trip instead. Our own
-        // selection arrives as a `Selection` decoration (peer
-        // selections live in `peer_presences` and don't gate). The
-        // daemon's replace clears the region, the next Decorations
-        // frame clears the wash, and typing resumes optimistically.
         if self
             .current_decorations
             .iter()
@@ -846,15 +897,9 @@ impl State {
         {
             return None;
         }
-        let mut chbuf = [0u8; 4];
-        let insert = optimistic_insert_text(key, mods, &mut chbuf)?;
         let frontend_id = self.local_frontend_id?;
         let own = self.own_cursor?;
         if self.current_buffer_id != Some(own.buffer_id) {
-            return None;
-        }
-        let cursor = usize::try_from(own.byte).ok()?;
-        if cursor > self.current_text.len() || !self.current_text.is_char_boundary(cursor) {
             return None;
         }
         let doc = self.loro_doc.as_ref()?;
@@ -865,7 +910,18 @@ impl State {
             eprintln!("pmacs-gpu: failed to set optimistic Loro peer id: {e:?}");
             return None;
         }
+        Some((own, peer_id))
+    }
 
+    fn optimistic_crdt_insert(&mut self, key: ProtocolKey, mods: Modifiers) -> Option<CrdtOpSend> {
+        let mut chbuf = [0u8; 4];
+        let insert = optimistic_insert_text(key, mods, &mut chbuf)?;
+        let (own, peer_id) = self.optimistic_edit_eligible()?;
+        let cursor = usize::try_from(own.byte).ok()?;
+        if cursor > self.current_text.len() || !self.current_text.is_char_boundary(cursor) {
+            return None;
+        }
+        let doc = self.loro_doc.as_ref()?;
         let delta_batches = self.loro_text_delta_batches.clone()?;
         clear_loro_text_delta_batches(&delta_batches);
         let before = doc.oplog_vv();
@@ -877,19 +933,79 @@ impl State {
             .export(ExportMode::updates(&before))
             .expect("export local optimistic Loro update");
         let drained = drain_loro_text_delta_batches(&delta_batches);
+        let predicted = OwnCursor {
+            buffer_id: own.buffer_id,
+            byte: own.byte.saturating_add(insert.len() as u64),
+        };
+        Some(self.finish_optimistic_edit(&drained, predicted, peer_id, bytes))
+    }
+
+    /// Optimistic single-codepoint Backspace / Delete. Mirrors the
+    /// insert path: the daemon's `buffer.delete-backward/-forward`
+    /// no-region behavior is exactly "delete one codepoint", so the
+    /// local application cannot diverge; region deletes are excluded
+    /// by the selection gate (they round-trip into `delete_region`),
+    /// and modified variants (C-BS word delete, …) round-trip via
+    /// `optimistic_delete_range` returning `None`. The daemon applies
+    /// the op through its single-delete CRDT hot path.
+    fn optimistic_crdt_delete(&mut self, key: ProtocolKey, mods: Modifiers) -> Option<CrdtOpSend> {
+        if !matches!(key, ProtocolKey::Backspace | ProtocolKey::Delete) {
+            return None;
+        }
+        let (own, peer_id) = self.optimistic_edit_eligible()?;
+        let cursor = usize::try_from(own.byte).ok()?;
+        let (start, end) = optimistic_delete_range(&self.current_text, cursor, key, mods)?;
+        let doc = self.loro_doc.as_ref()?;
+        let delta_batches = self.loro_text_delta_batches.clone()?;
+        clear_loro_text_delta_batches(&delta_batches);
+        let before = doc.oplog_vv();
+        if let Err(e) = doc
+            .get_text(LORO_TEXT_CONTAINER)
+            .delete_utf8(start, end - start)
+        {
+            eprintln!("pmacs-gpu: optimistic delete failed: {e:?}");
+            return None;
+        }
+        let bytes = doc
+            .export(ExportMode::updates(&before))
+            .expect("export local optimistic Loro update");
+        let drained = drain_loro_text_delta_batches(&delta_batches);
+        let predicted = OwnCursor {
+            buffer_id: own.buffer_id,
+            byte: start as u64,
+        };
+        Some(self.finish_optimistic_edit(&drained, predicted, peer_id, bytes))
+    }
+
+    /// Common tail of the optimistic edit paths: patch the local text
+    /// from the drained Loro deltas (journaling them for
+    /// incoming-frame translation), predict the cursor + arm the
+    /// confirmation floor, follow the caret, and package the wire op.
+    fn finish_optimistic_edit(
+        &mut self,
+        drained: &[Vec<loro::TextDelta>],
+        predicted: OwnCursor,
+        peer_id: u64,
+        bytes: Vec<u8>,
+    ) -> CrdtOpSend {
         if drained.is_empty() {
-            let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
-            self.set_text(&text);
+            let text = self
+                .loro_doc
+                .as_ref()
+                .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
+            if let Some(text) = text {
+                self.set_text(&text);
+            }
             // Cache rebuilt wholesale — there are no translated
             // anchors left for frame translation to protect.
             self.unconfirmed_edits.clear();
         } else {
-            match self.apply_loro_text_delta_batches(&drained) {
+            match self.apply_loro_text_delta_batches(drained) {
                 Ok(edits) => {
                     // Journal this keystroke so producer frames the
                     // daemon computed before integrating it can be
                     // translated on arrival (see `unconfirmed_edits`).
-                    // The scalar is read *after* the local insert, so
+                    // The scalar is read *after* the local edit, so
                     // any frame stamped at or beyond it includes us.
                     let scalar = self.loro_doc.as_ref().map_or(0, loro_version_scalar);
                     self.unconfirmed_edits
@@ -911,27 +1027,25 @@ impl State {
                 }
             }
         }
-        let predicted = OwnCursor {
-            buffer_id: own.buffer_id,
-            byte: own.byte.saturating_add(insert.len() as u64),
-        };
         self.own_cursor = Some(predicted);
         self.optimistic_cursor_floor = Some(predicted);
+        self.optimistic_floor_set_at = Some(std::time::Instant::now());
         // Follow the caret NOW rather than when the daemon's
         // `CursorByte` confirms — an optimistic Enter on the bottom
-        // visible line moves the caret to a line below the slice, and
-        // waiting a round trip to scroll reads as a hitch.
+        // visible line (or a Backspace pulling the caret above the
+        // top) moves it outside the slice, and waiting a round trip
+        // to scroll reads as a hitch.
         let viewport = if self.scroll_to_cursor() {
             self.reshape();
-            self.viewport_send_if_changed(own.buffer_id)
+            self.viewport_send_if_changed(predicted.buffer_id)
         } else {
             None
         };
-        Some(CrdtOpSend {
-            buffer_id: own.buffer_id,
+        CrdtOpSend {
+            buffer_id: predicted.buffer_id,
             op: CrdtOp { peer_id, bytes },
             viewport,
-        })
+        }
     }
 
     fn mark_cursor_stale_after_round_trip(&mut self) {
@@ -969,6 +1083,27 @@ impl State {
     fn prune_unconfirmed_edits(&mut self, generation: u64) {
         self.unconfirmed_edits
             .retain(|(scalar, _)| *scalar > generation);
+    }
+
+    fn optimistic_floor_timed_out(&self) -> bool {
+        self.optimistic_floor_set_at
+            .is_some_and(|armed| armed.elapsed() >= FLOOR_CONFIRM_TIMEOUT)
+    }
+
+    /// Escape hatch: release a floor the daemon never confirmed so
+    /// deferred round-trip keys can't wedge forever. Dropping
+    /// `cursor_fresh` falls the GPU back to round-trip mode until the
+    /// next `CursorByte` resynchronizes the cursor.
+    fn release_timed_out_floor(&mut self) {
+        if self.optimistic_cursor_floor.is_some() && self.optimistic_floor_timed_out() {
+            eprintln!(
+                "pmacs-gpu: optimistic cursor unconfirmed after {FLOOR_CONFIRM_TIMEOUT:?}; \
+                 falling back to round-trip input"
+            );
+            self.optimistic_cursor_floor = None;
+            self.optimistic_floor_set_at = None;
+            self.cursor_fresh = false;
+        }
     }
 
     fn defer_round_trip_key_if_needed(&mut self, key: ProtocolKey, mods: Modifiers) -> bool {
@@ -1087,6 +1222,7 @@ impl State {
                 self.own_cursor = None;
                 self.cursor_fresh = false;
                 self.optimistic_cursor_floor = None;
+                self.optimistic_floor_set_at = None;
                 self.deferred_round_trip_keys.clear();
                 self.unconfirmed_edits.clear();
                 // New buffer ⇒ back to the top, and force a viewport
@@ -1167,16 +1303,20 @@ impl State {
                         Ok(edits) => {
                             // A daemon-originated edit shifts the text
                             // under any still-unconfirmed optimistic
-                            // inserts. Rebase the journal's anchors so
+                            // edits. Rebase the journal's anchors so
                             // frames that include this edit (but not
-                            // ours) translate correctly. Journal
-                            // entries are pure inserts (the optimistic
-                            // path only inserts), so anchor == start.
+                            // ours) translate correctly. Entries are
+                            // inserts (start == old_end) or
+                            // single-codepoint deletes; both rebase by
+                            // position translation, clamped so a range
+                            // can't invert.
                             for incoming in &edits {
                                 for (_, pending) in &mut self.unconfirmed_edits {
                                     pending.start =
                                         translate_byte_position(pending.start, *incoming);
-                                    pending.old_end = pending.start;
+                                    pending.old_end =
+                                        translate_byte_position(pending.old_end, *incoming)
+                                            .max(pending.start);
                                 }
                             }
                         }
@@ -1334,24 +1474,28 @@ impl State {
                         self.current_buffer_id == Some(buffer_id)
                     );
                 }
-                if let Some(floor) = self.optimistic_cursor_floor
-                    && floor.buffer_id == buffer_id
-                    && byte_pos < floor.byte
-                {
-                    if debug_input() {
-                        eprintln!(
-                            "pmacs-gpu cursor: ignored stale optimistic rewind \
-                             buf={buffer_id:?} byte={byte_pos} floor={}",
-                            floor.byte
-                        );
+                if let Some(floor) = self.optimistic_cursor_floor {
+                    // With deletes in the optimistic set the predicted
+                    // cursor is no longer monotonic, so only the EXACT
+                    // predicted byte (or a cursor for another buffer)
+                    // confirms; any other value is an in-flight frame
+                    // from before our unconfirmed edits. The timeout
+                    // hatch accepts daemon truth if confirmation never
+                    // comes (op dropped, peer raced our cursor).
+                    let confirmed = floor.buffer_id != buffer_id || byte_pos == floor.byte;
+                    if confirmed || self.optimistic_floor_timed_out() {
+                        self.optimistic_cursor_floor = None;
+                        self.optimistic_floor_set_at = None;
+                    } else {
+                        if debug_input() {
+                            eprintln!(
+                                "pmacs-gpu cursor: ignored stale in-flight position \
+                                 buf={buffer_id:?} byte={byte_pos} predicted={}",
+                                floor.byte
+                            );
+                        }
+                        return None;
                     }
-                    return None;
-                }
-                if self
-                    .optimistic_cursor_floor
-                    .is_some_and(|floor| floor.buffer_id != buffer_id || byte_pos >= floor.byte)
-                {
-                    self.optimistic_cursor_floor = None;
                 }
                 self.own_cursor = Some(OwnCursor {
                     buffer_id,
@@ -3691,6 +3835,59 @@ mod tests {
         );
         assert_eq!(
             optimistic_insert_text(ProtocolKey::Left, none, &mut buf),
+            None
+        );
+    }
+
+    #[test]
+    fn optimistic_delete_range_covers_single_codepoints_only() {
+        let none = Modifiers::NONE;
+        let text = "aé😀b";
+
+        // Backspace deletes the codepoint before the cursor, whatever
+        // its width: 'é' is 2 bytes, '😀' is 4.
+        assert_eq!(
+            optimistic_delete_range(text, 3, ProtocolKey::Backspace, none),
+            Some((1, 3)),
+            "backspace before the cursor crosses the full 'é'"
+        );
+        assert_eq!(
+            optimistic_delete_range(text, 7, ProtocolKey::Backspace, none),
+            Some((3, 7)),
+            "backspace crosses the full '😀'"
+        );
+        // Delete removes the codepoint at the cursor.
+        assert_eq!(
+            optimistic_delete_range(text, 1, ProtocolKey::Delete, none),
+            Some((1, 3))
+        );
+        assert_eq!(
+            optimistic_delete_range(text, 7, ProtocolKey::Delete, none),
+            Some((7, 8))
+        );
+
+        // Buffer edges: nothing to delete ⇒ round-trip (daemon no-op).
+        assert_eq!(
+            optimistic_delete_range(text, 0, ProtocolKey::Backspace, none),
+            None
+        );
+        assert_eq!(
+            optimistic_delete_range(text, text.len(), ProtocolKey::Delete, none),
+            None
+        );
+        // Mid-codepoint (stale) cursor ⇒ round-trip, never a panic.
+        assert_eq!(
+            optimistic_delete_range(text, 2, ProtocolKey::Backspace, none),
+            None
+        );
+        // Modified variants are separate bindings (C-BS word delete).
+        assert_eq!(
+            optimistic_delete_range(text, 3, ProtocolKey::Backspace, Modifiers::CTRL),
+            None
+        );
+        // Non-delete keys are not this helper's business.
+        assert_eq!(
+            optimistic_delete_range(text, 3, ProtocolKey::Char('x'), none),
             None
         );
     }
