@@ -544,7 +544,7 @@ fn m9_2_cancelled_sibling_wins_over_queued_response() {
     // macOS runners); a generous wait does not weaken the contract —
     // the race under test is cancel-AFTER-queue-BEFORE-manager-tick,
     // which holds for any wait long enough for the response to land.
-    std::thread::sleep(Duration::from_millis(1000));
+    std::thread::sleep(Duration::from_secs(1));
     sup.borrow_mut().tick();
 
     // Cancel only b after the response is queued but before
