@@ -225,6 +225,10 @@ struct App {
 type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
 
 /// All resources owned by one running pmacs-gpu instance.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent render/input state flags, not a config bitset"
+)]
 struct State {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -409,6 +413,11 @@ struct State {
     /// `(when, byte)` of the last primary Down, for frontend-side
     /// double-click detection (same-hit within the interval).
     last_pointer_down: Option<(std::time::Instant, u64)>,
+    /// Q#R2 — the per-line surgery path skips rebuilding the pointer
+    /// hit map (clicks are rare next to keystrokes); this marks it
+    /// stale so `hit_test_source_byte` rebuilds on demand from the
+    /// same shared chunk function.
+    hit_map_dirty: bool,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -1006,6 +1015,7 @@ impl State {
             pointer_drag_active: false,
             last_pointer_sent_byte: None,
             last_pointer_down: None,
+            hit_map_dirty: false,
         }
     }
 
@@ -1203,6 +1213,7 @@ impl State {
         &mut self,
         delta_batches: &[Vec<loro::TextDelta>],
     ) -> Result<Vec<TextProjectionEdit>, &'static str> {
+        let line_count_before = self.current_line_starts.len();
         let edits = apply_loro_text_delta_batches(
             &mut self.current_text,
             &mut self.current_line_starts,
@@ -1213,7 +1224,17 @@ impl State {
             return Ok(edits);
         }
         self.translate_cached_anchors(&edits);
-        self.reshape();
+        // Q#R1 — the keystroke case (one edit, no line-structure
+        // change) re-shapes only the affected BufferLine; everything
+        // else falls back to the full slice reshape.
+        let single_line_edit = edits.len() == 1
+            && self.current_line_starts.len() == line_count_before
+            && !self.current_text
+                [edits[0].start as usize..(edits[0].start + edits[0].inserted_len) as usize]
+                .contains('\n');
+        if !(single_line_edit && self.try_reshape_line(edits[0])) {
+            self.reshape();
+        }
         Ok(edits)
     }
 
@@ -1736,8 +1757,25 @@ impl State {
     /// line) → projected byte → run map → slice byte → + `vstart`.
     /// `None` when no buffer is attached or the position is outside
     /// anything hit-testable.
-    fn hit_test_source_byte(&self, x: f64, y: f64) -> Option<u64> {
+    fn hit_test_source_byte(&mut self, x: f64, y: f64) -> Option<u64> {
         self.current_buffer_id?;
+        if self.hit_map_dirty {
+            // Q#R2 — a per-line reshape deferred this; rebuild from
+            // the same chunk source the shaped buffer was built from.
+            let (vstart, vend) = self.view_range;
+            let rich = clipped_chunks_for_range(
+                &self.current_text,
+                &self.current_spans,
+                &self.current_decorations,
+                &self.current_adornments,
+                vstart,
+                vend,
+            );
+            let (hit_runs, projected_line_starts) = build_hit_runs(&rich);
+            self.current_hit_runs = hit_runs;
+            self.projected_line_starts = projected_line_starts;
+            self.hit_map_dirty = false;
+        }
         let rel_x = x as f32 - TEXT_LEFT;
         let rel_y = y as f32 - TEXT_TOP;
         let cursor = self.buffer.hit(rel_x, rel_y)?;
@@ -1763,6 +1801,102 @@ impl State {
         self.reshape();
         self.current_buffer_id
             .and_then(|bid| self.viewport_send_if_changed(bid))
+    }
+
+    /// Q#R1 — per-line incremental reshape for a single-line text
+    /// edit: rebuild ONE `BufferLine` instead of re-shaping the whole
+    /// visible slice. Returns `false` when the edit needs the full
+    /// `reshape` (slice origin moved, edited line outside the shaped
+    /// slice, exotic paragraph separators that the full path would
+    /// have split on). The caller has already established the edit is
+    /// single-line (line count unchanged, no `\n` inserted).
+    fn try_reshape_line(&mut self, edit: TextProjectionEdit) -> bool {
+        let (vstart, vend) = self.visible_byte_range();
+        if vstart != self.view_range.0 {
+            // The slice origin moved (edit before the viewport): the
+            // whole slice shifts; surgery can't help.
+            return false;
+        }
+        if edit.start >= vend {
+            // Entirely past the visible slice: no shaped line's
+            // content changes; offsets are clip-rebased per frame.
+            self.view_range = (vstart, vend);
+            self.hit_map_dirty = true;
+            self.window.request_redraw();
+            return true;
+        }
+        let line_idx = self
+            .current_line_starts
+            .partition_point(|&s| s <= edit.start)
+            .saturating_sub(1);
+        let line_start = self.current_line_starts[line_idx];
+        if line_start < vstart {
+            return false;
+        }
+        let next_start = self.current_line_starts.get(line_idx + 1).copied();
+        // Content end excludes the `\n` — matching cosmic-text's
+        // BidiParagraphs, which strips the separator from every line
+        // in both its ASCII and BidiInfo paths.
+        let content_end = next_start
+            .map_or(self.current_text.len() as u64, |n| n.saturating_sub(1))
+            .min(vend);
+        let top = self
+            .scroll_top
+            .min(self.current_line_starts.len().saturating_sub(1));
+        let Some(shaped_idx) = line_idx.checked_sub(top) else {
+            return false;
+        };
+        if shaped_idx >= self.buffer.lines.len() {
+            // E.g. the phantom empty line after a trailing `\n`
+            // (cosmic creates no BufferLine for it) — full reshape
+            // handles those shapes correctly.
+            return false;
+        }
+
+        let chunks = clipped_chunks_for_range(
+            &self.current_text,
+            &self.current_spans,
+            &self.current_decorations,
+            &self.current_adornments,
+            line_start,
+            content_end,
+        );
+        // Parity guard: any paragraph separator other than `\n`
+        // (e.g. inside injected hint text) would have split this line
+        // in the full set_rich_text path.
+        if chunks.iter().any(|c| {
+            c.text
+                .chars()
+                .any(|ch| matches!(ch, '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}'))
+        }) {
+            return false;
+        }
+
+        let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+        let mut attrs_list = glyphon::cosmic_text::AttrsList::new(&default_attrs);
+        let mut line_text = String::new();
+        for chunk in &chunks {
+            let s = line_text.len();
+            line_text.push_str(&chunk.text);
+            if let Some(c) = chunk.color {
+                // Mirrors set_rich_text: spans only when they differ
+                // from the defaults (ours differ exactly when colored).
+                attrs_list.add_span(s..line_text.len(), &default_attrs.clone().color(c));
+            }
+        }
+        // Every line gets LineEnding::Lf — set_rich_text assigns
+        // LineEnding::default() uniformly, including the final line.
+        self.buffer.lines[shaped_idx] = glyphon::cosmic_text::BufferLine::new(
+            line_text,
+            glyphon::cosmic_text::LineEnding::Lf,
+            attrs_list,
+            Shaping::Advanced,
+        );
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.view_range = (vstart, vend);
+        self.hit_map_dirty = true;
+        self.window.request_redraw();
+        true
     }
 
     /// Bookkeeping for an outgoing Pointer event: it supersedes any
@@ -2001,50 +2135,22 @@ impl State {
         // are clipped + rebased onto the slice (subtract `vstart`).
         let (vstart, vend) = self.visible_byte_range();
         self.view_range = (vstart, vend);
-        let slice = &self.current_text[vstart as usize..vend as usize];
-
-        let spans: Vec<StyleSpan> = self
-            .current_spans
-            .iter()
-            .filter_map(|sp| {
-                clip_rebase_range(sp.range.start, sp.range.end, vstart, vend).map(|(s, e)| {
-                    StyleSpan {
-                        range: ByteRange { start: s, end: e },
-                        style: sp.style,
-                    }
-                })
-            })
-            .collect();
-        let decorations: Vec<Decoration> = self
-            .current_decorations
-            .iter()
-            .filter_map(|d| {
-                clip_rebase_range(d.range.start, d.range.end, vstart, vend).map(|(s, e)| {
-                    Decoration {
-                        range: ByteRange { start: s, end: e },
-                        kind: d.kind,
-                    }
-                })
-            })
-            .collect();
-        let adornments: Vec<InlineAdornment> = self
-            .current_adornments
-            .iter()
-            .filter(|a| a.at >= vstart && a.at <= vend)
-            .map(|a| {
-                let mut a = a.clone();
-                a.at -= vstart;
-                a
-            })
-            .collect();
 
         let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
-        let rich = projected_rich_chunks(slice, &spans, &decorations, &adornments);
+        let rich = clipped_chunks_for_range(
+            &self.current_text,
+            &self.current_spans,
+            &self.current_decorations,
+            &self.current_adornments,
+            vstart,
+            vend,
+        );
         // Q#M2 — the pointer hit map is derived from the SAME chunks
         // the shaped buffer is built from, so the two cannot disagree.
         let (hit_runs, projected_line_starts) = build_hit_runs(&rich);
         self.current_hit_runs = hit_runs;
         self.projected_line_starts = projected_line_starts;
+        self.hit_map_dirty = false;
         let chunks: Vec<(String, Attrs<'static>)> = rich
             .into_iter()
             .map(|chunk| {
@@ -3485,6 +3591,52 @@ fn px_to_ndc_y(y: f32, height: u32) -> f32 {
 /// `text` and retain source-byte styling; inline adornments create
 /// extra chunks at their anchors and therefore do not shift any source
 /// span/decoration range.
+/// Clip + rebase the whole-file styling caches onto the byte range
+/// `[start, end)` and build its projected chunks (Q#R1: the ONE chunk
+/// source both the full `reshape` and the per-line surgery derive
+/// from, so the two paths cannot disagree about a line's content).
+/// Adornment anchors use an inclusive end — an anchor exactly at
+/// `end` (a line's `\n`, or the slice end) injects after the last
+/// content byte, matching the full-walk boundary behavior.
+fn clipped_chunks_for_range(
+    text: &str,
+    spans: &[StyleSpan],
+    decorations: &[Decoration],
+    adornments: &[InlineAdornment],
+    start: u64,
+    end: u64,
+) -> Vec<RichChunk> {
+    let range_text = &text[start as usize..end as usize];
+    let spans: Vec<StyleSpan> = spans
+        .iter()
+        .filter_map(|sp| {
+            clip_rebase_range(sp.range.start, sp.range.end, start, end).map(|(s, e)| StyleSpan {
+                range: ByteRange { start: s, end: e },
+                style: sp.style,
+            })
+        })
+        .collect();
+    let decorations: Vec<Decoration> = decorations
+        .iter()
+        .filter_map(|d| {
+            clip_rebase_range(d.range.start, d.range.end, start, end).map(|(s, e)| Decoration {
+                range: ByteRange { start: s, end: e },
+                kind: d.kind,
+            })
+        })
+        .collect();
+    let adornments: Vec<InlineAdornment> = adornments
+        .iter()
+        .filter(|a| a.at >= start && a.at <= end)
+        .map(|a| {
+            let mut a = a.clone();
+            a.at -= start;
+            a
+        })
+        .collect();
+    projected_rich_chunks(range_text, &spans, &decorations, &adornments)
+}
+
 fn projected_rich_chunks(
     text: &str,
     spans: &[StyleSpan],
@@ -4136,6 +4288,104 @@ mod tests {
         assert_eq!(
             optimistic_insert_text(ProtocolKey::Left, none, &mut buf),
             None
+        );
+    }
+
+    /// Q#R1 parity invariant: the per-line surgery's chunk source
+    /// (`clipped_chunks_for_range` over one line's content range)
+    /// must agree byte-for-byte — text AND color — with the full
+    /// slice walk split at line boundaries. Pinned here so the
+    /// surgically rebuilt `BufferLine` can't drift from what a full
+    /// `set_rich_text` would have produced.
+    #[test]
+    fn per_line_chunks_match_the_full_walk() {
+        // (byte, color) stream, with `\n` bytes dropped — the full
+        // walk keeps them inside source chunks; per-line walks
+        // exclude them (cosmic strips the separator per line).
+        fn flat(chunks: &[RichChunk]) -> Vec<(u8, Option<u32>)> {
+            chunks
+                .iter()
+                .flat_map(|c| {
+                    let color = c.color.map(|col| col.0);
+                    c.text
+                        .bytes()
+                        .filter(|&b| b != b'\n')
+                        .map(move |b| (b, color))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+        // Two content lines + trailing newline. A span crossing the
+        // line break, plus two inlay hints: one mid-line-1, one
+        // anchored EXACTLY at line 0's newline (the predicted-finding
+        // #1 boundary case — it must belong to line 0, before the \n).
+        let text = "alpha BETA\ngamma delta\n";
+        let spans = vec![StyleSpan {
+            range: ByteRange { start: 6, end: 16 },
+            style: CellStyle {
+                fg: CellColor::Indexed(2),
+                ..CellStyle::default()
+            },
+        }];
+        let decorations = vec![Decoration {
+            range: ByteRange { start: 0, end: 5 },
+            kind: DecorationKind::DiagnosticWarning,
+        }];
+        let hint = |at: u64, label: &str| InlineAdornment {
+            at,
+            placement: AdornmentPlacement::AtOffset,
+            content: AdornmentContent::Text {
+                text: label.to_owned(),
+                style: CellStyle::default(),
+            },
+        };
+        let adornments = vec![hint(10, "<eol>"), hint(17, ": T ")];
+
+        let full = flat(&clipped_chunks_for_range(
+            text,
+            &spans,
+            &decorations,
+            &adornments,
+            0,
+            text.len() as u64,
+        ));
+
+        // Line ranges as the surgery computes them: content excludes
+        // the newline; the phantom line after the trailing `\n` is
+        // empty.
+        let mut per_line = Vec::new();
+        for (start, content_end) in [(0u64, 10u64), (11, 22), (23, 23)] {
+            per_line.extend(flat(&clipped_chunks_for_range(
+                text,
+                &spans,
+                &decorations,
+                &adornments,
+                start,
+                content_end,
+            )));
+        }
+
+        assert_eq!(
+            per_line, full,
+            "per-line chunk walks must reproduce the full walk exactly \
+             (text and colors, newlines excluded)"
+        );
+
+        // The boundary hint landed on line 0 (before its newline), not
+        // line 1.
+        let line0 = clipped_chunks_for_range(text, &spans, &decorations, &adornments, 0, 10);
+        assert!(
+            line0.iter().any(|c| c.text == "<eol>"),
+            "newline-anchored hint belongs to the line it terminates"
+        );
+        let line1 = clipped_chunks_for_range(text, &spans, &decorations, &adornments, 11, 22);
+        assert!(
+            line1.iter().all(|c| c.text != "<eol>"),
+            "newline-anchored hint must not duplicate onto the next line"
+        );
+        assert!(
+            line1.iter().any(|c| c.text == ": T "),
+            "mid-line hint renders on its own line"
         );
     }
 
