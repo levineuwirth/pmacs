@@ -23,7 +23,7 @@ use std::thread;
 
 use pmacs_protocol::{
     AttachRequest, BufferId, ByteRange, CrdtOp, FrontendCapabilities, FrontendEvent, FrontendId,
-    Hello, InstanceMessage, Key, KeyEvent, Modifiers, PROTOCOL_VERSION,
+    Hello, InstanceMessage, Key, KeyEvent, Modifiers, PROTOCOL_VERSION, PointerKind,
     SUPPORTED_PROTOCOL_VERSIONS, TransportError, is_supported_protocol_version, read_message,
     write_message,
 };
@@ -202,6 +202,7 @@ pub fn connect(
     Ok(AttachClient {
         writer_tx,
         frontend_id: hello.assigned_frontend_id,
+        server_protocol_version: hello.protocol_version,
     })
 }
 
@@ -213,6 +214,10 @@ pub struct AttachClient {
     /// `FrontendEvent` carries this so the daemon can route input back
     /// to the per-session `SemanticRenderState`.
     frontend_id: FrontendId,
+    /// The daemon's `Hello.protocol_version`. Wire variants newer
+    /// than the daemon (e.g. `Pointer`, v5) must be gated on this —
+    /// an older daemon hard-errors decoding an unknown variant.
+    server_protocol_version: u32,
 }
 
 impl AttachClient {
@@ -253,6 +258,30 @@ impl AttachClient {
             mods,
             timestamp_ns: 0,
         }))
+    }
+
+    /// Send a `FrontendEvent::Pointer` (session M-2): a locally
+    /// hit-tested gesture in source bytes. Callers gate on
+    /// [`Self::server_protocol_version`] `>= 5`.
+    pub fn send_pointer(
+        &self,
+        buffer_id: BufferId,
+        byte: u64,
+        kind: PointerKind,
+        mods: Modifiers,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::Pointer {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            byte,
+            kind,
+            mods,
+        })
+    }
+
+    /// The daemon's negotiated wire version from `Hello`.
+    pub fn server_protocol_version(&self) -> u32 {
+        self.server_protocol_version
     }
 
     /// Send a locally-authored CRDT operation to the daemon. The GPU
