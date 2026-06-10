@@ -60,7 +60,10 @@ fn backspace_deletes_the_shift_selected_region() {
     let (_, region_active, _) = probe(&s);
     assert!(region_active, "shift+arrows must leave an active region");
 
-    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Backspace, KeyModifiers::NONE));
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Backspace, KeyModifiers::NONE),
+    );
 
     let (text, region_active, cursor) = probe(&s);
     assert_eq!(text, "he", "backspace must delete the whole region");
@@ -68,7 +71,10 @@ fn backspace_deletes_the_shift_selected_region() {
     assert_eq!(cursor, 2, "cursor lands at the deleted region's start");
 
     // Without a region, backspace keeps single-codepoint semantics.
-    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Backspace, KeyModifiers::NONE));
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Backspace, KeyModifiers::NONE),
+    );
     let (text, _, cursor) = probe(&s);
     assert_eq!(text, "h", "no region ⇒ plain single-codepoint backspace");
     assert_eq!(cursor, 1);
@@ -87,7 +93,10 @@ fn ctrl_backspace_deletes_the_previous_word() {
         key(KeyCode::Backspace, KeyModifiers::CONTROL),
     );
     let (text, _, cursor) = probe(&s);
-    assert_eq!(text, "alpha ", "C-BS deletes back through the previous word");
+    assert_eq!(
+        text, "alpha ",
+        "C-BS deletes back through the previous word"
+    );
     assert_eq!(cursor, 6);
 
     s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Left, KeyModifiers::CONTROL));

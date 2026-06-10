@@ -925,7 +925,10 @@ impl State {
         let delta_batches = self.loro_text_delta_batches.clone()?;
         clear_loro_text_delta_batches(&delta_batches);
         let before = doc.oplog_vv();
-        if let Err(e) = doc.get_text(LORO_TEXT_CONTAINER).insert_utf8(cursor, insert) {
+        if let Err(e) = doc
+            .get_text(LORO_TEXT_CONTAINER)
+            .insert_utf8(cursor, insert)
+        {
             eprintln!("pmacs-gpu: optimistic insert failed: {e:?}");
             return None;
         }

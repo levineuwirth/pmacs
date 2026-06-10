@@ -491,8 +491,9 @@ impl StdinWriter {
                     let result = sink.write_all(&bytes).and_then(|()| sink.flush());
                     thread_queued.fetch_sub(bytes.len(), Ordering::Relaxed);
                     if let Err(e) = result {
-                        *thread_error.lock().expect("stdin writer error mutex poisoned") =
-                            Some(e.to_string());
+                        *thread_error
+                            .lock()
+                            .expect("stdin writer error mutex poisoned") = Some(e.to_string());
                         return;
                     }
                 }

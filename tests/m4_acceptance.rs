@@ -5230,8 +5230,14 @@ fn m4_lua_bundle_debounces_did_change_per_keystroke() {
         )
         .eval()
         .expect("flush + count");
-    assert_eq!(sent, 1, "explicit flush ships exactly one coalesced didChange");
-    assert_eq!(version, 4, "flush carries the latest version (v1 open + 3 edits)");
+    assert_eq!(
+        sent, 1,
+        "explicit flush ships exactly one coalesced didChange"
+    );
+    assert_eq!(
+        version, 4,
+        "flush carries the latest version (v1 open + 3 edits)"
+    );
 
     // Time-based flush: one more edit, then tick after the quiet
     // window (75ms in the bundle) has elapsed.
