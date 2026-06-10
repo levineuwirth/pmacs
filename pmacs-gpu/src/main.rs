@@ -26,14 +26,15 @@ mod attach;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
-    AdornmentContent, AdornmentPlacement, BufferId, ByteRange, Decoration, DecorationKind,
+    AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CrdtOp, Decoration, DecorationKind,
     DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, Key as ProtocolKey, Modifiers,
     SelectionSnapshot, StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
@@ -221,6 +222,8 @@ struct App {
     modifiers: winit::keyboard::ModifiersState,
 }
 
+type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
+
 /// All resources owned by one running pmacs-gpu instance.
 struct State {
     window: Arc<Window>,
@@ -238,14 +241,35 @@ struct State {
     /// What the buffer is currently shaped to. Held so we can detect
     /// no-op updates and skip the re-shape.
     current_text: String,
-    /// Code-shape data derived from `current_text`, used to give the
-    /// minimap horizontal structure even though `FileStyleSummary`
-    /// carries only one dominant style per line.
+    /// Buffer-absolute byte offset for each source line in
+    /// `current_text`. Updated with text changes and reused by
+    /// reshape/scroll logic so those paths do not rescan the whole
+    /// file on every semantic frame.
+    current_line_starts: Vec<u64>,
+    /// Buffer-absolute Unicode scalar offset for each source line in
+    /// `current_text`. Loro's text event deltas use Unicode offsets
+    /// on native builds, so this lets the CRDT hot path convert a
+    /// retain/delete position to bytes by scanning only one source
+    /// line instead of the whole prefix.
+    current_line_char_starts: Vec<u64>,
+    /// Code-shape data used to give the minimap horizontal structure
+    /// even though `FileStyleSummary` carries only one dominant style
+    /// per line. Refreshed when a new summary lands, keeping this
+    /// cache in cadence with the debounced minimap data rather than
+    /// rebuilding it for every typed byte.
     current_line_shapes: Vec<MinimapLineShape>,
     /// Local CRDT replica seeded by `BufferSnapshot`. `None` in
     /// hello-world mode or before the first snapshot arrives in
     /// attach mode.
     loro_doc: Option<loro::LoroDoc>,
+    /// Pending text diff batches captured from the local Loro replica.
+    /// `CrdtOp` imports fire the subscription synchronously; the GPU
+    /// drains these deltas and patches `current_text` incrementally
+    /// instead of materializing the whole Loro text after each edit.
+    loro_text_delta_batches: Option<LoroTextDeltaBatches>,
+    /// Kept alive for as long as `loro_doc` is active. Dropping it
+    /// unsubscribes before the next buffer snapshot replaces the doc.
+    loro_text_subscription: Option<loro::Subscription>,
     /// Buffer the current rope text + spans interpret. Set when a
     /// `BufferSnapshot` arrives; used as the routing key for
     /// `StyleSpans` updates (drop those for other buffers).
@@ -317,6 +341,49 @@ struct State {
     /// shifts visible bytes, buffer switch) so the producer scopes
     /// `StyleSpans` to what's on screen without per-frame churn (Q#S5).
     last_viewport_sent: Option<(u64, u64)>,
+    /// Frontend id assigned by the daemon. Needed for locally-authored
+    /// optimistic CRDT ops, whose Loro peer id must match the
+    /// authenticated frontend id the daemon sees on the socket.
+    local_frontend_id: Option<FrontendId>,
+    /// Daemon-side key dispatcher state. Plain printable chars are
+    /// optimistically applied only while this is true; when false,
+    /// keys round-trip so minibuffer and prefix commands keep their
+    /// daemon-owned semantics.
+    dispatch_idle: bool,
+    /// Whether `own_cursor` is still an authoritative position for
+    /// local optimistic insertion. Round-tripped keys can move the
+    /// daemon cursor in ways the GPU does not predict, so they mark
+    /// this false until the next `CursorByte`.
+    cursor_fresh: bool,
+    /// Furthest locally-predicted cursor after optimistic inserts that
+    /// the daemon has not yet confirmed. `CursorByte` frames already
+    /// in flight can arrive after local typing; accepting one below
+    /// this floor would rewind subsequent optimistic inserts and
+    /// scramble their order.
+    optimistic_cursor_floor: Option<OwnCursor>,
+    /// Round-trip keys typed while optimistic inserts are still
+    /// awaiting confirmation. Sending a backward-moving key before
+    /// the floor is acknowledged would make its legitimate cursor
+    /// result indistinguishable from an older in-flight frame.
+    deferred_round_trip_keys: Vec<(ProtocolKey, Modifiers)>,
+    /// Optimistic local edits not yet known to be reflected in
+    /// incoming producer frames. Each entry pairs the version scalar
+    /// of this replica's doc *after* the edit applied (computed by
+    /// [`loro_version_scalar`], the same per-peer counter sum the
+    /// daemon stamps into `StyleSpans` / `Decorations` `generation`)
+    /// with the projection edit itself. On frame arrival, entries at
+    /// or below the frame's generation are pruned and the frame's
+    /// byte ranges are translated through the remainder — otherwise a
+    /// frame computed before an in-flight keystroke repaints the
+    /// viewport's colors a few bytes left of the text (the typing
+    /// "color shimmer"). Cleared whenever the cache is rebuilt
+    /// wholesale (snapshot / full-materialization fallback).
+    ///
+    /// Caveat (accepted): scalars from *divergent* replicas are not
+    /// causally comparable, so a peer edit racing our unconfirmed
+    /// ops can mis-prune by one frame; the next generation-keyed
+    /// full resync self-corrects.
+    unconfirmed_edits: Vec<(u64, TextProjectionEdit)>,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -367,6 +434,9 @@ impl ApplicationHandler<AppEvent> for App {
             let proxy = self.proxy.take().expect("proxy taken twice");
             match attach::connect(&socket, proxy) {
                 Ok(client) => {
+                    if let Some(state) = self.state.as_mut() {
+                        state.set_frontend_id(client.frontend_id());
+                    }
                     self.attach_client = Some(client);
                 }
                 Err(e) => {
@@ -401,6 +471,44 @@ impl ApplicationHandler<AppEvent> for App {
                     && should_forward_key(pkey, pmods)
                     && let Some(client) = self.attach_client.as_ref()
                 {
+                    if let Some(op) = self
+                        .state
+                        .as_mut()
+                        .and_then(|state| state.optimistic_crdt_insert(pkey, pmods))
+                    {
+                        if debug_input() {
+                            eprintln!(
+                                "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
+                                op.buffer_id,
+                                op.op.bytes.len()
+                            );
+                        }
+                        if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
+                            eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
+                        }
+                        // An optimistic Enter near the bottom edge can
+                        // scroll; re-declare the scoped viewport so
+                        // the producer styles the newly visible lines.
+                        if let Some(vp) = op.viewport
+                            && let Err(e) =
+                                client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                        {
+                            eprintln!("pmacs-gpu: send Viewport failed: {e}");
+                        }
+                        return;
+                    }
+                    if let Some(state) = self.state.as_mut() {
+                        if state.defer_round_trip_key_if_needed(pkey, pmods) {
+                            if debug_input() {
+                                eprintln!(
+                                    "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
+                                     pending optimistic cursor"
+                                );
+                            }
+                            return;
+                        }
+                        state.mark_cursor_stale_after_round_trip();
+                    }
                     if debug_input() {
                         eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
                     }
@@ -436,7 +544,16 @@ impl ApplicationHandler<AppEvent> for App {
         };
         match event {
             AppEvent::Attach(AttachEvent::Message(msg)) => {
+                let debug_apply = debug_apply();
+                let apply_start = debug_apply.then(std::time::Instant::now);
+                let label = debug_apply.then(|| instance_message_label(msg.as_ref()));
                 let follow_up = state.apply_attach_message(*msg);
+                if let (Some(start), Some(label)) = (apply_start, label) {
+                    eprintln!(
+                        "pmacs-gpu apply: {label}={}us",
+                        std::time::Instant::now().duration_since(start).as_micros()
+                    );
+                }
                 // If the message triggered a follow-up Viewport
                 // (currently: every BufferSnapshot does), emit it back
                 // to the daemon. The daemon's `SemanticRenderState`
@@ -450,6 +567,17 @@ impl ApplicationHandler<AppEvent> for App {
                     && let Err(e) = client.send_viewport(buffer_id, visible, generation)
                 {
                     eprintln!("pmacs-gpu: send Viewport failed: {e}");
+                }
+                let ready_keys = state.take_ready_round_trip_keys();
+                if let Some(client) = self.attach_client.as_ref() {
+                    for (key, mods) in ready_keys {
+                        if debug_input() {
+                            eprintln!("pmacs-gpu flush_key: {key:?} mods={mods:?}");
+                        }
+                        if let Err(e) = client.send_key(key, mods) {
+                            eprintln!("pmacs-gpu: flush send_key failed: {e}");
+                        }
+                    }
                 }
             }
             AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
@@ -468,6 +596,40 @@ struct ViewportSend {
     buffer_id: BufferId,
     visible: ByteRange,
     generation: u64,
+}
+
+#[derive(Debug)]
+struct CrdtOpSend {
+    buffer_id: BufferId,
+    op: CrdtOp,
+    /// A scoped-viewport re-declaration when the optimistic insert
+    /// scrolled the view (Enter on the bottom visible line). Sent
+    /// after the op so the producer styles the newly visible range.
+    viewport: Option<ViewportSend>,
+}
+
+/// The literal text `key` inserts when handled optimistically, or
+/// `None` for keys that must round-trip through the daemon.
+///
+/// `Enter` and `Tab` qualify alongside printable chars because their
+/// default bindings (`buffer.newline` / `buffer.tab`) reduce to plain
+/// `insert_char(10)` / `insert_char(9)` — byte-identical to a
+/// self-insert, so the local application cannot diverge from what the
+/// daemon will do with the same op. Two caveats are the caller's job:
+/// `optimistic_crdt_insert` round-trips when an own-window selection
+/// is active (the daemon commands consume the region first — CUA
+/// type-over — which a raw op can't), and modified variants (`S-RET`,
+/// `C-TAB`, …) return `None` here: a keymap may bind them to anything.
+fn optimistic_insert_text(key: ProtocolKey, mods: Modifiers, chbuf: &mut [u8; 4]) -> Option<&str> {
+    if !is_plain_text_modifiers(mods) {
+        return None;
+    }
+    match key {
+        ProtocolKey::Char(ch) if !ch.is_control() => Some(ch.encode_utf8(chbuf)),
+        ProtocolKey::Enter if mods.is_empty() => Some("\n"),
+        ProtocolKey::Tab if mods.is_empty() => Some("\t"),
+        _ => None,
+    }
 }
 
 impl QuadRenderer {
@@ -614,6 +776,7 @@ impl State {
             None,
         );
         buffer.shape_until_scroll(&mut font_system, false);
+        let (current_line_starts, current_line_char_starts) = line_offset_tables(initial_text);
 
         Self {
             window,
@@ -629,8 +792,12 @@ impl State {
             quad_renderer,
             buffer,
             current_text: initial_text.to_owned(),
+            current_line_starts,
+            current_line_char_starts,
             current_line_shapes: minimap_line_shapes(initial_text),
             loro_doc: None,
+            loro_text_delta_batches: None,
+            loro_text_subscription: None,
             current_buffer_id: None,
             current_spans: Vec::new(),
             current_decorations: Vec::new(),
@@ -641,7 +808,184 @@ impl State {
             scroll_top: 0,
             view_range: (0, 0),
             last_viewport_sent: None,
+            local_frontend_id: None,
+            dispatch_idle: false,
+            cursor_fresh: false,
+            optimistic_cursor_floor: None,
+            deferred_round_trip_keys: Vec::new(),
+            unconfirmed_edits: Vec::new(),
         }
+    }
+
+    fn set_frontend_id(&mut self, frontend_id: FrontendId) {
+        self.local_frontend_id = Some(frontend_id);
+        if let Some(doc) = self.loro_doc.as_ref()
+            && let Err(e) = doc.set_peer_id(frontend_id.0)
+        {
+            eprintln!("pmacs-gpu: failed to set local Loro peer id: {e:?}");
+        }
+    }
+
+    fn optimistic_crdt_insert(&mut self, key: ProtocolKey, mods: Modifiers) -> Option<CrdtOpSend> {
+        if !self.dispatch_idle || !self.cursor_fresh {
+            return None;
+        }
+        // CUA type-over: with an active selection, typing replaces the
+        // region. Those semantics live in the daemon's region-aware
+        // insert commands (`buffer.self-insert` / `newline` / `tab`),
+        // which a raw CrdtOp insert would bypass — so an own-window
+        // selection sends the key round-trip instead. Our own
+        // selection arrives as a `Selection` decoration (peer
+        // selections live in `peer_presences` and don't gate). The
+        // daemon's replace clears the region, the next Decorations
+        // frame clears the wash, and typing resumes optimistically.
+        if self
+            .current_decorations
+            .iter()
+            .any(|d| d.kind == DecorationKind::Selection)
+        {
+            return None;
+        }
+        let mut chbuf = [0u8; 4];
+        let insert = optimistic_insert_text(key, mods, &mut chbuf)?;
+        let frontend_id = self.local_frontend_id?;
+        let own = self.own_cursor?;
+        if self.current_buffer_id != Some(own.buffer_id) {
+            return None;
+        }
+        let cursor = usize::try_from(own.byte).ok()?;
+        if cursor > self.current_text.len() || !self.current_text.is_char_boundary(cursor) {
+            return None;
+        }
+        let doc = self.loro_doc.as_ref()?;
+        let peer_id = frontend_id.0;
+        if doc.peer_id() != peer_id
+            && let Err(e) = doc.set_peer_id(peer_id)
+        {
+            eprintln!("pmacs-gpu: failed to set optimistic Loro peer id: {e:?}");
+            return None;
+        }
+
+        let delta_batches = self.loro_text_delta_batches.clone()?;
+        clear_loro_text_delta_batches(&delta_batches);
+        let before = doc.oplog_vv();
+        if let Err(e) = doc.get_text(LORO_TEXT_CONTAINER).insert_utf8(cursor, insert) {
+            eprintln!("pmacs-gpu: optimistic insert failed: {e:?}");
+            return None;
+        }
+        let bytes = doc
+            .export(ExportMode::updates(&before))
+            .expect("export local optimistic Loro update");
+        let drained = drain_loro_text_delta_batches(&delta_batches);
+        if drained.is_empty() {
+            let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+            self.set_text(&text);
+            // Cache rebuilt wholesale — there are no translated
+            // anchors left for frame translation to protect.
+            self.unconfirmed_edits.clear();
+        } else {
+            match self.apply_loro_text_delta_batches(&drained) {
+                Ok(edits) => {
+                    // Journal this keystroke so producer frames the
+                    // daemon computed before integrating it can be
+                    // translated on arrival (see `unconfirmed_edits`).
+                    // The scalar is read *after* the local insert, so
+                    // any frame stamped at or beyond it includes us.
+                    let scalar = self.loro_doc.as_ref().map_or(0, loro_version_scalar);
+                    self.unconfirmed_edits
+                        .extend(edits.into_iter().map(|e| (scalar, e)));
+                }
+                Err(reason) => {
+                    eprintln!(
+                        "pmacs-gpu: optimistic text update failed ({reason}); falling back to \
+                         full materialization"
+                    );
+                    let text = self
+                        .loro_doc
+                        .as_ref()
+                        .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
+                    if let Some(text) = text {
+                        self.set_text(&text);
+                    }
+                    self.unconfirmed_edits.clear();
+                }
+            }
+        }
+        let predicted = OwnCursor {
+            buffer_id: own.buffer_id,
+            byte: own.byte.saturating_add(insert.len() as u64),
+        };
+        self.own_cursor = Some(predicted);
+        self.optimistic_cursor_floor = Some(predicted);
+        // Follow the caret NOW rather than when the daemon's
+        // `CursorByte` confirms — an optimistic Enter on the bottom
+        // visible line moves the caret to a line below the slice, and
+        // waiting a round trip to scroll reads as a hitch.
+        let viewport = if self.scroll_to_cursor() {
+            self.reshape();
+            self.viewport_send_if_changed(own.buffer_id)
+        } else {
+            None
+        };
+        Some(CrdtOpSend {
+            buffer_id: own.buffer_id,
+            op: CrdtOp { peer_id, bytes },
+            viewport,
+        })
+    }
+
+    fn mark_cursor_stale_after_round_trip(&mut self) {
+        self.cursor_fresh = false;
+    }
+
+    fn apply_loro_text_delta_batches(
+        &mut self,
+        delta_batches: &[Vec<loro::TextDelta>],
+    ) -> Result<Vec<TextProjectionEdit>, &'static str> {
+        let edits = apply_loro_text_delta_batches(
+            &mut self.current_text,
+            &mut self.current_line_starts,
+            &mut self.current_line_char_starts,
+            delta_batches,
+        )?;
+        if edits.is_empty() {
+            return Ok(edits);
+        }
+        self.translate_cached_anchors(&edits);
+        self.reshape();
+        Ok(edits)
+    }
+
+    fn translate_cached_anchors(&mut self, edits: &[TextProjectionEdit]) {
+        for edit in edits {
+            translate_style_spans(&mut self.current_spans, *edit);
+            translate_decorations(&mut self.current_decorations, *edit);
+            translate_inline_adornments(&mut self.current_adornments, *edit);
+        }
+    }
+
+    /// Drop journal entries already reflected in a producer frame
+    /// stamped `generation` — see the `unconfirmed_edits` field docs.
+    fn prune_unconfirmed_edits(&mut self, generation: u64) {
+        self.unconfirmed_edits
+            .retain(|(scalar, _)| *scalar > generation);
+    }
+
+    fn defer_round_trip_key_if_needed(&mut self, key: ProtocolKey, mods: Modifiers) -> bool {
+        if self.optimistic_cursor_floor.is_none() && self.deferred_round_trip_keys.is_empty() {
+            return false;
+        }
+        self.cursor_fresh = false;
+        self.deferred_round_trip_keys.push((key, mods));
+        true
+    }
+
+    fn take_ready_round_trip_keys(&mut self) -> Vec<(ProtocolKey, Modifiers)> {
+        if self.optimistic_cursor_floor.is_some() || self.deferred_round_trip_keys.is_empty() {
+            return Vec::new();
+        }
+        self.cursor_fresh = false;
+        std::mem::take(&mut self.deferred_round_trip_keys)
     }
 
     /// Replace the rendered text with `text` and request a redraw.
@@ -664,7 +1008,9 @@ impl State {
         }
         self.current_text.clear();
         self.current_text.push_str(text);
-        self.current_line_shapes = minimap_line_shapes(text);
+        let (line_starts, line_char_starts) = line_offset_tables(text);
+        self.current_line_starts = line_starts;
+        self.current_line_char_starts = line_char_starts;
         self.reshape();
         true
     }
@@ -679,7 +1025,7 @@ impl State {
     ///   request the daemon scope styling to the new buffer (return a
     ///   Viewport send-back).
     /// - `CrdtOp` — apply incremental updates to the doc; text
-    ///   re-extracted.
+    ///   patched from Loro's diff event.
     /// - `StyleSpans` — replace or merge per the M11.4 dirty-segment
     ///   rule; reshape the rich-text rendering.
     /// - `Decorations` — same M11.4 shape as `StyleSpans` but for the
@@ -709,13 +1055,22 @@ impl State {
                 crdt_snapshot,
             } => {
                 let doc = loro::LoroDoc::new();
+                if let Some(frontend_id) = self.local_frontend_id
+                    && let Err(e) = doc.set_peer_id(frontend_id.0)
+                {
+                    eprintln!("pmacs-gpu: failed to set snapshot Loro peer id: {e:?}");
+                }
                 if let Err(e) = doc.import(&crdt_snapshot) {
                     eprintln!("pmacs-gpu: BufferSnapshot import failed: {e:?}");
                     return None;
                 }
                 let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
-                let text_len = text.len() as u64;
+                let (text_delta_batches, text_subscription) = subscribe_loro_text(&doc);
+                self.loro_text_subscription = None;
+                self.loro_text_delta_batches = None;
                 self.loro_doc = Some(doc);
+                self.loro_text_delta_batches = Some(text_delta_batches);
+                self.loro_text_subscription = Some(text_subscription);
                 self.current_buffer_id = Some(buffer_id);
                 // New buffer ⇒ drop any prior styling/decorations;
                 // the next StyleSpans / Decorations frame for this
@@ -730,11 +1085,14 @@ impl State {
                 // next PresenceUpdate / CursorByte arrives.
                 self.peer_presences.clear();
                 self.own_cursor = None;
+                self.cursor_fresh = false;
+                self.optimistic_cursor_floor = None;
+                self.deferred_round_trip_keys.clear();
+                self.unconfirmed_edits.clear();
                 // New buffer ⇒ back to the top, and force a viewport
                 // re-declaration for the new buffer's scoped range.
                 self.scroll_top = 0;
                 self.last_viewport_sent = None;
-                let _ = text_len;
                 if !self.set_text(&text) {
                     self.reshape();
                 }
@@ -753,10 +1111,17 @@ impl State {
                     // snapshot will have the ops baked in.
                     return None;
                 };
-                if let Err(e) = doc.import(&op.bytes) {
-                    eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
-                    return None;
+                let delta_batches = self.loro_text_delta_batches.clone();
+                if let Some(delta_batches) = delta_batches.as_ref() {
+                    clear_loro_text_delta_batches(delta_batches);
                 }
+                let import_status = match doc.import(&op.bytes) {
+                    Ok(status) => status,
+                    Err(e) => {
+                        eprintln!("pmacs-gpu: CrdtOp import failed: {e:?}");
+                        return None;
+                    }
+                };
                 // NOTE: `current_spans` / `current_decorations` index
                 // into the *pre-edit* byte positions. The producer's
                 // next render frame (in pmacs core, post-T M11.7
@@ -782,24 +1147,83 @@ impl State {
                 // inlay store stale, and the producer sends one empty
                 // replacement to clear cached virtual text until a
                 // fresh `textDocument/inlayHint` response arrives.
-                let text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
-                self.set_text(&text);
-                // An edit shifts byte positions, so the scoped viewport's
-                // byte range moves even at the same scroll position;
-                // re-declare it so the producer styles the right bytes
-                // (the generation bump already forces a full resync, so
-                // this is no extra round trip).
-                self.viewport_send_if_changed(buffer_id)
+                let delta_batches = delta_batches
+                    .as_ref()
+                    .map(drain_loro_text_delta_batches)
+                    .unwrap_or_default();
+                if delta_batches.is_empty() {
+                    if !import_status.success.is_empty() {
+                        let text = self
+                            .loro_doc
+                            .as_ref()
+                            .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
+                        if let Some(text) = text {
+                            self.set_text(&text);
+                        }
+                        self.unconfirmed_edits.clear();
+                    }
+                } else {
+                    match self.apply_loro_text_delta_batches(&delta_batches) {
+                        Ok(edits) => {
+                            // A daemon-originated edit shifts the text
+                            // under any still-unconfirmed optimistic
+                            // inserts. Rebase the journal's anchors so
+                            // frames that include this edit (but not
+                            // ours) translate correctly. Journal
+                            // entries are pure inserts (the optimistic
+                            // path only inserts), so anchor == start.
+                            for incoming in &edits {
+                                for (_, pending) in &mut self.unconfirmed_edits {
+                                    pending.start =
+                                        translate_byte_position(pending.start, *incoming);
+                                    pending.old_end = pending.start;
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            eprintln!(
+                                "pmacs-gpu: incremental CRDT text update failed ({reason}); \
+                                 falling back to full materialization"
+                            );
+                            let text = self
+                                .loro_doc
+                                .as_ref()
+                                .map(|doc| doc.get_text(LORO_TEXT_CONTAINER).to_string());
+                            if let Some(text) = text {
+                                self.set_text(&text);
+                            }
+                            self.unconfirmed_edits.clear();
+                        }
+                    }
+                }
+                // Local typing usually shifts only the viewport's end
+                // byte while the top visible source line stays fixed.
+                // The declared range includes overscan, and the daemon's
+                // generation bump already forces a full style resync, so
+                // re-declaring on every byte is mostly write amplification.
+                // Re-declare here only if the viewport origin moved (for
+                // example because an edit before `scroll_top` shifted the
+                // top line); scroll/resize/snapshot still send exact ranges.
+                self.viewport_send_if_origin_changed(buffer_id)
             }
             InstanceMessage::StyleSpans {
                 buffer_id,
-                generation: _,
+                generation,
                 full,
                 segments,
             } => {
                 if self.current_buffer_id != Some(buffer_id) {
                     return None;
                 }
+                // The producer computed this frame against the daemon
+                // text at `generation` (its CRDT version scalar). Any
+                // optimistic local inserts the daemon hadn't integrated
+                // yet shift the frame's byte ranges; translate them so
+                // the repaint doesn't flash every color after the
+                // cursor a few bytes left of its glyphs for one frame
+                // (the typing shimmer).
+                self.prune_unconfirmed_edits(generation);
+                let segments = translate_style_segments(segments, &self.unconfirmed_edits);
                 if full {
                     self.replace_style_spans(segments);
                 } else {
@@ -810,13 +1234,16 @@ impl State {
             }
             InstanceMessage::Decorations {
                 buffer_id,
-                generation: _,
+                generation,
                 full,
                 segments,
             } => {
                 if self.current_buffer_id != Some(buffer_id) {
                     return None;
                 }
+                // Same staleness translation as the StyleSpans arm.
+                self.prune_unconfirmed_edits(generation);
+                let segments = translate_decoration_segments(segments, &self.unconfirmed_edits);
                 // Only diagnostic decorations affect the *rich text*
                 // (they override glyph fg in `projected_rich_chunks`);
                 // background kinds (Selection / CurrentLine / Search)
@@ -907,10 +1334,30 @@ impl State {
                         self.current_buffer_id == Some(buffer_id)
                     );
                 }
+                if let Some(floor) = self.optimistic_cursor_floor
+                    && floor.buffer_id == buffer_id
+                    && byte_pos < floor.byte
+                {
+                    if debug_input() {
+                        eprintln!(
+                            "pmacs-gpu cursor: ignored stale optimistic rewind \
+                             buf={buffer_id:?} byte={byte_pos} floor={}",
+                            floor.byte
+                        );
+                    }
+                    return None;
+                }
+                if self
+                    .optimistic_cursor_floor
+                    .is_some_and(|floor| floor.buffer_id != buffer_id || byte_pos >= floor.byte)
+                {
+                    self.optimistic_cursor_floor = None;
+                }
                 self.own_cursor = Some(OwnCursor {
                     buffer_id,
                     byte: byte_pos,
                 });
+                self.cursor_fresh = self.current_buffer_id == Some(buffer_id);
                 // Session S1 — keep the caret on screen (Q#S2). When the
                 // cursor leaves the visible slice (arrows past an edge,
                 // PageUp/Down), scroll to follow it, re-shape the new
@@ -923,6 +1370,10 @@ impl State {
                     }
                 }
                 self.window.request_redraw();
+                None
+            }
+            InstanceMessage::DispatchIdle { idle } => {
+                self.dispatch_idle = idle;
                 None
             }
             _ => None,
@@ -946,6 +1397,23 @@ impl State {
         })
     }
 
+    /// Edit-path variant of [`Self::viewport_send_if_changed`]. For
+    /// ordinary insertion/deletion inside the visible slice, only the
+    /// end byte moves; sending that on every `CrdtOp` doubles the
+    /// frontend-to-daemon write traffic while the producer already has
+    /// a CRDT generation transition to trigger a full viewport resync.
+    /// If the start byte moves, the top visible line itself shifted, so
+    /// the daemon needs a fresh declaration.
+    fn viewport_send_if_origin_changed(&mut self, buffer_id: BufferId) -> Option<ViewportSend> {
+        let Some((last_start, _)) = self.last_viewport_sent else {
+            return self.viewport_send_if_changed(buffer_id);
+        };
+        if last_start == self.view_range.0 {
+            return None;
+        }
+        self.viewport_send_if_changed(buffer_id)
+    }
+
     /// Adjust `scroll_top` so the own cursor's source line is within the
     /// visible window (Q#S2). Returns whether `scroll_top` changed (in
     /// which case the caller re-shapes + re-declares the viewport).
@@ -956,7 +1424,7 @@ impl State {
         if self.current_buffer_id != Some(own.buffer_id) {
             return false;
         }
-        let line_starts = line_byte_offsets(&self.current_text);
+        let line_starts = &self.current_line_starts;
         let cursor = own.byte.min(self.current_text.len() as u64);
         // Cursor's source line = largest i with line_starts[i] <= cursor.
         let cursor_line = line_starts
@@ -988,6 +1456,7 @@ impl State {
         {
             return;
         }
+        self.current_line_shapes = minimap_line_shapes(&self.current_text);
         self.current_summary = Some(FileStyleSummaryState { generation, lines });
         self.window.request_redraw();
     }
@@ -1157,7 +1626,7 @@ impl State {
     /// boundaries (cosmic-text splits `BufferLine`s on `\n`, so a
     /// mid-line slice would corrupt the first/last line).
     fn visible_byte_range(&self) -> (u64, u64) {
-        let line_starts = line_byte_offsets(&self.current_text);
+        let line_starts = &self.current_line_starts;
         let n = line_starts.len();
         let top = self.scroll_top.min(n.saturating_sub(1));
         let span = estimated_visible_lines(self.config.height).max(1) + SCROLL_OVERSCAN;
@@ -1928,6 +2397,37 @@ fn debug_frame() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_FRAME").is_some())
 }
 
+/// One-shot env flag: `PMACS_GPU_DEBUG_APPLY=1` logs how long the
+/// main thread spends applying each inbound daemon message. This
+/// separates CRDT text patching, style replacement, and cursor updates
+/// from the later `render()` timings.
+fn debug_apply() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("PMACS_GPU_DEBUG_APPLY").is_some())
+}
+
+fn instance_message_label(msg: &InstanceMessage) -> &'static str {
+    match msg {
+        InstanceMessage::CellDelta { .. } => "CellDelta",
+        InstanceMessage::Cursor(_) => "Cursor",
+        InstanceMessage::ModeLine(_) => "ModeLine",
+        InstanceMessage::Signal(_) => "Signal",
+        InstanceMessage::Goodbye(_) => "Goodbye",
+        InstanceMessage::CrdtOp { .. } => "CrdtOp",
+        InstanceMessage::PresenceUpdate { .. } => "PresenceUpdate",
+        InstanceMessage::BufferSnapshot { .. } => "BufferSnapshot",
+        InstanceMessage::CursorByte { .. } => "CursorByte",
+        InstanceMessage::StyleSpans { .. } => "StyleSpans",
+        InstanceMessage::Decorations { .. } => "Decorations",
+        InstanceMessage::InlineAdornments { .. } => "InlineAdornments",
+        InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
+        InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
+        InstanceMessage::FoldState { .. } => "FoldState",
+        InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
+        InstanceMessage::DispatchIdle { .. } => "DispatchIdle",
+    }
+}
+
 /// One-shot env flag: `PMACS_GPU_DEBUG_INPUT=1` logs the input path —
 /// keys sent and `CursorByte` received (with the buffer it targets vs
 /// the buffer being displayed). The buffer comparison is the B1
@@ -1978,6 +2478,7 @@ fn translate_key(
             NamedKey::Delete => ProtocolKey::Delete,
             NamedKey::Insert => ProtocolKey::Insert,
             NamedKey::Tab => ProtocolKey::Tab,
+            NamedKey::Space => ProtocolKey::Char(' '),
             _ => return None,
         },
         Key::Character(s) => ProtocolKey::Char(s.chars().next()?),
@@ -2014,10 +2515,7 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
     if is_motion_key(key) {
         return true;
     }
-    let chord = mods.contains(Modifiers::CTRL)
-        || mods.contains(Modifiers::ALT)
-        || mods.contains(Modifiers::META);
-    if chord {
+    if !is_plain_text_modifiers(mods) {
         return false;
     }
     matches!(
@@ -2028,6 +2526,13 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
             | ProtocolKey::Delete
             | ProtocolKey::Tab
     )
+}
+
+fn is_plain_text_modifiers(mods: Modifiers) -> bool {
+    !mods.contains(Modifiers::CTRL)
+        && !mods.contains(Modifiers::ALT)
+        && !mods.contains(Modifiers::META)
+        && !mods.contains(Modifiers::HYPER)
 }
 
 /// Clip a whole-file byte range `[start, end)` to the visible slice
@@ -2042,6 +2547,117 @@ fn clip_rebase_range(start: u64, end: u64, vstart: u64, vend: u64) -> Option<(u6
         return None;
     }
     Some((s - vstart, e - vstart))
+}
+
+/// Sum of the doc's per-peer version-vector counters — the **same
+/// formula** as the daemon's `CrdtState::version_scalar`, which is
+/// what the producer stamps into `StyleSpans` / `Decorations`
+/// `generation`. The sum is integration-order independent, so once
+/// both replicas hold the same set of ops the scalars are equal;
+/// that is what makes frame generations comparable against locally
+/// computed values in `unconfirmed_edits`.
+fn loro_version_scalar(doc: &loro::LoroDoc) -> u64 {
+    doc.oplog_vv()
+        .values()
+        .map(|counter| u64::try_from(*counter).unwrap_or(0))
+        .sum()
+}
+
+/// Translate one incoming `StyleSpans` frame's segments through the
+/// optimistic edits the daemon had not yet integrated when it
+/// computed the frame. Ranges that a (defensive) delete fully
+/// removes drop out.
+fn translate_style_segments(
+    segments: Vec<StyleSegment>,
+    edits: &[(u64, TextProjectionEdit)],
+) -> Vec<StyleSegment> {
+    if edits.is_empty() {
+        return segments;
+    }
+    segments
+        .into_iter()
+        .filter_map(|seg| {
+            let mut range = seg.range;
+            let mut spans = seg.spans;
+            for (_, edit) in edits {
+                range = translate_byte_range(range, *edit)?;
+                spans = spans
+                    .into_iter()
+                    .filter_map(|mut sp| {
+                        sp.range = translate_byte_range(sp.range, *edit)?;
+                        Some(sp)
+                    })
+                    .collect();
+            }
+            Some(StyleSegment { range, spans })
+        })
+        .collect()
+}
+
+/// `Decorations` twin of [`translate_style_segments`].
+fn translate_decoration_segments(
+    segments: Vec<DecorationSegment>,
+    edits: &[(u64, TextProjectionEdit)],
+) -> Vec<DecorationSegment> {
+    if edits.is_empty() {
+        return segments;
+    }
+    segments
+        .into_iter()
+        .filter_map(|seg| {
+            let mut range = seg.range;
+            let mut decorations = seg.decorations;
+            for (_, edit) in edits {
+                range = translate_byte_range(range, *edit)?;
+                decorations = decorations
+                    .into_iter()
+                    .filter_map(|mut d| {
+                        d.range = translate_byte_range(d.range, *edit)?;
+                        Some(d)
+                    })
+                    .collect();
+            }
+            Some(DecorationSegment { range, decorations })
+        })
+        .collect()
+}
+
+fn subscribe_loro_text(doc: &loro::LoroDoc) -> (LoroTextDeltaBatches, loro::Subscription) {
+    let text = doc.get_text(LORO_TEXT_CONTAINER);
+    let delta_batches = Arc::new(Mutex::new(Vec::<Vec<loro::TextDelta>>::new()));
+    let captured_batches = Arc::clone(&delta_batches);
+    let subscription = doc.subscribe(
+        &text.id(),
+        Arc::new(move |event| {
+            let mut guard = captured_batches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for event in event.events {
+                if let Some(delta) = event.diff.as_text()
+                    && !delta.is_empty()
+                {
+                    guard.push(delta.clone());
+                }
+            }
+        }),
+    );
+    (delta_batches, subscription)
+}
+
+fn clear_loro_text_delta_batches(delta_batches: &LoroTextDeltaBatches) {
+    delta_batches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn drain_loro_text_delta_batches(
+    delta_batches: &LoroTextDeltaBatches,
+) -> Vec<Vec<loro::TextDelta>> {
+    let mut guard = delta_batches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::mem::take(&mut *guard)
 }
 
 /// Largest char-boundary `<= index` (stable equivalent of the unstable
@@ -2063,13 +2679,317 @@ fn floor_char_boundary(text: &str, index: usize) -> usize {
 /// line (index 0 = byte 0). Indexed by cosmic-text's
 /// `LayoutRun::line_i` to rebase line-relative glyph offsets.
 fn line_byte_offsets(text: &str) -> Vec<u64> {
+    line_offset_tables(text).0
+}
+
+fn line_offset_tables(text: &str) -> (Vec<u64>, Vec<u64>) {
     let mut starts = vec![0u64];
-    for (i, b) in text.bytes().enumerate() {
-        if b == b'\n' {
-            starts.push(i as u64 + 1);
+    let mut char_starts = vec![0u64];
+    let mut chars_seen = 0u64;
+    for (byte, ch) in text.char_indices() {
+        chars_seen += 1;
+        if ch == '\n' {
+            starts.push(byte as u64 + 1);
+            char_starts.push(chars_seen);
         }
     }
-    starts
+    (starts, char_starts)
+}
+
+fn byte_offset_for_char_offset(
+    text: &str,
+    line_starts: &[u64],
+    line_char_starts: &[u64],
+    char_offset: usize,
+) -> Option<usize> {
+    if line_starts.len() != line_char_starts.len() {
+        return None;
+    }
+    let line = line_char_starts
+        .partition_point(|&start| start <= char_offset as u64)
+        .saturating_sub(1);
+    let byte_start = *line_starts.get(line)? as usize;
+    let char_start = *line_char_starts.get(line)? as usize;
+    let mut byte = byte_start;
+    for _ in 0..char_offset.checked_sub(char_start)? {
+        let ch = text.get(byte..)?.chars().next()?;
+        byte += ch.len_utf8();
+    }
+    Some(byte)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextProjectionEdit {
+    start: u64,
+    old_end: u64,
+    inserted_len: u64,
+}
+
+fn apply_loro_text_delta_batches(
+    text: &mut String,
+    line_starts: &mut Vec<u64>,
+    line_char_starts: &mut Vec<u64>,
+    delta_batches: &[Vec<loro::TextDelta>],
+) -> Result<Vec<TextProjectionEdit>, &'static str> {
+    let mut edits = Vec::new();
+    for delta in delta_batches {
+        apply_loro_text_delta_batch(text, line_starts, line_char_starts, delta, &mut edits)?;
+    }
+    Ok(edits)
+}
+
+fn apply_loro_text_delta_batch(
+    text: &mut String,
+    line_starts: &mut Vec<u64>,
+    line_char_starts: &mut Vec<u64>,
+    delta: &[loro::TextDelta],
+    edits: &mut Vec<TextProjectionEdit>,
+) -> Result<(), &'static str> {
+    let mut cursor_char = 0usize;
+    for op in delta {
+        match op {
+            loro::TextDelta::Retain { retain, .. } => {
+                cursor_char = cursor_char
+                    .checked_add(*retain)
+                    .ok_or("retain offset overflow")?;
+            }
+            loro::TextDelta::Insert { insert, .. } => {
+                if insert.is_empty() {
+                    continue;
+                }
+                let start_byte =
+                    byte_offset_for_char_offset(text, line_starts, line_char_starts, cursor_char)
+                        .ok_or("insert offset outside current text")?;
+                replace_text_range_with_line_updates(
+                    text,
+                    line_starts,
+                    line_char_starts,
+                    start_byte,
+                    start_byte,
+                    cursor_char,
+                    cursor_char,
+                    insert,
+                )?;
+                edits.push(TextProjectionEdit {
+                    start: start_byte as u64,
+                    old_end: start_byte as u64,
+                    inserted_len: insert.len() as u64,
+                });
+                cursor_char = cursor_char
+                    .checked_add(insert.chars().count())
+                    .ok_or("insert offset overflow")?;
+            }
+            loro::TextDelta::Delete { delete } => {
+                if *delete == 0 {
+                    continue;
+                }
+                let start_char = cursor_char;
+                let end_char = cursor_char
+                    .checked_add(*delete)
+                    .ok_or("delete offset overflow")?;
+                let start_byte =
+                    byte_offset_for_char_offset(text, line_starts, line_char_starts, start_char)
+                        .ok_or("delete start outside current text")?;
+                let end_byte =
+                    byte_offset_for_char_offset(text, line_starts, line_char_starts, end_char)
+                        .ok_or("delete end outside current text")?;
+                replace_text_range_with_line_updates(
+                    text,
+                    line_starts,
+                    line_char_starts,
+                    start_byte,
+                    end_byte,
+                    start_char,
+                    end_char,
+                    "",
+                )?;
+                edits.push(TextProjectionEdit {
+                    start: start_byte as u64,
+                    old_end: end_byte as u64,
+                    inserted_len: 0,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_text_range_with_line_updates(
+    text: &mut String,
+    line_starts: &mut Vec<u64>,
+    line_char_starts: &mut Vec<u64>,
+    start_byte: usize,
+    end_byte: usize,
+    start_char: usize,
+    end_char: usize,
+    insert: &str,
+) -> Result<(), &'static str> {
+    if line_starts.len() != line_char_starts.len() {
+        return Err("line offset tables have different lengths");
+    }
+    if start_byte > end_byte || end_byte > text.len() {
+        return Err("replacement byte range is outside current text");
+    }
+    if start_char > end_char {
+        return Err("replacement char range is inverted");
+    }
+    if !text.is_char_boundary(start_byte) || !text.is_char_boundary(end_byte) {
+        return Err("replacement byte range is not on char boundaries");
+    }
+
+    let start_line = line_starts
+        .partition_point(|&start| start <= start_byte as u64)
+        .saturating_sub(1);
+    let remove_start = start_line + 1;
+    let remove_end = line_starts.partition_point(|&start| start <= end_byte as u64);
+    let (inserted_line_starts, inserted_line_char_starts) =
+        inserted_line_offsets(insert, start_byte, start_char);
+    let inserted_line_count = inserted_line_starts.len();
+    let byte_delta = signed_usize_delta(insert.len(), end_byte - start_byte)?;
+    let char_delta = signed_usize_delta(insert.chars().count(), end_char - start_char)?;
+
+    text.replace_range(start_byte..end_byte, insert);
+    line_starts.splice(remove_start..remove_end, inserted_line_starts);
+    line_char_starts.splice(remove_start..remove_end, inserted_line_char_starts);
+    let suffix_start = remove_start + inserted_line_count;
+    for start in line_starts.iter_mut().skip(suffix_start) {
+        shift_u64(start, byte_delta);
+    }
+    for start in line_char_starts.iter_mut().skip(suffix_start) {
+        shift_u64(start, char_delta);
+    }
+    Ok(())
+}
+
+fn inserted_line_offsets(
+    insert: &str,
+    start_byte: usize,
+    start_char: usize,
+) -> (Vec<u64>, Vec<u64>) {
+    let mut line_starts = Vec::new();
+    let mut line_char_starts = Vec::new();
+    let mut chars_seen = 0usize;
+    for (rel_byte, ch) in insert.char_indices() {
+        chars_seen += 1;
+        if ch == '\n' {
+            line_starts.push((start_byte + rel_byte + 1) as u64);
+            line_char_starts.push((start_char + chars_seen) as u64);
+        }
+    }
+    (line_starts, line_char_starts)
+}
+
+fn shift_u64(value: &mut u64, delta: i64) {
+    if delta >= 0 {
+        *value = value.saturating_add(delta as u64);
+    } else {
+        *value = value.saturating_sub(delta.unsigned_abs());
+    }
+}
+
+fn signed_usize_delta(new_len: usize, old_len: usize) -> Result<i64, &'static str> {
+    let new_len = i64::try_from(new_len).map_err(|_| "new length exceeds i64")?;
+    let old_len = i64::try_from(old_len).map_err(|_| "old length exceeds i64")?;
+    Ok(new_len - old_len)
+}
+
+fn translate_style_spans(spans: &mut Vec<StyleSpan>, edit: TextProjectionEdit) {
+    let mut translated = Vec::with_capacity(spans.len());
+    for mut span in spans.drain(..) {
+        if let Some(range) = translate_byte_range(span.range, edit) {
+            span.range = range;
+            translated.push(span);
+        }
+    }
+    *spans = translated;
+}
+
+fn translate_decorations(decorations: &mut Vec<Decoration>, edit: TextProjectionEdit) {
+    let mut translated = Vec::with_capacity(decorations.len());
+    for mut decoration in decorations.drain(..) {
+        if let Some(range) = translate_byte_range(decoration.range, edit) {
+            decoration.range = range;
+            translated.push(decoration);
+        }
+    }
+    *decorations = translated;
+}
+
+fn translate_inline_adornments(adornments: &mut [InlineAdornment], edit: TextProjectionEdit) {
+    for adornment in adornments {
+        adornment.at = translate_byte_position(adornment.at, edit);
+    }
+}
+
+fn translate_byte_range(range: ByteRange, edit: TextProjectionEdit) -> Option<ByteRange> {
+    let start = translate_range_start(range.start, edit);
+    let end = translate_range_end(range.end, edit);
+    (start < end).then_some(ByteRange { start, end })
+}
+
+fn translate_range_start(pos: u64, edit: TextProjectionEdit) -> u64 {
+    if edit.old_end == edit.start {
+        if pos >= edit.start {
+            pos.saturating_add(edit.inserted_len)
+        } else {
+            pos
+        }
+    } else if pos <= edit.start {
+        pos
+    } else if pos >= edit.old_end {
+        shift_position(pos, edit)
+    } else {
+        edit.start
+    }
+}
+
+fn translate_range_end(pos: u64, edit: TextProjectionEdit) -> u64 {
+    if edit.old_end == edit.start {
+        // `>=` (not `>`): a range ending exactly at a pure-insert
+        // point *extends over* the inserted text. Typing at the end
+        // of a token is the dominant editing case, and inheriting the
+        // preceding span's color keeps the new char stably colored
+        // instead of blinking default-white until the next parse
+        // settles. (The start counterpart keeps `>=` shifting right,
+        // so a following span never overlaps the extension.)
+        if pos >= edit.start {
+            pos.saturating_add(edit.inserted_len)
+        } else {
+            pos
+        }
+    } else if pos <= edit.start {
+        pos
+    } else if pos >= edit.old_end {
+        shift_position(pos, edit)
+    } else {
+        edit.start.saturating_add(edit.inserted_len)
+    }
+}
+
+fn translate_byte_position(pos: u64, edit: TextProjectionEdit) -> u64 {
+    if edit.old_end == edit.start {
+        if pos >= edit.start {
+            pos.saturating_add(edit.inserted_len)
+        } else {
+            pos
+        }
+    } else if pos <= edit.start {
+        pos
+    } else if pos >= edit.old_end {
+        shift_position(pos, edit)
+    } else {
+        edit.start.saturating_add(edit.inserted_len)
+    }
+}
+
+fn shift_position(pos: u64, edit: TextProjectionEdit) -> u64 {
+    let old_len = edit.old_end.saturating_sub(edit.start);
+    if edit.inserted_len >= old_len {
+        pos.saturating_add(edit.inserted_len - old_len)
+    } else {
+        pos.saturating_sub(old_len - edit.inserted_len)
+    }
 }
 
 /// Byte range `[start, end)` of the source line containing `cursor`:
@@ -2498,6 +3418,10 @@ mod tests {
         let (bk, _) = translate_key(&WKey::Named(NamedKey::Backspace), none).expect("bksp maps");
         assert_eq!(bk, ProtocolKey::Backspace);
         assert!(!is_motion_key(bk));
+
+        let (space, _) = translate_key(&WKey::Named(NamedKey::Space), none).expect("space maps");
+        assert_eq!(space, ProtocolKey::Char(' '));
+        assert!(!is_motion_key(space));
     }
 
     #[test]
@@ -2523,6 +3447,10 @@ mod tests {
         // Ctrl/Alt/Meta + a non-motion key is a chord — withheld in B2.
         assert!(!should_forward_key(ProtocolKey::Char('x'), ctrl));
         assert!(!should_forward_key(ProtocolKey::Char('f'), Modifiers::ALT));
+        assert!(!should_forward_key(
+            ProtocolKey::Char('h'),
+            Modifiers::HYPER
+        ));
 
         // Motion keys forward regardless of modifiers (C-Left = word-left).
         assert!(should_forward_key(ProtocolKey::Left, ctrl));
@@ -2585,6 +3513,267 @@ mod tests {
         // No newline: one line at 0.
         assert_eq!(line_byte_offsets("abc"), vec![0]);
         assert_eq!(line_byte_offsets(""), vec![0]);
+    }
+
+    #[test]
+    fn line_char_offsets_track_unicode_line_starts() {
+        let text = "aé\n😀b\n";
+        let (line_starts, line_char_starts) = line_offset_tables(text);
+        assert_eq!(line_starts, vec![0, 4, 10]);
+        assert_eq!(line_char_starts, vec![0, 3, 6]);
+    }
+
+    #[test]
+    fn byte_offset_for_char_offset_scans_only_within_line() {
+        let text = "aé\n😀b";
+        let (line_starts, line_char_starts) = line_offset_tables(text);
+        assert_eq!(
+            byte_offset_for_char_offset(text, &line_starts, &line_char_starts, 0),
+            Some(0)
+        );
+        assert_eq!(
+            byte_offset_for_char_offset(text, &line_starts, &line_char_starts, 2),
+            Some(3)
+        );
+        assert_eq!(
+            byte_offset_for_char_offset(text, &line_starts, &line_char_starts, 3),
+            Some(4)
+        );
+        assert_eq!(
+            byte_offset_for_char_offset(text, &line_starts, &line_char_starts, 4),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn loro_text_delta_batch_inserts_multibyte_text_and_updates_lines() {
+        let mut text = "aé\nb".to_owned();
+        let (mut line_starts, mut line_char_starts) = line_offset_tables(&text);
+        let delta = vec![
+            loro::TextDelta::Retain {
+                retain: 3,
+                attributes: None,
+            },
+            loro::TextDelta::Insert {
+                insert: "😀\n".to_owned(),
+                attributes: None,
+            },
+        ];
+
+        let mut edits = Vec::new();
+        apply_loro_text_delta_batch(
+            &mut text,
+            &mut line_starts,
+            &mut line_char_starts,
+            &delta,
+            &mut edits,
+        )
+        .expect("delta applies");
+
+        assert_eq!(text, "aé\n😀\nb");
+        assert_eq!((line_starts, line_char_starts), line_offset_tables(&text));
+        assert_eq!(
+            edits,
+            vec![TextProjectionEdit {
+                start: 4,
+                old_end: 4,
+                inserted_len: "😀\n".len() as u64,
+            }]
+        );
+    }
+
+    #[test]
+    fn loro_text_delta_batch_deletes_across_unicode_lines() {
+        let mut text = "aé\n😀\nb".to_owned();
+        let (mut line_starts, mut line_char_starts) = line_offset_tables(&text);
+        let delta = vec![
+            loro::TextDelta::Retain {
+                retain: 1,
+                attributes: None,
+            },
+            loro::TextDelta::Delete { delete: 3 },
+        ];
+
+        let mut edits = Vec::new();
+        apply_loro_text_delta_batch(
+            &mut text,
+            &mut line_starts,
+            &mut line_char_starts,
+            &delta,
+            &mut edits,
+        )
+        .expect("delta applies");
+
+        assert_eq!(text, "a\nb");
+        assert_eq!((line_starts, line_char_starts), line_offset_tables(&text));
+        assert_eq!(
+            edits,
+            vec![TextProjectionEdit {
+                start: 1,
+                old_end: 8,
+                inserted_len: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn cached_style_ranges_translate_through_insertions() {
+        let edit = TextProjectionEdit {
+            start: 5,
+            old_end: 5,
+            inserted_len: 3,
+        };
+
+        assert_eq!(
+            translate_byte_range(ByteRange { start: 10, end: 14 }, edit),
+            Some(ByteRange { start: 13, end: 17 }),
+            "ranges after the insert shift right"
+        );
+        assert_eq!(
+            translate_byte_range(ByteRange { start: 2, end: 10 }, edit),
+            Some(ByteRange { start: 2, end: 13 }),
+            "ranges containing the insert expand"
+        );
+        assert_eq!(
+            translate_byte_range(ByteRange { start: 2, end: 5 }, edit),
+            Some(ByteRange { start: 2, end: 8 }),
+            "ranges ending exactly at the insert boundary extend over the typed \
+             text — typed chars inherit the preceding token's color until the \
+             next authoritative frame"
+        );
+    }
+
+    #[test]
+    fn optimistic_insert_text_covers_plain_chars_enter_and_tab() {
+        let mut buf = [0u8; 4];
+        let none = Modifiers::NONE;
+        let shift = Modifiers::SHIFT;
+        let ctrl = Modifiers::CTRL;
+
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Char('a'), none, &mut buf),
+            Some("a")
+        );
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Char('É'), shift, &mut buf),
+            Some("É"),
+            "shifted printable chars stay optimistic (shift is how uppercase arrives)"
+        );
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Enter, none, &mut buf),
+            Some("\n"),
+            "RET is bound to buffer.newline = insert_char(10): identical to a self-insert"
+        );
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Tab, none, &mut buf),
+            Some("\t"),
+            "TAB is bound to buffer.tab = insert_char(9): identical to a self-insert"
+        );
+
+        // Modified Enter/Tab and chords round-trip — a keymap may bind
+        // S-RET / C-TAB to anything.
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Enter, shift, &mut buf),
+            None
+        );
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Tab, ctrl, &mut buf),
+            None
+        );
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Char('x'), ctrl, &mut buf),
+            None
+        );
+        // Deletions and motion still round-trip.
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Backspace, none, &mut buf),
+            None
+        );
+        assert_eq!(
+            optimistic_insert_text(ProtocolKey::Left, none, &mut buf),
+            None
+        );
+    }
+
+    #[test]
+    fn incoming_frames_translate_through_unconfirmed_edits() {
+        // A frame computed at daemon generation G arrives while one
+        // local optimistic insert (scalar G+1: 3 bytes at byte 5) is
+        // still unconfirmed: the frame's ranges must shift through it.
+        let unconfirmed = vec![(
+            11u64,
+            TextProjectionEdit {
+                start: 5,
+                old_end: 5,
+                inserted_len: 3,
+            },
+        )];
+        let segments = vec![StyleSegment {
+            range: ByteRange { start: 0, end: 20 },
+            spans: vec![
+                StyleSpan {
+                    range: ByteRange { start: 2, end: 4 },
+                    style: CellStyle::default(),
+                },
+                StyleSpan {
+                    range: ByteRange { start: 10, end: 14 },
+                    style: CellStyle::default(),
+                },
+            ],
+        }];
+
+        let translated = translate_style_segments(segments, &unconfirmed);
+        assert_eq!(translated.len(), 1);
+        assert_eq!(
+            translated[0].range,
+            ByteRange { start: 0, end: 23 },
+            "segment range expands over the unconfirmed insert"
+        );
+        assert_eq!(
+            translated[0].spans[0].range,
+            ByteRange { start: 2, end: 4 },
+            "spans before the insert are untouched"
+        );
+        assert_eq!(
+            translated[0].spans[1].range,
+            ByteRange { start: 13, end: 17 },
+            "spans after the insert shift right by its length"
+        );
+
+        // With no unconfirmed edits the frame passes through as-is.
+        let untouched = translate_style_segments(
+            vec![StyleSegment {
+                range: ByteRange { start: 0, end: 20 },
+                spans: Vec::new(),
+            }],
+            &[],
+        );
+        assert_eq!(untouched[0].range, ByteRange { start: 0, end: 20 });
+    }
+
+    #[test]
+    fn cached_style_ranges_translate_through_deletions() {
+        let edit = TextProjectionEdit {
+            start: 5,
+            old_end: 9,
+            inserted_len: 0,
+        };
+
+        assert_eq!(
+            translate_byte_range(ByteRange { start: 12, end: 16 }, edit),
+            Some(ByteRange { start: 8, end: 12 }),
+            "ranges after the deletion shift left"
+        );
+        assert_eq!(
+            translate_byte_range(ByteRange { start: 3, end: 12 }, edit),
+            Some(ByteRange { start: 3, end: 8 }),
+            "ranges spanning the deletion shrink"
+        );
+        assert_eq!(
+            translate_byte_range(ByteRange { start: 6, end: 8 }, edit),
+            None,
+            "ranges fully removed by the deletion drop"
+        );
     }
 
     #[test]
