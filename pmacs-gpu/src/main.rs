@@ -40,7 +40,6 @@ use pmacs_protocol::{
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
-use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -425,6 +424,12 @@ struct State {
     line_chunk_cache: Vec<Vec<RichChunk>>,
     /// Absolute source-line index of `buffer.lines[0]`.
     shaped_top: usize,
+    bg_vertex_buffer: ReusableVertexBuffer,
+    caret_vertex_buffer: ReusableVertexBuffer,
+    minimap_vertex_buffer: ReusableVertexBuffer,
+    /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
+    /// rebuilding rescanned every line shape per frame.
+    minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -833,6 +838,58 @@ fn optimistic_insert_text(key: ProtocolKey, mods: Modifiers, chbuf: &mut [u8; 4]
     }
 }
 
+/// A vertex buffer reused across frames: rewritten in place while the
+/// data fits, reallocated (with slack) when it grows. `render()`
+/// previously allocated fresh wgpu buffers for the background / caret
+/// / minimap quads on every frame.
+/// `(summary generation, surface width, surface height, scroll_top)`
+/// — everything the minimap quads depend on.
+type MinimapCacheKey = (u64, u32, u32, usize);
+
+struct ReusableVertexBuffer {
+    buffer: Option<wgpu::Buffer>,
+    capacity: u64,
+}
+
+impl ReusableVertexBuffer {
+    const fn new() -> Self {
+        Self {
+            buffer: None,
+            capacity: 0,
+        }
+    }
+
+    /// Upload `bytes`, reusing the existing allocation when possible.
+    /// Returns the buffer to bind, or `None` for empty input.
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &str,
+        bytes: &[u8],
+    ) -> Option<&wgpu::Buffer> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let len = bytes.len() as u64;
+        if self.buffer.is_none() || self.capacity < len {
+            // Grow with slack so steady selection/minimap churn
+            // settles into one allocation.
+            let capacity = len.next_power_of_two();
+            self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.capacity = capacity;
+        }
+        let buffer = self.buffer.as_ref().expect("just ensured");
+        queue.write_buffer(buffer, 0, bytes);
+        Some(buffer)
+    }
+}
+
 impl QuadRenderer {
     fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1025,6 +1082,10 @@ impl State {
             hit_map_dirty: false,
             line_chunk_cache: Vec::new(),
             shaped_top: 0,
+            bg_vertex_buffer: ReusableVertexBuffer::new(),
+            caret_vertex_buffer: ReusableVertexBuffer::new(),
+            minimap_vertex_buffer: ReusableVertexBuffer::new(),
+            minimap_cache: None,
         }
     }
 
@@ -1732,13 +1793,24 @@ impl State {
     /// If the start byte moves, the top visible line itself shifted, so
     /// the daemon needs a fresh declaration.
     fn viewport_send_if_origin_changed(&mut self, buffer_id: BufferId) -> Option<ViewportSend> {
-        let Some((last_start, _)) = self.last_viewport_sent else {
+        let Some((last_start, last_end)) = self.last_viewport_sent else {
             return self.viewport_send_if_changed(buffer_id);
         };
-        if last_start == self.view_range.0 {
-            return None;
+        if last_start != self.view_range.0 {
+            return self.viewport_send_if_changed(buffer_id);
         }
-        self.viewport_send_if_changed(buffer_id)
+        // End drift: typing grows the slice end while the declared
+        // end stays put, and the daemon clips styling to the declared
+        // range. Long unbroken typing would eat through the bottom
+        // overscan and the deepest lines would lose styling — once
+        // the drift exceeds half the overscan (in lines), re-declare.
+        let starts = &self.current_line_starts;
+        let declared_line = starts.partition_point(|&s| s <= last_end);
+        let current_line = starts.partition_point(|&s| s <= self.view_range.1);
+        if current_line.abs_diff(declared_line) * 2 > SCROLL_OVERSCAN {
+            return self.viewport_send_if_changed(buffer_id);
+        }
+        None
     }
 
     /// Adjust `scroll_top` so the own cursor's source line is within the
@@ -2289,35 +2361,54 @@ impl State {
         let frame_start = debug_frame().then(std::time::Instant::now);
         let bg_vertices = self.decoration_background_vertex_bytes();
         let bg_vertex_count = (bg_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
-        let bg_buffer = (!bg_vertices.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("pmacs-gpu decoration backgrounds"),
-                    contents: &bg_vertices,
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let bg_buffer = self
+            .bg_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu decoration backgrounds",
+                &bg_vertices,
+            )
+            .cloned();
         let caret_vertices = self.caret_vertex_bytes();
         let caret_vertex_count = (caret_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
-        let caret_buffer = (!caret_vertices.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("pmacs-gpu caret"),
-                    contents: &caret_vertices,
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let caret_buffer = self
+            .caret_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu caret",
+                &caret_vertices,
+            )
+            .cloned();
         let after_bg = debug_frame().then(std::time::Instant::now);
-        let minimap_vertices = self.minimap_vertex_bytes();
+        // Minimap quads depend only on (summary, size, scroll); cache
+        // the vertex bytes instead of rescanning every line shape per
+        // frame.
+        let minimap_key = (
+            self.current_summary.as_ref().map_or(0, |s| s.generation),
+            self.config.width,
+            self.config.height,
+            self.scroll_top,
+        );
+        if self
+            .minimap_cache
+            .as_ref()
+            .is_none_or(|(key, _)| *key != minimap_key)
+        {
+            self.minimap_cache = Some((minimap_key, self.minimap_vertex_bytes()));
+        }
+        let minimap_vertices = &self.minimap_cache.as_ref().expect("just filled").1;
         let minimap_vertex_count = (minimap_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
-        let minimap_buffer = (!minimap_vertices.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("pmacs-gpu minimap vertices"),
-                    contents: &minimap_vertices,
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let minimap_buffer = self
+            .minimap_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu minimap vertices",
+                minimap_vertices,
+            )
+            .cloned();
         let after_minimap = debug_frame().then(std::time::Instant::now);
         let text_bounds_right = self.text_bounds_right();
 
