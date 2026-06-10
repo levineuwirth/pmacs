@@ -3044,24 +3044,7 @@ impl LspManager {
         let uri = uri.into();
         let text = text.into();
         self.documents.insert((sid, uri.clone()), text.clone());
-        // T M11.8 / Session 8 — mark cached LSP-derived render
-        // families stale so semantic frontends suppress byte ranges
-        // anchored to pre-edit text until the server refreshes them.
-        // Diagnostics clear on `publishDiagnostics`, semantic tokens
-        // on `textDocument/semanticTokens`, and inlay hints on
-        // `textDocument/inlayHint`.
-        self.diag_store
-            .lock()
-            .expect("diag store mutex poisoned")
-            .mark_stale(uri.clone());
-        self.semantic_token_store
-            .lock()
-            .expect("semantic token store mutex poisoned")
-            .mark_stale(uri.clone());
-        self.inlay_hint_store
-            .lock()
-            .expect("inlay hint store mutex poisoned")
-            .mark_stale(uri.clone());
+        self.mark_document_stale(&uri);
         let params = json!({
             "textDocument": {
                 "uri": uri,
@@ -3072,6 +3055,32 @@ impl LspManager {
             }],
         });
         self.send_notification(sid, "textDocument/didChange", params)
+    }
+
+    /// T M11.8 / Session 8 — mark cached LSP-derived render families
+    /// for `uri` stale so frontends suppress byte ranges anchored to
+    /// pre-edit text until the server refreshes them. Diagnostics
+    /// clear on `publishDiagnostics`, semantic tokens on
+    /// `textDocument/semanticTokens`, and inlay hints on
+    /// `textDocument/inlayHint`.
+    ///
+    /// Factored out of [`Self::did_change_full`] so the Lua glue can
+    /// mark staleness at *edit* time even while the (full-document,
+    /// O(file)) didChange notification itself is debounced — per-edit
+    /// staleness is what keeps stale-position artifacts off screen.
+    pub fn mark_document_stale(&self, uri: &str) {
+        self.diag_store
+            .lock()
+            .expect("diag store mutex poisoned")
+            .mark_stale(uri.to_owned());
+        self.semantic_token_store
+            .lock()
+            .expect("semantic token store mutex poisoned")
+            .mark_stale(uri.to_owned());
+        self.inlay_hint_store
+            .lock()
+            .expect("inlay hint store mutex poisoned")
+            .mark_stale(uri.to_owned());
     }
 
     /// Send `workspace/didChangeWatchedFiles` to `sid`. `changes` is

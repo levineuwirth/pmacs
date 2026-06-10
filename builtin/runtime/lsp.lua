@@ -233,6 +233,84 @@ local function buffer_text(buf)
   return buf:slice(0, buf:len())
 end
 
+-- didChange coalescing (typing perf) -----------------------------------------
+--
+-- Document sync is full-text, so each `textDocument/didChange` ships
+-- the entire buffer. Sending one per keystroke cost three O(file)
+-- copies plus an O(file) JSON write to the server pipe *per typed
+-- character* — the dominant daemon-side typing cost on large files.
+-- The after-edit hook now only bumps the version, marks the cached
+-- render families stale (cheap), and records the buffer as dirty;
+-- the actual notification ships from the async tick once the buffer
+-- has been quiet for DID_CHANGE_QUIET_MS, or unconditionally once
+-- the oldest unsent edit is DID_CHANGE_MAX_LAG_MS old (so the server
+-- keeps converging during continuous typing). Versions may skip
+-- values across a coalesced burst; LSP only requires that they
+-- increase. Anything that asks the server about a document flushes
+-- it first so no request is answered against stale text.
+local DID_CHANGE_QUIET_MS = 75
+local DID_CHANGE_MAX_LAG_MS = 400
+
+-- Dirty buffers: key (tostring(buf)) -> {
+--   rec      = the attachment record the edits belong to,
+--   first_ms = monotonic time of the oldest unsent edit,
+--   last_ms  = monotonic time of the newest unsent edit,
+-- }
+local pending_did_change = {}
+
+-- Forward declaration — defined below (needs helpers that follow);
+-- `flush_did_change` re-pulls inlay hints after each coalesced send.
+local pull_inlay_hints_quiet
+
+local function flush_did_change(key)
+  local pending = pending_did_change[key]
+  if not pending then return end
+  pending_did_change[key] = nil
+  local rec = pending.rec
+  -- The attachment may have been torn down or replaced (server
+  -- crash -> re-attach) since the edit was recorded; only the live
+  -- record's server should hear about the buffer.
+  if attachments[key] ~= rec then return end
+  local ok, text = pcall(buffer_text, rec.buffer)
+  if not ok then return end
+  pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, text)
+  -- Inlay hints are pull-model: the store's stale flag (set per edit)
+  -- only clears on a fresh `textDocument/inlayHint` response, and the
+  -- server never volunteers one. Re-request at flush cadence so
+  -- hints come back shortly after each pause instead of staying
+  -- suppressed until the next attach/refresh. The request is
+  -- supersede-keyed per (server, method, uri), so a burst of flushes
+  -- cancels its own predecessors rather than piling up.
+  pcall(pull_inlay_hints_quiet, rec)
+end
+
+local function flush_did_change_for(rec)
+  if rec and rec.buffer then flush_did_change(tostring(rec.buffer)) end
+end
+
+local function flush_all_did_changes()
+  for key in pairs(pending_did_change) do
+    flush_did_change(key)
+  end
+end
+
+local function flush_due_did_changes()
+  if next(pending_did_change) == nil then return end
+  local now = pmacs.editor.monotonic_ms()
+  for key, pending in pairs(pending_did_change) do
+    if now - pending.last_ms >= DID_CHANGE_QUIET_MS
+        or now - pending.first_ms >= DID_CHANGE_MAX_LAG_MS then
+      flush_did_change(key)
+    end
+  end
+end
+
+-- Exposed for tests and for glue that must synchronize the server's
+-- document view before an out-of-band operation (e.g. a save hook).
+function pmacs.lsp._flush_did_changes()
+  flush_all_did_changes()
+end
+
 local function document_end_position(text)
   local line, col = 0, 0
   for i = 1, #text do
@@ -350,9 +428,16 @@ local function server_supports_inlay_hints(sid)
   return caps.inlayHintProvider ~= nil and caps.inlayHintProvider ~= false
 end
 
-local function pull_inlay_hints_quiet(rec)
+-- Assigns the forward-declared local above (so `flush_did_change`
+-- can re-pull); a fresh `local function` here would shadow it.
+function pull_inlay_hints_quiet(rec)
   if not rec or not server_is_initialized(rec.server) then return end
   if not server_supports_inlay_hints(rec.server) then return end
+  -- The server must see the current text before being asked to
+  -- compute positions against it (didChange is debounced). A no-op
+  -- when called from `flush_did_change` itself (the pending entry is
+  -- removed before the send), so this cannot recurse.
+  flush_did_change_for(rec)
   local end_line, end_col = document_end_position(buffer_text(rec.buffer))
   pmacs.async(function()
     pcall(function()
@@ -379,7 +464,12 @@ local function attach_buffer(buf)
   local key = tostring(buf)
   local existing = attachments[key]
   if existing and server_is_live(existing.server) then return existing end
-  if existing then attachments[key] = nil end
+  if existing then
+    attachments[key] = nil
+    -- Unsent edits targeted the dead attachment; the did_open below
+    -- carries the full current text, superseding them.
+    pending_did_change[key] = nil
+  end
   local language = active_buffer_language()
   if not language then return nil end
   -- Path resolved before spawn so the server's `rootUri` can be
@@ -430,7 +520,16 @@ end
 local function attached_for_active()
   local buf = pmacs.window.buffer()
   if not buf then return nil end
-  return attachments[tostring(buf)] or attach_buffer(buf)
+  local key = tostring(buf)
+  local rec = attachments[key]
+  if rec then
+    -- Every interactive command resolves its attachment here before
+    -- issuing requests; flushing now means the server answers those
+    -- requests against the current text (didChange is debounced).
+    flush_did_change(key)
+    return rec
+  end
+  return attach_buffer(buf)
 end
 
 -- Hooks --------------------------------------------------------------------
@@ -442,10 +541,21 @@ end)
 pmacs.hook.add("buffer.after-edit", function()
   local buf = pmacs.window.buffer()
   if not buf then return end
-  local rec = attachments[tostring(buf)]
+  local key = tostring(buf)
+  local rec = attachments[key]
   if not rec then return end
   rec.version = rec.version + 1
-  pcall(pmacs.lsp.did_change, rec.server, rec.uri, rec.version, active_buffer_text())
+  -- Stale suppression must stay keystroke-accurate even though the
+  -- O(file) didChange send below is coalesced: render families
+  -- anchored to pre-edit positions are hidden from this edit on.
+  pcall(pmacs.lsp._mark_document_stale, rec.uri)
+  local now = pmacs.editor.monotonic_ms()
+  local pending = pending_did_change[key]
+  if pending and pending.rec == rec then
+    pending.last_ms = now
+  else
+    pending_did_change[key] = { rec = rec, first_ms = now, last_ms = now }
+  end
 end)
 
 -- Async request surface (T M4.5 async bridge). The Rust manager
@@ -658,6 +768,9 @@ end
 local function repull_for_attachments(sid, request_fn)
   for _, rec in pairs(attachments) do
     if rec.server == sid and rec.uri then
+      -- Server-initiated repulls (diagnostics refresh, semantic
+      -- tokens refresh) must also see the latest text first.
+      flush_did_change_for(rec)
       pcall(request_fn, sid, rec.uri, rec)
     end
   end
@@ -994,6 +1107,7 @@ if pmacs._async and pmacs._async.tick then
   pmacs._async.tick = function(...)
     local ret = _prior_async_tick(...)
     pcall(handle_server_requests)
+    pcall(flush_due_did_changes)
     return ret
   end
 end

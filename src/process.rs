@@ -51,7 +51,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -427,7 +427,7 @@ struct ManagedProcess {
 /// when the generation ends.
 struct RuntimeHandles {
     child: ChildHandle,
-    stdin: Option<Box<dyn Write + Send>>,
+    stdin: Option<StdinWriter>,
     pid: u32,
     /// Reader-thread join handles, drained by `Drop` of
     /// [`RuntimeHandles`] so a generation's worker threads don't
@@ -442,6 +442,102 @@ struct RuntimeHandles {
     /// reader stuck in `send` (consumer fell behind) wakes promptly
     /// instead of leaking until the kernel ends the producer.
     cancel: Arc<AtomicBool>,
+}
+
+/// Byte budget for stdin data queued but not yet written, per
+/// generation. A child this far behind on reading its own stdin is
+/// effectively not consuming it; erroring beats unbounded queue
+/// growth, and callers already treat `write_stdin` errors as
+/// process failure. Generous so it never triggers for a merely-busy
+/// child (LSP full-document didChange on a large file is ~MB-scale).
+const STDIN_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// Queued stdin writer: a dedicated thread owns the child's stdin
+/// handle and drains a channel of byte chunks. This decouples
+/// callers — the editor main thread, notably the LSP manager's
+/// full-document `didChange` notifications — from pipe
+/// backpressure: a child that stops reading (kernel pipe buffers
+/// are ~64 KiB) stalls this queue, not the editor frame loop.
+///
+/// Closing: dropping the sender (`close_stdin` / generation end)
+/// lets the thread drain whatever is queued, then drop the handle —
+/// the child sees EOF *after* the queued bytes, preserving the
+/// flush-then-EOF shutdown contract MCP relies on. The thread is
+/// detached rather than joined: joining at drop could block forever
+/// on a wedged pipe, and generation teardown (SIGTERM/SIGKILL)
+/// breaks the pipe and ends the thread shortly after anyway.
+struct StdinWriter {
+    tx: Sender<Vec<u8>>,
+    /// Bytes accepted by [`Self::write`] but not yet written by the
+    /// thread. Backpressure signal for the queue budget.
+    queued_bytes: Arc<AtomicUsize>,
+    /// First write error observed by the writer thread. Writes are
+    /// asynchronous, so the failure surfaces on the *next* `write`
+    /// call instead of the one that hit it.
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl StdinWriter {
+    fn spawn(mut sink: Box<dyn Write + Send>) -> Self {
+        let (tx, rx) = channel::unbounded::<Vec<u8>>();
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let error = Arc::new(Mutex::new(None));
+        let thread_queued = Arc::clone(&queued_bytes);
+        let thread_error = Arc::clone(&error);
+        std::thread::Builder::new()
+            .name("pmacs stdin writer".into())
+            .spawn(move || {
+                while let Ok(bytes) = rx.recv() {
+                    let result = sink.write_all(&bytes).and_then(|()| sink.flush());
+                    thread_queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                    if let Err(e) = result {
+                        *thread_error.lock().expect("stdin writer error mutex poisoned") =
+                            Some(e.to_string());
+                        return;
+                    }
+                }
+                // Channel closed: all queued chunks written. `sink`
+                // drops here, closing the pipe — the child sees EOF.
+            })
+            .expect("spawn stdin writer thread");
+        Self {
+            tx,
+            queued_bytes,
+            error,
+        }
+    }
+
+    fn write(&self, bytes: &[u8]) -> Result<(), String> {
+        if let Some(e) = self
+            .error
+            .lock()
+            .expect("stdin writer error mutex poisoned")
+            .as_ref()
+        {
+            return Err(format!("write_stdin: {e}"));
+        }
+        let queued = self.queued_bytes.load(Ordering::Relaxed);
+        if queued.saturating_add(bytes.len()) > STDIN_QUEUE_MAX_BYTES {
+            return Err(format!(
+                "write_stdin: child is not draining stdin ({queued} bytes already queued)"
+            ));
+        }
+        self.queued_bytes.fetch_add(bytes.len(), Ordering::Relaxed);
+        self.tx.send(bytes.to_vec()).map_err(|_| {
+            // Thread exited after a write error; report the stored
+            // cause when we have it.
+            self.queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
+            let stored = self
+                .error
+                .lock()
+                .expect("stdin writer error mutex poisoned")
+                .clone();
+            stored.map_or_else(
+                || "write_stdin: writer thread stopped".to_owned(),
+                |e| format!("write_stdin: {e}"),
+            )
+        })
+    }
 }
 
 impl Drop for RuntimeHandles {
@@ -723,12 +819,13 @@ impl ProcessSupervisor {
         self.signal(id, Signal::SIGTERM)
     }
 
-    /// Close `id`'s stdin pipe by dropping the writer. The child
-    /// observes EOF on its next read, which is the canonical
-    /// stdio-graceful-shutdown signal for protocols (notably MCP)
-    /// that have no protocol-level shutdown message. Idempotent: a
-    /// second call after the writer is gone is a no-op. Errors only
-    /// if the process id is unknown.
+    /// Close `id`'s stdin pipe by dropping the writer. The writer
+    /// thread drains any queued bytes first, then drops the handle,
+    /// so the child observes EOF *after* everything already written
+    /// — the canonical stdio-graceful-shutdown signal for protocols
+    /// (notably MCP) that have no protocol-level shutdown message.
+    /// Idempotent: a second call after the writer is gone is a
+    /// no-op. Errors only if the process id is unknown.
     ///
     /// Note: this does NOT kill the process. Callers that want a
     /// guaranteed exit follow up with [`Self::terminate`] (SIGTERM)
@@ -749,10 +846,14 @@ impl ProcessSupervisor {
     }
 
     /// Write `bytes` to `id`'s stdin. Errors if the id is unknown,
-    /// the process is not running, or stdin is closed (the child
+    /// the process is not running, stdin is closed (the child
     /// closed stdin on its end, or stdin was never piped in the
-    /// first place). Synchronous write --- callers that worry about
-    /// pipe-full blocking should chunk their writes.
+    /// first place), or the per-generation queue budget is
+    /// exhausted. The write itself is queued to a dedicated writer
+    /// thread, so this never blocks on pipe backpressure — a write
+    /// *failure* (broken pipe) therefore surfaces on a subsequent
+    /// call rather than the one that queued the bytes; callers that
+    /// need liveness should watch the supervisor's exit events.
     pub fn write_stdin(&mut self, id: ProcessId, bytes: &[u8]) -> Result<(), String> {
         let proc = self
             .processes
@@ -764,13 +865,9 @@ impl ProcessSupervisor {
             .ok_or_else(|| format!("process {id} has no live generation"))?;
         let stdin = runtime
             .stdin
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| format!("process {id} stdin is not piped"))?;
-        stdin
-            .write_all(bytes)
-            .map_err(|e| format!("write_stdin: {e}"))?;
-        stdin.flush().map_err(|e| format!("flush_stdin: {e}"))?;
-        Ok(())
+        stdin.write(bytes)
     }
 
     /// Resize the PTY for `id`. Errors if the id is unknown, the
@@ -1128,7 +1225,7 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
     let stdin = child
         .stdin
         .take()
-        .map(|s| Box::new(s) as Box<dyn Write + Send>);
+        .map(|s| StdinWriter::spawn(Box::new(s) as Box<dyn Write + Send>));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (byte_tx, byte_rx) = channel::bounded::<ByteChunk>(BYTE_CHUNK_CHANNEL_CAP);
@@ -1238,7 +1335,7 @@ fn build_pty_runtime(
             child: Arc::new(Mutex::new(into_send_sync_child(child))),
             _master: pair.master,
         },
-        stdin: Some(writer),
+        stdin: Some(StdinWriter::spawn(writer)),
         pid,
         readers,
         output_rx,
@@ -1603,6 +1700,82 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e.kind, ProcessEventKind::Signaled { .. })),
             "SIGTERM should produce a Signaled event"
+        );
+    }
+
+    #[test]
+    fn write_stdin_queues_without_blocking_when_child_never_reads() {
+        let mut sup = ProcessSupervisor::new();
+        // The child never reads its stdin, so the kernel pipe buffer
+        // (~64 KiB) fills almost immediately. The pre-writer-thread
+        // implementation blocked the caller in `write_all` here —
+        // which in the editor was the main thread, wedging the frame
+        // loop whenever an LSP server fell behind on its stdin.
+        let mut spec = ProcessSpec::new("stdin-ignorer", "/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        let id = sup.spawn(spec).expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
+            evs.iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
+        });
+        let payload = vec![b'x'; 1024 * 1024]; // 16x the pipe buffer
+        let start = Instant::now();
+        sup.write_stdin(id, &payload).expect("queued write");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "write_stdin must queue, not block on pipe backpressure (took {:?})",
+            start.elapsed()
+        );
+        sup.terminate(id).expect("terminate");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+    }
+
+    #[test]
+    fn close_stdin_flushes_queued_bytes_before_eof() {
+        let mut sup = ProcessSupervisor::new();
+        // `cat` echoes stdin and exits on EOF. Receiving the full
+        // payload back followed by a clean exit proves the writer
+        // thread drains its queue before dropping the pipe (the
+        // flush-then-EOF contract `close_stdin` documents).
+        let mut spec = ProcessSpec::new("cat-echo", "/bin/sh");
+        spec.args = vec!["-c".into(), "cat".into()];
+        let id = sup.spawn(spec).expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
+            evs.iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
+        });
+        let payload = vec![b'y'; 256 * 1024];
+        sup.write_stdin(id, &payload).expect("queued write");
+        sup.close_stdin(id).expect("close stdin");
+        let evs = drain_until(&mut sup, id, Duration::from_secs(10), |evs| {
+            let echoed: usize = evs
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    ProcessEventKind::Stdout(b) => Some(b.len()),
+                    _ => None,
+                })
+                .sum();
+            echoed >= 256 * 1024
+                && evs
+                    .iter()
+                    .any(|e| matches!(e.kind, ProcessEventKind::Exited { .. }))
+        });
+        let echoed: usize = evs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ProcessEventKind::Stdout(b) => Some(b.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            echoed,
+            payload.len(),
+            "child must receive every queued byte before EOF"
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Exited { code: 0 })),
+            "EOF after drain must let the child exit cleanly"
         );
     }
 
