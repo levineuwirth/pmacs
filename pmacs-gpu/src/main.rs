@@ -2649,14 +2649,23 @@ fn is_motion_key(key: ProtocolKey) -> bool {
 }
 
 /// Whether to forward a translated key to the daemon (session B2).
-/// Motion keys go through with any modifiers. Plain text-editing keys
-/// (`Char` / `Backspace` / `Enter` / `Delete` / `Tab`) go through only
-/// *without* a Ctrl/Alt/Meta chord modifier: a bare key edits text,
-/// but a chord drives commands and minibuffer flows the GUI can't
-/// render or interact with yet (deferred to a later session). Shift is
-/// not a chord modifier — `Shift`+a already arrives as `Char('A')`.
+/// Motion keys go through with any modifiers (C-<left> is word
+/// motion). Deletion keys do too: C-BS / C-DEL / M-BS are word-level
+/// deletes in the default keymap — the same editing-command family as
+/// chorded motion, and an unbound chord is a harmless no-op at the
+/// daemon keymap. (Chorded deletes never apply optimistically:
+/// `optimistic_delete_range` requires empty modifiers, so they always
+/// round-trip into their bound commands.) The remaining text keys
+/// (`Char` / `Enter` / `Tab`) go through only *without* a
+/// Ctrl/Alt/Meta chord modifier: a bare key edits text, but those
+/// chords drive commands and minibuffer flows the GUI can't render or
+/// interact with yet (deferred to a later session). Shift is not a
+/// chord modifier — `Shift`+a already arrives as `Char('A')`.
 fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
     if is_motion_key(key) {
+        return true;
+    }
+    if matches!(key, ProtocolKey::Backspace | ProtocolKey::Delete) {
         return true;
     }
     if !is_plain_text_modifiers(mods) {
@@ -2664,11 +2673,7 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
     }
     matches!(
         key,
-        ProtocolKey::Char(_)
-            | ProtocolKey::Backspace
-            | ProtocolKey::Enter
-            | ProtocolKey::Delete
-            | ProtocolKey::Tab
+        ProtocolKey::Char(_) | ProtocolKey::Enter | ProtocolKey::Tab
     )
 }
 
@@ -3600,6 +3605,13 @@ mod tests {
         assert!(should_forward_key(ProtocolKey::Left, ctrl));
         assert!(should_forward_key(ProtocolKey::Down, shift));
         assert!(should_forward_key(ProtocolKey::PageUp, none));
+
+        // Deletion keys forward regardless of modifiers too — C-BS /
+        // C-DEL / M-BS are word-level deletes in the default keymap,
+        // the same editing-command family as chorded motion.
+        assert!(should_forward_key(ProtocolKey::Backspace, ctrl));
+        assert!(should_forward_key(ProtocolKey::Delete, ctrl));
+        assert!(should_forward_key(ProtocolKey::Backspace, Modifiers::ALT));
     }
 
     #[test]

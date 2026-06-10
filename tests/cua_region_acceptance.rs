@@ -74,6 +74,32 @@ fn backspace_deletes_the_shift_selected_region() {
     assert_eq!(cursor, 1);
 }
 
+/// C-Backspace deletes the previous word (and C-Delete the next),
+/// mirroring C-arrow word motion. The pmacs-gpu frontend forwards
+/// chorded deletion keys to this same dispatch path.
+#[test]
+fn ctrl_backspace_deletes_the_previous_word() {
+    let mut s = EditorState::new();
+    type_str(&mut s, "alpha beta");
+
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Backspace, KeyModifiers::CONTROL),
+    );
+    let (text, _, cursor) = probe(&s);
+    assert_eq!(text, "alpha ", "C-BS deletes back through the previous word");
+    assert_eq!(cursor, 6);
+
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Left, KeyModifiers::CONTROL));
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Delete, KeyModifiers::CONTROL),
+    );
+    let (text, _, cursor) = probe(&s);
+    assert_eq!(text, " ", "C-DEL deletes forward through the next word");
+    assert_eq!(cursor, 0);
+}
+
 #[test]
 fn typing_replaces_the_shift_selected_region() {
     let mut s = EditorState::new();
