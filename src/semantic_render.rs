@@ -272,8 +272,27 @@ impl SemanticRenderState {
         }
 
         // --- Decorations (T M11.3 producer, T M11.4 diff) ---
-        let decorations = self.scoped_decorations(state, &vp);
+        let mut decorations = self.scoped_decorations(state, &vp);
         let prev = self.last_decorations.get(&vp.buffer_id);
+        // Hold-while-stale, part 2 (selection navigation): while the
+        // diag store is stale, CARRY the previously shipped diagnostic
+        // items through this frame's set instead of dropping them.
+        // A shift+arrow during the post-burst stale window then diffs
+        // as a tiny selection-only segment (the carried diag ranges
+        // are unchanged, so they fall outside the changed intervals
+        // and are never re-shipped at stale positions) — instead of
+        // a full frame per keypress that also blinked the frontend's
+        // held diagnostics out.
+        let diag_hold = diagnostics_store_stale(state, vp.buffer_id);
+        if diag_hold && let Some(p) = prev {
+            decorations.extend(
+                p.items
+                    .iter()
+                    .filter(|d| is_diagnostic_kind(d.kind))
+                    .cloned(),
+            );
+            decorations.sort_by_key(|d| d.range.start);
+        }
         // Hold-while-stale: while the diag store is stale (document
         // edited since the last `publishDiagnostics`), this frame has
         // no authoritative diagnostic positions. The frontend's
@@ -288,18 +307,23 @@ impl SemanticRenderState {
         // the baseline untouched — staleness clears on the next
         // publishDiagnostics absorption, and the generation transition
         // since the held baseline forces that frame full.
-        let held = diagnostics_store_stale(state, vp.buffer_id)
-            && prev.is_some_and(|p| {
-                decorations
-                    .iter()
-                    .eq(p.items.iter().filter(|d| !is_diagnostic_kind(d.kind)))
-            });
-        let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
+        let held = diag_hold
+            && prev
+                .is_some_and(|p| p.visible == vp.visible && decorations.iter().eq(p.items.iter()));
+        // During a hold, only the GENERATION trigger for a full frame
+        // is suppressed (edits bump it every keystroke; the carried
+        // set diffs instead). First-ever frames and viewport changes
+        // still resync in full.
+        let full = prev
+            .is_none_or(|p| p.visible != vp.visible || (!diag_hold && p.generation != generation));
         if held {
-            // No new information for the frontend this frame. (A
-            // selection change during the stale window falls through
-            // to the branches below and ships without diagnostics —
-            // rare, and better than pinning a dead selection.)
+            // No new information for the frontend this frame. Keep
+            // the baseline's generation current so the eventual
+            // unstale frame diffs instead of full-resyncing (the diff
+            // covers the diagnostics' post-publish positions).
+            if let Some(p) = self.last_decorations.get_mut(&vp.buffer_id) {
+                p.generation = generation;
+            }
         } else if full {
             let suppress_empty_generation_bump = prev.is_some_and(|p| {
                 p.visible == vp.visible && p.items.is_empty() && decorations.is_empty()
@@ -1632,8 +1656,9 @@ mod tests {
             "no stale-positioned diagnostics ride along; got {decos:?}"
         );
 
-        // The next publishDiagnostics clears the flag; diagnostics
-        // re-emit on the following frame.
+        // The next publishDiagnostics clears the flag. An IDENTICAL
+        // publish stays silent — the carried baseline already matches
+        // the frontend's cache. A *changed* diagnostic diffs through.
         state
             .lsp_manager
             .borrow()
@@ -1644,7 +1669,7 @@ mod tests {
                 &uri,
                 vec![crate::diag::Diagnostic {
                     start_line: 1,
-                    start_col: 0,
+                    start_col: 1,
                     end_line: 1,
                     end_col: 2,
                     severity: crate::diag::DiagnosticSeverity::Warning,
@@ -1654,12 +1679,12 @@ mod tests {
                 }],
             );
         let (_full, decos) = decorations_of(&s.render_frame(&state))
-            .expect("post-publish frame re-ships diagnostics");
+            .expect("post-publish frame ships the moved diagnostic");
         assert!(
             decos
                 .iter()
                 .any(|d| d.kind == DecorationKind::DiagnosticWarning),
-            "diagnostics return once the store is fresh; got {decos:?}"
+            "diagnostics update once the store is fresh; got {decos:?}"
         );
     }
 

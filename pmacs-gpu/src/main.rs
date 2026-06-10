@@ -225,6 +225,10 @@ struct App {
 type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
 
 /// All resources owned by one running pmacs-gpu instance.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent render/input state flags, not a config bitset"
+)]
 struct State {
     window: Arc<Window>,
     device: wgpu::Device,
@@ -409,6 +413,18 @@ struct State {
     /// `(when, byte)` of the last primary Down, for frontend-side
     /// double-click detection (same-hit within the interval).
     last_pointer_down: Option<(std::time::Instant, u64)>,
+    /// Q#R2 — the per-line surgery path skips rebuilding the pointer
+    /// hit map (clicks are rare next to keystrokes); this marks it
+    /// stale so `hit_test_source_byte` rebuilds on demand from the
+    /// same shared chunk function.
+    hit_map_dirty: bool,
+    /// Per-shaped-line chunk cache: `line_chunk_cache[i]` is the
+    /// chunk set `buffer.lines[i]` was built from. Lets incoming
+    /// frames re-shape ONLY lines whose styling actually changed, and
+    /// lets scroll reuse retained lines wholesale.
+    line_chunk_cache: Vec<Vec<RichChunk>>,
+    /// Absolute source-line index of `buffer.lines[0]`.
+    shaped_top: usize,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -1006,6 +1022,9 @@ impl State {
             pointer_drag_active: false,
             last_pointer_sent_byte: None,
             last_pointer_down: None,
+            hit_map_dirty: false,
+            line_chunk_cache: Vec::new(),
+            shaped_top: 0,
         }
     }
 
@@ -1183,7 +1202,7 @@ impl State {
         // top) moves it outside the slice, and waiting a round trip
         // to scroll reads as a hitch.
         let viewport = if self.scroll_to_cursor() {
-            self.reshape();
+            self.rebuild_lines_reusing_scroll();
             self.viewport_send_if_changed(predicted.buffer_id)
         } else {
             None
@@ -1203,6 +1222,7 @@ impl State {
         &mut self,
         delta_batches: &[Vec<loro::TextDelta>],
     ) -> Result<Vec<TextProjectionEdit>, &'static str> {
+        let line_count_before = self.current_line_starts.len();
         let edits = apply_loro_text_delta_batches(
             &mut self.current_text,
             &mut self.current_line_starts,
@@ -1213,7 +1233,17 @@ impl State {
             return Ok(edits);
         }
         self.translate_cached_anchors(&edits);
-        self.reshape();
+        // Q#R1 — the keystroke case (one edit, no line-structure
+        // change) re-shapes only the affected BufferLine; everything
+        // else falls back to the full slice reshape.
+        let single_line_edit = edits.len() == 1
+            && self.current_line_starts.len() == line_count_before
+            && !self.current_text
+                [edits[0].start as usize..(edits[0].start + edits[0].inserted_len) as usize]
+                .contains('\n');
+        if !(single_line_edit && self.try_reshape_line(edits[0])) {
+            self.reshape();
+        }
         Ok(edits)
     }
 
@@ -1516,7 +1546,11 @@ impl State {
                 } else {
                     self.merge_style_spans(segments);
                 }
-                self.reshape();
+                // Re-shape only lines whose styling actually changed
+                // — a parse-settle frame after a burst usually
+                // recolors a line or two, and a scroll-triggered
+                // resync only the newly exposed ones.
+                self.refresh_changed_lines();
                 None
             }
             InstanceMessage::Decorations {
@@ -1549,7 +1583,7 @@ impl State {
                 if fg_before == fg_decoration_fingerprint(&self.current_decorations) {
                     self.window.request_redraw();
                 } else {
-                    self.reshape();
+                    self.refresh_changed_lines();
                 }
                 None
             }
@@ -1559,7 +1593,7 @@ impl State {
                 }
                 self.current_adornments = items;
                 self.current_adornments.sort_by_key(|a| a.at);
-                self.reshape();
+                self.refresh_changed_lines();
                 None
             }
             InstanceMessage::FileStyleSummary {
@@ -1655,7 +1689,9 @@ impl State {
                 // slice, and re-declare the scoped Viewport so the
                 // producer ships spans for what's now visible.
                 if self.scroll_to_cursor() {
-                    self.reshape();
+                    // Pure scroll: retained lines keep their shape
+                    // caches; only newly exposed lines shape.
+                    self.rebuild_lines_reusing_scroll();
                     if let Some(vp) = self.viewport_send_if_changed(buffer_id) {
                         return Some(vp);
                     }
@@ -1736,8 +1772,25 @@ impl State {
     /// line) → projected byte → run map → slice byte → + `vstart`.
     /// `None` when no buffer is attached or the position is outside
     /// anything hit-testable.
-    fn hit_test_source_byte(&self, x: f64, y: f64) -> Option<u64> {
+    fn hit_test_source_byte(&mut self, x: f64, y: f64) -> Option<u64> {
         self.current_buffer_id?;
+        if self.hit_map_dirty {
+            // Q#R2 — a per-line reshape deferred this; rebuild from
+            // the same chunk source the shaped buffer was built from.
+            let (vstart, vend) = self.view_range;
+            let rich = clipped_chunks_for_range(
+                &self.current_text,
+                &self.current_spans,
+                &self.current_decorations,
+                &self.current_adornments,
+                vstart,
+                vend,
+            );
+            let (hit_runs, projected_line_starts) = build_hit_runs(&rich);
+            self.current_hit_runs = hit_runs;
+            self.projected_line_starts = projected_line_starts;
+            self.hit_map_dirty = false;
+        }
         let rel_x = x as f32 - TEXT_LEFT;
         let rel_y = y as f32 - TEXT_TOP;
         let cursor = self.buffer.hit(rel_x, rel_y)?;
@@ -1760,9 +1813,184 @@ impl State {
             return None;
         }
         self.scroll_top = new_top;
-        self.reshape();
+        self.rebuild_lines_reusing_scroll();
         self.current_buffer_id
             .and_then(|bid| self.viewport_send_if_changed(bid))
+    }
+
+    /// Q#R1 — per-line incremental reshape for a single-line text
+    /// edit: rebuild ONE `BufferLine` instead of re-shaping the whole
+    /// visible slice. Returns `false` when the edit needs the full
+    /// `reshape` (slice origin moved, edited line outside the shaped
+    /// slice, exotic paragraph separators that the full path would
+    /// have split on). The caller has already established the edit is
+    /// single-line (line count unchanged, no `\n` inserted).
+    fn try_reshape_line(&mut self, edit: TextProjectionEdit) -> bool {
+        let (vstart, vend) = self.visible_byte_range();
+        if vstart != self.view_range.0 {
+            // The slice origin moved (edit before the viewport): the
+            // whole slice shifts; surgery can't help.
+            return false;
+        }
+        if edit.start >= vend {
+            // Entirely past the visible slice: no shaped line's
+            // content changes; offsets are clip-rebased per frame.
+            self.view_range = (vstart, vend);
+            self.hit_map_dirty = true;
+            self.window.request_redraw();
+            return true;
+        }
+        let line_idx = self
+            .current_line_starts
+            .partition_point(|&s| s <= edit.start)
+            .saturating_sub(1);
+        let line_start = self.current_line_starts[line_idx];
+        if line_start < vstart {
+            return false;
+        }
+        let next_start = self.current_line_starts.get(line_idx + 1).copied();
+        let content_end = next_start
+            .map_or(self.current_text.len() as u64, |n| n.saturating_sub(1))
+            .min(vend);
+        let Some(shaped_idx) = line_idx.checked_sub(self.shaped_top) else {
+            return false;
+        };
+        if shaped_idx >= self.buffer.lines.len() || shaped_idx >= self.line_chunk_cache.len() {
+            // E.g. typing on the phantom empty line after a trailing
+            // newline — no BufferLine exists for it; full reshape
+            // handles those shapes correctly.
+            return false;
+        }
+        let chunks = self.chunks_for_line(line_start, content_end);
+        self.buffer.lines[shaped_idx] = line_from_chunks(&chunks);
+        self.line_chunk_cache[shaped_idx] = chunks;
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.view_range = (vstart, vend);
+        self.hit_map_dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
+    /// `(top, [(line_start, content_end)])` for the slice
+    /// `[vstart, vend)`: one entry per shaped line, content excluding
+    /// the `\n`. A line starting exactly at `vend` (incl. the phantom
+    /// line after a trailing `\n`) is not shaped — matching the line
+    /// splitting `set_rich_text` used to do.
+    fn slice_line_ranges(&self, vstart: u64, vend: u64) -> (usize, Vec<(u64, u64)>) {
+        let starts = &self.current_line_starts;
+        let n = starts.len();
+        let top = self.scroll_top.min(n.saturating_sub(1));
+        let mut ranges = Vec::new();
+        let mut idx = top;
+        while idx < n {
+            let ls = starts[idx];
+            if ls >= vend {
+                break;
+            }
+            let ce = starts
+                .get(idx + 1)
+                .map_or(self.current_text.len() as u64, |&next| next - 1)
+                .min(vend);
+            ranges.push((ls, ce));
+            idx += 1;
+        }
+        if ranges.is_empty() {
+            ranges.push((vstart, vstart));
+        }
+        (top, ranges)
+    }
+
+    fn chunks_for_line(&self, line_start: u64, content_end: u64) -> Vec<RichChunk> {
+        clipped_chunks_for_range(
+            &self.current_text,
+            &self.current_spans,
+            &self.current_decorations,
+            &self.current_adornments,
+            line_start,
+            content_end,
+        )
+    }
+
+    /// Rebuild the shaped slice, reusing any retained line whose
+    /// absolute index was already shaped (pure scroll: content and
+    /// styling unchanged for retained lines, their shape caches
+    /// survive — only newly exposed lines pay shaping). Falls back to
+    /// building everything when nothing overlaps. Every builder keeps
+    /// `line_chunk_cache` current, so reuse is always sound here.
+    fn rebuild_lines_reusing_scroll(&mut self) {
+        let (vstart, vend) = self.visible_byte_range();
+        self.view_range = (vstart, vend);
+        let (new_top, ranges) = self.slice_line_ranges(vstart, vend);
+        let old_top = self.shaped_top;
+        let mut old_lines: Vec<Option<glyphon::cosmic_text::BufferLine>> =
+            std::mem::take(&mut self.buffer.lines)
+                .into_iter()
+                .map(Some)
+                .collect();
+        let mut old_cache: Vec<Option<Vec<RichChunk>>> = std::mem::take(&mut self.line_chunk_cache)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut lines = Vec::with_capacity(ranges.len());
+        let mut cache = Vec::with_capacity(ranges.len());
+        for (i, &(ls, ce)) in ranges.iter().enumerate() {
+            let abs = new_top + i;
+            let reused = abs.checked_sub(old_top).and_then(|j| {
+                if j < old_lines.len() && j < old_cache.len() {
+                    old_lines[j].take().zip(old_cache[j].take())
+                } else {
+                    None
+                }
+            });
+            if let Some((line, chunks)) = reused {
+                lines.push(line);
+                cache.push(chunks);
+            } else {
+                let chunks = self.chunks_for_line(ls, ce);
+                lines.push(line_from_chunks(&chunks));
+                cache.push(chunks);
+            }
+        }
+        self.buffer.lines = lines;
+        self.line_chunk_cache = cache;
+        self.shaped_top = new_top;
+        self.buffer
+            .set_scroll(glyphon::cosmic_text::Scroll::default());
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.hit_map_dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// Re-shape ONLY lines whose chunk set changed — the incoming
+    /// frame path (`StyleSpans` / fg `Decorations` / `InlineAdornments`).
+    /// A parse-settle frame after a typing burst usually recolors a
+    /// line or two; re-shaping the whole slice for it was a full
+    /// keystroke-cost stall.
+    fn refresh_changed_lines(&mut self) {
+        let (vstart, vend) = self.visible_byte_range();
+        let (top, ranges) = self.slice_line_ranges(vstart, vend);
+        if (vstart, vend) != self.view_range
+            || top != self.shaped_top
+            || ranges.len() != self.line_chunk_cache.len()
+            || ranges.len() != self.buffer.lines.len()
+        {
+            self.reshape();
+            return;
+        }
+        let mut any = false;
+        for (i, &(ls, ce)) in ranges.iter().enumerate() {
+            let chunks = self.chunks_for_line(ls, ce);
+            if chunks != self.line_chunk_cache[i] {
+                self.buffer.lines[i] = line_from_chunks(&chunks);
+                self.line_chunk_cache[i] = chunks;
+                any = true;
+            }
+        }
+        if any {
+            self.buffer.shape_until_scroll(&mut self.font_system, false);
+            self.hit_map_dirty = true;
+        }
+        self.window.request_redraw();
     }
 
     /// Bookkeeping for an outgoing Pointer event: it supersedes any
@@ -2001,68 +2229,23 @@ impl State {
         // are clipped + rebased onto the slice (subtract `vstart`).
         let (vstart, vend) = self.visible_byte_range();
         self.view_range = (vstart, vend);
-        let slice = &self.current_text[vstart as usize..vend as usize];
-
-        let spans: Vec<StyleSpan> = self
-            .current_spans
-            .iter()
-            .filter_map(|sp| {
-                clip_rebase_range(sp.range.start, sp.range.end, vstart, vend).map(|(s, e)| {
-                    StyleSpan {
-                        range: ByteRange { start: s, end: e },
-                        style: sp.style,
-                    }
-                })
-            })
-            .collect();
-        let decorations: Vec<Decoration> = self
-            .current_decorations
-            .iter()
-            .filter_map(|d| {
-                clip_rebase_range(d.range.start, d.range.end, vstart, vend).map(|(s, e)| {
-                    Decoration {
-                        range: ByteRange { start: s, end: e },
-                        kind: d.kind,
-                    }
-                })
-            })
-            .collect();
-        let adornments: Vec<InlineAdornment> = self
-            .current_adornments
-            .iter()
-            .filter(|a| a.at >= vstart && a.at <= vend)
-            .map(|a| {
-                let mut a = a.clone();
-                a.at -= vstart;
-                a
-            })
-            .collect();
-
-        let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
-        let rich = projected_rich_chunks(slice, &spans, &decorations, &adornments);
-        // Q#M2 — the pointer hit map is derived from the SAME chunks
-        // the shaped buffer is built from, so the two cannot disagree.
-        let (hit_runs, projected_line_starts) = build_hit_runs(&rich);
-        self.current_hit_runs = hit_runs;
-        self.projected_line_starts = projected_line_starts;
-        let chunks: Vec<(String, Attrs<'static>)> = rich
-            .into_iter()
-            .map(|chunk| {
-                let mut attrs = default_attrs.clone();
-                if let Some(c) = chunk.color {
-                    attrs = attrs.color(c);
-                }
-                (chunk.text, attrs)
-            })
-            .collect();
-        self.buffer.set_rich_text(
-            &mut self.font_system,
-            chunks.iter().map(|(s, a)| (s.as_str(), a.clone())),
-            &default_attrs,
-            Shaping::Advanced,
-            None,
-        );
+        let (top, ranges) = self.slice_line_ranges(vstart, vend);
+        let mut lines = Vec::with_capacity(ranges.len());
+        let mut cache = Vec::with_capacity(ranges.len());
+        for &(ls, ce) in &ranges {
+            let chunks = self.chunks_for_line(ls, ce);
+            lines.push(line_from_chunks(&chunks));
+            cache.push(chunks);
+        }
+        self.buffer.lines = lines;
+        self.line_chunk_cache = cache;
+        self.shaped_top = top;
+        self.buffer
+            .set_scroll(glyphon::cosmic_text::Scroll::default());
         self.buffer.shape_until_scroll(&mut self.font_system, false);
+        // The pointer hit map rebuilds lazily from the same caches
+        // (Q#R2) — clicks are rare next to keystrokes/frames.
+        self.hit_map_dirty = true;
         self.window.request_redraw();
     }
 
@@ -2475,7 +2658,7 @@ struct MinimapLineShape {
     content_cols: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct RichChunk {
     text: String,
     color: Option<glyphon::Color>,
@@ -3485,6 +3668,75 @@ fn px_to_ndc_y(y: f32, height: u32) -> f32 {
 /// `text` and retain source-byte styling; inline adornments create
 /// extra chunks at their anchors and therefore do not shift any source
 /// span/decoration range.
+/// Clip + rebase the whole-file styling caches onto the byte range
+/// `[start, end)` and build its projected chunks (Q#R1: the ONE chunk
+/// source both the full `reshape` and the per-line surgery derive
+/// from, so the two paths cannot disagree about a line's content).
+/// Adornment anchors use an inclusive end — an anchor exactly at
+/// `end` (a line's `\n`, or the slice end) injects after the last
+/// content byte, matching the full-walk boundary behavior.
+/// Assemble one shaped line from its chunks: concatenated projected
+/// text + an attrs span per colored chunk (mirroring `set_rich_text`'s
+/// only-when-non-default rule). Every line gets `LineEnding::Lf` —
+/// the separator byte itself never enters a line's text.
+fn line_from_chunks(chunks: &[RichChunk]) -> glyphon::cosmic_text::BufferLine {
+    let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+    let mut attrs_list = glyphon::cosmic_text::AttrsList::new(&default_attrs);
+    let mut text = String::new();
+    for chunk in chunks {
+        let start = text.len();
+        text.push_str(&chunk.text);
+        if let Some(c) = chunk.color {
+            attrs_list.add_span(start..text.len(), &default_attrs.clone().color(c));
+        }
+    }
+    glyphon::cosmic_text::BufferLine::new(
+        text,
+        glyphon::cosmic_text::LineEnding::Lf,
+        attrs_list,
+        Shaping::Advanced,
+    )
+}
+
+fn clipped_chunks_for_range(
+    text: &str,
+    spans: &[StyleSpan],
+    decorations: &[Decoration],
+    adornments: &[InlineAdornment],
+    start: u64,
+    end: u64,
+) -> Vec<RichChunk> {
+    let range_text = &text[start as usize..end as usize];
+    let spans: Vec<StyleSpan> = spans
+        .iter()
+        .filter_map(|sp| {
+            clip_rebase_range(sp.range.start, sp.range.end, start, end).map(|(s, e)| StyleSpan {
+                range: ByteRange { start: s, end: e },
+                style: sp.style,
+            })
+        })
+        .collect();
+    let decorations: Vec<Decoration> = decorations
+        .iter()
+        .filter_map(|d| {
+            clip_rebase_range(d.range.start, d.range.end, start, end).map(|(s, e)| Decoration {
+                range: ByteRange { start: s, end: e },
+                kind: d.kind,
+            })
+        })
+        .collect();
+    let adornments: Vec<InlineAdornment> = adornments
+        .iter()
+        .filter(|a| a.at >= start && a.at <= end)
+        .map(|a| {
+            let mut a = a.clone();
+            a.at -= start;
+            a
+        })
+        .collect();
+    projected_rich_chunks(range_text, &spans, &decorations, &adornments)
+}
+
 fn projected_rich_chunks(
     text: &str,
     spans: &[StyleSpan],
@@ -4136,6 +4388,104 @@ mod tests {
         assert_eq!(
             optimistic_insert_text(ProtocolKey::Left, none, &mut buf),
             None
+        );
+    }
+
+    /// Q#R1 parity invariant: the per-line surgery's chunk source
+    /// (`clipped_chunks_for_range` over one line's content range)
+    /// must agree byte-for-byte — text AND color — with the full
+    /// slice walk split at line boundaries. Pinned here so the
+    /// surgically rebuilt `BufferLine` can't drift from what a full
+    /// `set_rich_text` would have produced.
+    #[test]
+    fn per_line_chunks_match_the_full_walk() {
+        // (byte, color) stream, with `\n` bytes dropped — the full
+        // walk keeps them inside source chunks; per-line walks
+        // exclude them (cosmic strips the separator per line).
+        fn flat(chunks: &[RichChunk]) -> Vec<(u8, Option<u32>)> {
+            chunks
+                .iter()
+                .flat_map(|c| {
+                    let color = c.color.map(|col| col.0);
+                    c.text
+                        .bytes()
+                        .filter(|&b| b != b'\n')
+                        .map(move |b| (b, color))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+        // Two content lines + trailing newline. A span crossing the
+        // line break, plus two inlay hints: one mid-line-1, one
+        // anchored EXACTLY at line 0's newline (the predicted-finding
+        // #1 boundary case — it must belong to line 0, before the \n).
+        let text = "alpha BETA\ngamma delta\n";
+        let spans = vec![StyleSpan {
+            range: ByteRange { start: 6, end: 16 },
+            style: CellStyle {
+                fg: CellColor::Indexed(2),
+                ..CellStyle::default()
+            },
+        }];
+        let decorations = vec![Decoration {
+            range: ByteRange { start: 0, end: 5 },
+            kind: DecorationKind::DiagnosticWarning,
+        }];
+        let hint = |at: u64, label: &str| InlineAdornment {
+            at,
+            placement: AdornmentPlacement::AtOffset,
+            content: AdornmentContent::Text {
+                text: label.to_owned(),
+                style: CellStyle::default(),
+            },
+        };
+        let adornments = vec![hint(10, "<eol>"), hint(17, ": T ")];
+
+        let full = flat(&clipped_chunks_for_range(
+            text,
+            &spans,
+            &decorations,
+            &adornments,
+            0,
+            text.len() as u64,
+        ));
+
+        // Line ranges as the surgery computes them: content excludes
+        // the newline; the phantom line after the trailing `\n` is
+        // empty.
+        let mut per_line = Vec::new();
+        for (start, content_end) in [(0u64, 10u64), (11, 22), (23, 23)] {
+            per_line.extend(flat(&clipped_chunks_for_range(
+                text,
+                &spans,
+                &decorations,
+                &adornments,
+                start,
+                content_end,
+            )));
+        }
+
+        assert_eq!(
+            per_line, full,
+            "per-line chunk walks must reproduce the full walk exactly \
+             (text and colors, newlines excluded)"
+        );
+
+        // The boundary hint landed on line 0 (before its newline), not
+        // line 1.
+        let line0 = clipped_chunks_for_range(text, &spans, &decorations, &adornments, 0, 10);
+        assert!(
+            line0.iter().any(|c| c.text == "<eol>"),
+            "newline-anchored hint belongs to the line it terminates"
+        );
+        let line1 = clipped_chunks_for_range(text, &spans, &decorations, &adornments, 11, 22);
+        assert!(
+            line1.iter().all(|c| c.text != "<eol>"),
+            "newline-anchored hint must not duplicate onto the next line"
+        );
+        assert!(
+            line1.iter().any(|c| c.text == ": T "),
+            "mid-line hint renders on its own line"
         );
     }
 
