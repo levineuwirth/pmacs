@@ -579,6 +579,16 @@ impl SyntaxRegistry {
         self.parse_jobs.borrow().len()
     }
 
+    /// True when a dispatched parse job for `buffer` has not yet been
+    /// installed or drained. The syntax Lua glue records jobs here at
+    /// dispatch time and removes them in `_install_settled`, so this
+    /// is the main-thread "parse in flight" bit for render producers
+    /// that need to avoid stale whole-file work while typing.
+    #[must_use]
+    pub fn has_pending_parse_job_for(&self, buffer: BufferId) -> bool {
+        self.parse_jobs.borrow().values().any(|&bid| bid == buffer)
+    }
+
     /// Lazy-compile and cache the bundled `highlights.scm` query for
     /// `lang_name`. Returns `None` if the language is unknown, the
     /// language entry has an empty query (no highlights shipped),
@@ -868,5 +878,22 @@ mod tests {
         );
         // Pending list cleared on make_request.
         assert_eq!(handle.pending_edit_count(), 0);
+    }
+
+    #[test]
+    fn registry_tracks_inflight_parse_jobs_by_buffer() {
+        let registry = SyntaxRegistry::new();
+        let a = BufferId::next();
+        let b = BufferId::next();
+
+        registry.record_parse_job(11, a);
+        registry.record_parse_job(12, b);
+
+        assert!(registry.has_pending_parse_job_for(a));
+        assert!(registry.has_pending_parse_job_for(b));
+
+        assert_eq!(registry.take_parse_job(11), Some(a));
+        assert!(!registry.has_pending_parse_job_for(a));
+        assert!(registry.has_pending_parse_job_for(b));
     }
 }

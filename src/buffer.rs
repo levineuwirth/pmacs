@@ -684,16 +684,12 @@ impl Buffer {
     /// Used by the daemon's `FrontendEvent::CrdtOp` handler when a
     /// replica frontend forwards a CRDT op. The flow:
     ///
-    /// 1. Capture the rope's current bytes (rope ≡ CRDT projection
-    ///    invariant — both have the same content pre-import).
-    /// 2. `crdt.import_updates(op_bytes)` — integrates the remote op
-    ///    into the local CRDT state. CRDT convergence handles
-    ///    concurrent edits.
-    /// 3. Materialize the post-import CRDT content.
-    /// 4. Compute the diff between pre- and post-content as a single
-    ///    `Replace` `EditOp` (single insert/delete falls out as
-    ///    Replace with empty inserted or empty range).
-    /// 5. Apply the rope stages (rope mutation + mark adjustment +
+    /// 1. `crdt.import_updates_with_text_deltas(op_bytes)` integrates
+    ///    the remote op and captures Loro's text projection delta.
+    /// 2. Apply the common single-insert shape directly to the rope.
+    ///    Deletes and compound updates conservatively fall back to a
+    ///    post-import materialization + contiguous diff.
+    /// 3. Apply the rope stages (rope mutation + mark adjustment +
     ///    revision bump + modified flag + `on_edit` broadcast).
     ///    Skips the CRDT-application stage (already done in step 2)
     ///    AND the undo push (remote ops aren't locally undoable per
@@ -750,25 +746,37 @@ impl Buffer {
             });
         };
 
-        // Step 1: capture pre-import bytes (rope ≡ CRDT projection
-        // invariant means rope.slice == crdt.materialize_string here).
+        // Integrate the remote op and capture Loro's projection diff.
+        // Optimistic GUI typing produces one Insert delta, so handle
+        // that shape without copying or materializing the document.
+        let text_deltas = crdt
+            .import_updates_with_text_deltas(op_bytes)
+            .map_err(|e| BufferError::CrdtRejected {
+                reason: format!("import_updates: {e:?}"),
+            })?;
+        if let Some((unicode_pos, inserted)) = single_remote_text_insert(&text_deltas)
+            && let Some(byte_pos) = crdt.unicode_to_utf8_pos(unicode_pos)
+        {
+            let byte_pos = byte_pos as Position;
+            let mut views = std::mem::take(&mut self.views);
+            let result =
+                self.run_remote_rope_stages(&mut views, byte_pos, byte_pos, inserted.as_bytes());
+            self.views = views;
+            return result.map(Some);
+        }
+
+        // Conservative fallback for deletes, compound updates, and
+        // already-integrated ops. The rope is still the pre-import
+        // projection, so it remains the source for the old bytes.
         let old_len = self.rope.len();
         let mut old_bytes = vec![0u8; old_len as usize];
         if old_len > 0 {
             self.rope.slice(0, old_len, &mut old_bytes);
         }
-
-        // Step 2: integrate the remote op into the CRDT state.
-        crdt.import_updates(op_bytes)
-            .map_err(|e| BufferError::CrdtRejected {
-                reason: format!("import_updates: {e:?}"),
-            })?;
-
-        // Step 3: materialize the post-import content.
         let new_content = crdt.materialize_string();
         let new_bytes = new_content.as_bytes();
 
-        // Step 4: compute common prefix/suffix at byte level, then
+        // Compute common prefix/suffix at byte level, then
         // **back off to UTF-8 char boundaries** in both strings.
         //
         // # Post-audit-round-4 F25: char-boundary alignment
@@ -829,7 +837,7 @@ impl Buffer {
         let range_end = (old_bytes.len() - suffix) as Position;
         let inserted = &new_bytes[prefix..new_bytes.len() - suffix];
 
-        // Step 5: apply rope stages without re-applying to CRDT
+        // Apply rope stages without re-applying to CRDT
         // (CRDT was applied above in step 2) and without undo push
         // (remote ops aren't locally undoable per M10.4).
         let mut views = std::mem::take(&mut self.views);
@@ -1450,6 +1458,37 @@ impl Buffer {
 /// Factored out to silence clippy's `type_complexity`.
 #[cfg(feature = "crdt")]
 type CrdtRoutingResult = (Option<Vec<u8>>, Option<Box<crate::rope::CrdtOp>>);
+
+/// Recognize the hot-path projection delta produced by one remote
+/// insertion. Loro's retain/delete lengths use Unicode scalar offsets;
+/// the caller converts the insertion point through the post-import
+/// text container before applying the UTF-8 bytes to the rope.
+#[cfg(feature = "crdt")]
+fn single_remote_text_insert(deltas: &[Vec<loro::TextDelta>]) -> Option<(usize, &str)> {
+    let [delta] = deltas else {
+        return None;
+    };
+    let mut cursor = 0usize;
+    let mut found = None;
+    for op in delta {
+        match op {
+            loro::TextDelta::Retain { retain, .. } => {
+                cursor = cursor.checked_add(*retain)?;
+            }
+            loro::TextDelta::Insert { insert, .. } if insert.is_empty() => {}
+            loro::TextDelta::Insert { insert, .. } => {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((cursor, insert.as_str()));
+                cursor = cursor.checked_add(insert.chars().count())?;
+            }
+            loro::TextDelta::Delete { delete } if *delete == 0 => {}
+            loro::TextDelta::Delete { .. } => return None,
+        }
+    }
+    found
+}
 
 /// T M10.4: derive a fine-grained `(range, inserted_len)` Edit
 /// description for the change from `old_rope` to `new_rope` via
@@ -2882,6 +2921,35 @@ mod tests {
         let _edit = buf.apply_remote_crdt_op(&op_bytes).expect("apply").unwrap();
 
         assert_eq!(count.get(), 1, "on_edit must fire for remote op");
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn apply_remote_crdt_op_insert_after_multibyte_char_uses_utf8_byte_position() {
+        let donor = crate::crdt::CrdtState::new(2).expect("donor");
+        donor.insert(0, "éx").expect("seed");
+
+        let mut buf = Buffer::new_with_crdt(BufferId::next(), "*utf8-insert*", 1).expect("buf");
+        let donor_snap = donor.export_snapshot().expect("snap");
+        buf.crdt
+            .as_ref()
+            .expect("crdt")
+            .import_snapshot(&donor_snap)
+            .expect("init from snap");
+        buf.rope = crate::rope::Rope::from_bytes("éx".as_bytes());
+
+        let v_before = donor.version();
+        donor.insert("é".len(), "!").expect("insert");
+        let op_bytes = donor.export_updates_since(&v_before).expect("export");
+        let edit = buf
+            .apply_remote_crdt_op(&op_bytes)
+            .expect("apply")
+            .expect("non-empty edit");
+
+        assert_eq!(rope_string(&buf), "é!x");
+        assert_eq!(edit.range, Range::new("é".len() as u64, "é".len() as u64));
+        assert_eq!(edit.inserted_len, 1);
+        assert_invariant(&buf);
     }
 
     /// F25 (post-audit-round-4): a CRDT update that changes one

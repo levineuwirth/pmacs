@@ -40,7 +40,18 @@
 //! propagation, the optional `crdt_op` field on [`crate::rope::Edit`],
 //! and the convergence proptest.
 
-use loro::{ExportMode, LoroDoc, LoroEncodeError, LoroResult, UndoManager, VersionVector};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
+use loro::{
+    ContainerTrait, ExportMode, LoroDoc, LoroEncodeError, LoroResult, TextDelta, UndoManager,
+    VersionVector,
+};
+
+type TextDeltaBatches = Arc<Mutex<Vec<Vec<TextDelta>>>>;
+type TextDeltaSubscription = (TextDeltaBatches, Arc<AtomicBool>, loro::Subscription);
 
 /// The CRDT-backed buffer state.
 ///
@@ -54,6 +65,12 @@ use loro::{ExportMode, LoroDoc, LoroEncodeError, LoroResult, UndoManager, Versio
 /// (foreground worker materializes the initial projection).
 pub struct CrdtState {
     doc: LoroDoc,
+    /// Text projection deltas captured only while a remote import is
+    /// active. Keeping the subscription alive avoids registering and
+    /// dropping one callback for every typed character.
+    text_delta_batches: TextDeltaBatches,
+    text_delta_capture_enabled: Arc<AtomicBool>,
+    _text_delta_subscription: loro::Subscription,
     /// T M10.4: per-peer undo machinery. Bound to `doc`'s `peer_id`
     /// at construction; produces inverse ops attributed to that peer.
     ///
@@ -90,11 +107,43 @@ impl CrdtState {
         // explicit get here ensures the container is registered before
         // any read or write.
         let _ = doc.get_text("body");
+        let (text_delta_batches, text_delta_capture_enabled, text_delta_subscription) =
+            Self::subscribe_text_deltas(&doc);
         let undo = Self::create_undo_manager(&doc);
         Ok(Self {
             doc,
+            text_delta_batches,
+            text_delta_capture_enabled,
+            _text_delta_subscription: text_delta_subscription,
             undo: std::cell::RefCell::new(undo),
         })
+    }
+
+    fn subscribe_text_deltas(doc: &LoroDoc) -> TextDeltaSubscription {
+        let text = doc.get_text("body");
+        let batches = Arc::new(Mutex::new(Vec::<Vec<TextDelta>>::new()));
+        let capture_enabled = Arc::new(AtomicBool::new(false));
+        let captured_batches = Arc::clone(&batches);
+        let captured_enabled = Arc::clone(&capture_enabled);
+        let subscription = doc.subscribe(
+            &text.id(),
+            Arc::new(move |event| {
+                if !captured_enabled.load(Ordering::Relaxed) {
+                    return;
+                }
+                let mut guard = captured_batches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for event in event.events {
+                    if let Some(delta) = event.diff.as_text()
+                        && !delta.is_empty()
+                    {
+                        guard.push(delta.clone());
+                    }
+                }
+            }),
+        );
+        (batches, capture_enabled, subscription)
     }
 
     /// T M10.4: construct a fresh `UndoManager` bound to the given doc.
@@ -136,9 +185,14 @@ impl CrdtState {
         // The buffer's starting contents (from file load, scratch
         // initial text, etc.) shouldn't be undoable from the user's
         // perspective; only post-construction edits are.
+        let (text_delta_batches, text_delta_capture_enabled, text_delta_subscription) =
+            Self::subscribe_text_deltas(&doc);
         let undo = Self::create_undo_manager(&doc);
         Ok(Self {
             doc,
+            text_delta_batches,
+            text_delta_capture_enabled,
+            _text_delta_subscription: text_delta_subscription,
             undo: std::cell::RefCell::new(undo),
         })
     }
@@ -300,6 +354,41 @@ impl CrdtState {
     /// the property M10.2 Day 4's convergence proptest verifies.
     pub fn import_updates(&self, bytes: &[u8]) -> LoroResult<()> {
         self.doc.import(bytes).map(|_| ())
+    }
+
+    /// Import remote updates and capture Loro's text projection deltas.
+    ///
+    /// The import callback runs synchronously before `doc.import`
+    /// returns. Buffer's hot path uses the captured single-insert shape
+    /// to update its rope projection without materializing the whole
+    /// document.
+    pub fn import_updates_with_text_deltas(&self, bytes: &[u8]) -> LoroResult<Vec<Vec<TextDelta>>> {
+        self.text_delta_batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.text_delta_capture_enabled
+            .store(true, Ordering::Relaxed);
+        let import_result = self.doc.import(bytes).map(|_| ());
+        self.text_delta_capture_enabled
+            .store(false, Ordering::Relaxed);
+        import_result?;
+        let mut guard = self
+            .text_delta_batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(std::mem::take(&mut *guard))
+    }
+
+    /// Convert a Unicode scalar offset in the current text projection
+    /// to its UTF-8 byte offset.
+    #[must_use]
+    pub fn unicode_to_utf8_pos(&self, pos: usize) -> Option<usize> {
+        self.doc.get_text("body").convert_pos(
+            pos,
+            loro::cursor::PosType::Unicode,
+            loro::cursor::PosType::Bytes,
+        )
     }
 
     /// T M10.10 post-audit-round-4 F26 — validate that importing

@@ -34,6 +34,10 @@ use crate::view::{DisplayCoord, View, Viewport};
 /// that is a multiple of this value.
 const TAB_WIDTH: u32 = 8;
 
+/// Line-prefix lengths up to this many bytes are decoded on the stack in
+/// [`TextView::pos_to_display`]; longer prefixes fall back to a heap buffer.
+const STACK_CAP: usize = 256;
+
 /// Display width of `ch` when drawn starting at column `current_col`.
 ///
 /// Tabs expand to the next [`TAB_WIDTH`]-aligned column, so they need the
@@ -180,13 +184,27 @@ impl View for TextView {
         if take == 0 {
             return Some(DisplayCoord::new(row_idx as u32, 0));
         }
-        let mut bytes = vec![0u8; take];
-        buf.snapshot_rope().slice(line_start, pos, &mut bytes);
-        // Drop trailing bytes that don't form a complete codepoint.
-        while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
-            bytes.pop();
-        }
-        let s = std::str::from_utf8(&bytes).unwrap_or("");
+        // Copy [line_start, pos) into a stack buffer for the common short-line
+        // case, hitting the heap only for unusually long prefixes. This removes
+        // the per-call allocation that previously ran on every cursor move.
+        let mut stack_buf = [0u8; STACK_CAP];
+        let mut heap_buf: Vec<u8>;
+        let bytes: &mut [u8] = if take <= STACK_CAP {
+            &mut stack_buf[..take]
+        } else {
+            heap_buf = vec![0u8; take];
+            &mut heap_buf
+        };
+        buf.snapshot_rope().slice(line_start, pos, bytes);
+        // If `pos` fell inside a multi-byte codepoint, keep only the bytes up to
+        // the last complete codepoint. `valid_up_to()` gives that boundary in
+        // one step, replacing the old pop-one-byte-and-revalidate loop. (Only
+        // trailing bytes can be invalid here, since the slice is a prefix of
+        // valid UTF-8 cut at `pos`.)
+        let s = match std::str::from_utf8(bytes) {
+            Ok(valid) => valid,
+            Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap(),
+        };
         let mut col: u32 = 0;
         for ch in s.chars() {
             col += char_display_width(ch, col);
