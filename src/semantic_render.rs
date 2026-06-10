@@ -124,6 +124,21 @@ pub struct SemanticRenderState {
     /// Only the grammar (tree-sitter) path is gated; the LSP-token path
     /// has no comparably cheap handle and recomputes as before.
     last_style_gate: HashMap<BufferId, StyleGate>,
+    /// Cached byte↔line table for the diagnostics projection, keyed
+    /// by buffer revision. Building it costs an O(buffer) rope copy
+    /// plus a full scan; before this cache, that ran on *every tick*
+    /// while diagnostics were on screen (the table is only consulted
+    /// when the store is non-stale and non-empty) — a steady-state
+    /// CPU burn for a value that changes only when the buffer does.
+    diag_line_cache: HashMap<BufferId, DiagLineCache>,
+}
+
+/// One [`SemanticRenderState::diag_line_cache`] entry: the line-start
+/// offsets and source length of a buffer at `revision`.
+struct DiagLineCache {
+    revision: u64,
+    line_starts: Vec<u64>,
+    source_len: u64,
 }
 
 /// Recompute gate for [`scoped_style_spans`] on a grammar-backed
@@ -169,6 +184,7 @@ impl SemanticRenderState {
             last_adornments: HashMap::new(),
             last_summary: HashMap::new(),
             last_style_gate: HashMap::new(),
+            diag_line_cache: HashMap::new(),
         }
     }
 
@@ -220,14 +236,29 @@ impl SemanticRenderState {
         // already-sent baseline — can skip the whole block. The LSP-
         // token path returns `None` (no cheap revision) and recomputes
         // every tick as before.
-        let style_gate = grammar_style_key(state, &vp, generation);
+        let style_parse_not_ready = grammar_style_parse_not_ready(state, vp.buffer_id);
+        // The LSP-token styling authority (grammar-less buffers, e.g.
+        // C++) gets the same hold: while the semantic-token store is
+        // stale (document edited since the last token response),
+        // `lsp_scoped_style_spans` would compute an empty set, and
+        // shipping that clears the frontend's colors for the whole
+        // stale window — the styling twin of the diagnostics blink.
+        let style_tokens_stale = lsp_style_tokens_stale(state, vp.buffer_id);
+        let style_hold = style_parse_not_ready || style_tokens_stale;
+        let style_gate = (!style_hold).then(|| grammar_style_key(state, &vp, generation));
+        let style_gate = style_gate.flatten();
         let style_unchanged = match (&style_gate, self.last_style_gate.get(&vp.buffer_id)) {
             (Some(g), Some(prev)) => g.matches(prev) && self.last_sent.contains_key(&vp.buffer_id),
             _ => false,
         };
-        if style_unchanged {
-            // Styling cannot have changed since the last computation;
-            // emit nothing and skip the query.
+        if style_hold || style_unchanged {
+            // If the style key is unchanged, styling cannot have
+            // changed since the last computation. If a grammar parse is
+            // still pending (or the LSP token store is stale), keep the
+            // previous spans briefly rather than querying and reshaping
+            // stale syntax on every typed byte; the parse-bundle
+            // revision (or the next token response) will force a fresh
+            // frame as soon as it settles.
         } else {
             match style_gate {
                 Some(g) => {
@@ -243,8 +274,36 @@ impl SemanticRenderState {
         // --- Decorations (T M11.3 producer, T M11.4 diff) ---
         let decorations = self.scoped_decorations(state, &vp);
         let prev = self.last_decorations.get(&vp.buffer_id);
+        // Hold-while-stale: while the diag store is stale (document
+        // edited since the last `publishDiagnostics`), this frame has
+        // no authoritative diagnostic positions. The frontend's
+        // last-received set — which it translates through its own
+        // local edits — is strictly better than anything we can ship:
+        // an empty frame wipes it (diagnostics blink out on the first
+        // keystroke of every burst and back in after the next publish,
+        // one full frontend reshape each way), and re-shipping the
+        // store's items would anchor pre-edit positions over post-edit
+        // text (the M11.8 artifact). So as long as the
+        // *non-diagnostic* part is unchanged, say nothing and leave
+        // the baseline untouched — staleness clears on the next
+        // publishDiagnostics absorption, and the generation transition
+        // since the held baseline forces that frame full.
+        let held = diagnostics_store_stale(state, vp.buffer_id)
+            && prev.is_some_and(|p| {
+                decorations
+                    .iter()
+                    .eq(p.items.iter().filter(|d| !is_diagnostic_kind(d.kind)))
+            });
         let full = prev.is_none_or(|p| p.visible != vp.visible || p.generation != generation);
-        if full {
+        if held {
+            // No new information for the frontend this frame. (A
+            // selection change during the stale window falls through
+            // to the branches below and ships without diagnostics —
+            // rare, and better than pinning a dead selection.)
+        } else if full {
+            let suppress_empty_generation_bump = prev.is_some_and(|p| {
+                p.visible == vp.visible && p.items.is_empty() && decorations.is_empty()
+            });
             self.last_decorations.insert(
                 vp.buffer_id,
                 LastFrame {
@@ -253,15 +312,17 @@ impl SemanticRenderState {
                     generation,
                 },
             );
-            out.push(InstanceMessage::Decorations {
-                buffer_id: vp.buffer_id,
-                generation,
-                full: true,
-                segments: vec![DecorationSegment {
-                    range: vp.visible,
-                    decorations,
-                }],
-            });
+            if !suppress_empty_generation_bump {
+                out.push(InstanceMessage::Decorations {
+                    buffer_id: vp.buffer_id,
+                    generation,
+                    full: true,
+                    segments: vec![DecorationSegment {
+                        range: vp.visible,
+                        decorations,
+                    }],
+                });
+            }
         } else {
             let prev = prev.expect("checked is_none_or above");
             let intervals = changed_intervals(&prev.items, &decorations, |d| d.range);
@@ -308,6 +369,17 @@ impl SemanticRenderState {
         state: &EditorState,
         vp: &DeclaredViewport,
     ) -> Option<InstanceMessage> {
+        // Hold-while-stale — mirrors the Decorations hold in
+        // `render_frame`. An empty frame here wipes the frontend's
+        // cached virtual text mid-typing-burst, and inline adornments
+        // occupy layout space: the wipe visibly shifts real glyphs
+        // (and forces a reshape), then the post-refresh re-emit
+        // shifts them back. The frontend's locally-translated cache
+        // is the better picture until a fresh `inlayHint` response
+        // clears the stale flag and re-emits through the diff below.
+        if inlay_store_stale(state, vp.buffer_id) {
+            return None;
+        }
         let adornments = scoped_inline_adornments(state, vp);
         let should_emit = match self.last_adornments.get(&vp.buffer_id) {
             // First sight of this buffer: speak only if there is
@@ -356,6 +428,18 @@ impl SemanticRenderState {
         buffer_id: BufferId,
         generation: u64,
     ) -> Option<InstanceMessage> {
+        // The summary is a *whole-file* tree-sitter pass (the minimap
+        // needs every line). Recomputing it on every edit's generation
+        // bump was a per-keystroke O(file) cost — a major part of the
+        // typing slowness. For grammar-backed buffers, debounce it to
+        // reparse-completion. `pending_edit_count()` alone is not
+        // enough: dispatch drains that list immediately, leaving the
+        // expensive summary path free to run while a parse job is still
+        // in flight. Wait until there is an installed parse, no pending
+        // edits, and no recorded parse job for this buffer.
+        if grammar_style_parse_not_ready(state, buffer_id) {
+            return None;
+        }
         if self.last_summary.get(&buffer_id).copied() == Some(generation) {
             return None;
         }
@@ -444,56 +528,31 @@ impl SemanticRenderState {
         }
     }
 
-    fn scoped_decorations(&self, state: &EditorState, vp: &DeclaredViewport) -> Vec<Decoration> {
+    fn scoped_decorations(
+        &mut self,
+        state: &EditorState,
+        vp: &DeclaredViewport,
+    ) -> Vec<Decoration> {
         let core = state.core.borrow();
         let registry = core.registry.clone();
         let reg = registry.borrow();
         let mut out = Vec::new();
 
-        // Byte<->line mapping is needed by both the CurrentLine
-        // derivation and the diagnostics projection, and
-        // `buffer_source_bytes` is an O(n) rope copy. This runs every
-        // tick in the daemon's hot loop, so materialize at most once
-        // per call and reuse — never twice (the pre-9.2 shape copied
-        // separately in each branch).
-        let mut line_info: Option<(Vec<u8>, Vec<u64>)> = None;
-
-        // Selection + CurrentLine — per-window (per-frontend) state.
-        // Only this session's active window for the declared buffer
-        // contributes either kind.
-        //
-        // Q#3 (per-line CurrentLine cadence, stance β) falls out of the
-        // existing M11.4 diff: `render_frame` compares the new
-        // decoration Vec against the last sent one and emits only on
-        // change. Horizontal cursor motion within a single line
-        // produces an identical `CurrentLine` range and an identical
-        // overall Vec, so `changed_intervals` returns empty and nothing
-        // ships. No `last_cursor_line` cache is needed at this layer.
+        // Selection is per-window (per-frontend) state. CurrentLine is
+        // deliberately not emitted for semantic frontends: the GPU has
+        // CursorByte and paints its own caret/current-line affordances.
+        // Emitting CurrentLine here forced a whole-buffer line table on
+        // every frame even though pmacs-gpu ignores its own current-line
+        // wash.
         if let Some(win) = core.active_window_for(self.frontend_id)
             && win.buffer_id == vp.buffer_id
+            && let Some((lo, hi)) = win.region()
+            && let Some(range) = clip_to_viewport(lo, hi, vp)
         {
-            if let Some((lo, hi)) = win.region()
-                && let Some(range) = clip_to_viewport(lo, hi, vp)
-            {
-                out.push(Decoration {
-                    range,
-                    kind: DecorationKind::Selection,
-                });
-            }
-            if let Ok(buf) = reg.get(vp.buffer_id) {
-                let (source, line_starts) = line_info.get_or_insert_with(|| {
-                    let s = buffer_source_bytes(buf);
-                    let ls = line_start_offsets(&s);
-                    (s, ls)
-                });
-                let (lo, hi) = current_line_range(line_starts, source.len() as u64, win.cursor);
-                if let Some(range) = clip_to_viewport(lo, hi, vp) {
-                    out.push(Decoration {
-                        range,
-                        kind: DecorationKind::CurrentLine,
-                    });
-                }
-            }
+            out.push(Decoration {
+                range,
+                kind: DecorationKind::Selection,
+            });
         }
 
         // Diagnostics — keyed in the shared store by the file URI the
@@ -518,12 +577,30 @@ impl SemanticRenderState {
                 && !diags.is_empty()
                 && let Ok(buf) = reg.get(vp.buffer_id)
             {
-                let (source, line_starts) = line_info.get_or_insert_with(|| {
-                    let s = buffer_source_bytes(buf);
-                    let ls = line_start_offsets(&s);
-                    (s, ls)
-                });
-                let source_len = source.len() as u64;
+                // Byte<->line mapping, cached per buffer revision —
+                // rebuilding it is an O(buffer) rope copy + scan, far
+                // too expensive to repeat on every tick a diagnostic
+                // is on screen.
+                let cache = self
+                    .diag_line_cache
+                    .entry(vp.buffer_id)
+                    .and_modify(|c| {
+                        if c.revision != buf.revision() {
+                            let s = buffer_source_bytes(buf);
+                            c.revision = buf.revision();
+                            c.line_starts = line_start_offsets(&s);
+                            c.source_len = s.len() as u64;
+                        }
+                    })
+                    .or_insert_with(|| {
+                        let s = buffer_source_bytes(buf);
+                        DiagLineCache {
+                            revision: buf.revision(),
+                            line_starts: line_start_offsets(&s),
+                            source_len: s.len() as u64,
+                        }
+                    });
+                let (line_starts, source_len) = (&cache.line_starts, cache.source_len);
                 for d in &diags {
                     let lo = line_col_to_byte(line_starts, source_len, d.start_line, d.start_col);
                     let hi = line_col_to_byte(line_starts, source_len, d.end_line, d.end_col);
@@ -711,6 +788,61 @@ fn clip_decorations(iv: ByteRange, decos: &[Decoration]) -> Vec<Decoration> {
         .collect()
 }
 
+/// True for the four diagnostic-underline decoration kinds — the
+/// family whose emission is gated on diag-store staleness by the
+/// hold-while-stale logic in `render_frame`.
+fn is_diagnostic_kind(kind: DecorationKind) -> bool {
+    matches!(
+        kind,
+        DecorationKind::DiagnosticError
+            | DecorationKind::DiagnosticWarning
+            | DecorationKind::DiagnosticInfo
+            | DecorationKind::DiagnosticHint
+    )
+}
+
+/// True when `buffer_id`'s entry in the diagnostics store is stale
+/// (the document changed since the last `publishDiagnostics`
+/// absorption). Buffers with no file URI are never stale.
+fn diagnostics_store_stale(state: &EditorState, buffer_id: BufferId) -> bool {
+    let core = state.core.borrow();
+    let Some(uri) = buffer_file_uri(&core, buffer_id) else {
+        return false;
+    };
+    let store = state.lsp_manager.borrow().diag_store();
+    let guard = store.lock().expect("diag store mutex poisoned");
+    guard.is_stale(&uri)
+}
+
+/// Style-family staleness for the LSP-token authority. True only for
+/// a buffer with **no** tree-sitter view (policy A routes those
+/// through `lsp_scoped_style_spans`) whose semantic-token store entry
+/// is stale. Grammar-backed buffers always return `false` — their
+/// styling freshness is `grammar_style_parse_not_ready`'s job.
+fn lsp_style_tokens_stale(state: &EditorState, buffer_id: BufferId) -> bool {
+    if state.syntax_registry.view(buffer_id).is_some() {
+        return false;
+    }
+    let core = state.core.borrow();
+    let Some(uri) = buffer_file_uri(&core, buffer_id) else {
+        return false;
+    };
+    let store = state.lsp_manager.borrow().semantic_token_store();
+    let guard = store.lock().expect("semantic token store mutex poisoned");
+    guard.is_stale(&uri)
+}
+
+/// Inlay-hint twin of [`diagnostics_store_stale`].
+fn inlay_store_stale(state: &EditorState, buffer_id: BufferId) -> bool {
+    let core = state.core.borrow();
+    let Some(uri) = buffer_file_uri(&core, buffer_id) else {
+        return false;
+    };
+    let store = state.lsp_manager.borrow().inlay_hint_store();
+    let guard = store.lock().expect("inlay-hint store mutex poisoned");
+    guard.is_stale(&uri)
+}
+
 /// Map an LSP diagnostic severity onto the wire decoration kind.
 fn severity_to_kind(sev: crate::diag::DiagnosticSeverity) -> DecorationKind {
     use crate::diag::DiagnosticSeverity as S;
@@ -756,31 +888,6 @@ fn buffer_source_bytes(buf: &crate::buffer::Buffer) -> Vec<u8> {
         buf.snapshot_rope().slice(0, len, &mut bytes);
     }
     bytes
-}
-
-/// Byte range `(start, end)` of the line containing `cursor`, where
-/// `start` is the position right after the previous `\n` (or 0 for the
-/// first line) and `end` is the position of the next `\n` (or
-/// `source_len` for the last line). Used by `scoped_decorations` to
-/// emit `DecorationKind::CurrentLine`; clamps so a cursor at or past
-/// `source_len` returns the last line's range rather than indexing
-/// out.
-fn current_line_range(line_starts: &[u64], source_len: u64, cursor: u64) -> (u64, u64) {
-    // `partition_point` returns the count of leading elements satisfying
-    // the predicate, i.e. the index of the first `line_start > cursor`.
-    // Subtracting 1 yields the index of the largest `line_start <=
-    // cursor`. `line_starts` always starts with 0, so the saturating
-    // sub is defensive against an empty `line_starts`.
-    let idx = line_starts
-        .partition_point(|&start| start <= cursor)
-        .saturating_sub(1);
-    let lo = line_starts.get(idx).copied().unwrap_or(0);
-    let hi = line_starts
-        .get(idx + 1)
-        .copied()
-        .unwrap_or(source_len)
-        .min(source_len);
-    (lo, hi)
 }
 
 /// Byte offset of the start of each line (index 0 = byte 0; one entry
@@ -830,6 +937,15 @@ fn grammar_style_key(
     })
 }
 
+fn grammar_style_parse_not_ready(state: &EditorState, buffer_id: BufferId) -> bool {
+    let Some(handle) = state.syntax_registry.view(buffer_id) else {
+        return false;
+    };
+    handle.current().is_none()
+        || handle.pending_edit_count() > 0
+        || state.syntax_registry.has_pending_parse_job_for(buffer_id)
+}
+
 /// Compute the styled byte runs intersecting the declared viewport,
 /// mapped through the active theme. Spans are clipped to the viewport
 /// and to the parsed source length; runs that resolve to the default
@@ -871,7 +987,15 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     }
 
     let capture_names = query.capture_names();
-    let highlights = crate::syntax::compute_highlight_spans(&query, &bundle);
+    // Scope the tree-sitter capture walk to the visible byte range so
+    // re-styling on each edit is O(visible), not O(file) — the typing
+    // bottleneck on large files (framing Q#S6). Captures whose nodes
+    // intersect the range are returned, then clipped exactly below.
+    let highlights = crate::syntax::compute_highlight_spans_in_range(
+        &query,
+        &bundle,
+        Some(vis_start as usize..vis_end as usize),
+    );
     let mut out = Vec::new();
     for hs in highlights {
         let s = u64::from(hs.start_byte).max(vis_start);
@@ -1272,30 +1396,9 @@ mod tests {
     }
 
     #[test]
-    fn current_line_range_finds_enclosing_line() {
-        // "abc\nde\nfgh": line_starts = [0, 4, 7]; source_len = 10.
-        let line_starts = vec![0u64, 4, 7];
-        let len = 10u64;
-
-        // Cursor at byte 0 → line 0 = [0, 4).
-        assert_eq!(current_line_range(&line_starts, len, 0), (0, 4));
-        // Cursor anywhere within line 0 → still line 0.
-        assert_eq!(current_line_range(&line_starts, len, 3), (0, 4));
-        // Cursor on the newline byte still belongs to the line it
-        // terminates.
-        assert_eq!(current_line_range(&line_starts, len, 3), (0, 4));
-        // Cursor at line 1 start → line 1 = [4, 7).
-        assert_eq!(current_line_range(&line_starts, len, 4), (4, 7));
-        // Cursor in last line → [7, len).
-        assert_eq!(current_line_range(&line_starts, len, 8), (7, 10));
-        // Cursor at exactly source_len (past last byte) → still last
-        // line; clamps cleanly without indexing out.
-        assert_eq!(current_line_range(&line_starts, len, len), (7, 10));
-    }
-
-    #[test]
-    fn current_line_projects_as_a_decoration_for_cursor_on_seed() {
-        // "abc\nde": cursor at byte 0 → CurrentLine = [0, 4).
+    fn semantic_projection_does_not_emit_current_line_decoration() {
+        // CurrentLine is a frontend-local visual for semantic sessions;
+        // the daemon should not copy the whole buffer to derive it.
         let state = empty_state();
         let buffer_id = active_buffer(&state);
         seed_diagnostic(&state, buffer_id);
@@ -1304,23 +1407,14 @@ mod tests {
 
         let (_full, decos) =
             decorations_of(&s.render_frame(&state)).expect("a Decorations message");
-        let current = decos
-            .iter()
-            .find(|d| d.kind == DecorationKind::CurrentLine)
-            .expect("CurrentLine present (cursor on line 0)");
-        assert_eq!(
-            current.range,
-            ByteRange { start: 0, end: 4 },
-            "line 0 of \"abc\\nde\" spans bytes [0, 4)"
+        assert!(
+            decos.iter().all(|d| d.kind != DecorationKind::CurrentLine),
+            "semantic projection must not emit CurrentLine; got {decos:?}"
         );
     }
 
     #[test]
-    fn current_line_skipped_when_active_window_is_a_different_buffer() {
-        // Producer must only emit per-window state for windows whose
-        // active buffer matches the projected viewport. The vp.buffer_id
-        // regression test (decorations_use_vp_buffer_not_active_buffer)
-        // exercises this for Selection; assert it for CurrentLine too.
+    fn semantic_current_line_absence_does_not_depend_on_active_buffer() {
         let state = empty_state();
         let scratch_id = active_buffer(&state);
         let file_id = {
@@ -1338,17 +1432,15 @@ mod tests {
             decorations_of(&s.render_frame(&state)).expect("a Decorations message");
         assert!(
             decos.iter().all(|d| d.kind != DecorationKind::CurrentLine),
-            "CurrentLine must not project against a viewport whose buffer is not the active window's buffer; got {decos:?}"
+            "semantic projection must not emit CurrentLine for any viewport; got {decos:?}"
         );
     }
 
     #[test]
-    fn same_line_cursor_motion_does_not_re_emit_decorations() {
-        // Q#3 stance β: horizontal cursor motion within the same line
-        // must not re-ship a Decorations frame. The existing M11.4
-        // changed_intervals diff gives this for free — same line means
-        // identical decoration ranges means an empty interval list
-        // means no emission.
+    fn cursor_motion_does_not_re_emit_decorations() {
+        // Cursor-only movement should not ship Decorations. Semantic
+        // frontends receive CursorByte separately and derive local
+        // cursor visuals without daemon decoration churn.
         let state = empty_state();
         let buffer_id = active_buffer(&state);
         {
@@ -1381,20 +1473,15 @@ mod tests {
             "same-line cursor motion must not re-emit Decorations"
         );
 
-        // Cross a `\n` (byte 10) → line changes → re-emission.
+        // Cross a `\n` (byte 10). Still no Decorations frame.
         {
             let mut core = state.core.borrow_mut();
             core.active_window_mut().cursor = 12;
         }
-        let msgs = s.render_frame(&state);
-        let (_full, decos) =
-            decorations_of(&msgs).expect("line-change must ship a Decorations frame");
-        let current = decos
-            .iter()
-            .find(|d| d.kind == DecorationKind::CurrentLine)
-            .expect("CurrentLine present");
-        // Line 1 of "abcdefghij\nklmno" starts at byte 11.
-        assert_eq!(current.range, ByteRange { start: 11, end: 16 });
+        assert!(
+            s.render_frame(&state).is_empty(),
+            "line-crossing cursor motion must not re-emit Decorations"
+        );
     }
 
     #[test]
@@ -1408,11 +1495,8 @@ mod tests {
 
         let (_full, decos) =
             decorations_of(&s.render_frame(&state)).expect("a Decorations message");
-        // Session 9.2 added `CurrentLine` to the projection: line 0
-        // (cursor at byte 0) emits as a `CurrentLine` decoration in
-        // addition to the seeded warning. This test pins the
-        // diagnostic projection's byte math; assert that decoration's
-        // shape rather than the total count.
+        // This test pins the diagnostic projection's byte math without
+        // relying on any cursor-line decoration.
         let warning = decos
             .iter()
             .find(|d| d.kind == DecorationKind::DiagnosticWarning)
@@ -1488,6 +1572,94 @@ mod tests {
                 .iter()
                 .any(|d| d.kind == DecorationKind::DiagnosticWarning),
             "fresh set ⇒ stale flag cleared ⇒ decoration re-emitted; got {decos:?}"
+        );
+    }
+
+    /// Hold-while-stale (diagnostics churn fix): once diagnostics
+    /// have shipped, marking the store stale (which happens per edit)
+    /// must NOT ship a clearing frame — the frontend keeps its
+    /// last-received set, translated through its own local edits,
+    /// until the next `publishDiagnostics`. The pre-fix behavior
+    /// shipped a full empty frame on the first keystroke of every
+    /// burst (diagnostics blinked out, one full frontend reshape) and
+    /// re-added them after the next publish (blink in, another
+    /// reshape).
+    #[test]
+    fn diagnostics_hold_emission_while_store_stale_after_shipping() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        seed_diagnostic(&state, buffer_id);
+
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("baseline ships the diagnostic");
+        assert!(
+            decos.iter().any(|d| is_diagnostic_kind(d.kind)),
+            "baseline contains the seeded diagnostic; got {decos:?}"
+        );
+
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
+        state
+            .lsp_manager
+            .borrow()
+            .diag_store()
+            .lock()
+            .expect("diag store")
+            .mark_stale(uri.clone());
+
+        assert!(
+            decorations_of(&s.render_frame(&state)).is_none(),
+            "stale store holds Decorations emission instead of shipping a clearing frame"
+        );
+        assert!(
+            decorations_of(&s.render_frame(&state)).is_none(),
+            "the hold is stable across frames"
+        );
+
+        // A selection change during the stale window still ships
+        // (without diagnostic kinds) — the hold must not pin a dead
+        // selection just to protect the diagnostics.
+        set_selection(&state, 0, 2);
+        let (_full, decos) = decorations_of(&s.render_frame(&state))
+            .expect("selection change ships during the stale window");
+        assert!(
+            decos.iter().any(|d| d.kind == DecorationKind::Selection),
+            "fresh selection present; got {decos:?}"
+        );
+        assert!(
+            decos.iter().all(|d| !is_diagnostic_kind(d.kind)),
+            "no stale-positioned diagnostics ride along; got {decos:?}"
+        );
+
+        // The next publishDiagnostics clears the flag; diagnostics
+        // re-emit on the following frame.
+        state
+            .lsp_manager
+            .borrow()
+            .diag_store()
+            .lock()
+            .expect("diag store")
+            .set(
+                &uri,
+                vec![crate::diag::Diagnostic {
+                    start_line: 1,
+                    start_col: 0,
+                    end_line: 1,
+                    end_col: 2,
+                    severity: crate::diag::DiagnosticSeverity::Warning,
+                    message: "x".into(),
+                    source: None,
+                    code: None,
+                }],
+            );
+        let (_full, decos) = decorations_of(&s.render_frame(&state))
+            .expect("post-publish frame re-ships diagnostics");
+        assert!(
+            decos
+                .iter()
+                .any(|d| d.kind == DecorationKind::DiagnosticWarning),
+            "diagnostics return once the store is fresh; got {decos:?}"
         );
     }
 
@@ -1628,6 +1800,7 @@ mod tests {
         let buffer_id = active_buffer(&state);
         let mut s = local();
         s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        set_selection(&state, 0, 1);
         let _ = s.render_frame(&state); // initial full
         assert!(
             s.render_frame(&state).is_empty(),
@@ -1651,7 +1824,7 @@ mod tests {
         }
 
         // Generation transitioned → next frame must be full for both
-        // diff-shaped families.
+        // diff-shaped families when there is state to re-anchor.
         let msgs = s.render_frame(&state);
         let (style_full, _) = style_segments(&msgs).expect("StyleSpans re-emitted");
         let (deco_full, _) = decorations_of(&msgs).expect("Decorations re-emitted");
@@ -1892,6 +2065,39 @@ mod tests {
         sid
     }
 
+    fn seed_rust_parse_view(
+        state: &EditorState,
+        buffer_id: BufferId,
+        text: &[u8],
+    ) -> crate::syntax::ParseViewHandle {
+        let language = state
+            .syntax_registry
+            .language("rust")
+            .expect("rust language");
+        let mut core = state.core.borrow_mut();
+        let registry_handle = core.registry.clone();
+        let mut registry = registry_handle.borrow_mut();
+        let buf = registry.get_mut(buffer_id).expect("active buffer");
+        if !text.is_empty() {
+            buf.apply_edit(crate::buffer::EditOp::Insert {
+                pos: 0,
+                bytes: text,
+            })
+            .expect("seed rust text");
+        }
+        let parse_view = crate::syntax::ParseView::new(buf, language, "rust".to_owned());
+        let handle = parse_view.handle();
+        let req = handle.make_request();
+        let bundle = crate::syntax::run_parse(req).expect("initial rust parse");
+        handle.install(std::sync::Arc::new(bundle));
+        buf.attach_view(Box::new(parse_view));
+        drop(registry);
+        core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.rs")));
+        drop(core);
+        state.syntax_registry.attach_view(buffer_id, handle.clone());
+        handle
+    }
+
     #[test]
     fn cpp_style_comes_from_lsp_when_no_tree_sitter_grammar() {
         let state = empty_state();
@@ -1930,6 +2136,123 @@ mod tests {
         assert!(
             spans[0].style.bold,
             "token_type resolved through legend → theme face"
+        );
+    }
+
+    #[test]
+    fn grammar_style_spans_wait_for_pending_parse() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        let handle = seed_rust_parse_view(&state, bid, b"fn main() {}\n");
+        s.set_viewport(
+            bid,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
+
+        let first = s.render_frame(&state);
+        assert!(
+            style_segments(&first).is_some(),
+            "installed parse emits the baseline style frame"
+        );
+
+        {
+            let core = state.core.borrow();
+            core.registry
+                .borrow_mut()
+                .get_mut(bid)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"// editing\n",
+                })
+                .expect("typing edit");
+        }
+        assert!(
+            handle.pending_edit_count() > 0,
+            "attached parse view recorded the edit"
+        );
+        let pending = s.render_frame(&state);
+        assert!(
+            style_segments(&pending).is_none(),
+            "style query is skipped while edits are waiting for parse dispatch"
+        );
+
+        let req = handle.make_request();
+        state.syntax_registry.record_parse_job(9001, bid);
+        let in_flight = s.render_frame(&state);
+        assert!(
+            style_segments(&in_flight).is_none(),
+            "style query is skipped while the parse job is in flight"
+        );
+
+        let bundle = crate::syntax::run_parse(req).expect("settled rust parse");
+        handle.install(std::sync::Arc::new(bundle));
+        assert_eq!(state.syntax_registry.take_parse_job(9001), Some(bid));
+        let settled = s.render_frame(&state);
+        assert!(
+            style_segments(&settled).is_some(),
+            "new parse bundle emits refreshed style spans"
+        );
+    }
+
+    /// Hold-while-stale for the LSP-token styling authority: once a
+    /// grammar-less buffer's colors have shipped, marking the token
+    /// store stale (which happens per edit) must NOT ship a clearing
+    /// frame — the styling twin of the diagnostics hold. The next
+    /// token response clears the flag and re-emits.
+    #[test]
+    fn lsp_style_holds_while_token_store_stale() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        let sid = seed_lsp_style(&state, bid, b"int x;\n", vec![tok(0, 0, 3)]);
+        s.set_viewport(
+            bid,
+            ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            0,
+        );
+        assert!(
+            style_segments(&s.render_frame(&state)).is_some(),
+            "baseline ships the LSP-token styling"
+        );
+
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/x.cpp"));
+        {
+            let store = state.lsp_manager.borrow().semantic_token_store();
+            let mut guard = store.lock().expect("semantic token store");
+            guard.mark_stale(uri.clone());
+        }
+
+        assert!(
+            style_segments(&s.render_frame(&state)).is_none(),
+            "stale token store holds StyleSpans instead of clearing the colors"
+        );
+        assert!(
+            style_segments(&s.render_frame(&state)).is_none(),
+            "the hold is stable across frames"
+        );
+
+        // A fresh token response (absorbed via `set`) clears the flag.
+        // Identical tokens produce no frame — the frontend's cache was
+        // never cleared, so there is nothing to say. Changed tokens
+        // diff against the held baseline and ship.
+        set_tokens(&state, sid, vec![tok(0, 0, 3)]);
+        assert!(
+            style_segments(&s.render_frame(&state)).is_none(),
+            "fresh-but-identical tokens stay silent (cache was never wiped)"
+        );
+        set_tokens(&state, sid, vec![tok(0, 0, 5)]);
+        assert!(
+            style_segments(&s.render_frame(&state)).is_some(),
+            "fresh changed tokens re-emit the styling"
         );
     }
 
@@ -2139,7 +2462,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_adornments_emit_empty_clear_while_inlay_store_stale() {
+    fn inline_adornments_hold_while_inlay_store_stale() {
         let state = empty_state();
         let mut s = local();
         let bid = active_buffer(&state);
@@ -2155,26 +2478,30 @@ mod tests {
         let store = state.lsp_manager.borrow().inlay_hint_store();
         store.lock().expect("inlay store").mark_stale(uri.clone());
 
-        let clear =
-            adornments_of(&s.render_frame(&state)).expect("stale transition clears adornments");
+        // Hold-while-stale: no frame at all. The frontend keeps its
+        // last-received hints, translated through its own local
+        // edits — an empty frame here would wipe them and visibly
+        // shift the line layout on the first keystroke of a burst.
         assert!(
-            clear.is_empty(),
-            "stale hints must clear the frontend's cached virtual text"
+            adornments_of(&s.render_frame(&state)).is_none(),
+            "stale store holds emission (frontend keeps its translated cache)"
         );
         assert!(
             adornments_of(&s.render_frame(&state)).is_none(),
-            "unchanged stale-empty state is suppressed after the clear"
+            "the hold is stable across frames"
         );
 
-        set_inlay_store(&state, &uri, vec![hint(0, 5, ": i32")]);
+        // A fresh inlayHint response clears the flag and re-emits at
+        // the server's (possibly shifted) positions.
+        set_inlay_store(&state, &uri, vec![hint(0, 7, ": i32")]);
         let refreshed = adornments_of(&s.render_frame(&state)).expect("fresh hints re-emit");
         assert_eq!(refreshed.len(), 1);
-        assert_eq!(refreshed[0].at, 5);
+        assert_eq!(refreshed[0].at, 7);
     }
 
     #[cfg(feature = "crdt")]
     #[test]
-    fn session8_temporal_probe_sustained_edits_clear_stale_inlays_until_refresh() {
+    fn session8_temporal_probe_sustained_edits_hold_stale_inlays_until_refresh() {
         let state = empty_state();
         let mut s = local();
         let bid = active_buffer(&state);
@@ -2247,16 +2574,17 @@ mod tests {
         }
 
         assert_eq!(
-            clear_frames, 1,
-            "first stale frame clears cached hints; later stale frames stay silent"
+            clear_frames, 0,
+            "stale frames hold emission entirely — the frontend keeps \
+             its locally-translated hints instead of blinking them out"
         );
         assert_eq!(
             full_style_frames, 1000,
             "each CRDT generation transition forces a StyleSpans full resync"
         );
         assert_eq!(
-            full_deco_frames, 1000,
-            "each CRDT generation transition forces a Decorations full resync"
+            full_deco_frames, 0,
+            "empty Decorations state stays silent across generation transitions"
         );
 
         set_inlay_store(&state, &uri, vec![hint(0, 1005, ": i32")]);

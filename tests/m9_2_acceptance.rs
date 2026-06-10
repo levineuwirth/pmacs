@@ -536,10 +536,15 @@ fn m9_2_cancelled_sibling_wins_over_queued_response() {
         .read_resource(sid, "file:///race")
         .expect("read c");
 
-    // Let the fake server finish its delayed response, then harvest
-    // the supervisor event queue without giving McpManager a chance
-    // to process it yet.
-    std::thread::sleep(Duration::from_millis(350));
+    // Let the fake server finish its delayed response (it sleeps
+    // 250ms), then harvest the supervisor event queue without giving
+    // McpManager a chance to process it yet. The margin over the
+    // fake's delay must absorb two pipe transits plus the request's
+    // queued-stdin-writer hop under CI load (a 100ms margin flaked on
+    // macOS runners); a generous wait does not weaken the contract —
+    // the race under test is cancel-AFTER-queue-BEFORE-manager-tick,
+    // which holds for any wait long enough for the response to land.
+    std::thread::sleep(Duration::from_secs(1));
     sup.borrow_mut().tick();
 
     // Cancel only b after the response is queued but before

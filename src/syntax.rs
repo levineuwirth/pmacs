@@ -579,6 +579,16 @@ impl SyntaxRegistry {
         self.parse_jobs.borrow().len()
     }
 
+    /// True when a dispatched parse job for `buffer` has not yet been
+    /// installed or drained. The syntax Lua glue records jobs here at
+    /// dispatch time and removes them in `_install_settled`, so this
+    /// is the main-thread "parse in flight" bit for render producers
+    /// that need to avoid stale whole-file work while typing.
+    #[must_use]
+    pub fn has_pending_parse_job_for(&self, buffer: BufferId) -> bool {
+        self.parse_jobs.borrow().values().any(|&bid| bid == buffer)
+    }
+
     /// Lazy-compile and cache the bundled `highlights.scm` query for
     /// `lang_name`. Returns `None` if the language is unknown, the
     /// language entry has an empty query (no highlights shipped),
@@ -692,8 +702,26 @@ pub fn compute_highlight_spans(
     query: &tree_sitter::Query,
     bundle: &ParseTreeBundle,
 ) -> Vec<HighlightSpan> {
+    compute_highlight_spans_in_range(query, bundle, None)
+}
+
+/// Like [`compute_highlight_spans`], but restricts the query to nodes
+/// intersecting `byte_range` when `Some`. tree-sitter's
+/// `QueryCursor::set_byte_range` makes the capture walk proportional to
+/// the range, not the whole tree — the semantic producer passes the
+/// declared viewport so styling a screenful of a huge file is
+/// O(visible), not O(file) (the per-edit typing cost; framing Q#S6).
+#[must_use]
+pub fn compute_highlight_spans_in_range(
+    query: &tree_sitter::Query,
+    bundle: &ParseTreeBundle,
+    byte_range: Option<std::ops::Range<usize>>,
+) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
+    if let Some(range) = byte_range {
+        cursor.set_byte_range(range);
+    }
     let source: &[u8] = bundle.source.as_ref();
     let root = bundle.tree.root_node();
     let mut iter = cursor.captures(query, root, source);
@@ -850,5 +878,22 @@ mod tests {
         );
         // Pending list cleared on make_request.
         assert_eq!(handle.pending_edit_count(), 0);
+    }
+
+    #[test]
+    fn registry_tracks_inflight_parse_jobs_by_buffer() {
+        let registry = SyntaxRegistry::new();
+        let a = BufferId::next();
+        let b = BufferId::next();
+
+        registry.record_parse_job(11, a);
+        registry.record_parse_job(12, b);
+
+        assert!(registry.has_pending_parse_job_for(a));
+        assert!(registry.has_pending_parse_job_for(b));
+
+        assert_eq!(registry.take_parse_job(11), Some(a));
+        assert!(!registry.has_pending_parse_job_for(a));
+        assert!(registry.has_pending_parse_job_for(b));
     }
 }

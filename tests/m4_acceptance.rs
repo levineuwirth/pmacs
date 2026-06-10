@@ -5158,6 +5158,112 @@ fn m4_12_default_bundle_wires_commands_and_keymaps() {
     assert!(probe.get::<bool>("cmd_sig").unwrap());
 }
 
+/// Typing-perf: the default bundle coalesces full-document
+/// `didChange` notifications instead of sending one per keystroke
+/// (each send copies the whole buffer several times and writes
+/// O(file) JSON to the server pipe). The after-edit hook only bumps
+/// the version and records the buffer dirty; the notification ships
+/// on the async tick after the quiet window, or synchronously when a
+/// request path flushes via `pmacs.lsp._flush_did_changes`. Observed
+/// by monkeypatching `pmacs.lsp.did_change` (the bundle resolves it
+/// dynamically at flush time) and firing `buffer.after-edit` through
+/// the public hook runner.
+#[test]
+fn m4_lua_bundle_debounces_did_change_per_keystroke() {
+    use pmacs::editor::EditorState;
+
+    let mut s = EditorState::new();
+    let fake = fake_lsp_path();
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("debounce.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+    let file_disp = file.display();
+
+    // Point the rust config at the fake server, open the file (the
+    // after-load hook auto-attaches and sends didOpen v1), then
+    // instrument did_change.
+    s.lua_host
+        .lua()
+        .load(format!(
+            "
+            pmacs.lsp.config.rust = {{ command = '{fake}' }}
+            pmacs.buffer.find_or_open('{file_disp}')
+            _G.__sent_did_changes = {{}}
+            local real = pmacs.lsp.did_change
+            pmacs.lsp.did_change = function(sid, uri, version, text)
+                table.insert(_G.__sent_did_changes, {{ version = version, len = #text }})
+                return real(sid, uri, version, text)
+            end
+            "
+        ))
+        .exec()
+        .expect("configure + open + instrument");
+
+    // Three "keystrokes" in a burst: nothing may ship inline.
+    s.lua_host
+        .lua()
+        .load("for _ = 1, 3 do pmacs.hook.run('buffer.after-edit') end")
+        .exec()
+        .expect("fire after-edit burst");
+    let sent: i64 = s
+        .lua_host
+        .lua()
+        .load("return #_G.__sent_did_changes")
+        .eval()
+        .expect("count sends");
+    assert_eq!(sent, 0, "didChange must not ship per keystroke");
+
+    // Request-path flush: exactly one coalesced notification carrying
+    // the latest version (didOpen was v1, three edits bump to v4 —
+    // skipped intermediate versions are legal, LSP only requires
+    // strictly increasing).
+    let (sent, version): (i64, i64) = s
+        .lua_host
+        .lua()
+        .load(
+            "
+            pmacs.lsp._flush_did_changes()
+            local n = #_G.__sent_did_changes
+            local v = n > 0 and _G.__sent_did_changes[n].version or -1
+            return n, v
+            ",
+        )
+        .eval()
+        .expect("flush + count");
+    assert_eq!(
+        sent, 1,
+        "explicit flush ships exactly one coalesced didChange"
+    );
+    assert_eq!(
+        version, 4,
+        "flush carries the latest version (v1 open + 3 edits)"
+    );
+
+    // Time-based flush: one more edit, then tick after the quiet
+    // window (75ms in the bundle) has elapsed.
+    s.lua_host
+        .lua()
+        .load("pmacs.hook.run('buffer.after-edit')")
+        .exec()
+        .expect("fire single after-edit");
+    std::thread::sleep(Duration::from_millis(120));
+    s.tick_async();
+    let (sent, version): (i64, i64) = s
+        .lua_host
+        .lua()
+        .load(
+            "
+            local n = #_G.__sent_did_changes
+            local v = n > 0 and _G.__sent_did_changes[n].version or -1
+            return n, v
+            ",
+        )
+        .eval()
+        .expect("count after tick");
+    assert_eq!(sent, 2, "quiet-window tick flushes the pending didChange");
+    assert_eq!(version, 5, "tick flush carries the post-edit version");
+}
+
 /// Defensive: the auto-attach hook ignores buffers that don't have a
 /// language config, doesn't crash on `*scratch*`, and pcall-wraps the
 /// spawn so a missing server binary in the user's PATH doesn't poison

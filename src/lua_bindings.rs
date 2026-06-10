@@ -7262,6 +7262,23 @@ pub fn install_lsp(
     }
 
     {
+        // Mark `uri`'s cached LSP render families (diagnostics,
+        // semantic tokens, inlay hints) stale without sending
+        // anything. The didChange-debounce glue in
+        // `builtin/runtime/lsp.lua` calls this per edit so stale
+        // suppression stays keystroke-accurate while the O(file)
+        // full-document notification is coalesced.
+        let m = manager.clone();
+        lsp_mod.set(
+            "_mark_document_stale",
+            lua.create_function(move |_, uri: String| {
+                m.borrow().mark_document_stale(&uri);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
         let m = manager.clone();
         lsp_mod.set(
             "did_close",
@@ -11425,6 +11442,22 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             lua.create_function(move |_, msg: String| {
                 cc.borrow_mut().status = msg;
                 Ok(())
+            })?,
+        )?;
+    }
+    {
+        // Milliseconds on a process-local monotonic clock. Only
+        // differences are meaningful (the epoch is the first call).
+        // Exists for Lua-side debounce/throttle logic — notably the
+        // LSP didChange coalescing in `builtin/runtime/lsp.lua` —
+        // which needs wall-clock-independent elapsed time; `os.clock`
+        // is CPU time and `os.time` is second-granular.
+        editor.set(
+            "monotonic_ms",
+            lua.create_function(|_, ()| {
+                static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                let epoch = *EPOCH.get_or_init(std::time::Instant::now);
+                Ok(i64::try_from(epoch.elapsed().as_millis()).unwrap_or(i64::MAX))
             })?,
         )?;
     }

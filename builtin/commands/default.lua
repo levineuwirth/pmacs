@@ -40,10 +40,20 @@ cmd { name = "cursor.paragraph-down",
 
 -- Buffer editing -------------------------------------------------------------
 
-cmd { name = "buffer.delete-backward", description = "Delete the codepoint before the cursor.",
-      fn = function() ed.backspace() end }
-cmd { name = "buffer.delete-forward",  description = "Delete the codepoint at the cursor.",
-      fn = function() ed.delete_forward() end }
+-- CUA region semantics: with an active selection, Backspace / Delete
+-- consume the region (cursor lands at its start, selection clears).
+-- `delete_region` returns false when no region is active, so the
+-- single-codepoint behavior is untouched outside selections.
+cmd { name = "buffer.delete-backward",
+      description = "Delete the active region, or the codepoint before the cursor.",
+      fn = function()
+        if not ed.delete_region() then ed.backspace() end
+      end }
+cmd { name = "buffer.delete-forward",
+      description = "Delete the active region, or the codepoint at the cursor.",
+      fn = function()
+        if not ed.delete_region() then ed.delete_forward() end
+      end }
 cmd { name = "buffer.delete-word-backward",
       description = "Delete from the cursor back to the start of the previous word.",
       fn = function() ed.delete_word_backward() end }
@@ -79,18 +89,31 @@ cmd { name = "cursor.select-word-left",
 cmd { name = "cursor.select-word-right",
       description = "Extend selection by one word right.",
       fn = function() ensure_anchor(); ed.move_word_right() end }
+cmd { name = "cursor.select-paragraph-up",
+      description = "Extend selection to the previous paragraph break.",
+      fn = function() ensure_anchor(); ed.move_paragraph_up() end }
+cmd { name = "cursor.select-paragraph-down",
+      description = "Extend selection to the next paragraph break.",
+      fn = function() ensure_anchor(); ed.move_paragraph_down() end }
 cmd { name = "cursor.select-line-start",
       description = "Extend selection to start of line.",
       fn = function() ensure_anchor(); ed.move_line_start() end }
 cmd { name = "cursor.select-line-end",
       description = "Extend selection to end of line.",
       fn = function() ensure_anchor(); ed.move_line_end() end }
-cmd { name = "buffer.newline",         description = "Insert a newline at the cursor.",
-      fn = function() ed.insert_char(10) end }
-cmd { name = "buffer.tab",             description = "Insert a tab at the cursor.",
-      fn = function() ed.insert_char(9) end }
-cmd { name = "buffer.self-insert",     description = "Insert the codepoint argument at the cursor.",
-      fn = function(codepoint) ed.insert_char(codepoint) end }
+-- CUA type-over: inserting with an active selection replaces it
+-- (`delete_region` is a no-op without one). The pmacs-gpu frontend
+-- relies on this: its optimistic-insert path detects an own-window
+-- selection and round-trips the key so these commands run.
+cmd { name = "buffer.newline",
+      description = "Insert a newline at the cursor, replacing the active region.",
+      fn = function() ed.delete_region(); ed.insert_char(10) end }
+cmd { name = "buffer.tab",
+      description = "Insert a tab at the cursor, replacing the active region.",
+      fn = function() ed.delete_region(); ed.insert_char(9) end }
+cmd { name = "buffer.self-insert",
+      description = "Insert the codepoint argument at the cursor, replacing the active region.",
+      fn = function(codepoint) ed.delete_region(); ed.insert_char(codepoint) end }
 
 -- History --------------------------------------------------------------------
 

@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -97,7 +97,20 @@ pub struct EditorState {
     /// Snippet store (T M4.11). Co-owned with the snippet
     /// provider closure inside [`Self::completion_registry`].
     pub snippets: crate::completion_framework::SharedSnippetRegistry,
+    /// Last left-button down event, used to synthesize terminal double
+    /// clicks from crossterm's plain Down/Up mouse event stream.
+    mouse_click: Option<MouseClickState>,
 }
+
+#[derive(Copy, Clone)]
+struct MouseClickState {
+    frontend_id: FrontendId,
+    window_id: WindowId,
+    cell: CellCoord,
+    at: Instant,
+}
+
+const DOUBLE_CLICK_MAX_DELAY: Duration = Duration::from_millis(500);
 
 impl EditorState {
     /// Construct a fresh editor for an unnamed scratch buffer.
@@ -322,6 +335,7 @@ impl EditorState {
             project_indexer,
             completion_registry,
             snippets,
+            mouse_click: None,
         }
     }
 
@@ -662,6 +676,8 @@ impl EditorState {
     ///     positions the buffer cursor at the corresponding rope
     ///     position. Starts an empty selection at that position so
     ///     a drag continues the region from there.
+    ///   * A second `Down(Left)` in the same cell within the double-click
+    ///     threshold selects the word at the click position.
     ///   * `Drag(Left)` updates the cursor as the mouse moves; the
     ///     anchor stays put, so the region grows.
     ///   * `Up(Left)` ends a drag. If anchor and cursor coincide
@@ -699,14 +715,28 @@ impl EditorState {
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if local_row >= inner_rows {
+                    self.mouse_click = None;
                     return; // Mode-line click: reserved.
                 }
+                let click_cell = CellCoord::new(cell_row, cell_col);
+                let is_double_click = self.is_double_click(frontend_id, win_id, click_cell);
                 self.activate_and_position(win_id, local_row, local_col);
-                let mut core = self.core.borrow_mut();
-                let pos = core.cursor();
-                core.begin_selection(pos);
+                if is_double_click && self.core.borrow_mut().select_word_at_cursor() {
+                    self.mouse_click = None;
+                } else {
+                    let mut core = self.core.borrow_mut();
+                    let pos = core.cursor();
+                    core.begin_selection(pos);
+                    self.mouse_click = Some(MouseClickState {
+                        frontend_id,
+                        window_id: win_id,
+                        cell: click_cell,
+                        at: Instant::now(),
+                    });
+                }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                self.mouse_click = None;
                 if local_row >= inner_rows {
                     return;
                 }
@@ -721,13 +751,32 @@ impl EditorState {
                 }
             }
             MouseEventKind::ScrollUp => {
+                self.mouse_click = None;
                 self.scroll_window(win_id, -SCROLL_LINES);
             }
             MouseEventKind::ScrollDown => {
+                self.mouse_click = None;
                 self.scroll_window(win_id, SCROLL_LINES);
             }
-            _ => {}
+            _ => {
+                self.mouse_click = None;
+            }
         }
+    }
+
+    fn is_double_click(
+        &self,
+        frontend_id: FrontendId,
+        window_id: WindowId,
+        cell: CellCoord,
+    ) -> bool {
+        let Some(prev) = self.mouse_click else {
+            return false;
+        };
+        prev.frontend_id == frontend_id
+            && prev.window_id == window_id
+            && prev.cell == cell
+            && prev.at.elapsed() <= DOUBLE_CLICK_MAX_DELAY
     }
 
     /// Make `win_id` the active window and place its cursor at the
@@ -1110,6 +1159,7 @@ pub fn paint_frame(
         for overlay in &mut window.overlays {
             overlay.render(buf, viewport, grid);
         }
+        paint_local_selection(grid, buf, window, &rect, inner_rows);
         // Mode line for this window. Painted last so the line
         // itself is always visible regardless of overlay activity.
         let coord = window
@@ -1197,6 +1247,62 @@ fn paint_status_line(
 /// the per-window mode line (one row).
 fn inner_rows(rect: &crate::window::Rect) -> u32 {
     rect.size.rows.saturating_sub(1)
+}
+
+fn paint_local_selection(
+    grid: &mut crate::cell::CellGrid<'_>,
+    buf: &crate::buffer::Buffer,
+    window: &crate::window::Window,
+    rect: &crate::window::Rect,
+    inner_rows: u32,
+) {
+    let Some((sel_start, sel_end)) = window.region() else {
+        return;
+    };
+    if inner_rows == 0 || rect.size.cols == 0 || sel_start >= sel_end {
+        return;
+    }
+
+    let first_row = window.view_top;
+    let last_row = first_row.saturating_add(inner_rows as usize);
+    for display_row in first_row..last_row {
+        let Some(line_start) = window.text_view.line_offset(display_row) else {
+            continue;
+        };
+        let Some(line_len) = window.text_view.line_len(buf, display_row) else {
+            continue;
+        };
+        let line_end = line_start.saturating_add(line_len);
+        let paint_start = sel_start.max(line_start);
+        let paint_end = sel_end.min(line_end);
+        if paint_start >= paint_end {
+            continue;
+        }
+
+        let Some(start_coord) = window.text_view.pos_to_display(buf, paint_start) else {
+            continue;
+        };
+        let Some(end_coord) = window.text_view.pos_to_display(buf, paint_end) else {
+            continue;
+        };
+        if start_coord.row as usize != display_row || end_coord.row as usize != display_row {
+            continue;
+        }
+
+        let row_offset = display_row.saturating_sub(first_row) as u32;
+        let start_col = start_coord.col.min(rect.size.cols);
+        let end_col = end_coord.col.min(rect.size.cols);
+        if start_col >= end_col {
+            continue;
+        }
+        for col in start_col..end_col {
+            let cell = grid.at(CellCoord::new(
+                rect.origin.row + row_offset,
+                rect.origin.col + col,
+            ));
+            cell.style.reverse = true;
+        }
+    }
 }
 
 #[allow(
@@ -4055,6 +4161,94 @@ mod tests {
         assert!(core.active_region().is_none());
     }
 
+    #[test]
+    fn mouse_drag_selection_paints_in_tui_grid() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut s = fresh_with(b"hello world\n");
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 0),
+            term_size_24x80(),
+        );
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 0, 5),
+            term_size_24x80(),
+        );
+
+        let (cells, _, _) = render_to_grid(&s, 24, 80);
+        for col in 0..5 {
+            let style = cells[col as usize].style;
+            assert!(style.reverse, "selected col {col} was not reverse video");
+        }
+        assert!(
+            !cells[5].style.reverse,
+            "unselected cell after mouse selection was reverse video"
+        );
+    }
+
+    #[test]
+    fn mouse_double_click_selects_word_and_paints_in_tui_grid() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut s = fresh_with(b"hello world\n");
+
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 7),
+            term_size_24x80(),
+        );
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::Up(MouseButton::Left), 0, 7),
+            term_size_24x80(),
+        );
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 7),
+            term_size_24x80(),
+        );
+        s.dispatch_mouse(
+            FrontendId::LOCAL,
+            mouse(MouseEventKind::Up(MouseButton::Left), 0, 7),
+            term_size_24x80(),
+        );
+
+        assert_eq!(s.core.borrow().cursor(), 11);
+        assert_eq!(s.core.borrow().active_region(), Some((6, 11)));
+
+        let (cells, _, _) = render_to_grid(&s, 24, 80);
+        assert!(!cells[5].style.reverse, "selection leaked into separator");
+        for col in 6..11 {
+            assert!(
+                cells[col as usize].style.reverse,
+                "double-click selected word missing col {col}"
+            );
+        }
+        assert!(!cells[11].style.reverse, "selection leaked past word");
+    }
+
+    #[test]
+    fn mouse_double_click_on_separator_leaves_no_region() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut s = fresh_with(b"hello world\n");
+
+        for _ in 0..2 {
+            s.dispatch_mouse(
+                FrontendId::LOCAL,
+                mouse(MouseEventKind::Down(MouseButton::Left), 0, 5),
+                term_size_24x80(),
+            );
+            s.dispatch_mouse(
+                FrontendId::LOCAL,
+                mouse(MouseEventKind::Up(MouseButton::Left), 0, 5),
+                term_size_24x80(),
+            );
+        }
+
+        assert_eq!(s.core.borrow().cursor(), 5);
+        assert!(s.core.borrow().active_region().is_none());
+    }
+
     /// Acceptance bullet 3: mouse events are coalesced at frame
     /// boundaries — many drag events between renders all apply, and
     /// the cursor ends up at the last position.
@@ -4315,6 +4509,43 @@ mod tests {
         );
         // "résumé" is 8 bytes; cursor at 5 + 1 (space) + 8 = 14.
         assert_eq!(s.core.borrow().cursor(), 14);
+    }
+
+    #[test]
+    fn shift_arrow_extends_selection_and_paints_in_tui_grid() {
+        let mut s = fresh_with(b"abcdef\n");
+        s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Right, KeyModifiers::SHIFT));
+        s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Right, KeyModifiers::SHIFT));
+
+        assert_eq!(s.core.borrow().cursor(), 2);
+        assert_eq!(s.core.borrow().active_region(), Some((0, 2)));
+
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        assert!(cells[0].style.reverse, "selection did not paint col 0");
+        assert!(cells[1].style.reverse, "selection did not paint col 1");
+        assert!(!cells[2].style.reverse, "selection leaked into col 2");
+        assert_eq!(glyph_at(&cells, stride, 0, 0), 'a');
+        assert_eq!(glyph_at(&cells, stride, 0, 1), 'b');
+    }
+
+    #[test]
+    fn ctrl_shift_arrow_extends_selection_by_words_and_paragraphs() {
+        let mut s = fresh_with(b"alpha beta\n\nsecond\n");
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(KeyCode::Right, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert_eq!(s.core.borrow().cursor(), 5);
+        assert_eq!(s.core.borrow().active_region(), Some((0, 5)));
+
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        s.core.borrow_mut().clear_selection();
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        );
+        assert_eq!(s.core.borrow().cursor(), 11);
+        assert_eq!(s.core.borrow().active_region(), Some((0, 11)));
     }
 
     #[test]

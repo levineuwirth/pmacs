@@ -18,13 +18,14 @@
 
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::thread;
 
 use pmacs_protocol::{
-    AttachRequest, BufferId, ByteRange, FrontendCapabilities, FrontendEvent, FrontendId, Hello,
-    InstanceMessage, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, TransportError,
-    is_supported_protocol_version, read_message, write_message,
+    AttachRequest, BufferId, ByteRange, CrdtOp, FrontendCapabilities, FrontendEvent, FrontendId,
+    Hello, InstanceMessage, Key, KeyEvent, Modifiers, PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS, TransportError, is_supported_protocol_version, read_message,
+    write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -76,10 +77,10 @@ pub enum AttachEvent {
 /// Connect, handshake, and spawn the reader thread.
 ///
 /// Returns once the handshake has completed and the reader thread is
-/// running. The reader thread owns the read half of the stream; the
-/// returned [`AttachClient`] retains the write half so the main loop
-/// can eventually emit `FrontendEvent`s back to the daemon (session 4
-/// will need this — selection / viewport / edits travel that way).
+/// running. The reader thread owns the read half of the stream; a
+/// writer thread owns the write half. The returned [`AttachClient`]
+/// queues outbound `FrontendEvent`s so the winit UI thread never blocks
+/// on daemon socket backpressure.
 ///
 /// **Initial window size note** — `AttachRequest::initial_size` is
 /// nominally a `CellSize` (rows × cols) anchored to the TUI. The
@@ -146,12 +147,13 @@ pub fn connect(
     };
     write_message(&mut handshake_stream, &req).map_err(AttachClientError::Handshake)?;
 
-    // Split read/write halves for the reader thread + main-thread
-    // write path. UnixStream clones share the underlying FD with
-    // independent buffer state — safe to read on one clone while the
-    // other writes (the FD is full-duplex).
+    // Split read/write halves for the reader thread + writer thread.
+    // UnixStream clones share the underlying FD with independent
+    // buffer state — safe to read on one clone while the other writes
+    // (the FD is full-duplex).
     let mut read_stream = stream.try_clone().map_err(AttachClientError::Connect)?;
     let write_stream = stream;
+    let (writer_tx, writer_rx) = mpsc::channel::<FrontendEvent>();
 
     // Reader thread. Each iteration: block on read_message, decode,
     // forward via the event-loop proxy. Exits cleanly on EOF / any
@@ -181,22 +183,32 @@ pub fn connect(
         })
         .expect("spawn attach reader thread");
 
+    // Writer thread. Socket writes can block when the daemon falls
+    // behind; doing them here keeps keyboard input, redraws, and
+    // message application off that backpressure path.
+    thread::Builder::new()
+        .name("pmacs-gpu attach writer".into())
+        .spawn(move || {
+            let mut write_stream = write_stream;
+            while let Ok(event) = writer_rx.recv() {
+                if let Err(e) = write_message(&mut write_stream, &event) {
+                    eprintln!("pmacs-gpu: attach writer stopped: {e}");
+                    return;
+                }
+            }
+        })
+        .expect("spawn attach writer thread");
+
     Ok(AttachClient {
-        write_stream: Arc::new(Mutex::new(write_stream)),
+        writer_tx,
         frontend_id: hello.assigned_frontend_id,
     })
 }
 
-/// Handle the main loop keeps after `connect` returns. Session 4
-/// wires the write side for `FrontendEvent::Viewport` emission;
-/// future sessions will add cursor / edit / focus / detach.
-///
-/// The write half is wrapped in `Arc<Mutex<...>>` because, while
-/// pmacs-gpu's event loop is single-threaded, a future multi-window
-/// shape might emit events from several places concurrently. The
-/// lock cost is one mutex per emitted frame — negligible.
+/// Handle the main loop keeps after `connect` returns. It queues
+/// `FrontendEvent`s for the attach writer thread.
 pub struct AttachClient {
-    write_stream: Arc<Mutex<UnixStream>>,
+    writer_tx: mpsc::Sender<FrontendEvent>,
     /// Assigned by the daemon in the `Hello` response. Every
     /// `FrontendEvent` carries this so the daemon can route input back
     /// to the per-session `SemanticRenderState`.
@@ -204,6 +216,11 @@ pub struct AttachClient {
 }
 
 impl AttachClient {
+    /// Frontend id assigned by the daemon in the initial `Hello`.
+    pub fn frontend_id(&self) -> FrontendId {
+        self.frontend_id
+    }
+
     /// Send a `FrontendEvent::Viewport` to the daemon. The daemon's
     /// `SemanticRenderState::set_viewport` feeds the spans producer;
     /// without this call the daemon ships no `StyleSpans` for the
@@ -214,18 +231,48 @@ impl AttachClient {
         visible: ByteRange,
         generation: u64,
     ) -> Result<(), TransportError> {
-        let mut stream = self
-            .write_stream
-            .lock()
-            .expect("attach write-stream mutex poisoned");
-        write_message(
-            &mut *stream,
-            &FrontendEvent::Viewport {
-                frontend_id: self.frontend_id,
-                buffer_id,
-                visible,
-                generation,
-            },
-        )
+        self.send_event(FrontendEvent::Viewport {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            visible,
+            generation,
+        })
+    }
+
+    /// Send a `FrontendEvent::Key` to the daemon (session B1). The
+    /// daemon routes it through `dispatch_key` — the same keymap +
+    /// command + Lua stack the TUI drives — so cursor motion and (in
+    /// later sessions) edits are produced entirely instance-side; the
+    /// resulting `CursorByte` / `CrdtOp` come back over the attach
+    /// stream. `timestamp_ns` is 0 (no capture clock plumbed yet; the
+    /// daemon does not depend on it).
+    pub fn send_key(&self, key: Key, mods: Modifiers) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::Key(KeyEvent {
+            frontend_id: self.frontend_id,
+            key,
+            mods,
+            timestamp_ns: 0,
+        }))
+    }
+
+    /// Send a locally-authored CRDT operation to the daemon. The GPU
+    /// uses this for idle plain-text insertion after applying the same
+    /// op to its local Loro replica, avoiding a Key round trip on the
+    /// hot typing path.
+    pub fn send_crdt_op(&self, buffer_id: BufferId, op: CrdtOp) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::CrdtOp {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            op,
+        })
+    }
+
+    fn send_event(&self, event: FrontendEvent) -> Result<(), TransportError> {
+        self.writer_tx.send(event).map_err(|_| {
+            TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "attach writer thread stopped",
+            ))
+        })
     }
 }

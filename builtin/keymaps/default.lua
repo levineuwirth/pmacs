@@ -73,7 +73,8 @@ bind("M-d",   "buffer.delete-word-forward")
 -- CUA-style Shift+motion selection. Each Shift+arrow extends a
 -- selection from the cursor (anchoring at the current position if no
 -- region is yet active). Ctrl+Shift+Left/Right extend by whole words;
--- Shift+Home/End extend to line edges. Plain motion (without Shift)
+-- Ctrl+Shift+Up/Down extend by paragraphs; Shift+Home/End extend to
+-- line edges. Plain motion (without Shift)
 -- is unchanged --- it preserves any existing selection rather than
 -- dropping it (Emacs-flavored default; users who want strict-CUA
 -- "drop-on-plain-motion" can rebind their motion commands).
@@ -85,6 +86,8 @@ bind("S-<home>",   "cursor.select-line-start")
 bind("S-<end>",    "cursor.select-line-end")
 bind("C-S-<left>",  "cursor.select-word-left")
 bind("C-S-<right>", "cursor.select-word-right")
+bind("C-S-<up>",    "cursor.select-paragraph-up")
+bind("C-S-<down>",  "cursor.select-paragraph-down")
 
 -- Undo / redo ----------------------------------------------------------------
 --
