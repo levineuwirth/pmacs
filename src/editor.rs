@@ -779,6 +779,81 @@ impl EditorState {
             && prev.at.elapsed() <= DOUBLE_CLICK_MAX_DELAY
     }
 
+    /// Mouse framing Q#M1 — apply a semantic frontend's locally
+    /// hit-tested pointer gesture (`FrontendEvent::Pointer`) to its
+    /// window. The byte-space twin of [`Self::dispatch_mouse`]: same
+    /// gesture semantics, but the position arrives as a source byte
+    /// offset the frontend resolved against its own layout (fonts,
+    /// inline adornments, scroll), so no cell geometry is consulted.
+    ///
+    ///   * `Down` places the cursor and anchors a selection there
+    ///     (a following drag grows it).
+    ///   * `Drag` moves the cursor; the anchor stays.
+    ///   * `Up` collapses an empty selection (a click without drag).
+    ///   * `DoubleDown` selects the word at the hit (frontend-side
+    ///     double-click detection — only it knows pixel proximity).
+    ///
+    /// The hit byte is clamped into the buffer and snapped back to a
+    /// UTF-8 boundary: the frontend's hit may race an in-flight edit.
+    /// `mods` is carried for future Shift-click extension and ignored
+    /// today, matching `dispatch_mouse`.
+    pub fn dispatch_pointer(
+        &mut self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+        byte: u64,
+        kind: crate::protocol::PointerKind,
+        _mods: crate::protocol::Modifiers,
+    ) {
+        use crate::protocol::PointerKind;
+        let mut core = self.core.borrow_mut();
+        core.active_frontend = frontend_id;
+        let Some(win_id) = core.views.get(&frontend_id).map(|v| v.active) else {
+            return;
+        };
+        // The dispatcher aligns the session's window to the declared
+        // buffer before calling here; re-check defensively (a click
+        // can race a buffer switch).
+        if core.windows.get(&win_id).map(|w| w.buffer_id) != Some(buffer_id) {
+            return;
+        }
+        core.set_active_window_id(win_id);
+        let byte = {
+            let registry = core.registry.clone();
+            let reg = registry.borrow();
+            let Ok(buf) = reg.get(buffer_id) else {
+                return;
+            };
+            snap_to_char_boundary(buf, byte)
+        };
+        match kind {
+            PointerKind::Down => {
+                let aw = core.active_window_mut();
+                aw.cursor = byte;
+                aw.goal_col = None;
+                core.begin_selection(byte);
+            }
+            PointerKind::Drag => {
+                let aw = core.active_window_mut();
+                aw.cursor = byte;
+                aw.goal_col = None;
+            }
+            PointerKind::Up => {
+                if let Some(sel) = core.active_window().selection
+                    && sel.anchor == core.cursor()
+                {
+                    core.clear_selection();
+                }
+            }
+            PointerKind::DoubleDown => {
+                let aw = core.active_window_mut();
+                aw.cursor = byte;
+                aw.goal_col = None;
+                core.select_word_at_cursor();
+            }
+        }
+    }
+
     /// Make `win_id` the active window and place its cursor at the
     /// buffer position corresponding to `(local_row, local_col)`,
     /// where the coordinates are relative to the window's viewport
@@ -1245,6 +1320,24 @@ fn paint_status_line(
 
 /// Rows available for buffer text inside `rect`, after subtracting
 /// the per-window mode line (one row).
+/// Clamp `pos` into `buf` and walk back to the nearest UTF-8
+/// codepoint boundary. Pointer hits arrive from a frontend whose text
+/// may be a few unconfirmed edits ahead of or behind the instance, so
+/// a raw byte offset can land mid-codepoint; a snapped position is
+/// always safe to assign to a window cursor.
+fn snap_to_char_boundary(buf: &crate::buffer::Buffer, pos: u64) -> u64 {
+    let len = buf.len();
+    let mut pos = pos.min(len);
+    while pos > 0 && pos < len {
+        match buf.snapshot_rope().byte_at(pos) {
+            // UTF-8 continuation byte (0b10xx_xxxx) ⇒ mid-codepoint.
+            Some(b) if b & 0b1100_0000 == 0b1000_0000 => pos -= 1,
+            _ => break,
+        }
+    }
+    pos
+}
+
 fn inner_rows(rect: &crate::window::Rect) -> u32 {
     rect.size.rows.saturating_sub(1)
 }
@@ -4247,6 +4340,55 @@ mod tests {
 
         assert_eq!(s.core.borrow().cursor(), 5);
         assert!(s.core.borrow().active_region().is_none());
+    }
+
+    /// Mouse framing Q#M1 — `dispatch_pointer` replays the mouse
+    /// gesture semantics in byte space for semantic frontends.
+    #[test]
+    fn dispatch_pointer_replays_mouse_semantics_in_byte_space() {
+        use crate::protocol::{Modifiers as WireMods, PointerKind};
+        // Bytes: h=0 é=1,2 ' '=3 l=4 l=5 o=6 ' '=7 w=8 ö=9,10 r=11
+        // l=12 d=13 \n=14; len=15.
+        let mut s = fresh_with("hé llo wörld\n".as_bytes());
+        let bid = s.core.borrow().active_buffer_id();
+        let none = WireMods::NONE;
+
+        // Down places the cursor — a mid-codepoint hit (inside 'é')
+        // snaps back to the boundary — and anchors a selection.
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 2, PointerKind::Down, none);
+        assert_eq!(
+            s.core.borrow().cursor(),
+            1,
+            "mid-codepoint hit snaps to the char boundary"
+        );
+
+        // Drag grows the region from the anchor; Up keeps it.
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 6, PointerKind::Drag, none);
+        assert_eq!(s.core.borrow().cursor(), 6);
+        assert_eq!(s.core.borrow().active_region(), Some((1, 6)));
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 6, PointerKind::Up, none);
+        assert_eq!(s.core.borrow().active_region(), Some((1, 6)));
+
+        // A plain click (Down + Up, no drag) leaves no region.
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 4, PointerKind::Down, none);
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 4, PointerKind::Up, none);
+        assert_eq!(s.core.borrow().cursor(), 4);
+        assert!(s.core.borrow().active_region().is_none());
+
+        // DoubleDown selects the word at the hit ("wörld").
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 8, PointerKind::DoubleDown, none);
+        assert_eq!(s.core.borrow().active_region(), Some((8, 14)));
+        assert_eq!(s.core.borrow().cursor(), 14);
+
+        // Past-EOF hits clamp to the buffer length.
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 999, PointerKind::Down, none);
+        assert_eq!(s.core.borrow().cursor(), 15);
+
+        // A pointer for a buffer the window isn't displaying is
+        // dropped (click racing a buffer switch).
+        let other = crate::buffer::BufferId::next();
+        s.dispatch_pointer(FrontendId::LOCAL, other, 0, PointerKind::Down, none);
+        assert_eq!(s.core.borrow().cursor(), 15, "mismatched buffer ignored");
     }
 
     /// Acceptance bullet 3: mouse events are coalesced at frame

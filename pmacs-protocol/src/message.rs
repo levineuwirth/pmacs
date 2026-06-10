@@ -307,6 +307,51 @@ pub enum FrontendEvent {
         /// CRDT generation the frontend computed `visible` against.
         generation: u64,
     },
+    /// Q#M1 (protocol v5): a pointer gesture a *semantic* frontend
+    /// hit-tested locally to a **source byte offset**. The pixel→byte
+    /// resolution happens entirely frontend-side (the frontend owns
+    /// layout: fonts, inline adornments, scroll) — consistent with
+    /// `Viewport`'s no-pixels contract; the instance replays its
+    /// existing mouse gesture semantics in byte space, so selection
+    /// behavior stays single-sourced with the grid path.
+    ///
+    /// Cell-grid frontends keep using [`FrontendEvent::Mouse`]; the
+    /// two variants are per-session-kind, never mixed. Only sent when
+    /// the instance's `Hello.protocol_version >= 5` (an older
+    /// instance cannot decode the variant).
+    Pointer {
+        /// Which frontend produced the gesture (untrusted; the
+        /// instance routes by the authenticated session, matching
+        /// the `CrdtOp` / `Viewport` source-trust rule).
+        frontend_id: FrontendId,
+        /// Buffer the frontend was displaying when it hit-tested.
+        buffer_id: crate::BufferId,
+        /// Source byte offset of the hit (frontend-local hit test;
+        /// adornment runs already snapped to their anchors).
+        byte: u64,
+        /// Which gesture step this is.
+        kind: PointerKind,
+        /// Modifiers held during the gesture. Carried for future
+        /// Shift-click extension; the v5 instance ignores them.
+        mods: Modifiers,
+    },
+}
+
+/// Gesture step for [`FrontendEvent::Pointer`]. Double-click
+/// detection is frontend-side (`DoubleDown` instead of a second
+/// `Down`): only the frontend knows pixel proximity and its own
+/// double-click interval.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerKind {
+    /// Primary button pressed at `byte`.
+    Down,
+    /// Pointer moved to `byte` with the primary button held.
+    Drag,
+    /// Primary button released at `byte`.
+    Up,
+    /// Second press at the same hit within the frontend's
+    /// double-click window — selects the word at `byte`.
+    DoubleDown,
 }
 
 impl FrontendEvent {
@@ -322,7 +367,8 @@ impl FrontendEvent {
             | Self::FocusLost(frontend_id)
             | Self::Detach(frontend_id)
             | Self::CrdtOp { frontend_id, .. }
-            | Self::Viewport { frontend_id, .. } => *frontend_id,
+            | Self::Viewport { frontend_id, .. }
+            | Self::Pointer { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -967,7 +1013,14 @@ pub enum ResourceBody {
 /// checks the session's negotiated version and skips the variant for
 /// older peers. An old peer would hard-error on decode of an unknown
 /// postcard variant; gating prevents that.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// Q#M1 (mouse framing): bumped from 4 to 5 for
+/// [`FrontendEvent::Pointer`]. The gate runs in the *frontend* this
+/// time (the new variant travels frontend→instance): a semantic
+/// frontend sends `Pointer` only when the instance's
+/// `Hello.protocol_version >= 5`, because an older instance would
+/// hard-error decoding the unknown variant.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -987,7 +1040,11 @@ pub const PROTOCOL_VERSION: u32 = 4;
 /// T M11.6: extended to `[1, 2, 3, 4]`. v4 sessions receive
 /// `InstanceMessage::DispatchIdle`; older sessions are filtered out
 /// of that emission.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2, 3, 4];
+///
+/// Mouse framing Q#M1: extended to `[1, 2, 3, 4, 5]`. v5 peers may
+/// send `FrontendEvent::Pointer`; the frontend-side gate (see
+/// [`PROTOCOL_VERSION`]) keeps the variant off wires negotiated `< 5`.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

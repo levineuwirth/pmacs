@@ -50,7 +50,7 @@ pub use message::{
     DecorationKind, DecorationSegment, FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello,
     InlineAdornment, InstanceCapabilities, InstanceIdentity, InstanceMessage, InstanceSignal, Key,
     KeyEvent, Modifiers, MouseButton, MouseEvent, MouseKind, NegotiatedCapabilities,
-    PROTOCOL_VERSION, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, StyleSegment,
-    StyleSpan, is_supported_protocol_version, negotiate_capabilities,
+    PROTOCOL_VERSION, PointerKind, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot,
+    StyleSegment, StyleSpan, is_supported_protocol_version, negotiate_capabilities,
 };
 pub use transport::{MAX_FRAME_BYTES, TransportError, read_message, write_message};
