@@ -757,6 +757,28 @@ impl EditorCore {
         aw.goal_col = None;
     }
 
+    /// Select the word at the active cursor. Returns `false` when the
+    /// cursor is not on a word character.
+    pub fn select_word_at_cursor(&mut self) -> bool {
+        let id = self.active_buffer_id();
+        let cursor = self.active_window().cursor;
+        let range = {
+            let reg = self.registry.borrow();
+            let Ok(buffer) = reg.get(id) else {
+                return false;
+            };
+            word_range_at(buffer, cursor)
+        };
+        let Some((start, end)) = range else {
+            return false;
+        };
+        let aw = self.active_window_mut();
+        aw.selection = Some(crate::window::Selection { anchor: start });
+        aw.cursor = end;
+        aw.goal_col = None;
+        true
+    }
+
     /// Move the cursor forward to the next paragraph break.
     ///
     /// A paragraph break is a blank line (empty or whitespace-only).
@@ -1381,6 +1403,16 @@ fn forward_word(buf: &Buffer, mut pos: Position) -> Position {
         pos += advance;
     }
     pos
+}
+
+fn word_range_at(buf: &Buffer, pos: Position) -> Option<(Position, Position)> {
+    let (ch, _) = char_at(buf, pos)?;
+    if !is_word_char(ch) {
+        return None;
+    }
+    let start = backward_word(buf, pos);
+    let end = forward_word(buf, pos);
+    (start < end).then_some((start, end))
 }
 
 /// True iff `line` is empty or contains only ASCII whitespace.
