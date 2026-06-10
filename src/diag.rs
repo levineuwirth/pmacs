@@ -384,6 +384,25 @@ fn style_for(severity: DiagnosticSeverity) -> Style {
     }
 }
 
+/// Style of the column-0 line marker — the TUI's gutter sign
+/// (T M4.6). The TUI reserves no gutter column, so the sign is a
+/// severity-colored *background* on the line's first cell: the
+/// glyph and its syntax color survive (the view contract is
+/// style-only), and zero-width diagnostics — invisible to the
+/// underline pass — still get a visible artifact.
+fn marker_style_for(severity: DiagnosticSeverity) -> Style {
+    let bg = match severity {
+        DiagnosticSeverity::Error => Color::Indexed(1),
+        DiagnosticSeverity::Warning => Color::Indexed(3),
+        DiagnosticSeverity::Information => Color::Indexed(6),
+        DiagnosticSeverity::Hint => Color::Indexed(8),
+    };
+    Style {
+        bg,
+        ..Style::default()
+    }
+}
+
 /// View that consumes the shared diagnostic store and underlines
 /// affected ranges. Composes over [`crate::text_view::TextView`] per
 /// the M2 view-composition contract --- never writes glyphs, only
@@ -456,6 +475,12 @@ impl View for DiagnosticView {
         let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
 
+        // Column-0 line markers (gutter signs, T M4.6): most severe
+        // diagnostic per visible row wins. `Ord` on the severity enum
+        // follows LSP numbering, so "most severe" is the minimum.
+        let mut line_markers: std::collections::HashMap<u32, DiagnosticSeverity> =
+            std::collections::HashMap::new();
+
         for diag in &diags {
             let style = style_for(diag.severity);
             // Apply to each line the diagnostic touches. LSP ranges
@@ -478,6 +503,13 @@ impl View for DiagnosticView {
                 if row_offset >= max_rows {
                     break;
                 }
+                // Record the line marker before any byte-range work:
+                // zero-width ranges (`byte_end <= byte_start` below)
+                // skip the underline but still mark the line.
+                line_markers
+                    .entry(row_offset)
+                    .and_modify(|s| *s = (*s).min(diag.severity))
+                    .or_insert(diag.severity);
                 let line_start = line_offsets[line as usize];
                 let line_end = line_offsets
                     .get(line as usize + 1)
@@ -505,11 +537,9 @@ impl View for DiagnosticView {
                     line_byte_len
                 };
                 if byte_end <= byte_start {
-                    // Empty range on a line --- still flag the
-                    // gutter character (the cell at column 0). For
-                    // a multi-line diagnostic with end_col=0, this
-                    // path is hit on the first / last line; the
-                    // visible column already moved on.
+                    // Empty range on a line --- no underline to
+                    // paint, but the column-0 marker recorded above
+                    // keeps the diagnostic visible.
                     continue;
                 }
                 let (start_col, end_col) =
@@ -524,6 +554,19 @@ impl View for DiagnosticView {
                     let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
                     cell.style = merge_styles(cell.style, style);
                 }
+            }
+        }
+
+        // Paint the column-0 markers last so a marker is visible even
+        // when an underline span also touches column 0 (bg and
+        // underline merge independently).
+        if max_cols > 0 {
+            for (row_offset, severity) in line_markers {
+                let cell = cells.at(CellCoord::new(
+                    cell_origin.row + row_offset,
+                    cell_origin.col,
+                ));
+                cell.style = merge_styles(cell.style, marker_style_for(severity));
             }
         }
     }
@@ -880,4 +923,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn column_zero_marker_shows_most_severe_diagnostic_per_line() {
+        use crate::cell::{Cell, CellSize, Glyph, UnderlineStyle};
+
+        let store = make_shared_store();
+        {
+            let mut guard = store.lock().expect("diag store");
+            // Line 0: a Hint and an Error overlap — the marker must
+            // show the Error. Line 1: a zero-width Warning (start ==
+            // end), invisible to the underline pass but still marked.
+            guard.set(
+                "file:///a",
+                vec![
+                    diag(0, DiagnosticSeverity::Hint, "h"),
+                    diag(0, DiagnosticSeverity::Error, "e"),
+                    Diagnostic {
+                        start_line: 1,
+                        start_col: 2,
+                        end_line: 1,
+                        end_col: 2,
+                        severity: DiagnosticSeverity::Warning,
+                        message: "w".to_owned(),
+                        source: None,
+                        code: None,
+                    },
+                ],
+            );
+        }
+
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "test.c");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"hello\nworld\nclean\n",
+        })
+        .expect("seed buffer");
+
+        let mut view = DiagnosticView::new("file:///a", store);
+        let mut backing = vec![Cell::default(); 30];
+        // Pre-paint glyphs at column 0 to pin the style-only contract.
+        backing[0].glyph = Glyph::Char('h');
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 10,
+            size: CellSize::new(3, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(3, 10),
+            },
+            &mut grid,
+        );
+
+        // Line 0: red (error) marker wins over the hint's gray; the
+        // glyph survives untouched.
+        assert_eq!(grid.get(CellCoord::new(0, 0)).style.bg, Color::Indexed(1));
+        assert_eq!(grid.get(CellCoord::new(0, 0)).glyph, Glyph::Char('h'));
+        // Line 1: zero-width warning still produces a marker, and no
+        // underline anywhere on the line (the range is empty).
+        assert_eq!(grid.get(CellCoord::new(1, 0)).style.bg, Color::Indexed(3));
+        assert_eq!(
+            grid.get(CellCoord::new(1, 2)).style.underline,
+            UnderlineStyle::None
+        );
+        // Line 2: clean — no marker.
+        assert_eq!(grid.get(CellCoord::new(2, 0)).style.bg, Color::Default);
+    }
 }
