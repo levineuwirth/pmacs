@@ -332,14 +332,14 @@ pub fn make_shared_store() -> SharedDiagStore {
 const TAB_WIDTH: u32 = 8;
 
 /// Style applied to bytes covered by an `Error` diagnostic. Wavy
-/// underline in red so it composes with whatever the syntax view
-/// painted on top.
+/// underline colored via `underline_color` (not `fg`) so the
+/// squiggle reads red while the syntax view's text color survives
+/// underneath (T M4.6, protocol v6).
 fn error_style() -> Style {
     Style {
         underline: UnderlineStyle::Curly,
-        // Red. Indexed 1 is portable across 8/16-color terminals.
-        fg: Color::Default,
-        bg: Color::Default,
+        // Indexed 1 (red) is portable across 8/16-color terminals.
+        underline_color: Color::Indexed(1),
         ..Style::default()
     }
 }
@@ -348,6 +348,8 @@ fn error_style() -> Style {
 fn warning_style() -> Style {
     Style {
         underline: UnderlineStyle::Curly,
+        // Indexed 3: yellow.
+        underline_color: Color::Indexed(3),
         ..Style::default()
     }
 }
@@ -356,6 +358,8 @@ fn warning_style() -> Style {
 fn info_style() -> Style {
     Style {
         underline: UnderlineStyle::Single,
+        // Indexed 6: cyan.
+        underline_color: Color::Indexed(6),
         ..Style::default()
     }
 }
@@ -364,6 +368,9 @@ fn info_style() -> Style {
 fn hint_style() -> Style {
     Style {
         underline: UnderlineStyle::Dotted,
+        // Indexed 8: bright black ("gray") — present on 16-color
+        // terminals, subtle by design for hints.
+        underline_color: Color::Indexed(8),
         ..Style::default()
     }
 }
@@ -792,6 +799,33 @@ mod tests {
     }
 
     #[test]
+    fn severity_styles_color_the_underline_not_the_text() {
+        // T M4.6: each severity gets a distinct underline color via
+        // `underline_color` (SGR 58); `fg` stays Default so the
+        // syntax view's text color survives the merge.
+        let mut seen = Vec::new();
+        for s in [
+            DiagnosticSeverity::Error,
+            DiagnosticSeverity::Warning,
+            DiagnosticSeverity::Information,
+            DiagnosticSeverity::Hint,
+        ] {
+            let style = style_for(s);
+            assert_eq!(style.fg, Color::Default, "{s:?} must not set fg");
+            assert_ne!(
+                style.underline_color,
+                Color::Default,
+                "{s:?} must color its underline"
+            );
+            assert!(
+                !seen.contains(&style.underline_color),
+                "{s:?} reuses another severity's underline color"
+            );
+            seen.push(style.underline_color);
+        }
+    }
+
+    #[test]
     fn view_advertises_diagnostic_kind() {
         // `pmacs.window._overlay_kinds()` introspection (task #23 wire-up,
         // mirroring "syntax-highlight" / LspStyleView) relies on this.
@@ -845,4 +879,5 @@ mod tests {
             "stale diagnostics must not underline shifted TUI bytes"
         );
     }
+
 }

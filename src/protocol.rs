@@ -1683,34 +1683,34 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_five_for_pointer_events() {
+    fn protocol_version_is_six_for_underline_color() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
         // bumped 3→4 (DispatchIdle for the optimistic-apply gate).
-        // The mouse framing Q#M1 bumped 4→5 (FrontendEvent::Pointer,
-        // byte-position gestures from semantic frontends). The
-        // current binary serves v1..=v5 sessions — the slice-
-        // membership handshake makes the relaxation symmetric.
-        assert_eq!(PROTOCOL_VERSION, 5);
+        // The mouse framing Q#M1 bumped 4→5 (FrontendEvent::Pointer).
+        // T M4.6 bumped 5→6 (`Style::underline_color`) — the first
+        // bump that changed an existing struct's postcard encoding,
+        // so v6 binaries serve v6 sessions only.
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 
     #[test]
-    fn supported_protocol_versions_includes_one_through_five() {
-        // T M10.5: v1.0 binaries accept v1+v2. T M11.1: v1.1 binaries
-        // accept v1+v2+v3. T M11.6: v4 binaries accept v1..=v4. Mouse
-        // framing Q#M1: v5 binaries accept v1..=v5. The check is
-        // slice membership, not strict equality, so older binaries
-        // keep connecting to current binaries unchanged. v6+ is
-        // rejected until the next bump.
-        assert!(is_supported_protocol_version(1));
-        assert!(is_supported_protocol_version(2));
-        assert!(is_supported_protocol_version(3));
-        assert!(is_supported_protocol_version(4));
-        assert!(is_supported_protocol_version(5));
-        assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(6));
-        assert!(!is_supported_protocol_version(u32::MAX));
+    fn supported_protocol_versions_is_exactly_v6() {
+        // T M4.6: `Style::underline_color` changed the encoding of
+        // every cell-carrying message (`Cell` / `CellDelta` /
+        // `Snapshot` / `StyleSpans`). The v1–v5 compat ladder relied
+        // on shared-struct encodings never changing — additive enum
+        // variants filtered per session — so the ladder ends here:
+        // pre-v6 peers are refused at the handshake (a clean
+        // VersionMismatch) rather than garbling postcard mid-session.
+        assert!(is_supported_protocol_version(6));
+        for rejected in [0, 1, 2, 3, 4, 5, 7, u32::MAX] {
+            assert!(
+                !is_supported_protocol_version(rejected),
+                "v{rejected} must be rejected by a v6 binary"
+            );
+        }
     }
 
     #[test]
@@ -2041,79 +2041,40 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // T M10.5 — backward-compat handshake matrix tests.
+    // Handshake version-policy tests.
     //
-    // Four cases per the framing-pass handshake matrix:
-    //   1. v1 daemon ↔ v1 frontend: pre-existing behavior; not retested.
-    //   2. v1 daemon ↔ v2 frontend: rejected with VersionMismatch.
-    //   3. v2 daemon ↔ v1 frontend: success; v1 session.
-    //   4. v2 daemon ↔ v2 frontend: success; v2 session.
-    //
-    // These tests exercise `is_supported_protocol_version` directly
-    // since the full daemon-attach path requires socket setup that's
-    // in m5_5_acceptance.rs. The version-check predicate is the
-    // load-bearing piece; daemon-level integration tests are in the
-    // separate integration test file.
+    // History: T M10.5 introduced the slice-membership relaxation
+    // (`is_supported_protocol_version`) so v1.0 daemons could accept
+    // v0.1 frontends, and the ladder grew through v5 (T M11.1, T
+    // M11.6, mouse framing Q#M1) — all additive enum variants,
+    // filtered per session, with shared-struct encodings untouched.
+    // T M4.6 (`Style::underline_color`) changed a shared struct's
+    // postcard encoding, ending the ladder: v6 binaries accept only
+    // v6 peers. These tests exercise the predicate directly; the
+    // daemon-level handshake integration lives in m5_5_acceptance.rs.
     // -----------------------------------------------------------------
 
     #[test]
-    fn m10_5_handshake_matrix_v2_daemon_accepts_v1_frontend() {
-        // The relaxation that makes §sec:m10-backward-compat hold.
-        assert!(
-            is_supported_protocol_version(1),
-            "v2 daemon must accept v1 frontend per §sec:m10-backward-compat"
-        );
-    }
-
-    #[test]
-    fn m10_5_handshake_matrix_v2_daemon_accepts_v2_frontend() {
-        // The new case M10.5 enables.
-        assert!(
-            is_supported_protocol_version(2),
-            "v2 daemon must accept v2 frontend (the v1.0 happy path)"
-        );
-    }
-
-    #[test]
-    fn m10_5_handshake_matrix_versions_outside_range_rejected() {
-        // v1 daemon's strict-equality behavior is documented at the
-        // v0.1 code level (different binary); the current daemon's
-        // range check accepts v1..=v5 (T M11.1 added v3; T M11.6
-        // added v4; the mouse framing Q#M1 added v5) and rejects v6+
-        // until the next protocol bump.
-        assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(6));
-        assert!(!is_supported_protocol_version(u32::MAX));
-    }
-
-    #[test]
-    fn m10_5_strict_equality_v1_frontend_simulation() {
-        // T M10.5 framing-pass risk #5 verification: existing v1
-        // frontends (the v0.1.0 release codebase, pre-M10.5) do
-        // strict equality on Hello.protocol_version. Simulate that
-        // check explicitly so the audit doc has empirical evidence
-        // of the actual backward-compat surface.
-        //
-        // Before M10.5: `if hello.protocol_version != 1 { reject }`.
-        // After M10.5: `if !is_supported_protocol_version(...) { reject }`.
-        //
-        // For a v1-strict-frontend connecting to a v2 daemon: the
-        // daemon's Hello carries protocol_version=2; the v1-strict
-        // frontend rejects with VersionMismatch.
-        fn v1_strict_check(hello_version: u32) -> bool {
-            hello_version == 1
+    fn m4_6_handshake_rejects_every_pre_v6_wire() {
+        // A v5-or-older peer cannot decode v6 cell traffic (postcard
+        // is not self-describing), so the handshake must refuse the
+        // session up front with VersionMismatch — slice membership is
+        // how that policy is expressed.
+        for old in 1..=5 {
+            assert!(
+                !is_supported_protocol_version(old),
+                "v6 binary must refuse a v{old} peer: its Style encoding \
+                 predates underline_color and would mis-decode every CellDelta"
+            );
         }
-        // v1-strict frontend hitting v2 daemon's Hello: rejected.
+    }
+
+    #[test]
+    fn m4_6_handshake_accepts_v6_peer() {
         assert!(
-            !v1_strict_check(2),
-            "v1-strict frontend rejects v2 daemon's Hello — pre-M10.5 binaries \
-             can NOT connect to v2 daemons even though v2 daemons accept their requests"
+            is_supported_protocol_version(PROTOCOL_VERSION),
+            "the current wire version must accept itself"
         );
-        // v1-strict frontend hitting v1 daemon's Hello: accepted.
-        assert!(v1_strict_check(1));
-        // For comparison, M10.5's relaxed check (v2 frontend after this milestone):
-        assert!(is_supported_protocol_version(1));
-        assert!(is_supported_protocol_version(2));
     }
 
     // T M10.6 — PresenceUpdate wire shape tests.

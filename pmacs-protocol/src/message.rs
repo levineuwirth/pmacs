@@ -1020,7 +1020,18 @@ pub enum ResourceBody {
 /// frontend sends `Pointer` only when the instance's
 /// `Hello.protocol_version >= 5`, because an older instance would
 /// hard-error decoding the unknown variant.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// T M4.6 (diagnostic surface): bumped from 5 to 6 for
+/// `Style::underline_color`. Unlike every previous bump, this one
+/// changes the *encoding of an existing struct* — `Style` rides
+/// inside `Cell` / `CellDelta` / `Snapshot` / `StyleSpans`, messages
+/// every session receives — so per-session send gating cannot
+/// preserve compatibility (postcard is not self-describing; a v5
+/// decoder mis-reads any v6 `Style`). v6 binaries therefore accept
+/// only v6 peers: a version-mismatched pair fails the handshake with
+/// [`GoodbyeReason::VersionMismatch`] instead of garbling cell
+/// traffic mid-session.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1044,7 +1055,15 @@ pub const PROTOCOL_VERSION: u32 = 5;
 /// Mouse framing Q#M1: extended to `[1, 2, 3, 4, 5]`. v5 peers may
 /// send `FrontendEvent::Pointer`; the frontend-side gate (see
 /// [`PROTOCOL_VERSION`]) keeps the variant off wires negotiated `< 5`.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[1, 2, 3, 4, 5];
+///
+/// T M4.6: narrowed to `[6]`. `Style::underline_color` changed the
+/// postcard encoding of every cell-carrying message, so v6 binaries
+/// cannot exchange cell traffic with any earlier wire. The v1–v5
+/// compat ladder (additive variants, per-session filtering) assumed
+/// shared-struct encodings never changed; this bump is the first
+/// that breaks that assumption, and slice membership is how the
+/// handshake communicates it.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

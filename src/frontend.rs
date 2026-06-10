@@ -634,15 +634,29 @@ fn apply_style<W: Write>(w: &mut W, style: &Style) -> io::Result<()> {
     }
     match style.underline {
         crate::cell::UnderlineStyle::None => {}
-        crate::cell::UnderlineStyle::Single
-        | crate::cell::UnderlineStyle::Double
-        | crate::cell::UnderlineStyle::Curly
-        | crate::cell::UnderlineStyle::Dotted
-        | crate::cell::UnderlineStyle::Dashed => {
-            // crossterm exposes Underlined; richer styles need a manual
-            // CSI 4:N m emit, which most terminals fall back to plain
-            // underline on. M2 can wire CSI 4:N m for kitty/iTerm.
+        crate::cell::UnderlineStyle::Single => {
             queue!(w, SetAttribute(Attribute::Underlined))?;
+        }
+        // Kitty-style underline subparameters (CSI 4:N m). Terminals
+        // that predate the extension treat the whole sequence as
+        // SGR 4 (plain underline) or ignore the subparameter, so the
+        // fallback is a straight underline — same as the previous
+        // flatten-to-`Underlined` behavior (T M4.6).
+        crate::cell::UnderlineStyle::Double => write!(w, "\x1b[4:2m")?,
+        crate::cell::UnderlineStyle::Curly => write!(w, "\x1b[4:3m")?,
+        crate::cell::UnderlineStyle::Dotted => write!(w, "\x1b[4:4m")?,
+        crate::cell::UnderlineStyle::Dashed => write!(w, "\x1b[4:5m")?,
+    }
+    // Underline color (SGR 58, colon subparameter form). Emitted only
+    // when set and an underline is present: the SGR 0 at the top of
+    // this function already reset the underline color to
+    // follow-text-color (SGR 59 state), which is what
+    // `Color::Default` means.
+    if style.underline != crate::cell::UnderlineStyle::None {
+        match style.underline_color {
+            Color::Default => {}
+            Color::Rgb(r, g, b) => write!(w, "\x1b[58:2::{r}:{g}:{b}m")?,
+            Color::Indexed(n) => write!(w, "\x1b[58:5:{n}m")?,
         }
     }
     if style.reverse {
@@ -769,6 +783,54 @@ mod tests {
         let s = String::from_utf8_lossy(&out);
         // Bold uses SGR 1.
         assert!(s.contains("\x1b[1m"), "missing bold-on in {s:?}");
+    }
+
+    #[test]
+    fn curly_underline_emits_csi_4_3_and_underline_color() {
+        // A diagnostic-style cell: curly underline colored red via
+        // SGR 58 (T M4.6). The text color must NOT be touched.
+        let span = DiffSpan {
+            start: CellCoord::new(0, 0),
+            cells: vec![Cell {
+                glyph: Glyph::Char('x'),
+                style: Style {
+                    underline: crate::cell::UnderlineStyle::Curly,
+                    underline_color: crate::cell::Color::Indexed(1),
+                    ..Style::default()
+                },
+                attachment: None,
+            }],
+        };
+        let mut out = Vec::new();
+        emit_span(&mut out, &span).unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("\x1b[4:3m"), "missing curly underline in {s:?}");
+        assert!(
+            s.contains("\x1b[58:5:1m"),
+            "missing underline color in {s:?}"
+        );
+    }
+
+    #[test]
+    fn default_underline_color_emits_no_sgr_58() {
+        // A plain single underline with follow-text color: no SGR 58
+        // on the wire (the reset at the start of every style apply
+        // already put the terminal in SGR 59 state).
+        let span = DiffSpan {
+            start: CellCoord::new(0, 0),
+            cells: vec![Cell {
+                glyph: Glyph::Char('x'),
+                style: Style {
+                    underline: crate::cell::UnderlineStyle::Single,
+                    ..Style::default()
+                },
+                attachment: None,
+            }],
+        };
+        let mut out = Vec::new();
+        emit_span(&mut out, &span).unwrap();
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("\x1b[58"), "unexpected SGR 58 in {s:?}");
     }
 
     // ---- status overlay (T M5.8) -----------------------------------------

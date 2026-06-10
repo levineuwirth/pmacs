@@ -125,6 +125,11 @@ pub struct Style {
     pub underline: UnderlineStyle,
     /// Reverse video.
     pub reverse: bool,
+    /// Underline color (SGR 58/59). `Color::Default` means "follow
+    /// the text color": the underline draws in `fg`. Diagnostics set
+    /// this per severity so the squiggle color can differ from the
+    /// syntax-colored text it underlines (T M4.6, protocol v6).
+    pub underline_color: Color,
 }
 
 /// A non-text attachment carried in a cell (TUI ignores this).

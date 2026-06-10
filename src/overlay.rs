@@ -125,12 +125,12 @@ impl View for StyleSpanOverlay {
 
 /// Merge `overlay` over `base`, producing a new [`Style`].
 ///
-/// `fg`/`bg`/`underline` use "non-default wins" --- the overlay's
-/// value applies only when it is non-default; otherwise the base
-/// value is preserved. Boolean attributes (`bold`, `italic`,
-/// `reverse`) OR-blend so that two stacked overlays can each
-/// contribute. Pulled out of [`StyleSpanOverlay`] so
-/// [`crate::highlight::SyntaxHighlightView`] can reuse the same
+/// `fg`/`bg`/`underline`/`underline_color` use "non-default wins"
+/// --- the overlay's value applies only when it is non-default;
+/// otherwise the base value is preserved. Boolean attributes
+/// (`bold`, `italic`, `reverse`) OR-blend so that two stacked
+/// overlays can each contribute. Pulled out of [`StyleSpanOverlay`]
+/// so [`crate::highlight::SyntaxHighlightView`] can reuse the same
 /// composition rule (T M4.3).
 #[must_use]
 pub fn merge_styles(base: Style, overlay: Style) -> Style {
@@ -154,6 +154,11 @@ pub fn merge_styles(base: Style, overlay: Style) -> Style {
             overlay.underline
         },
         reverse: base.reverse || overlay.reverse,
+        underline_color: if overlay.underline_color == Color::Default {
+            base.underline_color
+        } else {
+            overlay.underline_color
+        },
     }
 }
 
@@ -612,6 +617,34 @@ mod tests {
                 UnderlineStyle::Curly
             );
         }
+    }
+
+    #[test]
+    fn merge_styles_underline_color_non_default_wins() {
+        use crate::cell::Color;
+        let base = Style {
+            fg: Color::Indexed(2),
+            underline: UnderlineStyle::Single,
+            underline_color: Color::Indexed(6),
+            ..Default::default()
+        };
+        // Overlay sets its own underline color: it wins, while the
+        // base's fg (syntax color) survives untouched.
+        let diag_overlay = Style {
+            underline: UnderlineStyle::Curly,
+            underline_color: Color::Indexed(1),
+            ..Default::default()
+        };
+        let merged = merge_styles(base, diag_overlay);
+        assert_eq!(merged.underline_color, Color::Indexed(1));
+        assert_eq!(merged.fg, Color::Indexed(2));
+        // Overlay with default underline color: base's is preserved.
+        let plain_overlay = Style {
+            bold: true,
+            ..Default::default()
+        };
+        let merged = merge_styles(base, plain_overlay);
+        assert_eq!(merged.underline_color, Color::Indexed(6));
     }
 
     #[test]

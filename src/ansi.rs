@@ -931,6 +931,15 @@ impl AnsiParser {
                     }
                 }
                 49 => self.current_style.bg = Color::Default,
+                // 58/59 (underline color, kitty/mintty extension):
+                // same extended-color grammar as 38/48 (T M4.6).
+                58 => {
+                    if let Some((color, extra)) = parse_extended_color(p, &params[i + 1..]) {
+                        self.current_style.underline_color = color;
+                        consumed_extra = extra;
+                    }
+                }
+                59 => self.current_style.underline_color = Color::Default,
                 90..=97 => {
                     self.current_style.fg =
                         Color::Indexed(u8::try_from(p.main - 90 + 8).unwrap_or(0));
@@ -1263,6 +1272,35 @@ mod tests {
         assert_eq!(
             styles.last().map(|s| s.underline),
             Some(UnderlineStyle::None)
+        );
+    }
+
+    /// Underline color via SGR 58 (both colon-subparam and semicolon
+    /// grammars, mirroring 38/48), reset via SGR 59 (T M4.6).
+    #[test]
+    fn m4_6_underline_color() {
+        let cases: &[(&[u8], Color)] = &[
+            (b"\x1b[58:5:1m", Color::Indexed(1)),
+            (b"\x1b[58;5;124m", Color::Indexed(124)),
+            (b"\x1b[58:2::255:0:0m", Color::Rgb(255, 0, 0)),
+        ];
+        for (input, expected) in cases {
+            let mut p = AnsiParser::new();
+            let evs = p.feed(input);
+            let styles = collect_styles(&evs);
+            assert_eq!(
+                styles.first().map(|s| s.underline_color),
+                Some(*expected),
+                "input {input:?} should produce underline color {expected:?}; got {evs:?}"
+            );
+        }
+        // 59 resets to follow-text-color.
+        let mut p = AnsiParser::new();
+        let evs = p.feed(b"\x1b[58:5:1m\x1b[59m");
+        let styles = collect_styles(&evs);
+        assert_eq!(
+            styles.last().map(|s| s.underline_color),
+            Some(Color::Default)
         );
     }
 
