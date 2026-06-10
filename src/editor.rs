@@ -1207,6 +1207,8 @@ pub fn paint_frame(
     // Render every window.
     let registry = core.registry.clone();
     let reg = registry.borrow();
+    let diag_store = state.lsp_manager.borrow().diag_store();
+    let diag_guard = diag_store.lock().expect("diag store mutex poisoned");
     for (id, window) in &mut core.windows {
         let Some(rect) = placements.get(id).copied() else {
             continue;
@@ -1247,6 +1249,7 @@ pub fn paint_frame(
             window.text_view.line_count(),
             coord.row as usize,
         );
+        let diags = diag_mode_line_summary(&diag_guard, buf);
         paint_mode_line(
             grid,
             &rect,
@@ -1256,8 +1259,10 @@ pub fn paint_frame(
             coord.row,
             coord.col,
             &scroll,
+            &diags,
         );
     }
+    drop(diag_guard);
     drop(reg);
 
     paint_status_line(grid, core, &state.lua_host, &state.dispatcher, term_size);
@@ -1398,9 +1403,43 @@ fn paint_local_selection(
     }
 }
 
+/// Format the mode-line diagnostic readout for a buffer: `"E:2 W:5"`
+/// with only the nonzero severities (errors, then warnings; info and
+/// hints stay off the mode line). Empty when the buffer has no file
+/// path, no diagnostics, or the stored diagnostics are stale — the
+/// document was edited since the last `publishDiagnostics`, so the
+/// counts would describe text that no longer exists (T M4.6).
+fn diag_mode_line_summary(
+    store: &crate::diag::DiagnosticStore,
+    buf: &crate::buffer::Buffer,
+) -> String {
+    let Some(path) = buf.file_path() else {
+        return String::new();
+    };
+    let uri = crate::lsp::path_to_file_uri(path);
+    if store.is_stale(&uri) {
+        return String::new();
+    }
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    for d in store.for_uri(&uri) {
+        match d.severity {
+            crate::diag::DiagnosticSeverity::Error => errors += 1,
+            crate::diag::DiagnosticSeverity::Warning => warnings += 1,
+            _ => {}
+        }
+    }
+    match (errors, warnings) {
+        (0, 0) => String::new(),
+        (e, 0) => format!("E:{e}"),
+        (0, w) => format!("W:{w}"),
+        (e, w) => format!("E:{e} W:{w}"),
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
-    reason = "the mode line packs eight unrelated facts; bundling them into a struct just adds ceremony"
+    reason = "the mode line packs nine unrelated facts; bundling them into a struct just adds ceremony"
 )]
 fn paint_mode_line(
     grid: &mut crate::cell::CellGrid<'_>,
@@ -1411,6 +1450,7 @@ fn paint_mode_line(
     cursor_row: u32,
     cursor_col: u32,
     scroll: &str,
+    diags: &str,
 ) {
     if rect.size.rows == 0 || rect.size.cols == 0 {
         return;
@@ -1419,7 +1459,11 @@ fn paint_mode_line(
     let marker = if modified { '*' } else { ' ' };
     let active_marker = if is_active { '+' } else { '-' };
     let left = format!(" {active_marker}{marker} {name} ");
-    let right = format!(" L{}:C{} {scroll} ", cursor_row + 1, cursor_col + 1);
+    let right = if diags.is_empty() {
+        format!(" L{}:C{} {scroll} ", cursor_row + 1, cursor_col + 1)
+    } else {
+        format!(" {diags} L{}:C{} {scroll} ", cursor_row + 1, cursor_col + 1)
+    };
 
     // Fill the row with reverse-video spaces.
     let mode_style = crate::cell::Style {
@@ -5087,6 +5131,88 @@ mod tests {
             let style = cells[(22 * stride + col) as usize].style;
             assert!(style.reverse, "mode line col {col} not reverse video");
         }
+    }
+
+    /// Give the active buffer a file path and return its `file://`
+    /// URI, so diag-store entries can be keyed to it.
+    fn set_active_buffer_path(s: &EditorState, path: &str) -> String {
+        let core = s.core.borrow();
+        let registry = core.registry.clone();
+        let mut reg = registry.borrow_mut();
+        let buf = reg.get_mut(core.active_buffer_id()).unwrap();
+        buf.set_file_path(Some(std::path::PathBuf::from(path)));
+        crate::lsp::path_to_file_uri(buf.file_path().unwrap())
+    }
+
+    fn diag_with_severity(severity: crate::diag::DiagnosticSeverity) -> crate::diag::Diagnostic {
+        crate::diag::Diagnostic {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 1,
+            severity,
+            message: "boom".into(),
+            source: None,
+            code: None,
+        }
+    }
+
+    #[test]
+    fn render_mode_line_shows_diagnostic_counts() {
+        use crate::diag::DiagnosticSeverity::{Error, Hint, Warning};
+        let s = fresh_with(b"hello\n");
+        let uri = set_active_buffer_path(&s, "/tmp/modeline_diag.rs");
+        let store = s.lsp_manager.borrow().diag_store();
+        store.lock().unwrap().set(
+            uri,
+            vec![
+                diag_with_severity(Error),
+                diag_with_severity(Error),
+                diag_with_severity(Warning),
+                diag_with_severity(Hint), // hints stay off the mode line
+            ],
+        );
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        let mode_text = row_text(&cells, stride, 22, 80);
+        assert!(
+            mode_text.contains("E:2 W:1"),
+            "mode line missing diagnostic counts: {mode_text:?}"
+        );
+        assert!(
+            !mode_text.contains("H:"),
+            "hints should not appear on the mode line: {mode_text:?}"
+        );
+    }
+
+    #[test]
+    fn render_mode_line_hides_diagnostic_counts_while_stale() {
+        use crate::diag::DiagnosticSeverity::Error;
+        let s = fresh_with(b"hello\n");
+        let uri = set_active_buffer_path(&s, "/tmp/modeline_stale.rs");
+        let store = s.lsp_manager.borrow().diag_store();
+        {
+            let mut guard = store.lock().unwrap();
+            guard.set(uri.clone(), vec![diag_with_severity(Error)]);
+            guard.mark_stale(uri);
+        }
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        let mode_text = row_text(&cells, stride, 22, 80);
+        assert!(
+            !mode_text.contains("E:"),
+            "stale diagnostics must not reach the mode line: {mode_text:?}"
+        );
+    }
+
+    #[test]
+    fn render_mode_line_omits_diagnostic_counts_when_clean() {
+        let s = fresh_with(b"hello\n");
+        let _uri = set_active_buffer_path(&s, "/tmp/modeline_clean.rs");
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        let mode_text = row_text(&cells, stride, 22, 80);
+        assert!(
+            !mode_text.contains("E:") && !mode_text.contains("W:"),
+            "clean buffer must not show diagnostic counts: {mode_text:?}"
+        );
     }
 
     #[test]
