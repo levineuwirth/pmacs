@@ -1406,11 +1406,17 @@ fn forward_word(buf: &Buffer, mut pos: Position) -> Position {
 }
 
 fn word_range_at(buf: &Buffer, pos: Position) -> Option<(Position, Position)> {
-    let (ch, _) = char_at(buf, pos)?;
+    let (ch, ch_len) = char_at(buf, pos)?;
     if !is_word_char(ch) {
         return None;
     }
-    let start = backward_word(buf, pos);
+    // Walk back from just *past* the char under the cursor, not from
+    // `pos` itself: `backward_word(pos)` at a word's FIRST character
+    // sees the non-word char before it, skips it, and crosses into
+    // the previous word — double-clicking the 'w' of "llo world"
+    // would select "llo world". From `pos + ch_len` the char behind
+    // is this word's own first char, so the walk stops at its start.
+    let start = backward_word(buf, pos.saturating_add(ch_len));
     let end = forward_word(buf, pos);
     (start < end).then_some((start, end))
 }

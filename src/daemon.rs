@@ -1359,6 +1359,25 @@ fn handle_dispatcher_event(
                         }
                     }
                 }
+                FrontendEvent::Pointer {
+                    buffer_id,
+                    byte,
+                    kind,
+                    mods,
+                    ..
+                } => {
+                    // Mouse framing Q#M1 — a semantic frontend's
+                    // locally hit-tested gesture, in source bytes.
+                    // Routed by the authenticated `source` (the
+                    // client-supplied frontend_id is untrusted — the
+                    // CrdtOp / Viewport source-trust rule). The window
+                    // aligns to the buffer the frontend says it was
+                    // displaying: a click can race a buffer switch.
+                    if semantic_states.contains_key(&source) {
+                        align_semantic_window_to_buffer(editor, source, buffer_id);
+                        editor.dispatch_pointer(source, buffer_id, byte, kind, mods);
+                    }
+                }
                 _ => {
                     let term_size = *term_sizes
                         .get(&source)
@@ -2050,6 +2069,17 @@ fn apply_event(
                 "pmacs daemon: FrontendEvent::CrdtOp reached apply_event; \
                  this path is supposed to be intercepted in \
                  handle_dispatcher_event. Dropping op."
+            );
+        }
+        FrontendEvent::Pointer { .. } => {
+            // Mouse framing Q#M1 — only semantic sessions emit
+            // Pointer, and `handle_dispatcher_event` routes those via
+            // `apply_semantic_input_event` (with the authenticated
+            // source). A grid session sending one is a protocol
+            // violation; drop it like the CrdtOp arm above.
+            eprintln!(
+                "pmacs daemon: FrontendEvent::Pointer from a grid session; dropping \
+                 (semantic sessions route via apply_semantic_input_event)"
             );
         }
     }

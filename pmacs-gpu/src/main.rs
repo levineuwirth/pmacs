@@ -36,7 +36,7 @@ use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CrdtOp, Decoration, DecorationKind,
     DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, Key as ProtocolKey, Modifiers,
-    SelectionSnapshot, StyleSegment, StyleSpan,
+    PointerKind, SelectionSnapshot, StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
@@ -391,6 +391,24 @@ struct State {
     /// ops can mis-prune by one frame; the next generation-keyed
     /// full resync self-corrects.
     unconfirmed_edits: Vec<(u64, TextProjectionEdit)>,
+    /// Q#M2 — projected→source hit map for the currently shaped
+    /// slice. Rebuilt by every `reshape` from the same chunks that
+    /// feed glyphon; source offsets are slice-relative (pair with
+    /// `view_range.0`).
+    current_hit_runs: Vec<ProjectedRun>,
+    /// Line-start byte offsets of the *projected* text (cosmic-text
+    /// reports hits as line index + byte-within-line).
+    projected_line_starts: Vec<u64>,
+    /// Last reported pointer position, in window pixels.
+    pointer_pos: Option<(f64, f64)>,
+    /// Primary button is held after a Down inside the text area.
+    pointer_drag_active: bool,
+    /// Hit byte of the last Pointer event sent — Drag coalescing:
+    /// pixel-rate motion only ships when the hit byte changes.
+    last_pointer_sent_byte: Option<u64>,
+    /// `(when, byte)` of the last primary Down, for frontend-side
+    /// double-click detection (same-hit within the interval).
+    last_pointer_down: Option<(std::time::Instant, u64)>,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -420,6 +438,23 @@ struct QuadRenderer {
 struct FileStyleSummaryState {
     generation: u64,
     lines: Vec<CellStyle>,
+}
+
+impl App {
+    /// Ship a Pointer event if the daemon speaks protocol v5+ — the
+    /// Q#M1 frontend-side gate (an older instance cannot decode the
+    /// variant and would drop the connection).
+    fn send_pointer(&self, buffer_id: BufferId, byte: u64, kind: PointerKind, mods: Modifiers) {
+        let Some(client) = self.attach_client.as_ref() else {
+            return;
+        };
+        if client.server_protocol_version() < 5 {
+            return;
+        }
+        if let Err(e) = client.send_pointer(buffer_id, byte, kind, mods) {
+            eprintln!("pmacs-gpu: send_pointer failed: {e}");
+        }
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -456,6 +491,7 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // linear per-event dispatch; splitting hides the input flow.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -534,6 +570,100 @@ impl ApplicationHandler<AppEvent> for App {
                     && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
                 {
                     eprintln!("pmacs-gpu: resize send_viewport failed: {e}");
+                }
+            }
+            // Session M-2 — pointer input (docs/pmacs-gpu-mouse-framing.md).
+            WindowEvent::CursorMoved { position, .. } => {
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
+                state.pointer_pos = Some((position.x, position.y));
+                if !state.pointer_drag_active {
+                    return;
+                }
+                // Drag coalescing (predicted finding #4): pixel-rate
+                // motion only ships when the hit byte changes.
+                let Some(byte) = state.hit_test_source_byte(position.x, position.y) else {
+                    return;
+                };
+                if state.last_pointer_sent_byte == Some(byte) {
+                    return;
+                }
+                state.last_pointer_sent_byte = Some(byte);
+                state.note_pointer_round_trip();
+                let buffer_id = state.current_buffer_id;
+                let mods = translate_mods(self.modifiers);
+                if let Some(buffer_id) = buffer_id {
+                    self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: button_state,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
+                let Some((x, y)) = state.pointer_pos else {
+                    return;
+                };
+                let mods = translate_mods(self.modifiers);
+                match button_state {
+                    ElementState::Pressed => {
+                        let Some(byte) = state.hit_test_source_byte(x, y) else {
+                            return;
+                        };
+                        let kind = state.classify_pointer_down(byte);
+                        state.pointer_drag_active = true;
+                        state.last_pointer_sent_byte = Some(byte);
+                        state.note_pointer_round_trip();
+                        if let Some(buffer_id) = state.current_buffer_id {
+                            if debug_input() {
+                                eprintln!("pmacs-gpu pointer: {kind:?} byte={byte}");
+                            }
+                            self.send_pointer(buffer_id, byte, kind, mods);
+                        }
+                    }
+                    ElementState::Released => {
+                        if !state.pointer_drag_active {
+                            return;
+                        }
+                        state.pointer_drag_active = false;
+                        let byte = state
+                            .hit_test_source_byte(x, y)
+                            .or(state.last_pointer_sent_byte);
+                        let buffer_id = state.current_buffer_id;
+                        if let (Some(byte), Some(buffer_id)) = (byte, buffer_id) {
+                            self.send_pointer(buffer_id, byte, PointerKind::Up, mods);
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
+                // Wheel scroll is local-only: the GPU owns the
+                // viewport. Positive winit y = scroll up = smaller
+                // scroll_top.
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                        (-y * WHEEL_LINES_PER_TICK).round() as i64
+                    }
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        (-(p.y as f32) / CODE_LINE_HEIGHT).round() as i64
+                    }
+                };
+                if lines == 0 {
+                    return;
+                }
+                let vp = state.scroll_by_lines(lines);
+                if let Some(vp) = vp
+                    && let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                {
+                    eprintln!("pmacs-gpu: wheel send_viewport failed: {e}");
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -621,6 +751,14 @@ struct CrdtOpSend {
 /// escape hatch releases it. Generous against a busy daemon tick;
 /// tiny against a human noticing wedged keys.
 const FLOOR_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Frontend-side double-click interval (Q#M1: the daemon cannot see
+/// pixels, so the frontend decides what a double-click is). Matches
+/// the TUI's `DOUBLE_CLICK_MAX_DELAY`.
+const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Wheel lines scrolled per `MouseScrollDelta::LineDelta` unit.
+const WHEEL_LINES_PER_TICK: f32 = 3.0;
 
 /// Byte range an optimistic Backspace/Delete removes at `cursor`, or
 /// `None` when it can't be predicted locally: buffer edge (the
@@ -862,6 +1000,12 @@ impl State {
             deferred_round_trip_keys: Vec::new(),
             optimistic_floor_set_at: None,
             unconfirmed_edits: Vec::new(),
+            current_hit_runs: Vec::new(),
+            projected_line_starts: vec![0],
+            pointer_pos: None,
+            pointer_drag_active: false,
+            last_pointer_sent_byte: None,
+            last_pointer_down: None,
         }
     }
 
@@ -1587,6 +1731,67 @@ impl State {
         self.scroll_top != old
     }
 
+    /// Resolve a window-pixel position to an **absolute source byte**
+    /// (Q#M2): pixel → cosmic-text hit (shaped line + byte within
+    /// line) → projected byte → run map → slice byte → + `vstart`.
+    /// `None` when no buffer is attached or the position is outside
+    /// anything hit-testable.
+    fn hit_test_source_byte(&self, x: f64, y: f64) -> Option<u64> {
+        self.current_buffer_id?;
+        let rel_x = x as f32 - TEXT_LEFT;
+        let rel_y = y as f32 - TEXT_TOP;
+        let cursor = self.buffer.hit(rel_x, rel_y)?;
+        let line_start = *self.projected_line_starts.get(cursor.line)?;
+        let projected = line_start + cursor.index as u64;
+        let slice_byte = projected_to_source(&self.current_hit_runs, projected)?;
+        let (vstart, vend) = self.view_range;
+        Some((vstart + slice_byte).min(vend))
+    }
+
+    /// Wheel scroll (local-only — the GPU owns the viewport; no wire
+    /// event exists or is needed). Positive `delta` scrolls down.
+    fn scroll_by_lines(&mut self, delta: i64) -> Option<ViewportSend> {
+        let max_top = self.current_line_starts.len().saturating_sub(1);
+        let new_top = self
+            .scroll_top
+            .saturating_add_signed(delta as isize)
+            .min(max_top);
+        if new_top == self.scroll_top {
+            return None;
+        }
+        self.scroll_top = new_top;
+        self.reshape();
+        self.current_buffer_id
+            .and_then(|bid| self.viewport_send_if_changed(bid))
+    }
+
+    /// Bookkeeping for an outgoing Pointer event: it supersedes any
+    /// unconfirmed optimistic-cursor prediction (the daemon's answer
+    /// will be the click position, not the typing prediction), and
+    /// the cursor is not authoritative again until that `CursorByte`
+    /// lands.
+    fn note_pointer_round_trip(&mut self) {
+        self.cursor_fresh = false;
+        self.optimistic_cursor_floor = None;
+        self.optimistic_floor_set_at = None;
+    }
+
+    /// Frontend-side double-click detection: a second Down at the
+    /// same hit byte within the interval upgrades to `DoubleDown`.
+    fn classify_pointer_down(&mut self, byte: u64) -> PointerKind {
+        let now = std::time::Instant::now();
+        let is_double = self.last_pointer_down.take().is_some_and(|(at, prev)| {
+            prev == byte && now.duration_since(at) <= DOUBLE_CLICK_WINDOW
+        });
+        if is_double {
+            // A third click starts over (triple-click is deferred).
+            PointerKind::DoubleDown
+        } else {
+            self.last_pointer_down = Some((now, byte));
+            PointerKind::Down
+        }
+    }
+
     fn apply_file_style_summary(
         &mut self,
         buffer_id: BufferId,
@@ -1834,17 +2039,22 @@ impl State {
             .collect();
 
         let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
-        let chunks: Vec<(String, Attrs<'static>)> =
-            projected_rich_chunks(slice, &spans, &decorations, &adornments)
-                .into_iter()
-                .map(|chunk| {
-                    let mut attrs = default_attrs.clone();
-                    if let Some(c) = chunk.color {
-                        attrs = attrs.color(c);
-                    }
-                    (chunk.text, attrs)
-                })
-                .collect();
+        let rich = projected_rich_chunks(slice, &spans, &decorations, &adornments);
+        // Q#M2 — the pointer hit map is derived from the SAME chunks
+        // the shaped buffer is built from, so the two cannot disagree.
+        let (hit_runs, projected_line_starts) = build_hit_runs(&rich);
+        self.current_hit_runs = hit_runs;
+        self.projected_line_starts = projected_line_starts;
+        let chunks: Vec<(String, Attrs<'static>)> = rich
+            .into_iter()
+            .map(|chunk| {
+                let mut attrs = default_attrs.clone();
+                if let Some(c) = chunk.color {
+                    attrs = attrs.color(c);
+                }
+                (chunk.text, attrs)
+            })
+            .collect();
         self.buffer.set_rich_text(
             &mut self.font_system,
             chunks.iter().map(|(s, a)| (s.as_str(), a.clone())),
@@ -2269,6 +2479,74 @@ struct MinimapLineShape {
 struct RichChunk {
     text: String,
     color: Option<glyphon::Color>,
+    /// Where this chunk's text came from — the seam the pointer
+    /// hit-test walks back through (Q#M2).
+    source: ChunkSource,
+}
+
+/// Origin of one [`RichChunk`] in the shaped (projected) text.
+/// Offsets are slice-relative (the same space `projected_rich_chunks`
+/// works in); the hit test rebases with the slice's `vstart`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChunkSource {
+    /// Verbatim source text starting at this slice byte offset.
+    Source { start: u64 },
+    /// Injected adornment text (inlay hint) anchored at this slice
+    /// byte offset. Hits inside it snap to the anchor.
+    Adornment { anchor: u64 },
+}
+
+/// One run of the projected→source hit map (Q#M2), built by
+/// [`build_hit_runs`] from the same chunks `reshape` feeds glyphon —
+/// so the map and the shaped buffer can never disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectedRun {
+    /// Byte offset of this run in the shaped (projected) text.
+    projected_start: u64,
+    /// Run length in projected bytes.
+    len: u64,
+    source: ChunkSource,
+}
+
+/// Build the projected→source run map plus the projected text's line
+/// start table (cosmic-text reports hits as line + byte-within-line).
+fn build_hit_runs(chunks: &[RichChunk]) -> (Vec<ProjectedRun>, Vec<u64>) {
+    let mut runs = Vec::with_capacity(chunks.len());
+    let mut line_starts = vec![0u64];
+    let mut projected = 0u64;
+    for chunk in chunks {
+        let len = chunk.text.len() as u64;
+        runs.push(ProjectedRun {
+            projected_start: projected,
+            len,
+            source: chunk.source,
+        });
+        for (i, b) in chunk.text.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(projected + i as u64 + 1);
+            }
+        }
+        projected += len;
+    }
+    (runs, line_starts)
+}
+
+/// Map a projected byte offset back to a slice-relative source byte
+/// (Q#M2). Hits inside an adornment run snap to its anchor; offsets
+/// past the last run clamp to its end.
+fn projected_to_source(runs: &[ProjectedRun], projected: u64) -> Option<u64> {
+    if runs.is_empty() {
+        return None;
+    }
+    let idx = runs
+        .partition_point(|r| r.projected_start <= projected)
+        .saturating_sub(1);
+    let run = runs[idx];
+    let within = projected.saturating_sub(run.projected_start).min(run.len);
+    match run.source {
+        ChunkSource::Source { start } => Some(start + within),
+        ChunkSource::Adornment { anchor } => Some(anchor),
+    }
 }
 
 fn minimap_left(surface_width: u32) -> Option<f32> {
@@ -2591,10 +2869,7 @@ fn debug_input() -> bool {
 /// has no representation for (the daemon ignores `Key::Unknown`, so
 /// there's no value in forwarding them). `translate_key` covers the
 /// full editing set; session B1 gates the send on [`is_motion_key`].
-fn translate_key(
-    logical: &Key,
-    mods: winit::keyboard::ModifiersState,
-) -> Option<(ProtocolKey, Modifiers)> {
+fn translate_mods(mods: winit::keyboard::ModifiersState) -> Modifiers {
     let mut bits = 0u8;
     if mods.shift_key() {
         bits |= Modifiers::SHIFT.bits();
@@ -2608,7 +2883,14 @@ fn translate_key(
     if mods.super_key() {
         bits |= Modifiers::META.bits();
     }
-    let pmods = Modifiers::from_bits_truncate(bits);
+    Modifiers::from_bits_truncate(bits)
+}
+
+fn translate_key(
+    logical: &Key,
+    mods: winit::keyboard::ModifiersState,
+) -> Option<(ProtocolKey, Modifiers)> {
+    let pmods = translate_mods(mods);
 
     let pkey = match logical {
         Key::Named(named) => match named {
@@ -3248,6 +3530,7 @@ fn projected_rich_chunks(
             chunks.push(RichChunk {
                 text: text[a as usize..b as usize].to_owned(),
                 color: source_color_at(a, spans, decorations),
+                source: ChunkSource::Source { start: a },
             });
         }
     }
@@ -3261,6 +3544,7 @@ fn projected_rich_chunks(
         chunks.push(RichChunk {
             text: String::new(),
             color: None,
+            source: ChunkSource::Source { start: 0 },
         });
     }
     chunks
@@ -3292,6 +3576,7 @@ fn push_adornments_at(
             chunks.push(RichChunk {
                 text: text.clone(),
                 color: Some(adornment_text_color(style.fg)),
+                source: ChunkSource::Adornment { anchor },
             });
         }
         *next += 1;
@@ -3852,6 +4137,57 @@ mod tests {
             optimistic_insert_text(ProtocolKey::Left, none, &mut buf),
             None
         );
+    }
+
+    #[test]
+    fn hit_runs_map_projected_bytes_back_to_source() {
+        // Source slice "ab\ncd" with an inlay hint ": i32 " anchored
+        // at byte 2 (end of "ab"): projected text = "ab: i32 \ncd".
+        let chunks = vec![
+            RichChunk {
+                text: "ab".into(),
+                color: None,
+                source: ChunkSource::Source { start: 0 },
+            },
+            RichChunk {
+                text: ": i32 ".into(),
+                color: None,
+                source: ChunkSource::Adornment { anchor: 2 },
+            },
+            RichChunk {
+                text: "\ncd".into(),
+                color: None,
+                source: ChunkSource::Source { start: 2 },
+            },
+        ];
+        let (runs, line_starts) = build_hit_runs(&chunks);
+
+        assert_eq!(
+            line_starts,
+            vec![0, 9],
+            "projected line table counts the newline at projected byte 8"
+        );
+
+        // Hits inside source runs map linearly.
+        assert_eq!(projected_to_source(&runs, 0), Some(0));
+        assert_eq!(projected_to_source(&runs, 1), Some(1));
+        assert_eq!(
+            projected_to_source(&runs, 9),
+            Some(3),
+            "projected 'c' (byte 9) maps to source byte 3"
+        );
+        // Hits inside the adornment snap to its anchor.
+        for projected in 2..8 {
+            assert_eq!(
+                projected_to_source(&runs, projected),
+                Some(2),
+                "adornment hit at projected {projected} snaps to the anchor"
+            );
+        }
+        // Past-the-end hits clamp into the last run.
+        assert_eq!(projected_to_source(&runs, 999), Some(5));
+        // Empty map: nothing to hit.
+        assert_eq!(projected_to_source(&[], 0), None);
     }
 
     #[test]

@@ -1683,29 +1683,33 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_four_for_dispatch_idle() {
+    fn protocol_version_is_five_for_pointer_events() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
         // bumped 3→4 (DispatchIdle for the optimistic-apply gate).
-        // The current binary serves v1..=v4 sessions — the slice-
+        // The mouse framing Q#M1 bumped 4→5 (FrontendEvent::Pointer,
+        // byte-position gestures from semantic frontends). The
+        // current binary serves v1..=v5 sessions — the slice-
         // membership handshake makes the relaxation symmetric.
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 
     #[test]
-    fn supported_protocol_versions_includes_one_through_four() {
+    fn supported_protocol_versions_includes_one_through_five() {
         // T M10.5: v1.0 binaries accept v1+v2. T M11.1: v1.1 binaries
-        // accept v1+v2+v3. T M11.6: v4 binaries accept v1+v2+v3+v4.
-        // The check is slice membership, not strict equality, so
-        // older binaries keep connecting to current binaries
-        // unchanged. v5+ is rejected until the next bump.
+        // accept v1+v2+v3. T M11.6: v4 binaries accept v1..=v4. Mouse
+        // framing Q#M1: v5 binaries accept v1..=v5. The check is
+        // slice membership, not strict equality, so older binaries
+        // keep connecting to current binaries unchanged. v6+ is
+        // rejected until the next bump.
         assert!(is_supported_protocol_version(1));
         assert!(is_supported_protocol_version(2));
         assert!(is_supported_protocol_version(3));
         assert!(is_supported_protocol_version(4));
+        assert!(is_supported_protocol_version(5));
         assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(5));
+        assert!(!is_supported_protocol_version(6));
         assert!(!is_supported_protocol_version(u32::MAX));
     }
 
@@ -2074,10 +2078,11 @@ mod tests {
     fn m10_5_handshake_matrix_versions_outside_range_rejected() {
         // v1 daemon's strict-equality behavior is documented at the
         // v0.1 code level (different binary); the current daemon's
-        // range check accepts v1/v2/v3/v4 (T M11.1 added v3; T M11.6
-        // added v4) and rejects v5+ until the next protocol bump.
+        // range check accepts v1..=v5 (T M11.1 added v3; T M11.6
+        // added v4; the mouse framing Q#M1 added v5) and rejects v6+
+        // until the next protocol bump.
         assert!(!is_supported_protocol_version(0));
-        assert!(!is_supported_protocol_version(5));
+        assert!(!is_supported_protocol_version(6));
         assert!(!is_supported_protocol_version(u32::MAX));
     }
 

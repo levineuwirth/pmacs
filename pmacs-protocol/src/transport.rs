@@ -187,6 +187,19 @@ mod tests {
     }
 
     #[test]
+    fn pointer_event_round_trips_through_transport() {
+        // Q#M1 (protocol v5): the byte-position pointer gesture.
+        let ev = FrontendEvent::Pointer {
+            frontend_id: FrontendId(7),
+            buffer_id: crate::BufferId::next(),
+            byte: 4096,
+            kind: crate::PointerKind::DoubleDown,
+            mods: Modifiers::SHIFT,
+        };
+        round_trip(&ev);
+    }
+
+    #[test]
     fn attach_request_round_trips_through_transport() {
         let req = AttachRequest {
             protocol_version: PROTOCOL_VERSION,
