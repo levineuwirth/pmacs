@@ -332,14 +332,14 @@ pub fn make_shared_store() -> SharedDiagStore {
 const TAB_WIDTH: u32 = 8;
 
 /// Style applied to bytes covered by an `Error` diagnostic. Wavy
-/// underline in red so it composes with whatever the syntax view
-/// painted on top.
+/// underline colored via `underline_color` (not `fg`) so the
+/// squiggle reads red while the syntax view's text color survives
+/// underneath (T M4.6, protocol v6).
 fn error_style() -> Style {
     Style {
         underline: UnderlineStyle::Curly,
-        // Red. Indexed 1 is portable across 8/16-color terminals.
-        fg: Color::Default,
-        bg: Color::Default,
+        // Indexed 1 (red) is portable across 8/16-color terminals.
+        underline_color: Color::Indexed(1),
         ..Style::default()
     }
 }
@@ -348,6 +348,8 @@ fn error_style() -> Style {
 fn warning_style() -> Style {
     Style {
         underline: UnderlineStyle::Curly,
+        // Indexed 3: yellow.
+        underline_color: Color::Indexed(3),
         ..Style::default()
     }
 }
@@ -356,6 +358,8 @@ fn warning_style() -> Style {
 fn info_style() -> Style {
     Style {
         underline: UnderlineStyle::Single,
+        // Indexed 6: cyan.
+        underline_color: Color::Indexed(6),
         ..Style::default()
     }
 }
@@ -364,6 +368,9 @@ fn info_style() -> Style {
 fn hint_style() -> Style {
     Style {
         underline: UnderlineStyle::Dotted,
+        // Indexed 8: bright black ("gray") — present on 16-color
+        // terminals, subtle by design for hints.
+        underline_color: Color::Indexed(8),
         ..Style::default()
     }
 }
@@ -374,6 +381,25 @@ fn style_for(severity: DiagnosticSeverity) -> Style {
         DiagnosticSeverity::Warning => warning_style(),
         DiagnosticSeverity::Information => info_style(),
         DiagnosticSeverity::Hint => hint_style(),
+    }
+}
+
+/// Style of the column-0 line marker — the TUI's gutter sign
+/// (T M4.6). The TUI reserves no gutter column, so the sign is a
+/// severity-colored *background* on the line's first cell: the
+/// glyph and its syntax color survive (the view contract is
+/// style-only), and zero-width diagnostics — invisible to the
+/// underline pass — still get a visible artifact.
+fn marker_style_for(severity: DiagnosticSeverity) -> Style {
+    let bg = match severity {
+        DiagnosticSeverity::Error => Color::Indexed(1),
+        DiagnosticSeverity::Warning => Color::Indexed(3),
+        DiagnosticSeverity::Information => Color::Indexed(6),
+        DiagnosticSeverity::Hint => Color::Indexed(8),
+    };
+    Style {
+        bg,
+        ..Style::default()
     }
 }
 
@@ -449,6 +475,12 @@ impl View for DiagnosticView {
         let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
 
+        // Column-0 line markers (gutter signs, T M4.6): most severe
+        // diagnostic per visible row wins. `Ord` on the severity enum
+        // follows LSP numbering, so "most severe" is the minimum.
+        let mut line_markers: std::collections::HashMap<u32, DiagnosticSeverity> =
+            std::collections::HashMap::new();
+
         for diag in &diags {
             let style = style_for(diag.severity);
             // Apply to each line the diagnostic touches. LSP ranges
@@ -471,6 +503,13 @@ impl View for DiagnosticView {
                 if row_offset >= max_rows {
                     break;
                 }
+                // Record the line marker before any byte-range work:
+                // zero-width ranges (`byte_end <= byte_start` below)
+                // skip the underline but still mark the line.
+                line_markers
+                    .entry(row_offset)
+                    .and_modify(|s| *s = (*s).min(diag.severity))
+                    .or_insert(diag.severity);
                 let line_start = line_offsets[line as usize];
                 let line_end = line_offsets
                     .get(line as usize + 1)
@@ -497,16 +536,8 @@ impl View for DiagnosticView {
                 } else {
                     line_byte_len
                 };
-                if byte_end <= byte_start {
-                    // Empty range on a line --- still flag the
-                    // gutter character (the cell at column 0). For
-                    // a multi-line diagnostic with end_col=0, this
-                    // path is hit on the first / last line; the
-                    // visible column already moved on.
-                    continue;
-                }
                 let (start_col, end_col) =
-                    byte_range_to_display_cols(line_bytes, byte_start as usize, byte_end as usize);
+                    underline_cols_for_line(line_bytes, byte_start, byte_end);
                 if end_col <= start_col {
                     continue;
                 }
@@ -517,6 +548,19 @@ impl View for DiagnosticView {
                     let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
                     cell.style = merge_styles(cell.style, style);
                 }
+            }
+        }
+
+        // Paint the column-0 markers last so a marker is visible even
+        // when an underline span also touches column 0 (bg and
+        // underline merge independently).
+        if max_cols > 0 {
+            for (row_offset, severity) in line_markers {
+                let cell = cells.at(CellCoord::new(
+                    cell_origin.row + row_offset,
+                    cell_origin.col,
+                ));
+                cell.style = merge_styles(cell.style, marker_style_for(severity));
             }
         }
     }
@@ -542,6 +586,25 @@ fn line_at_offset(line_offsets: &[u32], offset: u32) -> u32 {
     match line_offsets.binary_search(&offset) {
         Ok(i) => i as u32,
         Err(i) => i.saturating_sub(1) as u32,
+    }
+}
+
+/// Resolve the display-column span to underline for one line of a
+/// diagnostic. Zero-width ranges — the shape parsers use for
+/// "expected COMMA"-style errors anchored one past the last token
+/// (rust-analyzer reports a missing comma as `col 12 → col 12` at
+/// end of line, and the caller's `.min(line_byte_len)` clamps
+/// collapse any past-EOL anchor the same way) — get a single-cell
+/// span at the anchor: one past EOL is a blank cell inside the
+/// window, and a squiggled space is exactly how other editors
+/// surface it.
+fn underline_cols_for_line(line_bytes: &[u8], byte_start: u32, byte_end: u32) -> (u32, u32) {
+    if byte_end <= byte_start {
+        let (anchor, _) =
+            byte_range_to_display_cols(line_bytes, byte_start as usize, byte_start as usize);
+        (anchor, anchor + 1)
+    } else {
+        byte_range_to_display_cols(line_bytes, byte_start as usize, byte_end as usize)
     }
 }
 
@@ -792,6 +855,33 @@ mod tests {
     }
 
     #[test]
+    fn severity_styles_color_the_underline_not_the_text() {
+        // T M4.6: each severity gets a distinct underline color via
+        // `underline_color` (SGR 58); `fg` stays Default so the
+        // syntax view's text color survives the merge.
+        let mut seen = Vec::new();
+        for s in [
+            DiagnosticSeverity::Error,
+            DiagnosticSeverity::Warning,
+            DiagnosticSeverity::Information,
+            DiagnosticSeverity::Hint,
+        ] {
+            let style = style_for(s);
+            assert_eq!(style.fg, Color::Default, "{s:?} must not set fg");
+            assert_ne!(
+                style.underline_color,
+                Color::Default,
+                "{s:?} must color its underline"
+            );
+            assert!(
+                !seen.contains(&style.underline_color),
+                "{s:?} reuses another severity's underline color"
+            );
+            seen.push(style.underline_color);
+        }
+    }
+
+    #[test]
     fn view_advertises_diagnostic_kind() {
         // `pmacs.window._overlay_kinds()` introspection (task #23 wire-up,
         // mirroring "syntax-highlight" / LspStyleView) relies on this.
@@ -843,6 +933,145 @@ mod tests {
             grid.get(CellCoord::new(0, 0)).style.underline,
             UnderlineStyle::None,
             "stale diagnostics must not underline shifted TUI bytes"
+        );
+    }
+
+    #[test]
+    fn column_zero_marker_shows_most_severe_diagnostic_per_line() {
+        use crate::cell::{Cell, CellSize, Glyph, UnderlineStyle};
+
+        let store = make_shared_store();
+        {
+            let mut guard = store.lock().expect("diag store");
+            // Line 0: a Hint and an Error overlap — the marker must
+            // show the Error. Line 1: a zero-width Warning (start ==
+            // end), invisible to the underline pass but still marked.
+            guard.set(
+                "file:///a",
+                vec![
+                    diag(0, DiagnosticSeverity::Hint, "h"),
+                    diag(0, DiagnosticSeverity::Error, "e"),
+                    Diagnostic {
+                        start_line: 1,
+                        start_col: 2,
+                        end_line: 1,
+                        end_col: 2,
+                        severity: DiagnosticSeverity::Warning,
+                        message: "w".to_owned(),
+                        source: None,
+                        code: None,
+                    },
+                ],
+            );
+        }
+
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "test.c");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"hello\nworld\nclean\n",
+        })
+        .expect("seed buffer");
+
+        let mut view = DiagnosticView::new("file:///a", store);
+        let mut backing = vec![Cell::default(); 30];
+        // Pre-paint glyphs at column 0 to pin the style-only contract.
+        backing[0].glyph = Glyph::Char('h');
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 10,
+            size: CellSize::new(3, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(3, 10),
+            },
+            &mut grid,
+        );
+
+        // Line 0: red (error) marker wins over the hint's gray; the
+        // glyph survives untouched.
+        assert_eq!(grid.get(CellCoord::new(0, 0)).style.bg, Color::Indexed(1));
+        assert_eq!(grid.get(CellCoord::new(0, 0)).glyph, Glyph::Char('h'));
+        // Line 1: zero-width warning gets a marker and a single-cell
+        // squiggle at its anchor column — and only there.
+        assert_eq!(grid.get(CellCoord::new(1, 0)).style.bg, Color::Indexed(3));
+        assert_eq!(
+            grid.get(CellCoord::new(1, 2)).style.underline,
+            UnderlineStyle::Curly
+        );
+        assert_eq!(
+            grid.get(CellCoord::new(1, 3)).style.underline,
+            UnderlineStyle::None
+        );
+        // Line 2: clean — no marker.
+        assert_eq!(grid.get(CellCoord::new(2, 0)).style.bg, Color::Default);
+    }
+
+    #[test]
+    fn end_of_line_zero_width_error_squiggles_the_cell_past_eol() {
+        // The missing-comma shape: rust-analyzer anchors "expected
+        // COMMA" as a zero-width range one past the line's last
+        // character (`b: 2` → col 12..12 on a 12-byte line). The
+        // squiggle must land on the blank cell just past EOL, not
+        // vanish in the empty-range clamp.
+        use crate::cell::{Cell, CellSize, UnderlineStyle};
+
+        let store = make_shared_store();
+        store.lock().expect("diag store").set(
+            "file:///a",
+            vec![Diagnostic {
+                start_line: 0,
+                start_col: 5, // one past "hello" (5 bytes)
+                end_line: 0,
+                end_col: 5,
+                severity: DiagnosticSeverity::Error,
+                message: "expected COMMA".to_owned(),
+                source: None,
+                code: None,
+            }],
+        );
+
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "test.rs");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"hello\nworld\n",
+        })
+        .expect("seed buffer");
+
+        let mut view = DiagnosticView::new("file:///a", store);
+        let mut backing = vec![Cell::default(); 20];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 10,
+            size: CellSize::new(2, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(2, 10),
+            },
+            &mut grid,
+        );
+
+        // Single-cell red squiggle on the blank cell past "hello".
+        let cell = grid.get(CellCoord::new(0, 5));
+        assert_eq!(cell.style.underline, UnderlineStyle::Curly);
+        assert_eq!(cell.style.underline_color, Color::Indexed(1));
+        // Nothing under the word itself or beyond the anchor.
+        assert_eq!(
+            grid.get(CellCoord::new(0, 4)).style.underline,
+            UnderlineStyle::None
+        );
+        assert_eq!(
+            grid.get(CellCoord::new(0, 6)).style.underline,
+            UnderlineStyle::None
         );
     }
 }

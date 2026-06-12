@@ -6248,6 +6248,7 @@ fn lua_to_style(t: &Table) -> mlua::Result<Style> {
     let fg: mlua::Value = t.get("fg").unwrap_or(mlua::Value::Nil);
     let bg: mlua::Value = t.get("bg").unwrap_or(mlua::Value::Nil);
     let underline: mlua::Value = t.get("underline").unwrap_or(mlua::Value::Nil);
+    let underline_color: mlua::Value = t.get("underline_color").unwrap_or(mlua::Value::Nil);
     Ok(Style {
         fg: lua_to_color(&fg)?,
         bg: lua_to_color(&bg)?,
@@ -6255,17 +6256,19 @@ fn lua_to_style(t: &Table) -> mlua::Result<Style> {
         italic: t.get("italic").unwrap_or(false),
         underline: lua_to_underline(&underline)?,
         reverse: t.get("reverse").unwrap_or(false),
+        underline_color: lua_to_color(&underline_color)?,
     })
 }
 
 fn style_to_lua(lua: &Lua, style: Style) -> mlua::Result<Table> {
-    let t = lua.create_table_with_capacity(0, 6)?;
+    let t = lua.create_table_with_capacity(0, 7)?;
     t.set("fg", color_to_lua(lua, style.fg)?)?;
     t.set("bg", color_to_lua(lua, style.bg)?)?;
     t.set("bold", style.bold)?;
     t.set("italic", style.italic)?;
     t.set("underline", underline_to_lua(style.underline))?;
     t.set("reverse", style.reverse)?;
+    t.set("underline_color", color_to_lua(lua, style.underline_color)?)?;
     Ok(t)
 }
 
