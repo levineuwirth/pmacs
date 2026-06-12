@@ -536,14 +536,8 @@ impl View for DiagnosticView {
                 } else {
                     line_byte_len
                 };
-                if byte_end <= byte_start {
-                    // Empty range on a line --- no underline to
-                    // paint, but the column-0 marker recorded above
-                    // keeps the diagnostic visible.
-                    continue;
-                }
                 let (start_col, end_col) =
-                    byte_range_to_display_cols(line_bytes, byte_start as usize, byte_end as usize);
+                    underline_cols_for_line(line_bytes, byte_start, byte_end);
                 if end_col <= start_col {
                     continue;
                 }
@@ -592,6 +586,25 @@ fn line_at_offset(line_offsets: &[u32], offset: u32) -> u32 {
     match line_offsets.binary_search(&offset) {
         Ok(i) => i as u32,
         Err(i) => i.saturating_sub(1) as u32,
+    }
+}
+
+/// Resolve the display-column span to underline for one line of a
+/// diagnostic. Zero-width ranges — the shape parsers use for
+/// "expected COMMA"-style errors anchored one past the last token
+/// (rust-analyzer reports a missing comma as `col 12 → col 12` at
+/// end of line, and the caller's `.min(line_byte_len)` clamps
+/// collapse any past-EOL anchor the same way) — get a single-cell
+/// span at the anchor: one past EOL is a blank cell inside the
+/// window, and a squiggled space is exactly how other editors
+/// surface it.
+fn underline_cols_for_line(line_bytes: &[u8], byte_start: u32, byte_end: u32) -> (u32, u32) {
+    if byte_end <= byte_start {
+        let (anchor, _) =
+            byte_range_to_display_cols(line_bytes, byte_start as usize, byte_start as usize);
+        (anchor, anchor + 1)
+    } else {
+        byte_range_to_display_cols(line_bytes, byte_start as usize, byte_end as usize)
     }
 }
 
@@ -983,14 +996,82 @@ mod tests {
         // glyph survives untouched.
         assert_eq!(grid.get(CellCoord::new(0, 0)).style.bg, Color::Indexed(1));
         assert_eq!(grid.get(CellCoord::new(0, 0)).glyph, Glyph::Char('h'));
-        // Line 1: zero-width warning still produces a marker, and no
-        // underline anywhere on the line (the range is empty).
+        // Line 1: zero-width warning gets a marker and a single-cell
+        // squiggle at its anchor column — and only there.
         assert_eq!(grid.get(CellCoord::new(1, 0)).style.bg, Color::Indexed(3));
         assert_eq!(
             grid.get(CellCoord::new(1, 2)).style.underline,
+            UnderlineStyle::Curly
+        );
+        assert_eq!(
+            grid.get(CellCoord::new(1, 3)).style.underline,
             UnderlineStyle::None
         );
         // Line 2: clean — no marker.
         assert_eq!(grid.get(CellCoord::new(2, 0)).style.bg, Color::Default);
+    }
+
+    #[test]
+    fn end_of_line_zero_width_error_squiggles_the_cell_past_eol() {
+        // The missing-comma shape: rust-analyzer anchors "expected
+        // COMMA" as a zero-width range one past the line's last
+        // character (`b: 2` → col 12..12 on a 12-byte line). The
+        // squiggle must land on the blank cell just past EOL, not
+        // vanish in the empty-range clamp.
+        use crate::cell::{Cell, CellSize, UnderlineStyle};
+
+        let store = make_shared_store();
+        store.lock().expect("diag store").set(
+            "file:///a",
+            vec![Diagnostic {
+                start_line: 0,
+                start_col: 5, // one past "hello" (5 bytes)
+                end_line: 0,
+                end_col: 5,
+                severity: DiagnosticSeverity::Error,
+                message: "expected COMMA".to_owned(),
+                source: None,
+                code: None,
+            }],
+        );
+
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "test.rs");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"hello\nworld\n",
+        })
+        .expect("seed buffer");
+
+        let mut view = DiagnosticView::new("file:///a", store);
+        let mut backing = vec![Cell::default(); 20];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 10,
+            size: CellSize::new(2, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(2, 10),
+            },
+            &mut grid,
+        );
+
+        // Single-cell red squiggle on the blank cell past "hello".
+        let cell = grid.get(CellCoord::new(0, 5));
+        assert_eq!(cell.style.underline, UnderlineStyle::Curly);
+        assert_eq!(cell.style.underline_color, Color::Indexed(1));
+        // Nothing under the word itself or beyond the anchor.
+        assert_eq!(
+            grid.get(CellCoord::new(0, 4)).style.underline,
+            UnderlineStyle::None
+        );
+        assert_eq!(
+            grid.get(CellCoord::new(0, 6)).style.underline,
+            UnderlineStyle::None
+        );
     }
 }
