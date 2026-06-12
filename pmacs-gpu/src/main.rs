@@ -101,6 +101,14 @@ const EDGE_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(3
 /// flash. Short enough to read as instantaneous when styling never
 /// arrives (plain-text buffers).
 const JUMP_STYLE_HOLD: std::time::Duration = std::time::Duration::from_millis(25);
+/// Status band (Q#S2): one-line strip reserved at the surface
+/// bottom — buffer name + modified star on the left, diagnostics /
+/// cursor / scroll readout on the right.
+const STATUS_BAND_HEIGHT: f32 = 26.0;
+const STATUS_BAND_BG: [f32; 4] = [0.105, 0.105, 0.145, 1.0];
+const STATUS_TEXT_PAD: f32 = 10.0;
+const STATUS_FONT_SIZE: f32 = 13.0;
+const STATUS_LINE_HEIGHT: f32 = 18.0;
 const QUAD_SHADER: &str = r"
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
@@ -459,9 +467,35 @@ struct State {
     bg_vertex_buffer: ReusableVertexBuffer,
     caret_vertex_buffer: ReusableVertexBuffer,
     minimap_vertex_buffer: ReusableVertexBuffer,
+    /// Q#S2 — the status band's one-line text. Shaped only when the
+    /// composed status string changes; rendered as a second
+    /// `TextArea` in the same prepare pass as the main buffer.
+    status_buffer: Buffer,
+    /// The string `status_buffer` currently holds, for change
+    /// detection.
+    status_text: String,
+    /// Q#S2 — the band's left side (buffer name + modified dot),
+    /// its own buffer so it left-aligns independently of the
+    /// right-aligned readout.
+    status_left_buffer: Buffer,
+    /// Change-detection twin of `status_text` for the left side.
+    status_left_text: String,
+    /// Q#S1 — the wire-authoritative status facts (protocol v8).
+    status_facts: Option<StatusFactsLocal>,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
+}
+
+/// The wire-authoritative status facts (Q#S1, protocol v8),
+/// mirrored from `InstanceMessage::StatusFacts`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatusFactsLocal {
+    buffer_id: BufferId,
+    name: String,
+    modified: bool,
+    diag_errors: u32,
+    diag_warnings: u32,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -1184,6 +1218,24 @@ impl State {
             Some(config.width as f32),
             Some(config.height as f32),
         );
+        let mut status_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(STATUS_FONT_SIZE, STATUS_LINE_HEIGHT),
+        );
+        status_buffer.set_size(
+            &mut font_system,
+            Some(config.width as f32),
+            Some(STATUS_BAND_HEIGHT),
+        );
+        let mut status_left_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(STATUS_FONT_SIZE, STATUS_LINE_HEIGHT),
+        );
+        status_left_buffer.set_size(
+            &mut font_system,
+            Some(config.width as f32),
+            Some(STATUS_BAND_HEIGHT),
+        );
         buffer.set_text(
             &mut font_system,
             initial_text,
@@ -1247,6 +1299,11 @@ impl State {
             bg_vertex_buffer: ReusableVertexBuffer::new(),
             caret_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_vertex_buffer: ReusableVertexBuffer::new(),
+            status_buffer,
+            status_text: String::new(),
+            status_left_buffer,
+            status_left_text: String::new(),
+            status_facts: None,
             minimap_cache: None,
         }
     }
@@ -1821,6 +1878,25 @@ impl State {
                 self.apply_file_style_summary(buffer_id, generation, lines);
                 None
             }
+            // Q#S1 (protocol v8) — the wire-authoritative half of the
+            // status band: name, modified, whole-file diag counts.
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                modified,
+                diag_errors,
+                diag_warnings,
+            } => {
+                self.status_facts = Some(StatusFactsLocal {
+                    buffer_id,
+                    name,
+                    modified,
+                    diag_errors,
+                    diag_warnings,
+                });
+                self.window.request_redraw();
+                None
+            }
             // Session 9.3 — peer presence. The editing frontend's
             // cursor + selection drive the `CurrentLine` / `Selection`
             // washes for this read-only mirror (finding QB1). Store
@@ -2264,6 +2340,139 @@ impl State {
         self.window.request_redraw();
     }
 
+    /// Compose the status-band readout (Q#S1): diagnostic counts
+    /// (wire-authoritative, severity-colored, omitted when zero),
+    /// then cursor L:C from the *optimistic* caret (so it tracks
+    /// typing bursts instead of lagging a round trip), then the
+    /// All/Top/Bot/NN% scroll indicator. Returns the colored spans.
+    fn compose_status_spans(&self) -> Vec<(String, Option<Color>)> {
+        let mut spans: Vec<(String, Option<Color>)> = Vec::new();
+        if let Some(facts) = self
+            .status_facts
+            .as_ref()
+            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
+        {
+            if facts.diag_errors > 0 {
+                spans.push((
+                    format!("E:{}", facts.diag_errors),
+                    Some(Color::rgb(241, 76, 76)),
+                ));
+            }
+            if facts.diag_warnings > 0 {
+                spans.push((
+                    format!("W:{}", facts.diag_warnings),
+                    Some(Color::rgb(245, 245, 67)),
+                ));
+            }
+        }
+        let mut readout = String::new();
+        let mut cursor_row = self.scroll_top;
+        if let Some(own) = self.own_cursor
+            && self.current_buffer_id == Some(own.buffer_id)
+        {
+            let byte = floor_char_boundary(
+                &self.current_text,
+                (own.byte as usize).min(self.current_text.len()),
+            );
+            let line = self
+                .current_line_starts
+                .partition_point(|&s| s as usize <= byte)
+                .saturating_sub(1);
+            cursor_row = line;
+            let ls = self.current_line_starts.get(line).copied().unwrap_or(0) as usize;
+            let col = self
+                .current_text
+                .get(ls..byte)
+                .map_or(0, |s| s.chars().count());
+            readout.push_str(&format!("L{}:C{}", line + 1, col + 1));
+            readout.push_str("  ");
+        }
+        readout.push_str(&format_scroll_indicator(
+            self.scroll_top,
+            estimated_visible_lines(self.config.height),
+            self.current_line_starts.len(),
+            cursor_row,
+        ));
+        spans.push((readout, None));
+        spans
+    }
+
+    /// The band's left side: buffer name + modified dot, from the
+    /// v8 `StatusFacts` (empty until the daemon ships them).
+    fn compose_status_left(&self) -> String {
+        match self
+            .status_facts
+            .as_ref()
+            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
+        {
+            Some(facts) if facts.modified => format!("{} ●", facts.name),
+            Some(facts) => facts.name.clone(),
+            None => String::new(),
+        }
+    }
+
+    /// Re-shape the status-band text iff the composed content
+    /// changed (short lines — shaping is trivial, but not free per
+    /// frame).
+    fn refresh_status_line(&mut self) {
+        let spans = self.compose_status_spans();
+        let composed: String = spans
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("  ");
+        let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+        if composed != self.status_text {
+            let mut rich: Vec<(&str, Attrs)> = Vec::new();
+            for (i, (t, c)) in spans.iter().enumerate() {
+                if i > 0 {
+                    rich.push(("  ", default_attrs.clone()));
+                }
+                let attrs = match c {
+                    Some(color) => default_attrs.clone().color(*color),
+                    None => default_attrs.clone(),
+                };
+                rich.push((t.as_str(), attrs));
+            }
+            self.status_buffer.set_rich_text(
+                &mut self.font_system,
+                rich,
+                &default_attrs,
+                Shaping::Advanced,
+                None,
+            );
+            self.status_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            self.status_text = composed;
+        }
+        let left = self.compose_status_left();
+        if left != self.status_left_text {
+            self.status_left_buffer.set_text(
+                &mut self.font_system,
+                &left,
+                &default_attrs,
+                Shaping::Advanced,
+                None,
+            );
+            self.status_left_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            self.status_left_text = left;
+        }
+    }
+
+    /// The status band's background quad (Q#S2): a full-width strip
+    /// under the band text.
+    fn status_band_vertex_bytes(&self) -> Vec<u8> {
+        let rect = MinimapRect {
+            x: 0.0,
+            y: text_area_bottom(self.config.height),
+            w: self.config.width as f32,
+            h: STATUS_BAND_HEIGHT,
+            color: STATUS_BAND_BG,
+        };
+        rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
+    }
+
     /// Bookkeeping for an outgoing Pointer event: it supersedes any
     /// unconfirmed optimistic-cursor prediction (the daemon's answer
     /// will be the click position, not the typing prediction), and
@@ -2552,6 +2761,16 @@ impl State {
             Some(width as f32),
             Some(height as f32),
         );
+        self.status_buffer.set_size(
+            &mut self.font_system,
+            Some(width as f32),
+            Some(STATUS_BAND_HEIGHT),
+        );
+        self.status_left_buffer.set_size(
+            &mut self.font_system,
+            Some(width as f32),
+            Some(STATUS_BAND_HEIGHT),
+        );
         // A taller/shorter window changes the visible line count, so the
         // slice + scoped viewport change (session S1).
         self.reshape();
@@ -2579,7 +2798,11 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let frame_start = debug_frame().then(std::time::Instant::now);
-        let bg_vertices = self.decoration_background_vertex_bytes();
+        self.refresh_status_line();
+        // The band's strip rides the bg quad batch so it draws under
+        // the band text (text renders after the first quad draw).
+        let mut bg_vertices = self.decoration_background_vertex_bytes();
+        bg_vertices.extend(self.status_band_vertex_bytes());
         let bg_vertex_count = (bg_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let bg_buffer = self
             .bg_vertex_buffer
@@ -2632,6 +2855,17 @@ impl State {
         let after_minimap = debug_frame().then(std::time::Instant::now);
         let text_bounds_right = self.text_bounds_right();
 
+        // Right-align the status readout: measure the shaped width
+        // and place the area flush to the right pad (Q#S2).
+        let status_width = self
+            .status_buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0_f32, f32::max);
+        let status_left =
+            (self.config.width as f32 - STATUS_TEXT_PAD - status_width).max(TEXT_LEFT);
+        let status_top =
+            text_area_bottom(self.config.height) + (STATUS_BAND_HEIGHT - STATUS_LINE_HEIGHT) / 2.0;
         self.text_renderer
             .prepare(
                 &self.device,
@@ -2639,20 +2873,54 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [TextArea {
-                    buffer: &self.buffer,
-                    left: TEXT_LEFT,
-                    top: TEXT_TOP,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: text_bounds_right,
-                        bottom: self.config.height.cast_signed(),
+                [
+                    TextArea {
+                        buffer: &self.buffer,
+                        left: TEXT_LEFT,
+                        top: TEXT_TOP,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: text_bounds_right,
+                            // Clip at the status band (Q#S3): a final
+                            // partially-visible line must not bleed
+                            // into the band.
+                            bottom: text_area_bottom(self.config.height).round() as i32,
+                        },
+                        default_color: Color::rgb(230, 230, 235),
+                        custom_glyphs: &[],
                     },
-                    default_color: Color::rgb(230, 230, 235),
-                    custom_glyphs: &[],
-                }],
+                    TextArea {
+                        buffer: &self.status_buffer,
+                        left: status_left,
+                        top: status_top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: text_area_bottom(self.config.height).round() as i32,
+                            right: self.config.width.cast_signed(),
+                            bottom: self.config.height.cast_signed(),
+                        },
+                        default_color: Color::rgb(168, 168, 180),
+                        custom_glyphs: &[],
+                    },
+                    TextArea {
+                        buffer: &self.status_left_buffer,
+                        left: STATUS_TEXT_PAD,
+                        top: status_top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: text_area_bottom(self.config.height).round() as i32,
+                            // Stop before the right-aligned readout.
+                            right: (status_left - STATUS_TEXT_PAD).max(0.0).round() as i32,
+                            bottom: self.config.height.cast_signed(),
+                        },
+                        default_color: Color::rgb(200, 200, 210),
+                        custom_glyphs: &[],
+                    },
+                ],
                 &mut self.swash_cache,
             )
             .expect("text_renderer prepare");
@@ -3074,8 +3342,20 @@ fn minimap_left(surface_width: u32) -> Option<f32> {
     (x > TEXT_LEFT + TEXT_RIGHT_GAP).then_some(x)
 }
 
+/// Where editor content stops and the status band begins (Q#S3) —
+/// the single source for every bottom-of-text computation.
+fn text_area_bottom(surface_height: u32) -> f32 {
+    (surface_height as f32 - STATUS_BAND_HEIGHT).max(0.0)
+}
+
+/// The minimap's drawable height: the text area minus its own
+/// top/bottom insets.
+fn minimap_height(surface_height: u32) -> f32 {
+    text_area_bottom(surface_height) - MINIMAP_TOP - MINIMAP_BOTTOM
+}
+
 fn estimated_visible_lines(surface_height: u32) -> usize {
-    ((surface_height as f32 - TEXT_TOP.max(0.0)) / CODE_LINE_HEIGHT)
+    ((text_area_bottom(surface_height) - TEXT_TOP.max(0.0)) / CODE_LINE_HEIGHT)
         .ceil()
         .max(1.0) as usize
 }
@@ -3087,7 +3367,7 @@ fn minimap_band_contains(x: f32, y: f32, surface_width: u32, surface_height: u32
     let Some(left) = minimap_left(surface_width) else {
         return false;
     };
-    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    let height = minimap_height(surface_height);
     height > 0.0
         && x >= left
         && x < surface_width as f32 - MINIMAP_RIGHT
@@ -3095,13 +3375,41 @@ fn minimap_band_contains(x: f32, y: f32, surface_width: u32, surface_height: u32
         && y < MINIMAP_TOP + height
 }
 
+/// The TUI mode line's scroll readout, ported verbatim (Q#S1): "All"
+/// when the buffer fits, "Top"/"Bot" at the extremes, else the cursor
+/// row as a percentage of the file.
+fn format_scroll_indicator(
+    view_top: usize,
+    visible: usize,
+    total_lines: usize,
+    cursor_row: usize,
+) -> String {
+    if total_lines <= 1 {
+        return "All".to_string();
+    }
+    if visible > 0 {
+        if visible >= total_lines {
+            return "All".to_string();
+        }
+        if view_top == 0 {
+            return "Top".to_string();
+        }
+        if view_top.saturating_add(visible) >= total_lines {
+            return "Bot".to_string();
+        }
+    }
+    let pct = (cursor_row + 1).saturating_mul(100) / total_lines;
+    format!("{pct}%")
+}
+
 /// Q#M7 — which way (if any) a drag at pixel `y` should auto-scroll:
 /// `-1` in the band hugging the text area's top, `+1` in the band at
-/// the surface bottom, `None` in the interior.
+/// the text area's bottom (above the status band), `None` in the
+/// interior.
 fn edge_scroll_direction(y: f32, surface_height: u32) -> Option<i64> {
     if y < TEXT_TOP + EDGE_SCROLL_BAND {
         Some(-1)
-    } else if y > surface_height as f32 - EDGE_SCROLL_BAND {
+    } else if y > text_area_bottom(surface_height) - EDGE_SCROLL_BAND {
         Some(1)
     } else {
         None
@@ -3116,7 +3424,7 @@ fn minimap_y_to_line(y: f32, surface_height: u32, total_lines: usize) -> Option<
     if total_lines == 0 {
         return None;
     }
-    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    let height = minimap_height(surface_height);
     if height <= 0.0 {
         return None;
     }
@@ -3135,10 +3443,10 @@ fn minimap_rects(
     let Some(x) = minimap_left(surface_width) else {
         return Vec::new();
     };
-    if lines.is_empty() || surface_height as f32 <= MINIMAP_TOP + MINIMAP_BOTTOM {
+    if lines.is_empty() || minimap_height(surface_height) <= 0.0 {
         return Vec::new();
     }
-    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    let height = minimap_height(surface_height);
     let pixel_rows = height.round().max(1.0) as usize;
     let mut rects = Vec::new();
     rects.push(MinimapRect {
@@ -3415,6 +3723,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::Decorations { .. } => "Decorations",
         InstanceMessage::InlineAdornments { .. } => "InlineAdornments",
         InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
+        InstanceMessage::StatusFacts { .. } => "StatusFacts",
         InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
@@ -5151,8 +5460,10 @@ mod tests {
 
     #[test]
     fn minimap_band_and_inverse_line_mapping() {
-        // 800×600 surface: band x = [800-12-48, 800-12) = [740, 788),
-        // y = [12, 588).
+        // 800×600 surface: band x = [800-12-48, 800-12) = [740, 788).
+        // The status band reserves 26px (Q#S3), so the text area
+        // ends at 574 and the minimap column is y = [12, 562)
+        // (height 550).
         assert!(minimap_band_contains(750.0, 100.0, 800, 600));
         assert!(
             !minimap_band_contains(739.0, 100.0, 800, 600),
@@ -5163,15 +5474,18 @@ mod tests {
             "right of band"
         );
         assert!(!minimap_band_contains(750.0, 5.0, 800, 600), "above band");
-        assert!(!minimap_band_contains(750.0, 590.0, 800, 600), "below band");
+        assert!(
+            !minimap_band_contains(750.0, 563.0, 800, 600),
+            "below band (status strip)"
+        );
         // Too-narrow surfaces have no minimap at all.
         assert!(!minimap_band_contains(100.0, 100.0, 150, 600));
 
-        // Inverse mapping: height = 576; 100 lines. Top → line 0,
+        // Inverse mapping: height = 550; 100 lines. Top → line 0,
         // bottom → last line, midpoint → ~half.
         assert_eq!(minimap_y_to_line(12.0, 600, 100), Some(0));
-        assert_eq!(minimap_y_to_line(587.9, 600, 100), Some(99));
-        assert_eq!(minimap_y_to_line(12.0 + 288.0, 600, 100), Some(50));
+        assert_eq!(minimap_y_to_line(561.9, 600, 100), Some(99));
+        assert_eq!(minimap_y_to_line(12.0 + 275.0, 600, 100), Some(50));
         // Out-of-band y clamps rather than panics (scrubbing wanders).
         assert_eq!(minimap_y_to_line(0.0, 600, 100), Some(0));
         assert_eq!(minimap_y_to_line(9999.0, 600, 100), Some(99));
@@ -5180,17 +5494,30 @@ mod tests {
 
     #[test]
     fn edge_scroll_direction_bands() {
-        // 600px surface: up-band y < 16 + 24 = 40; down-band y > 576.
+        // 600px surface: up-band y < 16 + 24 = 40; the text area
+        // ends at 574 (status band, Q#S3), so the down-band is
+        // y > 574 - 24 = 550.
         assert_eq!(edge_scroll_direction(10.0, 600), Some(-1));
         assert_eq!(edge_scroll_direction(39.9, 600), Some(-1));
         assert_eq!(edge_scroll_direction(40.0, 600), None, "interior");
         assert_eq!(edge_scroll_direction(300.0, 600), None);
         assert_eq!(
-            edge_scroll_direction(576.0, 600),
+            edge_scroll_direction(550.0, 600),
             None,
             "band edge exclusive"
         );
-        assert_eq!(edge_scroll_direction(577.0, 600), Some(1));
+        assert_eq!(edge_scroll_direction(551.0, 600), Some(1));
+    }
+
+    #[test]
+    fn scroll_indicator_matches_tui_formula() {
+        // Verbatim port of the TUI's format (Q#S1) — both frontends
+        // must read the same.
+        assert_eq!(format_scroll_indicator(0, 10, 1, 0), "All");
+        assert_eq!(format_scroll_indicator(0, 50, 30, 10), "All");
+        assert_eq!(format_scroll_indicator(0, 10, 100, 5), "Top");
+        assert_eq!(format_scroll_indicator(90, 10, 100, 95), "Bot");
+        assert_eq!(format_scroll_indicator(40, 10, 100, 49), "50%");
     }
 
     #[test]

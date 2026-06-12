@@ -724,6 +724,26 @@ pub enum InstanceMessage {
         /// from line 0. Empty when the buffer is empty.
         lines: Vec<crate::cell::Style>,
     },
+    /// Q#S1 (status band, protocol v8) — instance-authoritative
+    /// status facts a semantic frontend cannot derive locally:
+    /// buffer name, modified flag, whole-file diagnostic counts.
+    /// Cursor position and scroll stay frontend-derived (the
+    /// optimistic caret must not lag a round trip). Emitted by the
+    /// semantic producer when any fact changes; kept off wires
+    /// negotiated `< 8` (additive variant — an older peer would
+    /// hard-error decoding it).
+    StatusFacts {
+        /// Buffer these facts describe.
+        buffer_id: crate::BufferId,
+        /// Buffer display name.
+        name: String,
+        /// Unsaved-changes flag.
+        modified: bool,
+        /// Whole-file `Error`-severity diagnostic count.
+        diag_errors: u32,
+        /// Whole-file `Warning`-severity diagnostic count.
+        diag_warnings: u32,
+    },
     /// T M11.1 — diff zones, folded-region placeholders, anything
     /// occupying its own vertical band. Anchored to the offset of the
     /// line it precedes or replaces; the frontend allocates the
@@ -1044,7 +1064,13 @@ pub enum ResourceBody {
 /// (sent only when the instance's `Hello.protocol_version >= 7`),
 /// so the compat ladder restarts on the v6 encoding floor —
 /// `SUPPORTED_PROTOCOL_VERSIONS` grows to `[6, 7]`.
-pub const PROTOCOL_VERSION: u32 = 7;
+///
+/// Q#S1 (status band): bumped from 7 to 8 for
+/// [`InstanceMessage::StatusFacts`]. Additive again, gated in the
+/// *daemon* this time (the variant travels instance→frontend): the
+/// per-session filter keeps it off wires negotiated `< 8`, the same
+/// shape as the `DispatchIdle` (v4) gate.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1081,7 +1107,10 @@ pub const PROTOCOL_VERSION: u32 = 7;
 /// and frontend-gated (like `Pointer` itself at v5), so the ladder
 /// resumes: v6 and v7 binaries interoperate, with the new variant
 /// kept off wires whose instance negotiated `< 7`.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7];
+///
+/// Q#S1: extended to `[6, 7, 8]`. `InstanceMessage::StatusFacts` is
+/// additive and daemon-gated per session.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

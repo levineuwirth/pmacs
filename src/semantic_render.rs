@@ -118,6 +118,9 @@ pub struct SemanticRenderState {
     /// bump, so the epoch half catches republishes (minimap marks,
     /// T M4.6 GPU parity).
     last_summary: HashMap<BufferId, (u64, u64)>,
+    /// `(name, modified, diag_errors, diag_warnings)` last emitted as
+    /// `StatusFacts` (Q#S1) — cached-compare suppression.
+    last_status: HashMap<BufferId, (String, bool, u32, u32)>,
     /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
     /// the tree-sitter highlights query over the *whole declared
     /// viewport* (which the GPU frontend sets to the entire buffer)
@@ -187,6 +190,7 @@ impl SemanticRenderState {
             last_decorations: HashMap::new(),
             last_adornments: HashMap::new(),
             last_summary: HashMap::new(),
+            last_status: HashMap::new(),
             last_style_gate: HashMap::new(),
             diag_line_cache: HashMap::new(),
         }
@@ -383,7 +387,68 @@ impl SemanticRenderState {
         out.extend(self.inline_adornments_msg(state, &vp));
         // --- FileStyleSummary (minimap producer; Open Q#2) ---
         out.extend(self.file_style_summary_msg(state, vp.buffer_id, generation));
+        // --- StatusFacts (status band; Q#S1, protocol v8) ---
+        out.extend(self.status_facts_msg(state, vp.buffer_id));
         out
+    }
+
+    /// The `StatusFacts` message for this frame, or `None` when
+    /// nothing changed. Carries the facts a semantic frontend cannot
+    /// derive locally: buffer name, modified flag, whole-file
+    /// diagnostic counts (errors / warnings). Counts freeze at their
+    /// last value while the diag store is stale — mid-edit positions
+    /// are wrong but *counts* merely lag, and flickering to zero on
+    /// every keystroke would be worse. The daemon's write loop keeps
+    /// the variant off wires negotiated `< 8`.
+    fn status_facts_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> Option<InstanceMessage> {
+        let (name, modified) = {
+            let core = state.core.borrow();
+            let registry = core.registry.clone();
+            let reg = registry.borrow();
+            let buf = reg.get(buffer_id).ok()?;
+            (buf.name().to_owned(), buf.is_modified())
+        };
+        let counts = {
+            let core = state.core.borrow();
+            buffer_file_uri(&core, buffer_id).and_then(|uri| {
+                let store = state.lsp_manager.borrow().diag_store();
+                let guard = store.lock().expect("diag store mutex poisoned");
+                if guard.is_stale(&uri) {
+                    None // keep the cached counts
+                } else {
+                    let mut errors = 0u32;
+                    let mut warnings = 0u32;
+                    for d in guard.for_uri(&uri) {
+                        match d.severity {
+                            crate::diag::DiagnosticSeverity::Error => errors += 1,
+                            crate::diag::DiagnosticSeverity::Warning => warnings += 1,
+                            _ => {}
+                        }
+                    }
+                    Some((errors, warnings))
+                }
+            })
+        };
+        let cached = self.last_status.get(&buffer_id);
+        let (diag_errors, diag_warnings) =
+            counts.unwrap_or_else(|| cached.map_or((0, 0), |c| (c.2, c.3)));
+        let facts = (name, modified, diag_errors, diag_warnings);
+        if cached == Some(&facts) {
+            return None;
+        }
+        let msg = InstanceMessage::StatusFacts {
+            buffer_id,
+            name: facts.0.clone(),
+            modified: facts.1,
+            diag_errors,
+            diag_warnings,
+        };
+        self.last_status.insert(buffer_id, facts);
+        Some(msg)
     }
 
     /// The `InlineAdornments` message for this frame, or `None` when
@@ -1368,9 +1433,10 @@ mod tests {
     }
 
     /// All `InstanceMessage` variants the semantic projection may
-    /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`, or
-    /// `FileStyleSummary` — never `CellDelta`, grid `Cursor`, or the
-    /// still-unwired `BlockAdornments` / `FoldState` families.
+    /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`,
+    /// `FileStyleSummary`, or `StatusFacts` (Q#S1) — never
+    /// `CellDelta`, grid `Cursor`, or the still-unwired
+    /// `BlockAdornments` / `FoldState` families.
     fn assert_semantic_only(msgs: &[InstanceMessage]) {
         for m in msgs {
             assert!(
@@ -1380,6 +1446,7 @@ mod tests {
                         | InstanceMessage::Decorations { .. }
                         | InstanceMessage::InlineAdornments { .. }
                         | InstanceMessage::FileStyleSummary { .. }
+                        | InstanceMessage::StatusFacts { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
@@ -1478,12 +1545,13 @@ mod tests {
         // the first frame is a `full` resync for both diffable families
         // (the frontend clears its viewport), carrying empty segments.
         // FileStyleSummary also emits on the first frame for this buffer
-        // (post-M11 minimap producer, generation-keyed).
+        // (post-M11 minimap producer, generation-keyed), as does
+        // StatusFacts (Q#S1, cached-compare).
         let first = s.render_frame(&state);
         assert_eq!(
             first.len(),
-            3,
-            "first frame ships StyleSpans + Decorations + FileStyleSummary"
+            4,
+            "first frame ships StyleSpans + Decorations + FileStyleSummary + StatusFacts"
         );
         assert_semantic_only(&first);
         let (style_full, _) = style_segments(&first).expect("StyleSpans present");
@@ -2804,6 +2872,63 @@ mod tests {
         assert_eq!(lines[1], Style::default(), "line 1 has no token → default");
         assert_eq!(lines[2], kw_style, "line 2 dominated by the LSP token");
         assert_eq!(lines[3], Style::default(), "trailing empty line → default");
+    }
+
+    fn facts_of(msgs: &[InstanceMessage]) -> Option<(String, bool, u32, u32)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::StatusFacts {
+                name,
+                modified,
+                diag_errors,
+                diag_warnings,
+                ..
+            } => Some((name.clone(), *modified, *diag_errors, *diag_warnings)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn status_facts_emit_on_change_and_freeze_counts_while_stale() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // "abc\nde" + a Warning diagnostic + file path; the seeding
+        // edit flips `modified`.
+        seed_diagnostic(&state, bid);
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        let first = s.render_frame(&state);
+        let (_, modified, errors, warnings) = facts_of(&first).expect("first frame ships facts");
+        assert!(modified, "the seeding edit dirtied the buffer");
+        assert_eq!((errors, warnings), (0, 1));
+
+        // Nothing changed → suppressed.
+        assert!(facts_of(&s.render_frame(&state)).is_none());
+
+        // Republish as an Error → re-emit with new counts.
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
+        let store = state.lsp_manager.borrow().diag_store();
+        store.lock().expect("diag store").set(
+            &uri,
+            vec![crate::diag::Diagnostic {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 3,
+                severity: crate::diag::DiagnosticSeverity::Error,
+                message: "boom".into(),
+                source: None,
+                code: None,
+            }],
+        );
+        let (_, _, errors, warnings) =
+            facts_of(&s.render_frame(&state)).expect("republish re-emits");
+        assert_eq!((errors, warnings), (1, 0));
+
+        // Stale store: counts freeze at the cached value instead of
+        // flickering to zero, so no re-emission either.
+        store.lock().expect("diag store").mark_stale(&uri);
+        assert!(facts_of(&s.render_frame(&state)).is_none());
     }
 
     #[test]

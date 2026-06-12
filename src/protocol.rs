@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_seven_for_triple_click() {
+    fn protocol_version_is_eight_for_status_facts() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1693,7 +1693,9 @@ mod tests {
         // bump that changed an existing struct's postcard encoding,
         // making v6 the ladder's encoding floor. Q#M4 bumped 6→7
         // (`PointerKind::TripleDown`, additive + frontend-gated).
-        assert_eq!(PROTOCOL_VERSION, 7);
+        // Q#S1 bumped 7→8 (`InstanceMessage::StatusFacts`, additive
+        // + daemon-gated per session).
+        assert_eq!(PROTOCOL_VERSION, 8);
     }
 
     #[test]
@@ -1702,14 +1704,16 @@ mod tests {
         // every cell-carrying message, ending the v1–v5 ladder —
         // pre-v6 peers are refused at the handshake (a clean
         // VersionMismatch) rather than garbling postcard mid-session.
-        // Q#M4: the ladder resumes above that floor — v7 is additive
-        // (`TripleDown`, frontend-gated), so v6 and v7 interoperate.
+        // Q#M4 / Q#S1: the ladder resumes above that floor — v7
+        // (`TripleDown`, frontend-gated) and v8 (`StatusFacts`,
+        // daemon-gated) are additive, so v6 through v8 interoperate.
         assert!(is_supported_protocol_version(6));
         assert!(is_supported_protocol_version(7));
-        for rejected in [0, 1, 2, 3, 4, 5, 8, u32::MAX] {
+        assert!(is_supported_protocol_version(8));
+        for rejected in [0, 1, 2, 3, 4, 5, 9, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v7 binary"
+                "v{rejected} must be rejected by a v8 binary"
             );
         }
     }
