@@ -635,7 +635,8 @@ impl ApplicationHandler<AppEvent> for App {
                         let Some(byte) = state.hit_test_source_byte(x, y) else {
                             return;
                         };
-                        let kind = state.classify_pointer_down(byte);
+                        let kind =
+                            state.classify_pointer_down(byte, mods.contains(Modifiers::SHIFT));
                         state.pointer_drag_active = true;
                         state.last_pointer_sent_byte = Some(byte);
                         state.note_pointer_round_trip();
@@ -2070,7 +2071,14 @@ impl State {
 
     /// Frontend-side double-click detection: a second Down at the
     /// same hit byte within the interval upgrades to `DoubleDown`.
-    fn classify_pointer_down(&mut self, byte: u64) -> PointerKind {
+    fn classify_pointer_down(&mut self, byte: u64, shift: bool) -> PointerKind {
+        if shift {
+            // Shift-click extends the selection (Q#M5); it neither
+            // advances nor inherits the multi-click chain — two
+            // Shift-clicks must not become a word select.
+            self.last_pointer_down = None;
+            return PointerKind::Down;
+        }
         let now = std::time::Instant::now();
         let is_double = self.last_pointer_down.take().is_some_and(|(at, prev)| {
             prev == byte && now.duration_since(at) <= DOUBLE_CLICK_WINDOW

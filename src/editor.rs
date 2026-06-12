@@ -787,7 +787,11 @@ impl EditorState {
     /// inline adornments, scroll), so no cell geometry is consulted.
     ///
     ///   * `Down` places the cursor and anchors a selection there
-    ///     (a following drag grows it).
+    ///     (a following drag grows it). With SHIFT it *extends*
+    ///     instead (Q#M5): the existing anchor — or, with no
+    ///     selection, the pre-click cursor — is kept and only the
+    ///     cursor moves, matching the universal Shift-click
+    ///     convention.
     ///   * `Drag` moves the cursor; the anchor stays.
     ///   * `Up` collapses an empty selection (a click without drag).
     ///   * `DoubleDown` selects the word at the hit (frontend-side
@@ -795,15 +799,13 @@ impl EditorState {
     ///
     /// The hit byte is clamped into the buffer and snapped back to a
     /// UTF-8 boundary: the frontend's hit may race an in-flight edit.
-    /// `mods` is carried for future Shift-click extension and ignored
-    /// today, matching `dispatch_mouse`.
     pub fn dispatch_pointer(
         &mut self,
         frontend_id: FrontendId,
         buffer_id: crate::buffer::BufferId,
         byte: u64,
         kind: crate::protocol::PointerKind,
-        _mods: crate::protocol::Modifiers,
+        mods: crate::protocol::Modifiers,
     ) {
         use crate::protocol::PointerKind;
         let mut core = self.core.borrow_mut();
@@ -828,10 +830,19 @@ impl EditorState {
         };
         match kind {
             PointerKind::Down => {
+                let prev_cursor = core.active_window().cursor;
+                let extending = mods.contains(crate::protocol::Modifiers::SHIFT);
+                let keep_anchor = extending && core.active_window().selection.is_some();
                 let aw = core.active_window_mut();
                 aw.cursor = byte;
                 aw.goal_col = None;
-                core.begin_selection(byte);
+                if extending {
+                    if !keep_anchor {
+                        core.begin_selection(prev_cursor);
+                    }
+                } else {
+                    core.begin_selection(byte);
+                }
             }
             PointerKind::Drag => {
                 let aw = core.active_window_mut();
@@ -4439,6 +4450,45 @@ mod tests {
         let other = crate::buffer::BufferId::next();
         s.dispatch_pointer(FrontendId::LOCAL, other, 0, PointerKind::Down, none);
         assert_eq!(s.core.borrow().cursor(), 15, "mismatched buffer ignored");
+    }
+
+    #[test]
+    fn dispatch_pointer_shift_down_extends_instead_of_restarting() {
+        use crate::protocol::{Modifiers as WireMods, PointerKind};
+        let mut s = fresh_with(b"hello world\n");
+        let bid = s.core.borrow().active_buffer_id();
+        let none = WireMods::NONE;
+        let shift = WireMods::SHIFT;
+
+        // No selection, cursor parked at 2: Shift-Down anchors at the
+        // pre-click cursor and moves to the hit (Q#M5).
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 2, PointerKind::Down, none);
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 2, PointerKind::Up, none);
+        assert!(s.core.borrow().active_region().is_none());
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 7, PointerKind::Down, shift);
+        assert_eq!(s.core.borrow().active_region(), Some((2, 7)));
+        // The Up after a Shift-click must not collapse the region
+        // (anchor ≠ cursor).
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 7, PointerKind::Up, shift);
+        assert_eq!(s.core.borrow().active_region(), Some((2, 7)));
+
+        // With a live selection, Shift-Down keeps the anchor — even
+        // extending in the other direction.
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 0, PointerKind::Down, shift);
+        assert_eq!(
+            s.core.borrow().active_region(),
+            Some((0, 2)),
+            "anchor 2 kept; cursor crossed to the other side"
+        );
+
+        // A drag after a Shift-Down grows from the inherited anchor.
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 9, PointerKind::Drag, shift);
+        assert_eq!(s.core.borrow().active_region(), Some((2, 9)));
+
+        // A plain Down restarts the anchor as before.
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 4, PointerKind::Down, none);
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 4, PointerKind::Up, none);
+        assert!(s.core.borrow().active_region().is_none());
     }
 
     /// Acceptance bullet 3: mouse events are coalesced at frame
