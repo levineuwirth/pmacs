@@ -474,9 +474,28 @@ struct State {
     /// The string `status_buffer` currently holds, for change
     /// detection.
     status_text: String,
+    /// Q#S2 — the band's left side (buffer name + modified dot),
+    /// its own buffer so it left-aligns independently of the
+    /// right-aligned readout.
+    status_left_buffer: Buffer,
+    /// Change-detection twin of `status_text` for the left side.
+    status_left_text: String,
+    /// Q#S1 — the wire-authoritative status facts (protocol v8).
+    status_facts: Option<StatusFactsLocal>,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
+}
+
+/// The wire-authoritative status facts (Q#S1, protocol v8),
+/// mirrored from `InstanceMessage::StatusFacts`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatusFactsLocal {
+    buffer_id: BufferId,
+    name: String,
+    modified: bool,
+    diag_errors: u32,
+    diag_warnings: u32,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -1208,6 +1227,15 @@ impl State {
             Some(config.width as f32),
             Some(STATUS_BAND_HEIGHT),
         );
+        let mut status_left_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(STATUS_FONT_SIZE, STATUS_LINE_HEIGHT),
+        );
+        status_left_buffer.set_size(
+            &mut font_system,
+            Some(config.width as f32),
+            Some(STATUS_BAND_HEIGHT),
+        );
         buffer.set_text(
             &mut font_system,
             initial_text,
@@ -1273,6 +1301,9 @@ impl State {
             minimap_vertex_buffer: ReusableVertexBuffer::new(),
             status_buffer,
             status_text: String::new(),
+            status_left_buffer,
+            status_left_text: String::new(),
+            status_facts: None,
             minimap_cache: None,
         }
     }
@@ -1847,6 +1878,25 @@ impl State {
                 self.apply_file_style_summary(buffer_id, generation, lines);
                 None
             }
+            // Q#S1 (protocol v8) — the wire-authoritative half of the
+            // status band: name, modified, whole-file diag counts.
+            InstanceMessage::StatusFacts {
+                buffer_id,
+                name,
+                modified,
+                diag_errors,
+                diag_warnings,
+            } => {
+                self.status_facts = Some(StatusFactsLocal {
+                    buffer_id,
+                    name,
+                    modified,
+                    diag_errors,
+                    diag_warnings,
+                });
+                self.window.request_redraw();
+                None
+            }
             // Session 9.3 — peer presence. The editing frontend's
             // cursor + selection drive the `CurrentLine` / `Selection`
             // washes for this read-only mirror (finding QB1). Store
@@ -2290,14 +2340,32 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// Compose the status-band readout from the locally fresh facts
-    /// (Q#S1): cursor L:C from the *optimistic* caret (so it tracks
-    /// typing bursts instead of lagging a round trip) and the
-    /// All/Top/Bot/NN% scroll indicator. The wire-authoritative
-    /// facts (name, modified star, diagnostic counts) join via the
-    /// v8 `StatusFacts` pass.
-    fn compose_status_line(&self) -> String {
-        let mut out = String::new();
+    /// Compose the status-band readout (Q#S1): diagnostic counts
+    /// (wire-authoritative, severity-colored, omitted when zero),
+    /// then cursor L:C from the *optimistic* caret (so it tracks
+    /// typing bursts instead of lagging a round trip), then the
+    /// All/Top/Bot/NN% scroll indicator. Returns the colored spans.
+    fn compose_status_spans(&self) -> Vec<(String, Option<Color>)> {
+        let mut spans: Vec<(String, Option<Color>)> = Vec::new();
+        if let Some(facts) = self
+            .status_facts
+            .as_ref()
+            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
+        {
+            if facts.diag_errors > 0 {
+                spans.push((
+                    format!("E:{}", facts.diag_errors),
+                    Some(Color::rgb(241, 76, 76)),
+                ));
+            }
+            if facts.diag_warnings > 0 {
+                spans.push((
+                    format!("W:{}", facts.diag_warnings),
+                    Some(Color::rgb(245, 245, 67)),
+                ));
+            }
+        }
+        let mut readout = String::new();
         let mut cursor_row = self.scroll_top;
         if let Some(own) = self.own_cursor
             && self.current_buffer_id == Some(own.buffer_id)
@@ -2316,38 +2384,80 @@ impl State {
                 .current_text
                 .get(ls..byte)
                 .map_or(0, |s| s.chars().count());
-            out.push_str(&format!("L{}:C{}", line + 1, col + 1));
+            readout.push_str(&format!("L{}:C{}", line + 1, col + 1));
+            readout.push_str("  ");
         }
-        let scroll = format_scroll_indicator(
+        readout.push_str(&format_scroll_indicator(
             self.scroll_top,
             estimated_visible_lines(self.config.height),
             self.current_line_starts.len(),
             cursor_row,
-        );
-        if !out.is_empty() {
-            out.push_str("  ");
-        }
-        out.push_str(&scroll);
-        out
+        ));
+        spans.push((readout, None));
+        spans
     }
 
-    /// Re-shape the status-band text iff the composed string changed
-    /// (one short line — shaping is trivial, but not free per frame).
-    fn refresh_status_line(&mut self) {
-        let composed = self.compose_status_line();
-        if composed == self.status_text {
-            return;
+    /// The band's left side: buffer name + modified dot, from the
+    /// v8 `StatusFacts` (empty until the daemon ships them).
+    fn compose_status_left(&self) -> String {
+        match self
+            .status_facts
+            .as_ref()
+            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
+        {
+            Some(facts) if facts.modified => format!("{} ●", facts.name),
+            Some(facts) => facts.name.clone(),
+            None => String::new(),
         }
-        self.status_buffer.set_text(
-            &mut self.font_system,
-            &composed,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
-            Shaping::Advanced,
-            None,
-        );
-        self.status_buffer
-            .shape_until_scroll(&mut self.font_system, false);
-        self.status_text = composed;
+    }
+
+    /// Re-shape the status-band text iff the composed content
+    /// changed (short lines — shaping is trivial, but not free per
+    /// frame).
+    fn refresh_status_line(&mut self) {
+        let spans = self.compose_status_spans();
+        let composed: String = spans
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("  ");
+        let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+        if composed != self.status_text {
+            let mut rich: Vec<(&str, Attrs)> = Vec::new();
+            for (i, (t, c)) in spans.iter().enumerate() {
+                if i > 0 {
+                    rich.push(("  ", default_attrs.clone()));
+                }
+                let attrs = match c {
+                    Some(color) => default_attrs.clone().color(*color),
+                    None => default_attrs.clone(),
+                };
+                rich.push((t.as_str(), attrs));
+            }
+            self.status_buffer.set_rich_text(
+                &mut self.font_system,
+                rich,
+                &default_attrs,
+                Shaping::Advanced,
+                None,
+            );
+            self.status_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            self.status_text = composed;
+        }
+        let left = self.compose_status_left();
+        if left != self.status_left_text {
+            self.status_left_buffer.set_text(
+                &mut self.font_system,
+                &left,
+                &default_attrs,
+                Shaping::Advanced,
+                None,
+            );
+            self.status_left_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            self.status_left_text = left;
+        }
     }
 
     /// The status band's background quad (Q#S2): a full-width strip
@@ -2656,6 +2766,11 @@ impl State {
             Some(width as f32),
             Some(STATUS_BAND_HEIGHT),
         );
+        self.status_left_buffer.set_size(
+            &mut self.font_system,
+            Some(width as f32),
+            Some(STATUS_BAND_HEIGHT),
+        );
         // A taller/shorter window changes the visible line count, so the
         // slice + scoped viewport change (session S1).
         self.reshape();
@@ -2788,6 +2903,21 @@ impl State {
                             bottom: self.config.height.cast_signed(),
                         },
                         default_color: Color::rgb(168, 168, 180),
+                        custom_glyphs: &[],
+                    },
+                    TextArea {
+                        buffer: &self.status_left_buffer,
+                        left: STATUS_TEXT_PAD,
+                        top: status_top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: text_area_bottom(self.config.height).round() as i32,
+                            // Stop before the right-aligned readout.
+                            right: (status_left - STATUS_TEXT_PAD).max(0.0).round() as i32,
+                            bottom: self.config.height.cast_signed(),
+                        },
+                        default_color: Color::rgb(200, 200, 210),
                         custom_glyphs: &[],
                     },
                 ],
@@ -3593,6 +3723,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::Decorations { .. } => "Decorations",
         InstanceMessage::InlineAdornments { .. } => "InlineAdornments",
         InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
+        InstanceMessage::StatusFacts { .. } => "StatusFacts",
         InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",

@@ -1015,7 +1015,18 @@ fn dispatcher_loop(
             if let Some(stream) = streams.get_mut(fid)
                 && !write_failed
             {
+                // Q#S1 — `StatusFacts` is a v8 variant; an older peer
+                // would hard-error decoding it. Same per-session gate
+                // shape as `DispatchIdle` (v4).
+                let peer_knows_status_facts = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 8);
                 for msg in &messages {
+                    if !peer_knows_status_facts
+                        && matches!(msg, InstanceMessage::StatusFacts { .. })
+                    {
+                        continue;
+                    }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
                     // jitter site: render-write latency.
                     //

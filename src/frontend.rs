@@ -383,6 +383,7 @@ impl Frontend {
             | InstanceMessage::BlockAdornments { .. }
             | InstanceMessage::FoldState { .. }
             | InstanceMessage::FileStyleSummary { .. }
+            | InstanceMessage::StatusFacts { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path
