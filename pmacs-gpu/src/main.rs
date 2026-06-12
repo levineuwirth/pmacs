@@ -90,6 +90,17 @@ const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
 const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
 const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
 const MINIMAP_THUMB_BORDER: [f32; 4] = [0.86, 0.86, 0.96, 0.7];
+/// Q#M7 — dragging within this many pixels of the text area's top or
+/// bottom edge auto-scrolls toward the pointer.
+const EDGE_SCROLL_BAND: f32 = 24.0;
+/// Q#M7 — one line per tick while edge-scrolling.
+const EDGE_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(35);
+/// Q#M6 (bet #2) — after a far jump (no shaped line reused), hold
+/// the redraw this long so the daemon's restyle usually lands before
+/// the first visible frame: the styled frame replaces the unstyled
+/// flash. Short enough to read as instantaneous when styling never
+/// arrives (plain-text buffers).
+const JUMP_STYLE_HOLD: std::time::Duration = std::time::Duration::from_millis(25);
 const QUAD_SHADER: &str = r"
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
@@ -409,9 +420,30 @@ struct State {
     /// Hit byte of the last Pointer event sent — Drag coalescing:
     /// pixel-rate motion only ships when the hit byte changes.
     last_pointer_sent_byte: Option<u64>,
-    /// `(when, byte)` of the last primary Down, for frontend-side
-    /// double-click detection (same-hit within the interval).
-    last_pointer_down: Option<(std::time::Instant, u64)>,
+    /// `(when, byte, chain_count)` of the last primary Down, for
+    /// frontend-side multi-click detection (same-hit within the
+    /// interval): count 1 = single, 2 = the double already fired,
+    /// so the next same-hit press is a triple (Q#M4).
+    last_pointer_down: Option<(std::time::Instant, u64, u8)>,
+    /// A press began inside the minimap band (Q#M6): subsequent
+    /// `CursorMoved` scrubs the viewport instead of dragging a
+    /// selection, until release. Never sends `Pointer` events —
+    /// the viewport is frontend-owned.
+    minimap_scrub_active: bool,
+    /// Q#M7 — `Some(±1)` while a drag sits in the top/bottom edge
+    /// band; `about_to_wait` ticks the viewport one line toward the
+    /// pointer per [`EDGE_SCROLL_TICK`] and re-runs the drag
+    /// hit-test (the mouse may be stationary — `CursorMoved` alone
+    /// would stall the selection).
+    edge_scroll_dir: Option<i64>,
+    /// When the last edge-scroll tick fired.
+    edge_scroll_last: Option<std::time::Instant>,
+    /// Q#M6 (bet #2) — a far jump rebuilt every visible line from
+    /// spans that can't cover the new region; the redraw is held
+    /// until restyle arrival (which clears this) or this deadline,
+    /// whichever is first, so the unstyled frame usually never
+    /// shows. `about_to_wait` enforces the deadline.
+    styled_redraw_deadline: Option<std::time::Instant>,
     /// Q#R2 — the per-line surgery path skips rebuilding the pointer
     /// hit map (clicks are rare next to keystrokes); this marks it
     /// stale so `hit_test_source_byte` rebuilds on demand from the
@@ -433,7 +465,7 @@ struct State {
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OwnCursor {
     buffer_id: BufferId,
     byte: u64,
@@ -472,6 +504,15 @@ impl App {
         if client.server_protocol_version() < 5 {
             return;
         }
+        // TripleDown is a v7 variant; a pre-v7 instance would
+        // hard-error decoding it. Downgrade to a plain Down — the
+        // exact behavior the third click had before v7 (the chain
+        // restarting).
+        let kind = if kind == PointerKind::TripleDown && client.server_protocol_version() < 7 {
+            PointerKind::Down
+        } else {
+            kind
+        };
         if let Err(e) = client.send_pointer(buffer_id, byte, kind, mods) {
             eprintln!("pmacs-gpu: send_pointer failed: {e}");
         }
@@ -599,9 +640,27 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 };
                 state.pointer_pos = Some((position.x, position.y));
+                if state.minimap_scrub_active {
+                    // Scrubbing (Q#M6): the press began on the
+                    // minimap; motion keeps jumping, even if the
+                    // pointer wanders out of the band.
+                    let vp = state.minimap_jump_to(position.y);
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: minimap scrub send_viewport failed: {e}");
+                    }
+                    return;
+                }
                 if !state.pointer_drag_active {
                     return;
                 }
+                // Q#M7 — arm/disarm edge auto-scroll from the drag's
+                // vertical position; `about_to_wait` runs the ticks.
+                state.edge_scroll_dir =
+                    edge_scroll_direction(position.y as f32, state.config.height);
                 // Drag coalescing (predicted finding #4): pixel-rate
                 // motion only ships when the hit byte changes.
                 let Some(byte) = state.hit_test_source_byte(position.x, position.y) else {
@@ -632,10 +691,25 @@ impl ApplicationHandler<AppEvent> for App {
                 let mods = translate_mods(self.modifiers);
                 match button_state {
                     ElementState::Pressed => {
+                        if state.in_minimap_band(x, y) {
+                            // Q#M6 — consumed before text hit-testing;
+                            // never a Pointer event.
+                            state.minimap_scrub_active = true;
+                            let vp = state.minimap_jump_to(y);
+                            if let Some(vp) = vp
+                                && let Some(client) = self.attach_client.as_ref()
+                                && let Err(e) =
+                                    client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                            {
+                                eprintln!("pmacs-gpu: minimap jump send_viewport failed: {e}");
+                            }
+                            return;
+                        }
                         let Some(byte) = state.hit_test_source_byte(x, y) else {
                             return;
                         };
-                        let kind = state.classify_pointer_down(byte);
+                        let kind =
+                            state.classify_pointer_down(byte, mods.contains(Modifiers::SHIFT));
                         state.pointer_drag_active = true;
                         state.last_pointer_sent_byte = Some(byte);
                         state.note_pointer_round_trip();
@@ -647,10 +721,16 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     }
                     ElementState::Released => {
+                        if state.minimap_scrub_active {
+                            state.minimap_scrub_active = false;
+                            return;
+                        }
                         if !state.pointer_drag_active {
                             return;
                         }
                         state.pointer_drag_active = false;
+                        state.edge_scroll_dir = None;
+                        state.edge_scroll_last = None;
                         let byte = state
                             .hit_test_source_byte(x, y)
                             .or(state.last_pointer_sent_byte);
@@ -694,6 +774,84 @@ impl ApplicationHandler<AppEvent> for App {
             }
             _ => {}
         }
+    }
+
+    /// The deadline pump. Two timed concerns share it, both armed
+    /// rarely:
+    ///
+    ///   * Q#M7 — the edge auto-scroll tick, while a drag sits in
+    ///     the top/bottom edge band. Each due tick scrolls one line
+    ///     toward the pointer and re-runs the drag hit-test at the
+    ///     *current* pointer position, so the selection keeps
+    ///     growing while the mouse is stationary past the edge.
+    ///   * Q#M6 (bet #2) — the post-jump styled-redraw hold: if the
+    ///     daemon's restyle hasn't landed by the deadline, draw the
+    ///     unstyled frame anyway (responsiveness floor).
+    ///
+    /// With neither armed the loop stays in plain `Wait`.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let mut next_wake: Option<std::time::Instant> = None;
+
+        // Q#M6 — held post-jump frame.
+        if let Some(deadline) = state.styled_redraw_deadline {
+            if now >= deadline {
+                state.styled_redraw_deadline = None;
+                state.window.request_redraw();
+            } else {
+                next_wake = Some(deadline);
+            }
+        }
+
+        // Q#M7 — edge auto-scroll.
+        let mut drag_resend: Option<(BufferId, u64)> = None;
+        if state.pointer_drag_active
+            && let Some(dir) = state.edge_scroll_dir
+        {
+            let due = state
+                .edge_scroll_last
+                .is_none_or(|at| now.duration_since(at) >= EDGE_SCROLL_TICK);
+            if due {
+                state.edge_scroll_last = Some(now);
+                let vp = state.scroll_by_lines(dir);
+                if let Some(vp) = vp
+                    && let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                {
+                    eprintln!("pmacs-gpu: edge-scroll send_viewport failed: {e}");
+                }
+                let state = self.state.as_mut().expect("checked above");
+                if let Some((x, y)) = state.pointer_pos
+                    && let Some(byte) = state.hit_test_source_byte(x, y)
+                    && state.last_pointer_sent_byte != Some(byte)
+                {
+                    state.last_pointer_sent_byte = Some(byte);
+                    state.note_pointer_round_trip();
+                    if let Some(buffer_id) = state.current_buffer_id {
+                        drag_resend = Some((buffer_id, byte));
+                    }
+                }
+            }
+            let last = self
+                .state
+                .as_ref()
+                .and_then(|s| s.edge_scroll_last)
+                .unwrap_or(now);
+            let tick_wake = last + EDGE_SCROLL_TICK;
+            next_wake = Some(next_wake.map_or(tick_wake, |w| w.min(tick_wake)));
+        }
+        if let Some((buffer_id, byte)) = drag_resend {
+            let mods = translate_mods(self.modifiers);
+            self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
+        }
+
+        event_loop.set_control_flow(match next_wake {
+            Some(at) => winit::event_loop::ControlFlow::WaitUntil(at),
+            None => winit::event_loop::ControlFlow::Wait,
+        });
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
@@ -1079,6 +1237,10 @@ impl State {
             pointer_drag_active: false,
             last_pointer_sent_byte: None,
             last_pointer_down: None,
+            minimap_scrub_active: false,
+            edge_scroll_dir: None,
+            edge_scroll_last: None,
+            styled_redraw_deadline: None,
             hit_map_dirty: false,
             line_chunk_cache: Vec::new(),
             shaped_top: 0,
@@ -1733,17 +1895,29 @@ impl State {
                         return None;
                     }
                 }
-                self.own_cursor = Some(OwnCursor {
+                let arrived = OwnCursor {
                     buffer_id,
                     byte: byte_pos,
-                });
+                };
+                let moved = self.own_cursor != Some(arrived);
+                self.own_cursor = Some(arrived);
                 self.cursor_fresh = self.current_buffer_id == Some(buffer_id);
                 // Session S1 — keep the caret on screen (Q#S2). When the
                 // cursor leaves the visible slice (arrows past an edge,
                 // PageUp/Down), scroll to follow it, re-shape the new
                 // slice, and re-declare the scoped Viewport so the
                 // producer ships spans for what's now visible.
-                if self.scroll_to_cursor() {
+                //
+                // Only when the cursor MOVED. The daemon attaches a
+                // CursorByte to every frame it produces — including
+                // the frames our own Viewport sends trigger — so an
+                // unconditional follow snapped the viewport back to
+                // a stationary cursor on every minimap jump / scrub
+                // (and on any wheel scroll past the cursor's screen):
+                // jump → Viewport → frame + re-announced CursorByte →
+                // snap, in a loop. Scrolling away from a cursor that
+                // isn't moving is the user's prerogative.
+                if moved && self.scroll_to_cursor() {
                     // Pure scroll: retained lines keep their shape
                     // caches; only newly exposed lines shape.
                     self.rebuild_lines_reusing_scroll();
@@ -1883,6 +2057,24 @@ impl State {
             .and_then(|bid| self.viewport_send_if_changed(bid))
     }
 
+    /// True when the pixel position lies inside the minimap band
+    /// (Q#M6). Presses here are consumed locally and never become
+    /// `Pointer` events.
+    fn in_minimap_band(&self, x: f64, y: f64) -> bool {
+        minimap_band_contains(x as f32, y as f32, self.config.width, self.config.height)
+    }
+
+    /// Center the viewport on the source line the minimap pixel `y`
+    /// maps to — the inverse of the painter's linear line→y
+    /// interpolation. Reuses [`Self::scroll_by_lines`] for the
+    /// clamp / rebuild / viewport-send plumbing.
+    fn minimap_jump_to(&mut self, y: f64) -> Option<ViewportSend> {
+        let target =
+            minimap_y_to_line(y as f32, self.config.height, self.current_line_starts.len())?;
+        let centered = target.saturating_sub(estimated_visible_lines(self.config.height) / 2);
+        self.scroll_by_lines(centered as i64 - self.scroll_top as i64)
+    }
+
     /// Q#R1 — per-line incremental reshape for a single-line text
     /// edit: rebuild ONE `BufferLine` instead of re-shaping the whole
     /// visible slice. Returns `false` when the edit needs the full
@@ -1997,6 +2189,7 @@ impl State {
             .collect();
         let mut lines = Vec::with_capacity(ranges.len());
         let mut cache = Vec::with_capacity(ranges.len());
+        let mut any_reused = false;
         for (i, &(ls, ce)) in ranges.iter().enumerate() {
             let abs = new_top + i;
             let reused = abs.checked_sub(old_top).and_then(|j| {
@@ -2007,6 +2200,7 @@ impl State {
                 }
             });
             if let Some((line, chunks)) = reused {
+                any_reused = true;
                 lines.push(line);
                 cache.push(chunks);
             } else {
@@ -2022,7 +2216,17 @@ impl State {
             .set_scroll(glyphon::cosmic_text::Scroll::default());
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.hit_map_dirty = true;
-        self.window.request_redraw();
+        if any_reused || self.line_chunk_cache.is_empty() {
+            self.styled_redraw_deadline = None;
+            self.window.request_redraw();
+        } else {
+            // Far jump (Q#M6, bet #2): every line rebuilt, and the
+            // span set covers the *old* viewport — drawing now would
+            // flash unstyled text. Hold the redraw until the restyle
+            // lands (`refresh_changed_lines` clears this) or the
+            // deadline fires in `about_to_wait`.
+            self.styled_redraw_deadline = Some(std::time::Instant::now() + JUMP_STYLE_HOLD);
+        }
     }
 
     /// Re-shape ONLY lines whose chunk set changed — the incoming
@@ -2054,6 +2258,9 @@ impl State {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
             self.hit_map_dirty = true;
         }
+        // Fresh styling reached the slice — release any held
+        // post-jump frame (Q#M6, bet #2).
+        self.styled_redraw_deadline = None;
         self.window.request_redraw();
     }
 
@@ -2068,19 +2275,38 @@ impl State {
         self.optimistic_floor_set_at = None;
     }
 
-    /// Frontend-side double-click detection: a second Down at the
-    /// same hit byte within the interval upgrades to `DoubleDown`.
-    fn classify_pointer_down(&mut self, byte: u64) -> PointerKind {
+    /// Frontend-side multi-click detection: a second Down at the
+    /// same hit byte within the interval upgrades to `DoubleDown`,
+    /// a third to `TripleDown` (Q#M4); a fourth restarts the chain.
+    fn classify_pointer_down(&mut self, byte: u64, shift: bool) -> PointerKind {
+        if shift {
+            // Shift-click extends the selection (Q#M5); it neither
+            // advances nor inherits the multi-click chain — two
+            // Shift-clicks must not become a word select.
+            self.last_pointer_down = None;
+            return PointerKind::Down;
+        }
         let now = std::time::Instant::now();
-        let is_double = self.last_pointer_down.take().is_some_and(|(at, prev)| {
-            prev == byte && now.duration_since(at) <= DOUBLE_CLICK_WINDOW
-        });
-        if is_double {
-            // A third click starts over (triple-click is deferred).
-            PointerKind::DoubleDown
-        } else {
-            self.last_pointer_down = Some((now, byte));
-            PointerKind::Down
+        let prior_chain = self
+            .last_pointer_down
+            .take()
+            .and_then(|(at, prev, count)| {
+                (prev == byte && now.duration_since(at) <= DOUBLE_CLICK_WINDOW).then_some(count)
+            })
+            .unwrap_or(0);
+        match prior_chain {
+            0 => {
+                self.last_pointer_down = Some((now, byte, 1));
+                PointerKind::Down
+            }
+            1 => {
+                self.last_pointer_down = Some((now, byte, 2));
+                PointerKind::DoubleDown
+            }
+            _ => {
+                // Chain consumed: a fourth click starts over.
+                PointerKind::TripleDown
+            }
         }
     }
 
@@ -2310,6 +2536,8 @@ impl State {
         // The pointer hit map rebuilds lazily from the same caches
         // (Q#R2) — clicks are rare next to keystrokes/frames.
         self.hit_map_dirty = true;
+        // Full restyle: release any held post-jump frame (Q#M6).
+        self.styled_redraw_deadline = None;
         self.window.request_redraw();
     }
 
@@ -2521,7 +2749,11 @@ impl State {
             &self.current_line_shapes,
             self.config.width,
             self.config.height,
-            0,
+            // The thumb tracks the live scroll position. (It was
+            // hardcoded to 0 from the minimap's first session —
+            // surfaced by Q#M6 validation, where jumping finally
+            // made the frozen thumb obvious.)
+            self.scroll_top,
             visible_lines,
         );
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
@@ -2846,6 +3078,50 @@ fn estimated_visible_lines(surface_height: u32) -> usize {
     ((surface_height as f32 - TEXT_TOP.max(0.0)) / CODE_LINE_HEIGHT)
         .ceil()
         .max(1.0) as usize
+}
+
+/// True when `(x, y)` lies inside the minimap band — the painter's
+/// geometry (`minimap_left` × the `MINIMAP_TOP..bottom` column),
+/// shared by the Q#M6 press hit-test.
+fn minimap_band_contains(x: f32, y: f32, surface_width: u32, surface_height: u32) -> bool {
+    let Some(left) = minimap_left(surface_width) else {
+        return false;
+    };
+    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    height > 0.0
+        && x >= left
+        && x < surface_width as f32 - MINIMAP_RIGHT
+        && y >= MINIMAP_TOP
+        && y < MINIMAP_TOP + height
+}
+
+/// Q#M7 — which way (if any) a drag at pixel `y` should auto-scroll:
+/// `-1` in the band hugging the text area's top, `+1` in the band at
+/// the surface bottom, `None` in the interior.
+fn edge_scroll_direction(y: f32, surface_height: u32) -> Option<i64> {
+    if y < TEXT_TOP + EDGE_SCROLL_BAND {
+        Some(-1)
+    } else if y > surface_height as f32 - EDGE_SCROLL_BAND {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// Map a minimap pixel `y` to a whole-file source line — the inverse
+/// of the painter's `y = MINIMAP_TOP + line * height / total`
+/// interpolation, clamped into the file. `None` for an empty file or
+/// a degenerate surface.
+fn minimap_y_to_line(y: f32, surface_height: u32, total_lines: usize) -> Option<usize> {
+    if total_lines == 0 {
+        return None;
+    }
+    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    if height <= 0.0 {
+        return None;
+    }
+    let frac = ((y - MINIMAP_TOP) / height).clamp(0.0, 1.0);
+    Some(((frac * total_lines as f32) as usize).min(total_lines - 1))
 }
 
 fn minimap_rects(
@@ -4871,6 +5147,50 @@ mod tests {
         );
 
         assert_eq!(chunk_texts(&chunks), vec!["abcd", "X"]);
+    }
+
+    #[test]
+    fn minimap_band_and_inverse_line_mapping() {
+        // 800×600 surface: band x = [800-12-48, 800-12) = [740, 788),
+        // y = [12, 588).
+        assert!(minimap_band_contains(750.0, 100.0, 800, 600));
+        assert!(
+            !minimap_band_contains(739.0, 100.0, 800, 600),
+            "left of band"
+        );
+        assert!(
+            !minimap_band_contains(788.0, 100.0, 800, 600),
+            "right of band"
+        );
+        assert!(!minimap_band_contains(750.0, 5.0, 800, 600), "above band");
+        assert!(!minimap_band_contains(750.0, 590.0, 800, 600), "below band");
+        // Too-narrow surfaces have no minimap at all.
+        assert!(!minimap_band_contains(100.0, 100.0, 150, 600));
+
+        // Inverse mapping: height = 576; 100 lines. Top → line 0,
+        // bottom → last line, midpoint → ~half.
+        assert_eq!(minimap_y_to_line(12.0, 600, 100), Some(0));
+        assert_eq!(minimap_y_to_line(587.9, 600, 100), Some(99));
+        assert_eq!(minimap_y_to_line(12.0 + 288.0, 600, 100), Some(50));
+        // Out-of-band y clamps rather than panics (scrubbing wanders).
+        assert_eq!(minimap_y_to_line(0.0, 600, 100), Some(0));
+        assert_eq!(minimap_y_to_line(9999.0, 600, 100), Some(99));
+        assert_eq!(minimap_y_to_line(100.0, 600, 0), None, "empty file");
+    }
+
+    #[test]
+    fn edge_scroll_direction_bands() {
+        // 600px surface: up-band y < 16 + 24 = 40; down-band y > 576.
+        assert_eq!(edge_scroll_direction(10.0, 600), Some(-1));
+        assert_eq!(edge_scroll_direction(39.9, 600), Some(-1));
+        assert_eq!(edge_scroll_direction(40.0, 600), None, "interior");
+        assert_eq!(edge_scroll_direction(300.0, 600), None);
+        assert_eq!(
+            edge_scroll_direction(576.0, 600),
+            None,
+            "band edge exclusive"
+        );
+        assert_eq!(edge_scroll_direction(577.0, 600), Some(1));
     }
 
     #[test]

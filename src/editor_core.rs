@@ -779,6 +779,30 @@ impl EditorCore {
         true
     }
 
+    /// Select the whole line at the active cursor, trailing newline
+    /// included — the convention that makes consecutive triple-click
+    /// lines abut (Q#M4). The cursor lands at the selection end (the
+    /// start of the next line). No-op when the buffer is gone.
+    pub fn select_line_at_cursor(&mut self) {
+        let id = self.active_buffer_id();
+        let cursor = self.active_window().cursor;
+        let (start, end) = {
+            let reg = self.registry.borrow();
+            let Ok(buffer) = reg.get(id) else {
+                return;
+            };
+            let view = &self.active_window().text_view;
+            let line = view.line_at_offset(cursor);
+            let start = view.line_offset(line).unwrap_or(0);
+            let end = view.line_offset(line + 1).unwrap_or_else(|| buffer.len());
+            (start, end)
+        };
+        let aw = self.active_window_mut();
+        aw.selection = Some(crate::window::Selection { anchor: start });
+        aw.cursor = end;
+        aw.goal_col = None;
+    }
+
     /// Move the cursor forward to the next paragraph break.
     ///
     /// A paragraph break is a blank line (empty or whitespace-only).

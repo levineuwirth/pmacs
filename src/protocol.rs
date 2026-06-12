@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_six_for_underline_color() {
+    fn protocol_version_is_seven_for_triple_click() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1691,24 +1691,25 @@ mod tests {
         // The mouse framing Q#M1 bumped 4→5 (FrontendEvent::Pointer).
         // T M4.6 bumped 5→6 (`Style::underline_color`) — the first
         // bump that changed an existing struct's postcard encoding,
-        // so v6 binaries serve v6 sessions only.
-        assert_eq!(PROTOCOL_VERSION, 6);
+        // making v6 the ladder's encoding floor. Q#M4 bumped 6→7
+        // (`PointerKind::TripleDown`, additive + frontend-gated).
+        assert_eq!(PROTOCOL_VERSION, 7);
     }
 
     #[test]
-    fn supported_protocol_versions_is_exactly_v6() {
+    fn supported_protocol_versions_resume_ladder_on_v6_floor() {
         // T M4.6: `Style::underline_color` changed the encoding of
-        // every cell-carrying message (`Cell` / `CellDelta` /
-        // `Snapshot` / `StyleSpans`). The v1–v5 compat ladder relied
-        // on shared-struct encodings never changing — additive enum
-        // variants filtered per session — so the ladder ends here:
+        // every cell-carrying message, ending the v1–v5 ladder —
         // pre-v6 peers are refused at the handshake (a clean
         // VersionMismatch) rather than garbling postcard mid-session.
+        // Q#M4: the ladder resumes above that floor — v7 is additive
+        // (`TripleDown`, frontend-gated), so v6 and v7 interoperate.
         assert!(is_supported_protocol_version(6));
-        for rejected in [0, 1, 2, 3, 4, 5, 7, u32::MAX] {
+        assert!(is_supported_protocol_version(7));
+        for rejected in [0, 1, 2, 3, 4, 5, 8, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v6 binary"
+                "v{rejected} must be rejected by a v7 binary"
             );
         }
     }
