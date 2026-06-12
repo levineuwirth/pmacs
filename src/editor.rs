@@ -1208,7 +1208,6 @@ pub fn paint_frame(
     let registry = core.registry.clone();
     let reg = registry.borrow();
     let diag_store = state.lsp_manager.borrow().diag_store();
-    let diag_guard = diag_store.lock().expect("diag store mutex poisoned");
     for (id, window) in &mut core.windows {
         let Some(rect) = placements.get(id).copied() else {
             continue;
@@ -1249,7 +1248,15 @@ pub fn paint_frame(
             window.text_view.line_count(),
             coord.row as usize,
         );
-        let diags = diag_mode_line_summary(&diag_guard, buf);
+        // Lock scoped to the summary computation only: the overlay
+        // renders above include `DiagnosticView`, which takes this
+        // same mutex — holding the guard across the loop deadlocked
+        // the daemon on the first frame after a file (and thus a
+        // diagnostic overlay) was opened.
+        let diags = {
+            let guard = diag_store.lock().expect("diag store mutex poisoned");
+            diag_mode_line_summary(&guard, buf)
+        };
         paint_mode_line(
             grid,
             &rect,
@@ -1262,7 +1269,6 @@ pub fn paint_frame(
             &diags,
         );
     }
-    drop(diag_guard);
     drop(reg);
 
     paint_status_line(grid, core, &state.lua_host, &state.dispatcher, term_size);
@@ -5200,6 +5206,43 @@ mod tests {
         assert!(
             !mode_text.contains("E:"),
             "stale diagnostics must not reach the mode line: {mode_text:?}"
+        );
+    }
+
+    #[test]
+    fn render_with_attached_diagnostic_view_does_not_deadlock() {
+        // Regression: paint_frame once held the diag-store mutex
+        // across the whole window loop, and `DiagnosticView::render`
+        // (attached as a window overlay when a file with an LSP
+        // opens) locks the same mutex — the daemon froze on the
+        // first frame after C-x C-f. This test renders the full
+        // paint_frame path with a real DiagnosticView attached; it
+        // hangs the suite if the lock is ever widened again.
+        use crate::diag::DiagnosticSeverity::Error;
+        let s = fresh_with(b"hello\n");
+        let uri = set_active_buffer_path(&s, "/tmp/modeline_overlay.rs");
+        let store = s.lsp_manager.borrow().diag_store();
+        store
+            .lock()
+            .unwrap()
+            .set(uri.clone(), vec![diag_with_severity(Error)]);
+        {
+            let mut core = s.core.borrow_mut();
+            core.active_window_mut()
+                .push_overlay(Box::new(crate::diag::DiagnosticView::new(uri, store)));
+        }
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        // Both surfaces of the same store: the overlay's underline
+        // and the mode line's count.
+        assert_eq!(
+            cells[0].style.underline,
+            crate::cell::UnderlineStyle::Curly,
+            "diagnostic overlay should underline the error range"
+        );
+        let mode_text = row_text(&cells, stride, 22, 80);
+        assert!(
+            mode_text.contains("E:1"),
+            "mode line missing count: {mode_text:?}"
         );
     }
 
