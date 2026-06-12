@@ -1626,26 +1626,20 @@ impl State {
                 // Same staleness translation as the StyleSpans arm.
                 self.prune_unconfirmed_edits(generation);
                 let segments = translate_decoration_segments(segments, &self.unconfirmed_edits);
-                // Only diagnostic decorations affect the *rich text*
-                // (they override glyph fg in `projected_rich_chunks`);
-                // background kinds (Selection / CurrentLine / Search)
-                // are quads rebuilt cheaply in `render()`. A full
-                // `reshape()` (set_rich_text + shape_until_scroll) on
-                // every decoration change made cursor motion crawl —
-                // B1's own `CurrentLine` changes on every up/down move.
-                // Reshape only when the fg-affecting set changed; else
-                // just repaint the quads.
-                let fg_before = fg_decoration_fingerprint(&self.current_decorations);
                 if full {
                     self.replace_decorations(segments);
                 } else {
                     self.merge_decorations(segments);
                 }
-                if fg_before == fg_decoration_fingerprint(&self.current_decorations) {
-                    self.window.request_redraw();
-                } else {
-                    self.refresh_changed_lines();
-                }
+                // Every decoration kind is now a quad (backgrounds
+                // for Selection/CurrentLine, underline bars for the
+                // diagnostics — the fg-recolor path retired with T
+                // M4.6 parity), and quads rebuild cheaply per frame
+                // in `render()`. No decoration change needs a
+                // reshape, so none triggers one — diagnostic
+                // publishes no longer pay set_rich_text +
+                // shape_until_scroll.
+                self.window.request_redraw();
                 None
             }
             InstanceMessage::InlineAdornments { buffer_id, items } => {
@@ -1853,7 +1847,6 @@ impl State {
             let rich = clipped_chunks_for_range(
                 &self.current_text,
                 &self.current_spans,
-                &self.current_decorations,
                 &self.current_adornments,
                 vstart,
                 vend,
@@ -1976,7 +1969,6 @@ impl State {
         clipped_chunks_for_range(
             &self.current_text,
             &self.current_spans,
-            &self.current_decorations,
             &self.current_adornments,
             line_start,
             content_end,
@@ -2581,10 +2573,21 @@ impl State {
             if d.kind == DecorationKind::CurrentLine {
                 continue;
             }
-            if let Some(color) = decoration_kind_to_bg_color(d.kind)
-                && let Some((lo, hi)) = clip_rebase_range(d.range.start, d.range.end, vstart, vend)
-            {
-                self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
+            let Some((lo, hi)) = clip_rebase_range(d.range.start, d.range.end, vstart, vend) else {
+                continue;
+            };
+            if let Some(color) = decoration_kind_to_bg_color(d.kind) {
+                self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color, None);
+            }
+            if let Some(color) = decoration_kind_to_underline_color(d.kind) {
+                self.push_glyph_extent_rects(
+                    rects,
+                    line_offsets,
+                    lo,
+                    hi,
+                    color,
+                    Some(DIAG_UNDERLINE_PX),
+                );
             }
         }
     }
@@ -2608,7 +2611,7 @@ impl State {
             if let Some(color) = decoration_kind_to_bg_color(DecorationKind::CurrentLine) {
                 let (lo, hi) = source_line_range(&self.current_text, presence.cursor);
                 if let Some((lo, hi)) = clip_rebase_range(lo, hi, vstart, vend) {
-                    self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
+                    self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color, None);
                 }
             }
             if let Some(sel) = presence.selection
@@ -2617,7 +2620,7 @@ impl State {
                 let lo = sel.anchor.min(sel.active).min(text_len);
                 let hi = sel.anchor.max(sel.active).min(text_len);
                 if let Some((lo, hi)) = clip_rebase_range(lo, hi, vstart, vend) {
-                    self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color);
+                    self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color, None);
                 }
             }
         }
@@ -2700,6 +2703,7 @@ impl State {
         lo: u64,
         hi: u64,
         color: [f32; 4],
+        bar_px: Option<f32>,
     ) {
         if hi <= lo {
             return;
@@ -2722,11 +2726,18 @@ impl State {
             if let (Some(x0), Some(x1)) = (min_x, max_x)
                 && x1 > x0
             {
+                // `bar_px`: an underline bar hugging the bottom of the
+                // line box instead of a full-height wash — the GPU's
+                // diagnostic squiggle (T M4.6 parity, straight-bar v1).
+                let (y, h) = match bar_px {
+                    Some(bar) => (TEXT_TOP + run.line_top + run.line_height - bar, bar),
+                    None => (TEXT_TOP + run.line_top, run.line_height),
+                };
                 rects.push(MinimapRect {
                     x: TEXT_LEFT + x0,
-                    y: TEXT_TOP + run.line_top,
+                    y,
                     w: x1 - x0,
-                    h: run.line_height,
+                    h,
                     color,
                 });
             }
@@ -3060,7 +3071,15 @@ fn advance_minimap_col(col: usize, ch: char) -> usize {
 }
 
 fn minimap_style_color(style: CellStyle) -> [f32; 4] {
-    match style.fg {
+    // A set underline_color is the producer's diagnostic mark for the
+    // line (protocol v6, T M4.6 parity) — the minimap's gutter sign.
+    // It outranks the syntax-dominant fg so error/warning lines read
+    // at a glance.
+    let color = match style.underline_color {
+        CellColor::Default => style.fg,
+        marked => marked,
+    };
+    match color {
         CellColor::Default => MINIMAP_DEFAULT_LINE,
         CellColor::Rgb(r, g, b) => rgb_to_minimap_color(r, g, b),
         CellColor::Indexed(idx) => {
@@ -3792,7 +3811,6 @@ fn line_from_chunks(chunks: &[RichChunk]) -> glyphon::cosmic_text::BufferLine {
 fn clipped_chunks_for_range(
     text: &str,
     spans: &[StyleSpan],
-    decorations: &[Decoration],
     adornments: &[InlineAdornment],
     start: u64,
     end: u64,
@@ -3807,15 +3825,6 @@ fn clipped_chunks_for_range(
             })
         })
         .collect();
-    let decorations: Vec<Decoration> = decorations
-        .iter()
-        .filter_map(|d| {
-            clip_rebase_range(d.range.start, d.range.end, start, end).map(|(s, e)| Decoration {
-                range: ByteRange { start: s, end: e },
-                kind: d.kind,
-            })
-        })
-        .collect();
     let adornments: Vec<InlineAdornment> = adornments
         .iter()
         .filter(|a| a.at >= start && a.at <= end)
@@ -3825,13 +3834,12 @@ fn clipped_chunks_for_range(
             a
         })
         .collect();
-    projected_rich_chunks(range_text, &spans, &decorations, &adornments)
+    projected_rich_chunks(range_text, &spans, &adornments)
 }
 
 fn projected_rich_chunks(
     text: &str,
     spans: &[StyleSpan],
-    decorations: &[Decoration],
     adornments: &[InlineAdornment],
 ) -> Vec<RichChunk> {
     let text_len = text.len() as u64;
@@ -3847,10 +3855,6 @@ fn projected_rich_chunks(
     for sp in spans {
         boundaries.push(snap(sp.range.start));
         boundaries.push(snap(sp.range.end));
-    }
-    for d in decorations {
-        boundaries.push(snap(d.range.start));
-        boundaries.push(snap(d.range.end));
     }
     let mut renderable_adornments: Vec<(usize, u64, &InlineAdornment)> = adornments
         .iter()
@@ -3872,7 +3876,7 @@ fn projected_rich_chunks(
         if a < b {
             chunks.push(RichChunk {
                 text: text[a as usize..b as usize].to_owned(),
-                color: source_color_at(a, spans, decorations),
+                color: source_color_at(a, spans),
                 source: ChunkSource::Source { start: a },
             });
         }
@@ -3930,19 +3934,7 @@ fn adornment_text_color(fg: CellColor) -> glyphon::Color {
     cell_color_to_glyphon(fg).unwrap_or_else(|| glyphon::Color::rgb(130, 130, 140))
 }
 
-fn source_color_at(
-    byte: u64,
-    spans: &[StyleSpan],
-    decorations: &[Decoration],
-) -> Option<glyphon::Color> {
-    for d in decorations {
-        if d.range.start <= byte
-            && byte < d.range.end
-            && let Some(c) = decoration_kind_to_color(d.kind)
-        {
-            return Some(c);
-        }
-    }
+fn source_color_at(byte: u64, spans: &[StyleSpan]) -> Option<glyphon::Color> {
     for sp in spans {
         if sp.range.start <= byte && byte < sp.range.end {
             return cell_color_to_glyphon(sp.style.fg);
@@ -4010,46 +4002,34 @@ fn indexed_to_glyphon(idx: u8) -> glyphon::Color {
     glyphon::Color::rgb(level, level, level)
 }
 
-/// The decorations that affect the *rich text* (a glyph fg override in
-/// `projected_rich_chunks`), as an ordered `(range, kind)` set. Only
-/// kinds with a foreground color qualify — i.e. the diagnostic
-/// severities; background kinds (`Selection` / `CurrentLine` / search)
-/// are quads. Equal fingerprints across a `Decorations` update mean the
-/// shaped text is unaffected and a `reshape()` can be skipped (the perf
-/// fix for cursor-motion-driven `CurrentLine` churn).
-fn fg_decoration_fingerprint(decos: &[Decoration]) -> Vec<(ByteRange, DecorationKind)> {
-    decos
-        .iter()
-        .filter(|d| decoration_kind_to_color(d.kind).is_some())
-        .map(|d| (d.range, d.kind))
-        .collect()
-}
+/// Height of the diagnostic underline bar, in pixels. Straight-bar
+/// v1; a wavy squiggle needs shader/texture work and waits until the
+/// straight bar is proven (framing Q#D1).
+const DIAG_UNDERLINE_PX: f32 = 2.0;
 
-/// Map a [`DecorationKind`] to a foreground color override, or `None`
-/// for kinds whose visual is a background and can't be expressed in
-/// the current `Attrs`-only rendering pipeline.
+/// Map a [`DecorationKind`] to an underline-bar color, or `None` for
+/// kinds that don't underline.
 ///
-/// Session 5 ships **fg-only** decoration rendering. The four
-/// background-needing kinds (`Selection`, `SearchMatch`,
-/// `SearchMatchActive`, `CurrentLine`) return `None` here because the
-/// glyph-color path can only render foregrounds; they route through
-/// [`decoration_kind_to_bg_color`] and the quad pipeline instead.
-///
-/// Color choices match the conventional editor palette (red errors,
-/// yellow warnings, light blue info, dim hints) so the GPU window's
-/// visual matches what the pmacs TUI paints via terminal color codes.
-fn decoration_kind_to_color(kind: DecorationKind) -> Option<glyphon::Color> {
+/// Session 5 originally rendered diagnostics by *recoloring the text
+/// foreground*, which clobbered the syntax color of the very token
+/// the diagnostic points at — the same flaw the TUI fixed with
+/// protocol v6's `underline_color` (T M4.6). The GPU's equivalent is
+/// a [`DIAG_UNDERLINE_PX`]-tall quad hugging the bottom of the glyph
+/// extent; the text keeps its syntax color. Same RGB palette the fg
+/// path used (red / yellow / light blue / dim gray), so the window's
+/// severity language is unchanged.
+fn decoration_kind_to_underline_color(kind: DecorationKind) -> Option<[f32; 4]> {
     match kind {
         // ANSI bright red — matches TUI diagnostic-error palette.
-        DecorationKind::DiagnosticError => Some(glyphon::Color::rgb(241, 76, 76)),
+        DecorationKind::DiagnosticError => Some([0.945, 0.298, 0.298, 1.0]),
         // ANSI bright yellow.
-        DecorationKind::DiagnosticWarning => Some(glyphon::Color::rgb(245, 245, 67)),
+        DecorationKind::DiagnosticWarning => Some([0.961, 0.961, 0.263, 1.0]),
         // ANSI bright blue.
-        DecorationKind::DiagnosticInfo => Some(glyphon::Color::rgb(59, 142, 234)),
+        DecorationKind::DiagnosticInfo => Some([0.231, 0.557, 0.918, 1.0]),
         // ANSI bright black (dim gray — hints should be visible but
         // visually quietest of the diagnostic four).
-        DecorationKind::DiagnosticHint => Some(glyphon::Color::rgb(102, 102, 102)),
-        // Background-needing kinds route through the quad pipeline.
+        DecorationKind::DiagnosticHint => Some([0.4, 0.4, 0.4, 1.0]),
+        // Background kinds wash the full line box instead.
         DecorationKind::Selection
         | DecorationKind::SearchMatch
         | DecorationKind::SearchMatchActive
@@ -4057,9 +4037,10 @@ fn decoration_kind_to_color(kind: DecorationKind) -> Option<glyphon::Color> {
     }
 }
 
-/// Background-bearing companion to [`decoration_kind_to_color`]: maps
-/// each background-needing `DecorationKind` to its quad-pipeline color
-/// as an RGBA tuple in 0..=1 space. Returns `None` for foreground-only
+/// Background-bearing companion to
+/// [`decoration_kind_to_underline_color`]: maps each
+/// background-needing `DecorationKind` to its quad-pipeline color as
+/// an RGBA tuple in 0..=1 space. Returns `None` for underline-only
 /// kinds (the four diagnostic severities) so the two helpers form a
 /// total cover with no overlap.
 ///
@@ -4085,7 +4066,8 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
         DecorationKind::CurrentLine => Some([0.55, 0.60, 0.75, 0.22]),
         // Deferred to the search-feature arc.
         DecorationKind::SearchMatch | DecorationKind::SearchMatchActive => None,
-        // Foreground-only — handled by [`decoration_kind_to_color`].
+        // Underline-only — handled by
+        // [`decoration_kind_to_underline_color`].
         DecorationKind::DiagnosticError
         | DecorationKind::DiagnosticWarning
         | DecorationKind::DiagnosticInfo
@@ -4254,40 +4236,6 @@ mod tests {
         assert_eq!(k, ProtocolKey::Left);
         assert!(m.contains(Modifiers::CTRL));
         assert!(!m.contains(Modifiers::SHIFT));
-    }
-
-    #[test]
-    fn fg_fingerprint_ignores_background_decoration_changes() {
-        let deco = |start, end, kind| Decoration {
-            range: ByteRange { start, end },
-            kind,
-        };
-        // A diagnostic (fg) decoration + a CurrentLine (bg) decoration.
-        let before = vec![
-            deco(10, 14, DecorationKind::DiagnosticError),
-            deco(0, 20, DecorationKind::CurrentLine),
-        ];
-        // The cursor moved: CurrentLine now spans a different line, the
-        // diagnostic is unchanged.
-        let after = vec![
-            deco(10, 14, DecorationKind::DiagnosticError),
-            deco(40, 60, DecorationKind::CurrentLine),
-        ];
-        assert_eq!(
-            fg_decoration_fingerprint(&before),
-            fg_decoration_fingerprint(&after),
-            "a CurrentLine-only change must not change the fg fingerprint (no reshape)"
-        );
-
-        // A diagnostic change DOES alter the fingerprint (reshape needed).
-        let after_diag = vec![
-            deco(10, 18, DecorationKind::DiagnosticError),
-            deco(0, 20, DecorationKind::CurrentLine),
-        ];
-        assert_ne!(
-            fg_decoration_fingerprint(&before),
-            fg_decoration_fingerprint(&after_diag)
-        );
     }
 
     #[test]
@@ -4518,10 +4466,6 @@ mod tests {
                 ..CellStyle::default()
             },
         }];
-        let decorations = vec![Decoration {
-            range: ByteRange { start: 0, end: 5 },
-            kind: DecorationKind::DiagnosticWarning,
-        }];
         let hint = |at: u64, label: &str| InlineAdornment {
             at,
             placement: AdornmentPlacement::AtOffset,
@@ -4535,7 +4479,6 @@ mod tests {
         let full = flat(&clipped_chunks_for_range(
             text,
             &spans,
-            &decorations,
             &adornments,
             0,
             text.len() as u64,
@@ -4549,7 +4492,6 @@ mod tests {
             per_line.extend(flat(&clipped_chunks_for_range(
                 text,
                 &spans,
-                &decorations,
                 &adornments,
                 start,
                 content_end,
@@ -4564,12 +4506,12 @@ mod tests {
 
         // The boundary hint landed on line 0 (before its newline), not
         // line 1.
-        let line0 = clipped_chunks_for_range(text, &spans, &decorations, &adornments, 0, 10);
+        let line0 = clipped_chunks_for_range(text, &spans, &adornments, 0, 10);
         assert!(
             line0.iter().any(|c| c.text == "<eol>"),
             "newline-anchored hint belongs to the line it terminates"
         );
-        let line1 = clipped_chunks_for_range(text, &spans, &decorations, &adornments, 11, 22);
+        let line1 = clipped_chunks_for_range(text, &spans, &adornments, 11, 22);
         assert!(
             line1.iter().all(|c| c.text != "<eol>"),
             "newline-anchored hint must not duplicate onto the next line"
@@ -4784,7 +4726,8 @@ mod tests {
         assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_none());
         assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_none());
 
-        // Foreground-only kinds belong to the fg helper.
+        // Underline-only kinds belong to the underline helper (T M4.6
+        // parity: squiggle bars, not text recoloring).
         for kind in [
             DecorationKind::DiagnosticError,
             DecorationKind::DiagnosticWarning,
@@ -4792,12 +4735,12 @@ mod tests {
             DecorationKind::DiagnosticHint,
         ] {
             assert!(decoration_kind_to_bg_color(kind).is_none());
-            assert!(decoration_kind_to_color(kind).is_some());
+            assert!(decoration_kind_to_underline_color(kind).is_some());
         }
     }
 
     #[test]
-    fn fg_and_bg_helpers_are_disjoint_total_cover() {
+    fn underline_and_bg_helpers_are_disjoint_total_cover() {
         // Every DecorationKind is renderable by exactly one helper.
         // Adding a new kind without updating one of the helpers should
         // fail this assertion.
@@ -4811,19 +4754,18 @@ mod tests {
             DecorationKind::DiagnosticInfo,
             DecorationKind::DiagnosticHint,
         ] {
-            let fg = decoration_kind_to_color(kind).is_some();
+            let ul = decoration_kind_to_underline_color(kind).is_some();
             let bg = decoration_kind_to_bg_color(kind).is_some();
-            // Background helper returns None for the search pair —
-            // deferred to the search-feature arc. For both of those,
-            // decoration_kind_to_color is also None. That is the
-            // "neither yet" state — the exclusive-or test exempts it.
+            // Both helpers return None for the search pair — deferred
+            // to the search-feature arc. That is the "neither yet"
+            // state — the exclusive-or test exempts it.
             let deferred = matches!(
                 kind,
                 DecorationKind::SearchMatch | DecorationKind::SearchMatchActive
             );
             assert!(
-                deferred || (fg ^ bg),
-                "{kind:?}: fg={fg} bg={bg} — should be exactly one (unless deferred)"
+                deferred || (ul ^ bg),
+                "{kind:?}: underline={ul} bg={bg} — should be exactly one (unless deferred)"
             );
         }
     }
@@ -4837,11 +4779,10 @@ mod tests {
         let text = "ab→cd";
         let chunks = projected_rich_chunks(
             text,
-            &[span(0, 3, CellColor::Indexed(1))],
-            &[Decoration {
-                range: ByteRange { start: 4, end: 9 },
-                kind: DecorationKind::DiagnosticError,
-            }],
+            &[
+                span(0, 3, CellColor::Indexed(1)),
+                span(4, 9, CellColor::Indexed(2)),
+            ],
             &[],
         );
         let rendered: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
@@ -4878,7 +4819,6 @@ mod tests {
         let chunks = projected_rich_chunks(
             "abcd",
             &[],
-            &[],
             &[adornment(2, AdornmentPlacement::AtOffset, "X")],
         );
 
@@ -4892,7 +4832,6 @@ mod tests {
         let chunks = projected_rich_chunks(
             "abcd",
             &[span(2, 4, CellColor::Indexed(1))],
-            &[],
             &[adornment(2, AdornmentPlacement::AtOffset, "X")],
         );
 
@@ -4909,34 +4848,9 @@ mod tests {
     }
 
     #[test]
-    fn inline_adornment_does_not_shift_source_decoration_ranges() {
-        let chunks = projected_rich_chunks(
-            "abcd",
-            &[],
-            &[Decoration {
-                range: ByteRange { start: 2, end: 4 },
-                kind: DecorationKind::DiagnosticError,
-            }],
-            &[adornment(2, AdornmentPlacement::AtOffset, "X")],
-        );
-
-        assert_eq!(chunk_texts(&chunks), vec!["ab", "X", "cd"]);
-        assert!(chunks[0].color.is_none());
-        assert!(
-            chunks[1].color.is_some(),
-            "default-styled virtual text should render as muted adornment text"
-        );
-        assert!(
-            chunks[2].color.is_some(),
-            "diagnostic fg override must still begin at source byte 2"
-        );
-    }
-
-    #[test]
     fn unsupported_adornment_placements_are_ignored_for_session_6() {
         let chunks = projected_rich_chunks(
             "abcd",
-            &[],
             &[],
             &[
                 adornment(0, AdornmentPlacement::BeforeLine, "before"),
@@ -4952,7 +4866,6 @@ mod tests {
     fn adornment_anchor_past_end_clamps_to_end() {
         let chunks = projected_rich_chunks(
             "abcd",
-            &[],
             &[],
             &[adornment(99, AdornmentPlacement::AtOffset, "X")],
         );

@@ -113,7 +113,11 @@ pub struct SemanticRenderState {
     /// buffer at the same generation re-uses what the frontend
     /// already has and emits nothing. First emission happens on the
     /// first frame for a buffer; further emissions only after edits.
-    last_summary: HashMap<BufferId, u64>,
+    /// `(crdt_generation, diag_epoch)` the last emitted summary was
+    /// computed against. Diagnostics arrive without a generation
+    /// bump, so the epoch half catches republishes (minimap marks,
+    /// T M4.6 GPU parity).
+    last_summary: HashMap<BufferId, (u64, u64)>,
     /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
     /// the tree-sitter highlights query over the *whole declared
     /// viewport* (which the GPU frontend sets to the entire buffer)
@@ -464,11 +468,17 @@ impl SemanticRenderState {
         if grammar_style_parse_not_ready(state, buffer_id) {
             return None;
         }
-        if self.last_summary.get(&buffer_id).copied() == Some(generation) {
+        // Diagnostics fold into the summary (minimap marks) but
+        // publish without a generation bump — key the cache on the
+        // diag store's per-URI epoch as well, so a republish
+        // refreshes the marks and anything else stays suppressed.
+        let diag_epoch = diagnostics_epoch(state, buffer_id);
+        if self.last_summary.get(&buffer_id).copied() == Some((generation, diag_epoch)) {
             return None;
         }
         let lines = scoped_file_summary(state, buffer_id);
-        self.last_summary.insert(buffer_id, generation);
+        self.last_summary
+            .insert(buffer_id, (generation, diag_epoch));
         Some(InstanceMessage::FileStyleSummary {
             buffer_id,
             generation,
@@ -628,6 +638,8 @@ impl SemanticRenderState {
                 for d in &diags {
                     let lo = line_col_to_byte(line_starts, source_len, d.start_line, d.start_col);
                     let hi = line_col_to_byte(line_starts, source_len, d.end_line, d.end_col);
+                    let (lo, hi) =
+                        widen_zero_width_diag(lo, hi, d.start_line, line_starts, source_len);
                     if let Some(range) = clip_to_viewport(lo, hi, vp) {
                         out.push(Decoration {
                             range,
@@ -723,6 +735,38 @@ fn scoped_inline_adornments(state: &EditorState, vp: &DeclaredViewport) -> Vec<I
 /// the source length is the caller's concern for styling; for
 /// decorations we clamp against the viewport only). `None` when the
 /// intersection is empty or degenerate.
+/// Widen a zero-width diagnostic range to one byte so it survives
+/// the wire and overlaps a glyph at the frontend (a zero-width range
+/// clips to nothing and underlines nothing). Parsers anchor
+/// "expected COMMA"-style errors one past the last token —
+/// rust-analyzer reports the missing comma as `col N → col N` at end
+/// of line — the same shape the TUI's `DiagnosticView` special-cases
+/// at its anchor cell (T M4.6). Mid-line anchors widen forward; an
+/// anchor at/past the line's content end widens backward instead,
+/// because forward would cover only the `\n`, which shapes no glyph.
+/// Non-empty ranges pass through untouched.
+fn widen_zero_width_diag(
+    lo: u64,
+    hi: u64,
+    start_line: u32,
+    line_starts: &[u64],
+    source_len: u64,
+) -> (u64, u64) {
+    if hi > lo {
+        return (lo, hi);
+    }
+    // Content end excludes the trailing newline, same semantics as
+    // the summary's per-line ranges.
+    let content_end = line_starts
+        .get(start_line as usize + 1)
+        .map_or(source_len, |&next| next.saturating_sub(1));
+    if lo >= content_end {
+        (lo.saturating_sub(1), lo)
+    } else {
+        (lo, (lo + 1).min(source_len))
+    }
+}
+
 fn clip_to_viewport(lo: u64, hi: u64, vp: &DeclaredViewport) -> Option<ByteRange> {
     let start = lo.max(vp.visible.start);
     let end = hi.min(vp.visible.end);
@@ -836,6 +880,19 @@ fn diagnostics_store_stale(state: &EditorState, buffer_id: BufferId) -> bool {
     let store = state.lsp_manager.borrow().diag_store();
     let guard = store.lock().expect("diag store mutex poisoned");
     guard.is_stale(&uri)
+}
+
+/// The diag store's per-URI change epoch for `buffer_id`'s file, `0`
+/// for buffers with no file URI or no diagnostics history. Keys the
+/// `FileStyleSummary` cache (see [`SemanticRenderState::last_summary`]).
+fn diagnostics_epoch(state: &EditorState, buffer_id: BufferId) -> u64 {
+    let core = state.core.borrow();
+    let Some(uri) = buffer_file_uri(&core, buffer_id) else {
+        return 0;
+    };
+    let store = state.lsp_manager.borrow().diag_store();
+    let guard = store.lock().expect("diag store mutex poisoned");
+    guard.epoch_for(&uri)
 }
 
 /// Style-family staleness for the LSP-token authority. True only for
@@ -1182,6 +1239,9 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
     };
     let spans = scoped_style_spans(state, &vp_all);
     if spans.is_empty() {
+        // No styled runs — but diagnostic marks are independent of
+        // syntax styling (a plain-text buffer can still have lints).
+        overlay_diagnostic_marks(state, buffer_id, &mut out);
         return out;
     }
 
@@ -1214,7 +1274,47 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
             *line_dominant = winner.0;
         }
     }
+    overlay_diagnostic_marks(state, buffer_id, &mut out);
     out
+}
+
+/// Fold diagnostics into the file summary: each line a diagnostic
+/// touches gets the most severe severity's canonical color in
+/// `underline_color` (protocol v6) — the minimap's line marks, the
+/// GPU's equivalent of the TUI's column-0 gutter signs (T M4.6).
+/// Skipped while the URI's store entry is stale: the positions
+/// describe pre-edit text, same discipline as the decorations
+/// producer (the marks return on republish, which bumps the diag
+/// epoch and recomputes this summary).
+fn overlay_diagnostic_marks(state: &EditorState, buffer_id: BufferId, lines: &mut [Style]) {
+    let uri = {
+        let core = state.core.borrow();
+        let Some(uri) = buffer_file_uri(&core, buffer_id) else {
+            return;
+        };
+        uri
+    };
+    let store = state.lsp_manager.borrow().diag_store();
+    let guard = store.lock().expect("diag store mutex poisoned");
+    if guard.is_stale(&uri) {
+        return;
+    }
+    // Most severe per line wins; LSP numbering makes that the
+    // minimum severity value.
+    let mut best: Vec<Option<crate::diag::DiagnosticSeverity>> = vec![None; lines.len()];
+    for d in guard.for_uri(&uri) {
+        for li in d.start_line..=d.end_line {
+            let Some(slot) = best.get_mut(li as usize) else {
+                break;
+            };
+            *slot = Some(slot.map_or(d.severity, |s| s.min(d.severity)));
+        }
+    }
+    for (line, severity) in lines.iter_mut().zip(best) {
+        if let Some(s) = severity {
+            line.underline_color = s.underline_color();
+        }
+    }
 }
 
 /// The buffer's CRDT version projected to a monotonic scalar — the
@@ -2704,5 +2804,87 @@ mod tests {
         assert_eq!(lines[1], Style::default(), "line 1 has no token → default");
         assert_eq!(lines[2], kw_style, "line 2 dominated by the LSP token");
         assert_eq!(lines[3], Style::default(), "trailing empty line → default");
+    }
+
+    #[test]
+    fn zero_width_diagnostics_widen_to_a_visible_byte() {
+        // "abc\nde" — line starts [0, 4], source_len 6; line 0
+        // content is bytes [0, 3) (newline excluded).
+        let ls = vec![0u64, 4];
+        // Mid-line anchor: widen forward.
+        assert_eq!(widen_zero_width_diag(1, 1, 0, &ls, 6), (1, 2));
+        // End-of-line anchor (the rust-analyzer "expected COMMA"
+        // shape): widen backward — forward would cover only the \n.
+        assert_eq!(widen_zero_width_diag(3, 3, 0, &ls, 6), (2, 3));
+        // End-of-file anchor on the last line.
+        assert_eq!(widen_zero_width_diag(6, 6, 1, &ls, 6), (5, 6));
+        // Non-empty ranges pass through untouched.
+        assert_eq!(widen_zero_width_diag(1, 3, 0, &ls, 6), (1, 3));
+    }
+
+    #[test]
+    fn file_style_summary_marks_diagnostic_lines_and_refreshes_on_republish() {
+        use crate::cell::Color;
+        use crate::diag::DiagnosticSeverity;
+
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // "abc\nde" with a Warning on line 1 (and a file path so the
+        // buffer has a URI).
+        seed_diagnostic(&state, bid);
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        let first = s.render_frame(&state);
+        let (_, lines) = summary_of(&first).expect("first frame ships a summary");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0].underline_color,
+            Color::Default,
+            "clean line carries no mark"
+        );
+        assert_eq!(
+            lines[1].underline_color,
+            DiagnosticSeverity::Warning.underline_color(),
+            "diagnostic line carries the severity mark"
+        );
+
+        // Unchanged generation + diag epoch → suppressed.
+        assert!(summary_of(&s.render_frame(&state)).is_none());
+
+        // A republish moves the diagnostic to line 0 and escalates it.
+        // No CRDT edit happened — the diag epoch alone must re-emit
+        // the summary with refreshed marks.
+        let uri = crate::lsp::path_to_file_uri(std::path::Path::new("/tmp/m114.rs"));
+        state
+            .lsp_manager
+            .borrow()
+            .diag_store()
+            .lock()
+            .expect("diag store")
+            .set(
+                &uri,
+                vec![crate::diag::Diagnostic {
+                    start_line: 0,
+                    start_col: 0,
+                    end_line: 0,
+                    end_col: 3,
+                    severity: DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                    source: None,
+                    code: None,
+                }],
+            );
+        let refreshed = s.render_frame(&state);
+        let (_, lines) = summary_of(&refreshed).expect("diag republish re-emits the summary");
+        assert_eq!(
+            lines[0].underline_color,
+            DiagnosticSeverity::Error.underline_color()
+        );
+        assert_eq!(
+            lines[1].underline_color,
+            Color::Default,
+            "the old warning mark is gone after the republish"
+        );
     }
 }
