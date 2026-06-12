@@ -409,9 +409,11 @@ struct State {
     /// Hit byte of the last Pointer event sent — Drag coalescing:
     /// pixel-rate motion only ships when the hit byte changes.
     last_pointer_sent_byte: Option<u64>,
-    /// `(when, byte)` of the last primary Down, for frontend-side
-    /// double-click detection (same-hit within the interval).
-    last_pointer_down: Option<(std::time::Instant, u64)>,
+    /// `(when, byte, chain_count)` of the last primary Down, for
+    /// frontend-side multi-click detection (same-hit within the
+    /// interval): count 1 = single, 2 = the double already fired,
+    /// so the next same-hit press is a triple (Q#M4).
+    last_pointer_down: Option<(std::time::Instant, u64, u8)>,
     /// Q#R2 — the per-line surgery path skips rebuilding the pointer
     /// hit map (clicks are rare next to keystrokes); this marks it
     /// stale so `hit_test_source_byte` rebuilds on demand from the
@@ -472,6 +474,15 @@ impl App {
         if client.server_protocol_version() < 5 {
             return;
         }
+        // TripleDown is a v7 variant; a pre-v7 instance would
+        // hard-error decoding it. Downgrade to a plain Down — the
+        // exact behavior the third click had before v7 (the chain
+        // restarting).
+        let kind = if kind == PointerKind::TripleDown && client.server_protocol_version() < 7 {
+            PointerKind::Down
+        } else {
+            kind
+        };
         if let Err(e) = client.send_pointer(buffer_id, byte, kind, mods) {
             eprintln!("pmacs-gpu: send_pointer failed: {e}");
         }
@@ -2069,8 +2080,9 @@ impl State {
         self.optimistic_floor_set_at = None;
     }
 
-    /// Frontend-side double-click detection: a second Down at the
-    /// same hit byte within the interval upgrades to `DoubleDown`.
+    /// Frontend-side multi-click detection: a second Down at the
+    /// same hit byte within the interval upgrades to `DoubleDown`,
+    /// a third to `TripleDown` (Q#M4); a fourth restarts the chain.
     fn classify_pointer_down(&mut self, byte: u64, shift: bool) -> PointerKind {
         if shift {
             // Shift-click extends the selection (Q#M5); it neither
@@ -2080,15 +2092,26 @@ impl State {
             return PointerKind::Down;
         }
         let now = std::time::Instant::now();
-        let is_double = self.last_pointer_down.take().is_some_and(|(at, prev)| {
-            prev == byte && now.duration_since(at) <= DOUBLE_CLICK_WINDOW
-        });
-        if is_double {
-            // A third click starts over (triple-click is deferred).
-            PointerKind::DoubleDown
-        } else {
-            self.last_pointer_down = Some((now, byte));
-            PointerKind::Down
+        let prior_chain = self
+            .last_pointer_down
+            .take()
+            .and_then(|(at, prev, count)| {
+                (prev == byte && now.duration_since(at) <= DOUBLE_CLICK_WINDOW).then_some(count)
+            })
+            .unwrap_or(0);
+        match prior_chain {
+            0 => {
+                self.last_pointer_down = Some((now, byte, 1));
+                PointerKind::Down
+            }
+            1 => {
+                self.last_pointer_down = Some((now, byte, 2));
+                PointerKind::DoubleDown
+            }
+            _ => {
+                // Chain consumed: a fourth click starts over.
+                PointerKind::TripleDown
+            }
         }
     }
 

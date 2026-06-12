@@ -352,6 +352,12 @@ pub enum PointerKind {
     /// Second press at the same hit within the frontend's
     /// double-click window — selects the word at `byte`.
     DoubleDown,
+    /// Third press at the same hit within the frontend's
+    /// multi-click window — selects the whole line at `byte`,
+    /// trailing newline included (Q#M4, protocol v7). The frontend
+    /// sends this only to a `>= 7` instance; against an older one
+    /// the third click restarts the chain as a plain `Down`.
+    TripleDown,
 }
 
 impl FrontendEvent {
@@ -1031,7 +1037,14 @@ pub enum ResourceBody {
 /// only v6 peers: a version-mismatched pair fails the handshake with
 /// [`GoodbyeReason::VersionMismatch`] instead of garbling cell
 /// traffic mid-session.
-pub const PROTOCOL_VERSION: u32 = 6;
+///
+/// Q#M4 (mouse deferred set): bumped from 6 to 7 for
+/// [`PointerKind::TripleDown`]. Back to the cheap additive shape:
+/// a new variant on a frontend→instance enum, gated in the frontend
+/// (sent only when the instance's `Hello.protocol_version >= 7`),
+/// so the compat ladder restarts on the v6 encoding floor —
+/// `SUPPORTED_PROTOCOL_VERSIONS` grows to `[6, 7]`.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1063,7 +1076,12 @@ pub const PROTOCOL_VERSION: u32 = 6;
 /// shared-struct encodings never changed; this bump is the first
 /// that breaks that assumption, and slice membership is how the
 /// handshake communicates it.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6];
+///
+/// Q#M4: extended to `[6, 7]`. `PointerKind::TripleDown` is additive
+/// and frontend-gated (like `Pointer` itself at v5), so the ladder
+/// resumes: v6 and v7 binaries interoperate, with the new variant
+/// kept off wires whose instance negotiated `< 7`.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

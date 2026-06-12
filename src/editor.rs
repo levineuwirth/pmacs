@@ -796,6 +796,8 @@ impl EditorState {
     ///   * `Up` collapses an empty selection (a click without drag).
     ///   * `DoubleDown` selects the word at the hit (frontend-side
     ///     double-click detection — only it knows pixel proximity).
+    ///   * `TripleDown` selects the whole line at the hit, trailing
+    ///     newline included (Q#M4, protocol v7).
     ///
     /// The hit byte is clamped into the buffer and snapped back to a
     /// UTF-8 boundary: the frontend's hit may race an in-flight edit.
@@ -861,6 +863,12 @@ impl EditorState {
                 aw.cursor = byte;
                 aw.goal_col = None;
                 core.select_word_at_cursor();
+            }
+            PointerKind::TripleDown => {
+                let aw = core.active_window_mut();
+                aw.cursor = byte;
+                aw.goal_col = None;
+                core.select_line_at_cursor();
             }
         }
     }
@@ -4450,6 +4458,30 @@ mod tests {
         let other = crate::buffer::BufferId::next();
         s.dispatch_pointer(FrontendId::LOCAL, other, 0, PointerKind::Down, none);
         assert_eq!(s.core.borrow().cursor(), 15, "mismatched buffer ignored");
+    }
+
+    #[test]
+    fn dispatch_pointer_triple_down_selects_the_whole_line() {
+        use crate::protocol::{Modifiers as WireMods, PointerKind};
+        // Line 0 = bytes [0, 12) including the newline; line 1 =
+        // [12, 19).
+        let mut s = fresh_with(b"hello world\nsecond\n");
+        let bid = s.core.borrow().active_buffer_id();
+        let none = WireMods::NONE;
+
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 4, PointerKind::TripleDown, none);
+        assert_eq!(
+            s.core.borrow().active_region(),
+            Some((0, 12)),
+            "whole line selected, trailing newline included"
+        );
+        assert_eq!(s.core.borrow().cursor(), 12, "cursor at selection end");
+
+        // A line without a trailing newline runs to the buffer end.
+        let mut s = fresh_with(b"abc");
+        let bid = s.core.borrow().active_buffer_id();
+        s.dispatch_pointer(FrontendId::LOCAL, bid, 1, PointerKind::TripleDown, none);
+        assert_eq!(s.core.borrow().active_region(), Some((0, 3)));
     }
 
     #[test]
