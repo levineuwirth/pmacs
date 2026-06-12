@@ -638,6 +638,8 @@ impl SemanticRenderState {
                 for d in &diags {
                     let lo = line_col_to_byte(line_starts, source_len, d.start_line, d.start_col);
                     let hi = line_col_to_byte(line_starts, source_len, d.end_line, d.end_col);
+                    let (lo, hi) =
+                        widen_zero_width_diag(lo, hi, d.start_line, line_starts, source_len);
                     if let Some(range) = clip_to_viewport(lo, hi, vp) {
                         out.push(Decoration {
                             range,
@@ -733,6 +735,38 @@ fn scoped_inline_adornments(state: &EditorState, vp: &DeclaredViewport) -> Vec<I
 /// the source length is the caller's concern for styling; for
 /// decorations we clamp against the viewport only). `None` when the
 /// intersection is empty or degenerate.
+/// Widen a zero-width diagnostic range to one byte so it survives
+/// the wire and overlaps a glyph at the frontend (a zero-width range
+/// clips to nothing and underlines nothing). Parsers anchor
+/// "expected COMMA"-style errors one past the last token —
+/// rust-analyzer reports the missing comma as `col N → col N` at end
+/// of line — the same shape the TUI's `DiagnosticView` special-cases
+/// at its anchor cell (T M4.6). Mid-line anchors widen forward; an
+/// anchor at/past the line's content end widens backward instead,
+/// because forward would cover only the `\n`, which shapes no glyph.
+/// Non-empty ranges pass through untouched.
+fn widen_zero_width_diag(
+    lo: u64,
+    hi: u64,
+    start_line: u32,
+    line_starts: &[u64],
+    source_len: u64,
+) -> (u64, u64) {
+    if hi > lo {
+        return (lo, hi);
+    }
+    // Content end excludes the trailing newline, same semantics as
+    // the summary's per-line ranges.
+    let content_end = line_starts
+        .get(start_line as usize + 1)
+        .map_or(source_len, |&next| next.saturating_sub(1));
+    if lo >= content_end {
+        (lo.saturating_sub(1), lo)
+    } else {
+        (lo, (lo + 1).min(source_len))
+    }
+}
+
 fn clip_to_viewport(lo: u64, hi: u64, vp: &DeclaredViewport) -> Option<ByteRange> {
     let start = lo.max(vp.visible.start);
     let end = hi.min(vp.visible.end);
@@ -2770,6 +2804,22 @@ mod tests {
         assert_eq!(lines[1], Style::default(), "line 1 has no token → default");
         assert_eq!(lines[2], kw_style, "line 2 dominated by the LSP token");
         assert_eq!(lines[3], Style::default(), "trailing empty line → default");
+    }
+
+    #[test]
+    fn zero_width_diagnostics_widen_to_a_visible_byte() {
+        // "abc\nde" — line starts [0, 4], source_len 6; line 0
+        // content is bytes [0, 3) (newline excluded).
+        let ls = vec![0u64, 4];
+        // Mid-line anchor: widen forward.
+        assert_eq!(widen_zero_width_diag(1, 1, 0, &ls, 6), (1, 2));
+        // End-of-line anchor (the rust-analyzer "expected COMMA"
+        // shape): widen backward — forward would cover only the \n.
+        assert_eq!(widen_zero_width_diag(3, 3, 0, &ls, 6), (2, 3));
+        // End-of-file anchor on the last line.
+        assert_eq!(widen_zero_width_diag(6, 6, 1, &ls, 6), (5, 6));
+        // Non-empty ranges pass through untouched.
+        assert_eq!(widen_zero_width_diag(1, 3, 0, &ls, 6), (1, 3));
     }
 
     #[test]
