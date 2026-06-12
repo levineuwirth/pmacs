@@ -95,6 +95,12 @@ const MINIMAP_THUMB_BORDER: [f32; 4] = [0.86, 0.86, 0.96, 0.7];
 const EDGE_SCROLL_BAND: f32 = 24.0;
 /// Q#M7 — one line per tick while edge-scrolling.
 const EDGE_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(35);
+/// Q#M6 (bet #2) — after a far jump (no shaped line reused), hold
+/// the redraw this long so the daemon's restyle usually lands before
+/// the first visible frame: the styled frame replaces the unstyled
+/// flash. Short enough to read as instantaneous when styling never
+/// arrives (plain-text buffers).
+const JUMP_STYLE_HOLD: std::time::Duration = std::time::Duration::from_millis(25);
 const QUAD_SHADER: &str = r"
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
@@ -432,6 +438,12 @@ struct State {
     edge_scroll_dir: Option<i64>,
     /// When the last edge-scroll tick fired.
     edge_scroll_last: Option<std::time::Instant>,
+    /// Q#M6 (bet #2) — a far jump rebuilt every visible line from
+    /// spans that can't cover the new region; the redraw is held
+    /// until restyle arrival (which clears this) or this deadline,
+    /// whichever is first, so the unstyled frame usually never
+    /// shows. `about_to_wait` enforces the deadline.
+    styled_redraw_deadline: Option<std::time::Instant>,
     /// Q#R2 — the per-line surgery path skips rebuilding the pointer
     /// hit map (clicks are rare next to keystrokes); this marks it
     /// stale so `hit_test_source_byte` rebuilds on demand from the
@@ -764,59 +776,82 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    /// Q#M7 — the edge auto-scroll tick. Armed only while a drag
-    /// sits in the top/bottom edge band; otherwise the loop stays in
-    /// plain `Wait`. Each due tick scrolls one line toward the
-    /// pointer and re-runs the drag hit-test at the *current*
-    /// pointer position, so the selection keeps growing while the
-    /// mouse is stationary past the edge.
+    /// The deadline pump. Two timed concerns share it, both armed
+    /// rarely:
+    ///
+    ///   * Q#M7 — the edge auto-scroll tick, while a drag sits in
+    ///     the top/bottom edge band. Each due tick scrolls one line
+    ///     toward the pointer and re-runs the drag hit-test at the
+    ///     *current* pointer position, so the selection keeps
+    ///     growing while the mouse is stationary past the edge.
+    ///   * Q#M6 (bet #2) — the post-jump styled-redraw hold: if the
+    ///     daemon's restyle hasn't landed by the deadline, draw the
+    ///     unstyled frame anyway (responsiveness floor).
+    ///
+    /// With neither armed the loop stays in plain `Wait`.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
-        if !state.pointer_drag_active || state.edge_scroll_dir.is_none() {
-            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
-            return;
-        }
-        let dir = state.edge_scroll_dir.unwrap_or(0);
         let now = std::time::Instant::now();
-        let due = state
-            .edge_scroll_last
-            .is_none_or(|at| now.duration_since(at) >= EDGE_SCROLL_TICK);
-        let mut drag_resend: Option<(BufferId, u64)> = None;
-        if due {
-            state.edge_scroll_last = Some(now);
-            let vp = state.scroll_by_lines(dir);
-            if let Some(vp) = vp
-                && let Some(client) = self.attach_client.as_ref()
-                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-            {
-                eprintln!("pmacs-gpu: edge-scroll send_viewport failed: {e}");
+        let mut next_wake: Option<std::time::Instant> = None;
+
+        // Q#M6 — held post-jump frame.
+        if let Some(deadline) = state.styled_redraw_deadline {
+            if now >= deadline {
+                state.styled_redraw_deadline = None;
+                state.window.request_redraw();
+            } else {
+                next_wake = Some(deadline);
             }
-            let state = self.state.as_mut().expect("checked above");
-            if let Some((x, y)) = state.pointer_pos
-                && let Some(byte) = state.hit_test_source_byte(x, y)
-                && state.last_pointer_sent_byte != Some(byte)
-            {
-                state.last_pointer_sent_byte = Some(byte);
-                state.note_pointer_round_trip();
-                if let Some(buffer_id) = state.current_buffer_id {
-                    drag_resend = Some((buffer_id, byte));
+        }
+
+        // Q#M7 — edge auto-scroll.
+        let mut drag_resend: Option<(BufferId, u64)> = None;
+        if state.pointer_drag_active
+            && let Some(dir) = state.edge_scroll_dir
+        {
+            let due = state
+                .edge_scroll_last
+                .is_none_or(|at| now.duration_since(at) >= EDGE_SCROLL_TICK);
+            if due {
+                state.edge_scroll_last = Some(now);
+                let vp = state.scroll_by_lines(dir);
+                if let Some(vp) = vp
+                    && let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                {
+                    eprintln!("pmacs-gpu: edge-scroll send_viewport failed: {e}");
+                }
+                let state = self.state.as_mut().expect("checked above");
+                if let Some((x, y)) = state.pointer_pos
+                    && let Some(byte) = state.hit_test_source_byte(x, y)
+                    && state.last_pointer_sent_byte != Some(byte)
+                {
+                    state.last_pointer_sent_byte = Some(byte);
+                    state.note_pointer_round_trip();
+                    if let Some(buffer_id) = state.current_buffer_id {
+                        drag_resend = Some((buffer_id, byte));
+                    }
                 }
             }
+            let last = self
+                .state
+                .as_ref()
+                .and_then(|s| s.edge_scroll_last)
+                .unwrap_or(now);
+            let tick_wake = last + EDGE_SCROLL_TICK;
+            next_wake = Some(next_wake.map_or(tick_wake, |w| w.min(tick_wake)));
         }
         if let Some((buffer_id, byte)) = drag_resend {
             let mods = translate_mods(self.modifiers);
             self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
         }
-        let last = self
-            .state
-            .as_ref()
-            .and_then(|s| s.edge_scroll_last)
-            .unwrap_or(now);
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-            last + EDGE_SCROLL_TICK,
-        ));
+
+        event_loop.set_control_flow(match next_wake {
+            Some(at) => winit::event_loop::ControlFlow::WaitUntil(at),
+            None => winit::event_loop::ControlFlow::Wait,
+        });
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
@@ -1205,6 +1240,7 @@ impl State {
             minimap_scrub_active: false,
             edge_scroll_dir: None,
             edge_scroll_last: None,
+            styled_redraw_deadline: None,
             hit_map_dirty: false,
             line_chunk_cache: Vec::new(),
             shaped_top: 0,
@@ -2141,6 +2177,7 @@ impl State {
             .collect();
         let mut lines = Vec::with_capacity(ranges.len());
         let mut cache = Vec::with_capacity(ranges.len());
+        let mut any_reused = false;
         for (i, &(ls, ce)) in ranges.iter().enumerate() {
             let abs = new_top + i;
             let reused = abs.checked_sub(old_top).and_then(|j| {
@@ -2151,6 +2188,7 @@ impl State {
                 }
             });
             if let Some((line, chunks)) = reused {
+                any_reused = true;
                 lines.push(line);
                 cache.push(chunks);
             } else {
@@ -2166,7 +2204,17 @@ impl State {
             .set_scroll(glyphon::cosmic_text::Scroll::default());
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.hit_map_dirty = true;
-        self.window.request_redraw();
+        if any_reused || self.line_chunk_cache.is_empty() {
+            self.styled_redraw_deadline = None;
+            self.window.request_redraw();
+        } else {
+            // Far jump (Q#M6, bet #2): every line rebuilt, and the
+            // span set covers the *old* viewport — drawing now would
+            // flash unstyled text. Hold the redraw until the restyle
+            // lands (`refresh_changed_lines` clears this) or the
+            // deadline fires in `about_to_wait`.
+            self.styled_redraw_deadline = Some(std::time::Instant::now() + JUMP_STYLE_HOLD);
+        }
     }
 
     /// Re-shape ONLY lines whose chunk set changed — the incoming
@@ -2198,6 +2246,9 @@ impl State {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
             self.hit_map_dirty = true;
         }
+        // Fresh styling reached the slice — release any held
+        // post-jump frame (Q#M6, bet #2).
+        self.styled_redraw_deadline = None;
         self.window.request_redraw();
     }
 
@@ -2473,6 +2524,8 @@ impl State {
         // The pointer hit map rebuilds lazily from the same caches
         // (Q#R2) — clicks are rare next to keystrokes/frames.
         self.hit_map_dirty = true;
+        // Full restyle: release any held post-jump frame (Q#M6).
+        self.styled_redraw_deadline = None;
         self.window.request_redraw();
     }
 
@@ -2684,7 +2737,11 @@ impl State {
             &self.current_line_shapes,
             self.config.width,
             self.config.height,
-            0,
+            // The thumb tracks the live scroll position. (It was
+            // hardcoded to 0 from the minimap's first session —
+            // surfaced by Q#M6 validation, where jumping finally
+            // made the frozen thumb obvious.)
+            self.scroll_top,
             visible_lines,
         );
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
