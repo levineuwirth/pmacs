@@ -465,7 +465,7 @@ struct State {
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OwnCursor {
     buffer_id: BufferId,
     byte: u64,
@@ -1895,17 +1895,29 @@ impl State {
                         return None;
                     }
                 }
-                self.own_cursor = Some(OwnCursor {
+                let arrived = OwnCursor {
                     buffer_id,
                     byte: byte_pos,
-                });
+                };
+                let moved = self.own_cursor != Some(arrived);
+                self.own_cursor = Some(arrived);
                 self.cursor_fresh = self.current_buffer_id == Some(buffer_id);
                 // Session S1 — keep the caret on screen (Q#S2). When the
                 // cursor leaves the visible slice (arrows past an edge,
                 // PageUp/Down), scroll to follow it, re-shape the new
                 // slice, and re-declare the scoped Viewport so the
                 // producer ships spans for what's now visible.
-                if self.scroll_to_cursor() {
+                //
+                // Only when the cursor MOVED. The daemon attaches a
+                // CursorByte to every frame it produces — including
+                // the frames our own Viewport sends trigger — so an
+                // unconditional follow snapped the viewport back to
+                // a stationary cursor on every minimap jump / scrub
+                // (and on any wheel scroll past the cursor's screen):
+                // jump → Viewport → frame + re-announced CursorByte →
+                // snap, in a loop. Scrolling away from a cursor that
+                // isn't moving is the user's prerogative.
+                if moved && self.scroll_to_cursor() {
                     // Pure scroll: retained lines keep their shape
                     // caches; only newly exposed lines shape.
                     self.rebuild_lines_reusing_scroll();
