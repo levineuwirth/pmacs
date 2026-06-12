@@ -90,6 +90,11 @@ const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
 const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
 const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
 const MINIMAP_THUMB_BORDER: [f32; 4] = [0.86, 0.86, 0.96, 0.7];
+/// Q#M7 — dragging within this many pixels of the text area's top or
+/// bottom edge auto-scrolls toward the pointer.
+const EDGE_SCROLL_BAND: f32 = 24.0;
+/// Q#M7 — one line per tick while edge-scrolling.
+const EDGE_SCROLL_TICK: std::time::Duration = std::time::Duration::from_millis(35);
 const QUAD_SHADER: &str = r"
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
@@ -419,6 +424,14 @@ struct State {
     /// selection, until release. Never sends `Pointer` events —
     /// the viewport is frontend-owned.
     minimap_scrub_active: bool,
+    /// Q#M7 — `Some(±1)` while a drag sits in the top/bottom edge
+    /// band; `about_to_wait` ticks the viewport one line toward the
+    /// pointer per [`EDGE_SCROLL_TICK`] and re-runs the drag
+    /// hit-test (the mouse may be stationary — `CursorMoved` alone
+    /// would stall the selection).
+    edge_scroll_dir: Option<i64>,
+    /// When the last edge-scroll tick fired.
+    edge_scroll_last: Option<std::time::Instant>,
     /// Q#R2 — the per-line surgery path skips rebuilding the pointer
     /// hit map (clicks are rare next to keystrokes); this marks it
     /// stale so `hit_test_source_byte` rebuilds on demand from the
@@ -632,6 +645,10 @@ impl ApplicationHandler<AppEvent> for App {
                 if !state.pointer_drag_active {
                     return;
                 }
+                // Q#M7 — arm/disarm edge auto-scroll from the drag's
+                // vertical position; `about_to_wait` runs the ticks.
+                state.edge_scroll_dir =
+                    edge_scroll_direction(position.y as f32, state.config.height);
                 // Drag coalescing (predicted finding #4): pixel-rate
                 // motion only ships when the hit byte changes.
                 let Some(byte) = state.hit_test_source_byte(position.x, position.y) else {
@@ -700,6 +717,8 @@ impl ApplicationHandler<AppEvent> for App {
                             return;
                         }
                         state.pointer_drag_active = false;
+                        state.edge_scroll_dir = None;
+                        state.edge_scroll_last = None;
                         let byte = state
                             .hit_test_source_byte(x, y)
                             .or(state.last_pointer_sent_byte);
@@ -743,6 +762,61 @@ impl ApplicationHandler<AppEvent> for App {
             }
             _ => {}
         }
+    }
+
+    /// Q#M7 — the edge auto-scroll tick. Armed only while a drag
+    /// sits in the top/bottom edge band; otherwise the loop stays in
+    /// plain `Wait`. Each due tick scrolls one line toward the
+    /// pointer and re-runs the drag hit-test at the *current*
+    /// pointer position, so the selection keeps growing while the
+    /// mouse is stationary past the edge.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if !state.pointer_drag_active || state.edge_scroll_dir.is_none() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            return;
+        }
+        let dir = state.edge_scroll_dir.unwrap_or(0);
+        let now = std::time::Instant::now();
+        let due = state
+            .edge_scroll_last
+            .is_none_or(|at| now.duration_since(at) >= EDGE_SCROLL_TICK);
+        let mut drag_resend: Option<(BufferId, u64)> = None;
+        if due {
+            state.edge_scroll_last = Some(now);
+            let vp = state.scroll_by_lines(dir);
+            if let Some(vp) = vp
+                && let Some(client) = self.attach_client.as_ref()
+                && let Err(e) = client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+            {
+                eprintln!("pmacs-gpu: edge-scroll send_viewport failed: {e}");
+            }
+            let state = self.state.as_mut().expect("checked above");
+            if let Some((x, y)) = state.pointer_pos
+                && let Some(byte) = state.hit_test_source_byte(x, y)
+                && state.last_pointer_sent_byte != Some(byte)
+            {
+                state.last_pointer_sent_byte = Some(byte);
+                state.note_pointer_round_trip();
+                if let Some(buffer_id) = state.current_buffer_id {
+                    drag_resend = Some((buffer_id, byte));
+                }
+            }
+        }
+        if let Some((buffer_id, byte)) = drag_resend {
+            let mods = translate_mods(self.modifiers);
+            self.send_pointer(buffer_id, byte, PointerKind::Drag, mods);
+        }
+        let last = self
+            .state
+            .as_ref()
+            .and_then(|s| s.edge_scroll_last)
+            .unwrap_or(now);
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            last + EDGE_SCROLL_TICK,
+        ));
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
@@ -1129,6 +1203,8 @@ impl State {
             last_pointer_sent_byte: None,
             last_pointer_down: None,
             minimap_scrub_active: false,
+            edge_scroll_dir: None,
+            edge_scroll_last: None,
             hit_map_dirty: false,
             line_chunk_cache: Vec::new(),
             shaped_top: 0,
@@ -2948,6 +3024,19 @@ fn minimap_band_contains(x: f32, y: f32, surface_width: u32, surface_height: u32
         && x < surface_width as f32 - MINIMAP_RIGHT
         && y >= MINIMAP_TOP
         && y < MINIMAP_TOP + height
+}
+
+/// Q#M7 — which way (if any) a drag at pixel `y` should auto-scroll:
+/// `-1` in the band hugging the text area's top, `+1` in the band at
+/// the surface bottom, `None` in the interior.
+fn edge_scroll_direction(y: f32, surface_height: u32) -> Option<i64> {
+    if y < TEXT_TOP + EDGE_SCROLL_BAND {
+        Some(-1)
+    } else if y > surface_height as f32 - EDGE_SCROLL_BAND {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 /// Map a minimap pixel `y` to a whole-file source line — the inverse
@@ -5018,6 +5107,21 @@ mod tests {
         assert_eq!(minimap_y_to_line(0.0, 600, 100), Some(0));
         assert_eq!(minimap_y_to_line(9999.0, 600, 100), Some(99));
         assert_eq!(minimap_y_to_line(100.0, 600, 0), None, "empty file");
+    }
+
+    #[test]
+    fn edge_scroll_direction_bands() {
+        // 600px surface: up-band y < 16 + 24 = 40; down-band y > 576.
+        assert_eq!(edge_scroll_direction(10.0, 600), Some(-1));
+        assert_eq!(edge_scroll_direction(39.9, 600), Some(-1));
+        assert_eq!(edge_scroll_direction(40.0, 600), None, "interior");
+        assert_eq!(edge_scroll_direction(300.0, 600), None);
+        assert_eq!(
+            edge_scroll_direction(576.0, 600),
+            None,
+            "band edge exclusive"
+        );
+        assert_eq!(edge_scroll_direction(577.0, 600), Some(1));
     }
 
     #[test]
