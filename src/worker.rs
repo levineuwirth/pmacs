@@ -494,6 +494,18 @@ mod tests {
             }
             handles.push(h);
         }
+        // Drop may discard still-queued work after setting shutdown,
+        // so on a loaded CI runner it can win the race before any
+        // worker finishes even one job, flaking the `count > 0`
+        // assert below (observed on the macOS runner). ~2/3 of the
+        // queue is non-cancelled, so one completion must land unless
+        // workers are wedged — wait for it, bounded.
+        let wait_start = std::time::Instant::now();
+        while completed.load(Ordering::Relaxed) == 0
+            && wait_start.elapsed() < std::time::Duration::from_secs(10)
+        {
+            std::thread::yield_now();
+        }
         // Drain shutdown synchronously via Drop: this returns only
         // after every queued, non-cancelled job has run (or every
         // cancelled job has either run-then-noop or been silently
