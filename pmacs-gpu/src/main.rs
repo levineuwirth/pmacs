@@ -414,6 +414,11 @@ struct State {
     /// interval): count 1 = single, 2 = the double already fired,
     /// so the next same-hit press is a triple (Q#M4).
     last_pointer_down: Option<(std::time::Instant, u64, u8)>,
+    /// A press began inside the minimap band (Q#M6): subsequent
+    /// `CursorMoved` scrubs the viewport instead of dragging a
+    /// selection, until release. Never sends `Pointer` events —
+    /// the viewport is frontend-owned.
+    minimap_scrub_active: bool,
     /// Q#R2 — the per-line surgery path skips rebuilding the pointer
     /// hit map (clicks are rare next to keystrokes); this marks it
     /// stale so `hit_test_source_byte` rebuilds on demand from the
@@ -610,6 +615,20 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 };
                 state.pointer_pos = Some((position.x, position.y));
+                if state.minimap_scrub_active {
+                    // Scrubbing (Q#M6): the press began on the
+                    // minimap; motion keeps jumping, even if the
+                    // pointer wanders out of the band.
+                    let vp = state.minimap_jump_to(position.y);
+                    if let Some(vp) = vp
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: minimap scrub send_viewport failed: {e}");
+                    }
+                    return;
+                }
                 if !state.pointer_drag_active {
                     return;
                 }
@@ -643,6 +662,20 @@ impl ApplicationHandler<AppEvent> for App {
                 let mods = translate_mods(self.modifiers);
                 match button_state {
                     ElementState::Pressed => {
+                        if state.in_minimap_band(x, y) {
+                            // Q#M6 — consumed before text hit-testing;
+                            // never a Pointer event.
+                            state.minimap_scrub_active = true;
+                            let vp = state.minimap_jump_to(y);
+                            if let Some(vp) = vp
+                                && let Some(client) = self.attach_client.as_ref()
+                                && let Err(e) =
+                                    client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                            {
+                                eprintln!("pmacs-gpu: minimap jump send_viewport failed: {e}");
+                            }
+                            return;
+                        }
                         let Some(byte) = state.hit_test_source_byte(x, y) else {
                             return;
                         };
@@ -659,6 +692,10 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                     }
                     ElementState::Released => {
+                        if state.minimap_scrub_active {
+                            state.minimap_scrub_active = false;
+                            return;
+                        }
                         if !state.pointer_drag_active {
                             return;
                         }
@@ -1091,6 +1128,7 @@ impl State {
             pointer_drag_active: false,
             last_pointer_sent_byte: None,
             last_pointer_down: None,
+            minimap_scrub_active: false,
             hit_map_dirty: false,
             line_chunk_cache: Vec::new(),
             shaped_top: 0,
@@ -1893,6 +1931,24 @@ impl State {
         self.rebuild_lines_reusing_scroll();
         self.current_buffer_id
             .and_then(|bid| self.viewport_send_if_changed(bid))
+    }
+
+    /// True when the pixel position lies inside the minimap band
+    /// (Q#M6). Presses here are consumed locally and never become
+    /// `Pointer` events.
+    fn in_minimap_band(&self, x: f64, y: f64) -> bool {
+        minimap_band_contains(x as f32, y as f32, self.config.width, self.config.height)
+    }
+
+    /// Center the viewport on the source line the minimap pixel `y`
+    /// maps to — the inverse of the painter's linear line→y
+    /// interpolation. Reuses [`Self::scroll_by_lines`] for the
+    /// clamp / rebuild / viewport-send plumbing.
+    fn minimap_jump_to(&mut self, y: f64) -> Option<ViewportSend> {
+        let target =
+            minimap_y_to_line(y as f32, self.config.height, self.current_line_starts.len())?;
+        let centered = target.saturating_sub(estimated_visible_lines(self.config.height) / 2);
+        self.scroll_by_lines(centered as i64 - self.scroll_top as i64)
     }
 
     /// Q#R1 — per-line incremental reshape for a single-line text
@@ -2877,6 +2933,37 @@ fn estimated_visible_lines(surface_height: u32) -> usize {
     ((surface_height as f32 - TEXT_TOP.max(0.0)) / CODE_LINE_HEIGHT)
         .ceil()
         .max(1.0) as usize
+}
+
+/// True when `(x, y)` lies inside the minimap band — the painter's
+/// geometry (`minimap_left` × the `MINIMAP_TOP..bottom` column),
+/// shared by the Q#M6 press hit-test.
+fn minimap_band_contains(x: f32, y: f32, surface_width: u32, surface_height: u32) -> bool {
+    let Some(left) = minimap_left(surface_width) else {
+        return false;
+    };
+    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    height > 0.0
+        && x >= left
+        && x < surface_width as f32 - MINIMAP_RIGHT
+        && y >= MINIMAP_TOP
+        && y < MINIMAP_TOP + height
+}
+
+/// Map a minimap pixel `y` to a whole-file source line — the inverse
+/// of the painter's `y = MINIMAP_TOP + line * height / total`
+/// interpolation, clamped into the file. `None` for an empty file or
+/// a degenerate surface.
+fn minimap_y_to_line(y: f32, surface_height: u32, total_lines: usize) -> Option<usize> {
+    if total_lines == 0 {
+        return None;
+    }
+    let height = surface_height as f32 - MINIMAP_TOP - MINIMAP_BOTTOM;
+    if height <= 0.0 {
+        return None;
+    }
+    let frac = ((y - MINIMAP_TOP) / height).clamp(0.0, 1.0);
+    Some(((frac * total_lines as f32) as usize).min(total_lines - 1))
 }
 
 fn minimap_rects(
@@ -4902,6 +4989,35 @@ mod tests {
         );
 
         assert_eq!(chunk_texts(&chunks), vec!["abcd", "X"]);
+    }
+
+    #[test]
+    fn minimap_band_and_inverse_line_mapping() {
+        // 800×600 surface: band x = [800-12-48, 800-12) = [740, 788),
+        // y = [12, 588).
+        assert!(minimap_band_contains(750.0, 100.0, 800, 600));
+        assert!(
+            !minimap_band_contains(739.0, 100.0, 800, 600),
+            "left of band"
+        );
+        assert!(
+            !minimap_band_contains(788.0, 100.0, 800, 600),
+            "right of band"
+        );
+        assert!(!minimap_band_contains(750.0, 5.0, 800, 600), "above band");
+        assert!(!minimap_band_contains(750.0, 590.0, 800, 600), "below band");
+        // Too-narrow surfaces have no minimap at all.
+        assert!(!minimap_band_contains(100.0, 100.0, 150, 600));
+
+        // Inverse mapping: height = 576; 100 lines. Top → line 0,
+        // bottom → last line, midpoint → ~half.
+        assert_eq!(minimap_y_to_line(12.0, 600, 100), Some(0));
+        assert_eq!(minimap_y_to_line(587.9, 600, 100), Some(99));
+        assert_eq!(minimap_y_to_line(12.0 + 288.0, 600, 100), Some(50));
+        // Out-of-band y clamps rather than panics (scrubbing wanders).
+        assert_eq!(minimap_y_to_line(0.0, 600, 100), Some(0));
+        assert_eq!(minimap_y_to_line(9999.0, 600, 100), Some(99));
+        assert_eq!(minimap_y_to_line(100.0, 600, 0), None, "empty file");
     }
 
     #[test]
