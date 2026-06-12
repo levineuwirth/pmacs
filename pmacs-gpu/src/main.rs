@@ -3071,7 +3071,15 @@ fn advance_minimap_col(col: usize, ch: char) -> usize {
 }
 
 fn minimap_style_color(style: CellStyle) -> [f32; 4] {
-    match style.fg {
+    // A set underline_color is the producer's diagnostic mark for the
+    // line (protocol v6, T M4.6 parity) — the minimap's gutter sign.
+    // It outranks the syntax-dominant fg so error/warning lines read
+    // at a glance.
+    let color = match style.underline_color {
+        CellColor::Default => style.fg,
+        marked => marked,
+    };
+    match color {
         CellColor::Default => MINIMAP_DEFAULT_LINE,
         CellColor::Rgb(r, g, b) => rgb_to_minimap_color(r, g, b),
         CellColor::Indexed(idx) => {

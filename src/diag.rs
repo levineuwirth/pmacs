@@ -81,6 +81,21 @@ impl DiagnosticSeverity {
         }
     }
 
+    /// Canonical severity color (T M4.6 / protocol v6): the
+    /// `underline_color` of this severity's squiggle, the column-0
+    /// marker background, and the minimap mark all share it. Indexed
+    /// 1/3/6/8 (red / yellow / cyan / gray) for 8/16-color terminal
+    /// portability.
+    #[must_use]
+    pub fn underline_color(self) -> Color {
+        match self {
+            Self::Error => Color::Indexed(1),
+            Self::Warning => Color::Indexed(3),
+            Self::Information => Color::Indexed(6),
+            Self::Hint => Color::Indexed(8),
+        }
+    }
+
     fn from_lsp_value(v: Option<&Value>) -> Self {
         match v.and_then(Value::as_i64) {
             Some(1) => Self::Error,
@@ -187,6 +202,12 @@ pub struct DiagnosticStore {
     /// here on the assumption that a fresh `publishDiagnostics`
     /// corresponds to the latest sent version.
     stale_uris: std::collections::HashSet<String>,
+    /// Per-URI change counter, bumped on every [`Self::set`] /
+    /// [`Self::clear`]. Diagnostics arrive without a CRDT generation
+    /// bump, so generation-keyed caches (the `FileStyleSummary`
+    /// producer's) additionally key on this to know a republish
+    /// happened (T M4.6 GPU parity).
+    epochs: HashMap<String, u64>,
 }
 
 impl DiagnosticStore {
@@ -207,6 +228,7 @@ impl DiagnosticStore {
         diags.sort_by(Diagnostic::compare_by_position);
         let uri = uri.into();
         self.stale_uris.remove(&uri);
+        *self.epochs.entry(uri.clone()).or_insert(0) += 1;
         if diags.is_empty() {
             self.by_uri.remove(&uri);
         } else {
@@ -219,6 +241,16 @@ impl DiagnosticStore {
     pub fn clear(&mut self, uri: &str) {
         self.by_uri.remove(uri);
         self.stale_uris.remove(uri);
+        *self.epochs.entry(uri.to_owned()).or_insert(0) += 1;
+    }
+
+    /// Monotonic per-URI change counter: how many times `set` /
+    /// `clear` ran for this URI. `0` for a URI never written.
+    /// Consumers cache against this to detect republishes that no
+    /// CRDT generation bump announces.
+    #[must_use]
+    pub fn epoch_for(&self, uri: &str) -> u64 {
+        self.epochs.get(uri).copied().unwrap_or(0)
     }
 
     /// Mark `uri`'s stored diagnostics as stale (T M11.8). Called
@@ -338,8 +370,7 @@ const TAB_WIDTH: u32 = 8;
 fn error_style() -> Style {
     Style {
         underline: UnderlineStyle::Curly,
-        // Indexed 1 (red) is portable across 8/16-color terminals.
-        underline_color: Color::Indexed(1),
+        underline_color: DiagnosticSeverity::Error.underline_color(),
         ..Style::default()
     }
 }
@@ -348,8 +379,7 @@ fn error_style() -> Style {
 fn warning_style() -> Style {
     Style {
         underline: UnderlineStyle::Curly,
-        // Indexed 3: yellow.
-        underline_color: Color::Indexed(3),
+        underline_color: DiagnosticSeverity::Warning.underline_color(),
         ..Style::default()
     }
 }
@@ -358,8 +388,7 @@ fn warning_style() -> Style {
 fn info_style() -> Style {
     Style {
         underline: UnderlineStyle::Single,
-        // Indexed 6: cyan.
-        underline_color: Color::Indexed(6),
+        underline_color: DiagnosticSeverity::Information.underline_color(),
         ..Style::default()
     }
 }
@@ -368,9 +397,7 @@ fn info_style() -> Style {
 fn hint_style() -> Style {
     Style {
         underline: UnderlineStyle::Dotted,
-        // Indexed 8: bright black ("gray") — present on 16-color
-        // terminals, subtle by design for hints.
-        underline_color: Color::Indexed(8),
+        underline_color: DiagnosticSeverity::Hint.underline_color(),
         ..Style::default()
     }
 }
@@ -391,14 +418,8 @@ fn style_for(severity: DiagnosticSeverity) -> Style {
 /// style-only), and zero-width diagnostics — invisible to the
 /// underline pass — still get a visible artifact.
 fn marker_style_for(severity: DiagnosticSeverity) -> Style {
-    let bg = match severity {
-        DiagnosticSeverity::Error => Color::Indexed(1),
-        DiagnosticSeverity::Warning => Color::Indexed(3),
-        DiagnosticSeverity::Information => Color::Indexed(6),
-        DiagnosticSeverity::Hint => Color::Indexed(8),
-    };
     Style {
-        bg,
+        bg: severity.underline_color(),
         ..Style::default()
     }
 }
@@ -879,6 +900,24 @@ mod tests {
             );
             seen.push(style.underline_color);
         }
+    }
+
+    #[test]
+    fn epoch_bumps_on_set_and_clear_per_uri() {
+        let mut store = DiagnosticStore::new();
+        assert_eq!(store.epoch_for("file:///a"), 0);
+        store.set("file:///a", vec![diag(0, DiagnosticSeverity::Error, "x")]);
+        assert_eq!(store.epoch_for("file:///a"), 1);
+        // An empty set (server reports clean) still counts — the
+        // consumer must refresh to drop its marks.
+        store.set("file:///a", vec![]);
+        assert_eq!(store.epoch_for("file:///a"), 2);
+        store.clear("file:///a");
+        assert_eq!(store.epoch_for("file:///a"), 3);
+        // mark_stale is not a content change; other URIs are isolated.
+        store.mark_stale("file:///a");
+        assert_eq!(store.epoch_for("file:///a"), 3);
+        assert_eq!(store.epoch_for("file:///b"), 0);
     }
 
     #[test]
