@@ -4381,12 +4381,33 @@ fn translate_style_spans(spans: &mut Vec<StyleSpan>, edit: TextProjectionEdit) {
 fn translate_decorations(decorations: &mut Vec<Decoration>, edit: TextProjectionEdit) {
     let mut translated = Vec::with_capacity(decorations.len());
     for mut decoration in decorations.drain(..) {
+        // Optimistic clear (diagnostics only): an edit that touches a
+        // diagnostic's range invalidates it locally, so drop the
+        // squiggle now instead of holding a stale wave over the text
+        // you just changed until the LSP re-analyzes and republishes.
+        // Scoped to the *touched* diagnostic — an error elsewhere
+        // still translates and holds, so the no-blink benefit of the
+        // producer's hold-while-stale survives. Non-diagnostic
+        // decorations (selection / current-line) always translate.
+        if decoration_kind_to_underline_color(decoration.kind).is_some()
+            && edit_touches_range(decoration.range, edit)
+        {
+            continue;
+        }
         if let Some(range) = translate_byte_range(decoration.range, edit) {
             decoration.range = range;
             translated.push(decoration);
         }
     }
     *decorations = translated;
+}
+
+/// True when `edit` touches `range` in the pre-edit coordinate space.
+/// An insert (`old_end == start`) touches when its point lies within
+/// `[start, end]` (inclusive — typing at either edge of an error
+/// token counts); a delete/replace touches when its span overlaps.
+fn edit_touches_range(range: ByteRange, edit: TextProjectionEdit) -> bool {
+    edit.start <= range.end && range.start <= edit.old_end
 }
 
 fn translate_inline_adornments(adornments: &mut [InlineAdornment], edit: TextProjectionEdit) {
@@ -5494,6 +5515,45 @@ mod tests {
             None,
             "ranges fully removed by the deletion drop"
         );
+    }
+
+    #[test]
+    fn editing_a_diagnostic_clears_it_optimistically_but_holds_untouched_ones() {
+        let diag = |start, end| Decoration {
+            range: ByteRange { start, end },
+            kind: DecorationKind::DiagnosticError,
+        };
+        // Insert the missing char right at the 1-byte widened anchor of
+        // an end-of-line "expected COMMA": the squiggle clears now.
+        let mut decos = vec![diag(11, 12), diag(40, 50)];
+        translate_decorations(
+            &mut decos,
+            TextProjectionEdit {
+                start: 11,
+                old_end: 11,
+                inserted_len: 1,
+            },
+        );
+        // The touched diagnostic is gone; the far one is kept (shifted
+        // right by the insert) — hold-while-stale still applies to it.
+        assert_eq!(decos.len(), 1, "only the touched diagnostic clears");
+        assert_eq!(decos[0].range, ByteRange { start: 41, end: 51 });
+
+        // A non-diagnostic decoration over the edited region is never
+        // dropped — selection / current-line translate as before.
+        let mut sel = vec![Decoration {
+            range: ByteRange { start: 8, end: 14 },
+            kind: DecorationKind::Selection,
+        }];
+        translate_decorations(
+            &mut sel,
+            TextProjectionEdit {
+                start: 10,
+                old_end: 10,
+                inserted_len: 2,
+            },
+        );
+        assert_eq!(sel.len(), 1, "selection survives an edit in its range");
     }
 
     #[test]
