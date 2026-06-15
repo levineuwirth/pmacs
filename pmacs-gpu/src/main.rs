@@ -136,6 +136,51 @@ const QUAD_VERTEX_STRIDE: wgpu::BufferAddress = 24;
 const QUAD_VERTEX_ATTRS: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
 
+/// Diagnostic squiggle shader (Q#W1). The vertex carries, beyond NDC
+/// position and color, a `uv`: `uv.x` is the absolute screen-space
+/// pixel x (so the wave's phase is continuous across separately
+/// emitted glyph-run rects), `uv.y` is the signed pixel offset from
+/// the band's vertical centerline. The fragment draws an
+/// anti-aliased sine: alpha falls off with distance to the curve via
+/// `fwidth`/`smoothstep` (both core WGSL — no MSAA or feature flag).
+const SQUIGGLE_SHADER: &str = r"
+struct VertexOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(
+    @location(0) pos: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+) -> VertexOut {
+    var out: VertexOut;
+    out.pos = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uv;
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let wavelength = 6.0;   // px per full sine period
+    let amplitude = 1.4;    // px peak from centerline
+    let thickness = 1.0;    // px stroke half-width
+    let two_pi = 6.2831853;
+    let wave = amplitude * sin(in.uv.x * (two_pi / wavelength));
+    let dist = abs(in.uv.y - wave);
+    let aa = fwidth(dist);
+    let alpha = 1.0 - smoothstep(thickness - aa, thickness + aa, dist);
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+}
+";
+
+const SQUIGGLE_VERTEX_STRIDE: wgpu::BufferAddress = 32;
+const SQUIGGLE_VERTEX_ATTRS: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
+
 /// Text the hello-world (and attach-pre-snapshot / attach-failed)
 /// modes render. Once the daemon's `BufferSnapshot` arrives the
 /// rendered text becomes the rope contents instead.
@@ -259,6 +304,7 @@ struct State {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     quad_renderer: QuadRenderer,
+    squiggle_renderer: SquiggleRenderer,
     buffer: Buffer,
     /// What the buffer is currently shaped to. Held so we can detect
     /// no-op updates and skip the re-shape.
@@ -465,6 +511,7 @@ struct State {
     /// Absolute source-line index of `buffer.lines[0]`.
     shaped_top: usize,
     bg_vertex_buffer: ReusableVertexBuffer,
+    squiggle_vertex_buffer: ReusableVertexBuffer,
     caret_vertex_buffer: ReusableVertexBuffer,
     minimap_vertex_buffer: ReusableVertexBuffer,
     /// Q#S2 — the status band's one-line text. Shaped only when the
@@ -1137,6 +1184,69 @@ impl QuadRenderer {
     }
 }
 
+/// Diagnostic-squiggle pipeline (Q#W1). Parallel to [`QuadRenderer`]
+/// but with the [`SQUIGGLE_SHADER`] / [`SQUIGGLE_VERTEX_ATTRS`] vertex
+/// format that carries the per-fragment `uv` the sine fragment shader
+/// needs.
+struct SquiggleRenderer {
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl SquiggleRenderer {
+    fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pmacs-gpu squiggle shader"),
+            source: wgpu::ShaderSource::Wgsl(SQUIGGLE_SHADER.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pmacs-gpu squiggle pipeline layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pmacs-gpu squiggle pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: SQUIGGLE_VERTEX_STRIDE,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &SQUIGGLE_VERTEX_ATTRS,
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline }
+    }
+
+    fn render<'pass>(
+        &'pass self,
+        pass: &mut wgpu::RenderPass<'pass>,
+        vertex_buffer: &'pass wgpu::Buffer,
+        vertex_count: u32,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.draw(0..vertex_count, 0..1);
+    }
+}
+
 impl State {
     #[allow(clippy::too_many_lines)] // linear GPU/font/surface setup; splitting would obscure ordering.
     fn new(event_loop: &ActiveEventLoop, initial_text: &str) -> Self {
@@ -1207,6 +1317,7 @@ impl State {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad_renderer = QuadRenderer::new(&device, surface_format);
+        let squiggle_renderer = SquiggleRenderer::new(&device, surface_format);
 
         // Smaller font in attach mode (file contents tend to be more
         // than one line); larger only fits "hello, pmacs"-shaped
@@ -1258,6 +1369,7 @@ impl State {
             atlas,
             text_renderer,
             quad_renderer,
+            squiggle_renderer,
             buffer,
             current_text: initial_text.to_owned(),
             current_line_starts,
@@ -1297,6 +1409,7 @@ impl State {
             line_chunk_cache: Vec::new(),
             shaped_top: 0,
             bg_vertex_buffer: ReusableVertexBuffer::new(),
+            squiggle_vertex_buffer: ReusableVertexBuffer::new(),
             caret_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_vertex_buffer: ReusableVertexBuffer::new(),
             status_buffer,
@@ -2813,6 +2926,21 @@ impl State {
                 &bg_vertices,
             )
             .cloned();
+        // Diagnostic squiggles (Q#W1): own pipeline + buffer, drawn
+        // between the wash quads and the text (under the glyphs, the
+        // z-slot the straight bar held).
+        let squiggle_vertices = self.squiggle_vertex_bytes();
+        let squiggle_vertex_count =
+            (squiggle_vertices.len() / SQUIGGLE_VERTEX_STRIDE as usize) as u32;
+        let squiggle_buffer = self
+            .squiggle_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu diagnostic squiggles",
+                &squiggle_vertices,
+            )
+            .cloned();
         let caret_vertices = self.caret_vertex_bytes();
         let caret_vertex_count = (caret_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let caret_buffer = self
@@ -2956,6 +3084,11 @@ impl State {
                 self.quad_renderer
                     .render(&mut pass, vertex_buffer, bg_vertex_count);
             }
+            // Diagnostic squiggles under the glyphs (Q#W1).
+            if let Some(vertex_buffer) = squiggle_buffer.as_ref() {
+                self.squiggle_renderer
+                    .render(&mut pass, vertex_buffer, squiggle_vertex_count);
+            }
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text_renderer render");
@@ -3076,20 +3209,47 @@ impl State {
             let Some((lo, hi)) = clip_rebase_range(d.range.start, d.range.end, vstart, vend) else {
                 continue;
             };
+            // Diagnostic underlines are squiggles now, drawn by their
+            // own pipeline (`squiggle_vertex_bytes`); only the solid
+            // washes belong in this quad batch.
             if let Some(color) = decoration_kind_to_bg_color(d.kind) {
                 self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color, None);
             }
-            if let Some(color) = decoration_kind_to_underline_color(d.kind) {
+        }
+    }
+
+    /// Vertex bytes for diagnostic squiggles (Q#W1), drawn by the
+    /// dedicated [`SquiggleRenderer`] pipeline rather than the solid
+    /// quad batch. Geometry is the same bottom-hugging glyph-extent
+    /// band as the old straight bar — only the vertex *format* differs
+    /// (carries the `uv` the sine fragment shader needs).
+    fn squiggle_vertex_bytes(&self) -> Vec<u8> {
+        if self.current_buffer_id.is_none() {
+            return Vec::new();
+        }
+        let (vstart, vend) = self.view_range;
+        if vend <= vstart {
+            return Vec::new();
+        }
+        let slice = &self.current_text[vstart as usize..vend as usize];
+        let line_offsets = line_byte_offsets(slice);
+        let mut rects = Vec::new();
+        for d in &self.current_decorations {
+            let Some(color) = decoration_kind_to_underline_color(d.kind) else {
+                continue;
+            };
+            if let Some((lo, hi)) = clip_rebase_range(d.range.start, d.range.end, vstart, vend) {
                 self.push_glyph_extent_rects(
-                    rects,
-                    line_offsets,
+                    &mut rects,
+                    &line_offsets,
                     lo,
                     hi,
                     color,
-                    Some(DIAG_UNDERLINE_PX),
+                    Some(DIAG_SQUIGGLE_PX),
                 );
             }
         }
+        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
     /// Peer cursor-line + selection washes from `PresenceUpdate`
@@ -3226,9 +3386,10 @@ impl State {
             if let (Some(x0), Some(x1)) = (min_x, max_x)
                 && x1 > x0
             {
-                // `bar_px`: an underline bar hugging the bottom of the
-                // line box instead of a full-height wash — the GPU's
-                // diagnostic squiggle (T M4.6 parity, straight-bar v1).
+                // `bar_px`: a band hugging the bottom of the line box
+                // instead of a full-height wash — the diagnostic
+                // squiggle's geometry (T M4.6 parity; the squiggle
+                // shape comes from the fragment shader, Q#W1).
                 let (y, h) = match bar_px {
                     Some(bar) => (TEXT_TOP + run.line_top + run.line_height - bar, bar),
                     None => (TEXT_TOP + run.line_top, run.line_height),
@@ -4351,6 +4512,48 @@ fn push_quad_vertex(bytes: &mut Vec<u8>, x: f32, y: f32, color: [f32; 4]) {
     }
 }
 
+/// Vertex bytes for the diagnostic-squiggle pipeline (Q#W1). Same six
+/// vertices per rect as a quad, but each carries a `uv`: `uv.x` is the
+/// absolute screen-space pixel x of the corner (continuous phase
+/// across separately emitted rects), `uv.y` is the signed pixel offset
+/// from the band's vertical centerline (`±h/2`). The fragment shader
+/// turns that into the sine.
+fn squiggles_to_vertex_bytes(rects: &[MinimapRect], width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(rects.len() * 6 * SQUIGGLE_VERTEX_STRIDE as usize);
+    for rect in rects {
+        if rect.w <= 0.0 || rect.h <= 0.0 || width == 0 || height == 0 {
+            continue;
+        }
+        let x0 = px_to_ndc_x(rect.x, width);
+        let x1 = px_to_ndc_x(rect.x + rect.w, width);
+        let y0 = px_to_ndc_y(rect.y, height);
+        let y1 = px_to_ndc_y(rect.y + rect.h, height);
+        let (left, right) = (rect.x, rect.x + rect.w);
+        let half = rect.h * 0.5;
+        // Top edge → centerline-relative uv.y = -half; bottom → +half.
+        push_squiggle_vertex(&mut bytes, x0, y0, left, -half, rect.color);
+        push_squiggle_vertex(&mut bytes, x1, y0, right, -half, rect.color);
+        push_squiggle_vertex(&mut bytes, x1, y1, right, half, rect.color);
+        push_squiggle_vertex(&mut bytes, x0, y0, left, -half, rect.color);
+        push_squiggle_vertex(&mut bytes, x1, y1, right, half, rect.color);
+        push_squiggle_vertex(&mut bytes, x0, y1, left, half, rect.color);
+    }
+    bytes
+}
+
+fn push_squiggle_vertex(
+    bytes: &mut Vec<u8>,
+    x: f32,
+    y: f32,
+    uv_x: f32,
+    uv_y: f32,
+    color: [f32; 4],
+) {
+    for value in [x, y, uv_x, uv_y, color[0], color[1], color[2], color[3]] {
+        bytes.extend_from_slice(&value.to_ne_bytes());
+    }
+}
+
 fn px_to_ndc_x(x: f32, width: u32) -> f32 {
     x / width as f32 * 2.0 - 1.0
 }
@@ -4587,22 +4790,23 @@ fn indexed_to_glyphon(idx: u8) -> glyphon::Color {
     glyphon::Color::rgb(level, level, level)
 }
 
-/// Height of the diagnostic underline bar, in pixels. Straight-bar
-/// v1; a wavy squiggle needs shader/texture work and waits until the
-/// straight bar is proven (framing Q#D1).
-const DIAG_UNDERLINE_PX: f32 = 2.0;
+/// Height of the diagnostic squiggle band, in pixels (Q#W1). Taller
+/// than the original straight bar (2px) so the sine wave fits: the
+/// fragment shader's `amplitude + thickness` (~2.4px each side) must
+/// sit inside half the band.
+const DIAG_SQUIGGLE_PX: f32 = 6.0;
 
-/// Map a [`DecorationKind`] to an underline-bar color, or `None` for
+/// Map a [`DecorationKind`] to an underline color, or `None` for
 /// kinds that don't underline.
 ///
 /// Session 5 originally rendered diagnostics by *recoloring the text
 /// foreground*, which clobbered the syntax color of the very token
 /// the diagnostic points at — the same flaw the TUI fixed with
 /// protocol v6's `underline_color` (T M4.6). The GPU's equivalent is
-/// a [`DIAG_UNDERLINE_PX`]-tall quad hugging the bottom of the glyph
-/// extent; the text keeps its syntax color. Same RGB palette the fg
-/// path used (red / yellow / light blue / dim gray), so the window's
-/// severity language is unchanged.
+/// a wavy squiggle hugging the bottom of the glyph extent (Q#W1, was
+/// a straight bar through PR #65); the text keeps its syntax color.
+/// Same RGB palette the fg path used (red / yellow / light blue /
+/// dim gray), so the window's severity language is unchanged.
 fn decoration_kind_to_underline_color(kind: DecorationKind) -> Option<[f32; 4]> {
     match kind {
         // ANSI bright red — matches TUI diagnostic-error palette.
@@ -5645,5 +5849,45 @@ mod tests {
         assert!((f32_at(&bytes, 0) + 1.0).abs() < 0.001);
         assert!((f32_at(&bytes, 1) - 1.0).abs() < 0.001);
         assert!((f32_at(&bytes, 2) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn squiggle_vertices_carry_centerline_relative_uv() {
+        // Q#W1: uv.x is the absolute screen pixel x (so phase is
+        // continuous across rects); uv.y is signed px from the band
+        // centerline (±h/2). Layout per vertex: [ndc_x, ndc_y, uv_x,
+        // uv_y, r, g, b, a] — 8 floats.
+        let rect = MinimapRect {
+            x: 10.0,
+            y: 20.0,
+            w: 30.0,
+            h: 6.0,
+            color: [0.9, 0.1, 0.2, 1.0],
+        };
+        let bytes = squiggles_to_vertex_bytes(&[rect], 100, 100);
+        assert_eq!(bytes.len(), 6 * SQUIGGLE_VERTEX_STRIDE as usize);
+
+        // Vertex 0 = top-left: uv = (left x, -h/2).
+        assert!((f32_at(&bytes, 2) - 10.0).abs() < 0.001, "uv.x left");
+        assert!((f32_at(&bytes, 3) + 3.0).abs() < 0.001, "uv.y top = -h/2");
+        // Color rides every vertex.
+        assert!((f32_at(&bytes, 4) - 0.9).abs() < 0.001);
+        assert!((f32_at(&bytes, 7) - 1.0).abs() < 0.001);
+        // Vertex 2 = bottom-right (8 floats in): uv = (right x, +h/2).
+        assert!((f32_at(&bytes, 16 + 2) - 40.0).abs() < 0.001, "uv.x right");
+        assert!((f32_at(&bytes, 16 + 3) - 3.0).abs() < 0.001, "uv.y bottom");
+    }
+
+    #[test]
+    fn squiggles_skip_degenerate_rects() {
+        let zero_w = MinimapRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 6.0,
+            color: [1.0, 0.0, 0.0, 1.0],
+        };
+        assert!(squiggles_to_vertex_bytes(&[zero_w], 100, 100).is_empty());
+        assert!(squiggles_to_vertex_bytes(&[zero_w], 0, 100).is_empty());
     }
 }
