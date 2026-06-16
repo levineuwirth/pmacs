@@ -148,6 +148,34 @@ fn typing_replaces_the_shift_selected_region() {
 }
 
 #[test]
+fn type_over_is_a_single_undo_step() {
+    let mut s = EditorState::new();
+    type_str(&mut s, "hello");
+
+    // Select "llo" (region [2, 5)) and type 'X' → "heX".
+    for _ in 0..3 {
+        s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Left, KeyModifiers::SHIFT));
+    }
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('X'), KeyModifiers::SHIFT),
+    );
+    let (text, _, _) = probe(&s);
+    assert_eq!(text, "heX");
+
+    // A single undo restores the pre-type-over text — not the
+    // half-replaced "hel" the old delete-then-insert pair left after
+    // one undo.
+    s.lua_host
+        .lua()
+        .load("pmacs.editor.undo()")
+        .exec()
+        .expect("undo");
+    let (text, _, _) = probe(&s);
+    assert_eq!(text, "hello", "type-over undoes in one step");
+}
+
+#[test]
 fn delete_forward_deletes_the_shift_selected_region() {
     let mut s = EditorState::new();
     type_str(&mut s, "world");

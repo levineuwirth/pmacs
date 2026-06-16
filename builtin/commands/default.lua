@@ -101,19 +101,21 @@ cmd { name = "cursor.select-line-start",
 cmd { name = "cursor.select-line-end",
       description = "Extend selection to end of line.",
       fn = function() ensure_anchor(); ed.move_line_end() end }
--- CUA type-over: inserting with an active selection replaces it
--- (`delete_region` is a no-op without one). The pmacs-gpu frontend
--- relies on this: its optimistic-insert path detects an own-window
--- selection and round-trips the key so these commands run.
+-- CUA type-over: inserting with an active selection replaces it in a
+-- SINGLE edit (one undo step — `insert_char_over_region` emits one
+-- `Replace`, not a `delete` + `insert` pair). Without a selection it
+-- is a plain insert. The pmacs-gpu frontend relies on this: its
+-- optimistic-insert path detects an own-window selection and
+-- round-trips the key so these commands run daemon-side.
 cmd { name = "buffer.newline",
       description = "Insert a newline at the cursor, replacing the active region.",
-      fn = function() ed.delete_region(); ed.insert_char(10) end }
+      fn = function() ed.insert_char_over_region(10) end }
 cmd { name = "buffer.tab",
       description = "Insert a tab at the cursor, replacing the active region.",
-      fn = function() ed.delete_region(); ed.insert_char(9) end }
+      fn = function() ed.insert_char_over_region(9) end }
 cmd { name = "buffer.self-insert",
       description = "Insert the codepoint argument at the cursor, replacing the active region.",
-      fn = function(codepoint) ed.delete_region(); ed.insert_char(codepoint) end }
+      fn = function(codepoint) ed.insert_char_over_region(codepoint) end }
 
 -- History --------------------------------------------------------------------
 
