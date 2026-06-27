@@ -954,6 +954,32 @@ impl EditorCore {
         self.active_window_mut().cursor += bytes.len() as u64;
     }
 
+    /// CUA type-over: insert `ch`, replacing the active region if one
+    /// exists. With a region this is a *single* `EditOp::Replace` — one
+    /// undo step — rather than the former `delete_region()` +
+    /// `insert_char()` pair, which recorded two. With no region it
+    /// delegates to [`Self::insert_char`] (a plain insert). The cursor
+    /// lands just past the inserted bytes and any selection is cleared.
+    pub fn insert_char_over_region(&mut self, ch: char) {
+        let Some((lo, hi)) = self.active_region() else {
+            self.insert_char(ch);
+            return;
+        };
+        self.active_window_mut().goal_col = None;
+        let mut buf = [0u8; 4];
+        let bytes = ch.encode_utf8(&mut buf).as_bytes();
+        if let Err(e) = self.apply_active_edit(EditOp::Replace {
+            range: Range { start: lo, end: hi },
+            bytes,
+        }) {
+            self.status = format!("replace failed: {e}");
+            return;
+        }
+        let aw = self.active_window_mut();
+        aw.cursor = lo + bytes.len() as u64;
+        aw.selection = None;
+    }
+
     /// Delete the codepoint immediately before the cursor.
     pub fn backspace(&mut self) {
         self.active_window_mut().goal_col = None;

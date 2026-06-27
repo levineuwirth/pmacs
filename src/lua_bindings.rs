@@ -11411,6 +11411,17 @@ fn install_editing(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             })?,
         )?;
     }
+    {
+        let cc = core.clone();
+        editor.set(
+            "insert_char_over_region",
+            lua.create_function(move |_, codepoint: i64| {
+                let ch = char_from_lua_codepoint(codepoint)?;
+                cc.borrow_mut().insert_char_over_region(ch);
+                Ok(())
+            })?,
+        )?;
+    }
     Ok(())
 }
 

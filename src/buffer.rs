@@ -2071,6 +2071,27 @@ mod tests {
         assert!(matches!(b.undo(), Err(BufferError::NothingToUndo)));
     });
 
+    dual_mode_test!(replace_is_a_single_undo_step, |_make, make_bytes| {
+        // CUA type-over models "replace the selection with the typed
+        // char" as one `EditOp::Replace`, so it must undo in ONE step
+        // in both modes — including CRDT, where a Replace is a
+        // delete-then-insert on the loro text but still a single
+        // `apply_edit` (one commit, one undo unit). If it were two
+        // units, the first undo would leave "hel" and the second
+        // would be needed to reach "hello".
+        let mut b = make_bytes("test", b"hello");
+        b.apply_edit(EditOp::Replace {
+            range: Range::new(2, 5),
+            bytes: b"X",
+        })
+        .unwrap();
+        assert_eq!(collect(&b), b"heX");
+
+        b.undo().unwrap();
+        assert_eq!(collect(&b), b"hello", "type-over undoes in one step");
+        assert!(matches!(b.undo(), Err(BufferError::NothingToUndo)));
+    });
+
     dual_mode_test!(redo_replays_undone_edit, |_make, make_bytes| {
         let mut b = make_bytes("test", b"abc");
         b.apply_edit(EditOp::Insert {
