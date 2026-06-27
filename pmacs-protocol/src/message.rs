@@ -823,9 +823,11 @@ pub enum InstanceMessage {
     /// `None` means no search is running — the frontend hides the band.
     ///
     /// Emitted by the semantic producer when the search state changes
-    /// (cached-compare suppressed, like [`Self::StatusFacts`]). Kept
-    /// off wires negotiated `< 9` by the daemon's per-session filter
-    /// (additive variant — an older peer would hard-error decoding it).
+    /// (cached-compare suppressed, like [`Self::StatusFacts`]). The
+    /// `regex` / `invalid` fields (Q#RX6) changed this variant's
+    /// encoding, so the daemon's per-session filter now keeps it off
+    /// wires negotiated `< 10` (was `< 9` for the original four-field
+    /// shape — see `PROTOCOL_VERSION`).
     SearchPrompt {
         /// Buffer the search is anchored in (the active buffer).
         buffer_id: crate::BufferId,
@@ -837,6 +839,13 @@ pub enum InstanceMessage {
         active: Option<u32>,
         /// Total number of matches for the current query.
         total: u32,
+        /// `true` when the search is in regex mode (Q#RX3) — the
+        /// frontend prefixes the prompt with `Regex `.
+        regex: bool,
+        /// `true` when a regex pattern failed to compile — the frontend
+        /// shows `[invalid]` instead of a match count. Always `false`
+        /// in literal mode.
+        invalid: bool,
     },
 }
 
@@ -1098,7 +1107,13 @@ pub enum ResourceBody {
 /// Q#SR5 (incremental search): bumped from 8 to 9 for
 /// [`InstanceMessage::SearchPrompt`]. Additive and daemon-gated per
 /// session, identical shape to the `StatusFacts` (v8) bump.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// Q#RX6 (regex search): bumped from 9 to 10 — `SearchPrompt` gained
+/// `regex` / `invalid` fields, changing that variant's postcard
+/// encoding. Still daemon-gated per session (now at `< 10`); a v9 peer
+/// negotiates v9 and simply receives no `SearchPrompt` (the decorations
+/// still highlight), rather than mis-decoding the wider shape.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1141,7 +1156,12 @@ pub const PROTOCOL_VERSION: u32 = 9;
 ///
 /// Q#SR5: extended to `[6, 7, 8, 9]`. `InstanceMessage::SearchPrompt`
 /// is additive and daemon-gated per session.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9];
+///
+/// Q#RX6: extended to `[6, 7, 8, 9, 10]`. `SearchPrompt` gained
+/// `regex` / `invalid` (encoding change to that variant); v9 and v10
+/// interoperate because the variant is daemon-gated per session, so a
+/// v9 peer is simply never sent the wider shape.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

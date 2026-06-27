@@ -78,6 +78,14 @@ pub struct SearchSession {
     /// Drives the prompt label ("I-search" vs "I-search backward")
     /// and the wrap direction of an empty-query repeat.
     forward: bool,
+    /// Whether the query is a regex (Q#RX3). `false` = smart-case
+    /// substring (`find_all`); `true` = smart-case regex
+    /// (`find_all_regex`). Toggled live by `M-r`.
+    regex: bool,
+    /// `true` when the last recompute's regex pattern failed to compile
+    /// — the prompt shows `[invalid]` instead of a match count. Always
+    /// `false` in literal mode (substring never "fails to compile").
+    invalid: bool,
 }
 
 /// The world state mutated by editor commands.
@@ -536,6 +544,21 @@ impl EditorCore {
         self.search.as_ref().is_none_or(|s| s.forward)
     }
 
+    /// `true` iff the active search is in regex mode (Q#RX3). `false`
+    /// for literal substring, or when no search is running.
+    #[must_use]
+    pub fn search_is_regex(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.regex)
+    }
+
+    /// `true` iff the active regex search's pattern failed to compile —
+    /// the prompt shows `[invalid]` rather than a match count. Always
+    /// `false` in literal mode / when no search is running.
+    #[must_use]
+    pub fn search_is_invalid(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.invalid)
+    }
+
     /// `(active_index, total)` for the active buffer's matches, for the
     /// prompt's "n/m" readout. `active_index` is 0-based and `None`
     /// when there are no matches.
@@ -552,11 +575,12 @@ impl EditorCore {
     }
 
     /// Begin an incremental search anchored at the active buffer +
-    /// cursor. `forward` sets the initial step direction. A no-op if a
-    /// search is already running (the entry chord is intercepted while
-    /// active, so this is only reached from an inactive state — the
-    /// guard is belt-and-suspenders).
-    pub fn search_begin(&mut self, forward: bool) {
+    /// cursor. `forward` sets the initial step direction; `regex`
+    /// selects regex (`true`) vs literal substring (`false`) matching.
+    /// A no-op if a search is already running (the entry chord is
+    /// intercepted while active, so this is only reached from an
+    /// inactive state — the guard is belt-and-suspenders).
+    pub fn search_begin(&mut self, forward: bool, regex: bool) {
         if self.search.is_some() {
             return;
         }
@@ -571,7 +595,20 @@ impl EditorCore {
             query: String::new(),
             origin,
             forward,
+            regex,
+            invalid: false,
         });
+    }
+
+    /// Toggle the active search between literal and regex matching
+    /// (Q#RX3, `M-r`), re-running the current query in the new mode. A
+    /// no-op when no search is running.
+    pub fn search_toggle_regex(&mut self) {
+        let Some(session) = self.search.as_mut() else {
+            return;
+        };
+        session.regex = !session.regex;
+        self.search_recompute();
     }
 
     /// Ensure the active window carries a [`crate::search::SearchView`]
@@ -617,8 +654,23 @@ impl EditorCore {
         let bid = session.origin.0;
         let origin_byte = session.origin.1;
         let query = session.query.clone();
+        let regex = session.regex;
         let bytes = self.buffer_bytes(bid);
-        let matches = crate::search::find_all(&bytes, &query);
+        // Regex: `None` ⇒ the pattern won't compile (mark invalid, drop
+        // matches). Literal substring never fails. An invalid pattern
+        // clears the store (no stale matches paint) and shows
+        // `[invalid]` via the prompt.
+        let (matches, invalid) = if regex {
+            match crate::search::find_all_regex(&bytes, &query) {
+                Some(m) => (m, false),
+                None => (Vec::new(), true),
+            }
+        } else {
+            (crate::search::find_all(&bytes, &query), false)
+        };
+        if let Some(session) = self.search.as_mut() {
+            session.invalid = invalid;
+        }
         let focus = {
             let mut guard = self
                 .search_store
@@ -2422,7 +2474,7 @@ mod tests {
         let mut s = from_bytes(b"foo bar foo baz foo");
         let bid = s.active_buffer_id();
         s.active_window_mut().cursor = 0;
-        s.search_begin(true);
+        s.search_begin(true, false);
         assert!(s.search_active());
         type_query(&mut s, "foo");
         // Three matches: 0..3, 8..11, 16..19; first (at/after origin 0)
@@ -2438,7 +2490,7 @@ mod tests {
     fn search_step_walks_matches_and_wraps() {
         let mut s = from_bytes(b"foo bar foo baz foo");
         s.active_window_mut().cursor = 0;
-        s.search_begin(true);
+        s.search_begin(true, false);
         type_query(&mut s, "foo");
         assert_eq!(s.cursor(), 0);
         s.search_step(true);
@@ -2455,7 +2507,7 @@ mod tests {
     fn search_focuses_first_match_at_or_after_origin() {
         let mut s = from_bytes(b"foo bar foo");
         s.active_window_mut().cursor = 5; // inside "bar"
-        s.search_begin(true);
+        s.search_begin(true, false);
         type_query(&mut s, "foo");
         // First match with start >= 5 is the one at byte 8.
         assert_eq!(s.cursor(), 8);
@@ -2467,7 +2519,7 @@ mod tests {
         let mut s = from_bytes(b"foo bar foo");
         let bid = s.active_buffer_id();
         s.active_window_mut().cursor = 5;
-        s.search_begin(true);
+        s.search_begin(true, false);
         type_query(&mut s, "foo");
         assert_eq!(s.cursor(), 8);
         s.search_finish(false); // cancel
@@ -2488,7 +2540,7 @@ mod tests {
         let mut s = from_bytes(b"foo bar foo");
         let bid = s.active_buffer_id();
         s.active_window_mut().cursor = 0;
-        s.search_begin(true);
+        s.search_begin(true, false);
         type_query(&mut s, "foo");
         s.search_step(true); // focus the match at byte 8
         assert_eq!(s.cursor(), 8);
@@ -2509,7 +2561,7 @@ mod tests {
     fn search_backspace_widens_the_match_set() {
         let mut s = from_bytes(b"fo foo food");
         s.active_window_mut().cursor = 0;
-        s.search_begin(true);
+        s.search_begin(true, false);
         type_query(&mut s, "foo"); // matches "foo" at 3..6, 7..10
         assert_eq!(s.search_match_summary().1, 2);
         s.search_backspace(); // query "fo"
@@ -2521,7 +2573,7 @@ mod tests {
     fn search_smart_case_is_case_sensitive_with_uppercase() {
         let mut s = from_bytes(b"Foo foo FOO");
         s.active_window_mut().cursor = 0;
-        s.search_begin(true);
+        s.search_begin(true, false);
         type_query(&mut s, "Foo"); // uppercase => case-sensitive
         assert_eq!(s.search_match_summary().1, 1);
         s.search_backspace();
@@ -2536,7 +2588,7 @@ mod tests {
         let mut s = from_bytes(b"foo foo");
         let bid = s.active_buffer_id();
         s.active_window_mut().cursor = 0;
-        s.search_begin(true);
+        s.search_begin(true, false);
         type_query(&mut s, "foo");
         s.search_finish(true); // matches persist after accept
         assert!(!s.search_store.lock().expect("store").is_stale(bid));
@@ -2545,5 +2597,51 @@ mod tests {
             s.search_store.lock().expect("store").is_stale(bid),
             "an edit marks the buffer's matches stale (linger fix)"
         );
+    }
+
+    // ---- regex search (Q#RX3) ------------------------------------------
+
+    #[test]
+    fn regex_search_matches_pattern() {
+        let mut s = from_bytes(b"a1 b2 c3");
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true, true);
+        assert!(s.search_is_regex());
+        type_query(&mut s, r"\d");
+        assert_eq!(s.search_match_summary().1, 3, "\\d matches 1, 2, 3");
+        assert!(!s.search_is_invalid());
+    }
+
+    #[test]
+    fn regex_invalid_pattern_flags_and_recovers() {
+        let mut s = from_bytes(b"foo");
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true, true);
+        type_query(&mut s, "fo("); // unbalanced group mid-typing
+        assert!(s.search_is_invalid(), "incomplete group is invalid");
+        assert_eq!(s.search_match_summary().1, 0, "invalid ⇒ no matches");
+        type_query(&mut s, "o)"); // completes the group: regex fo(o) → "foo"
+        assert!(!s.search_is_invalid(), "valid pattern recovers");
+        assert_eq!(s.search_match_summary().1, 1);
+    }
+
+    #[test]
+    fn toggle_regex_reinterprets_the_query() {
+        let mut s = from_bytes(b"a.b axb");
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true, false); // literal
+        type_query(&mut s, "a.b");
+        assert!(!s.search_is_regex());
+        assert_eq!(
+            s.search_match_summary().1,
+            1,
+            "literal '.' matches only a.b"
+        );
+        s.search_toggle_regex(); // → regex
+        assert!(s.search_is_regex());
+        assert_eq!(s.search_match_summary().1, 2, "regex '.' also matches axb");
+        s.search_toggle_regex(); // back to literal
+        assert!(!s.search_is_regex());
+        assert_eq!(s.search_match_summary().1, 1);
     }
 }

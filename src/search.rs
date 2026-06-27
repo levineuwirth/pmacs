@@ -228,6 +228,51 @@ pub fn find_all(haystack: &[u8], query: &str) -> Vec<ByteRange> {
     out
 }
 
+/// Smart-case regex search over `haystack` bytes for `pattern` (Q#RX1).
+///
+/// Returns `Some(matches)` — leftmost, non-overlapping, ascending byte
+/// ranges — for a valid pattern (possibly empty), or `None` when
+/// `pattern` fails to compile. The `Option` lets the caller tell an
+/// *invalid* pattern (show `[invalid]`) apart from a valid one with no
+/// matches (a failing search), which a flat `Vec` could not.
+///
+/// **Smart-case (Q#RX2).** Case-insensitive unless `pattern` contains
+/// an uppercase letter, applied by compiling `(?i)` ahead of the
+/// pattern. An uppercase letter inside an escape or class (`\D`,
+/// `[A-Z]`) trips case-sensitivity — the same coarse rule the literal
+/// path uses.
+///
+/// **Multi-line (Q#RX1)** falls out for free: the regex runs over the
+/// whole byte slice, so an explicit `\n` (or `(?s).`) spans lines. `.`
+/// keeps its default of not matching `\n`.
+///
+/// **Zero-width matches** (`a*`, `^`, `$`, anchors) are filtered — they
+/// wash nothing and would otherwise flood the match list. The `regex`
+/// crate's linear-time engine makes a pathological pattern slow at
+/// worst, never catastrophic.
+#[must_use]
+pub fn find_all_regex(haystack: &[u8], pattern: &str) -> Option<Vec<ByteRange>> {
+    if pattern.is_empty() {
+        return Some(Vec::new());
+    }
+    let case_insensitive = !pattern.chars().any(char::is_uppercase);
+    let re = if case_insensitive {
+        regex::bytes::Regex::new(&format!("(?i){pattern}"))
+    } else {
+        regex::bytes::Regex::new(pattern)
+    }
+    .ok()?;
+    let matches = re
+        .find_iter(haystack)
+        .filter(|m| m.end() > m.start())
+        .map(|m| ByteRange {
+            start: m.start() as u64,
+            end: m.end() as u64,
+        })
+        .collect();
+    Some(matches)
+}
+
 // ---------------------------------------------------------------------------
 // TUI view
 // ---------------------------------------------------------------------------
@@ -318,45 +363,65 @@ impl View for SearchView {
         let cell_origin = viewport.cell_origin;
 
         for m in &matches {
-            let line = crate::diag::line_at_offset(&line_offsets, m.start as u32);
-            if line < start_line_buf {
-                continue;
-            }
-            let row_offset = line - start_line_buf;
-            if row_offset >= max_rows {
-                break;
-            }
-            let line_start = line_offsets[line as usize];
-            let line_end = line_offsets
-                .get(line as usize + 1)
-                .copied()
-                .unwrap_or(source.len() as u32);
-            let line_end_no_nl = if line_end > line_start
-                && source.get(line_end as usize - 1).copied() == Some(b'\n')
-            {
-                line_end - 1
-            } else {
-                line_end
-            };
-            let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
-            let within_start = (m.start as u32).saturating_sub(line_start) as usize;
-            let within_end = (m.end as u32).saturating_sub(line_start) as usize;
-            let (start_col, end_col) =
-                crate::diag::byte_range_to_display_cols(line_bytes, within_start, within_end);
-            if end_col <= start_col {
-                continue;
-            }
             let style = if Some(*m) == active {
                 active_match_style()
             } else {
                 match_style()
             };
-            let cell_row = cell_origin.row + row_offset;
-            let clamped_start = start_col.min(max_cols);
-            let clamped_end = end_col.min(max_cols);
-            for col in clamped_start..clamped_end {
-                let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
-                cell.style = merge_styles(cell.style, style);
+            // A regex match may span multiple lines (Q#RX4); wash each
+            // row's clipped slice, mirroring the selection renderer.
+            // Single-line matches (every literal match) touch one row.
+            let first_line = crate::diag::line_at_offset(&line_offsets, m.start as u32);
+            // Matches are sorted ascending, so once one starts below the
+            // viewport every later one does too — stop.
+            if first_line >= start_line_buf.saturating_add(max_rows) {
+                break;
+            }
+            let last_byte = m.end.saturating_sub(1).max(m.start) as u32;
+            let last_line = crate::diag::line_at_offset(&line_offsets, last_byte);
+            for line in first_line..=last_line {
+                if line < start_line_buf {
+                    continue;
+                }
+                let row_offset = line - start_line_buf;
+                if row_offset >= max_rows {
+                    break;
+                }
+                let line_start = line_offsets[line as usize];
+                let line_end = line_offsets
+                    .get(line as usize + 1)
+                    .copied()
+                    .unwrap_or(source.len() as u32);
+                let line_end_no_nl = if line_end > line_start
+                    && source.get(line_end as usize - 1).copied() == Some(b'\n')
+                {
+                    line_end - 1
+                } else {
+                    line_end
+                };
+                // Clip the match to this line's content (newline excluded
+                // so a multi-line match doesn't wash a phantom trailing
+                // cell).
+                let paint_start = (m.start as u32).max(line_start);
+                let paint_end = (m.end as u32).min(line_end_no_nl);
+                if paint_start >= paint_end {
+                    continue;
+                }
+                let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
+                let within_start = (paint_start - line_start) as usize;
+                let within_end = (paint_end - line_start) as usize;
+                let (start_col, end_col) =
+                    crate::diag::byte_range_to_display_cols(line_bytes, within_start, within_end);
+                if end_col <= start_col {
+                    continue;
+                }
+                let cell_row = cell_origin.row + row_offset;
+                let clamped_start = start_col.min(max_cols);
+                let clamped_end = end_col.min(max_cols);
+                for col in clamped_start..clamped_end {
+                    let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
+                    cell.style = merge_styles(cell.style, style);
+                }
             }
         }
     }
@@ -399,6 +464,59 @@ mod tests {
         assert!(find_all(b"hello", "").is_empty());
         assert!(find_all(b"hi", "hello").is_empty());
         assert!(find_all(b"", "x").is_empty());
+    }
+
+    // ---- regex matcher (Q#RX1) -----------------------------------------
+
+    #[test]
+    fn find_all_regex_matches_pattern() {
+        // \d+ over "a1 bb 23 c" → "1" and "23".
+        assert_eq!(
+            find_all_regex(b"a1 bb 23 c", r"\d+"),
+            Some(vec![r(1, 2), r(6, 8)])
+        );
+    }
+
+    #[test]
+    fn find_all_regex_is_smart_case() {
+        // Lowercase pattern folds case (matches "Foo", "foo", "FOO").
+        assert_eq!(
+            find_all_regex(b"Foo foo FOO", "foo"),
+            Some(vec![r(0, 3), r(4, 7), r(8, 11)])
+        );
+        // An uppercase letter in the pattern makes it case-sensitive.
+        assert_eq!(find_all_regex(b"Foo foo FOO", "Foo"), Some(vec![r(0, 3)]));
+    }
+
+    #[test]
+    fn find_all_regex_spans_newlines() {
+        // An explicit \n in the pattern matches across the line break.
+        assert_eq!(
+            find_all_regex(b"foo\n  bar", r"foo\n\s*bar"),
+            Some(vec![r(0, 9)])
+        );
+        // Plain `.` does NOT cross the newline (default, not dotall).
+        assert_eq!(find_all_regex(b"a\nb", "a.b"), Some(vec![]));
+        // ...but `(?s)` opts into dotall.
+        assert_eq!(find_all_regex(b"a\nb", "(?s)a.b"), Some(vec![r(0, 3)]));
+    }
+
+    #[test]
+    fn find_all_regex_invalid_pattern_is_none() {
+        // Unbalanced group — the incremental-typing case (`foo(`).
+        assert_eq!(find_all_regex(b"foo(", "foo("), None);
+        // A valid pattern with zero matches is Some(empty), distinct
+        // from invalid.
+        assert_eq!(find_all_regex(b"abc", "zzz"), Some(vec![]));
+    }
+
+    #[test]
+    fn find_all_regex_filters_zero_width_and_empty() {
+        // `a*` matches empty at non-'a' positions; only the non-empty
+        // runs survive the zero-width filter.
+        assert_eq!(find_all_regex(b"baab", "a*"), Some(vec![r(1, 3)]));
+        // An empty pattern yields no matches (not one-per-position).
+        assert_eq!(find_all_regex(b"abc", ""), Some(vec![]));
     }
 
     #[test]
@@ -506,6 +624,66 @@ mod tests {
             grid2.get(CellCoord::new(0, 0)).style.bg,
             Color::Default,
             "stale store washes nothing"
+        );
+    }
+
+    #[test]
+    fn search_view_washes_a_multiline_match_per_row() {
+        use crate::cell::{Cell, CellGrid, CellSize};
+        use crate::view::Viewport;
+
+        let store = make_shared_store();
+        let bid = BufferId::next();
+        let mut buf = Buffer::new(bid, "t.txt");
+        // "foo\nbar\nbaz": match [0,7) = "foo\nbar" spans lines 0–1.
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"foo\nbar\nbaz",
+        })
+        .expect("seed");
+        store.lock().unwrap().set(bid, r"foo\nbar", vec![r(0, 7)]);
+
+        let (rows, cols) = (3u32, 10u32);
+        let mut backing = vec![Cell::default(); (rows * cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        SearchView::new(store.clone()).render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(rows, cols),
+            },
+            &mut grid,
+        );
+
+        // Row 0 "foo" and row 1 "bar" both wash (the active match's
+        // bright color); the newline cells and row 2 "baz" do not.
+        for col in 0..3 {
+            assert_eq!(
+                grid.get(CellCoord::new(0, col)).style.bg,
+                Color::Indexed(11),
+                "row 0 col {col} should wash"
+            );
+            assert_eq!(
+                grid.get(CellCoord::new(1, col)).style.bg,
+                Color::Indexed(11),
+                "row 1 col {col} should wash"
+            );
+        }
+        assert_eq!(
+            grid.get(CellCoord::new(0, 3)).style.bg,
+            Color::Default,
+            "the newline cell past 'foo' is not washed"
+        );
+        assert_eq!(
+            grid.get(CellCoord::new(2, 0)).style.bg,
+            Color::Default,
+            "row 2 'baz' is outside the match"
         );
     }
 

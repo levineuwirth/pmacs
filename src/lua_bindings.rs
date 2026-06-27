@@ -11439,13 +11439,14 @@ fn install_history(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
 /// post-accept navigation commands can begin / step a search from Lua.
 fn install_search(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     {
-        // search_start(forward): begin an isearch in the given
-        // direction, anchored at the active buffer + cursor.
+        // search_start(forward, regex): begin an isearch in the given
+        // direction, anchored at the active buffer + cursor. `regex`
+        // selects regex vs literal substring matching (Q#RX3).
         let cc = core.clone();
         editor.set(
             "search_start",
-            lua.create_function(move |_, forward: bool| {
-                cc.borrow_mut().search_begin(forward);
+            lua.create_function(move |_, (forward, regex): (bool, bool)| {
+                cc.borrow_mut().search_begin(forward, regex);
                 Ok(())
             })?,
         )?;

@@ -59,8 +59,12 @@ bind("TAB", "buffer.tab")
 -- adds isearch without colliding with the CUA / Emacs editing keys.
 -- Once a search is running, C-s / C-r step to the next / previous
 -- match; that interception happens in Rust, so it needs no binding.
+-- C-M-s / C-M-r start a regex search (Emacs isearch-forward-regexp);
+-- M-r toggles literal <-> regex mid-search (intercepted in Rust).
 bind("C-s", "search.forward")
 bind("C-r", "search.backward")
+bind("C-M-s", "search.forward-regex")
+bind("C-M-r", "search.backward-regex")
 
 -- CUA-style word-level deletion (the same shortcuts users expect from
 -- IDEs, browsers, terminals on Linux/Windows). C-BS deletes back to

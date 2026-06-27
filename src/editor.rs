@@ -641,6 +641,7 @@ impl EditorState {
     /// * `RET`                    --- accept (keep cursor + highlights).
     /// * `C-g` / `Esc`            --- cancel (restore origin cursor).
     /// * `BS`                     --- shorten the query by one char.
+    /// * `M-r`                    --- toggle literal ↔ regex (Q#RX3).
     /// * a printable char         --- extend the query.
     ///
     /// Unrecognized chords are swallowed (an active isearch eats every
@@ -654,6 +655,7 @@ impl EditorState {
             SearchKey::Accept => self.core.borrow_mut().search_finish(true),
             SearchKey::Cancel => self.core.borrow_mut().search_finish(false),
             SearchKey::Backspace => self.core.borrow_mut().search_backspace(),
+            SearchKey::ToggleRegex => self.core.borrow_mut().search_toggle_regex(),
             SearchKey::Insert(ch) => self.core.borrow_mut().search_input_char(ch),
             SearchKey::Ignore => {}
         }
@@ -1221,6 +1223,8 @@ enum SearchKey {
     Cancel,
     /// Shorten the query by one character (BS).
     Backspace,
+    /// Toggle literal ↔ regex matching (M-r; Q#RX3).
+    ToggleRegex,
     /// Extend the query with a printable character.
     Insert(char),
     /// Unhandled --- swallowed without complaint.
@@ -1259,6 +1263,14 @@ impl SearchKey {
                 'h' => Self::Backspace,
                 _ => Self::Ignore,
             };
+        }
+        // M-r toggles regex mode (Q#RX3). Alt-only chord, distinct from
+        // the C-r (previous-match) above.
+        if alt
+            && !ctrl
+            && let KeyCode::Char('r') = chord.code
+        {
+            return Self::ToggleRegex;
         }
         Self::Ignore
     }
@@ -1726,24 +1738,28 @@ fn paint_minibuffer(
 
 /// Paint the incremental-search prompt on the bottom row:
 /// `I-search: <query>  (n/m)`. Backward searches read `I-search
-/// backward:`; a non-empty query with no matches reads `[no match]`.
-/// Overwrites the status line painted just before it. The terminal
-/// cursor is *not* returned here — it stays in the buffer at the
-/// active match (see [`paint_frame`]).
+/// backward:`; regex searches prefix `Regex `; a non-empty query with
+/// no matches reads `[no match]`, and an uncompilable regex reads
+/// `[invalid]`. Overwrites the status line painted just before it. The
+/// terminal cursor is *not* returned here — it stays in the buffer at
+/// the active match (see [`paint_frame`]).
 fn paint_search_prompt(
     grid: &mut crate::cell::CellGrid<'_>,
     core: &EditorCore,
     term_size: crate::cell::CellSize,
 ) {
-    let prompt = if core.search_forward() {
-        "I-search: "
-    } else {
-        "I-search backward: "
+    let prompt = match (core.search_is_regex(), core.search_forward()) {
+        (false, true) => "I-search: ",
+        (false, false) => "I-search backward: ",
+        (true, true) => "Regex I-search: ",
+        (true, false) => "Regex I-search backward: ",
     };
     let query = core.search_query();
     let (active, total) = core.search_match_summary();
     let suffix = if query.is_empty() {
         String::new()
+    } else if core.search_is_invalid() {
+        "  [invalid]".to_string()
     } else if total == 0 {
         "  [no match]".to_string()
     } else {
@@ -2104,6 +2120,40 @@ mod tests {
         // untouched (no self-insert).
         assert_eq!(s.core.borrow().active_buffer_len(), 3);
         assert_eq!(s.core.borrow().search_query(), "foo");
+    }
+
+    #[test]
+    fn regex_isearch_via_dispatch_c_m_s() {
+        let mut s = fresh_with(b"a1 b2 c3");
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        // C-M-s starts a regex search (search.forward-regex).
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        );
+        assert!(s.core.borrow().search_active());
+        assert!(s.core.borrow().search_is_regex());
+        type_chars(&mut s, r"\d");
+        assert_eq!(s.core.borrow().search_match_summary().1, 3);
+    }
+
+    #[test]
+    fn m_r_toggles_regex_mid_search() {
+        let mut s = fresh_with(b"a.b axb");
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s')); // literal
+        type_chars(&mut s, "a.b");
+        assert_eq!(s.core.borrow().search_match_summary().1, 1);
+        // M-r toggles to regex (intercepted in dispatch_search_key).
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(KeyCode::Char('r'), KeyModifiers::ALT),
+        );
+        assert!(s.core.borrow().search_is_regex());
+        assert_eq!(s.core.borrow().search_match_summary().1, 2);
     }
 
     #[test]

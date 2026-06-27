@@ -2434,6 +2434,7 @@ dependencies = [
  "proptest",
  "rand 0.8.6",
  "rand_distr",
+ "regex",
  "rmp-serde",
  "semver",
  "serde",

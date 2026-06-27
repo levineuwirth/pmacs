@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_nine_for_search_prompt() {
+    fn protocol_version_is_ten_for_regex_search_prompt() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1696,7 +1696,9 @@ mod tests {
         // Q#S1 bumped 7→8 (`InstanceMessage::StatusFacts`, additive
         // + daemon-gated per session). Q#SR5 bumped 8→9
         // (`InstanceMessage::SearchPrompt`, additive + daemon-gated).
-        assert_eq!(PROTOCOL_VERSION, 9);
+        // Q#RX6 bumped 9→10 (`SearchPrompt` gained regex/invalid;
+        // encoding change to that variant, still daemon-gated).
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     #[test]
@@ -1705,18 +1707,19 @@ mod tests {
         // every cell-carrying message, ending the v1–v5 ladder —
         // pre-v6 peers are refused at the handshake (a clean
         // VersionMismatch) rather than garbling postcard mid-session.
-        // Q#M4 / Q#S1 / Q#SR5: the ladder resumes above that floor — v7
-        // (`TripleDown`, frontend-gated), v8 (`StatusFacts`) and v9
-        // (`SearchPrompt`, both daemon-gated) are additive, so v6
-        // through v9 interoperate.
+        // Q#M4 / Q#S1 / Q#SR5 / Q#RX6: the ladder resumes above that
+        // floor — v7 (`TripleDown`, frontend-gated), v8 (`StatusFacts`),
+        // v9 + v10 (`SearchPrompt` and its regex/invalid extension, both
+        // daemon-gated) interoperate, so v6 through v10 talk.
         assert!(is_supported_protocol_version(6));
         assert!(is_supported_protocol_version(7));
         assert!(is_supported_protocol_version(8));
         assert!(is_supported_protocol_version(9));
-        for rejected in [0, 1, 2, 3, 4, 5, 10, u32::MAX] {
+        assert!(is_supported_protocol_version(10));
+        for rejected in [0, 1, 2, 3, 4, 5, 11, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v9 binary"
+                "v{rejected} must be rejected by a v10 binary"
             );
         }
     }
@@ -1882,20 +1885,24 @@ mod tests {
 
     #[test]
     fn search_prompt_round_trips_through_postcard() {
-        // Q#SR5 — the v9 wire variant. Cover the three shapes the
-        // producer emits: an active search with matches, a failing
-        // search (active=None), and a cleared band (query=None).
+        // Q#SR5 / Q#RX6 — the v10 wire variant. Cover the shapes the
+        // producer emits: an active literal search with matches, an
+        // invalid regex (regex=true, invalid=true, no matches), a regex
+        // with matches, and a cleared band (query=None).
         let cases = [
-            (Some("foo".to_owned()), Some(2u32), 5u32),
-            (Some("zzz".to_owned()), None, 0u32),
-            (None, None, 0u32),
+            (Some("foo".to_owned()), Some(2u32), 5u32, false, false),
+            (Some("foo(".to_owned()), None, 0u32, true, true),
+            (Some(r"\d".to_owned()), Some(0u32), 3u32, true, false),
+            (None, None, 0u32, false, false),
         ];
-        for (query, active, total) in cases {
+        for (query, active, total, regex, invalid) in cases {
             let msg = InstanceMessage::SearchPrompt {
                 buffer_id: crate::buffer::BufferId::next(),
                 query: query.clone(),
                 active,
                 total,
+                regex,
+                invalid,
             };
             let bytes = postcard::to_allocvec(&msg).expect("encode");
             let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
@@ -1904,11 +1911,15 @@ mod tests {
                     query: q,
                     active: a,
                     total: t,
+                    regex: rx,
+                    invalid: inv,
                     ..
                 } => {
                     assert_eq!(q, query);
                     assert_eq!(a, active);
                     assert_eq!(t, total);
+                    assert_eq!(rx, regex);
+                    assert_eq!(inv, invalid);
                 }
                 other => panic!("expected SearchPrompt, got {other:?}"),
             }

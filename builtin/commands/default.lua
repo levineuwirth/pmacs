@@ -122,15 +122,23 @@ cmd { name = "buffer.self-insert",
 -- C-s / C-r begin a live in-buffer isearch: the match under the cursor
 -- highlights as you type, the same key steps to the next/previous
 -- match, RET accepts (keeping the highlights until the next edit), and
--- C-g / Esc restore the pre-search cursor. While a search is running
--- every keystroke is intercepted in Rust (dispatch_search_key), so
--- these commands only run to *start* a search from an idle keymap.
+-- C-g / Esc restore the pre-search cursor. C-M-s / C-M-r start a regex
+-- search, and M-r toggles literal <-> regex mid-search (handled in
+-- Rust). While a search is running every keystroke is intercepted in
+-- Rust (dispatch_search_key), so these commands only run to *start* a
+-- search from an idle keymap. ed.search_start(forward, regex).
 cmd { name = "search.forward",
       description = "Start an incremental search forward from the cursor.",
-      fn = function() ed.search_start(true) end }
+      fn = function() ed.search_start(true, false) end }
 cmd { name = "search.backward",
       description = "Start an incremental search backward from the cursor.",
-      fn = function() ed.search_start(false) end }
+      fn = function() ed.search_start(false, false) end }
+cmd { name = "search.forward-regex",
+      description = "Start an incremental regex search forward from the cursor.",
+      fn = function() ed.search_start(true, true) end }
+cmd { name = "search.backward-regex",
+      description = "Start an incremental regex search backward from the cursor.",
+      fn = function() ed.search_start(false, true) end }
 
 -- History --------------------------------------------------------------------
 
