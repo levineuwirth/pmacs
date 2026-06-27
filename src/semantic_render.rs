@@ -76,6 +76,11 @@ struct LastFrame<T> {
     generation: u64,
 }
 
+/// Cached `SearchPrompt` payload for cached-compare suppression
+/// (Q#SR5 / Q#RX6): `(query, active, total, regex, invalid)`. A `None`
+/// query means the last emission cleared the band.
+type SearchPromptFacts = (Option<String>, Option<u32>, u32, bool, bool);
+
 /// Owns one `semantic_render` session's projection state: the last
 /// viewport the frontend declared, and the diff baseline per buffer
 /// for the `StyleSpans` and `Decorations` families.
@@ -121,10 +126,9 @@ pub struct SemanticRenderState {
     /// `(name, modified, diag_errors, diag_warnings)` last emitted as
     /// `StatusFacts` (Q#S1) — cached-compare suppression.
     last_status: HashMap<BufferId, (String, bool, u32, u32)>,
-    /// `(query, active, total)` last emitted as `SearchPrompt`
-    /// (Q#SR5) — cached-compare suppression. A `None` query means the
-    /// last emission cleared the band (no active search).
-    last_search_prompt: HashMap<BufferId, (Option<String>, Option<u32>, u32)>,
+    /// Last emitted `SearchPrompt` payload per buffer, for
+    /// cached-compare suppression (see [`SearchPromptFacts`]).
+    last_search_prompt: HashMap<BufferId, SearchPromptFacts>,
     /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
     /// the tree-sitter highlights query over the *whole declared
     /// viewport* (which the GPU frontend sets to the entire buffer)
@@ -426,18 +430,17 @@ impl SemanticRenderState {
                     Some(core.search_query().to_owned()),
                     active_idx.and_then(|i| u32::try_from(i).ok()),
                     u32::try_from(total).unwrap_or(u32::MAX),
+                    core.search_is_regex(),
+                    core.search_is_invalid(),
                 )
             } else {
-                // No search → a cleared band. active/total are zeroed so
-                // the inactive state is one canonical tuple (the GPU only
-                // reads them when `query` is `Some`). The accepted matches
-                // keep highlighting via Decorations regardless.
-                (None, None, 0)
+                // No search → a cleared band. active/total/regex/invalid
+                // are zeroed so the inactive state is one canonical tuple
+                // (the GPU only reads them when `query` is `Some`). The
+                // accepted matches keep highlighting via Decorations.
+                (None, None, 0, false, false)
             }
         };
-        if self.last_search_prompt.get(&buffer_id) == Some(&facts) {
-            return None;
-        }
         let cached = self.last_search_prompt.get(&buffer_id);
         if cached == Some(&facts) {
             return None;
@@ -456,6 +459,8 @@ impl SemanticRenderState {
             query: facts.0.clone(),
             active: facts.1,
             total: facts.2,
+            regex: facts.3,
+            invalid: facts.4,
         };
         self.last_search_prompt.insert(buffer_id, facts);
         Some(msg)
@@ -3096,7 +3101,7 @@ mod tests {
         // Begin + type "foo": the live query + active/total ship.
         {
             let mut core = state.core.borrow_mut();
-            core.search_begin(true);
+            core.search_begin(true, false);
             for ch in "foo".chars() {
                 core.search_input_char(ch);
             }

@@ -551,14 +551,16 @@ struct StatusFactsLocal {
     diag_warnings: u32,
 }
 
-/// The live incremental-search prompt (Q#SR5, protocol v9), mirrored
-/// from a `SearchPrompt` message whose `query` was `Some`.
+/// The live incremental-search prompt (Q#SR5/Q#RX6, protocol v10),
+/// mirrored from a `SearchPrompt` message whose `query` was `Some`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchPromptLocal {
     buffer_id: BufferId,
     query: String,
     active: Option<u32>,
     total: u32,
+    regex: bool,
+    invalid: bool,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -2097,23 +2099,27 @@ impl State {
                 self.window.request_redraw();
                 None
             }
-            // Q#SR5 — the live isearch prompt (protocol v9). `query:
-            // None` clears the band (search ended); `Some` shows
-            // `I-search: <query> (n/m)` on the band's left side. The
-            // matches themselves arrive as SearchMatch decorations and
-            // the keys round-trip via the DispatchIdle gate, so this
+            // Q#SR5 / Q#RX6 — the live isearch prompt (protocol v10).
+            // `query: None` clears the band (search ended); `Some` shows
+            // `[Regex] I-search: <query> (n/m)` on the band's left side.
+            // The matches themselves arrive as SearchMatch decorations
+            // and the keys round-trip via the intercept gate, so this
             // handler only drives the prompt text.
             InstanceMessage::SearchPrompt {
                 buffer_id,
                 query,
                 active,
                 total,
+                regex,
+                invalid,
             } => {
                 self.search_prompt = query.map(|q| SearchPromptLocal {
                     buffer_id,
                     query: q,
                     active,
                     total,
+                    regex,
+                    invalid,
                 });
                 self.window.request_redraw();
                 None
@@ -2628,14 +2634,21 @@ impl State {
             .as_ref()
             .filter(|s| Some(s.buffer_id) == self.current_buffer_id)
         {
+            let label = if sp.regex {
+                "Regex I-search: "
+            } else {
+                "I-search: "
+            };
             let count = if sp.query.is_empty() {
                 String::new()
+            } else if sp.invalid {
+                " [invalid]".to_string()
             } else if sp.total == 0 {
                 " [no match]".to_string()
             } else {
                 format!(" ({}/{})", sp.active.map_or(0, |a| a + 1), sp.total)
             };
-            return format!("I-search: {}{}", sp.query, count);
+            return format!("{}{}{}", label, sp.query, count);
         }
         match self
             .status_facts
@@ -4126,12 +4139,14 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
     )
 }
 
-/// `C-s` / `C-r` — the chords that begin an incremental search
-/// (Q#SR5). Forwarded even when idle (they are otherwise withheld as
-/// command chords by [`should_forward_key`]) so a search can start;
-/// once it is running every key round-trips via the intercept path.
+/// The chords that begin an incremental search: `C-s` / `C-r` (literal)
+/// and `C-M-s` / `C-M-r` (regex, Q#RX5). Forwarded even when idle (they
+/// are otherwise withheld as command chords by [`should_forward_key`])
+/// so a search can start; once it is running every key round-trips via
+/// the intercept path (including `M-r`, the regex toggle).
 fn is_search_entry_chord(key: ProtocolKey, mods: Modifiers) -> bool {
-    mods == Modifiers::CTRL && matches!(key, ProtocolKey::Char('s' | 'r'))
+    matches!(key, ProtocolKey::Char('s' | 'r'))
+        && (mods == Modifiers::CTRL || mods == Modifiers::CTRL | Modifiers::ALT)
 }
 
 fn is_plain_text_modifiers(mods: Modifiers) -> bool {
@@ -5175,9 +5190,11 @@ mod tests {
     }
 
     #[test]
-    fn search_entry_chord_is_ctrl_s_or_ctrl_r_only() {
-        // C-s / C-r start a search (Q#SR5) — forwarded even though
-        // `should_forward_key` withholds them as command chords.
+    fn search_entry_chord_is_ctrl_or_ctrl_alt_s_r() {
+        // C-s / C-r (literal) and C-M-s / C-M-r (regex, Q#RX5) start a
+        // search — forwarded even though `should_forward_key` withholds
+        // them as command chords.
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
         assert!(is_search_entry_chord(
             ProtocolKey::Char('s'),
             Modifiers::CTRL
@@ -5186,11 +5203,13 @@ mod tests {
             ProtocolKey::Char('r'),
             Modifiers::CTRL
         ));
+        assert!(is_search_entry_chord(ProtocolKey::Char('s'), ctrl_alt));
+        assert!(is_search_entry_chord(ProtocolKey::Char('r'), ctrl_alt));
         assert!(
             !should_forward_key(ProtocolKey::Char('s'), Modifiers::CTRL),
             "C-s is otherwise a withheld chord; the search-entry path is what forwards it"
         );
-        // Other Ctrl chords, and C-s without Ctrl, are not entry chords.
+        // Other Ctrl chords, and s/r without Ctrl, are not entry chords.
         assert!(!is_search_entry_chord(
             ProtocolKey::Char('x'),
             Modifiers::CTRL
@@ -5201,7 +5220,7 @@ mod tests {
         ));
         assert!(!is_search_entry_chord(
             ProtocolKey::Char('s'),
-            Modifiers::CTRL | Modifiers::ALT
+            Modifiers::ALT
         ));
     }
 

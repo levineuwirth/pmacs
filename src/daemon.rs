@@ -1021,11 +1021,13 @@ fn dispatcher_loop(
                 let peer_knows_status_facts = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 8);
-                // Q#SR5 — `SearchPrompt` is a v9 variant; gate it the
-                // same way so an < 9 peer never sees the new shape.
+                // Q#SR5 / Q#RX6 — `SearchPrompt` gained regex/invalid
+                // fields in v10 (encoding change); gate at >= 10 so a v9
+                // peer is sent no SearchPrompt rather than the wider
+                // shape it would mis-decode.
                 let peer_knows_search_prompt = session_registry
                     .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 9);
+                    .is_some_and(|s| s.negotiated_protocol_version >= 10);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
