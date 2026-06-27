@@ -450,7 +450,8 @@ impl EditorState {
     /// - the dispatcher holds a pending multi-key prefix (e.g. the
     ///   user has typed `C-x` and the daemon is waiting for the next
     ///   chord), or
-    /// - a minibuffer prompt is active and absorbing keys.
+    /// - a minibuffer prompt is active and absorbing keys, or
+    /// - an incremental search is running and absorbing keys (Q#SR5).
     ///
     /// Used by the daemon to drive the `InstanceMessage::DispatchIdle`
     /// wire signal that gates `crdt_replica` frontends' optimistic-apply
@@ -458,13 +459,18 @@ impl EditorState {
     /// plain-char keystroke into the active document while the
     /// daemon's actual intent is to route the keystroke into the
     /// minibuffer prompt — the M10.10 "documented limitation" that
-    /// surfaced during session-5 manual validation.
+    /// surfaced during session-5 manual validation. Isearch reuses the
+    /// exact same gate: while a search runs every keystroke must
+    /// round-trip so the daemon's `dispatch_search_key` receives it
+    /// (extend the query / step) instead of the frontend self-inserting
+    /// it into the buffer.
     #[must_use]
     pub fn dispatch_idle(&self) -> bool {
         if !self.dispatcher.pending().is_empty() {
             return false;
         }
-        !self.core.borrow().minibuffer.is_active()
+        let core = self.core.borrow();
+        !core.minibuffer.is_active() && !core.search_active()
     }
 
     /// `frontend_id` records which frontend produced the event. v0.1
@@ -482,6 +488,17 @@ impl EditorState {
             let mut core = self.core.borrow_mut();
             core.status.clear();
             core.active_frontend = frontend_id;
+        }
+
+        // Incremental-search interception: while an isearch is running,
+        // every key routes through the search handler (the global keymap
+        // is shadowed, like the minibuffer). Printable chars extend the
+        // query; C-s / C-r step; RET accepts; C-g / Esc cancel. This is
+        // the shared input path for both frontends — the daemon's
+        // `FrontendEvent::Key` round-trip lands here too.
+        if self.core.borrow().search_active() {
+            self.dispatch_search_key(chord);
+            return;
         }
 
         // Minibuffer interception: when a prompt is active, every key
@@ -612,6 +629,33 @@ impl EditorState {
                 // (status-line warnings) would clobber the prompt.
                 let _ = (KeyCode::Null, KeyModifiers::NONE);
             }
+        }
+    }
+
+    /// Hardcoded handler for keys delivered while an incremental search
+    /// is active. The global keymap is shadowed (like the minibuffer),
+    /// so these chords are fixed:
+    ///
+    /// * `C-s` / `Down`           --- step to the next match (wraps).
+    /// * `C-r` / `Up`             --- step to the previous match (wraps).
+    /// * `RET`                    --- accept (keep cursor + highlights).
+    /// * `C-g` / `Esc`            --- cancel (restore origin cursor).
+    /// * `BS`                     --- shorten the query by one char.
+    /// * a printable char         --- extend the query.
+    ///
+    /// Unrecognized chords are swallowed (an active isearch eats every
+    /// keystroke, matching Emacs). The next/prev chords mirror the
+    /// entry bindings (`search.forward` / `search.backward`) so the
+    /// same key that started the search repeats it.
+    fn dispatch_search_key(&mut self, chord: Chord) {
+        match SearchKey::from_chord(chord) {
+            SearchKey::Next => self.core.borrow_mut().search_step(true),
+            SearchKey::Prev => self.core.borrow_mut().search_step(false),
+            SearchKey::Accept => self.core.borrow_mut().search_finish(true),
+            SearchKey::Cancel => self.core.borrow_mut().search_finish(false),
+            SearchKey::Backspace => self.core.borrow_mut().search_backspace(),
+            SearchKey::Insert(ch) => self.core.borrow_mut().search_input_char(ch),
+            SearchKey::Ignore => {}
         }
     }
 
@@ -1161,6 +1205,65 @@ fn process_event(state: &mut EditorState, ev: Event, term_size: crate::cell::Cel
     }
 }
 
+/// Decoded action for a key delivered while an incremental search is
+/// active. Mirrors [`crate::minibuffer::MinibufferAction`]: the
+/// bindings are hardcoded (not user-configurable) because isearch
+/// shadows the global keymap; changes happen by extending this enum.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum SearchKey {
+    /// Step to the next match (C-s / Down).
+    Next,
+    /// Step to the previous match (C-r / Up).
+    Prev,
+    /// Accept: keep cursor + highlights (RET).
+    Accept,
+    /// Cancel: restore the origin cursor (C-g / Esc).
+    Cancel,
+    /// Shorten the query by one character (BS).
+    Backspace,
+    /// Extend the query with a printable character.
+    Insert(char),
+    /// Unhandled --- swallowed without complaint.
+    Ignore,
+}
+
+impl SearchKey {
+    /// Decode `chord` into an isearch action. The next/prev chords
+    /// match the entry bindings (`C-s` forward, `C-r` backward) so the
+    /// search-starting key repeats the search; arrow keys offer a
+    /// modifier-free alternative.
+    fn from_chord(chord: Chord) -> Self {
+        let ctrl = chord.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = chord.modifiers.contains(KeyModifiers::ALT);
+
+        if !ctrl && !alt {
+            match chord.code {
+                KeyCode::Enter => return Self::Accept,
+                KeyCode::Esc => return Self::Cancel,
+                KeyCode::Backspace => return Self::Backspace,
+                KeyCode::Down => return Self::Next,
+                KeyCode::Up => return Self::Prev,
+                KeyCode::Char(ch) => return Self::Insert(ch),
+                _ => return Self::Ignore,
+            }
+        }
+        if ctrl
+            && !alt
+            && let KeyCode::Char(c) = chord.code
+        {
+            return match c {
+                's' => Self::Next,
+                'r' => Self::Prev,
+                'm' => Self::Accept,
+                'g' => Self::Cancel,
+                'h' => Self::Backspace,
+                _ => Self::Ignore,
+            };
+        }
+        Self::Ignore
+    }
+}
+
 /// Paint one full frame into `grid` and return the desired terminal
 /// cursor position.
 ///
@@ -1292,7 +1395,14 @@ pub fn paint_frame(
 
     paint_status_line(grid, core, &state.lua_host, &state.dispatcher, term_size);
 
-    let mb_cursor_col = if core.minibuffer.is_active() {
+    // An active isearch owns the bottom row (its prompt + match
+    // readout), but the terminal cursor stays in the buffer at the
+    // active match so the eye follows the search — so paint the prompt
+    // and fall through to the buffer-cursor placement below.
+    let mb_cursor_col = if core.search_active() {
+        paint_search_prompt(grid, core, term_size);
+        None
+    } else if core.minibuffer.is_active() {
         Some(paint_minibuffer(grid, core, term_size))
     } else {
         None
@@ -1614,6 +1724,61 @@ fn paint_minibuffer(
     cursor_col.min(max.saturating_sub(1))
 }
 
+/// Paint the incremental-search prompt on the bottom row:
+/// `I-search: <query>  (n/m)`. Backward searches read `I-search
+/// backward:`; a non-empty query with no matches reads `[no match]`.
+/// Overwrites the status line painted just before it. The terminal
+/// cursor is *not* returned here — it stays in the buffer at the
+/// active match (see [`paint_frame`]).
+fn paint_search_prompt(
+    grid: &mut crate::cell::CellGrid<'_>,
+    core: &EditorCore,
+    term_size: crate::cell::CellSize,
+) {
+    let prompt = if core.search_forward() {
+        "I-search: "
+    } else {
+        "I-search backward: "
+    };
+    let query = core.search_query();
+    let (active, total) = core.search_match_summary();
+    let suffix = if query.is_empty() {
+        String::new()
+    } else if total == 0 {
+        "  [no match]".to_string()
+    } else {
+        format!("  ({}/{})", active.map_or(0, |a| a + 1), total)
+    };
+
+    let row = term_size.rows - 1;
+    let max = term_size.cols;
+    let mut col: u32 = 0;
+    let put = |grid: &mut crate::cell::CellGrid<'_>, col: &mut u32, ch: char| {
+        if *col < max {
+            let cell = grid.at(CellCoord::new(row, *col));
+            cell.glyph = crate::cell::Glyph::Char(ch);
+            cell.style = crate::cell::Style::default();
+            *col += 1;
+        }
+    };
+    for ch in prompt.chars() {
+        put(grid, &mut col, ch);
+    }
+    for ch in query.chars() {
+        put(grid, &mut col, ch);
+    }
+    for ch in suffix.chars() {
+        put(grid, &mut col, ch);
+    }
+    // Clear the remainder of the row (the status line underneath used
+    // reverse video; blank it with the default style).
+    for c in col..max {
+        let cell = grid.at(CellCoord::new(row, c));
+        cell.glyph = crate::cell::Glyph::Char(' ');
+        cell.style = crate::cell::Style::default();
+    }
+}
+
 /// Build the global status (echo area) row: pure ephemeral state.
 ///
 /// Per-window facts (buffer name, modified marker, cursor coord,
@@ -1874,6 +2039,160 @@ mod tests {
         s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
         s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
         assert!(s.core.borrow().status.contains("no file"));
+    }
+
+    // ---- incremental search via dispatch (Q#SR5) ---------------------------
+
+    fn type_chars(s: &mut EditorState, text: &str) {
+        for c in text.chars() {
+            s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn isearch_dispatch_highlights_steps_and_accepts() {
+        let mut s = fresh_with(b"foo bar foo baz foo");
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        // C-s begins the search (via the search.forward command).
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        assert!(s.core.borrow().search_active());
+        // Typing extends the query; the first match is focused.
+        type_chars(&mut s, "foo");
+        assert_eq!(s.core.borrow().search_match_summary(), (Some(0), 3));
+        assert_eq!(s.core.borrow().cursor(), 0);
+        // C-s now steps (intercepted) rather than re-running the command.
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        assert_eq!(s.core.borrow().cursor(), 8);
+        // RET accepts: search ends, cursor holds, matches persist.
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Enter));
+        assert!(!s.core.borrow().search_active());
+        assert_eq!(s.core.borrow().cursor(), 8);
+        let bid = s.core.borrow().active_buffer_id();
+        assert!(
+            s.core
+                .borrow()
+                .search_store
+                .lock()
+                .expect("store")
+                .for_buffer(bid)
+                .is_some(),
+            "accepted matches stay for highlight + navigation"
+        );
+    }
+
+    #[test]
+    fn isearch_dispatch_esc_restores_origin() {
+        let mut s = fresh_with(b"foo bar foo");
+        s.core.borrow_mut().active_window_mut().cursor = 5;
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        type_chars(&mut s, "foo");
+        assert_eq!(s.core.borrow().cursor(), 8);
+        // Esc cancels: the pre-search cursor is restored, no edit happened.
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Esc));
+        assert!(!s.core.borrow().search_active());
+        assert_eq!(s.core.borrow().cursor(), 5);
+        assert_eq!(s.core.borrow().active_buffer_len(), 11);
+    }
+
+    #[test]
+    fn isearch_dispatch_keys_do_not_self_insert() {
+        let mut s = fresh_with(b"foo");
+        s.core.borrow_mut().active_window_mut().cursor = 3;
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        type_chars(&mut s, "foo");
+        // While searching, printable keys feed the query — the buffer is
+        // untouched (no self-insert).
+        assert_eq!(s.core.borrow().active_buffer_len(), 3);
+        assert_eq!(s.core.borrow().search_query(), "foo");
+    }
+
+    #[test]
+    fn isearch_accumulates_across_renders_like_run_loop() {
+        // Reproduce the real run loop: a render between every keystroke
+        // (the in-process TUI renders once per burst, but paint_frame
+        // borrows the core mutably and reads the search state, so a
+        // render must not corrupt mid-search input).
+        use crate::frontend::Event;
+        let mut s = fresh_with(b"foo bar foo baz foo");
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        let size = crate::cell::CellSize::new(24, 80);
+        let mut rs = crate::instance_render::RenderState::new(size);
+
+        let _ = rs.render_frame(&s, &[]);
+        process_event(&mut s, Event::Key(ctrl('s')), size);
+        assert!(s.core.borrow().search_active(), "C-s starts the search");
+        let _ = rs.render_frame(&s, &[]);
+
+        for c in "foo".chars() {
+            process_event(
+                &mut s,
+                Event::Key(key(KeyCode::Char(c), KeyModifiers::NONE)),
+                size,
+            );
+            let _ = rs.render_frame(&s, &[]);
+        }
+        assert_eq!(
+            s.core.borrow().search_query(),
+            "foo",
+            "query must accumulate across renders, not stick at the first char"
+        );
+    }
+
+    #[test]
+    fn isearch_tui_washes_matches_and_shows_full_query() {
+        // The regression behind "only searches for the first character":
+        // the TUI had no match-wash overlay, so the only feedback was the
+        // cursor jump. Paint a real frame and assert both the wash and
+        // the full-query prompt land on the grid.
+        use crate::cell::{Cell, CellCoord, CellGrid, CellSize, Color, Glyph};
+        let mut s = fresh_with(b"foo bar foo");
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        type_chars(&mut s, "foo");
+
+        let size = CellSize::new(24, 80);
+        let mut backing = vec![Cell::default(); (size.rows * size.cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: size.cols,
+            size,
+        };
+        let _ = paint_frame(&s, &mut grid, size);
+
+        // The active match [0,3) washes row 0's first cells (bright
+        // Indexed(11); lazy matches would be Indexed(3)).
+        let bg0 = grid.get(CellCoord::new(0, 0)).style.bg;
+        assert!(
+            matches!(bg0, Color::Indexed(11) | Color::Indexed(3)),
+            "first match cell should carry the search wash, got {bg0:?}"
+        );
+        // The bottom row shows the full live query, not just "f".
+        let row = size.rows - 1;
+        let prompt: String = (0..size.cols)
+            .filter_map(|c| match grid.get(CellCoord::new(row, c)).glyph {
+                Glyph::Char(ch) => Some(ch),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            prompt.contains("I-search: foo"),
+            "bottom row should show the accumulated query, got {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn isearch_flips_dispatch_idle_so_gpu_round_trips() {
+        // The GPU's optimistic-apply gate (M11.6) keys off dispatch_idle.
+        // An active isearch must drive it false so the GPU round-trips
+        // keystrokes to the daemon's dispatch_search_key instead of
+        // self-inserting them — the shared-core contract for Q#SR5.
+        let mut s = fresh_with(b"foo foo");
+        assert!(s.dispatch_idle(), "idle before any search");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        assert!(s.core.borrow().search_active());
+        assert!(!s.dispatch_idle(), "search active ⇒ keys must round-trip");
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Enter)); // accept
+        assert!(s.dispatch_idle(), "search ended ⇒ optimistic apply resumes");
     }
 
     // ---- T M11.6 — DispatchIdle ---------------------------------------------

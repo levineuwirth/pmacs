@@ -814,6 +814,30 @@ pub enum InstanceMessage {
         /// frontend must round-trip via [`FrontendEvent::Key`].
         idle: bool,
     },
+    /// Q#SR5 (incremental search, protocol v9) — the live isearch
+    /// prompt for a semantic frontend that cannot host a minibuffer.
+    /// Carries the query as typed and the match readout so the
+    /// frontend can render an `I-search: <query> (n/m)` band; the
+    /// matches themselves arrive as [`DecorationKind::SearchMatch`] /
+    /// [`DecorationKind::SearchMatchActive`] decorations. A `query` of
+    /// `None` means no search is running — the frontend hides the band.
+    ///
+    /// Emitted by the semantic producer when the search state changes
+    /// (cached-compare suppressed, like [`Self::StatusFacts`]). Kept
+    /// off wires negotiated `< 9` by the daemon's per-session filter
+    /// (additive variant — an older peer would hard-error decoding it).
+    SearchPrompt {
+        /// Buffer the search is anchored in (the active buffer).
+        buffer_id: crate::BufferId,
+        /// The query as typed so far, or `None` when no search runs.
+        /// `Some("")` is a freshly-started search with an empty query.
+        query: Option<String>,
+        /// 0-based index of the active match, or `None` when the query
+        /// has no matches (a failing search).
+        active: Option<u32>,
+        /// Total number of matches for the current query.
+        total: u32,
+    },
 }
 
 /// Flat selection state for the wire.
@@ -1070,7 +1094,11 @@ pub enum ResourceBody {
 /// *daemon* this time (the variant travels instance→frontend): the
 /// per-session filter keeps it off wires negotiated `< 8`, the same
 /// shape as the `DispatchIdle` (v4) gate.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// Q#SR5 (incremental search): bumped from 8 to 9 for
+/// [`InstanceMessage::SearchPrompt`]. Additive and daemon-gated per
+/// session, identical shape to the `StatusFacts` (v8) bump.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1110,7 +1138,10 @@ pub const PROTOCOL_VERSION: u32 = 8;
 ///
 /// Q#S1: extended to `[6, 7, 8]`. `InstanceMessage::StatusFacts` is
 /// additive and daemon-gated per session.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8];
+///
+/// Q#SR5: extended to `[6, 7, 8, 9]`. `InstanceMessage::SearchPrompt`
+/// is additive and daemon-gated per session.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

@@ -592,7 +592,7 @@ impl View for DiagnosticView {
 // cross-module coupling on internal helpers)
 // ---------------------------------------------------------------------------
 
-fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
+pub(crate) fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
     let mut out = Vec::with_capacity(source.len() / 32 + 1);
     out.push(0);
     for (i, b) in source.iter().enumerate() {
@@ -603,7 +603,7 @@ fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
     out
 }
 
-fn line_at_offset(line_offsets: &[u32], offset: u32) -> u32 {
+pub(crate) fn line_at_offset(line_offsets: &[u32], offset: u32) -> u32 {
     match line_offsets.binary_search(&offset) {
         Ok(i) => i as u32,
         Err(i) => i.saturating_sub(1) as u32,
@@ -629,7 +629,11 @@ fn underline_cols_for_line(line_bytes: &[u8], byte_start: u32, byte_end: u32) ->
     }
 }
 
-fn byte_range_to_display_cols(line_bytes: &[u8], byte_start: usize, byte_end: usize) -> (u32, u32) {
+pub(crate) fn byte_range_to_display_cols(
+    line_bytes: &[u8],
+    byte_start: usize,
+    byte_end: usize,
+) -> (u32, u32) {
     let bs = byte_start.min(line_bytes.len());
     let be = byte_end.min(line_bytes.len());
     let display_to = |upto: usize| -> u32 {

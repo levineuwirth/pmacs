@@ -384,6 +384,10 @@ impl Frontend {
             | InstanceMessage::FoldState { .. }
             | InstanceMessage::FileStyleSummary { .. }
             | InstanceMessage::StatusFacts { .. }
+            // Q#SR5 — SearchPrompt is a semantic-frontend status-band
+            // family member; the cell-grid TUI never negotiates it and
+            // drops it silently if one arrives.
+            | InstanceMessage::SearchPrompt { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

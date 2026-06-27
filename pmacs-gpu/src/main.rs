@@ -529,6 +529,12 @@ struct State {
     status_left_text: String,
     /// Q#S1 — the wire-authoritative status facts (protocol v8).
     status_facts: Option<StatusFactsLocal>,
+    /// Q#SR5 — the live incremental-search prompt (protocol v9), or
+    /// `None` when no search is running. While `Some`, the status
+    /// band's left side shows `I-search: <query> (n/m)` in place of
+    /// the buffer name; the matches highlight via `SearchMatch`
+    /// decorations.
+    search_prompt: Option<SearchPromptLocal>,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
@@ -543,6 +549,16 @@ struct StatusFactsLocal {
     modified: bool,
     diag_errors: u32,
     diag_warnings: u32,
+}
+
+/// The live incremental-search prompt (Q#SR5, protocol v9), mirrored
+/// from a `SearchPrompt` message whose `query` was `Some`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchPromptLocal {
+    buffer_id: BufferId,
+    query: String,
+    active: Option<u32>,
+    total: u32,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -643,64 +659,124 @@ impl ApplicationHandler<AppEvent> for App {
                 if key.state != ElementState::Pressed {
                     return;
                 }
-                // Escape stays a local quit (no daemon round trip).
+                // While the daemon is intercepting keystrokes — an active
+                // incremental search (Q#SR5), or a minibuffer / pending
+                // prefix — every key belongs to its handler, not the
+                // buffer. The GUI round-trips them all and never
+                // optimistic-applies (that would edit the document
+                // mid-search).
+                let intercept = self
+                    .state
+                    .as_ref()
+                    .is_some_and(State::daemon_intercepts_keys);
+
+                // Escape cancels an active intercept (e.g. a running
+                // search); otherwise it stays the local quit.
                 if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
-                    event_loop.exit();
+                    if intercept {
+                        if let Some(client) = self.attach_client.as_ref()
+                            && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
+                        {
+                            eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
+                        }
+                    } else {
+                        event_loop.exit();
+                    }
                     return;
                 }
+
+                let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers) else {
+                    return;
+                };
+                let Some(client) = self.attach_client.as_ref() else {
+                    return;
+                };
+
+                // Intercept path: round-trip every key into the daemon's
+                // active handler (search query / step / accept / cancel).
+                if intercept {
+                    if let Some(state) = self.state.as_mut() {
+                        state.mark_cursor_stale_after_round_trip();
+                    }
+                    if debug_input() {
+                        eprintln!("pmacs-gpu send_key (intercepted): {pkey:?} mods={pmods:?}");
+                    }
+                    if let Err(e) = client.send_key(pkey, pmods) {
+                        eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
+                    }
+                    return;
+                }
+
+                // Idle: C-s / C-r begin an incremental search. They are
+                // otherwise withheld as command chords; forward them so
+                // the search can start. The daemon then flips the
+                // intercept gate (DispatchIdle / SearchPrompt) one
+                // round-trip later, after which every key routes into the
+                // search — no optimistic local flip, so a C-s that (via
+                // rebinding) doesn't start a search can never wedge the
+                // gate against the daemon's authoritative state.
+                if is_search_entry_chord(pkey, pmods) {
+                    if let Some(state) = self.state.as_mut() {
+                        state.mark_cursor_stale_after_round_trip();
+                    }
+                    if let Err(e) = client.send_key(pkey, pmods) {
+                        eprintln!("pmacs-gpu: send_key (search entry) failed: {e}");
+                    }
+                    return;
+                }
+
                 // Session B2 forwards cursor motion + plain text editing
                 // (Char / Backspace / Enter / Delete / Tab). Ctrl/Alt/
                 // Meta chords are withheld — they drive commands and
                 // minibuffer flows the GUI can't render or interact with
                 // yet (a later session adds GUI minibuffer + chords).
-                if let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers)
-                    && should_forward_key(pkey, pmods)
-                    && let Some(client) = self.attach_client.as_ref()
-                {
-                    if let Some(op) = self.state.as_mut().and_then(|state| {
-                        state
-                            .optimistic_crdt_insert(pkey, pmods)
-                            .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
-                    }) {
+                if !should_forward_key(pkey, pmods) {
+                    return;
+                }
+
+                if let Some(op) = self.state.as_mut().and_then(|state| {
+                    state
+                        .optimistic_crdt_insert(pkey, pmods)
+                        .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
+                }) {
+                    if debug_input() {
+                        eprintln!(
+                            "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
+                            op.buffer_id,
+                            op.op.bytes.len()
+                        );
+                    }
+                    if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
+                        eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
+                    }
+                    // An optimistic Enter near the bottom edge can
+                    // scroll; re-declare the scoped viewport so
+                    // the producer styles the newly visible lines.
+                    if let Some(vp) = op.viewport
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: send Viewport failed: {e}");
+                    }
+                    return;
+                }
+                if let Some(state) = self.state.as_mut() {
+                    if state.defer_round_trip_key_if_needed(pkey, pmods) {
                         if debug_input() {
                             eprintln!(
-                                "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
-                                op.buffer_id,
-                                op.op.bytes.len()
+                                "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
+                                 pending optimistic cursor"
                             );
-                        }
-                        if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
-                            eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
-                        }
-                        // An optimistic Enter near the bottom edge can
-                        // scroll; re-declare the scoped viewport so
-                        // the producer styles the newly visible lines.
-                        if let Some(vp) = op.viewport
-                            && let Err(e) =
-                                client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                        {
-                            eprintln!("pmacs-gpu: send Viewport failed: {e}");
                         }
                         return;
                     }
-                    if let Some(state) = self.state.as_mut() {
-                        if state.defer_round_trip_key_if_needed(pkey, pmods) {
-                            if debug_input() {
-                                eprintln!(
-                                    "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
-                                     pending optimistic cursor"
-                                );
-                            }
-                            return;
-                        }
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if debug_input() {
-                        eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key failed: {e}");
-                    }
+                    state.mark_cursor_stale_after_round_trip();
+                }
+                if debug_input() {
+                    eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
+                }
+                if let Err(e) = client.send_key(pkey, pmods) {
+                    eprintln!("pmacs-gpu: send_key failed: {e}");
                 }
             }
             WindowEvent::Resized(size) => {
@@ -1417,6 +1493,7 @@ impl State {
             status_left_buffer,
             status_left_text: String::new(),
             status_facts: None,
+            search_prompt: None,
             minimap_cache: None,
         }
     }
@@ -1428,6 +1505,16 @@ impl State {
         {
             eprintln!("pmacs-gpu: failed to set local Loro peer id: {e:?}");
         }
+    }
+
+    /// `true` while the daemon is intercepting keystrokes — an active
+    /// incremental search (Q#SR5), surfaced by a live `SearchPrompt`, or
+    /// the daemon reporting non-idle (`DispatchIdle { idle: false }` for
+    /// a minibuffer / pending prefix). In this state the GUI round-trips
+    /// every key to the daemon's handler instead of optimistically
+    /// applying it to the buffer.
+    fn daemon_intercepts_keys(&self) -> bool {
+        self.search_prompt.is_some() || !self.dispatch_idle
     }
 
     /// Shared eligibility gates for the optimistic edit paths
@@ -2010,6 +2097,27 @@ impl State {
                 self.window.request_redraw();
                 None
             }
+            // Q#SR5 — the live isearch prompt (protocol v9). `query:
+            // None` clears the band (search ended); `Some` shows
+            // `I-search: <query> (n/m)` on the band's left side. The
+            // matches themselves arrive as SearchMatch decorations and
+            // the keys round-trip via the DispatchIdle gate, so this
+            // handler only drives the prompt text.
+            InstanceMessage::SearchPrompt {
+                buffer_id,
+                query,
+                active,
+                total,
+            } => {
+                self.search_prompt = query.map(|q| SearchPromptLocal {
+                    buffer_id,
+                    query: q,
+                    active,
+                    total,
+                });
+                self.window.request_redraw();
+                None
+            }
             // Session 9.3 — peer presence. The editing frontend's
             // cursor + selection drive the `CurrentLine` / `Selection`
             // washes for this read-only mirror (finding QB1). Store
@@ -2510,9 +2618,25 @@ impl State {
         spans
     }
 
-    /// The band's left side: buffer name + modified dot, from the
-    /// v8 `StatusFacts` (empty until the daemon ships them).
+    /// The band's left side. While an incremental search is running
+    /// (Q#SR5) it shows `I-search: <query> (n/m)` — the prompt takes
+    /// over the band like Emacs's echo area, returning to the buffer
+    /// name + modified dot (v8 `StatusFacts`) when the search ends.
     fn compose_status_left(&self) -> String {
+        if let Some(sp) = self
+            .search_prompt
+            .as_ref()
+            .filter(|s| Some(s.buffer_id) == self.current_buffer_id)
+        {
+            let count = if sp.query.is_empty() {
+                String::new()
+            } else if sp.total == 0 {
+                " [no match]".to_string()
+            } else {
+                format!(" ({}/{})", sp.active.map_or(0, |a| a + 1), sp.total)
+            };
+            return format!("I-search: {}{}", sp.query, count);
+        }
         match self
             .status_facts
             .as_ref()
@@ -3885,6 +4009,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::InlineAdornments { .. } => "InlineAdornments",
         InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
         InstanceMessage::StatusFacts { .. } => "StatusFacts",
+        InstanceMessage::SearchPrompt { .. } => "SearchPrompt",
         InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
@@ -3999,6 +4124,14 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
         key,
         ProtocolKey::Char(_) | ProtocolKey::Enter | ProtocolKey::Tab
     )
+}
+
+/// `C-s` / `C-r` — the chords that begin an incremental search
+/// (Q#SR5). Forwarded even when idle (they are otherwise withheld as
+/// command chords by [`should_forward_key`]) so a search can start;
+/// once it is running every key round-trips via the intercept path.
+fn is_search_entry_chord(key: ProtocolKey, mods: Modifiers) -> bool {
+    mods == Modifiers::CTRL && matches!(key, ProtocolKey::Char('s' | 'r'))
 }
 
 fn is_plain_text_modifiers(mods: Modifiers) -> bool {
@@ -4874,8 +5007,12 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
         // 0.22 keeps it subtle vs Selection's 0.30 while actually
         // reading as a current-line band.
         DecorationKind::CurrentLine => Some([0.55, 0.60, 0.75, 0.22]),
-        // Deferred to the search-feature arc.
-        DecorationKind::SearchMatch | DecorationKind::SearchMatchActive => None,
+        // In-buffer search (Q#SR4): a translucent yellow wash under
+        // every match, a stronger amber under the active one so it
+        // stands out as you step through. Both let the glyph color
+        // show through (text renders after this pass).
+        DecorationKind::SearchMatch => Some([0.85, 0.78, 0.20, 0.30]),
+        DecorationKind::SearchMatchActive => Some([0.95, 0.55, 0.12, 0.48]),
         // Underline-only — handled by
         // [`decoration_kind_to_underline_color`].
         DecorationKind::DiagnosticError
@@ -5035,6 +5172,37 @@ mod tests {
         assert!(should_forward_key(ProtocolKey::Backspace, ctrl));
         assert!(should_forward_key(ProtocolKey::Delete, ctrl));
         assert!(should_forward_key(ProtocolKey::Backspace, Modifiers::ALT));
+    }
+
+    #[test]
+    fn search_entry_chord_is_ctrl_s_or_ctrl_r_only() {
+        // C-s / C-r start a search (Q#SR5) — forwarded even though
+        // `should_forward_key` withholds them as command chords.
+        assert!(is_search_entry_chord(
+            ProtocolKey::Char('s'),
+            Modifiers::CTRL
+        ));
+        assert!(is_search_entry_chord(
+            ProtocolKey::Char('r'),
+            Modifiers::CTRL
+        ));
+        assert!(
+            !should_forward_key(ProtocolKey::Char('s'), Modifiers::CTRL),
+            "C-s is otherwise a withheld chord; the search-entry path is what forwards it"
+        );
+        // Other Ctrl chords, and C-s without Ctrl, are not entry chords.
+        assert!(!is_search_entry_chord(
+            ProtocolKey::Char('x'),
+            Modifiers::CTRL
+        ));
+        assert!(!is_search_entry_chord(
+            ProtocolKey::Char('s'),
+            Modifiers::NONE
+        ));
+        assert!(!is_search_entry_chord(
+            ProtocolKey::Char('s'),
+            Modifiers::CTRL | Modifiers::ALT
+        ));
     }
 
     #[test]
@@ -5566,14 +5734,14 @@ mod tests {
     }
 
     #[test]
-    fn bg_color_helper_covers_selection_and_current_line() {
+    fn bg_color_helper_covers_selection_current_line_and_search() {
         // Sessions 9.1 + 9.2: Selection and CurrentLine paint.
         assert!(decoration_kind_to_bg_color(DecorationKind::Selection).is_some());
         assert!(decoration_kind_to_bg_color(DecorationKind::CurrentLine).is_some());
 
-        // Search-feature arc — still deferred.
-        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_none());
-        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_none());
+        // In-buffer search (Q#SR4): both match kinds wash a bg.
+        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_some());
+        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_some());
 
         // Underline-only kinds belong to the underline helper (T M4.6
         // parity: squiggle bars, not text recoloring).
@@ -5605,16 +5773,9 @@ mod tests {
         ] {
             let ul = decoration_kind_to_underline_color(kind).is_some();
             let bg = decoration_kind_to_bg_color(kind).is_some();
-            // Both helpers return None for the search pair — deferred
-            // to the search-feature arc. That is the "neither yet"
-            // state — the exclusive-or test exempts it.
-            let deferred = matches!(
-                kind,
-                DecorationKind::SearchMatch | DecorationKind::SearchMatchActive
-            );
             assert!(
-                deferred || (ul ^ bg),
-                "{kind:?}: underline={ul} bg={bg} — should be exactly one (unless deferred)"
+                ul ^ bg,
+                "{kind:?}: underline={ul} bg={bg} — should be exactly one"
             );
         }
     }

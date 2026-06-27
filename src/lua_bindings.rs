@@ -5126,6 +5126,7 @@ pub fn install_editor(lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     install_editing(&editor, lua, core)?;
     install_history(&editor, lua, core)?;
     install_session(&editor, lua, core)?;
+    install_search(&editor, lua, core)?;
 
     pmacs.set("editor", editor)?;
     pmacs.set("frontend", install_frontend_module(lua, core)?)?;
@@ -11428,6 +11429,48 @@ fn install_editing(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
 fn install_history(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     register(editor, lua, core, "undo", EditorCore::undo)?;
     register(editor, lua, core, "redo", EditorCore::redo)?;
+    Ok(())
+}
+
+/// Install the `pmacs.editor.search_*` primitives that drive
+/// incremental search (Q#SR5). The live-typing keys are intercepted in
+/// Rust (`EditorState::dispatch_search_key`); these bindings exist so
+/// the *entry* commands (`search.forward` / `search.backward`) and any
+/// post-accept navigation commands can begin / step a search from Lua.
+fn install_search(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
+    {
+        // search_start(forward): begin an isearch in the given
+        // direction, anchored at the active buffer + cursor.
+        let cc = core.clone();
+        editor.set(
+            "search_start",
+            lua.create_function(move |_, forward: bool| {
+                cc.borrow_mut().search_begin(forward);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // search_step(forward): move the active buffer's match focus
+        // (works during a live search and after accept, for navigation
+        // commands). No-op when the buffer has no matches.
+        let cc = core.clone();
+        editor.set(
+            "search_step",
+            lua.create_function(move |_, forward: bool| {
+                cc.borrow_mut().search_step(forward);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // search_active(): true while an isearch session is running.
+        let cc = core.clone();
+        editor.set(
+            "search_active",
+            lua.create_function(move |_, ()| Ok(cc.borrow().search_active()))?,
+        )?;
+    }
     Ok(())
 }
 

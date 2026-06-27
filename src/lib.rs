@@ -96,6 +96,7 @@ pub mod project_index;
 pub mod protocol;
 pub mod rename;
 pub mod rope;
+pub mod search;
 // T M11.5 — the headless semantic consumer composes BufferMirror +
 // optimistic (both `crdt`-gated) and is only meaningful on a
 // `semantic_render` session, which the negotiation dependency rule
