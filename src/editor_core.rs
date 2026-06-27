@@ -561,11 +561,29 @@ impl EditorCore {
             return;
         }
         let origin = (self.active_buffer_id(), self.cursor());
+        // Attach the TUI match-wash overlay to the active window (once)
+        // so matches highlight live as the query grows. It
+        // self-suppresses when the store has no matches / is stale, so
+        // leaving it attached across searches is safe. The GPU gets the
+        // same matches via SearchMatch decorations and never reads this.
+        self.ensure_search_overlay();
         self.search = Some(SearchSession {
             query: String::new(),
             origin,
             forward,
         });
+    }
+
+    /// Ensure the active window carries a [`crate::search::SearchView`]
+    /// overlay, attaching one if absent (deduped by overlay kind). The
+    /// view reads the per-buffer [`Self::search_store`] keyed on the
+    /// rendered buffer, so one instance suffices per window.
+    fn ensure_search_overlay(&mut self) {
+        let store = self.search_store.clone();
+        let win = self.active_window_mut();
+        if !win.overlay_kinds().contains(&"search") {
+            win.push_overlay(Box::new(crate::search::SearchView::new(store)));
+        }
     }
 
     /// Append a character to the query and re-search.

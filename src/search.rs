@@ -264,15 +264,19 @@ fn active_match_style() -> Style {
 /// are single-line (the minibuffer query carries no newline), so each
 /// maps to one row.
 pub struct SearchView {
-    buffer_id: BufferId,
     store: SharedSearchStore,
 }
 
 impl SearchView {
-    /// Construct a view reading `store` for `buffer_id`.
+    /// Construct a view reading `store` for whichever buffer the host
+    /// window is showing. The view keys on the *rendered* buffer
+    /// ([`Buffer::id`]) rather than a fixed id, so a single attached
+    /// instance keeps highlighting correctly even if the window
+    /// switches buffers (the store is per-buffer; a buffer with no
+    /// search entry simply paints nothing).
     #[must_use]
-    pub fn new(buffer_id: BufferId, store: SharedSearchStore) -> Self {
-        Self { buffer_id, store }
+    pub fn new(store: SharedSearchStore) -> Self {
+        Self { store }
     }
 }
 
@@ -282,14 +286,15 @@ impl View for SearchView {
     }
 
     fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+        let buffer_id = buf.id();
         // Snapshot the matches under the lock, release immediately
         // (same discipline as DiagnosticView).
         let (matches, active): (Vec<ByteRange>, Option<ByteRange>) = {
             let guard = self.store.lock().expect("search store mutex poisoned");
-            if guard.is_stale(self.buffer_id) {
+            if guard.is_stale(buffer_id) {
                 return;
             }
-            match guard.for_buffer(self.buffer_id) {
+            match guard.for_buffer(buffer_id) {
                 Some(s) => (s.matches().to_vec(), s.active_match()),
                 None => return,
             }
@@ -453,7 +458,7 @@ mod tests {
             .unwrap()
             .set(bid, "lo", find_all(b"lo lo lo\n", "lo"));
 
-        let mut view = SearchView::new(bid, store.clone());
+        let mut view = SearchView::new(store.clone());
         let mut backing = vec![Cell::default(); 10];
         let mut grid = CellGrid {
             cells: &mut backing,

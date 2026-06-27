@@ -2107,6 +2107,80 @@ mod tests {
     }
 
     #[test]
+    fn isearch_accumulates_across_renders_like_run_loop() {
+        // Reproduce the real run loop: a render between every keystroke
+        // (the in-process TUI renders once per burst, but paint_frame
+        // borrows the core mutably and reads the search state, so a
+        // render must not corrupt mid-search input).
+        use crate::frontend::Event;
+        let mut s = fresh_with(b"foo bar foo baz foo");
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        let size = crate::cell::CellSize::new(24, 80);
+        let mut rs = crate::instance_render::RenderState::new(size);
+
+        let _ = rs.render_frame(&s, &[]);
+        process_event(&mut s, Event::Key(ctrl('s')), size);
+        assert!(s.core.borrow().search_active(), "C-s starts the search");
+        let _ = rs.render_frame(&s, &[]);
+
+        for c in "foo".chars() {
+            process_event(
+                &mut s,
+                Event::Key(key(KeyCode::Char(c), KeyModifiers::NONE)),
+                size,
+            );
+            let _ = rs.render_frame(&s, &[]);
+        }
+        assert_eq!(
+            s.core.borrow().search_query(),
+            "foo",
+            "query must accumulate across renders, not stick at the first char"
+        );
+    }
+
+    #[test]
+    fn isearch_tui_washes_matches_and_shows_full_query() {
+        // The regression behind "only searches for the first character":
+        // the TUI had no match-wash overlay, so the only feedback was the
+        // cursor jump. Paint a real frame and assert both the wash and
+        // the full-query prompt land on the grid.
+        use crate::cell::{Cell, CellCoord, CellGrid, CellSize, Color, Glyph};
+        let mut s = fresh_with(b"foo bar foo");
+        s.core.borrow_mut().active_window_mut().cursor = 0;
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        type_chars(&mut s, "foo");
+
+        let size = CellSize::new(24, 80);
+        let mut backing = vec![Cell::default(); (size.rows * size.cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: size.cols,
+            size,
+        };
+        let _ = paint_frame(&s, &mut grid, size);
+
+        // The active match [0,3) washes row 0's first cells (bright
+        // Indexed(11); lazy matches would be Indexed(3)).
+        let bg0 = grid.get(CellCoord::new(0, 0)).style.bg;
+        assert!(
+            matches!(bg0, Color::Indexed(11) | Color::Indexed(3)),
+            "first match cell should carry the search wash, got {bg0:?}"
+        );
+        // The bottom row shows the full live query, not just "f".
+        let row = size.rows - 1;
+        let prompt: String = (0..size.cols)
+            .filter_map(|c| match grid.get(CellCoord::new(row, c)).glyph {
+                Glyph::Char(ch) => Some(ch),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            prompt.contains("I-search: foo"),
+            "bottom row should show the accumulated query, got {prompt:?}"
+        );
+    }
+
+    #[test]
     fn isearch_flips_dispatch_idle_so_gpu_round_trips() {
         // The GPU's optimistic-apply gate (M11.6) keys off dispatch_idle.
         // An active isearch must drive it false so the GPU round-trips
