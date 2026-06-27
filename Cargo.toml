@@ -78,6 +78,10 @@ crdt = ["dep:loro", "pmacs-protocol/crdt"]
 crossterm = "0.28"
 thiserror = { workspace = true }
 unicode-width = "0.2"
+# Regex engine for in-buffer regex search (Q#RX1). `regex::bytes::Regex`
+# matches over rope-snapshot bytes and yields byte offsets directly.
+# Already in the lockfile transitively; promoted to a direct dependency.
+regex = "1"
 # Work-stealing deque, MPMC channels, and parking primitives for the
 # M3 worker pool (spec §6.3). The umbrella crate re-exports
 # `crossbeam_deque`, `crossbeam_channel`, and `crossbeam_utils`.

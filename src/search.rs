@@ -228,6 +228,51 @@ pub fn find_all(haystack: &[u8], query: &str) -> Vec<ByteRange> {
     out
 }
 
+/// Smart-case regex search over `haystack` bytes for `pattern` (Q#RX1).
+///
+/// Returns `Some(matches)` — leftmost, non-overlapping, ascending byte
+/// ranges — for a valid pattern (possibly empty), or `None` when
+/// `pattern` fails to compile. The `Option` lets the caller tell an
+/// *invalid* pattern (show `[invalid]`) apart from a valid one with no
+/// matches (a failing search), which a flat `Vec` could not.
+///
+/// **Smart-case (Q#RX2).** Case-insensitive unless `pattern` contains
+/// an uppercase letter, applied by compiling `(?i)` ahead of the
+/// pattern. An uppercase letter inside an escape or class (`\D`,
+/// `[A-Z]`) trips case-sensitivity — the same coarse rule the literal
+/// path uses.
+///
+/// **Multi-line (Q#RX1)** falls out for free: the regex runs over the
+/// whole byte slice, so an explicit `\n` (or `(?s).`) spans lines. `.`
+/// keeps its default of not matching `\n`.
+///
+/// **Zero-width matches** (`a*`, `^`, `$`, anchors) are filtered — they
+/// wash nothing and would otherwise flood the match list. The `regex`
+/// crate's linear-time engine makes a pathological pattern slow at
+/// worst, never catastrophic.
+#[must_use]
+pub fn find_all_regex(haystack: &[u8], pattern: &str) -> Option<Vec<ByteRange>> {
+    if pattern.is_empty() {
+        return Some(Vec::new());
+    }
+    let case_insensitive = !pattern.chars().any(char::is_uppercase);
+    let re = if case_insensitive {
+        regex::bytes::Regex::new(&format!("(?i){pattern}"))
+    } else {
+        regex::bytes::Regex::new(pattern)
+    }
+    .ok()?;
+    let matches = re
+        .find_iter(haystack)
+        .filter(|m| m.end() > m.start())
+        .map(|m| ByteRange {
+            start: m.start() as u64,
+            end: m.end() as u64,
+        })
+        .collect();
+    Some(matches)
+}
+
 // ---------------------------------------------------------------------------
 // TUI view
 // ---------------------------------------------------------------------------
@@ -399,6 +444,59 @@ mod tests {
         assert!(find_all(b"hello", "").is_empty());
         assert!(find_all(b"hi", "hello").is_empty());
         assert!(find_all(b"", "x").is_empty());
+    }
+
+    // ---- regex matcher (Q#RX1) -----------------------------------------
+
+    #[test]
+    fn find_all_regex_matches_pattern() {
+        // \d+ over "a1 bb 23 c" → "1" and "23".
+        assert_eq!(
+            find_all_regex(b"a1 bb 23 c", r"\d+"),
+            Some(vec![r(1, 2), r(6, 8)])
+        );
+    }
+
+    #[test]
+    fn find_all_regex_is_smart_case() {
+        // Lowercase pattern folds case (matches "Foo", "foo", "FOO").
+        assert_eq!(
+            find_all_regex(b"Foo foo FOO", "foo"),
+            Some(vec![r(0, 3), r(4, 7), r(8, 11)])
+        );
+        // An uppercase letter in the pattern makes it case-sensitive.
+        assert_eq!(find_all_regex(b"Foo foo FOO", "Foo"), Some(vec![r(0, 3)]));
+    }
+
+    #[test]
+    fn find_all_regex_spans_newlines() {
+        // An explicit \n in the pattern matches across the line break.
+        assert_eq!(
+            find_all_regex(b"foo\n  bar", r"foo\n\s*bar"),
+            Some(vec![r(0, 9)])
+        );
+        // Plain `.` does NOT cross the newline (default, not dotall).
+        assert_eq!(find_all_regex(b"a\nb", "a.b"), Some(vec![]));
+        // ...but `(?s)` opts into dotall.
+        assert_eq!(find_all_regex(b"a\nb", "(?s)a.b"), Some(vec![r(0, 3)]));
+    }
+
+    #[test]
+    fn find_all_regex_invalid_pattern_is_none() {
+        // Unbalanced group — the incremental-typing case (`foo(`).
+        assert_eq!(find_all_regex(b"foo(", "foo("), None);
+        // A valid pattern with zero matches is Some(empty), distinct
+        // from invalid.
+        assert_eq!(find_all_regex(b"abc", "zzz"), Some(vec![]));
+    }
+
+    #[test]
+    fn find_all_regex_filters_zero_width_and_empty() {
+        // `a*` matches empty at non-'a' positions; only the non-empty
+        // runs survive the zero-width filter.
+        assert_eq!(find_all_regex(b"baab", "a*"), Some(vec![r(1, 3)]));
+        // An empty pattern yields no matches (not one-per-position).
+        assert_eq!(find_all_regex(b"abc", ""), Some(vec![]));
     }
 
     #[test]
