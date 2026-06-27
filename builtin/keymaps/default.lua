@@ -52,6 +52,16 @@ bind("C-d", "buffer.delete-forward")
 bind("RET", "buffer.newline")
 bind("TAB", "buffer.tab")
 
+-- Incremental search ---------------------------------------------------------
+--
+-- C-s / C-r start a live isearch (forward / backward). Both keys are
+-- free in the default map (save is C-x C-s, redo is C-x r), so this
+-- adds isearch without colliding with the CUA / Emacs editing keys.
+-- Once a search is running, C-s / C-r step to the next / previous
+-- match; that interception happens in Rust, so it needs no binding.
+bind("C-s", "search.forward")
+bind("C-r", "search.backward")
+
 -- CUA-style word-level deletion (the same shortcuts users expect from
 -- IDEs, browsers, terminals on Linux/Windows). C-BS deletes back to
 -- the start of the previous word; C-DEL deletes forward through the

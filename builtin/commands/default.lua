@@ -117,6 +117,21 @@ cmd { name = "buffer.self-insert",
       description = "Insert the codepoint argument at the cursor, replacing the active region.",
       fn = function(codepoint) ed.insert_char_over_region(codepoint) end }
 
+-- Incremental search ---------------------------------------------------------
+--
+-- C-s / C-r begin a live in-buffer isearch: the match under the cursor
+-- highlights as you type, the same key steps to the next/previous
+-- match, RET accepts (keeping the highlights until the next edit), and
+-- C-g / Esc restore the pre-search cursor. While a search is running
+-- every keystroke is intercepted in Rust (dispatch_search_key), so
+-- these commands only run to *start* a search from an idle keymap.
+cmd { name = "search.forward",
+      description = "Start an incremental search forward from the cursor.",
+      fn = function() ed.search_start(true) end }
+cmd { name = "search.backward",
+      description = "Start an incremental search backward from the cursor.",
+      fn = function() ed.search_start(false) end }
+
 -- History --------------------------------------------------------------------
 
 cmd { name = "buffer.undo", description = "Undo the most recent edit.",

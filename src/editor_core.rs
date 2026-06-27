@@ -57,6 +57,29 @@ pub enum CrdtOpOrigin {
     DaemonKey,
 }
 
+/// Live state of an in-progress incremental search (Q#SR5).
+///
+/// Present only while an isearch is running (`EditorCore::search`);
+/// `None` otherwise. Holds the query as typed so far plus the cursor
+/// origin to restore on cancel. The *matches* themselves live in
+/// [`crate::search::SearchStore`] (shared with the decorations
+/// producer and the TUI overlay); this struct is the per-session
+/// input state that drives `find_all`.
+#[derive(Clone, Debug)]
+pub struct SearchSession {
+    /// The query as typed so far. Each edit re-runs `find_all`.
+    query: String,
+    /// Buffer + cursor position when the search began. `C-g` / `Esc`
+    /// restores this; `RET` keeps the current (match) cursor. The
+    /// buffer id also anchors `find_all` to the buffer the search
+    /// started in.
+    origin: (BufferId, Position),
+    /// Direction of the most recent step/begin. `true` = forward.
+    /// Drives the prompt label ("I-search" vs "I-search backward")
+    /// and the wrap direction of an empty-query repeat.
+    forward: bool,
+}
+
 /// The world state mutated by editor commands.
 pub struct EditorCore {
     /// Shared buffer registry. The registry is the canonical owner
@@ -133,6 +156,13 @@ pub struct EditorCore {
     /// ([`crate::semantic_render`]) and the TUI search overlay.
     /// Cheaply cloneable (`Arc<Mutex>`); shared with both readers.
     pub search_store: crate::search::SharedSearchStore,
+    /// Live incremental-search session (Q#SR5), or `None` when no
+    /// search is running. Frontend-agnostic: the TUI run loop and the
+    /// daemon's `FrontendEvent::Key` path both drive it through the
+    /// same `search_*` methods, so isearch behaves identically in the
+    /// terminal and GPU frontends. Only the *prompt surface* differs
+    /// (TUI bottom row vs GPU status band).
+    pub search: Option<SearchSession>,
 }
 
 impl EditorCore {
@@ -168,6 +198,7 @@ impl EditorCore {
             pending_crdt_ops: Vec::new(),
             jump_ring: Vec::new(),
             search_store: crate::search::make_shared_store(),
+            search: None,
         }
     }
 
@@ -476,6 +507,179 @@ impl EditorCore {
         false
     }
 
+    // ---- incremental search (Q#SR5) ----------------------------------------
+    //
+    // Frontend-agnostic isearch driven entirely through these methods.
+    // The TUI's `dispatch_search_key` and (later) the GPU's round-tripped
+    // keystrokes both call into here, so search behaves identically in
+    // both frontends. Matches live in `search_store` (shared with the
+    // decorations producer and the TUI overlay); `search` holds the
+    // live query + origin.
+
+    /// `true` iff an incremental search is in progress.
+    #[must_use]
+    pub fn search_active(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// The current isearch query (empty when no search is running).
+    #[must_use]
+    pub fn search_query(&self) -> &str {
+        self.search.as_ref().map_or("", |s| s.query.as_str())
+    }
+
+    /// Direction of the active search (`true` = forward). Defaults to
+    /// forward when no search is running — callers should gate on
+    /// [`Self::search_active`] first.
+    #[must_use]
+    pub fn search_forward(&self) -> bool {
+        self.search.as_ref().is_none_or(|s| s.forward)
+    }
+
+    /// `(active_index, total)` for the active buffer's matches, for the
+    /// prompt's "n/m" readout. `active_index` is 0-based and `None`
+    /// when there are no matches.
+    #[must_use]
+    pub fn search_match_summary(&self) -> (Option<usize>, usize) {
+        let bid = self.active_buffer_id();
+        let guard = self
+            .search_store
+            .lock()
+            .expect("search store mutex poisoned");
+        guard
+            .for_buffer(bid)
+            .map_or((None, 0), |s| (s.active_index(), s.len()))
+    }
+
+    /// Begin an incremental search anchored at the active buffer +
+    /// cursor. `forward` sets the initial step direction. A no-op if a
+    /// search is already running (the entry chord is intercepted while
+    /// active, so this is only reached from an inactive state — the
+    /// guard is belt-and-suspenders).
+    pub fn search_begin(&mut self, forward: bool) {
+        if self.search.is_some() {
+            return;
+        }
+        let origin = (self.active_buffer_id(), self.cursor());
+        self.search = Some(SearchSession {
+            query: String::new(),
+            origin,
+            forward,
+        });
+    }
+
+    /// Append a character to the query and re-search.
+    pub fn search_input_char(&mut self, ch: char) {
+        let Some(session) = self.search.as_mut() else {
+            return;
+        };
+        session.query.push(ch);
+        self.search_recompute();
+    }
+
+    /// Drop the last character of the query and re-search. With an
+    /// empty query this is a no-op (the search stays open, empty).
+    pub fn search_backspace(&mut self) {
+        let Some(session) = self.search.as_mut() else {
+            return;
+        };
+        session.query.pop();
+        self.search_recompute();
+    }
+
+    /// Re-run `find_all` for the current query against the origin
+    /// buffer, refresh the store, and move the cursor to the match
+    /// nearest the origin (first match at/after the origin cursor,
+    /// wrapping). An empty query or no match anchors the cursor back
+    /// at the origin so a failing search never drifts the view.
+    fn search_recompute(&mut self) {
+        let Some(session) = self.search.as_ref() else {
+            return;
+        };
+        let bid = session.origin.0;
+        let origin_byte = session.origin.1;
+        let query = session.query.clone();
+        let bytes = self.buffer_bytes(bid);
+        let matches = crate::search::find_all(&bytes, &query);
+        let focus = {
+            let mut guard = self
+                .search_store
+                .lock()
+                .expect("search store mutex poisoned");
+            guard.set(bid, query, matches);
+            guard.focus_from(bid, origin_byte)
+        };
+        let target = focus.map_or(origin_byte, |range| range.start);
+        self.search_place_cursor(target);
+    }
+
+    /// Step the active buffer's match focus forward/backward (wrapping)
+    /// and move the cursor to it. Operates on [`Self::search_store`]
+    /// directly, so it works both during a live session (C-s / C-r)
+    /// and after accept (a `search.next` navigation command). A no-op
+    /// when the active buffer has no matches.
+    pub fn search_step(&mut self, forward: bool) {
+        if let Some(session) = self.search.as_mut() {
+            session.forward = forward;
+        }
+        let bid = self.active_buffer_id();
+        let stepped = {
+            let mut guard = self
+                .search_store
+                .lock()
+                .expect("search store mutex poisoned");
+            guard.step(bid, forward)
+        };
+        if let Some(range) = stepped {
+            self.search_place_cursor(range.start);
+        }
+    }
+
+    /// End the active search. `accept` keeps the cursor at the current
+    /// match and leaves the matches in the store (so they stay
+    /// highlighted, and `search.next` can resume, until the next edit
+    /// marks them stale). Cancel restores the origin cursor and clears
+    /// the matches. A no-op when no search is running.
+    pub fn search_finish(&mut self, accept: bool) {
+        let Some(session) = self.search.take() else {
+            return;
+        };
+        if accept {
+            return;
+        }
+        let (bid, origin_byte) = session.origin;
+        if self.active_buffer_id() == bid {
+            self.search_place_cursor(origin_byte);
+        }
+        self.search_store
+            .lock()
+            .expect("search store mutex poisoned")
+            .clear(bid);
+    }
+
+    /// Move the active window's cursor to a byte offset (clamped to the
+    /// buffer extent), resetting the goal column. Shared by the search
+    /// motions.
+    fn search_place_cursor(&mut self, byte: u64) {
+        let clamped = byte.min(self.active_buffer_len());
+        let aw = self.active_window_mut();
+        aw.cursor = clamped;
+        aw.goal_col = None;
+    }
+
+    /// Snapshot a buffer's full byte content (empty if the id is
+    /// stale). O(1) rope snapshot + one copy; used to feed `find_all`.
+    fn buffer_bytes(&self, buffer_id: BufferId) -> Vec<u8> {
+        let reg = self.registry.borrow();
+        let Ok(buf) = reg.get(buffer_id) else {
+            return Vec::new();
+        };
+        let len = buf.len();
+        let mut out = vec![0u8; len as usize];
+        buf.snapshot_rope().slice(0, len, &mut out);
+        out
+    }
+
     // ---- editing primitives ------------------------------------------------
 
     /// Apply `op` to the active buffer; notify every window
@@ -511,6 +715,16 @@ impl EditorCore {
             self.pending_crdt_ops
                 .push((CrdtOpOrigin::DaemonKey, buffer_id, (**crdt_op).clone()));
         }
+        // Search matches were computed against the pre-edit text, so
+        // their byte positions are now wrong. Mark the buffer's matches
+        // stale (M11.8): the producer / TUI overlay suppress them until
+        // a fresh search re-runs against the current content. No-op for
+        // a buffer with no search state. The headline isearch bet —
+        // "stale-after-edit linger" — is closed here.
+        self.search_store
+            .lock()
+            .expect("search store mutex poisoned")
+            .mark_stale(buffer_id);
         Ok(edit.new_rope.len())
     }
 
@@ -2175,5 +2389,143 @@ mod tests {
         assert_eq!(s.cursor(), 4);
         // Next pop would be the stale `doomed` entry — skipped, ring empties.
         assert!(!s.jump_back());
+    }
+
+    // ---- incremental search (Q#SR5) ------------------------------------
+
+    fn type_query(s: &mut EditorCore, q: &str) {
+        for ch in q.chars() {
+            s.search_input_char(ch);
+        }
+    }
+
+    #[test]
+    fn search_begin_then_type_highlights_from_origin() {
+        let mut s = from_bytes(b"foo bar foo baz foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true);
+        assert!(s.search_active());
+        type_query(&mut s, "foo");
+        // Three matches: 0..3, 8..11, 16..19; first (at/after origin 0)
+        // is active and the cursor sits on it.
+        assert_eq!(s.search_match_summary(), (Some(0), 3));
+        assert_eq!(s.cursor(), 0);
+        let guard = s.search_store.lock().expect("store");
+        assert!(!guard.is_stale(bid));
+        assert_eq!(guard.for_buffer(bid).expect("entry").len(), 3);
+    }
+
+    #[test]
+    fn search_step_walks_matches_and_wraps() {
+        let mut s = from_bytes(b"foo bar foo baz foo");
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true);
+        type_query(&mut s, "foo");
+        assert_eq!(s.cursor(), 0);
+        s.search_step(true);
+        assert_eq!((s.search_match_summary(), s.cursor()), ((Some(1), 3), 8));
+        s.search_step(true);
+        assert_eq!(s.cursor(), 16);
+        s.search_step(true); // wraps to the first match
+        assert_eq!(s.cursor(), 0);
+        s.search_step(false); // backward wraps to the last
+        assert_eq!(s.cursor(), 16);
+    }
+
+    #[test]
+    fn search_focuses_first_match_at_or_after_origin() {
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 5; // inside "bar"
+        s.search_begin(true);
+        type_query(&mut s, "foo");
+        // First match with start >= 5 is the one at byte 8.
+        assert_eq!(s.cursor(), 8);
+        assert_eq!(s.search_match_summary(), (Some(1), 2));
+    }
+
+    #[test]
+    fn search_cancel_restores_origin_and_clears_store() {
+        let mut s = from_bytes(b"foo bar foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true);
+        type_query(&mut s, "foo");
+        assert_eq!(s.cursor(), 8);
+        s.search_finish(false); // cancel
+        assert!(!s.search_active());
+        assert_eq!(s.cursor(), 5, "cancel restores the pre-search cursor");
+        assert!(
+            s.search_store
+                .lock()
+                .expect("store")
+                .for_buffer(bid)
+                .is_none(),
+            "cancel clears the matches"
+        );
+    }
+
+    #[test]
+    fn search_accept_keeps_cursor_and_matches() {
+        let mut s = from_bytes(b"foo bar foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true);
+        type_query(&mut s, "foo");
+        s.search_step(true); // focus the match at byte 8
+        assert_eq!(s.cursor(), 8);
+        s.search_finish(true); // accept
+        assert!(!s.search_active());
+        assert_eq!(s.cursor(), 8, "accept keeps the cursor on the match");
+        assert!(
+            s.search_store
+                .lock()
+                .expect("store")
+                .for_buffer(bid)
+                .is_some(),
+            "accept keeps matches for highlight + navigation"
+        );
+    }
+
+    #[test]
+    fn search_backspace_widens_the_match_set() {
+        let mut s = from_bytes(b"fo foo food");
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true);
+        type_query(&mut s, "foo"); // matches "foo" at 3..6, 7..10
+        assert_eq!(s.search_match_summary().1, 2);
+        s.search_backspace(); // query "fo"
+        assert_eq!(s.search_query(), "fo");
+        assert_eq!(s.search_match_summary().1, 3);
+    }
+
+    #[test]
+    fn search_smart_case_is_case_sensitive_with_uppercase() {
+        let mut s = from_bytes(b"Foo foo FOO");
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true);
+        type_query(&mut s, "Foo"); // uppercase => case-sensitive
+        assert_eq!(s.search_match_summary().1, 1);
+        s.search_backspace();
+        s.search_backspace();
+        s.search_backspace();
+        type_query(&mut s, "foo"); // lowercase => smart-case folds all
+        assert_eq!(s.search_match_summary().1, 3);
+    }
+
+    #[test]
+    fn edit_marks_accepted_matches_stale() {
+        let mut s = from_bytes(b"foo foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true);
+        type_query(&mut s, "foo");
+        s.search_finish(true); // matches persist after accept
+        assert!(!s.search_store.lock().expect("store").is_stale(bid));
+        s.insert_char('x'); // any edit invalidates the match offsets
+        assert!(
+            s.search_store.lock().expect("store").is_stale(bid),
+            "an edit marks the buffer's matches stale (linger fix)"
+        );
     }
 }
