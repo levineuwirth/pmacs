@@ -127,6 +127,12 @@ pub struct EditorCore {
     /// skipped on pop (stale-handle safe, mirrors the registry's
     /// `Missing` contract).
     pub jump_ring: Vec<(BufferId, Position)>,
+    /// In-buffer incremental search store (Q#SR1). Per-buffer query +
+    /// matches + active index, written by the search session /
+    /// `search.*` commands and read by the decorations producer
+    /// ([`crate::semantic_render`]) and the TUI search overlay.
+    /// Cheaply cloneable (`Arc<Mutex>`); shared with both readers.
+    pub search_store: crate::search::SharedSearchStore,
 }
 
 impl EditorCore {
@@ -161,6 +167,7 @@ impl EditorCore {
             active_frontend: FrontendId::LOCAL,
             pending_crdt_ops: Vec::new(),
             jump_ring: Vec::new(),
+            search_store: crate::search::make_shared_store(),
         }
     }
 

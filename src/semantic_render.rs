@@ -715,6 +715,34 @@ impl SemanticRenderState {
             }
         }
 
+        // In-buffer search matches (Q#SR3). Already byte ranges — no
+        // line/col conversion. Skipped while stale (an edit leaves the
+        // matches at pre-edit positions until the next re-search, the
+        // M11.8 model). The active match emits `SearchMatchActive`,
+        // the rest `SearchMatch`; matches are non-overlapping so each
+        // range carries exactly one kind.
+        {
+            let store = core.search_store.clone();
+            let guard = store.lock().expect("search store mutex poisoned");
+            if !guard.is_stale(vp.buffer_id)
+                && let Some(search) = guard.for_buffer(vp.buffer_id)
+            {
+                let active = search.active_match();
+                for m in search.matches() {
+                    if let Some(range) = clip_to_viewport(m.start, m.end, vp) {
+                        out.push(Decoration {
+                            range,
+                            kind: if Some(*m) == active {
+                                DecorationKind::SearchMatchActive
+                            } else {
+                                DecorationKind::SearchMatch
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
         out
     }
 }
@@ -1516,6 +1544,76 @@ mod tests {
                 code: None,
             }],
         );
+    }
+
+    #[test]
+    fn search_matches_emit_as_decorations_with_active_distinguished() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // "lo lo lo" — three "lo" matches at 0..2, 3..5, 6..8.
+        {
+            let core = state.core.borrow();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(bid)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"lo lo lo",
+                })
+                .expect("seed");
+        }
+        {
+            let store = state.core.borrow().search_store.clone();
+            let matches = crate::search::find_all(b"lo lo lo", "lo");
+            store.lock().expect("search store").set(bid, "lo", matches);
+        }
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        let (_full, decos) =
+            decorations_of(&s.render_frame(&state)).expect("search frame ships decorations");
+        let search: Vec<_> = decos
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    DecorationKind::SearchMatch | DecorationKind::SearchMatchActive
+                )
+            })
+            .collect();
+        assert_eq!(search.len(), 3, "three matches highlighted; got {decos:?}");
+        let active: Vec<_> = decos
+            .iter()
+            .filter(|d| d.kind == DecorationKind::SearchMatchActive)
+            .collect();
+        assert_eq!(active.len(), 1, "exactly one active match");
+        assert_eq!(
+            active[0].range,
+            ByteRange { start: 0, end: 2 },
+            "the first match is active by default"
+        );
+
+        // Marking the store stale suppresses search emission (M11.8):
+        // the next frame ships a clearing diff, never a search kind.
+        state
+            .core
+            .borrow()
+            .search_store
+            .clone()
+            .lock()
+            .expect("search store")
+            .mark_stale(bid);
+        if let Some((_full, decos)) = decorations_of(&s.render_frame(&state)) {
+            assert!(
+                decos.iter().all(|d| !matches!(
+                    d.kind,
+                    DecorationKind::SearchMatch | DecorationKind::SearchMatchActive
+                )),
+                "stale search store paints no matches; got {decos:?}"
+            );
+        }
     }
 
     #[test]

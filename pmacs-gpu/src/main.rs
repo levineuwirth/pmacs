@@ -4874,8 +4874,12 @@ fn decoration_kind_to_bg_color(kind: DecorationKind) -> Option<[f32; 4]> {
         // 0.22 keeps it subtle vs Selection's 0.30 while actually
         // reading as a current-line band.
         DecorationKind::CurrentLine => Some([0.55, 0.60, 0.75, 0.22]),
-        // Deferred to the search-feature arc.
-        DecorationKind::SearchMatch | DecorationKind::SearchMatchActive => None,
+        // In-buffer search (Q#SR4): a translucent yellow wash under
+        // every match, a stronger amber under the active one so it
+        // stands out as you step through. Both let the glyph color
+        // show through (text renders after this pass).
+        DecorationKind::SearchMatch => Some([0.85, 0.78, 0.20, 0.30]),
+        DecorationKind::SearchMatchActive => Some([0.95, 0.55, 0.12, 0.48]),
         // Underline-only — handled by
         // [`decoration_kind_to_underline_color`].
         DecorationKind::DiagnosticError
@@ -5566,14 +5570,14 @@ mod tests {
     }
 
     #[test]
-    fn bg_color_helper_covers_selection_and_current_line() {
+    fn bg_color_helper_covers_selection_current_line_and_search() {
         // Sessions 9.1 + 9.2: Selection and CurrentLine paint.
         assert!(decoration_kind_to_bg_color(DecorationKind::Selection).is_some());
         assert!(decoration_kind_to_bg_color(DecorationKind::CurrentLine).is_some());
 
-        // Search-feature arc — still deferred.
-        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_none());
-        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_none());
+        // In-buffer search (Q#SR4): both match kinds wash a bg.
+        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatch).is_some());
+        assert!(decoration_kind_to_bg_color(DecorationKind::SearchMatchActive).is_some());
 
         // Underline-only kinds belong to the underline helper (T M4.6
         // parity: squiggle bars, not text recoloring).
@@ -5605,16 +5609,9 @@ mod tests {
         ] {
             let ul = decoration_kind_to_underline_color(kind).is_some();
             let bg = decoration_kind_to_bg_color(kind).is_some();
-            // Both helpers return None for the search pair — deferred
-            // to the search-feature arc. That is the "neither yet"
-            // state — the exclusive-or test exempts it.
-            let deferred = matches!(
-                kind,
-                DecorationKind::SearchMatch | DecorationKind::SearchMatchActive
-            );
             assert!(
-                deferred || (ul ^ bg),
-                "{kind:?}: underline={ul} bg={bg} — should be exactly one (unless deferred)"
+                ul ^ bg,
+                "{kind:?}: underline={ul} bg={bg} — should be exactly one"
             );
         }
     }

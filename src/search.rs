@@ -228,6 +228,135 @@ pub fn find_all(haystack: &[u8], query: &str) -> Vec<ByteRange> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// TUI view
+// ---------------------------------------------------------------------------
+
+use crate::buffer::Buffer;
+use crate::cell::{CellCoord, CellGrid, Color, Style};
+use crate::overlay::merge_styles;
+use crate::view::{View, Viewport};
+
+/// Background style applied to a non-active search match (Q#SR4) —
+/// black-on-yellow so the highlighted text reads on any theme.
+fn match_style() -> Style {
+    Style {
+        bg: Color::Indexed(3), // yellow
+        fg: Color::Indexed(0), // black
+        ..Style::default()
+    }
+}
+
+/// Background style for the active match — brighter yellow so it
+/// stands out from the lazy matches as you step through.
+fn active_match_style() -> Style {
+    Style {
+        bg: Color::Indexed(11), // bright yellow
+        fg: Color::Indexed(0),
+        ..Style::default()
+    }
+}
+
+/// TUI overlay that washes search matches in the visible region,
+/// mirroring [`crate::diag::DiagnosticView`]: snapshot the store under
+/// the lock, skip while stale, map each match's byte range to display
+/// columns, and merge the highlight style into those cells. Matches
+/// are single-line (the minibuffer query carries no newline), so each
+/// maps to one row.
+pub struct SearchView {
+    buffer_id: BufferId,
+    store: SharedSearchStore,
+}
+
+impl SearchView {
+    /// Construct a view reading `store` for `buffer_id`.
+    #[must_use]
+    pub fn new(buffer_id: BufferId, store: SharedSearchStore) -> Self {
+        Self { buffer_id, store }
+    }
+}
+
+impl View for SearchView {
+    fn kind(&self) -> &'static str {
+        "search"
+    }
+
+    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+        // Snapshot the matches under the lock, release immediately
+        // (same discipline as DiagnosticView).
+        let (matches, active): (Vec<ByteRange>, Option<ByteRange>) = {
+            let guard = self.store.lock().expect("search store mutex poisoned");
+            if guard.is_stale(self.buffer_id) {
+                return;
+            }
+            match guard.for_buffer(self.buffer_id) {
+                Some(s) => (s.matches().to_vec(), s.active_match()),
+                None => return,
+            }
+        };
+        if matches.is_empty() {
+            return;
+        }
+
+        let source: Vec<u8> = {
+            let mut bytes = vec![0u8; buf.len() as usize];
+            if !bytes.is_empty() {
+                buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
+            }
+            bytes
+        };
+        let line_offsets = crate::diag::compute_line_offsets(&source);
+        let start_line_buf =
+            crate::diag::line_at_offset(&line_offsets, viewport.buffer_start as u32);
+        let max_rows = viewport.cell_size.rows;
+        let max_cols = viewport.cell_size.cols;
+        let cell_origin = viewport.cell_origin;
+
+        for m in &matches {
+            let line = crate::diag::line_at_offset(&line_offsets, m.start as u32);
+            if line < start_line_buf {
+                continue;
+            }
+            let row_offset = line - start_line_buf;
+            if row_offset >= max_rows {
+                break;
+            }
+            let line_start = line_offsets[line as usize];
+            let line_end = line_offsets
+                .get(line as usize + 1)
+                .copied()
+                .unwrap_or(source.len() as u32);
+            let line_end_no_nl = if line_end > line_start
+                && source.get(line_end as usize - 1).copied() == Some(b'\n')
+            {
+                line_end - 1
+            } else {
+                line_end
+            };
+            let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
+            let within_start = (m.start as u32).saturating_sub(line_start) as usize;
+            let within_end = (m.end as u32).saturating_sub(line_start) as usize;
+            let (start_col, end_col) =
+                crate::diag::byte_range_to_display_cols(line_bytes, within_start, within_end);
+            if end_col <= start_col {
+                continue;
+            }
+            let style = if Some(*m) == active {
+                active_match_style()
+            } else {
+                match_style()
+            };
+            let cell_row = cell_origin.row + row_offset;
+            let clamped_start = start_col.min(max_cols);
+            let clamped_end = end_col.min(max_cols);
+            for col in clamped_start..clamped_end {
+                let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
+                cell.style = merge_styles(cell.style, style);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +433,75 @@ mod tests {
         assert_eq!(s.for_buffer(bid).unwrap().active_index(), Some(1));
         // Past the last match → wrap to the first.
         assert_eq!(s.focus_from(bid, 99), Some(r(2, 3)));
+    }
+
+    #[test]
+    fn search_view_washes_matches_and_distinguishes_active() {
+        use crate::cell::{Cell, CellGrid, CellSize};
+        use crate::view::Viewport;
+
+        let store = make_shared_store();
+        let bid = BufferId::next();
+        let mut buf = Buffer::new(bid, "test.txt");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"lo lo lo\n",
+        })
+        .expect("seed");
+        store
+            .lock()
+            .unwrap()
+            .set(bid, "lo", find_all(b"lo lo lo\n", "lo"));
+
+        let mut view = SearchView::new(bid, store.clone());
+        let mut backing = vec![Cell::default(); 10];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 10,
+            size: CellSize::new(1, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(1, 10),
+            },
+            &mut grid,
+        );
+
+        // Match 0 [0,2) is active (bright yellow), matches at [3,5) and
+        // [6,8) are lazy (yellow); the spaces between carry no bg.
+        assert_eq!(grid.get(CellCoord::new(0, 0)).style.bg, Color::Indexed(11));
+        assert_eq!(grid.get(CellCoord::new(0, 1)).style.bg, Color::Indexed(11));
+        assert_eq!(grid.get(CellCoord::new(0, 2)).style.bg, Color::Default);
+        assert_eq!(grid.get(CellCoord::new(0, 3)).style.bg, Color::Indexed(3));
+        assert_eq!(grid.get(CellCoord::new(0, 6)).style.bg, Color::Indexed(3));
+
+        // Stale store paints nothing.
+        store.lock().unwrap().mark_stale(bid);
+        let mut backing2 = vec![Cell::default(); 10];
+        let mut grid2 = CellGrid {
+            cells: &mut backing2,
+            stride: 10,
+            size: CellSize::new(1, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 0),
+                cell_size: CellSize::new(1, 10),
+            },
+            &mut grid2,
+        );
+        assert_eq!(
+            grid2.get(CellCoord::new(0, 0)).style.bg,
+            Color::Default,
+            "stale store washes nothing"
+        );
     }
 
     #[test]
