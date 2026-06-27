@@ -450,7 +450,8 @@ impl EditorState {
     /// - the dispatcher holds a pending multi-key prefix (e.g. the
     ///   user has typed `C-x` and the daemon is waiting for the next
     ///   chord), or
-    /// - a minibuffer prompt is active and absorbing keys.
+    /// - a minibuffer prompt is active and absorbing keys, or
+    /// - an incremental search is running and absorbing keys (Q#SR5).
     ///
     /// Used by the daemon to drive the `InstanceMessage::DispatchIdle`
     /// wire signal that gates `crdt_replica` frontends' optimistic-apply
@@ -458,13 +459,18 @@ impl EditorState {
     /// plain-char keystroke into the active document while the
     /// daemon's actual intent is to route the keystroke into the
     /// minibuffer prompt — the M10.10 "documented limitation" that
-    /// surfaced during session-5 manual validation.
+    /// surfaced during session-5 manual validation. Isearch reuses the
+    /// exact same gate: while a search runs every keystroke must
+    /// round-trip so the daemon's `dispatch_search_key` receives it
+    /// (extend the query / step) instead of the frontend self-inserting
+    /// it into the buffer.
     #[must_use]
     pub fn dispatch_idle(&self) -> bool {
         if !self.dispatcher.pending().is_empty() {
             return false;
         }
-        !self.core.borrow().minibuffer.is_active()
+        let core = self.core.borrow();
+        !core.minibuffer.is_active() && !core.search_active()
     }
 
     /// `frontend_id` records which frontend produced the event. v0.1
@@ -2098,6 +2104,21 @@ mod tests {
         // untouched (no self-insert).
         assert_eq!(s.core.borrow().active_buffer_len(), 3);
         assert_eq!(s.core.borrow().search_query(), "foo");
+    }
+
+    #[test]
+    fn isearch_flips_dispatch_idle_so_gpu_round_trips() {
+        // The GPU's optimistic-apply gate (M11.6) keys off dispatch_idle.
+        // An active isearch must drive it false so the GPU round-trips
+        // keystrokes to the daemon's dispatch_search_key instead of
+        // self-inserting them — the shared-core contract for Q#SR5.
+        let mut s = fresh_with(b"foo foo");
+        assert!(s.dispatch_idle(), "idle before any search");
+        s.dispatch_key(FrontendId::LOCAL, ctrl('s'));
+        assert!(s.core.borrow().search_active());
+        assert!(!s.dispatch_idle(), "search active ⇒ keys must round-trip");
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Enter)); // accept
+        assert!(s.dispatch_idle(), "search ended ⇒ optimistic apply resumes");
     }
 
     // ---- T M11.6 — DispatchIdle ---------------------------------------------

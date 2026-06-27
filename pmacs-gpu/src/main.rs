@@ -529,6 +529,12 @@ struct State {
     status_left_text: String,
     /// Q#S1 — the wire-authoritative status facts (protocol v8).
     status_facts: Option<StatusFactsLocal>,
+    /// Q#SR5 — the live incremental-search prompt (protocol v9), or
+    /// `None` when no search is running. While `Some`, the status
+    /// band's left side shows `I-search: <query> (n/m)` in place of
+    /// the buffer name; the matches highlight via `SearchMatch`
+    /// decorations.
+    search_prompt: Option<SearchPromptLocal>,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
@@ -543,6 +549,16 @@ struct StatusFactsLocal {
     modified: bool,
     diag_errors: u32,
     diag_warnings: u32,
+}
+
+/// The live incremental-search prompt (Q#SR5, protocol v9), mirrored
+/// from a `SearchPrompt` message whose `query` was `Some`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchPromptLocal {
+    buffer_id: BufferId,
+    query: String,
+    active: Option<u32>,
+    total: u32,
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -1417,6 +1433,7 @@ impl State {
             status_left_buffer,
             status_left_text: String::new(),
             status_facts: None,
+            search_prompt: None,
             minimap_cache: None,
         }
     }
@@ -2010,6 +2027,27 @@ impl State {
                 self.window.request_redraw();
                 None
             }
+            // Q#SR5 — the live isearch prompt (protocol v9). `query:
+            // None` clears the band (search ended); `Some` shows
+            // `I-search: <query> (n/m)` on the band's left side. The
+            // matches themselves arrive as SearchMatch decorations and
+            // the keys round-trip via the DispatchIdle gate, so this
+            // handler only drives the prompt text.
+            InstanceMessage::SearchPrompt {
+                buffer_id,
+                query,
+                active,
+                total,
+            } => {
+                self.search_prompt = query.map(|q| SearchPromptLocal {
+                    buffer_id,
+                    query: q,
+                    active,
+                    total,
+                });
+                self.window.request_redraw();
+                None
+            }
             // Session 9.3 — peer presence. The editing frontend's
             // cursor + selection drive the `CurrentLine` / `Selection`
             // washes for this read-only mirror (finding QB1). Store
@@ -2510,9 +2548,23 @@ impl State {
         spans
     }
 
-    /// The band's left side: buffer name + modified dot, from the
-    /// v8 `StatusFacts` (empty until the daemon ships them).
+    /// The band's left side. While an incremental search is running
+    /// (Q#SR5) it shows `I-search: <query> (n/m)` — the prompt takes
+    /// over the band like Emacs's echo area, returning to the buffer
+    /// name + modified dot (v8 `StatusFacts`) when the search ends.
     fn compose_status_left(&self) -> String {
+        if let Some(sp) = self
+            .search_prompt
+            .as_ref()
+            .filter(|s| Some(s.buffer_id) == self.current_buffer_id)
+        {
+            let count = if sp.total == 0 {
+                " [no match]".to_string()
+            } else {
+                format!(" ({}/{})", sp.active.map_or(0, |a| a + 1), sp.total)
+            };
+            return format!("I-search: {}{}", sp.query, count);
+        }
         match self
             .status_facts
             .as_ref()
@@ -3885,6 +3937,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::InlineAdornments { .. } => "InlineAdornments",
         InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
         InstanceMessage::StatusFacts { .. } => "StatusFacts",
+        InstanceMessage::SearchPrompt { .. } => "SearchPrompt",
         InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",

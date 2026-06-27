@@ -121,6 +121,10 @@ pub struct SemanticRenderState {
     /// `(name, modified, diag_errors, diag_warnings)` last emitted as
     /// `StatusFacts` (Q#S1) — cached-compare suppression.
     last_status: HashMap<BufferId, (String, bool, u32, u32)>,
+    /// `(query, active, total)` last emitted as `SearchPrompt`
+    /// (Q#SR5) — cached-compare suppression. A `None` query means the
+    /// last emission cleared the band (no active search).
+    last_search_prompt: HashMap<BufferId, (Option<String>, Option<u32>, u32)>,
     /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
     /// the tree-sitter highlights query over the *whole declared
     /// viewport* (which the GPU frontend sets to the entire buffer)
@@ -189,6 +193,7 @@ impl SemanticRenderState {
             last_sent: HashMap::new(),
             last_decorations: HashMap::new(),
             last_adornments: HashMap::new(),
+            last_search_prompt: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
             last_style_gate: HashMap::new(),
@@ -389,7 +394,71 @@ impl SemanticRenderState {
         out.extend(self.file_style_summary_msg(state, vp.buffer_id, generation));
         // --- StatusFacts (status band; Q#S1, protocol v8) ---
         out.extend(self.status_facts_msg(state, vp.buffer_id));
+        // --- SearchPrompt (isearch band; Q#SR5, protocol v9) ---
+        out.extend(self.search_prompt_msg(state, vp.buffer_id));
         out
+    }
+
+    /// The `SearchPrompt` message for this frame, or `None` when the
+    /// search state for `buffer_id` is unchanged. Only the active
+    /// buffer carries a live prompt: a search shadows dispatch, so it
+    /// always runs in the active buffer, and emitting for that buffer's
+    /// viewport keeps the per-buffer cached-compare honest. When no
+    /// search runs the active buffer emits `query: None` once (to clear
+    /// the frontend's band), then stays silent. The daemon's write loop
+    /// keeps the variant off wires negotiated `< 9`.
+    fn search_prompt_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> Option<InstanceMessage> {
+        // Off-active-buffer viewports never touch the search band — the
+        // active buffer owns it. (Without this, switching buffers mid-
+        // session would let an inactive viewport clobber the cache.)
+        let facts = {
+            let core = state.core.borrow();
+            if buffer_id != core.active_buffer_id() {
+                return None;
+            }
+            if core.search_active() {
+                let (active_idx, total) = core.search_match_summary();
+                (
+                    Some(core.search_query().to_owned()),
+                    active_idx.and_then(|i| u32::try_from(i).ok()),
+                    u32::try_from(total).unwrap_or(u32::MAX),
+                )
+            } else {
+                // No search → a cleared band. active/total are zeroed so
+                // the inactive state is one canonical tuple (the GPU only
+                // reads them when `query` is `Some`). The accepted matches
+                // keep highlighting via Decorations regardless.
+                (None, None, 0)
+            }
+        };
+        if self.last_search_prompt.get(&buffer_id) == Some(&facts) {
+            return None;
+        }
+        let cached = self.last_search_prompt.get(&buffer_id);
+        if cached == Some(&facts) {
+            return None;
+        }
+        // First sight of this buffer with no active search: there is
+        // nothing to clear, so stay silent rather than ship an empty
+        // band on every fresh buffer. Record the baseline so a *later*
+        // search→clear transition still diffs. (Mirrors the inline-
+        // adornments "speak only if there's something to show" rule.)
+        if cached.is_none() && facts.0.is_none() {
+            self.last_search_prompt.insert(buffer_id, facts);
+            return None;
+        }
+        let msg = InstanceMessage::SearchPrompt {
+            buffer_id,
+            query: facts.0.clone(),
+            active: facts.1,
+            total: facts.2,
+        };
+        self.last_search_prompt.insert(buffer_id, facts);
+        Some(msg)
     }
 
     /// The `StatusFacts` message for this frame, or `None` when
@@ -1462,8 +1531,8 @@ mod tests {
 
     /// All `InstanceMessage` variants the semantic projection may
     /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`,
-    /// `FileStyleSummary`, or `StatusFacts` (Q#S1) — never
-    /// `CellDelta`, grid `Cursor`, or the still-unwired
+    /// `FileStyleSummary`, `StatusFacts` (Q#S1), or `SearchPrompt`
+    /// (Q#SR5) — never `CellDelta`, grid `Cursor`, or the still-unwired
     /// `BlockAdornments` / `FoldState` families.
     fn assert_semantic_only(msgs: &[InstanceMessage]) {
         for m in msgs {
@@ -1475,6 +1544,7 @@ mod tests {
                         | InstanceMessage::InlineAdornments { .. }
                         | InstanceMessage::FileStyleSummary { .. }
                         | InstanceMessage::StatusFacts { .. }
+                        | InstanceMessage::SearchPrompt { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
@@ -2983,6 +3053,77 @@ mod tests {
             } => Some((name.clone(), *modified, *diag_errors, *diag_warnings)),
             _ => None,
         })
+    }
+
+    fn search_prompt_of(msgs: &[InstanceMessage]) -> Option<(Option<String>, Option<u32>, u32)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::SearchPrompt {
+                query,
+                active,
+                total,
+                ..
+            } => Some((query.clone(), *active, *total)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn search_prompt_emits_on_change_and_clears_on_finish() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        // Three "foo" matches.
+        {
+            let core = state.core.borrow();
+            core.registry
+                .clone()
+                .borrow_mut()
+                .get_mut(bid)
+                .expect("active buffer")
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"foo foo foo",
+                })
+                .expect("seed");
+        }
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        // No search yet: any prompt that ships carries a cleared query.
+        if let Some((q, _, _)) = search_prompt_of(&s.render_frame(&state)) {
+            assert!(q.is_none(), "no search ⇒ no live query");
+        }
+
+        // Begin + type "foo": the live query + active/total ship.
+        {
+            let mut core = state.core.borrow_mut();
+            core.search_begin(true);
+            for ch in "foo".chars() {
+                core.search_input_char(ch);
+            }
+        }
+        assert_eq!(
+            search_prompt_of(&s.render_frame(&state)),
+            Some((Some("foo".to_owned()), Some(0), 3)),
+            "live isearch ships query + (active, total)"
+        );
+        // Unchanged → suppressed (cached-compare).
+        assert!(search_prompt_of(&s.render_frame(&state)).is_none());
+
+        // Step: active index advances and re-emits.
+        state.core.borrow_mut().search_step(true);
+        assert_eq!(
+            search_prompt_of(&s.render_frame(&state)),
+            Some((Some("foo".to_owned()), Some(1), 3))
+        );
+
+        // Accept: the prompt band clears (query None) even though the
+        // matches stay in the store for navigation + highlight.
+        state.core.borrow_mut().search_finish(true);
+        assert_eq!(
+            search_prompt_of(&s.render_frame(&state)),
+            Some((None, None, 0)),
+            "accept clears the prompt band"
+        );
     }
 
     #[test]
