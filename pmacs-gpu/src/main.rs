@@ -659,64 +659,124 @@ impl ApplicationHandler<AppEvent> for App {
                 if key.state != ElementState::Pressed {
                     return;
                 }
-                // Escape stays a local quit (no daemon round trip).
+                // While the daemon is intercepting keystrokes — an active
+                // incremental search (Q#SR5), or a minibuffer / pending
+                // prefix — every key belongs to its handler, not the
+                // buffer. The GUI round-trips them all and never
+                // optimistic-applies (that would edit the document
+                // mid-search).
+                let intercept = self
+                    .state
+                    .as_ref()
+                    .is_some_and(State::daemon_intercepts_keys);
+
+                // Escape cancels an active intercept (e.g. a running
+                // search); otherwise it stays the local quit.
                 if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
-                    event_loop.exit();
+                    if intercept {
+                        if let Some(client) = self.attach_client.as_ref()
+                            && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
+                        {
+                            eprintln!("pmacs-gpu: send Escape (cancel) failed: {e}");
+                        }
+                    } else {
+                        event_loop.exit();
+                    }
                     return;
                 }
+
+                let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers) else {
+                    return;
+                };
+                let Some(client) = self.attach_client.as_ref() else {
+                    return;
+                };
+
+                // Intercept path: round-trip every key into the daemon's
+                // active handler (search query / step / accept / cancel).
+                if intercept {
+                    if let Some(state) = self.state.as_mut() {
+                        state.mark_cursor_stale_after_round_trip();
+                    }
+                    if debug_input() {
+                        eprintln!("pmacs-gpu send_key (intercepted): {pkey:?} mods={pmods:?}");
+                    }
+                    if let Err(e) = client.send_key(pkey, pmods) {
+                        eprintln!("pmacs-gpu: send_key (intercepted) failed: {e}");
+                    }
+                    return;
+                }
+
+                // Idle: C-s / C-r begin an incremental search. They are
+                // otherwise withheld as command chords; forward them so
+                // the search can start. The daemon then flips the
+                // intercept gate (DispatchIdle / SearchPrompt) one
+                // round-trip later, after which every key routes into the
+                // search — no optimistic local flip, so a C-s that (via
+                // rebinding) doesn't start a search can never wedge the
+                // gate against the daemon's authoritative state.
+                if is_search_entry_chord(pkey, pmods) {
+                    if let Some(state) = self.state.as_mut() {
+                        state.mark_cursor_stale_after_round_trip();
+                    }
+                    if let Err(e) = client.send_key(pkey, pmods) {
+                        eprintln!("pmacs-gpu: send_key (search entry) failed: {e}");
+                    }
+                    return;
+                }
+
                 // Session B2 forwards cursor motion + plain text editing
                 // (Char / Backspace / Enter / Delete / Tab). Ctrl/Alt/
                 // Meta chords are withheld — they drive commands and
                 // minibuffer flows the GUI can't render or interact with
                 // yet (a later session adds GUI minibuffer + chords).
-                if let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers)
-                    && should_forward_key(pkey, pmods)
-                    && let Some(client) = self.attach_client.as_ref()
-                {
-                    if let Some(op) = self.state.as_mut().and_then(|state| {
-                        state
-                            .optimistic_crdt_insert(pkey, pmods)
-                            .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
-                    }) {
+                if !should_forward_key(pkey, pmods) {
+                    return;
+                }
+
+                if let Some(op) = self.state.as_mut().and_then(|state| {
+                    state
+                        .optimistic_crdt_insert(pkey, pmods)
+                        .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
+                }) {
+                    if debug_input() {
+                        eprintln!(
+                            "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
+                            op.buffer_id,
+                            op.op.bytes.len()
+                        );
+                    }
+                    if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
+                        eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
+                    }
+                    // An optimistic Enter near the bottom edge can
+                    // scroll; re-declare the scoped viewport so
+                    // the producer styles the newly visible lines.
+                    if let Some(vp) = op.viewport
+                        && let Err(e) =
+                            client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
+                    {
+                        eprintln!("pmacs-gpu: send Viewport failed: {e}");
+                    }
+                    return;
+                }
+                if let Some(state) = self.state.as_mut() {
+                    if state.defer_round_trip_key_if_needed(pkey, pmods) {
                         if debug_input() {
                             eprintln!(
-                                "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
-                                op.buffer_id,
-                                op.op.bytes.len()
+                                "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
+                                 pending optimistic cursor"
                             );
-                        }
-                        if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
-                            eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
-                        }
-                        // An optimistic Enter near the bottom edge can
-                        // scroll; re-declare the scoped viewport so
-                        // the producer styles the newly visible lines.
-                        if let Some(vp) = op.viewport
-                            && let Err(e) =
-                                client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
-                        {
-                            eprintln!("pmacs-gpu: send Viewport failed: {e}");
                         }
                         return;
                     }
-                    if let Some(state) = self.state.as_mut() {
-                        if state.defer_round_trip_key_if_needed(pkey, pmods) {
-                            if debug_input() {
-                                eprintln!(
-                                    "pmacs-gpu defer_key: {pkey:?} mods={pmods:?} \
-                                     pending optimistic cursor"
-                                );
-                            }
-                            return;
-                        }
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if debug_input() {
-                        eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key failed: {e}");
-                    }
+                    state.mark_cursor_stale_after_round_trip();
+                }
+                if debug_input() {
+                    eprintln!("pmacs-gpu send_key: {pkey:?} mods={pmods:?}");
+                }
+                if let Err(e) = client.send_key(pkey, pmods) {
+                    eprintln!("pmacs-gpu: send_key failed: {e}");
                 }
             }
             WindowEvent::Resized(size) => {
@@ -1445,6 +1505,16 @@ impl State {
         {
             eprintln!("pmacs-gpu: failed to set local Loro peer id: {e:?}");
         }
+    }
+
+    /// `true` while the daemon is intercepting keystrokes — an active
+    /// incremental search (Q#SR5), surfaced by a live `SearchPrompt`, or
+    /// the daemon reporting non-idle (`DispatchIdle { idle: false }` for
+    /// a minibuffer / pending prefix). In this state the GUI round-trips
+    /// every key to the daemon's handler instead of optimistically
+    /// applying it to the buffer.
+    fn daemon_intercepts_keys(&self) -> bool {
+        self.search_prompt.is_some() || !self.dispatch_idle
     }
 
     /// Shared eligibility gates for the optimistic edit paths
@@ -2558,7 +2628,9 @@ impl State {
             .as_ref()
             .filter(|s| Some(s.buffer_id) == self.current_buffer_id)
         {
-            let count = if sp.total == 0 {
+            let count = if sp.query.is_empty() {
+                String::new()
+            } else if sp.total == 0 {
                 " [no match]".to_string()
             } else {
                 format!(" ({}/{})", sp.active.map_or(0, |a| a + 1), sp.total)
@@ -4054,6 +4126,14 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
     )
 }
 
+/// `C-s` / `C-r` — the chords that begin an incremental search
+/// (Q#SR5). Forwarded even when idle (they are otherwise withheld as
+/// command chords by [`should_forward_key`]) so a search can start;
+/// once it is running every key round-trips via the intercept path.
+fn is_search_entry_chord(key: ProtocolKey, mods: Modifiers) -> bool {
+    mods == Modifiers::CTRL && matches!(key, ProtocolKey::Char('s' | 'r'))
+}
+
 fn is_plain_text_modifiers(mods: Modifiers) -> bool {
     !mods.contains(Modifiers::CTRL)
         && !mods.contains(Modifiers::ALT)
@@ -5092,6 +5172,37 @@ mod tests {
         assert!(should_forward_key(ProtocolKey::Backspace, ctrl));
         assert!(should_forward_key(ProtocolKey::Delete, ctrl));
         assert!(should_forward_key(ProtocolKey::Backspace, Modifiers::ALT));
+    }
+
+    #[test]
+    fn search_entry_chord_is_ctrl_s_or_ctrl_r_only() {
+        // C-s / C-r start a search (Q#SR5) — forwarded even though
+        // `should_forward_key` withholds them as command chords.
+        assert!(is_search_entry_chord(
+            ProtocolKey::Char('s'),
+            Modifiers::CTRL
+        ));
+        assert!(is_search_entry_chord(
+            ProtocolKey::Char('r'),
+            Modifiers::CTRL
+        ));
+        assert!(
+            !should_forward_key(ProtocolKey::Char('s'), Modifiers::CTRL),
+            "C-s is otherwise a withheld chord; the search-entry path is what forwards it"
+        );
+        // Other Ctrl chords, and C-s without Ctrl, are not entry chords.
+        assert!(!is_search_entry_chord(
+            ProtocolKey::Char('x'),
+            Modifiers::CTRL
+        ));
+        assert!(!is_search_entry_chord(
+            ProtocolKey::Char('s'),
+            Modifiers::NONE
+        ));
+        assert!(!is_search_entry_chord(
+            ProtocolKey::Char('s'),
+            Modifiers::CTRL | Modifiers::ALT
+        ));
     }
 
     #[test]
