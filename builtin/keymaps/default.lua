@@ -103,6 +103,15 @@ bind("C-S-<right>", "cursor.select-word-right")
 bind("C-S-<up>",    "cursor.select-paragraph-up")
 bind("C-S-<down>",  "cursor.select-paragraph-down")
 
+-- Clipboard (Q#CM6). The Emacs kill/yank set --- all of these were free
+-- in the default map (C-a / C-v are taken for line-start / page-down, so
+-- the CUA trio would have clobbered motion). C-w cuts, M-w copies, C-y
+-- pastes; C-x h selects the whole buffer (Emacs mark-whole-buffer).
+bind("M-w",     "edit.copy")
+bind("C-w",     "edit.cut")
+bind("C-y",     "edit.paste")
+bind("C-x h",   "edit.select-all")
+
 -- Undo / redo ----------------------------------------------------------------
 --
 -- Multiple undo bindings exist because terminals translate Ctrl+/

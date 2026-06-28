@@ -532,6 +532,18 @@ local function attached_for_active()
   return attach_buffer(buf)
 end
 
+-- Pure, side-effect-free attachment lookup for the active buffer:
+-- returns the live record (with `.uri`) when a server is already
+-- attached, else nil. Unlike `attached_for_active`, it never *triggers*
+-- an attach --- the context menu (Q#CM3) calls it to decide whether to
+-- show symbol/diagnostic items, and must not perturb LSP state just by
+-- opening.
+function pmacs.lsp.active_attachment()
+  local buf = pmacs.window.buffer()
+  if not buf then return nil end
+  return attachments[tostring(buf)]
+end
+
 -- Hooks --------------------------------------------------------------------
 
 pmacs.hook.add("buffer.after-load", function()
