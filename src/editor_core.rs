@@ -171,6 +171,22 @@ pub struct EditorCore {
     /// terminal and GPU frontends. Only the *prompt surface* differs
     /// (TUI bottom row vs GPU status band).
     pub search: Option<SearchSession>,
+    /// In-core clipboard slot (Q#CM6) --- the bytes a paste inserts.
+    /// Written by copy/cut and by an inbound OS paste; read by paste.
+    /// The frontend-agnostic source of truth, so paste behaves
+    /// identically in the terminal and GPU frontends.
+    clipboard_slot: Vec<u8>,
+    /// One-shot outbound clipboard publish (Q#CM6). A copy/cut queues
+    /// `(originating frontend, bytes)`; the dispatcher drains it and
+    /// sends [`crate::protocol::InstanceSignal::Clipboard`] to that
+    /// frontend, which writes the OS clipboard (OSC 52 in the TUI,
+    /// `arboard` in the GPU). Drained per-tick like `pending_crdt_ops`.
+    pending_clipboard: Option<(FrontendId, Vec<u8>)>,
+    /// Open context menu (Q#CM1), or `None` when closed. Shared
+    /// `Arc<Mutex>` so the TUI [`crate::menu::MenuView`] overlay renders
+    /// from the same state the dispatch path mutates — the menu twin of
+    /// `search_store`.
+    pub menu: crate::menu::SharedMenu,
 }
 
 impl EditorCore {
@@ -207,6 +223,9 @@ impl EditorCore {
             jump_ring: Vec::new(),
             search_store: crate::search::make_shared_store(),
             search: None,
+            clipboard_slot: Vec::new(),
+            pending_clipboard: None,
+            menu: crate::menu::make_shared_menu(),
         }
     }
 
@@ -1569,6 +1588,216 @@ impl EditorCore {
         Ok(new_len)
     }
 
+    // ---- clipboard (Q#CM6) -------------------------------------------------
+
+    /// The identifier under (or immediately left of) the cursor, or
+    /// `None` when the cursor isn't on a word (Q#CM3, the `symbol`
+    /// context). A word is a run of ASCII alphanumerics / `_`; since
+    /// those are all single-byte, the slice always lands on UTF-8
+    /// boundaries.
+    #[must_use]
+    pub fn word_at_cursor(&self) -> Option<String> {
+        let bytes = self.buffer_bytes(self.active_buffer_id());
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let cursor = (self.cursor() as usize).min(bytes.len());
+        let mut start = cursor;
+        while start > 0 && is_word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = cursor;
+        while end < bytes.len() && is_word(bytes[end]) {
+            end += 1;
+        }
+        if start == end {
+            return None;
+        }
+        String::from_utf8(bytes[start..end].to_vec()).ok()
+    }
+
+    /// Bytes of the active region, or `None` when nothing is selected.
+    #[must_use]
+    pub fn region_bytes(&self) -> Option<Vec<u8>> {
+        let (lo, hi) = self.active_region()?;
+        let reg = self.registry.borrow();
+        let buf = reg.get(self.active_buffer_id()).ok()?;
+        let mut out = vec![0u8; (hi - lo) as usize];
+        buf.snapshot_rope().slice(lo, hi, &mut out);
+        Some(out)
+    }
+
+    /// Copy the active region into the clipboard slot and queue an
+    /// outbound OS-clipboard publish to the originating frontend.
+    /// Returns `false` (a no-op) when there is no region.
+    pub fn clipboard_copy(&mut self) -> bool {
+        let Some(bytes) = self.region_bytes() else {
+            return false;
+        };
+        self.clipboard_slot.clone_from(&bytes);
+        self.pending_clipboard = Some((self.active_frontend, bytes));
+        true
+    }
+
+    /// Cut: copy the region, then delete it. Returns `false` (a no-op)
+    /// when there is no region.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::delete_region`]'s error.
+    pub fn clipboard_cut(&mut self) -> Result<bool, String> {
+        if !self.clipboard_copy() {
+            return Ok(false);
+        }
+        self.delete_region()?;
+        Ok(true)
+    }
+
+    /// Paste the clipboard slot at the cursor, replacing the active
+    /// region if one exists (one undo step, like CUA type-over).
+    /// Returns `false` when the slot is empty.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the underlying edit error.
+    pub fn clipboard_paste(&mut self) -> Result<bool, String> {
+        if self.clipboard_slot.is_empty() {
+            return Ok(false);
+        }
+        let bytes = self.clipboard_slot.clone();
+        self.insert_bytes_over_region(&bytes)?;
+        Ok(true)
+    }
+
+    /// Insert externally-pasted bytes at the cursor (inbound OS paste:
+    /// terminal bracketed paste, or GPU Ctrl-V via `arboard`),
+    /// refreshing the slot so a later in-app paste repeats them.
+    /// Replaces the active region if one exists.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the underlying edit error.
+    pub fn paste_inbound(&mut self, data: &[u8]) -> Result<(), String> {
+        self.clipboard_slot = data.to_vec();
+        self.insert_bytes_over_region(data)
+    }
+
+    /// Shared insert/replace for paste: `Replace` over the active
+    /// region, else `Insert` at the cursor. The cursor lands just past
+    /// the inserted bytes and any selection is cleared. No-op insert for
+    /// empty `bytes`.
+    fn insert_bytes_over_region(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.active_window_mut().goal_col = None;
+        let start = if let Some((lo, hi)) = self.active_region() {
+            self.apply_active_edit(EditOp::Replace {
+                range: Range { start: lo, end: hi },
+                bytes,
+            })?;
+            lo
+        } else {
+            let pos = self.active_window().cursor;
+            self.apply_active_edit(EditOp::Insert { pos, bytes })?;
+            pos
+        };
+        let aw = self.active_window_mut();
+        aw.cursor = start + bytes.len() as u64;
+        aw.selection = None;
+        Ok(())
+    }
+
+    /// Select the whole active buffer (anchor at 0, cursor at the end).
+    pub fn select_all(&mut self) {
+        let len = self.active_buffer_len();
+        self.begin_selection(0);
+        let aw = self.active_window_mut();
+        aw.cursor = len;
+        aw.goal_col = None;
+    }
+
+    /// Drain the one-shot outbound clipboard publish, if any. Called by
+    /// the dispatcher each tick (alongside `pending_crdt_ops`).
+    pub fn take_pending_clipboard(&mut self) -> Option<(FrontendId, Vec<u8>)> {
+        self.pending_clipboard.take()
+    }
+
+    /// The current clipboard slot bytes (testing / introspection).
+    #[must_use]
+    pub fn clipboard_slot(&self) -> &[u8] {
+        &self.clipboard_slot
+    }
+
+    // ---- context menu (Q#CM1) ----------------------------------------------
+
+    /// True while a context menu is open.
+    #[must_use]
+    pub fn menu_is_open(&self) -> bool {
+        self.menu.lock().expect("menu mutex poisoned").is_some()
+    }
+
+    /// Open a menu of resolved `rows` anchored at the absolute `anchor`
+    /// cell. A no-op (stays closed) when no row is selectable. Attaches
+    /// the TUI overlay on first open (deduped by kind).
+    pub fn menu_open(&mut self, rows: Vec<crate::menu::MenuRow>, anchor: (u32, u32)) {
+        let state = crate::menu::MenuState::new(rows, anchor);
+        let opened = state.is_some();
+        *self.menu.lock().expect("menu mutex poisoned") = state;
+        if opened {
+            self.ensure_menu_overlay();
+        }
+    }
+
+    /// Close the menu (the overlay then self-suppresses).
+    pub fn menu_close(&mut self) {
+        *self.menu.lock().expect("menu mutex poisoned") = None;
+    }
+
+    /// Move the highlight by `delta` items (wrapping, skipping separators).
+    pub fn menu_step(&mut self, delta: isize) {
+        if let Some(m) = self.menu.lock().expect("menu mutex poisoned").as_mut() {
+            m.step(delta);
+        }
+    }
+
+    /// Set the highlight to `row` if it names a selectable item (mouse
+    /// hover / click).
+    pub fn menu_set_active_row(&mut self, row: usize) {
+        if let Some(m) = self.menu.lock().expect("menu mutex poisoned").as_mut()
+            && matches!(m.rows.get(row), Some(crate::menu::MenuRow::Item { .. }))
+        {
+            m.active = row;
+        }
+    }
+
+    /// The active item's command name, if a menu is open.
+    #[must_use]
+    pub fn menu_active_command(&self) -> Option<String> {
+        self.menu
+            .lock()
+            .expect("menu mutex poisoned")
+            .as_ref()
+            .and_then(|m| m.active_command().map(str::to_owned))
+    }
+
+    /// Hit-test an absolute cell against the open popup, returning the
+    /// selectable row it covers (or `None`).
+    #[must_use]
+    pub fn menu_hit(&self, row: u32, col: u32) -> Option<usize> {
+        self.menu
+            .lock()
+            .expect("menu mutex poisoned")
+            .as_ref()
+            .and_then(|m| m.hit(row, col))
+    }
+
+    /// Ensure the active window carries a [`crate::menu::MenuView`]
+    /// overlay (deduped by kind). The view reads the shared `menu`, so
+    /// one instance suffices; it renders nothing while the menu is closed.
+    fn ensure_menu_overlay(&mut self) {
+        let menu = self.menu.clone();
+        let win = self.active_window_mut();
+        if !win.overlay_kinds().contains(&"context-menu") {
+            win.push_overlay(Box::new(crate::menu::MenuView::new(menu)));
+        }
+    }
+
     /// Safely remove `buffer_id` from the registry. Any window that
     /// was displaying it is redirected to a fallback buffer (`*scratch*`,
     /// created on demand) so window state never refers to a missing id.
@@ -2028,6 +2257,118 @@ mod tests {
         s.backspace();
         assert_eq!(s.cursor(), 2);
         assert_eq!(s.active_buffer_len(), 2);
+    }
+
+    #[test]
+    fn copy_captures_region_and_queues_publish() {
+        let mut s = from_bytes(b"hello world");
+        s.begin_selection(0);
+        s.active_window_mut().cursor = 5; // region [0,5) = "hello"
+        assert!(s.clipboard_copy());
+        assert_eq!(s.clipboard_slot(), b"hello");
+        let (fid, bytes) = s.take_pending_clipboard().expect("publish queued");
+        assert_eq!(fid, s.active_frontend);
+        assert_eq!(bytes, b"hello");
+        // Drained: second take is None.
+        assert!(s.take_pending_clipboard().is_none());
+        // Copy does not mutate the buffer.
+        assert_eq!(s.active_buffer_len(), 11);
+    }
+
+    #[test]
+    fn copy_without_region_is_a_noop() {
+        let mut s = from_bytes(b"abc");
+        assert!(!s.clipboard_copy());
+        assert!(s.clipboard_slot().is_empty());
+        assert!(s.take_pending_clipboard().is_none());
+    }
+
+    #[test]
+    fn cut_copies_then_deletes_region() {
+        let mut s = from_bytes(b"hello world");
+        s.begin_selection(6);
+        s.active_window_mut().cursor = 11; // region [6,11) = "world"
+        assert!(s.clipboard_cut().unwrap());
+        assert_eq!(s.clipboard_slot(), b"world");
+        assert_eq!(s.buffer_bytes(s.active_buffer_id()), b"hello ");
+        assert_eq!(s.cursor(), 6);
+    }
+
+    #[test]
+    fn paste_inserts_slot_at_cursor() {
+        let mut s = from_bytes(b"ac");
+        // Seed the slot via a copy.
+        s.begin_selection(0);
+        s.active_window_mut().cursor = 1; // "a"
+        s.clipboard_copy();
+        // Paste "a" between a and c.
+        s.clear_selection();
+        s.active_window_mut().cursor = 1;
+        assert!(s.clipboard_paste().unwrap());
+        assert_eq!(s.buffer_bytes(s.active_buffer_id()), b"aac");
+        assert_eq!(s.cursor(), 2);
+    }
+
+    #[test]
+    fn paste_replaces_active_region_as_one_step() {
+        let mut s = from_bytes(b"hello world");
+        // Copy "hello".
+        s.begin_selection(0);
+        s.active_window_mut().cursor = 5;
+        s.clipboard_copy();
+        // Select "world" and paste over it.
+        s.begin_selection(6);
+        s.active_window_mut().cursor = 11;
+        assert!(s.clipboard_paste().unwrap());
+        assert_eq!(s.buffer_bytes(s.active_buffer_id()), b"hello hello");
+        assert!(s.active_region().is_none()); // selection cleared
+    }
+
+    #[test]
+    fn paste_with_empty_slot_is_a_noop() {
+        let mut s = from_bytes(b"abc");
+        assert!(!s.clipboard_paste().unwrap());
+        assert_eq!(s.active_buffer_len(), 3);
+    }
+
+    #[test]
+    fn paste_inbound_inserts_and_refreshes_slot() {
+        let mut s = from_bytes(b"ab");
+        s.active_window_mut().cursor = 1;
+        s.paste_inbound(b"XYZ").unwrap();
+        assert_eq!(s.buffer_bytes(s.active_buffer_id()), b"aXYZb");
+        assert_eq!(s.cursor(), 4);
+        // Slot refreshed, so an in-app paste repeats the external text.
+        assert_eq!(s.clipboard_slot(), b"XYZ");
+        // Inbound paste does NOT queue an outbound publish (no echo loop).
+        assert!(s.take_pending_clipboard().is_none());
+    }
+
+    #[test]
+    fn select_all_spans_the_buffer() {
+        let mut s = from_bytes(b"hello");
+        s.active_window_mut().cursor = 2;
+        s.select_all();
+        assert_eq!(s.active_region(), Some((0, 5)));
+        assert_eq!(s.region_bytes().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn word_at_cursor_reads_the_identifier() {
+        let mut s = from_bytes(b"foo bar_baz qux");
+        s.active_window_mut().cursor = 6; // inside "bar_baz"
+        assert_eq!(s.word_at_cursor().as_deref(), Some("bar_baz"));
+        s.active_window_mut().cursor = 0; // start of "foo"
+        assert_eq!(s.word_at_cursor().as_deref(), Some("foo"));
+        s.active_window_mut().cursor = 3; // just past "foo" → scans left
+        assert_eq!(s.word_at_cursor().as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn word_at_cursor_is_none_in_whitespace() {
+        let mut s = from_bytes(b"a   b");
+        s.active_window_mut().cursor = 2; // a run of spaces, none adjacent left
+        assert_eq!(s.word_at_cursor(), None);
     }
 
     #[test]

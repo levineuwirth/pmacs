@@ -59,6 +59,7 @@ use crate::highlight::{SyntaxHighlightView, Theme};
 use crate::hook::{Hook, HookRegistry};
 use crate::key::{display_sequence, parse_sequence};
 use crate::keymap_stack::KeymapStack;
+use crate::menu::{MenuItem, MenuRegistry};
 use crate::packages::{
     Address, Fetcher, InstallError, InstallPin, InstallScope, InstallSpec, InstalledPackage,
     Installer, LookupOutcome, ResolvedKind, lookup_in_roster,
@@ -87,6 +88,11 @@ pub type SharedCommandRegistry = Rc<RefCell<CommandRegistry>>;
 
 /// Shared, single-threaded handle to the keymap stack.
 pub type SharedKeymapStack = Rc<RefCell<KeymapStack>>;
+
+/// Shared handle to the context-menu registry. Cloned into the Lua
+/// `pmacs.menu.*` closures and stored as app data alongside the command
+/// and keymap registries.
+pub type SharedMenuRegistry = Rc<RefCell<MenuRegistry>>;
 
 /// Shared, single-threaded handle to the editor core --- the world
 /// state mutated by `pmacs.editor.*` primitives invoked from inside
@@ -1882,11 +1888,13 @@ pub fn install(
     registry: &SharedRegistry,
     commands: &SharedCommandRegistry,
     keymaps: &SharedKeymapStack,
+    menus: &SharedMenuRegistry,
     hooks: &SharedHookRegistry,
 ) -> mlua::Result<()> {
     lua.set_app_data(registry.clone());
     lua.set_app_data(commands.clone());
     lua.set_app_data(keymaps.clone());
+    lua.set_app_data(menus.clone());
     lua.set_app_data(hooks.clone());
     lua.set_app_data(InitCompleteFlag::new());
     lua.set_app_data(RequestedAttach::new());
@@ -1901,6 +1909,7 @@ pub fn install(
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
     pmacs.set("command", install_command_module(lua, commands)?)?;
     pmacs.set("keymap", install_keymap_module(lua, keymaps)?)?;
+    pmacs.set("menu", install_menu_module(lua, menus)?)?;
     pmacs.set("hook", install_hook_module(lua, hooks)?)?;
     // Wall-clock millis (since UNIX epoch). Used by builtin runtime
     // chunks for timeout loops; `os.clock()` only counts CPU time and
@@ -4415,6 +4424,113 @@ fn install_command_module(lua: &Lua, commands: &SharedCommandRegistry) -> mlua::
     }
 
     Ok(command)
+}
+
+/// Install `pmacs.menu.*` --- the context-menu item registry (Q#CM2).
+///
+/// Mirrors [`install_command_module`]: each closure clones the shared
+/// `Rc` and borrows on demand. `item` registers, `list` introspects,
+/// `remove`/`clear` tear down. Menu items reference commands by name
+/// (resolved at invoke time), so this module has no dependency on the
+/// command registry.
+fn install_menu_module(lua: &Lua, menus: &SharedMenuRegistry) -> mlua::Result<Table> {
+    let menu = lua.create_table()?;
+
+    {
+        let ms = menus.clone();
+        menu.set(
+            "item",
+            lua.create_function(move |lua, spec: Table| -> mlua::Result<()> {
+                let item = build_menu_item_from_spec(lua, &spec)?;
+                ms.borrow_mut().add(item).map_err(mlua::Error::external)?;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let ms = menus.clone();
+        menu.set(
+            "list",
+            lua.create_function(move |lua, ()| {
+                let r = ms.borrow();
+                let out = lua.create_table()?;
+                for (i, item) in r.items().iter().enumerate() {
+                    let t = lua.create_table()?;
+                    if let Some(id) = &item.id {
+                        t.set("id", id.clone())?;
+                    }
+                    t.set("label", item.label.clone())?;
+                    t.set("command", item.command.clone())?;
+                    if let Some(context) = &item.context {
+                        t.set("context", context.clone())?;
+                    }
+                    t.set("group", item.group.clone())?;
+                    t.set("order", item.order)?;
+                    t.set("has_predicate", item.predicate.is_some())?;
+                    out.set(i + 1, t)?;
+                }
+                Ok(out)
+            })?,
+        )?;
+    }
+
+    {
+        // `pmacs.menu.remove(id)` drops the item(s) carrying `id`.
+        // Returns `true` if anything was removed --- the symmetric
+        // inverse of `item`, mirroring `pmacs.command.unregister`. Lets
+        // a user config hide a builtin item idempotently.
+        let ms = menus.clone();
+        menu.set(
+            "remove",
+            lua.create_function(move |_, id: String| Ok(ms.borrow_mut().remove(&id)))?,
+        )?;
+    }
+
+    {
+        // `pmacs.menu.clear()` empties the registry --- the reset used
+        // when a config wants to rebuild the menu from scratch.
+        let ms = menus.clone();
+        menu.set(
+            "clear",
+            lua.create_function(move |_, ()| {
+                ms.borrow_mut().clear();
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        // `pmacs.menu._raw()` --- internal accessor returning items
+        // *with* their predicate functions (which `list` omits), so the
+        // Lua menu builder (`pmacs.menu.build`) can evaluate visibility.
+        // Underscore-prefixed: not part of the user-facing surface.
+        let ms = menus.clone();
+        menu.set(
+            "_raw",
+            lua.create_function(move |lua, ()| {
+                let r = ms.borrow();
+                let out = lua.create_table()?;
+                for (i, item) in r.items().iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("label", item.label.clone())?;
+                    t.set("command", item.command.clone())?;
+                    if let Some(context) = &item.context {
+                        t.set("context", context.clone())?;
+                    }
+                    t.set("group", item.group.clone())?;
+                    t.set("order", item.order)?;
+                    if let Some(predicate) = &item.predicate {
+                        t.set("predicate", predicate.clone())?;
+                    }
+                    out.set(i + 1, t)?;
+                }
+                Ok(out)
+            })?,
+        )?;
+    }
+
+    Ok(menu)
 }
 
 #[allow(
@@ -11559,6 +11675,16 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         )?;
     }
     {
+        // The identifier under the cursor, or nil (Q#CM3 `symbol`
+        // context). The context menu uses it to decide whether to show
+        // symbol-oriented LSP items.
+        let cc = core.clone();
+        editor.set(
+            "word_at_cursor",
+            lua.create_function(move |_, ()| Ok(cc.borrow().word_at_cursor()))?,
+        )?;
+    }
+    {
         // Active buffer's backing file path, or `nil` if none. Used by
         // the LSP runtime to compute file:// URIs and locate the
         // enclosing project root.
@@ -11628,6 +11754,50 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             lua.create_function(move |_, anchor: i64| {
                 let anchor = u64::try_from(anchor).map_err(mlua::Error::external)?;
                 cc.borrow_mut().begin_selection(anchor);
+                Ok(())
+            })?,
+        )?;
+    }
+    // Q#CM6: clipboard primitives. Copy/cut publish the region to the
+    // OS clipboard (the daemon drains the queued publish and sends
+    // `InstanceSignal::Clipboard` to the originating frontend); paste
+    // inserts the in-core slot. Each returns whether it acted, so the
+    // `edit.*` commands can report status / fall through.
+    {
+        let cc = core.clone();
+        editor.set(
+            "clipboard_copy",
+            lua.create_function(move |_, ()| Ok(cc.borrow_mut().clipboard_copy()))?,
+        )?;
+    }
+    {
+        let cc = core.clone();
+        editor.set(
+            "clipboard_cut",
+            lua.create_function(move |_, ()| -> mlua::Result<bool> {
+                cc.borrow_mut()
+                    .clipboard_cut()
+                    .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+    {
+        let cc = core.clone();
+        editor.set(
+            "clipboard_paste",
+            lua.create_function(move |_, ()| -> mlua::Result<bool> {
+                cc.borrow_mut()
+                    .clipboard_paste()
+                    .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+    {
+        let cc = core.clone();
+        editor.set(
+            "select_all",
+            lua.create_function(move |_, ()| {
+                cc.borrow_mut().select_all();
                 Ok(())
             })?,
         )?;
@@ -12089,6 +12259,64 @@ fn build_command_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<Command> {
     })
 }
 
+/// Build a [`MenuItem`] from a `pmacs.menu.item` spec table.
+///
+/// Mirrors [`build_command_from_spec`]: rejects unknown keys (R50
+/// typo-detection) before reading, then pulls the fields. `label` and
+/// `command` are required strings; `id`, `context`, `predicate`,
+/// `group`, and `order` are optional. The registry validates the
+/// `context` vocabulary and non-empty invariants.
+fn build_menu_item_from_spec(lua: &Lua, spec: &Table) -> mlua::Result<MenuItem> {
+    for pair in spec.clone().pairs::<Value, Value>() {
+        let (k, _) = pair?;
+        let key = match k {
+            Value::String(s) => s.to_str()?.to_string(),
+            other => {
+                return Err(mlua::Error::external(BindingError::NonStringSpecKey {
+                    got: other.type_name().to_string(),
+                }));
+            }
+        };
+        if !matches!(
+            key.as_str(),
+            "id" | "label" | "command" | "context" | "predicate" | "group" | "order"
+        ) {
+            return Err(mlua::Error::external(
+                crate::menu::MenuError::UnknownField { field: key },
+            ));
+        }
+    }
+
+    let label: String = spec.get("label").map_err(|_| {
+        mlua::Error::external(BindingError::SpecFieldType {
+            field: "label",
+            expected: "string",
+        })
+    })?;
+    let command: String = spec.get("command").map_err(|_| {
+        mlua::Error::external(BindingError::SpecFieldType {
+            field: "command",
+            expected: "string",
+        })
+    })?;
+    let id: Option<String> = spec.get("id")?;
+    let context: Option<String> = spec.get("context")?;
+    let predicate: Option<Function> = spec.get("predicate")?;
+    let group: String = spec.get::<Option<String>>("group")?.unwrap_or_default();
+    let order: i64 = spec.get::<Option<i64>>("order")?.unwrap_or(0);
+
+    Ok(MenuItem {
+        id,
+        label,
+        command,
+        context,
+        predicate,
+        group,
+        order,
+        source: caller_source(lua, 2),
+    })
+}
+
 /// Inspect the Lua call stack at `level` frames above the C boundary
 /// and return the caller's source location, or a default if debug info
 /// is unavailable.
@@ -12188,8 +12416,12 @@ mod tests {
         let reg: SharedRegistry = Rc::new(RefCell::new(BufferRegistry::new()));
         let cmds: SharedCommandRegistry = Rc::new(RefCell::new(CommandRegistry::new()));
         let kms: SharedKeymapStack = Rc::new(RefCell::new(KeymapStack::new()));
+        // The menu registry isn't returned --- install clones it into
+        // app data, which keeps it alive for the VM's lifetime, so tests
+        // that don't exercise menus needn't carry the handle.
+        let mns: SharedMenuRegistry = Rc::new(RefCell::new(MenuRegistry::new()));
         let hks: SharedHookRegistry = Rc::new(RefCell::new(HookRegistry::new()));
-        install(&lua, &reg, &cmds, &kms, &hks).expect("install");
+        install(&lua, &reg, &cmds, &kms, &mns, &hks).expect("install");
         (lua, reg, cmds, kms, hks)
     }
 
@@ -12222,6 +12454,97 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn menu_item_registers_and_lists_with_defaults() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let (label, command, group, order, has_pred): (String, String, String, i64, bool) = lua
+            .load(
+                r#"
+                pmacs.menu.item { label = "Copy", command = "edit.copy" }
+                local items = pmacs.menu.list()
+                assert(#items == 1, "one item")
+                local it = items[1]
+                return it.label, it.command, it.group, it.order, it.has_predicate
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(label, "Copy");
+        assert_eq!(command, "edit.copy");
+        assert_eq!(group, ""); // group defaults to empty
+        assert_eq!(order, 0); // order defaults to 0
+        assert!(!has_pred); // no predicate given
+    }
+
+    #[test]
+    fn menu_item_carries_context_and_predicate_through() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let (context, has_pred): (String, bool) = lua
+            .load(
+                r#"
+                pmacs.menu.item {
+                  label = "Paste", command = "edit.paste",
+                  context = "selection",
+                  predicate = function(cx) return true end,
+                  group = "edit", order = 30,
+                }
+                local it = pmacs.menu.list()[1]
+                return it.context, it.has_predicate
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(context, "selection");
+        assert!(has_pred);
+    }
+
+    #[test]
+    fn menu_remove_and_clear_work() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let (removed, removed_again, after_clear): (bool, bool, i64) = lua
+            .load(
+                r#"
+                pmacs.menu.item { id = "a", label = "A", command = "cmd.a" }
+                pmacs.menu.item { label = "B", command = "cmd.b" }
+                local r1 = pmacs.menu.remove("a")
+                local r2 = pmacs.menu.remove("a")
+                pmacs.menu.clear()
+                return r1, r2, #pmacs.menu.list()
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(removed);
+        assert!(!removed_again);
+        assert_eq!(after_clear, 0);
+    }
+
+    #[test]
+    fn menu_item_rejects_unknown_field() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let err = lua
+            .load(r#"pmacs.menu.item { label = "X", command = "x", colour = "red" }"#)
+            .exec()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `colour`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn menu_item_rejects_unknown_context() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let err = lua
+            .load(r#"pmacs.menu.item { label = "X", command = "x", context = "selecton" }"#)
+            .exec()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown context `selecton`"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -35,8 +35,9 @@ use crate::keymap_stack::KeymapStack;
 use crate::lua_bindings::{
     self, CurrentAttachmentSlot, InitCompleteFlag, LocalInstanceInfo, PackageInstallOverride,
     RequestedAttach, SharedCommandRegistry, SharedCore, SharedHookRegistry, SharedKeymapStack,
-    SharedRegistry,
+    SharedMenuRegistry, SharedRegistry,
 };
+use crate::menu::MenuRegistry;
 use crate::protocol::{AttachTarget, AttachmentHandle, InstanceIdentity};
 
 // `Rc` and `RefCell` are pulled in for the registry-owning fields.
@@ -76,6 +77,9 @@ pub struct LuaHost {
     /// once T M2.5 lands; M2.4 builds the system without yet routing
     /// the live event stream through it.
     keymaps: SharedKeymapStack,
+    /// Context-menu registry (Q#CM2). Lua bindings (`pmacs.menu.*`) and
+    /// the menu builder in the core share this through `Rc`.
+    menus: SharedMenuRegistry,
     /// Hook registry. Stub for T M2.11 introspection; T M2.6 will wire
     /// execution at the relevant call sites.
     hooks: SharedHookRegistry,
@@ -142,13 +146,15 @@ impl LuaHost {
         );
         let commands: SharedCommandRegistry = Rc::new(RefCell::new(CommandRegistry::new()));
         let keymaps: SharedKeymapStack = Rc::new(RefCell::new(KeymapStack::new()));
+        let menus: SharedMenuRegistry = Rc::new(RefCell::new(MenuRegistry::new()));
         let hooks: SharedHookRegistry = Rc::new(RefCell::new(HookRegistry::new()));
-        lua_bindings::install(&lua, &registry, &commands, &keymaps, &hooks)?;
+        lua_bindings::install(&lua, &registry, &commands, &keymaps, &menus, &hooks)?;
         Ok(Self {
             lua,
             registry,
             commands,
             keymaps,
+            menus,
             hooks,
             core: None,
             errors: Vec::new(),
@@ -204,6 +210,13 @@ impl LuaHost {
         &self.keymaps
     }
 
+    /// Shared handle to the context-menu registry. The menu builder
+    /// resolves visible items against this when a right-click opens the
+    /// menu (Q#CM2).
+    pub fn menus(&self) -> &SharedMenuRegistry {
+        &self.menus
+    }
+
     /// Shared handle to the hook registry. T M2.11 surfaces it via
     /// `pmacs.describe.hook`; T M2.6 will wire actual hook execution
     /// into the appropriate editor lifecycle points.
@@ -239,6 +252,12 @@ impl LuaHost {
         self.load_builtin(
             "@pmacs/builtin/keymaps/default.lua",
             include_str!("../builtin/keymaps/default.lua"),
+        )?;
+        // Menus last: items reference commands (and conceptually keys),
+        // so both registries must be populated first.
+        self.load_builtin(
+            "@pmacs/builtin/menus/default.lua",
+            include_str!("../builtin/menus/default.lua"),
         )?;
         Ok(())
     }
