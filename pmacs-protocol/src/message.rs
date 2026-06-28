@@ -335,6 +335,22 @@ pub enum FrontendEvent {
         /// Shift-click extension; the v5 instance ignores them.
         mods: Modifiers,
     },
+    /// Navigate an open context menu (Q#CM1, protocol v11). A semantic
+    /// frontend hit-tests the popup it drew locally and reports the row
+    /// the pointer is over, so the daemon never needs the frontend's
+    /// pixels — symmetric with how the GPU owns its viewport. Sent only
+    /// while the daemon's menu is open.
+    MenuPointer {
+        /// Which frontend produced the gesture.
+        frontend_id: FrontendId,
+        /// Row index the pointer is over, or `None` when it left the
+        /// popup (a hover off the menu, or a click outside).
+        index: Option<u32>,
+        /// `true` on a click/release: invoke `index`'s item, or dismiss
+        /// the menu when `index` is `None`. `false` is a hover that only
+        /// moves the highlight.
+        invoke: bool,
+    },
 }
 
 /// Gesture step for [`FrontendEvent::Pointer`]. Double-click
@@ -358,6 +374,10 @@ pub enum PointerKind {
     /// sends this only to a `>= 7` instance; against an older one
     /// the third click restarts the chain as a plain `Down`.
     TripleDown,
+    /// Secondary (right) button pressed at `byte` — opens the context
+    /// menu there (Q#CM1, protocol v11). The frontend sends this only to
+    /// a `>= 11` instance.
+    Context,
 }
 
 impl FrontendEvent {
@@ -374,7 +394,8 @@ impl FrontendEvent {
             | Self::Detach(frontend_id)
             | Self::CrdtOp { frontend_id, .. }
             | Self::Viewport { frontend_id, .. }
-            | Self::Pointer { frontend_id, .. } => *frontend_id,
+            | Self::Pointer { frontend_id, .. }
+            | Self::MenuPointer { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -847,6 +868,30 @@ pub enum InstanceMessage {
         /// in literal mode.
         invalid: bool,
     },
+    /// Open-menu contents for a semantic frontend (Q#CM1, protocol v11).
+    /// The daemon resolves the visible items (predicates / context tags)
+    /// and ships the rendered rows + highlight; the frontend draws the
+    /// popup at the pixel it remembered from the right-click and reports
+    /// navigation via [`FrontendEvent::MenuPointer`]. An empty `rows`
+    /// closes the menu. Cached-compare suppressed like `SearchPrompt`.
+    MenuPrompt {
+        /// Buffer the menu is anchored in (the active buffer).
+        buffer_id: crate::BufferId,
+        /// Rows top-to-bottom (items + separators); empty = closed.
+        rows: Vec<MenuPromptRow>,
+        /// Index into `rows` of the highlighted item, or `None` when
+        /// closed.
+        active: Option<u32>,
+    },
+}
+
+/// One row of an open menu on the wire ([`InstanceMessage::MenuPrompt`]).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MenuPromptRow {
+    /// Display label (empty and ignored when `separator`).
+    pub label: String,
+    /// `true` for a non-selectable group divider.
+    pub separator: bool,
 }
 
 /// Flat selection state for the wire.
@@ -1113,7 +1158,7 @@ pub enum ResourceBody {
 /// encoding. Still daemon-gated per session (now at `< 10`); a v9 peer
 /// negotiates v9 and simply receives no `SearchPrompt` (the decorations
 /// still highlight), rather than mis-decoding the wider shape.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1161,7 +1206,12 @@ pub const PROTOCOL_VERSION: u32 = 10;
 /// `regex` / `invalid` (encoding change to that variant); v9 and v10
 /// interoperate because the variant is daemon-gated per session, so a
 /// v9 peer is simply never sent the wider shape.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10];
+///
+/// Q#CM1: extended to `[6, 7, 8, 9, 10, 11]`. The context menu adds
+/// `PointerKind::Context` (frontend-gated like `Pointer`/`TripleDown`),
+/// `FrontendEvent::MenuPointer`, and `InstanceMessage::MenuPrompt`
+/// (daemon-gated per session) — all additive, so the ladder resumes.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

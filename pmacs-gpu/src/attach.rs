@@ -279,6 +279,33 @@ impl AttachClient {
         })
     }
 
+    /// Send a `FrontendEvent::Paste` (Q#CM6) carrying OS-clipboard
+    /// bytes read locally via `arboard` on Ctrl-V. The daemon inserts it
+    /// at the cursor (replacing any region) and refreshes its clipboard
+    /// slot, exactly as it handles the TUI's bracketed paste.
+    pub fn send_paste(&self, data: Vec<u8>) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::Paste {
+            frontend_id: self.frontend_id,
+            data,
+        })
+    }
+
+    /// Send a `FrontendEvent::MenuPointer` (Q#CM1) — open-menu
+    /// navigation hit-tested locally against the popup we drew. `index`
+    /// is the row the pointer is over (`None` = off the menu); `invoke`
+    /// marks a click (invoke the row, or dismiss when `index` is `None`).
+    pub fn send_menu_pointer(
+        &self,
+        index: Option<u32>,
+        invoke: bool,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::MenuPointer {
+            frontend_id: self.frontend_id,
+            index,
+            invoke,
+        })
+    }
+
     /// The daemon's negotiated wire version from `Hello`.
     pub fn server_protocol_version(&self) -> u32 {
         self.server_protocol_version

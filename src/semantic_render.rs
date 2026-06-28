@@ -37,7 +37,7 @@ use crate::cell::Style;
 use crate::editor::EditorState;
 use crate::protocol::{
     AdornmentContent, AdornmentPlacement, ByteRange, Decoration, DecorationKind, DecorationSegment,
-    FrontendId, InlineAdornment, InstanceMessage, StyleSegment, StyleSpan,
+    FrontendId, InlineAdornment, InstanceMessage, MenuPromptRow, StyleSegment, StyleSpan,
 };
 
 /// The viewport a `semantic_render` frontend last declared.
@@ -80,6 +80,11 @@ struct LastFrame<T> {
 /// (Q#SR5 / Q#RX6): `(query, active, total, regex, invalid)`. A `None`
 /// query means the last emission cleared the band.
 type SearchPromptFacts = (Option<String>, Option<u32>, u32, bool, bool);
+
+/// Cached `MenuPrompt` payload for cached-compare suppression (Q#CM1):
+/// `(rows, active)`. Empty `rows` means the last emission closed the
+/// menu.
+type MenuPromptFacts = (Vec<MenuPromptRow>, Option<u32>);
 
 /// Owns one `semantic_render` session's projection state: the last
 /// viewport the frontend declared, and the diff baseline per buffer
@@ -129,6 +134,9 @@ pub struct SemanticRenderState {
     /// Last emitted `SearchPrompt` payload per buffer, for
     /// cached-compare suppression (see [`SearchPromptFacts`]).
     last_search_prompt: HashMap<BufferId, SearchPromptFacts>,
+    /// Last emitted `MenuPrompt` payload per buffer (Q#CM1), for
+    /// cached-compare suppression (see [`MenuPromptFacts`]).
+    last_menu_prompt: HashMap<BufferId, MenuPromptFacts>,
     /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
     /// the tree-sitter highlights query over the *whole declared
     /// viewport* (which the GPU frontend sets to the entire buffer)
@@ -198,6 +206,7 @@ impl SemanticRenderState {
             last_decorations: HashMap::new(),
             last_adornments: HashMap::new(),
             last_search_prompt: HashMap::new(),
+            last_menu_prompt: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
             last_style_gate: HashMap::new(),
@@ -400,6 +409,8 @@ impl SemanticRenderState {
         out.extend(self.status_facts_msg(state, vp.buffer_id));
         // --- SearchPrompt (isearch band; Q#SR5, protocol v9) ---
         out.extend(self.search_prompt_msg(state, vp.buffer_id));
+        // --- MenuPrompt (context menu; Q#CM1, protocol v11) ---
+        out.extend(self.menu_prompt_msg(state, vp.buffer_id));
         out
     }
 
@@ -463,6 +474,63 @@ impl SemanticRenderState {
             invalid: facts.4,
         };
         self.last_search_prompt.insert(buffer_id, facts);
+        Some(msg)
+    }
+
+    /// The `MenuPrompt` message for this frame, or `None` when the menu
+    /// state for `buffer_id` is unchanged (Q#CM1). Only the active
+    /// buffer carries a live menu (it shadows dispatch). Closed = empty
+    /// `rows`; first sight of a buffer with no menu stays silent (like
+    /// `search_prompt_msg`). The daemon keeps the variant off wires
+    /// negotiated `< 11`.
+    fn menu_prompt_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> Option<InstanceMessage> {
+        let facts: MenuPromptFacts = {
+            let core = state.core.borrow();
+            if buffer_id != core.active_buffer_id() {
+                return None;
+            }
+            let guard = core.menu.lock().expect("menu mutex poisoned");
+            match guard.as_ref() {
+                Some(m) => {
+                    let rows = m
+                        .rows
+                        .iter()
+                        .map(|r| match r {
+                            crate::menu::MenuRow::Item { label, .. } => MenuPromptRow {
+                                label: label.clone(),
+                                separator: false,
+                            },
+                            crate::menu::MenuRow::Separator => MenuPromptRow {
+                                label: String::new(),
+                                separator: true,
+                            },
+                        })
+                        .collect();
+                    (rows, u32::try_from(m.active).ok())
+                }
+                None => (Vec::new(), None),
+            }
+        };
+        let cached = self.last_menu_prompt.get(&buffer_id);
+        if cached == Some(&facts) {
+            return None;
+        }
+        // First sight, menu closed: nothing to clear, stay silent (record
+        // the baseline so a later open→close still diffs).
+        if cached.is_none() && facts.0.is_empty() {
+            self.last_menu_prompt.insert(buffer_id, facts);
+            return None;
+        }
+        let msg = InstanceMessage::MenuPrompt {
+            buffer_id,
+            rows: facts.0.clone(),
+            active: facts.1,
+        };
+        self.last_menu_prompt.insert(buffer_id, facts);
         Some(msg)
     }
 

@@ -47,7 +47,7 @@ use std::io::{self, BufWriter, Stdout, Write};
 use std::time::Duration;
 
 #[cfg(feature = "crdt")]
-use crossterm::{cursor::MoveLeft, style::Print};
+use crossterm::cursor::MoveLeft;
 use crossterm::{
     cursor::{self, MoveTo},
     event::{
@@ -56,7 +56,7 @@ use crossterm::{
     },
     queue,
     style::{
-        Attribute, Color as CtColor, ResetColor, SetAttribute, SetBackgroundColor,
+        Attribute, Color as CtColor, Print, ResetColor, SetAttribute, SetBackgroundColor,
         SetForegroundColor,
     },
     terminal::{
@@ -66,7 +66,7 @@ use crossterm::{
 };
 
 use crate::cell::{CellSize, Color, DiffSpan, Glyph, Style};
-use crate::protocol::InstanceMessage;
+use crate::protocol::{InstanceMessage, InstanceSignal};
 
 // Re-export the input event types so callers don't depend on crossterm
 // directly. M2's keymap will translate these into normalized commands.
@@ -340,7 +340,16 @@ impl Frontend {
                     queue!(self.out, cursor::Hide)?;
                 }
             },
+            // Q#CM6 — publish to the OS clipboard via OSC 52. Writes are
+            // reliable in modern terminals; OSC 52 *reads* are widely
+            // disabled for security, which is why inbound paste rides
+            // bracketed paste rather than querying the clipboard here.
+            InstanceMessage::Signal(InstanceSignal::Clipboard(data)) => {
+                let payload = format!("\x1b]52;c;{}\x07", osc52_base64(data));
+                queue!(self.out, Print(payload))?;
+            }
             InstanceMessage::ModeLine(_)
+            // Bell / window-title Signals stay reserved for v0.3.
             | InstanceMessage::Signal(_)
             | InstanceMessage::Goodbye(_)
             // T M10.5: CrdtOp's wire shape exists; the v1.0 TUI doesn't
@@ -388,6 +397,10 @@ impl Frontend {
             // family member; the cell-grid TUI never negotiates it and
             // drops it silently if one arrives.
             | InstanceMessage::SearchPrompt { .. }
+            // Q#CM1 — MenuPrompt is the semantic-frontend menu surface;
+            // the TUI renders the menu via its cell overlay instead, so
+            // it drops this silently like the other semantic families.
+            | InstanceMessage::MenuPrompt { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path
@@ -678,6 +691,34 @@ fn to_ct_color(c: Color) -> CtColor {
     }
 }
 
+/// Standard-alphabet base64 (RFC 4648, with padding) for the OSC 52
+/// clipboard payload (Q#CM6). Inlined rather than pulling a crate: the
+/// only consumer is the clipboard escape, and the encoder is a dozen
+/// lines with no edge cases beyond the 1-/2-byte tail.
+fn osc52_base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(ALPHABET[(n >> 18) as usize & 0x3f] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 0x3f] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests (pure parts only --- the lifecycle machinery requires a TTY)
 // ---------------------------------------------------------------------------
@@ -686,6 +727,18 @@ fn to_ct_color(c: Color) -> CtColor {
 mod tests {
     use super::*;
     use crate::cell::{Cell, CellCoord, Glyph, Style};
+
+    #[test]
+    fn osc52_base64_matches_known_vectors() {
+        // RFC 4648 §10 test vectors exercise both tail lengths.
+        assert_eq!(osc52_base64(b""), "");
+        assert_eq!(osc52_base64(b"f"), "Zg==");
+        assert_eq!(osc52_base64(b"fo"), "Zm8=");
+        assert_eq!(osc52_base64(b"foo"), "Zm9v");
+        assert_eq!(osc52_base64(b"foob"), "Zm9vYg==");
+        assert_eq!(osc52_base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(osc52_base64(b"foobar"), "Zm9vYmFy");
+    }
 
     fn ch(c: char) -> Cell {
         Cell {
