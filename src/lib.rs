@@ -77,6 +77,7 @@ pub mod lua;
 pub mod lua_bindings;
 pub mod lua_isolation;
 pub mod mcp;
+pub mod menu;
 pub mod message_bus;
 pub mod minibuffer;
 // T M10.10: frontend-side optimistic-apply infrastructure (predicate
