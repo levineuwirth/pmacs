@@ -65,7 +65,8 @@ use crate::presence::{PresenceSnapshot, SessionRegistry};
 use crate::protocol::crossterm_translate::{key_to_crossterm, mouse_to_crossterm};
 use crate::protocol::{
     AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello, InstanceCapabilities,
-    InstanceIdentity, InstanceMessage, PROTOCOL_VERSION, SelectionSnapshot,
+    InstanceIdentity, InstanceMessage, InstanceSignal, PROTOCOL_VERSION, PointerKind,
+    SelectionSnapshot,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
@@ -920,6 +921,21 @@ fn dispatcher_loop(
             let _ = std::mem::take(&mut editor.core.borrow_mut().pending_crdt_ops);
         }
 
+        // Q#CM6 — outbound clipboard publish. A copy/cut queued the
+        // region bytes for the originating frontend; deliver them as an
+        // `InstanceSignal::Clipboard` (a v6-floor variant every peer
+        // understands, so no version gate) and let the frontend write
+        // the OS clipboard (OSC 52 / arboard). One-shot, like the CRDT
+        // drain above.
+        if let Some((fid, bytes)) = editor.core.borrow_mut().take_pending_clipboard()
+            && let Some(stream) = streams.get_mut(&fid)
+        {
+            let _ = write_message(
+                stream,
+                &InstanceMessage::Signal(InstanceSignal::Clipboard(bytes)),
+            );
+        }
+
         for fid in &attached_fids {
             editor.core.borrow_mut().active_frontend = *fid;
 
@@ -1028,6 +1044,9 @@ fn dispatcher_loop(
                 let peer_knows_search_prompt = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 10);
+                let peer_knows_menu_prompt = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 11);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1036,6 +1055,13 @@ fn dispatcher_loop(
                     }
                     if !peer_knows_search_prompt
                         && matches!(msg, InstanceMessage::SearchPrompt { .. })
+                    {
+                        continue;
+                    }
+                    // Q#CM1 — MenuPrompt gated at v11; a v10 peer keeps
+                    // its decoration-only highlights and never opens a
+                    // GPU menu, rather than mis-decoding the new variant.
+                    if !peer_knows_menu_prompt && matches!(msg, InstanceMessage::MenuPrompt { .. })
                     {
                         continue;
                     }
@@ -1398,7 +1424,21 @@ fn handle_dispatcher_event(
                     // displaying: a click can race a buffer switch.
                     if semantic_states.contains_key(&source) {
                         align_semantic_window_to_buffer(editor, source, buffer_id);
-                        editor.dispatch_pointer(source, buffer_id, byte, kind, mods);
+                        if kind == PointerKind::Context {
+                            // Q#CM1 — right-click opens the context menu
+                            // at the hit byte (needs the Lua builder, so
+                            // it routes here rather than dispatch_pointer).
+                            editor.open_menu_at_byte(source, buffer_id, byte);
+                        } else {
+                            editor.dispatch_pointer(source, buffer_id, byte, kind, mods);
+                        }
+                    }
+                }
+                FrontendEvent::MenuPointer { index, invoke, .. } => {
+                    // Q#CM1 — semantic frontend menu navigation (hover /
+                    // click), hit-tested against the popup it drew locally.
+                    if semantic_states.contains_key(&source) {
+                        editor.dispatch_menu_pointer(source, index, invoke);
                     }
                 }
                 _ => {
@@ -2056,8 +2096,20 @@ fn apply_event(
             render_state.resize(size);
             *term_size = size;
         }
-        FrontendEvent::Paste { .. }
-        | FrontendEvent::FocusGained(_)
+        FrontendEvent::Paste { frontend_id, data } => {
+            // Q#CM6 — inbound OS paste (terminal bracketed paste, or
+            // GPU Ctrl-V reading `arboard`). Insert at the cursor of the
+            // originating frontend's active window, replacing any region,
+            // and refresh the clipboard slot so a later in-app paste
+            // repeats the same text. (Previously dropped: pmacs had
+            // never honored a paste.)
+            let mut core = editor.core.borrow_mut();
+            core.active_frontend = frontend_id;
+            if let Err(e) = core.paste_inbound(&data) {
+                eprintln!("pmacs: inbound paste failed: {e}");
+            }
+        }
+        FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
         // consumer is the instance-side projection seam
@@ -2103,6 +2155,14 @@ fn apply_event(
             eprintln!(
                 "pmacs daemon: FrontendEvent::Pointer from a grid session; dropping \
                  (semantic sessions route via apply_semantic_input_event)"
+            );
+        }
+        FrontendEvent::MenuPointer { .. } => {
+            // Q#CM1 — like Pointer, only semantic sessions emit
+            // MenuPointer, routed by the authenticated source in
+            // `handle_dispatcher_event`. Drop a grid session's.
+            eprintln!(
+                "pmacs daemon: FrontendEvent::MenuPointer from a grid session; dropping"
             );
         }
     }

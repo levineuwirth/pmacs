@@ -470,7 +470,10 @@ impl EditorState {
             return false;
         }
         let core = self.core.borrow();
-        !core.minibuffer.is_active() && !core.search_active()
+        // A live context menu shadows the keymap too (Q#CM1): keys must
+        // round-trip so the daemon's `dispatch_menu_key` drives the menu
+        // rather than the frontend self-inserting.
+        !core.minibuffer.is_active() && !core.search_active() && !core.menu_is_open()
     }
 
     /// `frontend_id` records which frontend produced the event. v0.1
@@ -488,6 +491,15 @@ impl EditorState {
             let mut core = self.core.borrow_mut();
             core.status.clear();
             core.active_frontend = frontend_id;
+        }
+
+        // Context-menu interception (Q#CM1): while a menu is open every
+        // key drives it (navigate / invoke / dismiss), shadowing the
+        // global keymap like search and the minibuffer. Same shared path
+        // both frontends reach via the `FrontendEvent::Key` round-trip.
+        if self.core.borrow().menu_is_open() {
+            self.dispatch_menu_key(chord);
+            return;
         }
 
         // Incremental-search interception: while an isearch is running,
@@ -661,6 +673,111 @@ impl EditorState {
         }
     }
 
+    /// Drive an open context menu from a keystroke (Q#CM1).
+    fn dispatch_menu_key(&mut self, chord: Chord) {
+        match MenuKey::from_chord(chord) {
+            MenuKey::Next => self.core.borrow_mut().menu_step(1),
+            MenuKey::Prev => self.core.borrow_mut().menu_step(-1),
+            MenuKey::Invoke => self.menu_invoke_active(),
+            MenuKey::Cancel | MenuKey::Dismiss => self.core.borrow_mut().menu_close(),
+        }
+    }
+
+    /// Close the menu, then invoke its highlighted item's command. The
+    /// menu closes *first* so the command runs against a clean state
+    /// (and a command that itself opens a menu isn't immediately torn
+    /// down).
+    fn menu_invoke_active(&mut self) {
+        let command = self.core.borrow().menu_active_command();
+        self.core.borrow_mut().menu_close();
+        if let Some(command) = command
+            && let Err(e) = self
+                .lua_host
+                .invoke_command(&command, mlua::MultiValue::new())
+        {
+            self.core.borrow_mut().status =
+                format!("error in {command}: {}", first_line(&e.to_string()));
+        }
+    }
+
+    /// Build the resolved, grouped, visibility-filtered menu rows by
+    /// calling the Lua builder (`pmacs.menu.build`), which evaluates each
+    /// item's predicate / context tag against the live editor state.
+    /// Returns an empty list on any Lua error (the menu then won't open).
+    fn build_menu_rows(&mut self) -> Vec<crate::menu::MenuRow> {
+        let value = match self
+            .lua_host
+            .eval(Some("@pmacs/menu/build"), "return pmacs.menu.build()")
+        {
+            Ok(v) => v,
+            Err(e) => {
+                self.core.borrow_mut().status =
+                    format!("menu build failed: {}", first_line(&e.to_string()));
+                return Vec::new();
+            }
+        };
+        let mlua::Value::Table(table) = value else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for entry in table.sequence_values::<mlua::Table>() {
+            let Ok(t) = entry else { continue };
+            if t.get::<Option<bool>>("separator").ok().flatten() == Some(true) {
+                rows.push(crate::menu::MenuRow::Separator);
+            } else if let (Ok(label), Ok(command)) =
+                (t.get::<String>("label"), t.get::<String>("command"))
+            {
+                rows.push(crate::menu::MenuRow::Item { label, command });
+            }
+        }
+        rows
+    }
+
+    /// Open the context menu at the click cell (Q#CM1). Anchors the
+    /// cursor: an existing selection is kept (so Copy/Cut act on it);
+    /// otherwise the cursor moves to the click and any selection clears.
+    fn open_context_menu(
+        &mut self,
+        win_id: WindowId,
+        local_row: u32,
+        local_col: u32,
+        anchor: (u32, u32),
+    ) {
+        if !self.core.borrow().menu_is_open() {
+            let has_selection = self.core.borrow().active_region().is_some();
+            if !has_selection {
+                self.activate_and_position(win_id, local_row, local_col);
+            }
+        }
+        let rows = self.build_menu_rows();
+        self.core.borrow_mut().menu_open(rows, anchor);
+    }
+
+    /// Drive an open menu from a mouse event (Q#CM1): hover highlights,
+    /// left-click invokes, a click outside (or right-click) dismisses.
+    fn dispatch_menu_mouse(&mut self, ev: MouseEvent, cell_row: u32, cell_col: u32) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let hit = self.core.borrow().menu_hit(cell_row, cell_col);
+        match ev.kind {
+            MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(row) = hit {
+                    self.core.borrow_mut().menu_set_active_row(row);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => match hit {
+                Some(row) => {
+                    self.core.borrow_mut().menu_set_active_row(row);
+                    self.menu_invoke_active();
+                }
+                None => self.core.borrow_mut().menu_close(),
+            },
+            MouseEventKind::Down(MouseButton::Right | MouseButton::Middle) => {
+                self.core.borrow_mut().menu_close();
+            }
+            _ => {}
+        }
+    }
+
     fn with_minibuffer<F: FnOnce(&mut Minibuffer)>(&mut self, f: F) {
         f(&mut self.core.borrow_mut().minibuffer);
     }
@@ -749,6 +866,15 @@ impl EditorState {
         let cell_row = u32::from(ev.row);
         let cell_col = u32::from(ev.column);
 
+        // Context-menu interception (Q#CM1): while a menu is open the
+        // mouse drives it (hover highlights, left-click invokes, a click
+        // outside dismisses) — handled before window hit-testing so an
+        // outside click anywhere closes it.
+        if self.core.borrow().menu_is_open() {
+            self.dispatch_menu_mouse(ev, cell_row, cell_col);
+            return;
+        }
+
         let Some((win_id, rect)) =
             window_at_cell(&self.core.borrow(), term_size, cell_row, cell_col)
         else {
@@ -795,6 +921,14 @@ impl EditorState {
                 {
                     core.clear_selection();
                 }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                if local_row >= inner_rows {
+                    self.mouse_click = None;
+                    return; // Mode-line right-click: reserved.
+                }
+                self.mouse_click = None;
+                self.open_context_menu(win_id, local_row, local_col, (cell_row, cell_col));
             }
             MouseEventKind::ScrollUp => {
                 self.mouse_click = None;
@@ -916,6 +1050,75 @@ impl EditorState {
                 aw.goal_col = None;
                 core.select_line_at_cursor();
             }
+            // Right-click (Q#CM1) opens the menu, which needs the Lua
+            // builder — handled by `open_menu_at_byte`, which the daemon
+            // routes to *instead* of here. Unreachable in practice; the
+            // arm exists for match exhaustiveness.
+            PointerKind::Context => {}
+        }
+    }
+
+    /// Open the context menu at `byte` for a semantic frontend (Q#CM1) —
+    /// the byte-space twin of the TUI right-click. Keeps an existing
+    /// selection (so Copy/Cut act on it), else moves the cursor to the
+    /// click. The anchor cell is irrelevant for the GPU (it positions
+    /// the popup in pixels locally), so it stays at the origin.
+    pub fn open_menu_at_byte(
+        &mut self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+        byte: u64,
+    ) {
+        {
+            let mut core = self.core.borrow_mut();
+            core.active_frontend = frontend_id;
+            let Some(win_id) = core.views.get(&frontend_id).map(|v| v.active) else {
+                return;
+            };
+            if core.windows.get(&win_id).map(|w| w.buffer_id) != Some(buffer_id) {
+                return;
+            }
+            core.set_active_window_id(win_id);
+            if core.active_region().is_none() {
+                let snapped = {
+                    let registry = core.registry.clone();
+                    let reg = registry.borrow();
+                    let Ok(buf) = reg.get(buffer_id) else {
+                        return;
+                    };
+                    snap_to_char_boundary(buf, byte)
+                };
+                let aw = core.active_window_mut();
+                aw.cursor = snapped;
+                aw.goal_col = None;
+            }
+        }
+        let rows = self.build_menu_rows();
+        self.core.borrow_mut().menu_open(rows, (0, 0));
+    }
+
+    /// Apply a semantic frontend's menu navigation (Q#CM1). Hover
+    /// (`invoke = false`) moves the highlight; a click (`invoke = true`)
+    /// invokes the row, or dismisses the menu when `index` is `None`
+    /// (click outside the popup).
+    pub fn dispatch_menu_pointer(
+        &mut self,
+        frontend_id: FrontendId,
+        index: Option<u32>,
+        invoke: bool,
+    ) {
+        self.core.borrow_mut().active_frontend = frontend_id;
+        if !self.core.borrow().menu_is_open() {
+            return;
+        }
+        match (index, invoke) {
+            (Some(i), false) => self.core.borrow_mut().menu_set_active_row(i as usize),
+            (Some(i), true) => {
+                self.core.borrow_mut().menu_set_active_row(i as usize);
+                self.menu_invoke_active();
+            }
+            (None, true) => self.core.borrow_mut().menu_close(),
+            (None, false) => {}
         }
     }
 
@@ -1273,6 +1476,54 @@ impl SearchKey {
             return Self::ToggleRegex;
         }
         Self::Ignore
+    }
+}
+
+/// Keys handled while a context menu is open (Q#CM1). Like
+/// [`SearchKey`], this shadows the global keymap; the same decode runs
+/// in both frontends via the daemon's `FrontendEvent::Key` round-trip.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum MenuKey {
+    /// Highlight the next item (Down / C-n).
+    Next,
+    /// Highlight the previous item (Up / C-p).
+    Prev,
+    /// Invoke the highlighted item (RET).
+    Invoke,
+    /// Dismiss the menu (Esc / C-g).
+    Cancel,
+    /// Any other key — dismisses the menu (a click-away analogue).
+    Dismiss,
+}
+
+impl MenuKey {
+    /// Decode `chord` into a menu action. Unrecognized keys dismiss the
+    /// menu (standard popup behavior); a future mnemonic-jump refinement
+    /// would intercept printable chars here.
+    fn from_chord(chord: Chord) -> Self {
+        let ctrl = chord.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = chord.modifiers.contains(KeyModifiers::ALT);
+        if !ctrl && !alt {
+            match chord.code {
+                KeyCode::Down => return Self::Next,
+                KeyCode::Up => return Self::Prev,
+                KeyCode::Enter => return Self::Invoke,
+                KeyCode::Esc => return Self::Cancel,
+                _ => return Self::Dismiss,
+            }
+        }
+        if ctrl
+            && !alt
+            && let KeyCode::Char(c) = chord.code
+        {
+            return match c {
+                'n' => Self::Next,
+                'p' => Self::Prev,
+                'g' => Self::Cancel,
+                _ => Self::Dismiss,
+            };
+        }
+        Self::Dismiss
     }
 }
 
@@ -2213,7 +2464,7 @@ mod tests {
         // Indexed(11); lazy matches would be Indexed(3)).
         let bg0 = grid.get(CellCoord::new(0, 0)).style.bg;
         assert!(
-            matches!(bg0, Color::Indexed(11) | Color::Indexed(3)),
+            matches!(bg0, Color::Indexed(11 | 3)),
             "first match cell should carry the search wash, got {bg0:?}"
         );
         // The bottom row shows the full live query, not just "f".
@@ -2648,6 +2899,150 @@ mod tests {
             mlua::Value::Integer(n) => assert_eq!(n, expected),
             other => panic!("expected integer, got {other:?}"),
         }
+    }
+
+    fn right_click(row: u16, column: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right),
+            row,
+            column,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn menu_item_labels(s: &EditorState) -> Vec<String> {
+        let core = s.core.borrow();
+        let guard = core.menu.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|m| {
+                m.rows
+                    .iter()
+                    .filter_map(|r| match r {
+                        crate::menu::MenuRow::Item { label, .. } => Some(label.clone()),
+                        crate::menu::MenuRow::Separator => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn right_click_opens_context_menu_with_default_items() {
+        let mut s = fresh_with(b"hello world");
+        let term = crate::cell::CellSize::new(24, 80);
+        s.dispatch_mouse(FrontendId(1), right_click(1, 3), term);
+        assert!(s.core.borrow().menu_is_open());
+        // No selection: the selection-only Cut/Copy are filtered out.
+        assert_eq!(
+            menu_item_labels(&s),
+            vec!["Paste", "Select All", "Undo", "Redo"]
+        );
+    }
+
+    #[test]
+    fn right_click_with_selection_includes_cut_and_copy() {
+        let mut s = fresh_with(b"hello world");
+        {
+            let mut c = s.core.borrow_mut();
+            c.begin_selection(0);
+            c.active_window_mut().cursor = 5; // select "hello"
+        }
+        s.dispatch_mouse(
+            FrontendId(1),
+            right_click(1, 3),
+            crate::cell::CellSize::new(24, 80),
+        );
+        assert_eq!(
+            menu_item_labels(&s),
+            vec!["Cut", "Copy", "Paste", "Select All", "Undo", "Redo"]
+        );
+        // Right-clicking with a selection preserves it (so Copy/Cut act on it).
+        assert!(s.core.borrow().active_region().is_some());
+    }
+
+    #[test]
+    fn menu_arrows_navigate_and_escape_dismisses() {
+        let mut s = fresh_with(b"abc");
+        s.dispatch_mouse(
+            FrontendId(1),
+            right_click(1, 1),
+            crate::cell::CellSize::new(24, 80),
+        );
+        assert_eq!(
+            s.core.borrow().menu_active_command().as_deref(),
+            Some("edit.paste")
+        );
+        s.dispatch_key(FrontendId(1), key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            s.core.borrow().menu_active_command().as_deref(),
+            Some("edit.select-all")
+        );
+        s.dispatch_key(FrontendId(1), key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!s.core.borrow().menu_is_open());
+    }
+
+    #[test]
+    fn menu_context_eval_gates_symbol_and_diagnostic() {
+        let mut s = fresh_with(b"");
+        let eval_bool = |s: &mut EditorState, expr: &str| -> bool {
+            matches!(
+                s.lua_host.eval(None, expr).unwrap(),
+                mlua::Value::Boolean(true)
+            )
+        };
+        // always / selection — pure context-table reads.
+        assert!(eval_bool(
+            &mut s,
+            "return pmacs.menu._context_eval('always', {})"
+        ));
+        assert!(eval_bool(
+            &mut s,
+            "return pmacs.menu._context_eval('selection', {has_selection=true})"
+        ));
+        assert!(!eval_bool(
+            &mut s,
+            "return pmacs.menu._context_eval('selection', {has_selection=false})"
+        ));
+        // symbol needs BOTH a word and an attached server.
+        assert!(eval_bool(
+            &mut s,
+            "return pmacs.menu._context_eval('symbol', {word='x', attachment={uri='u'}})"
+        ));
+        assert!(!eval_bool(
+            &mut s,
+            "return pmacs.menu._context_eval('symbol', {word='x'})"
+        ));
+        assert!(!eval_bool(
+            &mut s,
+            "return pmacs.menu._context_eval('symbol', {attachment={uri='u'}})"
+        ));
+        // diagnostic with no published diagnostics at the point → false
+        // (exercises the diag-store lookup without erroring).
+        assert!(!eval_bool(
+            &mut s,
+            "return pmacs.menu._context_eval('diagnostic', {attachment={uri='file:///none'}, line=0, col=0})"
+        ));
+    }
+
+    #[test]
+    fn menu_enter_invokes_command_and_closes() {
+        let mut s = fresh_with(b"hello");
+        s.dispatch_mouse(
+            FrontendId(1),
+            right_click(1, 1),
+            crate::cell::CellSize::new(24, 80),
+        );
+        // Paste → Select All.
+        s.dispatch_key(FrontendId(1), key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            s.core.borrow().menu_active_command().as_deref(),
+            Some("edit.select-all")
+        );
+        s.dispatch_key(FrontendId(1), key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!s.core.borrow().menu_is_open());
+        // edit.select-all ran: the whole buffer is now the region.
+        assert_eq!(s.core.borrow().active_region(), Some((0, 5)));
     }
 
     /// The status line carries a Neovim/Doom-style scroll indicator

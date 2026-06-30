@@ -160,6 +160,31 @@ cmd { name = "region.cancel",
       description = "Drop any active selection without changing the cursor.",
       fn = function() ed.clear_selection() end }
 
+-- Clipboard (Q#CM6) ----------------------------------------------------------
+-- Copy/cut publish the selection to the OS clipboard (OSC 52 in the TUI,
+-- arboard in the GPU); paste inserts the in-app slot, which Ctrl-V /
+-- bracketed paste also refreshes. The default bindings are the Emacs
+-- kill/yank set (M-w / C-w / C-y, C-x h), which were all free.
+
+cmd { name = "edit.copy",
+      description = "Copy the active region to the clipboard.",
+      fn = function()
+        if not ed.clipboard_copy() then ed.set_status("no region") end
+      end }
+cmd { name = "edit.cut",
+      description = "Cut the active region to the clipboard.",
+      fn = function()
+        if not ed.clipboard_cut() then ed.set_status("no region") end
+      end }
+cmd { name = "edit.paste",
+      description = "Paste the clipboard at the cursor, replacing any region.",
+      fn = function()
+        if not ed.clipboard_paste() then ed.set_status("clipboard empty") end
+      end }
+cmd { name = "edit.select-all",
+      description = "Select the whole buffer.",
+      fn = function() ed.select_all() end }
+
 -- File I/O -------------------------------------------------------------------
 
 cmd { name = "buffer.save", description = "Save the current buffer to its backing file.",

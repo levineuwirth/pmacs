@@ -35,8 +35,9 @@ use glyphon::{
 use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CrdtOp, Decoration, DecorationKind,
-    DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, Key as ProtocolKey, Modifiers,
-    PointerKind, SelectionSnapshot, StyleSegment, StyleSpan,
+    DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, InstanceSignal,
+    Key as ProtocolKey, MenuPromptRow, Modifiers, PointerKind, SelectionSnapshot, StyleSegment,
+    StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
@@ -109,6 +110,20 @@ const STATUS_BAND_BG: [f32; 4] = [0.105, 0.105, 0.145, 1.0];
 const STATUS_TEXT_PAD: f32 = 10.0;
 const STATUS_FONT_SIZE: f32 = 13.0;
 const STATUS_LINE_HEIGHT: f32 = 18.0;
+// Context menu popup (Q#CM1). One row per item/separator; width tracks
+// the widest label (estimated from a fixed per-char advance, which the
+// code font's monospacing makes good enough for hit-testing + the bg
+// quad to agree).
+const MENU_ROW_HEIGHT: f32 = 22.0;
+const MENU_FONT_SIZE: f32 = 14.0;
+const MENU_LINE_HEIGHT: f32 = 22.0;
+const MENU_PAD_X: f32 = 12.0;
+const MENU_CHAR_W: f32 = 8.4;
+const MENU_MIN_WIDTH: f32 = 140.0;
+const MENU_MAX_WIDTH: f32 = 380.0;
+const MENU_BG: [f32; 4] = [0.16, 0.16, 0.20, 0.98];
+const MENU_SELECTED_BG: [f32; 4] = [0.20, 0.40, 0.66, 1.0];
+const MENU_SEPARATOR_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 const QUAD_SHADER: &str = r"
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
@@ -418,6 +433,11 @@ struct State {
     /// keys round-trip so minibuffer and prefix commands keep their
     /// daemon-owned semantics.
     dispatch_idle: bool,
+    /// OS clipboard handle (Q#CM6), created lazily on first cut / copy /
+    /// paste. `None` until first use or when the platform clipboard is
+    /// unavailable (headless / unsupported compositor) --- clipboard ops
+    /// then degrade to no-ops rather than crashing.
+    clipboard: Option<arboard::Clipboard>,
     /// Whether `own_cursor` is still an authoritative position for
     /// local optimistic insertion. Round-tripped keys can move the
     /// daemon cursor in ways the GPU does not predict, so they mark
@@ -535,6 +555,21 @@ struct State {
     /// the buffer name; the matches highlight via `SearchMatch`
     /// decorations.
     search_prompt: Option<SearchPromptLocal>,
+    /// Q#CM1 — the live context menu (protocol v11), or `None` when
+    /// closed. The rows + highlight come from `MenuPrompt`; the popup
+    /// draws at the pixel of the right-click.
+    menu: Option<MenuLocal>,
+    /// Pixel of the most recent right-click, remembered so the
+    /// `MenuPrompt` that follows can anchor the popup there.
+    menu_anchor_px: (f64, f64),
+    /// Shaped label text for the open menu (Q#CM1), one line per row.
+    menu_buffer: Buffer,
+    /// Dedicated text renderer for the menu, so its glyphs draw in a
+    /// layer *over* the buffer text + caret (a popup), not interleaved
+    /// with them in the main text pass.
+    menu_text_renderer: TextRenderer,
+    /// Popup background / highlight / separator quads (Q#CM1).
+    menu_bg_vertex_buffer: ReusableVertexBuffer,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
@@ -561,6 +596,17 @@ struct SearchPromptLocal {
     total: u32,
     regex: bool,
     invalid: bool,
+}
+
+/// The live context menu (Q#CM1, protocol v11), mirrored from a
+/// `MenuPrompt` with non-empty rows. The popup draws at `anchor_px`
+/// (the right-click pixel, remembered locally — the daemon never sees
+/// pixels).
+#[derive(Clone, Debug, PartialEq)]
+struct MenuLocal {
+    rows: Vec<MenuPromptRow>,
+    active: Option<u32>,
+    anchor_px: (f64, f64),
 }
 
 /// pmacs-gpu's own cursor position, mirrored from `CursorByte`.
@@ -612,8 +658,29 @@ impl App {
         } else {
             kind
         };
+        // Context (right-click, Q#CM1) is a v11 variant; a pre-v11
+        // instance can't open a menu, so drop the gesture rather than
+        // sending an undecodable variant.
+        if kind == PointerKind::Context && client.server_protocol_version() < 11 {
+            return;
+        }
         if let Err(e) = client.send_pointer(buffer_id, byte, kind, mods) {
             eprintln!("pmacs-gpu: send_pointer failed: {e}");
+        }
+    }
+
+    /// Ship a [`pmacs_protocol::FrontendEvent::MenuPointer`] if the
+    /// daemon speaks v11+ (Q#CM1). Navigates the open menu the daemon
+    /// owns; pixels stay local, only the resolved row index crosses.
+    fn send_menu_pointer(&self, index: Option<u32>, invoke: bool) {
+        let Some(client) = self.attach_client.as_ref() else {
+            return;
+        };
+        if client.server_protocol_version() < 11 {
+            return;
+        }
+        if let Err(e) = client.send_menu_pointer(index, invoke) {
+            eprintln!("pmacs-gpu: send_menu_pointer failed: {e}");
         }
     }
 }
@@ -690,6 +757,25 @@ impl ApplicationHandler<AppEvent> for App {
                 let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers) else {
                     return;
                 };
+
+                // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
+                // locally via arboard and ship it as a `Paste` event; the
+                // daemon inserts it. Handled before binding `client` so
+                // the `&mut self` clipboard read doesn't conflict with the
+                // client borrow. Skipped while intercepting (the daemon's
+                // active handler owns the key then). The daemon keymap's
+                // C-y yanks the in-app slot instead.
+                if !intercept && pkey == ProtocolKey::Char('v') && pmods == Modifiers::CTRL {
+                    let bytes = self.state.as_mut().and_then(State::read_os_clipboard);
+                    if let Some(bytes) = bytes
+                        && let Some(client) = self.attach_client.as_ref()
+                        && let Err(e) = client.send_paste(bytes)
+                    {
+                        eprintln!("pmacs-gpu: send_paste failed: {e}");
+                    }
+                    return;
+                }
+
                 let Some(client) = self.attach_client.as_ref() else {
                     return;
                 };
@@ -723,6 +809,21 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     if let Err(e) = client.send_key(pkey, pmods) {
                         eprintln!("pmacs-gpu: send_key (search entry) failed: {e}");
+                    }
+                    return;
+                }
+
+                // Clipboard command chords (Q#CM6): M-w copy, C-w cut,
+                // C-y yank. Like the search-entry chords, these drive
+                // daemon `edit.*` commands and are otherwise withheld, so
+                // forward them explicitly. (OS paste is Ctrl-V, handled
+                // locally above.)
+                if is_clipboard_chord(pkey, pmods) {
+                    if let Some(state) = self.state.as_mut() {
+                        state.mark_cursor_stale_after_round_trip();
+                    }
+                    if let Err(e) = client.send_key(pkey, pmods) {
+                        eprintln!("pmacs-gpu: send_key (clipboard) failed: {e}");
                     }
                     return;
                 }
@@ -799,6 +900,19 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 };
                 state.pointer_pos = Some((position.x, position.y));
+                // Q#CM1 — while the menu is open, motion only moves the
+                // highlight; send a hover when the item under the pointer
+                // changes from the daemon's current active row.
+                if state.menu.is_some() {
+                    let hit = state.menu_hit(position.x, position.y);
+                    let active = state.menu.as_ref().and_then(|m| m.active);
+                    if let Some((row, true)) = hit
+                        && active != Some(row)
+                    {
+                        self.send_menu_pointer(Some(row), false);
+                    }
+                    return;
+                }
                 if state.minimap_scrub_active {
                     // Scrubbing (Q#M6): the press began on the
                     // minimap; motion keeps jumping, even if the
@@ -847,6 +961,22 @@ impl ApplicationHandler<AppEvent> for App {
                 let Some((x, y)) = state.pointer_pos else {
                     return;
                 };
+                // Q#CM1 — while the menu is open the left button drives
+                // it: a press invokes the row under the pointer (or
+                // dismisses on a click outside); a release is swallowed.
+                if state.menu.is_some() {
+                    if button_state == ElementState::Pressed {
+                        let action = match state.menu_hit(x, y) {
+                            Some((row, true)) => Some((Some(row), true)),
+                            Some((_, false)) => None, // separator — ignore
+                            None => Some((None, true)), // outside — dismiss
+                        };
+                        if let Some((index, invoke)) = action {
+                            self.send_menu_pointer(index, invoke);
+                        }
+                    }
+                    return;
+                }
                 let mods = translate_mods(self.modifiers);
                 match button_state {
                     ElementState::Pressed => {
@@ -898,6 +1028,34 @@ impl ApplicationHandler<AppEvent> for App {
                             self.send_pointer(buffer_id, byte, PointerKind::Up, mods);
                         }
                     }
+                }
+            }
+            // Q#CM1 — right-click opens the context menu at the hit byte
+            // (or dismisses an open one). The anchor pixel is remembered
+            // so the popup the daemon sends back draws at the click.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: winit::event::MouseButton::Right,
+                ..
+            } => {
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
+                let Some((x, y)) = state.pointer_pos else {
+                    return;
+                };
+                if state.menu.is_some() {
+                    self.send_menu_pointer(None, true);
+                    return;
+                }
+                let Some(byte) = state.hit_test_source_byte(x, y) else {
+                    return;
+                };
+                state.menu_anchor_px = (x, y);
+                let buffer_id = state.current_buffer_id;
+                let mods = translate_mods(self.modifiers);
+                if let Some(buffer_id) = buffer_id {
+                    self.send_pointer(buffer_id, byte, PointerKind::Context, mods);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1394,6 +1552,9 @@ impl State {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, surface_format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        // Q#CM1 — a second renderer so the menu draws as a top layer.
+        let menu_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad_renderer = QuadRenderer::new(&device, surface_format);
         let squiggle_renderer = SquiggleRenderer::new(&device, surface_format);
 
@@ -1424,6 +1585,15 @@ impl State {
             &mut font_system,
             Some(config.width as f32),
             Some(STATUS_BAND_HEIGHT),
+        );
+        let mut menu_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(MENU_FONT_SIZE, MENU_LINE_HEIGHT),
+        );
+        menu_buffer.set_size(
+            &mut font_system,
+            Some(MENU_MAX_WIDTH),
+            Some(config.height as f32),
         );
         buffer.set_text(
             &mut font_system,
@@ -1468,6 +1638,7 @@ impl State {
             last_viewport_sent: None,
             local_frontend_id: None,
             dispatch_idle: false,
+            clipboard: None,
             cursor_fresh: false,
             optimistic_cursor_floor: None,
             deferred_round_trip_keys: Vec::new(),
@@ -1496,6 +1667,11 @@ impl State {
             status_left_text: String::new(),
             status_facts: None,
             search_prompt: None,
+            menu: None,
+            menu_anchor_px: (0.0, 0.0),
+            menu_buffer,
+            menu_text_renderer,
+            menu_bg_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_cache: None,
         }
     }
@@ -1516,7 +1692,9 @@ impl State {
     /// every key to the daemon's handler instead of optimistically
     /// applying it to the buffer.
     fn daemon_intercepts_keys(&self) -> bool {
-        self.search_prompt.is_some() || !self.dispatch_idle
+        // Q#CM1 — an open menu shadows the keymap like search: every key
+        // round-trips so the daemon's `dispatch_menu_key` drives it.
+        self.search_prompt.is_some() || self.menu.is_some() || !self.dispatch_idle
     }
 
     /// Shared eligibility gates for the optimistic edit paths
@@ -1841,6 +2019,45 @@ impl State {
     /// ignored — pmacs-gpu lays out locally and tracks the cursor via
     /// `PresenceUpdate` (session 9.3). Remaining semantic variants land
     /// in subsequent Phase A sessions.
+    /// Lazily-created OS clipboard handle (Q#CM6). Returns `None` if the
+    /// platform clipboard can't be opened, so callers degrade to no-ops.
+    fn os_clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(c) => self.clipboard = Some(c),
+                Err(e) => {
+                    eprintln!("pmacs-gpu: OS clipboard unavailable: {e}");
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
+    /// Read the OS clipboard as bytes (for Ctrl-V → `Paste`). `None` on
+    /// any failure (empty / non-text / unavailable).
+    fn read_os_clipboard(&mut self) -> Option<Vec<u8>> {
+        match self.os_clipboard()?.get_text() {
+            Ok(s) => Some(s.into_bytes()),
+            Err(e) => {
+                eprintln!("pmacs-gpu: clipboard read failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Write bytes to the OS clipboard (for an inbound
+    /// `Signal::Clipboard` after a daemon copy/cut). Lossy UTF-8; the
+    /// daemon only ever sends valid document text.
+    fn write_os_clipboard(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        if let Some(c) = self.os_clipboard()
+            && let Err(e) = c.set_text(text)
+        {
+            eprintln!("pmacs-gpu: clipboard write failed: {e}");
+        }
+    }
+
     #[allow(clippy::too_many_lines)] // per-variant match dispatcher; one arm per InstanceMessage.
     fn apply_attach_message(&mut self, msg: InstanceMessage) -> Option<ViewportSend> {
         match msg {
@@ -2235,6 +2452,28 @@ impl State {
                 self.dispatch_idle = idle;
                 None
             }
+            // Q#CM6 — a daemon copy/cut published the region; write it to
+            // the OS clipboard via arboard so other apps can paste it.
+            InstanceMessage::Signal(InstanceSignal::Clipboard(bytes)) => {
+                self.write_os_clipboard(&bytes);
+                None
+            }
+            // Q#CM1 — the context menu's rows + highlight. Empty rows
+            // close it; otherwise anchor the popup at the remembered
+            // right-click pixel.
+            InstanceMessage::MenuPrompt { rows, active, .. } => {
+                self.menu = if rows.is_empty() {
+                    None
+                } else {
+                    Some(MenuLocal {
+                        rows,
+                        active,
+                        anchor_px: self.menu_anchor_px,
+                    })
+                };
+                self.window.request_redraw();
+                None
+            }
             _ => None,
         }
     }
@@ -2365,6 +2604,35 @@ impl State {
     /// `Pointer` events.
     fn in_minimap_band(&self, x: f64, y: f64) -> bool {
         minimap_band_contains(x as f32, y as f32, self.config.width, self.config.height)
+    }
+
+    /// Popup width in pixels (Q#CM1) — widest label estimated from a
+    /// fixed per-char advance, padded, clamped. Used by both hit-testing
+    /// and the bg quad so they line up.
+    fn menu_width_px(menu: &MenuLocal) -> f32 {
+        let max_chars = menu
+            .rows
+            .iter()
+            .map(|r| r.label.chars().count())
+            .max()
+            .unwrap_or(0);
+        (max_chars as f32 * MENU_CHAR_W + 2.0 * MENU_PAD_X).clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH)
+    }
+
+    /// Hit-test a pixel against the open popup (Q#CM1). Returns
+    /// `(row_index, is_item)` when inside the popup rectangle, or `None`
+    /// when outside (or no menu open).
+    fn menu_hit(&self, x: f64, y: f64) -> Option<(u32, bool)> {
+        let menu = self.menu.as_ref()?;
+        let (ax, ay) = menu.anchor_px;
+        let w = f64::from(Self::menu_width_px(menu));
+        let h = menu.rows.len() as f64 * f64::from(MENU_ROW_HEIGHT);
+        if x < ax || x >= ax + w || y < ay || y >= ay + h {
+            return None;
+        }
+        let row =
+            (((y - ay) / f64::from(MENU_ROW_HEIGHT)).floor() as usize).min(menu.rows.len() - 1);
+        Some((row as u32, !menu.rows[row].separator))
     }
 
     /// Center the viewport on the source line the minimap pixel `y`
@@ -2723,6 +2991,67 @@ impl State {
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
     }
 
+    /// Re-shape the menu label text from `self.menu` (Q#CM1), one line
+    /// per row (separators are blank lines so rows stay aligned with the
+    /// bg quads). A no-op string when the menu is closed.
+    fn refresh_menu_buffer(&mut self) {
+        let text = self.menu.as_ref().map_or_else(String::new, |menu| {
+            menu.rows
+                .iter()
+                .map(|r| if r.separator { "" } else { r.label.as_str() })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        self.menu_buffer.set_text(
+            &mut self.font_system,
+            &text,
+            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+            None,
+        );
+        self.menu_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// Popup background, active-row highlight, and separator quads
+    /// (Q#CM1). Empty when the menu is closed.
+    fn menu_vertex_bytes(&self) -> Vec<u8> {
+        let Some(menu) = self.menu.as_ref() else {
+            return Vec::new();
+        };
+        let ax = menu.anchor_px.0 as f32;
+        let ay = menu.anchor_px.1 as f32;
+        let w = Self::menu_width_px(menu);
+        let mut rects = vec![MinimapRect {
+            x: ax,
+            y: ay,
+            w,
+            h: menu.rows.len() as f32 * MENU_ROW_HEIGHT,
+            color: MENU_BG,
+        }];
+        for (i, row) in menu.rows.iter().enumerate() {
+            let ry = ay + i as f32 * MENU_ROW_HEIGHT;
+            if row.separator {
+                rects.push(MinimapRect {
+                    x: ax + MENU_PAD_X,
+                    y: ry + MENU_ROW_HEIGHT / 2.0 - 0.5,
+                    w: w - 2.0 * MENU_PAD_X,
+                    h: 1.0,
+                    color: MENU_SEPARATOR_BG,
+                });
+            } else if menu.active == Some(i as u32) {
+                rects.push(MinimapRect {
+                    x: ax,
+                    y: ry,
+                    w,
+                    h: MENU_ROW_HEIGHT,
+                    color: MENU_SELECTED_BG,
+                });
+            }
+        }
+        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
     /// Bookkeeping for an outgoing Pointer event: it supersedes any
     /// unconfirmed optimistic-cursor prediction (the daemon's answer
     /// will be the click position, not the typing prediction), and
@@ -3049,6 +3378,20 @@ impl State {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let frame_start = debug_frame().then(std::time::Instant::now);
         self.refresh_status_line();
+        self.refresh_menu_buffer();
+        // Q#CM1 — the context-menu popup quads (bg / highlight /
+        // separators), drawn as a top layer after everything else.
+        let menu_vertices = self.menu_vertex_bytes();
+        let menu_vertex_count = (menu_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let menu_bg_buffer = self
+            .menu_bg_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu context menu",
+                &menu_vertices,
+            )
+            .cloned();
         // The band's strip rides the bg quad batch so it draws under
         // the band text (text renders after the first quad draw).
         let mut bg_vertices = self.decoration_background_vertex_bytes();
@@ -3190,6 +3533,43 @@ impl State {
             )
             .expect("text_renderer prepare");
 
+        // Q#CM1 — prepare the menu glyphs in their own layer (empty when
+        // closed, so the renderer draws nothing).
+        let menu_areas: Vec<TextArea> = self
+            .menu
+            .as_ref()
+            .map(|menu| {
+                let ax = menu.anchor_px.0 as f32;
+                let ay = menu.anchor_px.1 as f32;
+                TextArea {
+                    buffer: &self.menu_buffer,
+                    left: ax + MENU_PAD_X,
+                    top: ay + 2.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ax as i32,
+                        top: ay as i32,
+                        right: (ax + Self::menu_width_px(menu)).round() as i32,
+                        bottom: (ay + menu.rows.len() as f32 * MENU_ROW_HEIGHT).round() as i32,
+                    },
+                    default_color: Color::rgb(232, 232, 238),
+                    custom_glyphs: &[],
+                }
+            })
+            .into_iter()
+            .collect();
+        self.menu_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                menu_areas,
+                &mut self.swash_cache,
+            )
+            .expect("menu text_renderer prepare");
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3239,6 +3619,15 @@ impl State {
                 self.quad_renderer
                     .render(&mut pass, vertex_buffer, minimap_vertex_count);
             }
+            // Q#CM1 — the context menu draws last: its bg/highlight quads
+            // occlude everything beneath, then its glyphs on top.
+            if let Some(vertex_buffer) = menu_bg_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, menu_vertex_count);
+            }
+            self.menu_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("menu text_renderer render");
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -4023,6 +4412,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::FileStyleSummary { .. } => "FileStyleSummary",
         InstanceMessage::StatusFacts { .. } => "StatusFacts",
         InstanceMessage::SearchPrompt { .. } => "SearchPrompt",
+        InstanceMessage::MenuPrompt { .. } => "MenuPrompt",
         InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
@@ -4147,6 +4537,20 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
 fn is_search_entry_chord(key: ProtocolKey, mods: Modifiers) -> bool {
     matches!(key, ProtocolKey::Char('s' | 'r'))
         && (mods == Modifiers::CTRL || mods == Modifiers::CTRL | Modifiers::ALT)
+}
+
+/// The clipboard command chords (Q#CM6): `M-w` (copy), `C-w` (cut),
+/// `C-y` (yank the in-app slot). Forwarded to the daemon though they are
+/// otherwise withheld as command chords, mirroring
+/// [`is_search_entry_chord`]. OS paste (`C-V`) is handled locally via
+/// `arboard`, not here.
+fn is_clipboard_chord(key: ProtocolKey, mods: Modifiers) -> bool {
+    matches!(
+        (key, mods),
+        (ProtocolKey::Char('w'), Modifiers::ALT)
+            | (ProtocolKey::Char('w'), Modifiers::CTRL)
+            | (ProtocolKey::Char('y'), Modifiers::CTRL)
+    )
 }
 
 fn is_plain_text_modifiers(mods: Modifiers) -> bool {

@@ -37,6 +37,11 @@ similar_names = "allow"
 multiple_crate_versions = "allow"
 
 [dependencies]
+# OS clipboard for cut/copy/paste (Q#CM6). `wayland-data-control` adds
+# the zwlr_data_control backend so the clipboard works under Wayland
+# without a window handle; the default X11 backend covers X sessions.
+# `image-data` is dropped --- pmacs only round-trips text.
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 env_logger = "0.11.10"
 # Text shaping + GPU rendering. `glyphon` re-exports the `cosmic-text`
 # types it pins (`Buffer`, `Attrs`, `Family`, `FontSystem`,
