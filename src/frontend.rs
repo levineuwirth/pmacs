@@ -401,6 +401,10 @@ impl Frontend {
             // the TUI renders the menu via its cell overlay instead, so
             // it drops this silently like the other semantic families.
             | InstanceMessage::MenuPrompt { .. }
+            // Q#MB1 — MinibufferPrompt is the semantic-frontend minibuffer
+            // surface; the TUI paints the minibuffer via its own bottom
+            // row, so it drops this silently too.
+            | InstanceMessage::MinibufferPrompt { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

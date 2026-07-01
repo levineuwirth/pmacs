@@ -86,6 +86,32 @@ type SearchPromptFacts = (Option<String>, Option<u32>, u32, bool, bool);
 /// menu.
 type MenuPromptFacts = (Vec<MenuPromptRow>, Option<u32>);
 
+/// Cached `MinibufferPrompt` payload for cached-compare suppression
+/// (Q#MB1): `(prompt, input, cursor, candidates-window, selected, total)`.
+/// A `None` prompt means the minibuffer is closed.
+type MinibufferFacts = (Option<String>, String, u32, Vec<String>, Option<u32>, u32);
+
+/// How many completion candidates the minibuffer ships per frame — a
+/// scrolled window around the selection, not the full (≤1024) list.
+const MB_VISIBLE: usize = 10;
+
+/// A window of up to [`MB_VISIBLE`] candidates around `selected`, plus
+/// the selection's index *within* that window. Keeps the selected row
+/// visible as the user cycles a long list.
+fn minibuffer_window(candidates: &[String], selected: Option<usize>) -> (Vec<String>, Option<u32>) {
+    if candidates.is_empty() {
+        return (Vec::new(), None);
+    }
+    let sel = selected.unwrap_or(0).min(candidates.len() - 1);
+    let start = sel
+        .saturating_sub(MB_VISIBLE / 2)
+        .min(candidates.len().saturating_sub(MB_VISIBLE));
+    let end = (start + MB_VISIBLE).min(candidates.len());
+    let window = candidates[start..end].to_vec();
+    let selected_in_window = selected.map(|s| (s - start) as u32);
+    (window, selected_in_window)
+}
+
 /// Owns one `semantic_render` session's projection state: the last
 /// viewport the frontend declared, and the diff baseline per buffer
 /// for the `StyleSpans` and `Decorations` families.
@@ -137,6 +163,10 @@ pub struct SemanticRenderState {
     /// Last emitted `MenuPrompt` payload per buffer (Q#CM1), for
     /// cached-compare suppression (see [`MenuPromptFacts`]).
     last_menu_prompt: HashMap<BufferId, MenuPromptFacts>,
+    /// Last emitted `MinibufferPrompt` payload (Q#MB1) — a single value,
+    /// not per-buffer, because the minibuffer is one global core
+    /// instance.
+    last_minibuffer: Option<MinibufferFacts>,
     /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
     /// the tree-sitter highlights query over the *whole declared
     /// viewport* (which the GPU frontend sets to the entire buffer)
@@ -207,6 +237,7 @@ impl SemanticRenderState {
             last_adornments: HashMap::new(),
             last_search_prompt: HashMap::new(),
             last_menu_prompt: HashMap::new(),
+            last_minibuffer: None,
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
             last_style_gate: HashMap::new(),
@@ -411,6 +442,8 @@ impl SemanticRenderState {
         out.extend(self.search_prompt_msg(state, vp.buffer_id));
         // --- MenuPrompt (context menu; Q#CM1, protocol v11) ---
         out.extend(self.menu_prompt_msg(state, vp.buffer_id));
+        // --- MinibufferPrompt (Q#MB1, protocol v12) ---
+        out.extend(self.minibuffer_prompt_msg(state, vp.buffer_id));
         out
     }
 
@@ -531,6 +564,65 @@ impl SemanticRenderState {
             active: facts.1,
         };
         self.last_menu_prompt.insert(buffer_id, facts);
+        Some(msg)
+    }
+
+    /// The `MinibufferPrompt` message for this frame, or `None` when the
+    /// (global) minibuffer state is unchanged (Q#MB1). Emitted only from
+    /// the active buffer's viewport so the bufferless message ships once
+    /// per frame. Closed = `prompt: None`; first sight while closed stays
+    /// silent. The daemon keeps the variant off wires negotiated `< 12`.
+    fn minibuffer_prompt_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> Option<InstanceMessage> {
+        let facts: MinibufferFacts = {
+            let core = state.core.borrow();
+            if buffer_id != core.active_buffer_id() {
+                return None;
+            }
+            let mb = &core.minibuffer;
+            match mb.session.as_ref() {
+                Some(session) => {
+                    let input = mb.contents();
+                    let cursor_byte = mb.cursor as usize;
+                    let cursor = input
+                        .char_indices()
+                        .take_while(|(i, _)| *i < cursor_byte)
+                        .count() as u32;
+                    let total = session.candidates.len() as u32;
+                    let (candidates, selected) =
+                        minibuffer_window(&session.candidates, session.selected);
+                    (
+                        Some(session.prompt.clone()),
+                        input,
+                        cursor,
+                        candidates,
+                        selected,
+                        total,
+                    )
+                }
+                None => (None, String::new(), 0, Vec::new(), None, 0),
+            }
+        };
+        if self.last_minibuffer.as_ref() == Some(&facts) {
+            return None;
+        }
+        // First sight while closed: nothing to clear, stay silent.
+        if self.last_minibuffer.is_none() && facts.0.is_none() {
+            self.last_minibuffer = Some(facts);
+            return None;
+        }
+        let msg = InstanceMessage::MinibufferPrompt {
+            prompt: facts.0.clone(),
+            input: facts.1.clone(),
+            cursor: facts.2,
+            candidates: facts.3.clone(),
+            selected: facts.4,
+            total: facts.5,
+        };
+        self.last_minibuffer = Some(facts);
         Some(msg)
     }
 
@@ -3197,6 +3289,82 @@ mod tests {
             Some((None, None, 0)),
             "accept clears the prompt band"
         );
+    }
+
+    #[test]
+    fn minibuffer_window_scrolls_to_keep_selection_visible() {
+        let cands: Vec<String> = (0..30).map(|i| format!("c{i}")).collect();
+        // No selection → top window, no highlight.
+        let (w, sel) = minibuffer_window(&cands, None);
+        assert_eq!(w.len(), MB_VISIBLE);
+        assert_eq!(w[0], "c0");
+        assert_eq!(sel, None);
+        // Deep selection scrolls; the selected row stays inside the window.
+        let (w, sel) = minibuffer_window(&cands, Some(20));
+        assert_eq!(w.len(), MB_VISIBLE);
+        assert_eq!(w[sel.unwrap() as usize], "c20");
+        // End selection clamps the window to the tail.
+        let (w, sel) = minibuffer_window(&cands, Some(29));
+        assert_eq!(w.last().unwrap(), "c29");
+        assert_eq!(w[sel.unwrap() as usize], "c29");
+        // Short list passes through with the selection intact.
+        let short: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(minibuffer_window(&short, Some(2)), (short.clone(), Some(2)));
+        // Empty.
+        assert_eq!(minibuffer_window(&[], Some(0)), (Vec::new(), None));
+    }
+
+    fn minibuffer_prompt_of(
+        msgs: &[InstanceMessage],
+    ) -> Option<(Option<String>, String, Vec<String>)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::MinibufferPrompt {
+                prompt,
+                input,
+                candidates,
+                ..
+            } => Some((prompt.clone(), input.clone(), candidates.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn minibuffer_prompt_emits_prompt_input_and_windowed_candidates() {
+        let state = empty_state();
+        let mut s = local();
+        let bid = active_buffer(&state);
+        s.set_viewport(bid, ByteRange { start: 0, end: 64 }, 0);
+
+        // No minibuffer: the producer stays silent on first sight.
+        assert!(minibuffer_prompt_of(&s.render_frame(&state)).is_none());
+
+        // Open an `M-x` prompt (command completion) via the Lua API.
+        state
+            .lua_host
+            .lua()
+            .load("pmacs.minibuffer.read{ prompt = 'M-x ', source = 'commands', on_accept = function() end }")
+            .exec()
+            .expect("open minibuffer");
+        let (prompt, input, cands) =
+            minibuffer_prompt_of(&s.render_frame(&state)).expect("minibuffer prompt emitted");
+        assert_eq!(prompt.as_deref(), Some("M-x "));
+        assert_eq!(input, "");
+        // Empty input matches every command; the wire carries a window.
+        assert!(!cands.is_empty(), "M-x seeds command candidates");
+        assert!(cands.len() <= MB_VISIBLE, "candidates ship windowed");
+
+        // Unchanged → suppressed (cached-compare).
+        assert!(minibuffer_prompt_of(&s.render_frame(&state)).is_none());
+
+        // Cancel: the prompt clears (None).
+        state
+            .lua_host
+            .lua()
+            .load("pmacs.minibuffer.cancel()")
+            .exec()
+            .expect("cancel");
+        let (prompt, _, _) = minibuffer_prompt_of(&s.render_frame(&state)).expect("clear emitted");
+        assert!(prompt.is_none(), "cancel clears the minibuffer band");
     }
 
     #[test]
