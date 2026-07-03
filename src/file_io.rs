@@ -21,7 +21,17 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
+
+/// Attempts to find a free temp-file name before giving up (F-006). The
+/// atomic sequence makes same-process names unique, so retries only cover
+/// the rare stale-temp-from-a-crashed-run collision.
+const MAX_TEMP_ATTEMPTS: u32 = 8;
+
+/// Process-global disambiguator for temp names — guarantees two saves in
+/// the same process never collide, even within one nanosecond (F-006).
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // File metadata
@@ -129,31 +139,74 @@ pub fn save_atomic(path: &Path, content: &[u8]) -> Result<FileMeta, SaveError> {
     if path.parent().is_none() {
         return Err(SaveError::NoParent(path.to_path_buf()));
     }
-    let tmp_path = temp_sibling(path);
+
+    // Snapshot the target's current permissions so an existing file keeps
+    // its mode across the replace (F-006) — e.g. a `0755` script stays
+    // executable. `None` for a new file, which then gets the default mode.
+    let existing_perms = fs::metadata(path).ok().map(|m| m.permissions());
+
+    // Open a fresh temp, retrying on the rare name collision (a stale temp
+    // left by a crashed prior run whose pid+nanos recurs) instead of
+    // failing the save (F-006). `TEMP_SEQ` makes same-process names unique.
+    let (mut tmp, tmp_path) = {
+        let mut opened = None;
+        for _ in 0..MAX_TEMP_ATTEMPTS {
+            let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let candidate = temp_sibling(path, seq);
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => {
+                    opened = Some((file, candidate));
+                    break;
+                }
+                // Name taken (a stale temp): fall through to the next seq.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(SaveError::Io(e)),
+            }
+        }
+        opened.ok_or_else(|| {
+            SaveError::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "save_atomic: temp name still colliding after retries",
+            ))
+        })?
+    };
 
     let mut guard = TempCleanup {
         tmp: Some(tmp_path.clone()),
     };
 
-    {
-        let mut tmp = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .map_err(SaveError::Io)?;
-        tmp.write_all(content).map_err(SaveError::Io)?;
-        tmp.sync_all().map_err(SaveError::Io)?;
+    // Carry the target's mode onto the temp so the saved file preserves it
+    // (F-006). Done *before* the write so a sensitive (e.g. 0600) file's
+    // content is never briefly world-readable in a default-perms temp; the
+    // already-open write handle keeps write access regardless of the new
+    // mode (Unix checks permissions at open, not per write).
+    if let Some(perms) = existing_perms {
+        fs::set_permissions(&tmp_path, perms).map_err(SaveError::Io)?;
     }
+    tmp.write_all(content).map_err(SaveError::Io)?;
+    tmp.sync_all().map_err(SaveError::Io)?;
+    drop(tmp); // close before rename (Windows can't rename an open file)
 
     fs::rename(&tmp_path, path).map_err(SaveError::Io)?;
     // Rename succeeded: temp no longer exists at tmp_path; defuse cleanup.
     guard.tmp = None;
 
+    // fsync the parent directory so the rename (a directory operation) is
+    // durable across a crash, not just the file bytes `sync_all` covered
+    // (F-006). Best-effort: the rename already succeeded, and some
+    // filesystems reject directory fsync. Directory fsync is a Unix concept.
+    #[cfg(unix)]
+    sync_parent_dir(path);
+
     let meta = current_meta(path)?;
     Ok(meta)
 }
 
-fn temp_sibling(target: &Path) -> PathBuf {
+fn temp_sibling(target: &Path, seq: u64) -> PathBuf {
     // `parent()` may be empty (target is a bare filename in cwd) or
     // non-empty (target lives under some directory). `Path::join` handles
     // both correctly: empty parent + name == name; non-empty parent + name
@@ -165,13 +218,32 @@ fn temp_sibling(target: &Path) -> PathBuf {
     name.push(".");
     name.push(format!("{:x}", std::process::id()));
     name.push(".");
-    // A coarse per-call disambiguator. Collisions are vanishingly unlikely
-    // and `create_new` would error if hit.
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    name.push(format!("{nanos:x}"));
+    // pid + subsecond nanos + a process-global sequence: the sequence
+    // guarantees same-process uniqueness, the rest disambiguates across
+    // processes/runs.
+    name.push(format!("{nanos:x}.{seq:x}"));
     parent.join(name)
+}
+
+/// fsync the directory containing `path` so a rename into it is durable
+/// (F-006). Best-effort — errors are ignored (see the call site).
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    // An empty parent means the current directory.
+    let dir = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    if let Ok(dir) = File::open(dir) {
+        let _ = dir.sync_all();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +298,43 @@ mod tests {
         save_atomic(&path, &content).unwrap();
         let (bytes, _) = load_file(&path).unwrap();
         assert_eq!(bytes, content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_preserves_existing_file_mode() {
+        // F-006 — an atomic save over an existing file keeps its mode, so
+        // a `0755` script stays executable instead of dropping to `0644`.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("script.sh");
+        save_atomic(&path, b"#!/bin/sh\necho hi\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        save_atomic(&path, b"#!/bin/sh\necho bye\n").unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the executable bit must survive the save");
+    }
+
+    #[test]
+    fn temp_sibling_disambiguates_by_sequence() {
+        // F-006 — the process-global sequence makes temp names unique even
+        // for the same target within one nanosecond.
+        let p = Path::new("/tmp/foo.txt");
+        assert_ne!(temp_sibling(p, 1), temp_sibling(p, 2));
+    }
+
+    #[test]
+    fn rapid_saves_in_one_process_do_not_collide() {
+        // F-006 — back-to-back saves must never spuriously fail on a temp
+        // name collision (the sequence guarantees uniqueness).
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hot.txt");
+        for i in 0..50u32 {
+            save_atomic(&path, format!("write {i}").as_bytes()).unwrap();
+        }
+        let (bytes, _) = load_file(&path).unwrap();
+        assert_eq!(bytes, b"write 49");
     }
 
     #[test]
