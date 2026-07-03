@@ -57,14 +57,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
       - name: Confirm a Vulkan adapter is present
-        run: vulkaninfo --summary || true
+        run: |
+          ls -la /usr/share/vulkan/icd.d/ || true
+          vulkaninfo --summary || true
       - name: pmacs-gpu tests (render harness included)
         env:
-          # Force the Vulkan backend + lavapipe ICD so wgpu finds the
-          # software adapter; PMACS_REQUIRE_GPU turns a missing adapter
-          # into a hard failure so a broken setup can't pass as skipped.
+          # Force the Vulkan backend so wgpu uses lavapipe. Do NOT set
+          # VK_ICD_FILENAMES — the loader's default ICD discovery already
+          # finds lavapipe (vulkaninfo above proves it), and pinning a
+          # path that doesn't match the runner hides every ICD. The
+          # PMACS_REQUIRE_GPU guard turns a missing adapter into a hard
+          # failure so a broken setup can't pass as a silent skip.
           WGPU_BACKEND: vulkan
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           LIBGL_ALWAYS_SOFTWARE: "1"
           PMACS_REQUIRE_GPU: "1"
         run: cargo test -p pmacs-gpu -- --test-threads=1
