@@ -832,61 +832,32 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
-                // Idle: C-s / C-r begin an incremental search. They are
-                // otherwise withheld as command chords; forward them so
-                // the search can start. The daemon then flips the
-                // intercept gate (DispatchIdle / SearchPrompt) one
-                // round-trip later, after which every key routes into the
-                // search — no optimistic local flip, so a C-s that (via
-                // rebinding) doesn't start a search can never wedge the
-                // gate against the daemon's authoritative state.
-                if is_search_entry_chord(pkey, pmods) {
+                // Idle: forward any command chord (Char/Enter/Tab with
+                // Ctrl or Alt) to the daemon (Q#GC1). These drive the
+                // keymap — `C-a`, `M-f`, `C-x C-s`, isearch/clipboard/M-x,
+                // … — the same path the TUI forwards everything through.
+                // The GUI no longer withholds them (the minibuffer / prompt
+                // flows they open now render, Q#MB1). Once a forwarded
+                // chord opens a prompt or enters a prefix, `dispatch_idle`
+                // flips false and the intercept gate round-trips the rest —
+                // no optimistic local flip, so a chord that changes no
+                // daemon state can never wedge the gate. (Ctrl-V / OS paste
+                // is handled locally above and never reaches here.)
+                if is_command_chord(pkey, pmods) {
                     if let Some(state) = self.state.as_mut() {
                         state.mark_cursor_stale_after_round_trip();
                     }
                     if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key (search entry) failed: {e}");
-                    }
-                    return;
-                }
-
-                // Clipboard command chords (Q#CM6): M-w copy, C-w cut,
-                // C-y yank. Like the search-entry chords, these drive
-                // daemon `edit.*` commands and are otherwise withheld, so
-                // forward them explicitly. (OS paste is Ctrl-V, handled
-                // locally above.)
-                if is_clipboard_chord(pkey, pmods) {
-                    if let Some(state) = self.state.as_mut() {
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key (clipboard) failed: {e}");
-                    }
-                    return;
-                }
-
-                // Minibuffer-opening chords (Q#MB1): M-x (execute-command)
-                // and the C-x prefix. Forwarded though otherwise withheld
-                // so the GUI can open a prompt / enter a prefix; the
-                // daemon then flips `dispatch_idle` false (minibuffer
-                // active / pending prefix) and the intercept gate
-                // round-trips every following key. No optimistic local
-                // flip (the search-entry precedent).
-                if is_minibuffer_open_chord(pkey, pmods) {
-                    if let Some(state) = self.state.as_mut() {
-                        state.mark_cursor_stale_after_round_trip();
-                    }
-                    if let Err(e) = client.send_key(pkey, pmods) {
-                        eprintln!("pmacs-gpu: send_key (minibuffer open) failed: {e}");
+                        eprintln!("pmacs-gpu: send_key (command chord) failed: {e}");
                     }
                     return;
                 }
 
                 // Session B2 forwards cursor motion + plain text editing
-                // (Char / Backspace / Enter / Delete / Tab). Ctrl/Alt/
-                // Meta chords are withheld — they drive commands and
-                // minibuffer flows the GUI can't render or interact with
-                // yet (a later session adds GUI minibuffer + chords).
+                // (Char / Backspace / Enter / Delete / Tab). Command chords
+                // are handled above; Meta/Super-only chords fall through
+                // here and are withheld, leaving OS/WM shortcuts (Cmd-Q,
+                // Cmd-C) to the platform.
                 if !should_forward_key(pkey, pmods) {
                     return;
                 }
@@ -4793,39 +4764,19 @@ fn should_forward_key(key: ProtocolKey, mods: Modifiers) -> bool {
     )
 }
 
-/// The chords that begin an incremental search: `C-s` / `C-r` (literal)
-/// and `C-M-s` / `C-M-r` (regex, Q#RX5). Forwarded even when idle (they
-/// are otherwise withheld as command chords by [`should_forward_key`])
-/// so a search can start; once it is running every key round-trips via
-/// the intercept path (including `M-r`, the regex toggle).
-fn is_search_entry_chord(key: ProtocolKey, mods: Modifiers) -> bool {
-    matches!(key, ProtocolKey::Char('s' | 'r'))
-        && (mods == Modifiers::CTRL || mods == Modifiers::CTRL | Modifiers::ALT)
-}
-
-/// The clipboard command chords (Q#CM6): `M-w` (copy), `C-w` (cut),
-/// `C-y` (yank the in-app slot). Forwarded to the daemon though they are
-/// otherwise withheld as command chords, mirroring
-/// [`is_search_entry_chord`]. OS paste (`C-V`) is handled locally via
-/// `arboard`, not here.
-fn is_clipboard_chord(key: ProtocolKey, mods: Modifiers) -> bool {
+/// A command chord (Q#GC1): a `Char` / `Enter` / `Tab` with `Ctrl` or
+/// `Alt` held. These drive the daemon keymap (motion like `C-a`,
+/// commands like `M-f` / `C-x C-s`, isearch `C-s`, clipboard `M-w`,
+/// `M-x`, …) and are forwarded to it, subsuming the old per-feature
+/// allowlists. `Char + Ctrl/Alt` is the exact set `should_forward_key`
+/// withholds; motion / `Backspace` / `Delete` keep their own path, and
+/// `Meta`/`Super`-only chords (no `Ctrl`/`Alt`) are left to the OS.
+/// `Ctrl-V` is intercepted for OS paste before this is reached.
+fn is_command_chord(key: ProtocolKey, mods: Modifiers) -> bool {
     matches!(
-        (key, mods),
-        (ProtocolKey::Char('w'), Modifiers::ALT | Modifiers::CTRL)
-            | (ProtocolKey::Char('y'), Modifiers::CTRL)
-    )
-}
-
-/// The chords that open a minibuffer prompt or enter a prefix (Q#MB1):
-/// `M-x` (execute-command) and the `C-x` prefix. Forwarded though
-/// otherwise withheld; once the daemon enters the minibuffer / a pending
-/// prefix, `dispatch_idle` goes false and the intercept gate round-trips
-/// the rest. General Emacs-chord forwarding stays a separate thread.
-fn is_minibuffer_open_chord(key: ProtocolKey, mods: Modifiers) -> bool {
-    matches!(
-        (key, mods),
-        (ProtocolKey::Char('x'), Modifiers::ALT | Modifiers::CTRL)
-    )
+        key,
+        ProtocolKey::Char(_) | ProtocolKey::Enter | ProtocolKey::Tab
+    ) && (mods.contains(Modifiers::CTRL) || mods.contains(Modifiers::ALT))
 }
 
 fn is_plain_text_modifiers(mods: Modifiers) -> bool {
@@ -5869,38 +5820,36 @@ mod tests {
     }
 
     #[test]
-    fn search_entry_chord_is_ctrl_or_ctrl_alt_s_r() {
-        // C-s / C-r (literal) and C-M-s / C-M-r (regex, Q#RX5) start a
-        // search — forwarded even though `should_forward_key` withholds
-        // them as command chords.
+    fn command_chord_forwards_char_chords_with_ctrl_or_alt() {
+        // Q#GC1 — any Char/Enter/Tab with Ctrl or Alt is a command chord,
+        // forwarded to the daemon keymap. This subsumes the old allowlists
+        // (isearch C-s/C-r/C-M-s, clipboard M-w/C-w/C-y, M-x) plus the
+        // rest of the keymap (C-a, C-e, M-f, C-x, …).
         let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
-        assert!(is_search_entry_chord(
-            ProtocolKey::Char('s'),
-            Modifiers::CTRL
-        ));
-        assert!(is_search_entry_chord(
-            ProtocolKey::Char('r'),
-            Modifiers::CTRL
-        ));
-        assert!(is_search_entry_chord(ProtocolKey::Char('s'), ctrl_alt));
-        assert!(is_search_entry_chord(ProtocolKey::Char('r'), ctrl_alt));
-        assert!(
-            !should_forward_key(ProtocolKey::Char('s'), Modifiers::CTRL),
-            "C-s is otherwise a withheld chord; the search-entry path is what forwards it"
-        );
-        // Other Ctrl chords, and s/r without Ctrl, are not entry chords.
-        assert!(!is_search_entry_chord(
-            ProtocolKey::Char('x'),
-            Modifiers::CTRL
-        ));
-        assert!(!is_search_entry_chord(
-            ProtocolKey::Char('s'),
-            Modifiers::NONE
-        ));
-        assert!(!is_search_entry_chord(
-            ProtocolKey::Char('s'),
-            Modifiers::ALT
-        ));
+        for (key, mods) in [
+            (ProtocolKey::Char('s'), Modifiers::CTRL), // isearch
+            (ProtocolKey::Char('s'), ctrl_alt),        // regex isearch
+            (ProtocolKey::Char('w'), Modifiers::ALT),  // copy
+            (ProtocolKey::Char('y'), Modifiers::CTRL), // yank
+            (ProtocolKey::Char('x'), Modifiers::ALT),  // M-x
+            (ProtocolKey::Char('x'), Modifiers::CTRL), // C-x prefix
+            (ProtocolKey::Char('a'), Modifiers::CTRL), // line-start (was withheld)
+            (ProtocolKey::Char('f'), Modifiers::ALT),  // forward-word
+            (ProtocolKey::Enter, Modifiers::CTRL),
+        ] {
+            assert!(
+                is_command_chord(key, mods),
+                "{key:?}+{mods:?} is a command chord"
+            );
+            // The general forwarding is *why* these move; `should_forward_key`
+            // still withholds them (they're caught before it).
+            assert!(!should_forward_key(key, mods));
+        }
+        // Plain text, and Meta/Super-only chords, are not command chords.
+        assert!(!is_command_chord(ProtocolKey::Char('a'), Modifiers::NONE));
+        assert!(!is_command_chord(ProtocolKey::Char('c'), Modifiers::META));
+        // Motion isn't routed here (it keeps its own defer-aware path).
+        assert!(!is_command_chord(ProtocolKey::Left, Modifiers::CTRL));
     }
 
     #[test]
