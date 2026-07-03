@@ -3536,11 +3536,11 @@ fn do_install(lua: &Lua, spec: &InstallSpec, scope: &InstallScope) -> mlua::Resu
         } else {
             InstallSpec {
                 address: rp.address.clone(),
-                pin: crate::packages::InstallPin::Commit(rp.commit.clone()),
+                pin: crate::packages::InstallPin::Commit(rp.revision.clone()),
             }
         };
         let installed = installer
-            .install_at_commit(&install_spec, &rp.commit)
+            .install_at_commit(&install_spec, &rp.revision)
             .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
 
         if let Some(parent) = installed.install_path.parent() {
@@ -3749,13 +3749,13 @@ fn do_update(lua: &Lua, target: Option<&str>) -> mlua::Result<Table> {
             let pin_to_use = rp
                 .top_level_pin
                 .clone()
-                .unwrap_or_else(|| crate::packages::InstallPin::Commit(rp.commit.clone()));
+                .unwrap_or_else(|| crate::packages::InstallPin::Commit(rp.revision.clone()));
             let install_spec = InstallSpec {
                 address: rp.address.clone(),
                 pin: pin_to_use,
             };
             let installed = installer
-                .replace_at_commit(&install_spec, &rp.commit)
+                .replace_at_commit(&install_spec, &rp.revision)
                 .map_err(|e| mlua::Error::external(BindingError::from(e)))?;
             if let Some(parent) = installed.install_path.parent() {
                 prepend_package_path(lua, parent)?;

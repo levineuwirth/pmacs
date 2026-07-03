@@ -88,7 +88,9 @@ use super::address::Address;
 use super::fetcher::{FetchError, Fetcher, RefSpec};
 use super::installer::InstallPin;
 use super::manifest::PackageName;
-use super::resolver::{ResolvePlan, ResolvedPackage};
+use super::resolver::{
+    ResolvePlan, ResolvedPackage, find_basename_collision, format_package_name_list,
+};
 
 /// Schema version emitted by [`Lockfile::to_bytes`]. Bumped only on
 /// incompatible format changes.
@@ -489,6 +491,16 @@ impl Lockfile {
     /// (reproducible installs across machines) on the install path
     /// itself, not just at lockfile-write time.
     pub fn to_resolve_plan(&self, fetcher: &Fetcher) -> Result<ResolvePlan, LockfileError> {
+        // Reject basename collisions up front (audit F-005), before any
+        // fetch: a hand-edited or pre-existing lockfile with two distinct
+        // packages sharing a basename (e.g. `owner/magit` + `other/magit`)
+        // would otherwise install both to `<root>/<basename>`. The
+        // fresh-resolve path guards this identically in `into_plan`.
+        if let Some((basename, names)) =
+            find_basename_collision(self.packages.iter().map(|e| e.name.clone()))
+        {
+            return Err(LockfileError::BasenameCollision { basename, names });
+        }
         let mut packages = Vec::with_capacity(self.packages.len());
         for entry in &self.packages {
             // Verify before reading the manifest. `verify_entry`
@@ -534,7 +546,9 @@ impl Lockfile {
             packages.push(ResolvedPackage {
                 name: entry.name.clone(),
                 address,
-                commit: entry.commit.clone(),
+                // A lockfile entry's `commit` is a real SHA, a valid
+                // commit-ish for the renamed field (audit F-011).
+                revision: entry.commit.clone(),
                 version: entry.version.clone(),
                 manifest,
                 top_level_pin,
@@ -573,7 +587,7 @@ fn build_entry(
     // Resolve the chosen commit-ish (which may be a tag string for
     // version pins) to a 40-char SHA.
     let sha = fetcher
-        .resolve(&repo, &RefSpec::Commit(rp.commit.clone()))
+        .resolve(&repo, &RefSpec::Commit(rp.revision.clone()))
         .map_err(|source| LockfileError::Fetch {
             url: url.clone(),
             source,
@@ -814,6 +828,24 @@ pub enum LockfileError {
         /// The name that was passed to `UpdateOne`.
         name: PackageName,
     },
+    /// Two or more distinct lockfile entries share an install basename
+    /// (audit F-005). A hand-edited or pre-existing lockfile with e.g.
+    /// `owner/magit` and `other/magit` would install both to
+    /// `<root>/magit`. The frozen/lockfile plan path must reject this just
+    /// like the fresh-resolve path does.
+    #[error(
+        "lockfile has packages [{names}] sharing the install basename \
+         `{basename}`: pmacs installs and requires by basename, so these \
+         distinct packages would collide on disk. Regenerate the lockfile \
+         after renaming one, or install them in separate roots.",
+        names = format_package_name_list(.names)
+    )]
+    BasenameCollision {
+        /// The colliding last-path-segment.
+        basename: String,
+        /// The distinct package names that map to it.
+        names: Vec<PackageName>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +855,42 @@ pub enum LockfileError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_resolve_plan_rejects_basename_collision_before_fetching() {
+        // A hand-edited / pre-existing lockfile with two distinct packages
+        // that share an install basename (audit F-005). The frozen path
+        // must reject it just like the fresh-resolve path, and it does so
+        // *before* any fetch — so the throwaway cache dir is never touched.
+        let entry = |name: &str, url: &str| LockfileEntry {
+            name: PackageName::new(name).unwrap(),
+            url: url.into(),
+            commit: "0".repeat(40),
+            version: Version::new(1, 0, 0),
+            content_hash: ContentHash::sha256_of(name.as_bytes()),
+            top_level_pin: None,
+            dependencies: vec![],
+        };
+        let lock = Lockfile {
+            schema_version: LOCKFILE_SCHEMA_VERSION,
+            generator: "pmacs test".into(),
+            packages: vec![
+                entry("owner/magit", "https://example.com/owner/magit.git"),
+                entry("other/magit", "https://example.com/other/magit.git"),
+            ],
+        };
+        let fetcher = Fetcher::with_cache_dir(std::env::temp_dir());
+        let err = lock
+            .to_resolve_plan(&fetcher)
+            .expect_err("colliding lockfile must be rejected");
+        match err {
+            LockfileError::BasenameCollision { basename, names } => {
+                assert_eq!(basename, "magit");
+                assert_eq!(names.len(), 2);
+            }
+            other => panic!("expected BasenameCollision, got {other:?}"),
+        }
+    }
 
     #[test]
     fn content_hash_sha256_known_vector() {

@@ -369,9 +369,11 @@ fn resolver_resolves_transitive_dependency_chain() {
     for entry in &plan.packages {
         assert_eq!(entry.version, Version::new(1, 0, 0));
         assert!(
-            entry.commit.is_empty() || entry.commit.len() == 40 || entry.commit.starts_with('v'),
-            "expected commit to be a 40-char SHA or tag-resolved, got {:?}",
-            entry.commit,
+            entry.revision.is_empty()
+                || entry.revision.len() == 40
+                || entry.revision.starts_with('v'),
+            "expected revision to be a 40-char SHA or tag-resolved, got {:?}",
+            entry.revision,
         );
     }
 
@@ -625,7 +627,7 @@ fn resolver_branch_pin_records_pin_and_resolved_commit() {
     assert_eq!(plan.packages.len(), 1);
     let entry = &plan.packages[0];
     assert_eq!(
-        entry.commit, feature_head,
+        entry.revision, feature_head,
         "branch HEAD must be the resolved commit"
     );
     assert!(
@@ -650,7 +652,7 @@ fn resolver_commit_pin_uses_exact_revision() {
 
     assert_eq!(plan.packages.len(), 1);
     let entry = &plan.packages[0];
-    assert_eq!(entry.commit, feature_head);
+    assert_eq!(entry.revision, feature_head);
     assert!(
         matches!(entry.top_level_pin, Some(InstallPin::Commit(ref c)) if c == &feature_head),
         "plan must record the original commit pin, got {:?}",

@@ -83,7 +83,7 @@ use thiserror::Error;
 
 use super::address::{Address, AddressError};
 use super::fetcher::{FetchError, Fetcher, RefSpec};
-use super::installer::{InstallPin, running_pmacs_version};
+use super::installer::{InstallPin, package_basename, running_pmacs_version};
 use super::lockfile::{Lockfile, LockfileError, UpdatePolicy};
 use super::manifest::{ManifestError, PackageManifest, PackageName};
 
@@ -140,11 +140,16 @@ pub struct ResolvedPackage {
     /// Address used to fetch this package. For transitive deps this
     /// is whatever string the parent manifest recorded.
     pub address: Address,
-    /// Full 40-character commit hash this package resolves to.
-    pub commit: String,
-    /// Version parsed from the manifest at `commit`.
+    /// The commit-ish this package resolves to: a 40-char SHA, or a
+    /// tag/branch name (the resolver deliberately works against
+    /// commit-ishes and defers concrete-SHA resolution to the installer /
+    /// lockfile — see `TagCandidate::commit_for_tag`). **Not guaranteed to
+    /// be a SHA**; do not treat it as immutable. Renamed from `commit`
+    /// (audit F-011), whose name falsely promised a hash.
+    pub revision: String,
+    /// Version parsed from the manifest at `revision`.
     pub version: Version,
-    /// Manifest at `commit`, captured during resolution.
+    /// Manifest at `revision`, captured during resolution.
     pub manifest: PackageManifest,
     /// `Some(pin)` if this entry came directly from a top-level
     /// [`ResolveRequest`]; `None` if it was pulled in transitively
@@ -702,36 +707,14 @@ impl<'a> ResolverState<'a> {
             deps_of.insert(name.clone(), set);
         }
 
-        // Kahn's topological sort. `BTreeMap` + `BTreeSet` keep
-        // tie-breaking deterministic (alphabetical by package name).
-        let mut indegree: BTreeMap<PackageName, usize> =
-            entries.keys().map(|n| (n.clone(), 0)).collect();
-        for deps in deps_of.values() {
-            for d in deps {
-                if let Some(slot) = indegree.get_mut(d) {
-                    *slot += 1;
-                }
-            }
-        }
-
-        // Note: edge direction. We treat "X depends on Y" as an edge
-        // from X to Y. Topological order with Kahn's algorithm needs
-        // dependencies *before* dependents, which means we process
-        // nodes whose in-degree (number of dependents) is zero —
-        // i.e., leaves of the depender graph, which are the most
-        // fundamental dependencies. We then peel layers outward.
-        //
-        // Reframe: indegree[Y] = number of X such that X depends on Y.
-        // No, that's backwards. Indegree[Y] = number of edges pointing
-        // *into* Y. If "X depends on Y" is X → Y, then indegree[Y]
-        // counts dependents. We want to emit Y first when nothing
-        // points to it from a not-yet-emitted node. Reset.
-        //
-        // Cleaner: indegree[X] = count of X's outgoing edges still
-        // pending = number of X's deps not yet emitted. Start with
-        // indegree[X] = |deps_of[X]|; each time we emit Y, decrement
-        // indegree of every X that depends on Y. Emit X when its
-        // indegree hits 0.
+        // Kahn's topological sort, dependencies before dependents.
+        // Edge direction: "X depends on Y" is X → Y, and Y must be
+        // emitted before X. Track each node's *outgoing* pending edges —
+        // `indegree[X]` = the number of X's deps not yet emitted, seeded
+        // to `|deps_of[X]|` — and when a node Y is emitted, decrement
+        // every X that depends on Y; emit X once its count reaches 0.
+        // `BTreeMap` / `BTreeSet` keep tie-breaking deterministic
+        // (alphabetical by package name).
         let mut indegree: BTreeMap<PackageName, usize> = deps_of
             .iter()
             .map(|(n, deps)| (n.clone(), deps.len()))
@@ -790,13 +773,25 @@ impl<'a> ResolverState<'a> {
                 ResolvedPackage {
                     name,
                     address: entry.address,
-                    commit: entry.commit,
+                    revision: entry.commit,
                     version: entry.version,
                     manifest: entry.manifest,
                     top_level_pin: entry.top_level_pin,
                 }
             })
             .collect();
+
+        // Reject distinct packages that share an install basename (F-005).
+        // The plan is the one place holding every resolved name at once;
+        // installing by basename would otherwise let two of them (e.g.
+        // `owner/magit` and `other/magit`) collide on disk, most-recent
+        // winning. (This does not touch the loader's *intended* cross-scope
+        // override, which shares a basename across separate installs.)
+        if let Some((basename, names)) =
+            find_basename_collision(packages.iter().map(|p| p.name.clone()))
+        {
+            return Err(ResolveError::BasenameCollision { basename, names });
+        }
 
         Ok(ResolvePlan { packages })
     }
@@ -1312,6 +1307,55 @@ pub enum ResolveError {
     /// A lockfile-aware path produced an underlying [`LockfileError`].
     #[error("lockfile: {0}")]
     Lockfile(#[from] LockfileError),
+
+    /// Two or more distinct packages in one resolve plan share an install
+    /// basename (audit F-005). pmacs installs each package under
+    /// `<install_root>/<basename>/` and routes `require` by basename, so
+    /// distinct packages with the same last `/`-segment (e.g. `owner/magit`
+    /// and `other/magit`) would overwrite each other on disk with the
+    /// most-recent install silently winning. Reject rather than collapse
+    /// them — a namespace-preserving layout is the real fix (deferred).
+    #[error(
+        "packages [{names}] share the install basename `{basename}`: pmacs \
+         installs and requires by basename, so these distinct packages would \
+         collide on disk. Rename one, or install them in separate roots.",
+        names = format_package_name_list(.names)
+    )]
+    BasenameCollision {
+        /// The colliding last-path-segment.
+        basename: String,
+        /// The distinct package names that map to it (sorted).
+        names: Vec<PackageName>,
+    },
+}
+
+/// Comma-join package names for a basename-collision message. Shared with
+/// [`super::lockfile`], which guards the frozen/lockfile plan path.
+pub(crate) fn format_package_name_list(names: &[PackageName]) -> String {
+    names
+        .iter()
+        .map(|n| n.as_str().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Find an install basename shared by more than one distinct package name
+/// (audit F-005). Returns the colliding basename and its names (sorted by
+/// the `BTreeMap`/first-seen order), or `None` when every basename is
+/// unique. Guards both plan-construction paths: `into_plan` (fresh /
+/// `UpdateOne` resolves) and [`super::lockfile::Lockfile::to_resolve_plan`]
+/// (the frozen / lockfile-derived path).
+pub(crate) fn find_basename_collision(
+    names: impl Iterator<Item = PackageName>,
+) -> Option<(String, Vec<PackageName>)> {
+    let mut by_basename: BTreeMap<String, Vec<PackageName>> = BTreeMap::new();
+    for name in names {
+        by_basename
+            .entry(package_basename(name.as_str()).to_string())
+            .or_default()
+            .push(name);
+    }
+    by_basename.into_iter().find(|(_, names)| names.len() > 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,6 +1456,41 @@ mod tests {
     fn parse_tag_strips_v_prefix() {
         let v = parse_tag_as_version("v1.2.3").expect("parse");
         assert_eq!(v, Version::new(1, 2, 3));
+    }
+
+    #[test]
+    fn basename_collision_flags_distinct_same_basename_packages() {
+        let pn = |s: &str| PackageName::new(s).expect("valid name");
+        // `owner/magit` and `other/magit` both install as `magit` → collide.
+        let collision = find_basename_collision(
+            [pn("owner/magit"), pn("other/magit"), pn("ripgrep")].into_iter(),
+        );
+        let (basename, names) = collision.expect("collision detected");
+        assert_eq!(basename, "magit");
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&pn("owner/magit")) && names.contains(&pn("other/magit")));
+        // The message names both offenders.
+        let err = ResolveError::BasenameCollision { basename, names };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("owner/magit") && msg.contains("other/magit"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn basename_collision_ignores_unique_and_same_name_repeats() {
+        let pn = |s: &str| PackageName::new(s).expect("valid name");
+        // Distinct basenames: no collision.
+        assert!(
+            find_basename_collision([pn("owner/magit"), pn("owner/forge")].into_iter()).is_none()
+        );
+        // A namespaced and a bare package with different basenames are fine.
+        assert!(find_basename_collision([pn("owner/magit"), pn("ripgrep")].into_iter()).is_none());
+        // The plan's names are already distinct (keyed by PackageName), so
+        // an empty or singleton set never collides.
+        assert!(find_basename_collision(std::iter::empty()).is_none());
+        assert!(find_basename_collision([pn("owner/magit")].into_iter()).is_none());
     }
 
     #[test]
