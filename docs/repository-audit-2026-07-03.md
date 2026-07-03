@@ -78,6 +78,15 @@ commands, e.g. `cargo clippy --workspace --all-targets -- -D warnings` and
 `default-members` if the intent is for plain `cargo test` and `cargo clippy` to
 cover all first-party crates.
 
+Resolution (PR #75, then extended): the three `pmacs-gpu` lints were fixed and
+CI now runs `cargo clippy -p pmacs-gpu --all-targets` (README uses `--workspace`).
+That closed the *clippy* blind spot but not the symmetric *test* one — the
+default-member scope also means `cargo test` skips `pmacs-protocol`. F-014's
+GPU-render job later ran `pmacs-gpu`'s tests; this change adds
+`cargo test -p pmacs-protocol --all-targets` to the test job so the shared wire
+format (its ~12 encode/decode + transport-framing tests) is finally exercised in
+CI. All three first-party crates now run in CI.
+
 ### F-002 - Medium - `--all-features` is not buildable because Lua features are mutually exclusive
 
 Evidence:
@@ -152,6 +161,19 @@ Use winit's text/IME path or an explicit AltGraph signal to distinguish printabl
 text input from command chords. Add tests for AltGr-style printable input. If the
 wire protocol needs it, add an AltGraph modifier bit rather than folding it into
 Ctrl/Alt.
+
+Resolution (PR #76, then hardened): a keypress that produced printable
+`key.text` while a command modifier was held is reclassified as text input and
+the modifiers are stripped (`is_layout_text`). The first cut gated on *any*
+command modifier, which over-reached: on macOS the `Option` key is reported as
+`Alt` and emits printable text for most letters, so `Option+x` was stripped to a
+plain insert — swallowing every GUI Meta binding (`M-x`, `M-f`, …) on that
+platform. The gate is now the true AltGr signature — **both `Ctrl` and `Alt`**
+(the LCtrl+RAlt the OS synthesizes for AltGr on Windows) — so `Alt`-alone forwards
+as a Meta chord again while Windows AltGr still inserts. A protocol AltGraph bit
+was *not* added; the text-presence heuristic is sufficient and layout-agnostic.
+Not locally validatable on macOS (no box) — a narrowing of when we strip, so
+low-risk on Linux/Windows.
 
 ### F-005 - Medium - Package install paths collide for namespaced packages with the same basename
 

@@ -800,13 +800,14 @@ impl ApplicationHandler<AppEvent> for App {
 
                 // AltGr / international text (audit F-004). winit reports
                 // the text a keypress produces; when a keypress yields
-                // printable text *while* Ctrl/Alt is held — AltGr is
-                // Ctrl+Alt on Windows and some layouts — it's text input,
-                // not a command chord. Strip the Ctrl/Alt (keep Shift) so
-                // it inserts (through the plain-text path, or the daemon's
-                // SelfInsert while a prompt is open) instead of being
-                // routed to the keymap. On platforms where AltGr isn't
-                // Ctrl/Alt this is a no-op (the chord was already plain).
+                // printable text *while both Ctrl and Alt* are held — the
+                // AltGr signature on Windows (LCtrl+RAlt) — it's text
+                // input, not a command chord. Strip those modifiers (keep
+                // Shift) so it inserts (through the plain-text path, or the
+                // daemon's SelfInsert while a prompt is open) instead of
+                // being routed to the keymap. Alt alone is left intact so
+                // macOS Option-as-Meta still reaches the keymap; on layouts
+                // where AltGr isn't Ctrl+Alt this is a no-op.
                 if matches!(pkey, ProtocolKey::Char(_))
                     && is_layout_text(key.text.as_deref(), pmods)
                 {
@@ -4982,16 +4983,25 @@ fn is_command_chord(key: ProtocolKey, mods: Modifiers) -> bool {
     ) && (mods.contains(Modifiers::CTRL) || mods.contains(Modifiers::ALT))
 }
 
-/// Whether a keypress is **layout text input carried under a command
-/// modifier** — the `AltGr` case (audit F-004): winit produced printable
-/// `text` while `Ctrl`/`Alt` is held. On layouts/platforms where `AltGr`
-/// is `Ctrl+Alt` (Windows), the produced character would otherwise be
-/// misclassified as a command chord; when this is true the caller strips
-/// the command modifiers so it inserts. Returns `false` for genuine
-/// command chords (which produce no text, or a control char) and for
-/// plain text (no command modifier — already handled).
+/// Whether a keypress is **`AltGr` layout text** (audit F-004): winit
+/// produced printable `text` while **both `Ctrl` and `Alt`** are held.
+/// `AltGr` is `Ctrl+Alt` on Windows (the OS synthesizes LCtrl+RAlt), and
+/// on such layouts the produced character (`@`, `€`, `{`, …) would
+/// otherwise be misclassified as a command chord; when this is true the
+/// caller strips the command modifiers so it inserts.
+///
+/// The gate is deliberately `Ctrl+Alt`, **not** "any command modifier":
+/// `Alt` alone is *not* `AltGr`. On macOS the `Option` key is reported as
+/// `Alt` and produces printable text for most letters (`Option+x` → "≈"),
+/// but Option-as-Meta is exactly how the GUI reaches `M-x` / `M-f` / … —
+/// stripping `Alt`-alone would swallow every macOS Meta chord. Genuine
+/// `AltGr` needs both modifiers, so requiring both leaves `Alt`-alone
+/// (macOS `Option`, plain `Meta`) to forward as command chords. Returns
+/// `false` for genuine command chords (no text, or a control char) and
+/// for plain text (no command modifier — already handled).
 fn is_layout_text(text: Option<&str>, mods: Modifiers) -> bool {
-    !is_plain_text_modifiers(mods)
+    mods.contains(Modifiers::CTRL)
+        && mods.contains(Modifiers::ALT)
         && text.is_some_and(|t| !t.is_empty() && t.chars().all(|c| !c.is_control()))
 }
 
@@ -6074,8 +6084,14 @@ mod tests {
         // text; that's text input, so the caller strips the modifiers.
         let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
         assert!(is_layout_text(Some("@"), ctrl_alt));
-        assert!(is_layout_text(Some("€"), Modifiers::ALT));
         assert!(is_layout_text(Some("{"), ctrl_alt));
+        assert!(is_layout_text(Some("€"), ctrl_alt)); // AltGr+e on many layouts
+        // Alt ALONE is not AltGr. On macOS the Option key is Alt and emits
+        // printable text (Option+x → "≈"), but Option-as-Meta is how the
+        // GUI reaches M-x / M-f — leave it intact so it forwards as a
+        // command chord instead of self-inserting the symbol.
+        assert!(!is_layout_text(Some("≈"), Modifiers::ALT)); // macOS Option+x → M-x
+        assert!(!is_layout_text(Some("€"), Modifiers::ALT));
         // Genuine command chords produce no text (or a control char) —
         // not layout text, so they still route to the keymap.
         assert!(!is_layout_text(None, Modifiers::CTRL)); // C-a etc.

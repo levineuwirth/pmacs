@@ -92,6 +92,13 @@ jobs:
       # to the behavior under test.
       - run: cargo test --all-targets --no-default-features --features ${{ matrix.lua }} -- --test-threads=1
       - run: cargo test --doc --no-default-features --features ${{ matrix.lua }}
+      # The workspace default member is only the root `pmacs` package, so
+      # the runs above never execute pmacs-protocol's own tests — the
+      # shared wire format (encode/decode, transport framing) the daemon,
+      # TUI, and GPU all depend on. Run them explicitly (Lua-flavor
+      # independent, so once is enough; runs on every matrix leg cheaply
+      # off the shared cache).
+      - run: cargo test -p pmacs-protocol --all-targets
 
   acceptance:
     name: M1 Acceptance Gates
