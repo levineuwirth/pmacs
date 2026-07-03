@@ -791,9 +791,29 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
-                let Some((pkey, pmods)) = translate_key(&key.logical_key, self.modifiers) else {
+                let Some((pkey, mut pmods)) = translate_key(&key.logical_key, self.modifiers)
+                else {
                     return;
                 };
+
+                // AltGr / international text (audit F-004). winit reports
+                // the text a keypress produces; when a keypress yields
+                // printable text *while* Ctrl/Alt is held — AltGr is
+                // Ctrl+Alt on Windows and some layouts — it's text input,
+                // not a command chord. Strip the Ctrl/Alt (keep Shift) so
+                // it inserts (through the plain-text path, or the daemon's
+                // SelfInsert while a prompt is open) instead of being
+                // routed to the keymap. On platforms where AltGr isn't
+                // Ctrl/Alt this is a no-op (the chord was already plain).
+                if matches!(pkey, ProtocolKey::Char(_))
+                    && is_layout_text(key.text.as_deref(), pmods)
+                {
+                    pmods = if pmods.contains(Modifiers::SHIFT) {
+                        Modifiers::SHIFT
+                    } else {
+                        Modifiers::NONE
+                    };
+                }
 
                 // Ctrl-V — OS paste (Q#CM6). Read the system clipboard
                 // locally via arboard and ship it as a `Paste` event; the
@@ -4782,6 +4802,19 @@ fn is_command_chord(key: ProtocolKey, mods: Modifiers) -> bool {
     ) && (mods.contains(Modifiers::CTRL) || mods.contains(Modifiers::ALT))
 }
 
+/// Whether a keypress is **layout text input carried under a command
+/// modifier** — the `AltGr` case (audit F-004): winit produced printable
+/// `text` while `Ctrl`/`Alt` is held. On layouts/platforms where `AltGr`
+/// is `Ctrl+Alt` (Windows), the produced character would otherwise be
+/// misclassified as a command chord; when this is true the caller strips
+/// the command modifiers so it inserts. Returns `false` for genuine
+/// command chords (which produce no text, or a control char) and for
+/// plain text (no command modifier — already handled).
+fn is_layout_text(text: Option<&str>, mods: Modifiers) -> bool {
+    !is_plain_text_modifiers(mods)
+        && text.is_some_and(|t| !t.is_empty() && t.chars().all(|c| !c.is_control()))
+}
+
 fn is_plain_text_modifiers(mods: Modifiers) -> bool {
     !mods.contains(Modifiers::CTRL)
         && !mods.contains(Modifiers::ALT)
@@ -5853,6 +5886,25 @@ mod tests {
         assert!(!is_command_chord(ProtocolKey::Char('c'), Modifiers::META));
         // Motion isn't routed here (it keeps its own defer-aware path).
         assert!(!is_command_chord(ProtocolKey::Left, Modifiers::CTRL));
+    }
+
+    #[test]
+    fn is_layout_text_distinguishes_altgr_from_command_chords() {
+        // Audit F-004 — AltGr (Ctrl+Alt on Windows) produces printable
+        // text; that's text input, so the caller strips the modifiers.
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        assert!(is_layout_text(Some("@"), ctrl_alt));
+        assert!(is_layout_text(Some("€"), Modifiers::ALT));
+        assert!(is_layout_text(Some("{"), ctrl_alt));
+        // Genuine command chords produce no text (or a control char) —
+        // not layout text, so they still route to the keymap.
+        assert!(!is_layout_text(None, Modifiers::CTRL)); // C-a etc.
+        assert!(!is_layout_text(Some("\u{1}"), Modifiers::CTRL)); // Ctrl+A control char
+        assert!(!is_layout_text(Some(""), ctrl_alt)); // no text
+        // Plain text has no command modifier, so it's already handled and
+        // needs no stripping.
+        assert!(!is_layout_text(Some("a"), Modifiers::NONE));
+        assert!(!is_layout_text(Some("A"), Modifiers::SHIFT));
     }
 
     #[test]
