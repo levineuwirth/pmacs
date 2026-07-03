@@ -319,10 +319,12 @@ type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
     reason = "independent render/input state flags, not a config bitset"
 )]
 struct State {
-    window: Arc<Window>,
+    // `None` in the headless render-test path (F-014): a windowless State
+    // that renders to an offscreen texture instead of a surface.
+    window: Option<Arc<Window>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -1162,7 +1164,7 @@ impl ApplicationHandler<AppEvent> for App {
         if let Some(deadline) = state.styled_redraw_deadline {
             if now >= deadline {
                 state.styled_redraw_deadline = None;
-                state.window.request_redraw();
+                state.request_redraw();
             } else {
                 next_wake = Some(deadline);
             }
@@ -1581,7 +1583,74 @@ impl State {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
+        Self::assemble(
+            Some(window),
+            Some(surface),
+            device,
+            queue,
+            config,
+            initial_text,
+        )
+    }
 
+    /// Build a windowless `State` that renders to an offscreen texture, for
+    /// the headless render tests (F-014). Returns `None` when no GPU
+    /// adapter is available (a dev box with no working Vulkan, or CI
+    /// without lavapipe), so the caller skips rather than fails.
+    #[cfg(test)]
+    fn new_headless(width: u32, height: u32, initial_text: &str) -> Option<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("pmacs-gpu headless device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..wgpu::DeviceDescriptor::default()
+        }))
+        .ok()?;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        Some(Self::assemble(
+            None,
+            None,
+            device,
+            queue,
+            config,
+            initial_text,
+        ))
+    }
+
+    /// Build the window-agnostic half of a `State` — font system, glyph
+    /// atlas, the three text renderers, quad/squiggle pipelines, and every
+    /// render-input field — given an already-created device/queue and the
+    /// target `format`. Shared by the windowed `new` and headless
+    /// `new_headless` (F-014).
+    #[allow(clippy::too_many_lines)] // one large struct literal.
+    fn assemble(
+        window: Option<Arc<Window>>,
+        surface: Option<wgpu::Surface<'static>>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+        initial_text: &str,
+    ) -> Self {
+        // Pipelines, atlas, and any offscreen texture must all share the
+        // render-target format; `config.format` is the single source.
+        let format = config.format;
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(JETBRAINS_MONO.to_vec());
         let swash_cache = SwashCache::new();
@@ -1594,7 +1663,7 @@ impl State {
                 height: config.height,
             },
         );
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, surface_format);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         // Q#CM1 — a second renderer so the menu draws as a top layer.
@@ -1603,8 +1672,8 @@ impl State {
         // Q#MB1 — a third renderer for the minibuffer dropdown layer.
         let mb_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
-        let quad_renderer = QuadRenderer::new(&device, surface_format);
-        let squiggle_renderer = SquiggleRenderer::new(&device, surface_format);
+        let quad_renderer = QuadRenderer::new(&device, format);
+        let squiggle_renderer = SquiggleRenderer::new(&device, format);
 
         // Smaller font in attach mode (file contents tend to be more
         // than one line); larger only fits "hello, pmacs"-shaped
@@ -2342,7 +2411,7 @@ impl State {
                 // reshape, so none triggers one — diagnostic
                 // publishes no longer pay set_rich_text +
                 // shape_until_scroll.
-                self.window.request_redraw();
+                self.request_redraw();
                 None
             }
             InstanceMessage::InlineAdornments { buffer_id, items } => {
@@ -2378,7 +2447,7 @@ impl State {
                     diag_errors,
                     diag_warnings,
                 });
-                self.window.request_redraw();
+                self.request_redraw();
                 None
             }
             // Q#SR5 / Q#RX6 — the live isearch prompt (protocol v10).
@@ -2403,7 +2472,7 @@ impl State {
                     regex,
                     invalid,
                 });
-                self.window.request_redraw();
+                self.request_redraw();
                 None
             }
             // Session 9.3 — peer presence. The editing frontend's
@@ -2438,7 +2507,7 @@ impl State {
                         selection,
                     },
                 );
-                self.window.request_redraw();
+                self.request_redraw();
                 None
             }
             // Session B1 — our own cursor. The daemon emits this per
@@ -2510,7 +2579,7 @@ impl State {
                         return Some(vp);
                     }
                 }
-                self.window.request_redraw();
+                self.request_redraw();
                 None
             }
             InstanceMessage::DispatchIdle { idle } => {
@@ -2536,7 +2605,7 @@ impl State {
                         anchor_px: self.menu_anchor_px,
                     })
                 };
-                self.window.request_redraw();
+                self.request_redraw();
                 None
             }
             // Q#MB1 — the minibuffer prompt/input/candidates. `prompt:
@@ -2557,7 +2626,7 @@ impl State {
                     selected,
                     total,
                 });
-                self.window.request_redraw();
+                self.request_redraw();
                 None
             }
             _ => None,
@@ -2753,7 +2822,7 @@ impl State {
             // content changes; offsets are clip-rebased per frame.
             self.view_range = (vstart, vend);
             self.hit_map_dirty = true;
-            self.window.request_redraw();
+            self.request_redraw();
             return true;
         }
         let line_idx = self
@@ -2783,7 +2852,7 @@ impl State {
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.view_range = (vstart, vend);
         self.hit_map_dirty = true;
-        self.window.request_redraw();
+        self.request_redraw();
         true
     }
 
@@ -2877,7 +2946,7 @@ impl State {
         self.hit_map_dirty = true;
         if any_reused || self.line_chunk_cache.is_empty() {
             self.styled_redraw_deadline = None;
-            self.window.request_redraw();
+            self.request_redraw();
         } else {
             // Far jump (Q#M6, bet #2): every line rebuilt, and the
             // span set covers the *old* viewport — drawing now would
@@ -2920,7 +2989,7 @@ impl State {
         // Fresh styling reached the slice — release any held
         // post-jump frame (Q#M6, bet #2).
         self.styled_redraw_deadline = None;
-        self.window.request_redraw();
+        self.request_redraw();
     }
 
     /// Compose the status-band readout (Q#S1): diagnostic counts
@@ -3280,7 +3349,7 @@ impl State {
         }
         self.current_line_shapes = minimap_line_shapes(&self.current_text);
         self.current_summary = Some(FileStyleSummaryState { generation, lines });
-        self.window.request_redraw();
+        self.request_redraw();
     }
 
     /// `full = true` path: discard prior styling, take the segments'
@@ -3490,13 +3559,23 @@ impl State {
         self.hit_map_dirty = true;
         // Full restyle: release any held post-jump frame (Q#M6).
         self.styled_redraw_deadline = None;
-        self.window.request_redraw();
+        self.request_redraw();
+    }
+
+    /// Ask the window to repaint. A no-op headless (no window), where the
+    /// render tests drive `render_offscreen` directly (F-014).
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Option<ViewportSend> {
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        }
         self.viewport
             .update(&self.queue, Resolution { width, height });
         self.buffer.set_size(
@@ -3517,29 +3596,131 @@ impl State {
         // A taller/shorter window changes the visible line count, so the
         // slice + scoped viewport change (session S1).
         self.reshape();
-        self.window.request_redraw();
+        self.request_redraw();
         self.current_buffer_id
             .and_then(|bid| self.viewport_send_if_changed(bid))
     }
 
-    #[allow(clippy::too_many_lines)] // linear per-frame GPU sequence + optional timing.
+    /// Acquire the surface's current texture and render into it — the live
+    /// windowed path. Composition lives in `render_to_view`, shared with
+    /// the headless offscreen path (`render_offscreen`, F-014).
     fn render(&mut self) {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+        let frame = {
+            let Some(surface) = self.surface.as_ref() else {
                 return;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
-            wgpu::CurrentSurfaceTexture::Validation => {
-                eprintln!("surface acquisition raised a validation error");
-                return;
+            };
+            match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(frame)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                    surface.configure(&self.device, &self.config);
+                    return;
+                }
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    return;
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    eprintln!("surface acquisition raised a validation error");
+                    return;
+                }
             }
         };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        self.render_to_view(&view);
+        frame.present();
+    }
+
+    /// Render one frame to an offscreen texture and read it back as packed
+    /// RGBA8 (`width * height * 4` bytes, row padding removed). Test-only,
+    /// the entry point for the headless render harness (F-014).
+    #[cfg(test)]
+    fn render_offscreen(&mut self) -> Vec<u8> {
+        let width = self.config.width;
+        let height = self.config.height;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pmacs-gpu offscreen target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.render_to_view(&view);
+
+        // Copy into a mappable buffer, honoring the 256-byte per-row
+        // alignment `copy_texture_to_buffer` requires.
+        let unpadded_bytes_per_row = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pmacs-gpu readback"),
+            size: u64::from(padded_bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pmacs-gpu readback encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll readback");
+        rx.recv().expect("map channel").expect("map readback");
+
+        let mapped = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+        for row in 0..height {
+            let start = (row * padded_bytes_per_row) as usize;
+            pixels.extend_from_slice(&mapped[start..start + unpadded_bytes_per_row as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+        pixels
+    }
+
+    /// Compose and submit one frame into `view`. Window-agnostic — shared
+    /// by the live surface path (`render`) and the headless offscreen path
+    /// (`render_offscreen`, F-014). No surface acquire, no `present`.
+    #[allow(clippy::too_many_lines)] // linear per-frame GPU sequence + optional timing.
+    fn render_to_view(&mut self, view: &wgpu::TextureView) {
         let frame_start = debug_frame().then(std::time::Instant::now);
         self.refresh_status_line();
         self.refresh_menu_buffer();
@@ -3789,7 +3970,7 @@ impl State {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pmacs-gpu pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -3849,7 +4030,6 @@ impl State {
                 .expect("menu text_renderer render");
         }
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
         self.atlas.trim();
 
         if let (Some(start), Some(after_bg), Some(after_minimap)) =
@@ -6812,5 +6992,66 @@ mod tests {
         };
         assert!(squiggles_to_vertex_bytes(&[zero_w], 100, 100).is_empty());
         assert!(squiggles_to_vertex_bytes(&[zero_w], 0, 100).is_empty());
+    }
+
+    // --- Headless render harness (F-014) ---------------------------------
+    //
+    // These render a real frame through the actual `render_to_view`
+    // composition path to an offscreen texture and read the pixels back.
+    // They skip (not fail) when no wgpu adapter is available — a dev box
+    // without working Vulkan, or CI without lavapipe.
+
+    /// Build a headless `State`, or return `None` and log when there's no
+    /// adapter so the caller can skip. When `PMACS_REQUIRE_GPU` is set
+    /// (CI, where lavapipe is installed) a missing adapter is a hard
+    /// failure instead — so a broken software-rasterizer setup can't pass
+    /// as a silently-skipped green (F-014).
+    fn headless_or_skip(width: u32, height: u32, text: &str) -> Option<State> {
+        let state = State::new_headless(width, height, text);
+        if state.is_none() {
+            assert!(
+                std::env::var_os("PMACS_REQUIRE_GPU").is_none(),
+                "PMACS_REQUIRE_GPU is set but no wgpu adapter was available"
+            );
+            eprintln!("skipping headless render test: no wgpu adapter available");
+        }
+        state
+    }
+
+    #[test]
+    fn headless_render_produces_a_full_nonblank_frame() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let px = state.render_offscreen();
+        assert_eq!(px.len(), 320 * 240 * 4, "packed RGBA8 of the whole frame");
+        // A real frame varies (text ink over the background). A single
+        // uniform value would mean nothing composited.
+        let first = px[0];
+        assert!(
+            px.iter().any(|&b| b != first),
+            "frame is a single uniform value — nothing appears to have rendered"
+        );
+    }
+
+    #[test]
+    fn headless_text_changes_the_rendered_frame() {
+        let Some(mut empty) = headless_or_skip(320, 240, "") else {
+            return;
+        };
+        let empty_px = empty.render_offscreen();
+        let mut with_text =
+            State::new_headless(320, 240, "hello pmacs").expect("adapter was just available");
+        let text_px = with_text.render_offscreen();
+        assert_eq!(empty_px.len(), text_px.len());
+        let differing = empty_px
+            .iter()
+            .zip(&text_px)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 200,
+            "text should paint visible ink (only {differing} bytes differ from the empty frame)"
+        );
     }
 }

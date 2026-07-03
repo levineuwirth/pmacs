@@ -41,6 +41,38 @@ jobs:
       # it explicitly or its warnings slip through CI (audit F-001).
       - run: cargo clippy -p pmacs-gpu --all-targets -- -D warnings
 
+  gpu-render:
+    name: GPU Render (headless)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The headless render harness (audit F-014) needs a Vulkan adapter;
+      # the runner has no GPU, so install the mesa software rasterizer
+      # (lavapipe). This job also runs pmacs-gpu's other tests, which the
+      # workspace test job (root package only) never executes.
+      - name: Install lavapipe (Vulkan software rasterizer)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - name: Confirm a Vulkan adapter is present
+        run: |
+          ls -la /usr/share/vulkan/icd.d/ || true
+          vulkaninfo --summary || true
+      - name: pmacs-gpu tests (render harness included)
+        env:
+          # Force the Vulkan backend so wgpu uses lavapipe. Do NOT set
+          # VK_ICD_FILENAMES — the loader's default ICD discovery already
+          # finds lavapipe (vulkaninfo above proves it), and pinning a
+          # path that doesn't match the runner hides every ICD. The
+          # PMACS_REQUIRE_GPU guard turns a missing adapter into a hard
+          # failure so a broken setup can't pass as a silent skip.
+          WGPU_BACKEND: vulkan
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          PMACS_REQUIRE_GPU: "1"
+        run: cargo test -p pmacs-gpu -- --test-threads=1
+
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.lua }})
     runs-on: ${{ matrix.os }}
