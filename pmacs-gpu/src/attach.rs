@@ -276,6 +276,15 @@ pub fn connect(
     // buffer state — safe to read on one clone while the other writes
     // (the FD is full-duplex).
     let mut read_stream = stream.try_clone().map_err(AttachClientError::Connect)?;
+    // A third clone kept solely to *shut the socket down* (F-008). When the
+    // outbox closes — a lossless overflow, or a writer write error — we
+    // `shutdown(Both)` so the reader (blocked in `read_message` on its own
+    // clone) wakes with EOF and fires `Disconnected`. That routes the
+    // stall into the existing visible teardown instead of leaving the GPU
+    // showing locally-applied edits the daemon never received. Clones share
+    // the socket's file description, so a shutdown on any of them affects
+    // all — and it half-closes toward the daemon so it sees the departure.
+    let shutdown_handle = stream.try_clone().map_err(AttachClientError::Connect)?;
     let write_stream = stream;
     // Bounded, coalescing outbound queue (F-008) shared with the writer
     // thread; the `Condvar` wakes the writer when the UI thread enqueues.
@@ -336,6 +345,10 @@ pub fn connect(
                     if let Err(e) = write_message(&mut write_stream, &event) {
                         eprintln!("pmacs-gpu: attach writer stopped: {e}");
                         lock.lock().expect("outbox lock").closed = true;
+                        // Wake the reader (and signal the daemon) so the
+                        // session tears down visibly (F-008) rather than
+                        // leaving the reader blocked on a dead socket.
+                        let _ = write_stream.shutdown(std::net::Shutdown::Both);
                         return;
                     }
                 }
@@ -345,6 +358,7 @@ pub fn connect(
 
     Ok(AttachClient {
         outbox,
+        shutdown_handle,
         frontend_id: hello.assigned_frontend_id,
         server_protocol_version: hello.protocol_version,
     })
@@ -357,6 +371,10 @@ pub struct AttachClient {
     /// thread. `send_event` locks it, applies the enqueue policy, and
     /// wakes the writer via the paired `Condvar`.
     outbox: Arc<(Mutex<Outbox>, Condvar)>,
+    /// Socket clone used only to `shutdown(Both)` when the outbox closes
+    /// (F-008), so the reader wakes and the session tears down visibly
+    /// instead of diverging silently. See [`connect`].
+    shutdown_handle: UnixStream,
     /// Assigned by the daemon in the `Hello` response. Every
     /// `FrontendEvent` carries this so the daemon can route input back
     /// to the per-session `SemanticRenderState`.
@@ -480,6 +498,15 @@ impl AttachClient {
             cvar.notify_one();
             Ok(())
         } else {
+            // Refused because the outbox is closed — a lossless overflow
+            // against a stalled daemon (or an earlier writer failure).
+            // Tear the session down actively (F-008): shut the socket so
+            // the reader wakes with EOF and fires `Disconnected`, giving a
+            // visible "(daemon disconnected)" instead of a GPU that keeps
+            // showing optimistic edits the daemon never received. Idempotent
+            // — a second shutdown just returns `NotConnected`, ignored.
+            drop(ob);
+            let _ = self.shutdown_handle.shutdown(std::net::Shutdown::Both);
             Err(TransportError::Io(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "attach writer stopped or outbound queue overflowed",
@@ -666,5 +693,33 @@ mod tests {
         }
         assert_eq!(ob.queue.len(), 1);
         assert!(!ob.closed);
+    }
+
+    #[test]
+    fn a_closed_outbox_shuts_the_socket_down_to_wake_the_reader() {
+        use std::io::Read;
+        // A socketpair stands in for the daemon connection; `a` is the peer
+        // a blocked reader would be reading from.
+        let (mut a, b) = UnixStream::pair().expect("socketpair");
+        // The post-overflow state: the outbox is already closed.
+        let mut outbox = Outbox::new();
+        outbox.closed = true;
+        let client = AttachClient {
+            outbox: Arc::new((Mutex::new(outbox), Condvar::new())),
+            shutdown_handle: b,
+            frontend_id: FrontendId::LOCAL,
+            server_protocol_version: PROTOCOL_VERSION,
+        };
+        // A send against the closed outbox fails *and* shuts the socket
+        // down (F-008 fail-fast is now a real teardown, not just a flag).
+        assert!(client.send_event(fe_key('x')).is_err());
+        // The peer reads EOF: a real blocked reader would wake here and
+        // fire Disconnected, instead of the session diverging silently.
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            a.read(&mut buf).expect("read peer"),
+            0,
+            "peer should see EOF after the shutdown"
+        );
     }
 }

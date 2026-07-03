@@ -136,9 +136,19 @@ Landed as framed; all three in `pmacs-gpu`, no protocol/daemon change.
   same-kind `Viewport`/`Pointer{Drag}` (coalesce), appends everything else
   lossless, and on a lossless append past `OUTBOX_MAX` sets `closed` +
   returns `false` (fail-fast). The writer waits on the condvar, `mem::take`s
-  the whole batch, and writes with the lock released. 5 unit tests
-  (coalesce-to-latest, clicks keep order, same-kind-tail only, overflow
-  closes, coalescing is uncapped).
+  the whole batch, and writes with the lock released.
+  **Fail-fast is a real teardown, not just a flag** (review follow-up):
+  closing the outbox alone left the reader blocked on its still-open
+  socket clone, so the optimistic edit whose `send_crdt_op` failed was
+  applied locally, logged, and forgotten — silent divergence, the exact
+  stalled-daemon case F-008 targets. Now a `shutdown_handle` clone is
+  `shutdown(Both)` whenever the outbox closes (overflow in `send_event`,
+  or a writer write error): the reader wakes with EOF and fires the
+  existing `Disconnected` path (`(daemon disconnected)` in the window),
+  and the daemon sees the half-close. 6 unit tests (coalesce-to-latest,
+  clicks keep order, same-kind-tail only, overflow closes, coalescing is
+  uncapped, and a socketpair test asserting a closed outbox drives the
+  peer to EOF).
 - **F-007** (`main.rs`): a pure `mb_dropdown_window(n, selected, band_top)
   -> Option<(first, count)>` clamps the row count to what fits above the
   band (hides entirely when not even one row fits, so `top_y` is never
@@ -150,9 +160,11 @@ Landed as framed; all three in `pmacs-gpu`, no protocol/daemon change.
   byte-identical to before. 1 unit test.
 
 Validated: `cargo fmt` clean; `clippy -p pmacs-gpu --all-targets` clean;
-51 pmacs-gpu unit tests pass, including the two headless render tests on
-this box's Vulkan adapter (`PMACS_REQUIRE_GPU=1`). No divergence from the
-framing.
+52 pmacs-gpu unit tests pass, including the two headless render tests on
+this box's Vulkan adapter (`PMACS_REQUIRE_GPU=1`). Divergence from the
+framing: the F-008 fail-fast needed an actual socket teardown, added as a
+review follow-up (above); the framing's "clean disconnect" was otherwise
+aspirational.
 
 **Still needs a human eyeball before merge** (per the validation
 implication above): attach to a non-CRDT daemon → the actionable banner;
@@ -162,11 +174,13 @@ with the selection visible; and a normal attach still renders/resizes
 
 ## Deferred (named)
 
-- **F-008 degraded banner.** Overflow-close currently surfaces only as
-  logged send errors (the reader thread still drives the visible
-  `Disconnected` status). A dedicated "daemon not keeping up — reconnect"
-  banner + auto-reconnect is deferred to the reconnect thread
-  ([[attach_reconnect]] already exists daemon-side for the TUI).
+- **F-008 auto-reconnect / resync.** Overflow-close now actively tears the
+  session down and shows `(daemon disconnected)` (the review follow-up
+  above). What's still deferred is *recovery*: `pmacs-gpu` has no
+  auto-reconnect, so the diverged optimistic replica is reconciled only by
+  a fresh `BufferSnapshot` on a manual re-attach. A "daemon not keeping up
+  — reconnecting…" banner + automatic re-attach belongs with the reconnect
+  thread ([[attach_reconnect]] already exists daemon-side for the TUI).
 - **F-003 capability renegotiation.** We reject on missing caps; a
   friendlier flow would offer to relaunch the daemon with `crdt`. Out of
   scope — the frontend can't manage the daemon's lifecycle.
