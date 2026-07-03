@@ -200,7 +200,7 @@ fn install_plan(
     for rp in &plan.packages {
         let spec = InstallSpec {
             address: rp.address.clone(),
-            pin: InstallPin::Commit(rp.commit.clone()),
+            pin: InstallPin::Commit(rp.revision.clone()),
         };
         installed.push(installer.install(&spec).expect("install"));
     }

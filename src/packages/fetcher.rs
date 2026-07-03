@@ -62,6 +62,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -160,7 +161,7 @@ impl Fetcher {
     /// processes (durable on-disk cache).
     pub fn fetch(&self, url: &str) -> Result<PathBuf, FetchError> {
         let normalized = normalize_url(url);
-        let hash = fnv1a_hex(&normalized);
+        let hash = sha256_hex(&normalized);
         let repo_path = self.cache_dir.join(format!("{hash}.git"));
         let lock_path = self.cache_dir.join(format!("{hash}.git.lock"));
 
@@ -507,15 +508,22 @@ fn dot_git_strip_applies(u: &str) -> bool {
     false
 }
 
-/// 64-bit FNV-1a as 16 hex characters. Deterministic across processes,
-/// non-cryptographic but collision-resistant enough for a cache key.
-fn fnv1a_hex(s: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in s.as_bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+/// SHA-256 of the string as 64 lowercase hex characters (audit F-009).
+/// The cache dir is keyed by a hash of the (attacker-adjacent) repo URL,
+/// so a *cryptographic* digest is used: a non-cryptographic hash like the
+/// former 64-bit FNV-1a is trivially collidable, and a deliberate
+/// collision would make two URLs share one bare mirror + lock file. `sha2`
+/// is already a dependency (M7.6 lockfile content hashing).
+fn sha256_hex(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        let _ = write!(out, "{b:02x}");
     }
-    format!("{h:016x}")
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -603,15 +611,21 @@ fn run_with_timeout(
     let stdout_thread = thread::spawn(move || drain_to_vec(stdout_handle));
     let stderr_thread = thread::spawn(move || drain_to_vec(stderr_handle));
 
+    // Break out of the wait loop with the outcome instead of returning
+    // early, so the child is *reaped on every path* (normal exit, timeout
+    // kill, or a `try_wait` error) and the drain threads are joined at the
+    // single point below. Returning straight from a timeout used to leave
+    // the two reader threads detached until their pipe reads happened to
+    // finish (audit F-010) — nondeterministic and hard to test.
     let started = Instant::now();
-    let status = loop {
+    let outcome: Result<ExitStatus, FetchError> = loop {
         match child.try_wait() {
-            Ok(Some(s)) => break s,
+            Ok(Some(s)) => break Ok(s),
             Ok(None) => {
                 if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(FetchError::Timeout {
+                    break Err(FetchError::Timeout {
                         url: url_tag.to_string(),
                         after: timeout,
                     });
@@ -619,7 +633,11 @@ fn run_with_timeout(
                 thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                return Err(FetchError::GitSpawn {
+                // Reap before bailing so the pipes close and the joins
+                // below can't block on a still-running child.
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(FetchError::GitSpawn {
                     url: url_tag.to_string(),
                     source: e,
                 });
@@ -627,8 +645,12 @@ fn run_with_timeout(
         }
     };
 
+    // The child is reaped on every path above, so its stdout/stderr are at
+    // EOF and these joins return promptly. Always join before propagating
+    // — no detached reader survives a timeout.
     let stdout = stdout_thread.join().unwrap_or_default();
     let stderr = stderr_thread.join().unwrap_or_default();
+    let status = outcome?;
     Ok(CapturedOutput {
         status,
         stdout,
@@ -680,11 +702,15 @@ mod tests {
 
     #[test]
     fn normalize_collapses_dual_address_to_one_key() {
-        let a = fnv1a_hex(&normalize_url("https://github.com/foo/bar.git"));
-        let b = fnv1a_hex(&normalize_url("https://github.com/foo/bar"));
-        let c = fnv1a_hex(&normalize_url("https://GitHub.com/foo/bar/"));
+        let a = sha256_hex(&normalize_url("https://github.com/foo/bar.git"));
+        let b = sha256_hex(&normalize_url("https://github.com/foo/bar"));
+        let c = sha256_hex(&normalize_url("https://GitHub.com/foo/bar/"));
         assert_eq!(a, b);
         assert_eq!(b, c);
+        // SHA-256 hex: 64 lowercase hex chars, and distinct URLs differ.
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, sha256_hex(&normalize_url("https://github.com/foo/baz")));
     }
 
     #[test]
@@ -708,7 +734,7 @@ mod tests {
         let bare = normalize_url("file:///tmp/foo.git");
         let work = normalize_url("file:///tmp/foo");
         assert_ne!(bare, work);
-        assert_ne!(fnv1a_hex(&bare), fnv1a_hex(&work));
+        assert_ne!(sha256_hex(&bare), sha256_hex(&work));
     }
 
     #[test]
@@ -872,7 +898,7 @@ mod tests {
         let repo = fetcher.fetch(&url).unwrap();
         assert!(repo.join("HEAD").exists(), "bare clone should have HEAD");
         // Cache hash is deterministic.
-        let expected_hash = fnv1a_hex(&normalize_url(&url));
+        let expected_hash = sha256_hex(&normalize_url(&url));
         assert_eq!(
             repo.file_name().unwrap(),
             format!("{expected_hash}.git").as_str()

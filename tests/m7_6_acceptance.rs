@@ -380,7 +380,7 @@ fn frozen_resolve_yields_lockfile_commits_on_a_second_machine() {
     let mut commits_b: Vec<(String, String)> = plan_b
         .packages
         .iter()
-        .map(|p| (p.name.as_str().to_string(), p.commit.clone()))
+        .map(|p| (p.name.as_str().to_string(), p.revision.clone()))
         .collect();
     commits_b.sort();
     assert_eq!(

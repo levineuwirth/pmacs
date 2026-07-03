@@ -534,7 +534,9 @@ impl Lockfile {
             packages.push(ResolvedPackage {
                 name: entry.name.clone(),
                 address,
-                commit: entry.commit.clone(),
+                // A lockfile entry's `commit` is a real SHA, a valid
+                // commit-ish for the renamed field (audit F-011).
+                revision: entry.commit.clone(),
                 version: entry.version.clone(),
                 manifest,
                 top_level_pin,
@@ -573,7 +575,7 @@ fn build_entry(
     // Resolve the chosen commit-ish (which may be a tag string for
     // version pins) to a 40-char SHA.
     let sha = fetcher
-        .resolve(&repo, &RefSpec::Commit(rp.commit.clone()))
+        .resolve(&repo, &RefSpec::Commit(rp.revision.clone()))
         .map_err(|source| LockfileError::Fetch {
             url: url.clone(),
             source,
