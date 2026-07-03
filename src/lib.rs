@@ -23,6 +23,21 @@
 //! * [`worker`] --- work-stealing pool with cooperative cancellation (M3.1)
 //! * [`message_bus`] --- typed in-process bus with `MessagePack` codec (M3.2)
 //! * [`async_runtime`] --- main-thread dispatcher + tick over the bus (M3.3)
+//!
+//! # Lua flavor features (audit F-002)
+//!
+//! Exactly **one** Lua flavor must be enabled: `luajit` (the default) **or**
+//! `lua54`. They select `mlua`'s mutually-exclusive Lua backends, so
+//! enabling both — most commonly via `--all-features` — or neither is a
+//! hard build error. The `crdt` feature is orthogonal and composes with
+//! either flavor. See the feature matrix in `README.md` / `Cargo.toml`.
+//!
+//! Note: a misconfigured flavor set surfaces as an **`mlua-sys` build-script
+//! error** ("You can enable only one of the features: …"), not a
+//! pmacs-labeled one. That check lives in a *dependency*, which cargo
+//! compiles before this crate, so pmacs cannot intercept it with its own
+//! `compile_error!` — the mitigation is the documented matrix (don't reach
+//! for `--all-features`; build an explicit flavor).
 
 pub mod ansi;
 pub mod async_runtime;

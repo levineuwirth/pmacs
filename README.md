@@ -31,16 +31,48 @@ and send pull requests.
 ## Build
 
 Builds on the toolchain pinned in `rust-toolchain.toml` (Rust
-`1.95.0`, edition 2024); rustup selects it automatically. Lua flavor selectable
-between `luajit` (default) and `lua54`; both pass the full test suite.
+`1.95.0`, edition 2024); rustup selects it automatically.
 
 ```sh
-cargo build --release             # produce target/release/pmacs
+cargo build --release             # produce target/release/pmacs (LuaJIT)
 cargo run --release -- <file>     # build and run on a file
 cargo test --workspace            # unit + integration tests (all crates)
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings   # incl. pmacs-gpu
 ```
+
+### Feature matrix
+
+Cargo features fall into two independent axes. **Do not use
+`--all-features`** — it enables both Lua flavors at once, which cannot
+build (see below).
+
+| Feature  | Axis       | Notes                                                       |
+| -------- | ---------- | ---------------------------------------------------------- |
+| `luajit` | Lua flavor | **Default.** LuaJIT backend via `mlua` (vendored).         |
+| `lua54`  | Lua flavor | Lua 5.4 fallback for hosts without LuaJIT (big-endian, …). |
+| `crdt`   | Buffer     | Opt-in CRDT-backed buffer mode (adds the `loro` dep). v1.0 builds enable it; orthogonal to the flavor. |
+
+**Exactly one Lua flavor must be enabled** — `luajit` *or* `lua54`, never
+both (and never neither). They map to `mlua`'s mutually-exclusive Lua
+backends, so `--all-features` (or `--features luajit,lua54`, or
+`--no-default-features` with no flavor) fails in the `mlua-sys` build
+script with *"You can enable only one of the features: …"*. That check
+lives in a dependency cargo builds first, so pmacs can't replace it with a
+friendlier error — the fix is to build a specific flavor. Supported build
+lines:
+
+```sh
+cargo build --release                                   # luajit (default)
+cargo build --release --no-default-features --features lua54
+cargo build --release --features crdt                   # luajit + crdt
+cargo build --release --no-default-features --features lua54,crdt
+```
+
+CI, `cargo hack`, and distro tooling should iterate the flavors
+explicitly (`--no-default-features --features <flavor>[,crdt]`) rather
+than reaching for `--all-features`. Both flavors pass the full test suite;
+CI runs the matrix on every push.
 
 Release-only perf gates (M5 keystroke-to-render, M6 ingest/RSS/cancel
 and scrollback navigation/search) are `#[ignore]`'d during normal
