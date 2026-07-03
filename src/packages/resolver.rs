@@ -1329,9 +1329,9 @@ pub enum ResolveError {
     },
 }
 
-/// Comma-join package names for a [`ResolveError::BasenameCollision`]
-/// message.
-fn format_package_name_list(names: &[PackageName]) -> String {
+/// Comma-join package names for a basename-collision message. Shared with
+/// [`super::lockfile`], which guards the frozen/lockfile plan path.
+pub(crate) fn format_package_name_list(names: &[PackageName]) -> String {
     names
         .iter()
         .map(|n| n.as_str().to_string())
@@ -1342,9 +1342,10 @@ fn format_package_name_list(names: &[PackageName]) -> String {
 /// Find an install basename shared by more than one distinct package name
 /// (audit F-005). Returns the colliding basename and its names (sorted by
 /// the `BTreeMap`/first-seen order), or `None` when every basename is
-/// unique. Used by [`into_plan`] to reject a plan that would collide on
-/// disk before anything is installed.
-fn find_basename_collision(
+/// unique. Guards both plan-construction paths: `into_plan` (fresh /
+/// `UpdateOne` resolves) and [`super::lockfile::Lockfile::to_resolve_plan`]
+/// (the frozen / lockfile-derived path).
+pub(crate) fn find_basename_collision(
     names: impl Iterator<Item = PackageName>,
 ) -> Option<(String, Vec<PackageName>)> {
     let mut by_basename: BTreeMap<String, Vec<PackageName>> = BTreeMap::new();

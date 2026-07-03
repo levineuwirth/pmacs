@@ -115,13 +115,19 @@ CI.
 Landed as framed; all five in `src/packages/` (F-011 also touches
 `lua_bindings.rs` + acceptance tests via the rename). No serde/wire change.
 
-- **F-005** (`resolver.rs`): new `ResolveError::BasenameCollision {
-  basename, names }`; a free `find_basename_collision(names)` (testable,
-  used by `into_plan`) groups the plan's names by `package_basename` and
-  returns the first basename with >1 distinct name. Two unit tests; the
-  existing `roster_lookup_picks_most_recent_on_basename_collision` loader
-  test still passes, confirming the intended cross-scope override is
-  untouched.
+- **F-005** (`resolver.rs` + `lockfile.rs`): new
+  `ResolveError::BasenameCollision { basename, names }`; a `pub(crate)`
+  `find_basename_collision(names)` groups the plan's names by
+  `package_basename` and returns the first basename with >1 distinct name.
+  **Guards *both* plan-construction paths** (review follow-up): `into_plan`
+  (fresh / `UpdateOne`) *and* `Lockfile::to_resolve_plan` (the frozen /
+  lockfile-derived path, which returns its own
+  `LockfileError::BasenameCollision`). The frozen check runs up front,
+  before any fetch, so a hand-edited or pre-existing lockfile with two
+  same-basename packages fails fast. Three unit tests (detection, negative
+  cases, and the frozen-path rejection); the existing
+  `roster_lookup_picks_most_recent_on_basename_collision` loader test still
+  passes, confirming the intended cross-scope override is untouched.
 - **F-009** (`fetcher.rs`): `fnv1a_hex` → `sha256_hex` (`sha2::Sha256`,
   64-char hex) for the bare-mirror dir/lock key; `normalize_url` unchanged
   in front. Hash test asserts stability, normalization, 64-hex shape, and
@@ -142,8 +148,9 @@ Landed as framed; all five in `src/packages/` (F-011 also touches
   states the actual algorithm.
 
 Validated: `cargo fmt` clean; `clippy --all-targets` clean under **both**
-Lua flavors (luajit + lua54); 1436 lib unit tests pass, incl. the new
-F-005/F-009 tests, the F-010 timeout test, and the loader override test.
+Lua flavors (luajit + lua54); 1437 lib unit tests pass, incl. the new
+F-005 tests (fresh + frozen paths), the F-009 hash test, the F-010 timeout
+test, and the loader override test.
 
 ## Deferred (named)
 
