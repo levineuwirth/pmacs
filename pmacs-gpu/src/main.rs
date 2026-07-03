@@ -135,6 +135,30 @@ const MB_DROP_LINE_HEIGHT: f32 = 20.0;
 const MB_DROP_PAD_X: f32 = 10.0;
 const MB_DROP_MIN_WIDTH: f32 = 160.0;
 const MB_DROP_MAX_WIDTH: f32 = 480.0;
+
+/// Visible slice of the completion dropdown given `n` shaped candidates,
+/// the `selected` index, and `band_top` pixels available above the status
+/// band (audit F-007). Returns `(first, count)` — `count` clamped to the
+/// rows that actually fit (so the box never renders above `y = 0`) and
+/// `first` scrolled to keep `selected` on screen. `None` when nothing can
+/// show: no candidates, or the window is too short for even one row. When
+/// the whole list fits this is `(0, n)`, identical to the pre-clamp
+/// behavior — the common path is unchanged.
+fn mb_dropdown_window(n: usize, selected: usize, band_top: f32) -> Option<(usize, usize)> {
+    if n == 0 {
+        return None;
+    }
+    let max_rows = (band_top / MB_DROP_ROW_HEIGHT).floor() as usize;
+    if max_rows == 0 {
+        return None;
+    }
+    let count = n.min(max_rows);
+    let sel = selected.min(n - 1);
+    // Anchor `sel` at the window's bottom edge when it would otherwise be
+    // below the fold, then clamp so we never scroll past the last row.
+    let first = sel.saturating_sub(count - 1).min(n - count);
+    Some((first, count))
+}
 const QUAD_SHADER: &str = r"
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
@@ -751,7 +775,10 @@ impl ApplicationHandler<AppEvent> for App {
                 Err(e) => {
                     eprintln!("pmacs-gpu: attach failed: {e}");
                     if let Some(state) = self.state.as_mut() {
-                        state.set_text("(attach failed; see stderr)");
+                        // Render a concise, actionable line in the window
+                        // itself (F-003) — e.g. a non-CRDT daemon — rather
+                        // than a generic "see stderr" the user won't read.
+                        state.set_text(&e.window_status());
                     }
                 }
             }
@@ -3235,17 +3262,29 @@ impl State {
             .shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// The visible slice `(first, count)` of the dropdown candidates
+    /// (audit F-007), clamped to the rows that fit above the band and
+    /// scrolled to keep the selection on screen. `None` when closed,
+    /// candidate-free, or too short for a row. See [`mb_dropdown_window`].
+    fn mb_visible_window(&self) -> Option<(usize, usize)> {
+        let mb = self.minibuffer.as_ref()?;
+        let band_top = text_area_bottom(self.config.height);
+        mb_dropdown_window(
+            mb.candidates.len(),
+            mb.selected.map_or(0, |s| s as usize),
+            band_top,
+        )
+    }
+
     /// Dropdown geometry `(left, top_y, width)` when the minibuffer has
     /// candidates: a list anchored just above the bottom band, growing
     /// upward, as wide as the widest candidate (clamped). `None` when
-    /// closed or candidate-free. `refresh_mb_buffer` must have run so the
-    /// width measurement is current.
+    /// closed or candidate-free. The height is the *visible* row count
+    /// (F-007), so `top_y` never goes above the window top.
+    /// `refresh_mb_buffer` must have run so the width measurement is
+    /// current.
     fn mb_dropdown_rect(&self) -> Option<(f32, f32, f32)> {
-        let mb = self.minibuffer.as_ref()?;
-        let n = mb.candidates.len();
-        if n == 0 {
-            return None;
-        }
+        let (_first, count) = self.mb_visible_window()?;
         let widest = self
             .mb_buffer
             .layout_runs()
@@ -3253,7 +3292,7 @@ impl State {
             .fold(0.0_f32, f32::max);
         let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
         let band_top = text_area_bottom(self.config.height);
-        let top_y = band_top - n as f32 * MB_DROP_ROW_HEIGHT;
+        let top_y = band_top - count as f32 * MB_DROP_ROW_HEIGHT;
         Some((STATUS_TEXT_PAD, top_y, width))
     }
 
@@ -3263,21 +3302,28 @@ impl State {
         let Some(mb) = self.minibuffer.as_ref() else {
             return Vec::new();
         };
+        let Some((first, count)) = self.mb_visible_window() else {
+            return Vec::new();
+        };
         let Some((x, top_y, width)) = self.mb_dropdown_rect() else {
             return Vec::new();
         };
-        let n = mb.candidates.len();
         let mut rects = vec![MinimapRect {
             x,
             y: top_y,
             w: width,
-            h: n as f32 * MB_DROP_ROW_HEIGHT,
+            h: count as f32 * MB_DROP_ROW_HEIGHT,
             color: MENU_BG,
         }];
-        if let Some(sel) = mb.selected {
+        // Highlight the selection at its row *within the visible window*;
+        // by construction it always falls inside [first, first + count).
+        if let Some(sel) = mb.selected.map(|s| s as usize)
+            && sel >= first
+            && sel < first + count
+        {
             rects.push(MinimapRect {
                 x,
-                y: top_y + sel as f32 * MB_DROP_ROW_HEIGHT,
+                y: top_y + (sel - first) as f32 * MB_DROP_ROW_HEIGHT,
                 w: width,
                 h: MB_DROP_ROW_HEIGHT,
                 color: MENU_SELECTED_BG,
@@ -3932,12 +3978,17 @@ impl State {
             .expect("menu text_renderer prepare");
 
         // Q#MB1 — prepare the minibuffer dropdown glyphs in their layer.
+        // The buffer is shaped with *all* candidates; F-007 scrolls it up
+        // by `first` rows so line `first` lands at `top_y`, and the
+        // existing `bounds.top`/`bottom` clip the rows scrolled out of the
+        // visible window (no per-resize re-shape needed).
         let mb_areas: Vec<TextArea> = self
-            .mb_dropdown_rect()
-            .map(|(x, top_y, width)| TextArea {
+            .mb_visible_window()
+            .zip(self.mb_dropdown_rect())
+            .map(|((first, _count), (x, top_y, width))| TextArea {
                 buffer: &self.mb_buffer,
                 left: x + MB_DROP_PAD_X,
-                top: top_y,
+                top: top_y - first as f32 * MB_DROP_ROW_HEIGHT,
                 scale: 1.0,
                 bounds: TextBounds {
                     left: x as i32,
@@ -6101,6 +6152,32 @@ mod tests {
         // needs no stripping.
         assert!(!is_layout_text(Some("a"), Modifiers::NONE));
         assert!(!is_layout_text(Some("A"), Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn mb_dropdown_window_clamps_and_keeps_selection_visible() {
+        // Row height is 20.0; a 1000px space fits any producer-capped list.
+        assert_eq!(mb_dropdown_window(5, 2, 1000.0), Some((0, 5)));
+        // The whole-fits path is identical to no clamp: (0, n).
+        assert_eq!(mb_dropdown_window(10, 9, 1000.0), Some((0, 10)));
+
+        // A 100px space fits 5 rows. Selection near the top anchors at 0.
+        assert_eq!(mb_dropdown_window(10, 0, 100.0), Some((0, 5)));
+        // Selection past the fold scrolls so it stays visible (bottom edge).
+        assert_eq!(mb_dropdown_window(10, 9, 100.0), Some((5, 5)));
+        let (first, count) = mb_dropdown_window(10, 7, 100.0).unwrap();
+        assert!(
+            first <= 7 && 7 < first + count,
+            "sel 7 in [{first},{})",
+            first + count
+        );
+
+        // Degenerate: too short for even one row ⇒ hide, never draw above 0.
+        assert_eq!(mb_dropdown_window(10, 0, 10.0), None);
+        // No candidates ⇒ nothing.
+        assert_eq!(mb_dropdown_window(0, 0, 500.0), None);
+        // An out-of-range selection is clamped, not panicked.
+        assert_eq!(mb_dropdown_window(3, 99, 1000.0), Some((0, 3)));
     }
 
     #[test]
