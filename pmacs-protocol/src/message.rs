@@ -883,6 +883,28 @@ pub enum InstanceMessage {
         /// closed.
         active: Option<u32>,
     },
+    /// Minibuffer prompt state for a semantic frontend (Q#MB1, protocol
+    /// v12). The minibuffer is a single *global* core instance, so this
+    /// is bufferless; the producer still emits it from the active-buffer
+    /// viewport. `prompt: None` clears the GUI. Cached-compare
+    /// suppressed like `SearchPrompt`; daemon-gated `>= 12`.
+    MinibufferPrompt {
+        /// The prompt string (e.g. `"M-x "`), or `None` when no
+        /// minibuffer is open.
+        prompt: Option<String>,
+        /// The text typed so far.
+        input: String,
+        /// Codepoints before the cursor within `input` (the caret
+        /// position).
+        cursor: u32,
+        /// A windowed slice of the completion candidates (best-first,
+        /// already filtered/sorted by the core), `<= MB_VISIBLE`.
+        candidates: Vec<String>,
+        /// Highlighted row *within* `candidates`, or `None`.
+        selected: Option<u32>,
+        /// Total candidate count (the window is a slice of this).
+        total: u32,
+    },
 }
 
 /// One row of an open menu on the wire ([`InstanceMessage::MenuPrompt`]).
@@ -1158,7 +1180,7 @@ pub enum ResourceBody {
 /// encoding. Still daemon-gated per session (now at `< 10`); a v9 peer
 /// negotiates v9 and simply receives no `SearchPrompt` (the decorations
 /// still highlight), rather than mis-decoding the wider shape.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1211,7 +1233,11 @@ pub const PROTOCOL_VERSION: u32 = 11;
 /// `PointerKind::Context` (frontend-gated like `Pointer`/`TripleDown`),
 /// `FrontendEvent::MenuPointer`, and `InstanceMessage::MenuPrompt`
 /// (daemon-gated per session) — all additive, so the ladder resumes.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11];
+///
+/// Q#MB1: extended to `[6, 7, 8, 9, 10, 11, 12]`.
+/// `InstanceMessage::MinibufferPrompt` is additive and daemon-gated per
+/// session, so the ladder resumes again.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

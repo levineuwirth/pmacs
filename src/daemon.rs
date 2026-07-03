@@ -1047,6 +1047,9 @@ fn dispatcher_loop(
                 let peer_knows_menu_prompt = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 11);
+                let peer_knows_minibuffer_prompt = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 12);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1062,6 +1065,13 @@ fn dispatcher_loop(
                     // its decoration-only highlights and never opens a
                     // GPU menu, rather than mis-decoding the new variant.
                     if !peer_knows_menu_prompt && matches!(msg, InstanceMessage::MenuPrompt { .. })
+                    {
+                        continue;
+                    }
+                    // Q#MB1 — MinibufferPrompt gated at v12; a v11 peer
+                    // simply can't render the GUI minibuffer.
+                    if !peer_knows_minibuffer_prompt
+                        && matches!(msg, InstanceMessage::MinibufferPrompt { .. })
                     {
                         continue;
                     }

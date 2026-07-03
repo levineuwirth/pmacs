@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_eleven_for_context_menu() {
+    fn protocol_version_is_twelve_for_minibuffer() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1699,8 +1699,10 @@ mod tests {
         // Q#RX6 bumped 9→10 (`SearchPrompt` gained regex/invalid;
         // encoding change to that variant, still daemon-gated). Q#CM1
         // bumped 10→11 (`PointerKind::Context` + `MenuPointer` +
-        // `MenuPrompt`, all additive; the message daemon-gated).
-        assert_eq!(PROTOCOL_VERSION, 11);
+        // `MenuPrompt`, all additive; the message daemon-gated). Q#MB1
+        // bumped 11→12 (`InstanceMessage::MinibufferPrompt`, additive +
+        // daemon-gated).
+        assert_eq!(PROTOCOL_VERSION, 12);
     }
 
     #[test]
@@ -1709,20 +1711,21 @@ mod tests {
         // every cell-carrying message, ending the v1–v5 ladder —
         // pre-v6 peers are refused at the handshake (a clean
         // VersionMismatch) rather than garbling postcard mid-session.
-        // Q#M4 / Q#S1 / Q#SR5 / Q#RX6 / Q#CM1: the ladder resumes above
-        // that floor — v7 (`TripleDown`), v8 (`StatusFacts`), v9 + v10
-        // (`SearchPrompt` + regex/invalid), v11 (the context menu) all
-        // interoperate, so v6 through v11 talk.
+        // Q#M4 / Q#S1 / Q#SR5 / Q#RX6 / Q#CM1 / Q#MB1: the ladder resumes
+        // above that floor — v7 (`TripleDown`), v8 (`StatusFacts`), v9 +
+        // v10 (`SearchPrompt` + regex/invalid), v11 (the context menu),
+        // v12 (the GUI minibuffer) all interoperate, so v6 through v12 talk.
         assert!(is_supported_protocol_version(6));
         assert!(is_supported_protocol_version(7));
         assert!(is_supported_protocol_version(8));
         assert!(is_supported_protocol_version(9));
         assert!(is_supported_protocol_version(10));
         assert!(is_supported_protocol_version(11));
-        for rejected in [0, 1, 2, 3, 4, 5, 12, u32::MAX] {
+        assert!(is_supported_protocol_version(12));
+        for rejected in [0, 1, 2, 3, 4, 5, 13, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v11 binary"
+                "v{rejected} must be rejected by a v12 binary"
             );
         }
     }
@@ -1925,6 +1928,53 @@ mod tests {
                     assert_eq!(inv, invalid);
                 }
                 other => panic!("expected SearchPrompt, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn minibuffer_prompt_round_trips_through_postcard() {
+        // Q#MB1 — the v12 wire variant. Cover an open prompt with a
+        // windowed candidate list + selection, and a cleared band.
+        let cases = [
+            (
+                Some("M-x ".to_owned()),
+                "ed".to_owned(),
+                2u32,
+                vec!["edit.copy".to_owned(), "edit.cut".to_owned()],
+                Some(1u32),
+                7u32,
+            ),
+            (None, String::new(), 0, Vec::new(), None, 0),
+        ];
+        for (prompt, input, cursor, candidates, selected, total) in cases {
+            let msg = InstanceMessage::MinibufferPrompt {
+                prompt: prompt.clone(),
+                input: input.clone(),
+                cursor,
+                candidates: candidates.clone(),
+                selected,
+                total,
+            };
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            match decoded {
+                InstanceMessage::MinibufferPrompt {
+                    prompt: got_prompt,
+                    input: got_input,
+                    cursor: got_cursor,
+                    candidates: got_candidates,
+                    selected: got_selected,
+                    total: got_total,
+                } => {
+                    assert_eq!(got_prompt, prompt);
+                    assert_eq!(got_input, input);
+                    assert_eq!(got_cursor, cursor);
+                    assert_eq!(got_candidates, candidates);
+                    assert_eq!(got_selected, selected);
+                    assert_eq!(got_total, total);
+                }
+                other => panic!("expected MinibufferPrompt, got {other:?}"),
             }
         }
     }

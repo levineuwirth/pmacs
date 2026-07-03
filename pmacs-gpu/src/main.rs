@@ -124,6 +124,17 @@ const MENU_MAX_WIDTH: f32 = 380.0;
 const MENU_BG: [f32; 4] = [0.16, 0.16, 0.20, 0.98];
 const MENU_SELECTED_BG: [f32; 4] = [0.20, 0.40, 0.66, 1.0];
 const MENU_SEPARATOR_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
+
+// Minibuffer completion dropdown (Q#MB1). A vertical list anchored just
+// above the bottom band, best match at the top; reuses the menu popup's
+// colors. Width tracks the widest candidate (measured from the shaped
+// buffer).
+const MB_DROP_ROW_HEIGHT: f32 = 20.0;
+const MB_DROP_FONT_SIZE: f32 = 13.0;
+const MB_DROP_LINE_HEIGHT: f32 = 20.0;
+const MB_DROP_PAD_X: f32 = 10.0;
+const MB_DROP_MIN_WIDTH: f32 = 160.0;
+const MB_DROP_MAX_WIDTH: f32 = 480.0;
 const QUAD_SHADER: &str = r"
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
@@ -555,6 +566,10 @@ struct State {
     /// the buffer name; the matches highlight via `SearchMatch`
     /// decorations.
     search_prompt: Option<SearchPromptLocal>,
+    /// Q#MB1 — the live minibuffer (protocol v12), or `None` when
+    /// closed. The prompt+input render in the bottom band; the
+    /// candidates (when present) render as a dropdown above it.
+    minibuffer: Option<MinibufferLocal>,
     /// Q#CM1 — the live context menu (protocol v11), or `None` when
     /// closed. The rows + highlight come from `MenuPrompt`; the popup
     /// draws at the pixel of the right-click.
@@ -570,6 +585,14 @@ struct State {
     menu_text_renderer: TextRenderer,
     /// Popup background / highlight / separator quads (Q#CM1).
     menu_bg_vertex_buffer: ReusableVertexBuffer,
+    /// Shaped candidate text for the minibuffer dropdown (Q#MB1), one
+    /// line per candidate.
+    mb_buffer: Buffer,
+    /// Dedicated text renderer for the minibuffer dropdown (its own
+    /// layer over the buffer, like the menu's).
+    mb_text_renderer: TextRenderer,
+    /// Minibuffer dropdown background + selection quads (Q#MB1).
+    mb_bg_vertex_buffer: ReusableVertexBuffer,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
@@ -596,6 +619,20 @@ struct SearchPromptLocal {
     total: u32,
     regex: bool,
     invalid: bool,
+}
+
+/// The live minibuffer (Q#MB1, protocol v12), mirrored from a
+/// `MinibufferPrompt` whose `prompt` was `Some`. The prompt+input draw
+/// in the bottom band with a caret; `candidates` (a windowed slice) feed
+/// the dropdown.
+#[derive(Clone, Debug, PartialEq)]
+struct MinibufferLocal {
+    prompt: String,
+    input: String,
+    cursor: u32,
+    candidates: Vec<String>,
+    selected: Option<u32>,
+    total: u32,
 }
 
 /// The live context menu (Q#CM1, protocol v11), mirrored from a
@@ -824,6 +861,23 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     if let Err(e) = client.send_key(pkey, pmods) {
                         eprintln!("pmacs-gpu: send_key (clipboard) failed: {e}");
+                    }
+                    return;
+                }
+
+                // Minibuffer-opening chords (Q#MB1): M-x (execute-command)
+                // and the C-x prefix. Forwarded though otherwise withheld
+                // so the GUI can open a prompt / enter a prefix; the
+                // daemon then flips `dispatch_idle` false (minibuffer
+                // active / pending prefix) and the intercept gate
+                // round-trips every following key. No optimistic local
+                // flip (the search-entry precedent).
+                if is_minibuffer_open_chord(pkey, pmods) {
+                    if let Some(state) = self.state.as_mut() {
+                        state.mark_cursor_stale_after_round_trip();
+                    }
+                    if let Err(e) = client.send_key(pkey, pmods) {
+                        eprintln!("pmacs-gpu: send_key (minibuffer open) failed: {e}");
                     }
                     return;
                 }
@@ -1555,6 +1609,9 @@ impl State {
         // Q#CM1 — a second renderer so the menu draws as a top layer.
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        // Q#MB1 — a third renderer for the minibuffer dropdown layer.
+        let mb_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad_renderer = QuadRenderer::new(&device, surface_format);
         let squiggle_renderer = SquiggleRenderer::new(&device, surface_format);
 
@@ -1593,6 +1650,15 @@ impl State {
         menu_buffer.set_size(
             &mut font_system,
             Some(MENU_MAX_WIDTH),
+            Some(config.height as f32),
+        );
+        let mut mb_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(MB_DROP_FONT_SIZE, MB_DROP_LINE_HEIGHT),
+        );
+        mb_buffer.set_size(
+            &mut font_system,
+            Some(MB_DROP_MAX_WIDTH),
             Some(config.height as f32),
         );
         buffer.set_text(
@@ -1667,11 +1733,15 @@ impl State {
             status_left_text: String::new(),
             status_facts: None,
             search_prompt: None,
+            minibuffer: None,
             menu: None,
             menu_anchor_px: (0.0, 0.0),
             menu_buffer,
             menu_text_renderer,
             menu_bg_vertex_buffer: ReusableVertexBuffer::new(),
+            mb_buffer,
+            mb_text_renderer,
+            mb_bg_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_cache: None,
         }
     }
@@ -1692,9 +1762,13 @@ impl State {
     /// every key to the daemon's handler instead of optimistically
     /// applying it to the buffer.
     fn daemon_intercepts_keys(&self) -> bool {
-        // Q#CM1 — an open menu shadows the keymap like search: every key
-        // round-trips so the daemon's `dispatch_menu_key` drives it.
-        self.search_prompt.is_some() || self.menu.is_some() || !self.dispatch_idle
+        // Q#CM1 / Q#MB1 — an open menu or minibuffer shadows the keymap
+        // like search: every key round-trips so the daemon's
+        // `dispatch_menu_key` / minibuffer handler drives it.
+        self.search_prompt.is_some()
+            || self.menu.is_some()
+            || self.minibuffer.is_some()
+            || !self.dispatch_idle
     }
 
     /// Shared eligibility gates for the optimistic edit paths
@@ -2474,6 +2548,27 @@ impl State {
                 self.window.request_redraw();
                 None
             }
+            // Q#MB1 — the minibuffer prompt/input/candidates. `prompt:
+            // None` closes it.
+            InstanceMessage::MinibufferPrompt {
+                prompt,
+                input,
+                cursor,
+                candidates,
+                selected,
+                total,
+            } => {
+                self.minibuffer = prompt.map(|prompt| MinibufferLocal {
+                    prompt,
+                    input,
+                    cursor,
+                    candidates,
+                    selected,
+                    total,
+                });
+                self.window.request_redraw();
+                None
+            }
             _ => None,
         }
     }
@@ -2897,6 +2992,12 @@ impl State {
     /// over the band like Emacs's echo area, returning to the buffer
     /// name + modified dot (v8 `StatusFacts`) when the search ends.
     fn compose_status_left(&self) -> String {
+        // Q#MB1 — an open minibuffer takes over the band: prompt + input
+        // (the candidates render separately as a dropdown). Measured by
+        // the band caret, so it must stay exactly `prompt + input`.
+        if let Some(mb) = self.minibuffer.as_ref() {
+            return format!("{}{}", mb.prompt, mb.input);
+        }
         if let Some(sp) = self
             .search_prompt
             .as_ref()
@@ -3048,6 +3149,75 @@ impl State {
                     color: MENU_SELECTED_BG,
                 });
             }
+        }
+        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
+    /// Re-shape the minibuffer dropdown candidates (Q#MB1), one line per
+    /// candidate, best match first. Empty when there are no candidates.
+    fn refresh_mb_buffer(&mut self) {
+        let text = self
+            .minibuffer
+            .as_ref()
+            .map_or_else(String::new, |mb| mb.candidates.join("\n"));
+        self.mb_buffer.set_text(
+            &mut self.font_system,
+            &text,
+            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+            None,
+        );
+        self.mb_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// Dropdown geometry `(left, top_y, width)` when the minibuffer has
+    /// candidates: a list anchored just above the bottom band, growing
+    /// upward, as wide as the widest candidate (clamped). `None` when
+    /// closed or candidate-free. `refresh_mb_buffer` must have run so the
+    /// width measurement is current.
+    fn mb_dropdown_rect(&self) -> Option<(f32, f32, f32)> {
+        let mb = self.minibuffer.as_ref()?;
+        let n = mb.candidates.len();
+        if n == 0 {
+            return None;
+        }
+        let widest = self
+            .mb_buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0_f32, f32::max);
+        let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
+        let band_top = text_area_bottom(self.config.height);
+        let top_y = band_top - n as f32 * MB_DROP_ROW_HEIGHT;
+        Some((STATUS_TEXT_PAD, top_y, width))
+    }
+
+    /// Minibuffer dropdown background + selection-highlight quads (Q#MB1).
+    /// Empty when closed / candidate-free.
+    fn mb_dropdown_vertex_bytes(&self) -> Vec<u8> {
+        let Some(mb) = self.minibuffer.as_ref() else {
+            return Vec::new();
+        };
+        let Some((x, top_y, width)) = self.mb_dropdown_rect() else {
+            return Vec::new();
+        };
+        let n = mb.candidates.len();
+        let mut rects = vec![MinimapRect {
+            x,
+            y: top_y,
+            w: width,
+            h: n as f32 * MB_DROP_ROW_HEIGHT,
+            color: MENU_BG,
+        }];
+        if let Some(sel) = mb.selected {
+            rects.push(MinimapRect {
+                x,
+                y: top_y + sel as f32 * MB_DROP_ROW_HEIGHT,
+                w: width,
+                h: MB_DROP_ROW_HEIGHT,
+                color: MENU_SELECTED_BG,
+            });
         }
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
@@ -3392,6 +3562,21 @@ impl State {
                 &menu_vertices,
             )
             .cloned();
+        // Q#MB1 — the minibuffer dropdown quads (bg + selection), a top
+        // layer above the band. `refresh_mb_buffer` first so the width
+        // measurement in `mb_dropdown_vertex_bytes` is current.
+        self.refresh_mb_buffer();
+        let mb_vertices = self.mb_dropdown_vertex_bytes();
+        let mb_vertex_count = (mb_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let mb_bg_buffer = self
+            .mb_bg_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu minibuffer dropdown",
+                &mb_vertices,
+            )
+            .cloned();
         // The band's strip rides the bg quad batch so it draws under
         // the band text (text renders after the first quad draw).
         let mut bg_vertices = self.decoration_background_vertex_bytes();
@@ -3570,6 +3755,37 @@ impl State {
             )
             .expect("menu text_renderer prepare");
 
+        // Q#MB1 — prepare the minibuffer dropdown glyphs in their layer.
+        let mb_areas: Vec<TextArea> = self
+            .mb_dropdown_rect()
+            .map(|(x, top_y, width)| TextArea {
+                buffer: &self.mb_buffer,
+                left: x + MB_DROP_PAD_X,
+                top: top_y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: x as i32,
+                    top: top_y as i32,
+                    right: (x + width).round() as i32,
+                    bottom: text_area_bottom(self.config.height).round() as i32,
+                },
+                default_color: Color::rgb(232, 232, 238),
+                custom_glyphs: &[],
+            })
+            .into_iter()
+            .collect();
+        self.mb_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                mb_areas,
+                &mut self.swash_cache,
+            )
+            .expect("minibuffer text_renderer prepare");
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3619,6 +3835,15 @@ impl State {
                 self.quad_renderer
                     .render(&mut pass, vertex_buffer, minimap_vertex_count);
             }
+            // Q#MB1 — the minibuffer dropdown draws above the band: bg +
+            // selection quads, then its candidate glyphs on top.
+            if let Some(vertex_buffer) = mb_bg_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, mb_vertex_count);
+            }
+            self.mb_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("minibuffer text_renderer render");
             // Q#CM1 — the context menu draws last: its bg/highlight quads
             // occlude everything beneath, then its glyphs on top.
             if let Some(vertex_buffer) = menu_bg_buffer.as_ref() {
@@ -3816,6 +4041,14 @@ impl State {
     /// Empty when no own cursor is known, it's in another buffer, or it
     /// is scrolled out of the visible slice.
     fn caret_vertex_bytes(&self) -> Vec<u8> {
+        // Q#MB1 — while the minibuffer is open the caret lives in the
+        // band at the input cursor, not in the buffer.
+        if self.minibuffer.is_some() {
+            return self
+                .minibuffer_caret_rect()
+                .map(|r| rects_to_vertex_bytes(&[r], self.config.width, self.config.height))
+                .unwrap_or_default();
+        }
         let (vstart, vend) = self.view_range;
         if vend <= vstart {
             return Vec::new();
@@ -3826,6 +4059,36 @@ impl State {
             return Vec::new();
         };
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
+    }
+
+    /// The caret rectangle for an open minibuffer (Q#MB1): a thin bar in
+    /// the bottom band at the input cursor. The band font is monospace,
+    /// so the per-char advance is the shaped status-left width divided by
+    /// its char count; the caret sits `prompt_chars + cursor` advances
+    /// from the band's left pad.
+    fn minibuffer_caret_rect(&self) -> Option<MinimapRect> {
+        let mb = self.minibuffer.as_ref()?;
+        let line_w = self
+            .status_left_buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0_f32, f32::max);
+        let chars = mb.prompt.chars().count() + mb.input.chars().count();
+        let advance = if chars > 0 {
+            line_w / chars as f32
+        } else {
+            0.0
+        };
+        let cursor_chars = mb.prompt.chars().count() as f32 + mb.cursor as f32;
+        let status_top =
+            text_area_bottom(self.config.height) + (STATUS_BAND_HEIGHT - STATUS_LINE_HEIGHT) / 2.0;
+        Some(MinimapRect {
+            x: STATUS_TEXT_PAD + advance * cursor_chars,
+            y: status_top,
+            w: CARET_WIDTH,
+            h: STATUS_LINE_HEIGHT,
+            color: CARET_COLOR,
+        })
     }
 
     /// The caret rectangle for the own cursor, in slice coordinates: a
@@ -4413,6 +4676,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::StatusFacts { .. } => "StatusFacts",
         InstanceMessage::SearchPrompt { .. } => "SearchPrompt",
         InstanceMessage::MenuPrompt { .. } => "MenuPrompt",
+        InstanceMessage::MinibufferPrompt { .. } => "MinibufferPrompt",
         InstanceMessage::BlockAdornments { .. } => "BlockAdornments",
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
@@ -4547,9 +4811,20 @@ fn is_search_entry_chord(key: ProtocolKey, mods: Modifiers) -> bool {
 fn is_clipboard_chord(key: ProtocolKey, mods: Modifiers) -> bool {
     matches!(
         (key, mods),
-        (ProtocolKey::Char('w'), Modifiers::ALT)
-            | (ProtocolKey::Char('w'), Modifiers::CTRL)
+        (ProtocolKey::Char('w'), Modifiers::ALT | Modifiers::CTRL)
             | (ProtocolKey::Char('y'), Modifiers::CTRL)
+    )
+}
+
+/// The chords that open a minibuffer prompt or enter a prefix (Q#MB1):
+/// `M-x` (execute-command) and the `C-x` prefix. Forwarded though
+/// otherwise withheld; once the daemon enters the minibuffer / a pending
+/// prefix, `dispatch_idle` goes false and the intercept gate round-trips
+/// the rest. General Emacs-chord forwarding stays a separate thread.
+fn is_minibuffer_open_chord(key: ProtocolKey, mods: Modifiers) -> bool {
+    matches!(
+        (key, mods),
+        (ProtocolKey::Char('x'), Modifiers::ALT | Modifiers::CTRL)
     )
 }
 
