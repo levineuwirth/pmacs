@@ -36,6 +36,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --no-default-features --features ${{ matrix.lua }} -- -D warnings
+      # pmacs-gpu is Lua-flavor-independent (it depends on pmacs-protocol,
+      # not pmacs), so the root-package clippy above never lints it. Lint
+      # it explicitly or its warnings slip through CI (audit F-001).
+      - run: cargo clippy -p pmacs-gpu --all-targets -- -D warnings
 
   test:
     name: Test (${{ matrix.os }} / ${{ matrix.lua }})

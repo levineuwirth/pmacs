@@ -2709,7 +2709,9 @@ impl State {
         let target =
             minimap_y_to_line(y as f32, self.config.height, self.current_line_starts.len())?;
         let centered = target.saturating_sub(estimated_visible_lines(self.config.height) / 2);
-        self.scroll_by_lines(centered as i64 - self.scroll_top as i64)
+        let delta = i64::try_from(centered).unwrap_or(i64::MAX)
+            - i64::try_from(self.scroll_top).unwrap_or(i64::MAX);
+        self.scroll_by_lines(delta)
     }
 
     /// Q#R1 — per-line incremental reshape for a single-line text
@@ -2907,6 +2909,7 @@ impl State {
     /// typing bursts instead of lagging a round trip), then the
     /// All/Top/Bot/NN% scroll indicator. Returns the colored spans.
     fn compose_status_spans(&self) -> Vec<(String, Option<Color>)> {
+        use std::fmt::Write as _;
         let mut spans: Vec<(String, Option<Color>)> = Vec::new();
         if let Some(facts) = self
             .status_facts
@@ -2945,7 +2948,7 @@ impl State {
                 .current_text
                 .get(ls..byte)
                 .map_or(0, |s| s.chars().count());
-            readout.push_str(&format!("L{}:C{}", line + 1, col + 1));
+            let _ = write!(readout, "L{}:C{}", line + 1, col + 1);
             readout.push_str("  ");
         }
         readout.push_str(&format_scroll_indicator(

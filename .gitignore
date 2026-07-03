@@ -4,6 +4,18 @@
 *.swo
 .DS_Store
 
+# Editor backups / autosave (Emacs `#file#` / `.#file`, general `~`) and
+# ad-hoc `.local-bak` copies (audit F-015). The leading `#` is escaped
+# so git reads it as a pattern, not a comment.
+\#*\#
+.\#*
+*~
+*.local-bak
+
+# Local build/run symlink or binary at the repo root (dev convenience;
+# `cargo build` produces target/release/pmacs). Not a project artifact.
+/pmacs
+
 # Editor scratch
 /.idea
 /.vscode
