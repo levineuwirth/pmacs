@@ -1,8 +1,15 @@
 # pmacs-gpu — design note
 
-**Status: framing pass closed; pre-implementation.** Sessions queued:
-session 1 = `pmacs-protocol` crate extraction; session 2 = `pmacs-gpu`
-workspace setup + hello-world rendering; session 3+ = Phase A proper.
+**Status: implemented and evolving.** The GPU frontend attaches to a
+daemon and renders + edits: syntax, diagnostics (squiggles), minimap,
+peer presence, mouse selection + right-click context menu (protocol
+v11), OS clipboard (v11's `Signal::Clipboard` + `arboard`), the
+incremental-search band (v9/v10), and the minibuffer with a completion
+dropdown (v12); command chords forward generally to the daemon keymap.
+This note captures the original design contract; the current
+per-feature detail lives in the framing/as-built docs alongside it
+(`in-buffer-search-framing.md`, `context-menu-framing.md`,
+`gpu-minibuffer-framing.md`, `gpu-chord-forwarding-framing.md`).
 
 This is the post-v1.0 design artifact for the GPU/GUI frontend. It
 inherits the contract boundary established by

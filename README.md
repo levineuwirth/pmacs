@@ -37,9 +37,9 @@ between `luajit` (default) and `lua54`; both pass the full test suite.
 ```sh
 cargo build --release             # produce target/release/pmacs
 cargo run --release -- <file>     # build and run on a file
-cargo test                        # unit + integration tests
+cargo test --workspace            # unit + integration tests (all crates)
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings   # incl. pmacs-gpu
 ```
 
 Release-only perf gates (M5 keystroke-to-render, M6 ingest/RSS/cancel
