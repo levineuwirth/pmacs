@@ -112,6 +112,22 @@ lua54`, and `--features crdt`. If possible, add a clearer crate-local compile
 error for simultaneously enabled Lua flavors so users see a pmacs-specific
 message before the `mlua-sys` failure.
 
+Resolution (PR TBD): documented the feature matrix explicitly — a table in
+`README.md` §Build (the two Lua flavors + orthogonal `crdt`, the supported
+build lines, and an explicit "don't use `--all-features`"), a `# Lua flavor
+features` section in `src/lib.rs`'s crate docs, and an expanded `Cargo.toml`
+`[features]` comment. CI already avoids `--all-features` (it iterates the
+flavors explicitly), so no CI change was needed.
+
+The suggested crate-local `compile_error!` was **investigated and rejected as
+unreachable**: the flavor check lives in the `mlua-sys` *build script*, which
+cargo compiles before the `pmacs` crate, so any mis-set flavor (both, or
+neither) fails there first and `pmacs`'s own `compile_error!` never evaluates
+— confirmed empirically for both cases. A dependent crate cannot preempt a
+dependency's build failure, so the honest mitigation is the documented matrix
+rather than a guard that can never fire. The docs state that the actual error
+surface is the `mlua-sys` message.
+
 ### F-003 - Medium - `pmacs-gpu` can appear hung when attached to a non-CRDT daemon
 
 Evidence:

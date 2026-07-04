@@ -61,9 +61,17 @@ similar_names = "allow"
 multiple_crate_versions = "allow"
 
 [features]
-# Pick exactly one Lua flavor at build time. v0.1 default is LuaJIT
+# Pick exactly ONE Lua flavor at build time. v0.1 default is LuaJIT
 # (spec §3 Checkpoint 6); lua54 is a buildable fallback for environments
 # without LuaJIT support (e.g. some CI hosts, big-endian machines).
+#
+# `luajit` and `lua54` are MUTUALLY EXCLUSIVE — they select mlua's
+# mutually-exclusive Lua backends. `--all-features` enables both and CANNOT
+# build; the `mlua-sys` build script errors ("You can enable only one of
+# the features: …") before this crate compiles, so pmacs can't preempt it
+# with a friendlier message — the fix is to build one flavor. See the
+# feature matrix in README.md; build a non-default flavor with
+# `--no-default-features --features lua54` (audit F-002).
 default = ["luajit"]
 luajit = ["mlua/luajit", "mlua/vendored"]
 lua54 = ["mlua/lua54", "mlua/vendored"]
