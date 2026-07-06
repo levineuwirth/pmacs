@@ -106,15 +106,27 @@ pattern; coupled domains follow their dependencies.
    directory module, the `super::`-access discipline, and the new-file CI
    path on the *simplest* real case before moving code in bulk. Subsequent
    tranches batch multiple domains now that the mechanics are proven.
-1. **`parse` + `theme` and the other pure leaves.** `parse`/`theme` come
-   as one unit (`make_syntax_registry` installs both; it's the external
-   entry from `editor.rs`, so this tranche also establishes the
-   `pub(crate) use` re-export that keeps `crate::lua_bindings::…` paths
-   stable). Batch in `index`, `window`, `minibuffer`.
-2. **Hoist the misplaced helpers.** JSON converters → shared core; ANSI
-   converters → a new `ansi` module; extract `ansi` and `packages` (after
-   lifting the misplaced core installers back to shared core). Dissolves
-   the JSON / ANSI cross-domain edges.
+1. **`index` (the one genuinely clean remaining leaf).** Zero shared-core
+   coupling; establishes the `pub(crate) use` re-export for external
+   callers (`editor.rs`, `completion_framework.rs`) and `super::` access
+   to a stranded helper (`lua_to_json`). **Correction after tranche 1:**
+   the recon under-counted the misplaced helpers. Beyond the JSON/ANSI
+   clusters, the *style/color* converters (`lua_to_style`/`style_to_lua`/
+   `color_to_lua`/…) sit in the `theme` section, and `caller_source` +
+   the command/menu builders (`build_command_from_spec`,
+   `build_menu_item_from_spec`, `BindArgs`, `register`, …) sit at the tail
+   of the `minibuffer` range — all shared, used across sections. So
+   `parse`/`theme`, `window`, and `minibuffer` are **not** clean
+   line-range extractions until the hoist below runs.
+2. **Hoist the misplaced helpers (must precede the contaminated leaves).**
+   Move every shared helper stranded in a domain section to its proper
+   home: JSON converters → shared core; ANSI converters → the `ansi`
+   module; style/color converters + `caller_source` + command/menu
+   builders → shared core. This is a within-`mod.rs` repositioning (no
+   behavior change) that makes the domain sections clean line-range units.
+   Then extract `parse`/`theme`, `window`, `minibuffer`, `ansi`,
+   `packages` (the last after lifting the misplaced core installers out of
+   its range too).
 3. **The `lsp` hub + its JSON consumers.** `lsp`, then `async`, `mcp`,
    `completion` (edge-free once the JSON helpers are hoisted).
 4. **The coupled tail.** `process` (→ansi), `project` (→lsp),
@@ -174,3 +186,25 @@ Validated: `cargo fmt` clean; `clippy --lib` clean under luajit **and**
 lua54; full lib suite **1437 passed / 0 failed** under luajit (the tests,
 which drive `pmacs.diag.*` through the Lua VM, are the behavioral oracle —
 unchanged outcomes, code merely relocated).
+
+**Tranche 1 (this PR).** Extracted `pmacs.index` (the project symbol-index
+surface) into `src/lua_bindings/index.rs` (390 lines) — the one remaining
+*clean* leaf (its 3 private helpers are used only within its own range).
+`mod.rs` declares `mod index;` and `pub use index::{SharedProjectIndexer,
+make_project_indexer};`, which keeps the `crate::lua_bindings::…` paths in
+`editor.rs` + `completion_framework.rs` (and an in-file completion-framework
+use) valid. `index.rs` has **zero shared-core coupling** — it depends only
+on `crate::project_index`, mlua, std, and reaches one stranded helper
+(`lua_to_json`, still in the `lsp` section) via `super::`. Verbatim move,
+no logic change. `mod.rs`: 14,986 → 14,603 lines.
+
+While vetting the next leaves, discovered the recon under-counted the
+misplaced helpers (see the corrected tranche plan above): `parse`/`theme`,
+`window`, and `minibuffer` trail off into *shared* style/color, `caller_
+source`, and command/menu helpers, so they need the helper-hoist tranche
+(now #2) before they can be extracted cleanly. This tranche stops at
+`index` rather than force those.
+
+Validated: `cargo fmt` clean; `clippy --lib` clean under **both** flavors;
+full lib suite **1437 passed / 0 failed** under **both** luajit and
+lua54.
