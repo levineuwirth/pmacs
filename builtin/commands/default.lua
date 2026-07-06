@@ -219,6 +219,12 @@ cmd { name = "window.split-horizontal",
 cmd { name = "window.split-vertical",
       description = "Split the active window vertically (children sit side-by-side).",
       fn = function() pmacs.window.split_vertical() end }
+cmd { name = "window.toggle-line-numbers",
+      description = "Toggle the active window's line-number gutter (off / absolute).",
+      fn = function()
+        local cur = pmacs.window.line_numbers()
+        pmacs.window.set_line_numbers(cur == "off" and "absolute" or "off")
+      end }
 cmd { name = "window.focus-next",
       description = "Move focus to the next window in iteration order.",
       fn = function() pmacs.window.focus_next() end }

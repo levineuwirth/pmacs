@@ -87,6 +87,15 @@ const MINIMAP_CODE_COLS: f32 = 100.0;
 const MINIMAP_MIN_STROKE_WIDTH: f32 = 1.5;
 const MINIMAP_MAX_LINE_STROKE_HEIGHT: f32 = 2.0;
 const CODE_LINE_HEIGHT: f32 = 22.0;
+/// Font size of the code buffer (and the line-number gutter, so their
+/// line heights match and rows align).
+const CODE_FONT_SIZE: f32 = 16.0;
+/// Gap in px between the line-number gutter digits and the code
+/// (UX gutter arc, GPU side of sub-arc 1 — mirrors the TUI gutter).
+const GUTTER_GAP_PX: f32 = 10.0;
+/// Fallback monospace advance in px when no shaped glyph is available to
+/// measure (0.6 em at the 16px code font).
+const GUTTER_MONO_ADVANCE_FALLBACK: f32 = 9.6;
 const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
 const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
 const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
@@ -260,6 +269,19 @@ enum Mode {
     /// `pmacs-gpu --attach <socket>`: connect + render the daemon's
     /// rope.
     Attach { socket: PathBuf },
+}
+
+/// Number of decimal digits in `n` (for `n >= 1`); allocation-free. Sizes
+/// the line-number gutter (UX gutter arc). Mirrors the TUI's
+/// `pmacs::window::decimal_digits` — kept local since pmacs-gpu doesn't
+/// depend on the `pmacs` crate.
+fn decimal_digits(mut n: usize) -> u32 {
+    let mut d = 1u32;
+    while n >= 10 {
+        n /= 10;
+        d += 1;
+    }
+    d
 }
 
 fn main() {
@@ -622,6 +644,15 @@ struct State {
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
+    /// Line-number gutter toggle (UX gutter arc, GPU side). Frontend-local
+    /// (Q#UX5), set from the `--line-numbers` flag. Off ⇒ zero coordinate
+    /// change: `gutter_width_px()` is 0 and every shift site is a no-op.
+    line_numbers: bool,
+    /// Shaped right-aligned line numbers, one per visible code line — its
+    /// own text layer over the code, aligned row-for-row (same line height).
+    gutter_buffer: Buffer,
+    /// Dedicated renderer for the gutter number layer (like the menu / mb).
+    gutter_text_renderer: TextRenderer,
 }
 
 /// The wire-authoritative status facts (Q#S1, protocol v8),
@@ -1700,6 +1731,9 @@ impl State {
         // Q#MB1 — a third renderer for the minibuffer dropdown layer.
         let mb_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        // UX gutter — a renderer for the line-number layer.
+        let gutter_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad_renderer = QuadRenderer::new(&device, format);
         let squiggle_renderer = SquiggleRenderer::new(&device, format);
 
@@ -1747,6 +1781,17 @@ impl State {
         mb_buffer.set_size(
             &mut font_system,
             Some(MB_DROP_MAX_WIDTH),
+            Some(config.height as f32),
+        );
+        // Line-number gutter buffer (UX gutter arc): same font size + line
+        // height as the code buffer so its rows align one-for-one.
+        let mut gutter_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(CODE_FONT_SIZE, CODE_LINE_HEIGHT),
+        );
+        gutter_buffer.set_size(
+            &mut font_system,
+            Some(config.width as f32),
             Some(config.height as f32),
         );
         buffer.set_text(
@@ -1831,6 +1876,9 @@ impl State {
             mb_text_renderer,
             mb_bg_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_cache: None,
+            line_numbers: false,
+            gutter_buffer,
+            gutter_text_renderer,
         }
     }
 
@@ -2478,6 +2526,16 @@ impl State {
                 self.request_redraw();
                 None
             }
+            // UX gutter (protocol v13): the daemon owns the per-window
+            // line-number toggle (`M-x window.toggle-line-numbers`); apply
+            // it to our local gutter state and repaint on change.
+            InstanceMessage::LineNumbers { enabled, .. } => {
+                if self.line_numbers != enabled {
+                    self.line_numbers = enabled;
+                    self.request_redraw();
+                }
+                None
+            }
             // Q#SR5 / Q#RX6 — the live isearch prompt (protocol v10).
             // `query: None` clears the band (search ended); `Some` shows
             // `[Regex] I-search: <query> (n/m)` on the band's left side.
@@ -2732,6 +2790,66 @@ impl State {
         self.scroll_top != old
     }
 
+    /// Monospace glyph advance in px, read from the currently-shaped code
+    /// buffer (every glyph shares it in a monospace font), with a fallback
+    /// when the buffer has no glyphs yet. Used to size the line-number
+    /// gutter (UX gutter arc).
+    fn mono_advance(&self) -> f32 {
+        self.buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .next()
+            .map_or(GUTTER_MONO_ADVANCE_FALLBACK, |g| g.w)
+    }
+
+    /// Width in px the line-number gutter reserves on the left, or 0 when
+    /// disabled (UX gutter arc, Q#UX3): `digits * advance + gap`. Mirrors
+    /// the TUI's `Window::gutter_width`; the unit here is pixels.
+    fn gutter_width_px(&self) -> f32 {
+        if !self.line_numbers {
+            return 0.0;
+        }
+        let lines = self.current_line_starts.len().max(1);
+        decimal_digits(lines) as f32 * self.mono_advance() + GUTTER_GAP_PX
+    }
+
+    /// The code's left origin in px: `TEXT_LEFT` plus the gutter. Every
+    /// byte→pixel x site adds this instead of the bare `TEXT_LEFT` (Q#UX2),
+    /// and the pixel→byte hit-test subtracts it.
+    fn text_left(&self) -> f32 {
+        TEXT_LEFT + self.gutter_width_px()
+    }
+
+    /// Reshape the gutter buffer to the right-aligned line numbers for the
+    /// currently-shaped code lines (UX gutter arc). One number per code
+    /// line starting at `shaped_top`, so the two buffers align row-for-row
+    /// at the same `top` and line height. No-op when the gutter is off.
+    fn refresh_gutter_buffer(&mut self) {
+        use std::fmt::Write as _;
+        if !self.line_numbers {
+            return;
+        }
+        let digits = decimal_digits(self.current_line_starts.len().max(1)) as usize;
+        let first = self.shaped_top;
+        let n = self.buffer.lines.len();
+        let mut text = String::new();
+        for i in 0..n {
+            if i > 0 {
+                text.push('\n');
+            }
+            let _ = write!(text, "{:>digits$}", first + i + 1);
+        }
+        self.gutter_buffer.set_text(
+            &mut self.font_system,
+            &text,
+            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+            None,
+        );
+        self.gutter_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
     /// Resolve a window-pixel position to an **absolute source byte**
     /// (Q#M2): pixel → cosmic-text hit (shaped line + byte within
     /// line) → projected byte → run map → slice byte → + `vstart`.
@@ -2755,7 +2873,7 @@ impl State {
             self.projected_line_starts = projected_line_starts;
             self.hit_map_dirty = false;
         }
-        let rel_x = x as f32 - TEXT_LEFT;
+        let rel_x = x as f32 - self.text_left();
         let rel_y = y as f32 - TEXT_TOP;
         let cursor = self.buffer.hit(rel_x, rel_y)?;
         let line_start = *self.projected_line_starts.get(cursor.line)?;
@@ -3640,6 +3758,14 @@ impl State {
             Some(width as f32),
             Some(STATUS_BAND_HEIGHT),
         );
+        // UX gutter: resize the line-number buffer too, else it keeps its
+        // construction-time (800x200) height and `shape_until_scroll` only
+        // shapes the ~10 lines that fit — the "numbers stop at 10" bug.
+        self.gutter_buffer.set_size(
+            &mut self.font_system,
+            Some(width as f32),
+            Some(height as f32),
+        );
         // A taller/shorter window changes the visible line count, so the
         // slice + scoped viewport change (session S1).
         self.reshape();
@@ -3771,6 +3897,9 @@ impl State {
         let frame_start = debug_frame().then(std::time::Instant::now);
         self.refresh_status_line();
         self.refresh_menu_buffer();
+        // UX gutter: reshape the line-number layer to the current scroll
+        // (no-op when the gutter is off).
+        self.refresh_gutter_buffer();
         // Q#CM1 — the context-menu popup quads (bg / highlight /
         // separators), drawn as a top layer after everything else.
         let menu_vertices = self.menu_vertex_bytes();
@@ -3881,6 +4010,15 @@ impl State {
             (self.config.width as f32 - STATUS_TEXT_PAD - status_width).max(TEXT_LEFT);
         let status_top =
             text_area_bottom(self.config.height) + (STATUS_BAND_HEIGHT - STATUS_LINE_HEIGHT) / 2.0;
+        // UX gutter: the code's left origin (past the gutter) and the
+        // main-text clip-left. Computed here as locals — calling `self.*`
+        // inside the `prepare` args would conflict with its `&mut` borrows.
+        let text_left = self.text_left();
+        let gutter_clip_left = if self.line_numbers {
+            text_left.floor() as i32
+        } else {
+            0
+        };
         self.text_renderer
             .prepare(
                 &self.device,
@@ -3891,11 +4029,11 @@ impl State {
                 [
                     TextArea {
                         buffer: &self.buffer,
-                        left: TEXT_LEFT,
+                        left: text_left,
                         top: TEXT_TOP,
                         scale: 1.0,
                         bounds: TextBounds {
-                            left: 0,
+                            left: gutter_clip_left,
                             top: 0,
                             right: text_bounds_right,
                             // Clip at the status band (Q#S3): a final
@@ -3939,6 +4077,39 @@ impl State {
                 &mut self.swash_cache,
             )
             .expect("text_renderer prepare");
+
+        // UX gutter: prepare the line-number layer in the reserved left
+        // strip (empty when off → renders nothing). Same `top` + line
+        // height as the code, so numbers align row-for-row.
+        let gutter_areas: Vec<TextArea> = if self.line_numbers {
+            vec![TextArea {
+                buffer: &self.gutter_buffer,
+                left: TEXT_LEFT,
+                top: TEXT_TOP,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: gutter_clip_left,
+                    bottom: text_area_bottom(self.config.height).round() as i32,
+                },
+                default_color: Color::rgb(120, 120, 135),
+                custom_glyphs: &[],
+            }]
+        } else {
+            Vec::new()
+        };
+        self.gutter_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                gutter_areas,
+                &mut self.swash_cache,
+            )
+            .expect("gutter_text_renderer prepare");
 
         // Q#CM1 — prepare the menu glyphs in their own layer (empty when
         // closed, so the renderer draws nothing).
@@ -4052,6 +4223,11 @@ impl State {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text_renderer render");
+            // UX gutter: line numbers in the reserved left strip (empty
+            // layer when off).
+            self.gutter_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("gutter_text_renderer render");
             // Caret over the text so the insertion point reads on top
             // of the glyph it sits before (session B1).
             if let Some(vertex_buffer) = caret_buffer.as_ref() {
@@ -4339,20 +4515,22 @@ impl State {
         }
         let slice_cursor = cursor - vstart;
         let (line_lo, _) = source_line_range(slice, slice_cursor);
+        // UX gutter: the caret sits in the code area, past the gutter.
+        let text_left = self.text_left();
         for run in self.buffer.layout_runs() {
             if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
                 continue;
             }
             let line_base = line_lo;
-            let mut x = TEXT_LEFT;
+            let mut x = text_left;
             for glyph in run.glyphs {
                 if line_base + glyph.start as u64 >= slice_cursor {
-                    x = TEXT_LEFT + glyph.x;
+                    x = text_left + glyph.x;
                     break;
                 }
                 // Cursor is past this glyph; track its right edge so a
                 // cursor at line end lands after the final glyph.
-                x = TEXT_LEFT + glyph.x + glyph.w;
+                x = text_left + glyph.x + glyph.w;
             }
             return Some(MinimapRect {
                 x,
@@ -4383,6 +4561,8 @@ impl State {
         if hi <= lo {
             return;
         }
+        // UX gutter: washes/squiggles are code-relative, past the gutter.
+        let text_left = self.text_left();
         for run in self.buffer.layout_runs() {
             let line_base = line_offsets.get(run.line_i).copied().unwrap_or(0);
             let mut min_x: Option<f32> = None;
@@ -4410,7 +4590,7 @@ impl State {
                     None => (TEXT_TOP + run.line_top, run.line_height),
                 };
                 rects.push(MinimapRect {
-                    x: TEXT_LEFT + x0,
+                    x: text_left + x0,
                     y,
                     w: x1 - x0,
                     h,
@@ -4907,6 +5087,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
         InstanceMessage::DispatchIdle { .. } => "DispatchIdle",
+        InstanceMessage::LineNumbers { .. } => "LineNumbers",
     }
 }
 
@@ -7145,6 +7326,26 @@ mod tests {
         assert!(
             differing > 200,
             "text should paint visible ink (only {differing} bytes differ from the empty frame)"
+        );
+    }
+
+    #[test]
+    fn headless_line_number_gutter_changes_the_frame() {
+        // UX gutter: enabling line numbers must add ink on the left and
+        // shift the code right — the rendered frame must differ.
+        let Some(mut off) = headless_or_skip(400, 300, "alpha\nbeta\ngamma\ndelta\n") else {
+            return;
+        };
+        let off_px = off.render_offscreen();
+        let mut on = State::new_headless(400, 300, "alpha\nbeta\ngamma\ndelta\n")
+            .expect("adapter was just available");
+        on.line_numbers = true;
+        let on_px = on.render_offscreen();
+        assert_eq!(off_px.len(), on_px.len());
+        let differing = off_px.iter().zip(&on_px).filter(|(a, b)| a != b).count();
+        assert!(
+            differing > 200,
+            "the gutter should add ink + shift the text (only {differing} bytes differ)"
         );
     }
 }

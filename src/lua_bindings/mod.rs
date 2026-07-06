@@ -10094,6 +10094,44 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
     }
 
     {
+        // UX gutter: set the active window's line-number mode
+        // ("off" | "absolute"). Per-window (Q#UX5); a friendly toggle
+        // command wraps this in `builtin/`.
+        let cc = core.clone();
+        win.set(
+            "set_line_numbers",
+            lua.create_function(move |_, mode: String| {
+                let m = match mode.as_str() {
+                    "off" | "none" => crate::window::LineNumberMode::Off,
+                    "absolute" | "abs" | "on" => crate::window::LineNumberMode::Absolute,
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "unknown line-number mode {other:?} (expected off|absolute)"
+                        )));
+                    }
+                };
+                cc.borrow_mut().active_window_mut().line_numbers = m;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        // Read the active window's line-number mode as a string.
+        let cc = core.clone();
+        win.set(
+            "line_numbers",
+            lua.create_function(move |_, ()| {
+                let mode = match cc.borrow().active_window().line_numbers {
+                    crate::window::LineNumberMode::Off => "off",
+                    crate::window::LineNumberMode::Absolute => "absolute",
+                };
+                Ok(mode)
+            })?,
+        )?;
+    }
+
+    {
         let cc = core.clone();
         win.set(
             "focus_next",

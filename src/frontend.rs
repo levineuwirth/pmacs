@@ -405,6 +405,10 @@ impl Frontend {
             // surface; the TUI paints the minibuffer via its own bottom
             // row, so it drops this silently too.
             | InstanceMessage::MinibufferPrompt { .. }
+            // UX gutter — LineNumbers is the semantic-frontend gutter
+            // toggle; the cell-grid TUI reads its window's mode directly,
+            // so it drops this silently like the other semantic families.
+            | InstanceMessage::LineNumbers { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

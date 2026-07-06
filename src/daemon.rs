@@ -1050,6 +1050,11 @@ fn dispatcher_loop(
                 let peer_knows_minibuffer_prompt = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 12);
+                // UX gutter — `LineNumbers` is a v13 additive variant; a
+                // v12 peer keeps its gutter off rather than mis-decoding it.
+                let peer_knows_line_numbers = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 13);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1072,6 +1077,11 @@ fn dispatcher_loop(
                     // simply can't render the GUI minibuffer.
                     if !peer_knows_minibuffer_prompt
                         && matches!(msg, InstanceMessage::MinibufferPrompt { .. })
+                    {
+                        continue;
+                    }
+                    if !peer_knows_line_numbers
+                        && matches!(msg, InstanceMessage::LineNumbers { .. })
                     {
                         continue;
                     }

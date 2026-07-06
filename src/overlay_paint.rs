@@ -135,6 +135,15 @@ pub fn paint_other_frontend_overlays(
             let Ok(buf) = reg.get(window.buffer_id) else {
                 continue;
             };
+            // UX gutter: this window may reserve a left strip for line
+            // numbers; a remote cursor/selection is a text-relative column
+            // shifted right by that width (0 when the gutter is off). This
+            // pass runs after `paint_frame`, so it learns the width here.
+            let gutter_w = {
+                let g = window.gutter_width();
+                if g >= rect.size.cols { 0 } else { g }
+            };
+            let text_cols = rect.size.cols.saturating_sub(gutter_w);
             // Source's byte position → display coords via THIS
             // recipient window's text_view (the recipient's view
             // of the buffer).
@@ -154,11 +163,11 @@ pub fn paint_other_frontend_overlays(
             // Column bounds: disp.col is the buffer column; window
             // doesn't horizontally scroll in v1.0, so cells past
             // rect.size.cols are simply off-grid for this window.
-            if disp.col >= rect.size.cols {
+            if disp.col >= text_cols {
                 continue;
             }
             let cursor_grid_row = rect.origin.row + row_in_window as u32;
-            let cursor_grid_col = rect.origin.col + disp.col;
+            let cursor_grid_col = rect.origin.col + gutter_w + disp.col;
             paint_cursor_cell(grid, cursor_grid_row, cursor_grid_col, color);
             if let Some(label_ch) = label {
                 paint_label_cell(grid, cursor_grid_row, cursor_grid_col, label_ch, color);
@@ -171,7 +180,9 @@ pub fn paint_other_frontend_overlays(
                 } else {
                     (sel.active, sel.anchor)
                 };
-                paint_selection_in_window(grid, buf, window, rect, inner_rows, lo, hi, color);
+                paint_selection_in_window(
+                    grid, buf, window, rect, inner_rows, gutter_w, lo, hi, color,
+                );
             }
         }
     }
@@ -223,6 +234,7 @@ fn paint_selection_in_window(
     window: &crate::window::Window,
     rect: Rect,
     inner_rows: u32,
+    gutter_w: u32,
     lo: crate::rope::Position,
     hi: crate::rope::Position,
     color: Color,
@@ -230,6 +242,7 @@ fn paint_selection_in_window(
     if lo >= hi {
         return;
     }
+    let text_cols = rect.size.cols.saturating_sub(gutter_w);
     // Walk byte positions from lo to hi, mapping each to a
     // display coord. Step in single-byte increments; pos_to_display
     // tolerates byte-boundary positions and returns None for
@@ -249,9 +262,9 @@ fn paint_selection_in_window(
             break;
         };
         match (disp.row as usize).checked_sub(window.view_top) {
-            Some(r) if r < inner_rows as usize && disp.col < rect.size.cols => {
+            Some(r) if r < inner_rows as usize && disp.col < text_cols => {
                 let grid_row = rect.origin.row + r as u32;
-                let grid_col = rect.origin.col + disp.col;
+                let grid_col = rect.origin.col + gutter_w + disp.col;
                 if grid_row < grid.size.rows && grid_col < grid.size.cols {
                     let cell = grid.at(CellCoord::new(grid_row, grid_col));
                     cell.style.underline = UnderlineStyle::Single;

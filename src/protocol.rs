@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_twelve_for_minibuffer() {
+    fn protocol_version_is_thirteen_for_line_numbers() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1701,8 +1701,9 @@ mod tests {
         // bumped 10→11 (`PointerKind::Context` + `MenuPointer` +
         // `MenuPrompt`, all additive; the message daemon-gated). Q#MB1
         // bumped 11→12 (`InstanceMessage::MinibufferPrompt`, additive +
-        // daemon-gated).
-        assert_eq!(PROTOCOL_VERSION, 12);
+        // daemon-gated). UX gutter bumped 12→13
+        // (`InstanceMessage::LineNumbers`, additive + daemon-gated).
+        assert_eq!(PROTOCOL_VERSION, 13);
     }
 
     #[test]
@@ -1711,10 +1712,11 @@ mod tests {
         // every cell-carrying message, ending the v1–v5 ladder —
         // pre-v6 peers are refused at the handshake (a clean
         // VersionMismatch) rather than garbling postcard mid-session.
-        // Q#M4 / Q#S1 / Q#SR5 / Q#RX6 / Q#CM1 / Q#MB1: the ladder resumes
-        // above that floor — v7 (`TripleDown`), v8 (`StatusFacts`), v9 +
-        // v10 (`SearchPrompt` + regex/invalid), v11 (the context menu),
-        // v12 (the GUI minibuffer) all interoperate, so v6 through v12 talk.
+        // Q#M4 / Q#S1 / Q#SR5 / Q#RX6 / Q#CM1 / Q#MB1 / UX gutter: the
+        // ladder resumes above that floor — v7 (`TripleDown`), v8
+        // (`StatusFacts`), v9 + v10 (`SearchPrompt` + regex/invalid), v11
+        // (the context menu), v12 (the GUI minibuffer), v13 (`LineNumbers`)
+        // all interoperate, so v6 through v13 talk.
         assert!(is_supported_protocol_version(6));
         assert!(is_supported_protocol_version(7));
         assert!(is_supported_protocol_version(8));
@@ -1722,10 +1724,11 @@ mod tests {
         assert!(is_supported_protocol_version(10));
         assert!(is_supported_protocol_version(11));
         assert!(is_supported_protocol_version(12));
-        for rejected in [0, 1, 2, 3, 4, 5, 13, u32::MAX] {
+        assert!(is_supported_protocol_version(13));
+        for rejected in [0, 1, 2, 3, 4, 5, 14, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v12 binary"
+                "v{rejected} must be rejected by a v13 binary"
             );
         }
     }

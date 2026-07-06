@@ -905,6 +905,19 @@ pub enum InstanceMessage {
         /// Total candidate count (the window is a slice of this).
         total: u32,
     },
+    /// UX gutter (protocol v13) — the per-window line-number gutter mode
+    /// for the frontend's active window. A semantic frontend renders line
+    /// numbers *locally* (it owns the text), but the on/off toggle lives
+    /// daemon-side (`M-x window.toggle-line-numbers`), so the daemon ships
+    /// the mode. Additive + daemon-gated `>= 13` — an older peer would
+    /// hard-error decoding it, so it stays off wires negotiated below 13.
+    LineNumbers {
+        /// Buffer the active window shows (routing/consistency; the mode
+        /// is a window property, not a buffer one).
+        buffer_id: crate::BufferId,
+        /// Whether the line-number gutter is enabled for that window.
+        enabled: bool,
+    },
 }
 
 /// One row of an open menu on the wire ([`InstanceMessage::MenuPrompt`]).
@@ -1180,7 +1193,13 @@ pub enum ResourceBody {
 /// encoding. Still daemon-gated per session (now at `< 10`); a v9 peer
 /// negotiates v9 and simply receives no `SearchPrompt` (the decorations
 /// still highlight), rather than mis-decoding the wider shape.
-pub const PROTOCOL_VERSION: u32 = 12;
+///
+/// UX gutter: bumped 12 → 13 for [`InstanceMessage::LineNumbers`] — a new
+/// additive variant carrying the per-window line-number gutter mode.
+/// Daemon-gated `< 13`; a v12 peer negotiates v12 and receives no
+/// `LineNumbers` (its gutter simply stays off), like every prior additive
+/// bump.
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1237,7 +1256,7 @@ pub const PROTOCOL_VERSION: u32 = 12;
 /// Q#MB1: extended to `[6, 7, 8, 9, 10, 11, 12]`.
 /// `InstanceMessage::MinibufferPrompt` is additive and daemon-gated per
 /// session, so the ladder resumes again.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12];
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].
