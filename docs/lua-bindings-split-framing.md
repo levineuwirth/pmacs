@@ -118,15 +118,25 @@ pattern; coupled domains follow their dependencies.
    of the `minibuffer` range — all shared, used across sections. So
    `parse`/`theme`, `window`, and `minibuffer` are **not** clean
    line-range extractions until the hoist below runs.
-2. **Hoist the misplaced helpers (must precede the contaminated leaves).**
-   Move every shared helper stranded in a domain section to its proper
-   home: JSON converters → shared core; ANSI converters → the `ansi`
-   module; style/color converters + `caller_source` + command/menu
-   builders → shared core. This is a within-`mod.rs` repositioning (no
-   behavior change) that makes the domain sections clean line-range units.
-   Then extract `parse`/`theme`, `window`, `minibuffer`, `ansi`,
-   `packages` (the last after lifting the misplaced core installers out of
-   its range too).
+2. **Extract `mcp` — and the corrected mental model.** A helper-hoist is
+   *not* a prerequisite for most domains. The contamination that stopped
+   `parse`/`theme` is narrow: it bites only when a shared helper is
+   **defined inside the range being extracted** (the style helpers live in
+   the `theme` range and are used elsewhere, so extracting that range
+   removes them from `mod.rs`). A domain that merely *uses* a cross-section
+   helper reaches it via `super::` (parent-private access) — no hoist
+   needed. So `mcp` extracts cleanly today: all its items are
+   self-contained, and it reaches the JSON converters (still in the `lsp`
+   section) via `super::json_to_lua`/`lua_to_json`, exactly like `index`.
+   The JSON-helper hoist is deferred to the tranche that extracts **`lsp`
+   itself** (where they are *defined*).
+3. **Hoist-then-extract the genuinely contaminated sections.** Only the
+   sections that *define* shared helpers used elsewhere need a hoist first:
+   `theme` (style/color converters), `minibuffer`/`window` (`caller_
+   source`, command/menu builders), `lsp` (JSON converters), `packages`
+   (the core module installers). Hoist those helpers to shared-core
+   position (a within-`mod.rs` reposition, no behavior change), then
+   extract the now-clean ranges.
 3. **The `lsp` hub + its JSON consumers.** `lsp`, then `async`, `mcp`,
    `completion` (edge-free once the JSON helpers are hoisted).
 4. **The coupled tail.** `process` (→ansi), `project` (→lsp),
@@ -208,3 +218,17 @@ source`, and command/menu helpers, so they need the helper-hoist tranche
 Validated: `cargo fmt` clean; `clippy --lib` clean under **both** flavors;
 full lib suite **1437 passed / 0 failed** under **both** luajit and
 lua54.
+
+**Tranche 2 (this PR).** Extracted `pmacs.mcp` (the MCP client surface)
+into `src/lua_bindings/mcp.rs` (602 lines), verbatim. All mcp items are
+self-contained; it reaches the JSON converters via `super::json_to_lua`/
+`lua_to_json` and `SharedProcessSupervisor` via `super::` — no hoist
+needed (see the corrected model in the tranche plan). `mod.rs` re-exports
+`make_mcp_manager` (external caller `editor.rs`) and `McpServerIdLua` — the
+latter to **preserve the public-API path** `crate::lua_bindings::
+McpServerIdLua` (moving it into a private module had dropped it from the
+crate surface, surfacing as dead-code on `id()`; the split must not shrink
+the public API). `mod.rs`: 14,603 → 14,020 lines.
+
+Validated: `cargo fmt` clean; `clippy --lib` clean under **both** flavors;
+full lib suite **1437 passed / 0 failed** under **both** luajit and lua54.
