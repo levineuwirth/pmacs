@@ -136,6 +136,12 @@ pub struct Viewport {
     pub cell_origin: CellCoord,
     /// Number of cells the viewport occupies.
     pub cell_size: CellSize,
+    /// Width of the line-number gutter reserved to the *left* of
+    /// `cell_origin` (UX gutter arc). `0` when no gutter. Overlays that
+    /// want to draw in the gutter (e.g. the diagnostic sign) reach it at
+    /// `cell_origin.col - gutter_w`; overlays that only touch the text area
+    /// ignore it (the origin is already shifted past the gutter).
+    pub gutter_w: u32,
 }
 
 // ---------------------------------------------------------------------------

@@ -1635,15 +1635,19 @@ pub fn paint_frame(
             buffer_end: buf.len(),
             cell_origin: CellCoord::new(rect.origin.row, rect.origin.col + gutter_w),
             cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
+            gutter_w,
         };
-        // Composition (T M2.9): base text_view paints first, then
-        // each overlay in attach order. See [`crate::view::View`].
+        // Composition (T M2.9): base text_view paints first, then the
+        // gutter numbers — before the overlays, so a diagnostic overlay
+        // can draw its severity sign into the gutter's leading column
+        // without the gutter's own blank pass erasing it — then each
+        // overlay in attach order. See [`crate::view::View`].
         window.text_view.render(buf, viewport, grid);
-        for overlay in &mut window.overlays {
-            overlay.render(buf, viewport, grid);
-        }
         if gutter_w > 0 {
             paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w);
+        }
+        for overlay in &mut window.overlays {
+            overlay.render(buf, viewport, grid);
         }
         paint_local_selection(grid, buf, window, &rect, inner_rows, gutter_w);
         // Mode line for this window. Painted last so the line
@@ -4839,6 +4843,7 @@ mod tests {
             buffer_end: buf.len(),
             cell_origin: rect.origin,
             cell_size: CellSize::new(rect.size.rows, rect.size.cols),
+            gutter_w: 0,
         };
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -4972,6 +4977,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(24, 80),
+                gutter_w: 0,
             };
 
             // Two no-op overlays: probe the dispatch cost only.

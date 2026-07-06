@@ -564,6 +564,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 16),
+                gutter_w: 0,
             },
             &mut grid,
         );
@@ -591,6 +592,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 16),
+                gutter_w: 0,
             },
             &mut grid,
         );
@@ -621,6 +623,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(5, 5),
+                gutter_w: 0,
             },
             &mut grid,
         );
@@ -652,6 +655,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 5),
+                gutter_w: 0,
             },
             &mut grid,
         );
