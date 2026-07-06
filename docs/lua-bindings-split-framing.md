@@ -230,5 +230,14 @@ McpServerIdLua` (moving it into a private module had dropped it from the
 crate surface, surfacing as dead-code on `id()`; the split must not shrink
 the public API). `mod.rs`: 14,603 → 14,020 lines.
 
+Review follow-up: the `pub` `install_*` wiring fns (`install_diag`,
+`install_project_index`, `install_mcp`) were `pub` before the split but
+weren't re-exported, silently dropping their `crate::lua_bindings::*`
+paths. They take crate-internal handle types (so no external caller can
+invoke them, and none does), but to keep the split strictly API-preserving
+they're now re-exported alongside the factories/handles — restoring the
+paths for the two already-merged tranches too. Deliberately narrowing them
+to `pub(crate)` is left as a separate, intentional change.
+
 Validated: `cargo fmt` clean; `clippy --lib` clean under **both** flavors;
 full lib suite **1437 passed / 0 failed** under **both** luajit and lua54.

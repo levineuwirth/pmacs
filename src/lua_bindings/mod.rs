@@ -81,11 +81,15 @@ use crate::workers_buffer;
 mod diag;
 mod index;
 mod mcp;
-pub use index::{SharedProjectIndexer, make_project_indexer};
-// `McpServerIdLua` is re-exported to preserve its prior public path
-// (`crate::lua_bindings::McpServerIdLua`) — the split must not shrink the
-// public API surface.
-pub use mcp::{McpServerIdLua, make_mcp_manager};
+// Every `pub` item a moved domain owned is re-exported so its prior
+// `crate::lua_bindings::<item>` path still resolves — the split must not
+// shrink the public API surface. That includes the `install_*` wiring fns:
+// they take crate-internal handle types (so external callers can't invoke
+// them), but they were `pub`, so their paths are preserved for
+// compile-compatibility; any deliberate narrowing is a separate change.
+pub use diag::install_diag;
+pub use index::{SharedProjectIndexer, install_project_index, make_project_indexer};
+pub use mcp::{McpServerIdLua, install_mcp, make_mcp_manager};
 
 // ---------------------------------------------------------------------------
 // Shared registry alias
