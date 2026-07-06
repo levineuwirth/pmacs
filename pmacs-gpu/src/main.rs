@@ -286,13 +286,7 @@ fn decimal_digits(mut n: usize) -> u32 {
 
 fn main() {
     env_logger::init();
-    // Filter the frontend-local `--line-numbers` flag out before the
-    // mode parser (UX gutter arc, Q#UX5) — it's orthogonal to the
-    // hello-world/attach mode and may appear in any position.
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let line_numbers = args.iter().any(|a| a == "--line-numbers");
-    args.retain(|a| a != "--line-numbers");
-    let mode = parse_args(args);
+    let mode = parse_args(std::env::args().skip(1).collect());
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .expect("create winit event loop");
@@ -303,7 +297,6 @@ fn main() {
         state: None,
         attach_client: None,
         modifiers: winit::keyboard::ModifiersState::empty(),
-        line_numbers,
     };
     event_loop
         .run_app(&mut app)
@@ -362,9 +355,6 @@ struct App {
     /// delivers modifiers separately from key presses, so we track the
     /// current set and apply it when a key is sent (session B1).
     modifiers: winit::keyboard::ModifiersState,
-    /// Line-number gutter toggle from `--line-numbers` (UX gutter arc);
-    /// applied to `State` once it's built in `resumed`.
-    line_numbers: bool,
 }
 
 type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
@@ -798,9 +788,7 @@ impl ApplicationHandler<AppEvent> for App {
             Mode::HelloWorld => HELLO_TEXT,
             Mode::Attach { .. } => "(connecting...)",
         };
-        let mut state = State::new(event_loop, initial_text);
-        state.line_numbers = self.line_numbers;
-        self.state = Some(state);
+        self.state = Some(State::new(event_loop, initial_text));
 
         // In attach mode, kick off the connection now that the event
         // loop is running and a proxy is available. Failure logs and
@@ -2536,6 +2524,16 @@ impl State {
                     diag_warnings,
                 });
                 self.request_redraw();
+                None
+            }
+            // UX gutter (protocol v13): the daemon owns the per-window
+            // line-number toggle (`M-x window.toggle-line-numbers`); apply
+            // it to our local gutter state and repaint on change.
+            InstanceMessage::LineNumbers { enabled, .. } => {
+                if self.line_numbers != enabled {
+                    self.line_numbers = enabled;
+                    self.request_redraw();
+                }
                 None
             }
             // Q#SR5 / Q#RX6 — the live isearch prompt (protocol v10).
@@ -5081,6 +5079,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::FoldState { .. } => "FoldState",
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
         InstanceMessage::DispatchIdle { .. } => "DispatchIdle",
+        InstanceMessage::LineNumbers { .. } => "LineNumbers",
     }
 }
 

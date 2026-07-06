@@ -157,6 +157,11 @@ pub struct SemanticRenderState {
     /// `(name, modified, diag_errors, diag_warnings)` last emitted as
     /// `StatusFacts` (Q#S1) — cached-compare suppression.
     last_status: HashMap<BufferId, (String, bool, u32, u32)>,
+    /// Last-emitted line-number gutter enabled-flag (UX gutter arc,
+    /// protocol v13) — cached-compare suppression. Seeded to `Some(false)`
+    /// (the frontend's default) so an off gutter never emits. Per-frontend
+    /// (one value), since this state carries one frontend's `frontend_id`.
+    last_line_numbers: Option<bool>,
     /// Last emitted `SearchPrompt` payload per buffer, for
     /// cached-compare suppression (see [`SearchPromptFacts`]).
     last_search_prompt: HashMap<BufferId, SearchPromptFacts>,
@@ -240,6 +245,11 @@ impl SemanticRenderState {
             last_minibuffer: None,
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
+            // Seed to the frontend's default (gutter off): a plain default
+            // window never emits `LineNumbers`, so the common case adds no
+            // traffic and the first frame is unchanged. Only an actual
+            // toggle-on (or later toggle-off) ships a message.
+            last_line_numbers: Some(false),
             last_style_gate: HashMap::new(),
             diag_line_cache: HashMap::new(),
         }
@@ -438,6 +448,8 @@ impl SemanticRenderState {
         out.extend(self.file_style_summary_msg(state, vp.buffer_id, generation));
         // --- StatusFacts (status band; Q#S1, protocol v8) ---
         out.extend(self.status_facts_msg(state, vp.buffer_id));
+        // --- LineNumbers (gutter toggle; UX gutter arc, protocol v13) ---
+        out.extend(self.line_numbers_msg(state, vp.buffer_id));
         // --- SearchPrompt (isearch band; Q#SR5, protocol v9) ---
         out.extend(self.search_prompt_msg(state, vp.buffer_id));
         // --- MenuPrompt (context menu; Q#CM1, protocol v11) ---
@@ -683,6 +695,29 @@ impl SemanticRenderState {
         };
         self.last_status.insert(buffer_id, facts);
         Some(msg)
+    }
+
+    /// The `LineNumbers` message for this frame, or `None` when the gutter
+    /// mode hasn't changed (UX gutter arc, protocol v13). The toggle lives
+    /// on this frontend's active window (`M-x window.toggle-line-numbers`);
+    /// a semantic frontend renders the gutter locally but the daemon owns
+    /// the on/off state, so it ships the mode. The daemon's write loop
+    /// keeps the variant off wires negotiated `< 13`.
+    fn line_numbers_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> Option<InstanceMessage> {
+        let enabled = {
+            let core = state.core.borrow();
+            core.active_window_for(self.frontend_id)
+                .is_some_and(|w| w.line_numbers != crate::window::LineNumberMode::Off)
+        };
+        if self.last_line_numbers == Some(enabled) {
+            return None;
+        }
+        self.last_line_numbers = Some(enabled);
+        Some(InstanceMessage::LineNumbers { buffer_id, enabled })
     }
 
     /// The `InlineAdornments` message for this frame, or `None` when
@@ -1694,6 +1729,45 @@ mod tests {
         state.core.borrow().active_window().buffer_id
     }
 
+    #[test]
+    fn line_numbers_emitted_on_toggle_then_suppressed() {
+        // UX gutter (protocol v13): the daemon ships the per-window gutter
+        // mode. Off is the default → no message; toggling on emits
+        // `LineNumbers { enabled: true }`; an unchanged next frame suppresses.
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+
+        // Default (gutter off): no LineNumbers on the first frame.
+        let first = s.render_frame(&state);
+        assert!(
+            !first
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::LineNumbers { .. })),
+            "off gutter must not emit LineNumbers"
+        );
+
+        // Toggle the active window on → next frame emits enabled = true.
+        state.core.borrow_mut().active_window_mut().line_numbers =
+            crate::window::LineNumberMode::Absolute;
+        let on = s.render_frame(&state);
+        assert!(
+            on.iter()
+                .any(|m| matches!(m, InstanceMessage::LineNumbers { enabled: true, .. })),
+            "toggling the gutter on must emit LineNumbers {{ enabled: true }}"
+        );
+
+        // No further change → suppressed.
+        let again = s.render_frame(&state);
+        assert!(
+            !again
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::LineNumbers { .. })),
+            "an unchanged gutter mode must not re-emit"
+        );
+    }
+
     /// All `InstanceMessage` variants the semantic projection may
     /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`,
     /// `FileStyleSummary`, `StatusFacts` (Q#S1), or `SearchPrompt`
@@ -1710,6 +1784,7 @@ mod tests {
                         | InstanceMessage::FileStyleSummary { .. }
                         | InstanceMessage::StatusFacts { .. }
                         | InstanceMessage::SearchPrompt { .. }
+                        | InstanceMessage::LineNumbers { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
