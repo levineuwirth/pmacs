@@ -96,6 +96,12 @@ const GUTTER_GAP_PX: f32 = 10.0;
 /// Fallback monospace advance in px when no shaped glyph is available to
 /// measure (0.6 em at the 16px code font).
 const GUTTER_MONO_ADVANCE_FALLBACK: f32 = 9.6;
+/// Diagnostic gutter sign (UX gutter sub-arc 2): a thin severity-colored
+/// bar hugging the gutter's left edge, left of the line numbers — the GPU
+/// analogue of the TUI's leading-column sign glyph. `X` is its left inset,
+/// `W` its width; it spans the full line height.
+const GUTTER_SIGN_X: f32 = 4.0;
+const GUTTER_SIGN_W: f32 = 4.0;
 const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
 const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
 const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
@@ -4338,7 +4344,60 @@ impl State {
         let mut rects = Vec::new();
         self.collect_own_decoration_rects(&mut rects, &line_offsets, vstart, vend);
         self.collect_peer_rects(buffer_id, &line_offsets, vstart, vend, &mut rects);
+        self.collect_gutter_sign_rects(&mut rects, &line_offsets, vstart, vend);
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
+    /// Per-visible-line diagnostic sign bars in the gutter (UX gutter
+    /// sub-arc 2): one severity-colored bar at the gutter's left edge for
+    /// each line carrying a diagnostic, most-severe winning. Only when the
+    /// gutter is on, mirroring the TUI (signs ride the line-number gutter).
+    /// The GPU analogue of the TUI's leading-column `E`/`W`/`I`/`H` glyph.
+    fn collect_gutter_sign_rects(
+        &self,
+        rects: &mut Vec<MinimapRect>,
+        line_offsets: &[u64],
+        vstart: u64,
+        vend: u64,
+    ) {
+        if !self.line_numbers {
+            return;
+        }
+        let slice_len = vend - vstart;
+        for run in self.buffer.layout_runs() {
+            let line_base = line_offsets.get(run.line_i).copied().unwrap_or(0);
+            let line_end = line_offsets
+                .get(run.line_i + 1)
+                .copied()
+                .unwrap_or(slice_len);
+            let mut best: Option<(u8, [f32; 4])> = None;
+            for d in &self.current_decorations {
+                let Some(rank) = diagnostic_severity_rank(d.kind) else {
+                    continue;
+                };
+                let Some((lo, hi)) = clip_rebase_range(d.range.start, d.range.end, vstart, vend)
+                else {
+                    continue;
+                };
+                if hi <= line_base || lo >= line_end {
+                    continue; // decoration doesn't touch this line
+                }
+                if best.is_none_or(|(r, _)| rank < r)
+                    && let Some(color) = decoration_kind_to_underline_color(d.kind)
+                {
+                    best = Some((rank, color));
+                }
+            }
+            if let Some((_, color)) = best {
+                rects.push(MinimapRect {
+                    x: GUTTER_SIGN_X,
+                    y: TEXT_TOP + run.line_top,
+                    w: GUTTER_SIGN_W,
+                    h: run.line_height,
+                    color,
+                });
+            }
+        }
     }
 
     /// Own-window `Selection` washes from `current_decorations`. The
@@ -6083,6 +6142,23 @@ fn decoration_kind_to_underline_color(kind: DecorationKind) -> Option<[f32; 4]> 
     }
 }
 
+/// Severity rank of a diagnostic decoration kind (UX gutter sub-arc 2):
+/// `0` = most severe (`Error`) … `3` = least (`Hint`); `None` for
+/// non-diagnostic kinds. Lets the gutter sign pick the most-severe
+/// diagnostic touching a line (min rank wins), mirroring the TUI.
+fn diagnostic_severity_rank(kind: DecorationKind) -> Option<u8> {
+    match kind {
+        DecorationKind::DiagnosticError => Some(0),
+        DecorationKind::DiagnosticWarning => Some(1),
+        DecorationKind::DiagnosticInfo => Some(2),
+        DecorationKind::DiagnosticHint => Some(3),
+        DecorationKind::Selection
+        | DecorationKind::SearchMatch
+        | DecorationKind::SearchMatchActive
+        | DecorationKind::CurrentLine => None,
+    }
+}
+
 /// Background-bearing companion to
 /// [`decoration_kind_to_underline_color`]: maps each
 /// background-needing `DecorationKind` to its quad-pipeline color as
@@ -7346,6 +7422,43 @@ mod tests {
         assert!(
             differing > 200,
             "the gutter should add ink + shift the text (only {differing} bytes differ)"
+        );
+    }
+
+    #[test]
+    fn headless_diagnostic_gutter_sign_changes_the_frame() {
+        // UX gutter sub-arc 2: with the gutter on, a diagnostic on a line
+        // must add a severity-colored sign bar in the gutter — the frame
+        // must differ from the same gutter with no diagnostics.
+        let text = "alpha\nbeta\ngamma\n";
+        let Some(mut plain) = headless_or_skip(400, 300, text) else {
+            return;
+        };
+        plain.line_numbers = true;
+        plain.current_buffer_id = Some(BufferId::next());
+        plain.view_range = (0, text.len() as u64);
+        let plain_px = plain.render_offscreen();
+
+        let mut with_diag =
+            State::new_headless(400, 300, text).expect("adapter was just available");
+        with_diag.line_numbers = true;
+        with_diag.current_buffer_id = Some(BufferId::next());
+        with_diag.view_range = (0, text.len() as u64);
+        with_diag.current_decorations.push(Decoration {
+            range: ByteRange { start: 0, end: 5 }, // "alpha"
+            kind: DecorationKind::DiagnosticError,
+        });
+        let diag_px = with_diag.render_offscreen();
+
+        assert_eq!(plain_px.len(), diag_px.len());
+        let differing = plain_px
+            .iter()
+            .zip(&diag_px)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 20,
+            "the diagnostic sign bar should add ink ({differing} bytes differ)"
         );
     }
 }
