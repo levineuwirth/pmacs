@@ -882,7 +882,20 @@ impl EditorState {
         };
         let inner_rows = rect.size.rows.saturating_sub(1);
         let local_row = cell_row.saturating_sub(rect.origin.row);
-        let local_col = cell_col.saturating_sub(rect.origin.col);
+        // UX gutter (Q#UX6): subtract the reserved gutter width so the
+        // hit-test lands on the right text byte. A click inside the gutter
+        // strip (raw < gutter_w) saturates to column 0 → the start of that
+        // line, a mild, useful affordance for the MVP.
+        let gutter_w = {
+            let core = self.core.borrow();
+            core.windows.get(&win_id).map_or(0, |w| {
+                let g = w.gutter_width();
+                if g >= rect.size.cols { 0 } else { g }
+            })
+        };
+        let local_col = cell_col
+            .saturating_sub(rect.origin.col)
+            .saturating_sub(gutter_w);
 
         match ev.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1608,11 +1621,20 @@ pub fn paint_frame(
             continue;
         };
         let viewport_buffer_start = window.text_view.line_offset(window.view_top).unwrap_or(0);
+        // UX gutter (Q#UX2): reserve a left strip for line numbers and
+        // shrink+shift the text area into the remainder, so every
+        // viewport-relative painter (text, syntax, diagnostics, search)
+        // stays gutter-agnostic. A window too narrow for the gutter falls
+        // back to no gutter this frame rather than starving the text.
+        let gutter_w = {
+            let w = window.gutter_width();
+            if w >= rect.size.cols { 0 } else { w }
+        };
         let viewport = Viewport {
             buffer_start: viewport_buffer_start,
             buffer_end: buf.len(),
-            cell_origin: rect.origin,
-            cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols),
+            cell_origin: CellCoord::new(rect.origin.row, rect.origin.col + gutter_w),
+            cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
         };
         // Composition (T M2.9): base text_view paints first, then
         // each overlay in attach order. See [`crate::view::View`].
@@ -1620,7 +1642,10 @@ pub fn paint_frame(
         for overlay in &mut window.overlays {
             overlay.render(buf, viewport, grid);
         }
-        paint_local_selection(grid, buf, window, &rect, inner_rows);
+        if gutter_w > 0 {
+            paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w);
+        }
+        paint_local_selection(grid, buf, window, &rect, inner_rows, gutter_w);
         // Mode line for this window. Painted last so the line
         // itself is always visible regardless of overlay activity.
         let coord = window
@@ -1685,9 +1710,15 @@ pub fn paint_frame(
     {
         return None;
     }
+    // UX gutter: the terminal caret sits in the text area, past the
+    // reserved gutter strip (mirrors the viewport shift above).
+    let gutter_w = {
+        let w = aw.gutter_width();
+        if w >= active_rect.size.cols { 0 } else { w }
+    };
     let grid_row = active_rect.origin.row + (disp.row - aw.view_top as u32);
     let max_col = active_rect.origin.col + active_rect.size.cols.saturating_sub(1);
-    let grid_col = (active_rect.origin.col + disp.col).min(max_col);
+    let grid_col = (active_rect.origin.col + gutter_w + disp.col).min(max_col);
     Some(CellCoord::new(grid_row, grid_col))
 }
 
@@ -1745,12 +1776,69 @@ fn inner_rows(rect: &crate::window::Rect) -> u32 {
     rect.size.rows.saturating_sub(1)
 }
 
+/// Paint the left line-number gutter for `window` into the reserved strip
+/// `[rect.origin.col, rect.origin.col + gutter_w)` over the window's text
+/// rows (UX gutter arc). Numbers are 1-based, right-aligned with a single
+/// trailing pad cell; rows past end-of-buffer stay blank. Dimly styled so
+/// the gutter recedes behind the code. The caller guarantees `gutter_w >
+/// 0` and that it fits within `rect.size.cols`.
+fn paint_line_number_gutter(
+    grid: &mut crate::cell::CellGrid<'_>,
+    window: &crate::window::Window,
+    rect: &crate::window::Rect,
+    inner_rows: u32,
+    gutter_w: u32,
+) {
+    let line_count = window.text_view.line_count();
+    let style = crate::cell::Style {
+        fg: crate::cell::Color::Indexed(8),
+        ..crate::cell::Style::default()
+    };
+    // The number's rightmost digit sits at `field - 1`; the last gutter
+    // cell (`gutter_w - 1`) is a trailing pad separating it from the code.
+    let field = gutter_w.saturating_sub(1);
+    for r in 0..inner_rows {
+        let grid_row = rect.origin.row + r;
+        // Blank + style the whole strip first, so a number that shrank a
+        // digit (e.g. after a large delete) leaves no stale trailing glyph.
+        for c in 0..gutter_w {
+            let cell = grid.at(CellCoord::new(grid_row, rect.origin.col + c));
+            cell.glyph = crate::cell::Glyph::Char(' ');
+            cell.style = style;
+            cell.attachment = None;
+        }
+        let buffer_line = window.view_top + r as usize;
+        if buffer_line >= line_count {
+            continue; // past end-of-buffer: blank gutter
+        }
+        // Write the 1-based number right-aligned, rightmost digit first,
+        // alloc-free. `field >= digits(line_count)` by construction, so
+        // the leftmost digit always leaves at least a leading pad cell.
+        let mut val = buffer_line + 1;
+        let mut col = field;
+        loop {
+            col -= 1;
+            let digit = (val % 10) as u8;
+            grid.at(CellCoord::new(grid_row, rect.origin.col + col))
+                .glyph = crate::cell::Glyph::Char((b'0' + digit) as char);
+            val /= 10;
+            if val == 0 || col == 0 {
+                break;
+            }
+        }
+    }
+}
+
 fn paint_local_selection(
     grid: &mut crate::cell::CellGrid<'_>,
     buf: &crate::buffer::Buffer,
     window: &crate::window::Window,
     rect: &crate::window::Rect,
     inner_rows: u32,
+    // UX gutter: the reserved left-strip width; selection cells are the
+    // text-relative display column shifted right by this (Q#UX2). 0 when
+    // the gutter is off, so this is a no-op then.
+    gutter_w: u32,
 ) {
     let Some((sel_start, sel_end)) = window.region() else {
         return;
@@ -1758,6 +1846,7 @@ fn paint_local_selection(
     if inner_rows == 0 || rect.size.cols == 0 || sel_start >= sel_end {
         return;
     }
+    let text_cols = rect.size.cols.saturating_sub(gutter_w);
 
     let first_row = window.view_top;
     let last_row = first_row.saturating_add(inner_rows as usize);
@@ -1786,15 +1875,15 @@ fn paint_local_selection(
         }
 
         let row_offset = display_row.saturating_sub(first_row) as u32;
-        let start_col = start_coord.col.min(rect.size.cols);
-        let end_col = end_coord.col.min(rect.size.cols);
+        let start_col = start_coord.col.min(text_cols);
+        let end_col = end_coord.col.min(text_cols);
         if start_col >= end_col {
             continue;
         }
         for col in start_col..end_col {
             let cell = grid.at(CellCoord::new(
                 rect.origin.row + row_offset,
-                rect.origin.col + col,
+                rect.origin.col + gutter_w + col,
             ));
             cell.style.reverse = true;
         }
@@ -2195,6 +2284,49 @@ mod tests {
 
     use super::*;
     use crate::frontend::KeyEventKind;
+
+    #[test]
+    fn line_number_gutter_renders_right_aligned_digits() {
+        use crate::buffer::{Buffer, BufferId};
+        use crate::cell::{Cell, CellGrid, CellSize, Glyph};
+        use crate::text_view::TextView;
+        use crate::window::{LineNumberMode, Window, WindowId};
+
+        // 12 lines → decimal_digits(12) = 2, gutter_w = 2 + PAD(2) = 4.
+        let content = b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+        let bid = BufferId::next();
+        let buf = Buffer::from_bytes(bid, "test", content);
+        let view = TextView::new(&buf);
+        let mut window = Window::new(WindowId::next(), bid, view);
+        window.line_numbers = LineNumberMode::Absolute;
+        assert_eq!(window.gutter_width(), 4, "2-digit line count + 2 pad");
+
+        let (rows, cols) = (12u32, 20u32);
+        let mut storage = vec![Cell::default(); (rows * cols) as usize];
+        let mut grid = CellGrid {
+            cells: &mut storage,
+            stride: cols,
+            size: CellSize::new(rows, cols),
+        };
+        let rect = Rect::new(0, 0, rows, cols);
+        paint_line_number_gutter(&mut grid, &window, &rect, rows, 4);
+
+        let glyph = |r: u32, c: u32| storage[(r * cols + c) as usize].glyph.clone();
+        // Row 0 = line 1: "  1 " (digit right-aligned at col 2, col 3 = pad).
+        assert_eq!(glyph(0, 0), Glyph::Char(' '));
+        assert_eq!(glyph(0, 1), Glyph::Char(' '));
+        assert_eq!(glyph(0, 2), Glyph::Char('1'));
+        assert_eq!(glyph(0, 3), Glyph::Char(' '));
+        // Row 4 = line 5.
+        assert_eq!(glyph(4, 2), Glyph::Char('5'));
+        // Row 9 = line 10: two digits → col1='1', col2='0', col3 pad.
+        assert_eq!(glyph(9, 1), Glyph::Char('1'));
+        assert_eq!(glyph(9, 2), Glyph::Char('0'));
+        assert_eq!(glyph(9, 3), Glyph::Char(' '));
+        // Row 11 = line 12.
+        assert_eq!(glyph(11, 1), Glyph::Char('1'));
+        assert_eq!(glyph(11, 2), Glyph::Char('2'));
+    }
 
     fn fresh_with(content: &[u8]) -> EditorState {
         let s = EditorState::new();

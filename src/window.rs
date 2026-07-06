@@ -129,6 +129,36 @@ pub struct Selection {
     pub anchor: Position,
 }
 
+/// Line-number display mode for a window's left gutter (UX gutter arc).
+/// `Off` reserves no gutter at all — text starts at column 0, and every
+/// coordinate is unchanged (the default, matching the Emacs tradition).
+/// Additional modes (relative, hybrid) arrive in a later sub-arc.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum LineNumberMode {
+    /// No gutter; zero layout change.
+    #[default]
+    Off,
+    /// Absolute 1-based line numbers, right-aligned in the gutter.
+    Absolute,
+}
+
+/// Cells of horizontal padding the line-number gutter adds around the
+/// digit field: a leading and a trailing blank, so `gutter_w = digits +
+/// PAD` (Q#UX3). Kept as a named constant so both frontends can share the
+/// convention (Q#UX7). `u32` to match the cell-grid column type.
+pub const LINE_NUMBER_GUTTER_PAD: u32 = 2;
+
+/// Number of decimal digits in `n` (for `n >= 1`). Allocation-free.
+#[must_use]
+pub fn decimal_digits(mut n: usize) -> u32 {
+    let mut d = 1u32;
+    while n >= 10 {
+        n /= 10;
+        d += 1;
+    }
+    d
+}
+
 /// One leaf of the window tree: a buffer plus per-window state.
 pub struct Window {
     /// Unique identifier.
@@ -158,6 +188,9 @@ pub struct Window {
     /// render. Updated by the renderer; consumed by `cursor.page-down`
     /// / `cursor.page-up`. `0` until the first render lands.
     pub last_visible_rows: u32,
+    /// Line-number gutter mode for this window (UX gutter arc). `Off` by
+    /// default → no gutter, no coordinate change.
+    pub line_numbers: LineNumberMode,
 }
 
 impl Window {
@@ -175,6 +208,22 @@ impl Window {
             view_top: 0,
             goal_col: None,
             last_visible_rows: 0,
+            line_numbers: LineNumberMode::Off,
+        }
+    }
+
+    /// Width in cells this window's line-number gutter occupies, or `0`
+    /// when disabled (UX gutter arc, Q#UX3). `digits(line_count) + PAD`;
+    /// the renderer caps this against the window width and applies it as a
+    /// left offset to the text area. Every gutter coordinate-math site
+    /// reads this one function so the width stays consistent.
+    #[must_use]
+    pub fn gutter_width(&self) -> u32 {
+        match self.line_numbers {
+            LineNumberMode::Off => 0,
+            LineNumberMode::Absolute => {
+                decimal_digits(self.text_view.line_count().max(1)) + LINE_NUMBER_GUTTER_PAD
+            }
         }
     }
 
@@ -464,6 +513,18 @@ fn collapse_single_child_splits(node: &mut LayoutNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_digits_counts_correctly() {
+        assert_eq!(decimal_digits(1), 1);
+        assert_eq!(decimal_digits(9), 1);
+        assert_eq!(decimal_digits(10), 2);
+        assert_eq!(decimal_digits(99), 2);
+        assert_eq!(decimal_digits(100), 3);
+        assert_eq!(decimal_digits(1000), 4);
+        // A 6-digit file → 6 digits + PAD gutter.
+        assert_eq!(decimal_digits(123_456), 6);
+    }
 
     fn id() -> WindowId {
         WindowId::next()
