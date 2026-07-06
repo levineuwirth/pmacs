@@ -239,4 +239,46 @@ the adapter). Both frontends eyeballed for coordinate correctness.
 Deferred to later sub-arcs: relative/hybrid modes; diagnostic gutter signs
 (sub-arc 2); the exact gutter padding is a tunable to eyeball.
 
+**Sub-arc 2 — diagnostic gutter signs (TUI + GPU).**
+
+Per-line severity signs riding the sub-arc-1 gutter — closing the last
+deferred Task #23 item. No protocol/daemon change: the per-line severity is
+already frontend-side (the TUI's diag store, the GPU's `current_decorations`).
+
+- **Coupling decision.** Signs ride the *line-number* gutter — they show
+  when line numbers are on, and vanish when off (the legacy col-0
+  background marker returns in the TUI's no-gutter mode). A
+  signs-without-numbers mode is deferred; when it lands, the gutter's
+  presence test widens from "line numbers on" to "line numbers OR signs
+  on."
+- **TUI** (`diag.rs`/`editor.rs`/`view.rs`): `Viewport` gains `gutter_w` so
+  overlays can address the gutter's leading column at `cell_origin.col -
+  gutter_w`. The gutter number pass moved *before* the overlay loop so
+  `DiagnosticView` can draw its sign into the gutter's blanked leading
+  column without the number pass erasing it. The sign is the severity
+  glyph (`E`/`W`/`I`/`H`) colored by `underline_color()`; most-severe wins
+  (the existing `line_markers` map). Extracted `paint_line_markers`.
+- **GPU** (`pmacs-gpu/main.rs`): `collect_gutter_sign_rects` walks
+  `layout_runs()`, finds the most-severe diagnostic decoration overlapping
+  each line (`diagnostic_severity_rank`, min wins) and pushes a thin
+  severity-colored bar at the gutter's left edge, riding the existing
+  background quad batch. Rendered as a **bar**, not a glyph — the GPU
+  gutter number layer is single-color, so a per-line-colored bar was the
+  clean path; same convention as the TUI, per-frontend rendering (Q#UX7).
+
+Validated: `fmt` + `clippy --all-targets` clean both flavors; lib tests
+(incl. the TUI gutter-sign placement test) + 54 pmacs-gpu (incl. a headless
+sign render test on the adapter). Both frontends eyeballed.
+
+**Cross-cutting bug fixed en route (PR #87, off the arc):** a bare
+`--daemon` + a GPU is a *two-frontend* session; `EditorCore::close_active`
+/ `close_others` operated on the global `windows` set and so closed *other*
+frontends' windows, dangling their `view.active` and crashing the daemon in
+`active_window()`. Scoped both to the active frontend's layout. (Surfaced
+while eyeballing this sub-arc against the two-frontend setup.)
+
+**Known follow-up (not this arc):** the GPU minibuffer completion-navigation
+highlight sticks / doesn't wrap on arrow-up; reproduces on the "normal"
+nav path but not the alternate one. Its own thread.
+
 <!-- next sub-arcs appended here -->
