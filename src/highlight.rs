@@ -861,6 +861,7 @@ mod tests {
             buffer_end: u64::MAX,
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(1, 20),
+            gutter_w: 0,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -957,6 +958,7 @@ mod tests {
             buffer_end: u64::MAX,
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(1, 20),
+            gutter_w: 0,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1075,6 +1077,7 @@ mod tests {
             buffer_end: u64::MAX,
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(1, 20),
+            gutter_w: 0,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();

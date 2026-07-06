@@ -495,6 +495,7 @@ fn render_active_window_to_grid(
         buffer_end: buf.len(),
         cell_origin: rect.origin,
         cell_size: CellSize::new(rect.size.rows, rect.size.cols),
+        gutter_w: 0,
     };
     let mut grid = CellGrid {
         cells: &mut backing,

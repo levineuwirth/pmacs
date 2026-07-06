@@ -35,7 +35,7 @@ use serde_json::Value;
 use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::Buffer;
-use crate::cell::{CellCoord, CellGrid, Color, Style, UnderlineStyle};
+use crate::cell::{CellCoord, CellGrid, Color, Glyph, Style, UnderlineStyle};
 use crate::overlay::merge_styles;
 use crate::view::{View, Viewport};
 
@@ -572,17 +572,47 @@ impl View for DiagnosticView {
             }
         }
 
-        // Paint the column-0 markers last so a marker is visible even
-        // when an underline span also touches column 0 (bg and
-        // underline merge independently).
-        if max_cols > 0 {
-            for (row_offset, severity) in line_markers {
-                let cell = cells.at(CellCoord::new(
-                    cell_origin.row + row_offset,
-                    cell_origin.col,
-                ));
-                cell.style = merge_styles(cell.style, marker_style_for(severity));
-            }
+        // Paint the per-line severity markers last so one is visible even
+        // when an underline span also touches the same cell.
+        paint_line_markers(
+            cells,
+            cell_origin,
+            viewport.gutter_w,
+            max_cols,
+            &line_markers,
+        );
+    }
+}
+
+/// Paint one severity marker per diagnostic line (UX gutter sub-arc 2).
+///
+/// When the window reserves a gutter (`gutter_w > 0`), draw the severity
+/// *sign glyph* in the gutter's leading column (`cell_origin.col -
+/// gutter_w`, i.e. window column 0), colored by severity. Without a gutter,
+/// fall back to the legacy column-0 *background* marker on the line's first
+/// text cell — the "fake gutter" that predates a real gutter column.
+fn paint_line_markers(
+    cells: &mut CellGrid<'_>,
+    cell_origin: CellCoord,
+    gutter_w: u32,
+    max_cols: u32,
+    line_markers: &std::collections::HashMap<u32, DiagnosticSeverity>,
+) {
+    for (&row_offset, &severity) in line_markers {
+        let row = cell_origin.row + row_offset;
+        if gutter_w > 0 {
+            let cell = cells.at(CellCoord::new(
+                row,
+                cell_origin.col.saturating_sub(gutter_w),
+            ));
+            cell.glyph = Glyph::Char(severity.gutter_glyph());
+            cell.style = Style {
+                fg: severity.underline_color(),
+                ..Style::default()
+            };
+        } else if max_cols > 0 {
+            let cell = cells.at(CellCoord::new(row, cell_origin.col));
+            cell.style = merge_styles(cell.style, marker_style_for(severity));
         }
     }
 }
@@ -968,6 +998,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 10),
+                gutter_w: 0,
             },
             &mut grid,
         );
@@ -1031,6 +1062,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(3, 10),
+                gutter_w: 0,
             },
             &mut grid,
         );
@@ -1052,6 +1084,80 @@ mod tests {
         );
         // Line 2: clean — no marker.
         assert_eq!(grid.get(CellCoord::new(2, 0)).style.bg, Color::Default);
+    }
+
+    #[test]
+    fn gutter_sign_replaces_the_column_marker_when_a_gutter_is_reserved() {
+        use crate::cell::{Cell, CellSize, Glyph, UnderlineStyle};
+
+        let store = make_shared_store();
+        {
+            let mut guard = store.lock().expect("diag store");
+            guard.set(
+                "file:///a",
+                vec![
+                    // Line 0: Hint + Error overlap → the sign shows Error.
+                    diag(0, DiagnosticSeverity::Hint, "h"),
+                    diag(0, DiagnosticSeverity::Error, "e"),
+                    // Line 1: zero-width Warning (invisible to underline).
+                    Diagnostic {
+                        start_line: 1,
+                        start_col: 2,
+                        end_line: 1,
+                        end_col: 2,
+                        severity: DiagnosticSeverity::Warning,
+                        message: "w".to_owned(),
+                        source: None,
+                        code: None,
+                    },
+                ],
+            );
+        }
+
+        let mut buf = Buffer::new(crate::buffer::BufferId::next(), "test.c");
+        buf.apply_edit(crate::buffer::EditOp::Insert {
+            pos: 0,
+            bytes: b"hello\nworld\nclean\n",
+        })
+        .expect("seed buffer");
+
+        // A 2-cell gutter: text is shifted to column 2, signs land at
+        // window column 0 (`cell_origin.col - gutter_w`).
+        let mut view = DiagnosticView::new("file:///a", store);
+        let mut backing = vec![Cell::default(); 30];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: 10,
+            size: CellSize::new(3, 10),
+        };
+        view.render(
+            &buf,
+            Viewport {
+                buffer_start: 0,
+                buffer_end: buf.len(),
+                cell_origin: CellCoord::new(0, 2),
+                cell_size: CellSize::new(3, 8),
+                gutter_w: 2,
+            },
+            &mut grid,
+        );
+
+        // Line 0: Error sign glyph 'E' in red at the gutter's leading col.
+        assert_eq!(grid.get(CellCoord::new(0, 0)).glyph, Glyph::Char('E'));
+        assert_eq!(grid.get(CellCoord::new(0, 0)).style.fg, Color::Indexed(1));
+        // Line 1: Warning sign 'W' in yellow.
+        assert_eq!(grid.get(CellCoord::new(1, 0)).glyph, Glyph::Char('W'));
+        assert_eq!(grid.get(CellCoord::new(1, 0)).style.fg, Color::Indexed(3));
+        // The legacy background marker on the first *text* cell is NOT
+        // painted when a gutter carries the sign instead.
+        assert_eq!(grid.get(CellCoord::new(0, 2)).style.bg, Color::Default);
+        // The squiggle still lands in the shifted text area (col 2 + 2).
+        assert_eq!(
+            grid.get(CellCoord::new(1, 4)).style.underline,
+            UnderlineStyle::Curly
+        );
+        // Line 2: clean — no sign glyph.
+        assert_eq!(grid.get(CellCoord::new(2, 0)).glyph, Glyph::Char(' '));
     }
 
     #[test]
@@ -1099,6 +1205,7 @@ mod tests {
                 buffer_end: buf.len(),
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(2, 10),
+                gutter_w: 0,
             },
             &mut grid,
         );
