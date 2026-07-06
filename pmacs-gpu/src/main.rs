@@ -3758,6 +3758,14 @@ impl State {
             Some(width as f32),
             Some(STATUS_BAND_HEIGHT),
         );
+        // UX gutter: resize the line-number buffer too, else it keeps its
+        // construction-time (800x200) height and `shape_until_scroll` only
+        // shapes the ~10 lines that fit — the "numbers stop at 10" bug.
+        self.gutter_buffer.set_size(
+            &mut self.font_system,
+            Some(width as f32),
+            Some(height as f32),
+        );
         // A taller/shorter window changes the visible line count, so the
         // slice + scoped viewport change (session S1).
         self.reshape();
