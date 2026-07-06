@@ -1521,10 +1521,16 @@ impl EditorCore {
         self.set_active_window_id(prev);
     }
 
-    /// Close the active window (unless it's the only one). Returns
-    /// false if there's only one window left.
+    /// Close the active window (unless it's the only one in this
+    /// frontend). Returns false if the active frontend's layout has a
+    /// single window.
     pub fn close_active(&mut self) -> bool {
-        if self.windows.len() <= 1 {
+        // Per-frontend: gate on the *active frontend's* window count, not
+        // the global `self.windows` set. Every attached frontend keeps its
+        // own windows in `self.windows`, so a global `<= 1` check let a
+        // multi-frontend session close a frontend's last window and then
+        // panic picking a successor from the now-empty layout.
+        if self.active_layout().iter_ids().len() <= 1 {
             return false;
         }
         let target = self.active_window_id();
@@ -1540,11 +1546,25 @@ impl EditorCore {
         true
     }
 
-    /// Close every window except the active one.
+    /// Close every window except the active one, *within the active
+    /// frontend*.
     pub fn close_others(&mut self) {
+        // Per-frontend: only prune the active frontend's own layout. The
+        // global `self.windows` set holds every frontend's windows, so a
+        // global `retain(|id| id == keep)` deleted OTHER frontends'
+        // windows — leaving their `view.active` dangling and panicking the
+        // next `active_window()` (the multi-frontend close-others crash).
         let keep = self.active_window_id();
+        let doomed: Vec<WindowId> = self
+            .active_layout()
+            .iter_ids()
+            .into_iter()
+            .filter(|id| *id != keep)
+            .collect();
         self.active_layout_mut().keep_only(keep);
-        self.windows.retain(|id, _| *id == keep);
+        for id in doomed {
+            self.windows.remove(&id);
+        }
     }
 
     // ---- selection / region (T M2.12) --------------------------------------
@@ -2239,6 +2259,73 @@ mod tests {
         let reg: SharedRegistry =
             Rc::new(RefCell::new(crate::buffer_registry::BufferRegistry::new()));
         EditorCore::from_bytes(reg, "test", bytes)
+    }
+
+    /// Attach a second frontend `fid` with its own single-window layout,
+    /// sharing the active buffer (mirrors `build_fresh_frontend_view`).
+    fn attach_frontend(s: &mut EditorCore, fid: FrontendId) -> WindowId {
+        let buffer_id = s.active_buffer_id();
+        let text_view = {
+            let reg = s.registry.borrow();
+            crate::text_view::TextView::new(reg.get(buffer_id).expect("buffer present"))
+        };
+        let win_id = WindowId::next();
+        s.windows
+            .insert(win_id, Window::new(win_id, buffer_id, text_view));
+        s.register_frontend_view(
+            fid,
+            FrontendView {
+                layout: Layout::single(win_id),
+                active: win_id,
+            },
+        );
+        win_id
+    }
+
+    #[test]
+    fn close_others_does_not_prune_other_frontends_windows() {
+        // Multi-frontend crash regression: closing others from one
+        // frontend must not delete another frontend's window (which would
+        // leave its `view.active` dangling → `active_window()` panic).
+        let mut s = from_bytes(b"hello\n");
+        let local_win = s.active_window_id();
+        let fid2 = FrontendId(42);
+        let win2 = attach_frontend(&mut s, fid2);
+
+        s.active_frontend = fid2;
+        s.close_others();
+
+        assert!(
+            s.windows.contains_key(&win2),
+            "close_others keeps the active frontend's own window"
+        );
+        assert!(
+            s.windows.contains_key(&local_win),
+            "close_others must not remove another frontend's window"
+        );
+        // LOCAL's active window is intact — no panic.
+        s.active_frontend = FrontendId::LOCAL;
+        assert_eq!(s.active_window_id(), local_win);
+        let _ = s.active_window();
+    }
+
+    #[test]
+    fn close_active_refuses_the_frontends_last_window_even_with_others_attached() {
+        // The "only one left" guard is per-frontend: two windows exist
+        // globally (LOCAL + fid2), but fid2 has just one, so close must
+        // refuse rather than empty fid2's layout and panic.
+        let mut s = from_bytes(b"hello\n");
+        let local_win = s.active_window_id();
+        let fid2 = FrontendId(42);
+        let win2 = attach_frontend(&mut s, fid2);
+
+        s.active_frontend = fid2;
+        assert!(
+            !s.close_active(),
+            "close_active refuses the active frontend's only window"
+        );
+        assert!(s.windows.contains_key(&win2));
+        assert!(s.windows.contains_key(&local_win));
     }
 
     #[test]
