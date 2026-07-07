@@ -493,6 +493,19 @@ impl EditorState {
             core.active_frontend = frontend_id;
         }
 
+        // Modal surfaces beat the completion popup (Q#C3): if a menu /
+        // search / minibuffer opened while the popup was up, close the
+        // popup before the modal shadow swallows this key --- otherwise
+        // it would linger, rendered but unreachable.
+        {
+            let mut core = self.core.borrow_mut();
+            if core.completion_popup_is_open()
+                && (core.menu_is_open() || core.search_active() || core.minibuffer.is_active())
+            {
+                core.completion_popup_close();
+            }
+        }
+
         // Context-menu interception (Q#CM1): while a menu is open every
         // key drives it (navigate / invoke / dismiss), shadowing the
         // global keymap like search and the minibuffer. Same shared path
@@ -519,6 +532,21 @@ impl EditorState {
         // C-g and resume normal dispatch.
         if self.core.borrow().minibuffer.is_active() {
             self.dispatch_minibuffer_key(chord);
+            return;
+        }
+
+        // In-buffer completion popup (Q#C3): a PARTIAL shadow, the
+        // fourth member of the family above. Only the popup-control
+        // chords (TAB / RET / C-n / C-p / Up / Down / Esc / C-g) are
+        // intercepted; every other key falls through to normal dispatch
+        // below, so typing keeps self-inserting and motion keys keep
+        // moving. The post-dispatch validation at the bottom of this
+        // function closes the session when a fallen-through key breaks
+        // the anchor/prefix invariant.
+        if self.core.borrow().completion_popup_is_open()
+            && let Some(key) = CompletionPopupKey::from_chord(chord)
+        {
+            self.dispatch_completion_key(key);
             return;
         }
 
@@ -575,6 +603,13 @@ impl EditorState {
             self.lua_host
                 .run_hook("buffer.after-edit", mlua::MultiValue::new());
         }
+
+        // Q#C3 post-dispatch validation, deliberately AFTER the
+        // after-edit hook: the Lua driver may have just refreshed (or
+        // re-anchored) the popup for this very edit, and validation
+        // must judge the fresh session, not the stale one. A closed
+        // popup makes this a single mutex peek.
+        self.core.borrow_mut().completion_popup_validate();
     }
 
     /// Active buffer's edit revision, or `None` if the registry no
@@ -688,6 +723,28 @@ impl EditorState {
             SearchKey::ToggleRegex => self.core.borrow_mut().search_toggle_regex(),
             SearchKey::Insert(ch) => self.core.borrow_mut().search_input_char(ch),
             SearchKey::Ignore => {}
+        }
+    }
+
+    /// Drive the open completion popup from an intercepted control
+    /// chord (Q#C3). Accept (Q#C7) re-validates inside
+    /// [`EditorCore::completion_popup_accept`] and applies a single
+    /// Replace edit; when that edit lands, `buffer.after-edit` fires
+    /// here exactly as it does on the normal dispatch path, so LSP
+    /// `didChange` and styling refresh ride the existing machinery.
+    fn dispatch_completion_key(&mut self, key: CompletionPopupKey) {
+        match key {
+            CompletionPopupKey::Next => self.core.borrow_mut().completion_popup_step(1),
+            CompletionPopupKey::Prev => self.core.borrow_mut().completion_popup_step(-1),
+            CompletionPopupKey::Dismiss => self.core.borrow_mut().completion_popup_close(),
+            CompletionPopupKey::Accept => {
+                let pre_revision = self.active_buffer_revision();
+                self.core.borrow_mut().completion_popup_accept();
+                if pre_revision != self.active_buffer_revision() {
+                    self.lua_host
+                        .run_hook("buffer.after-edit", mlua::MultiValue::new());
+                }
+            }
         }
     }
 
@@ -1555,6 +1612,56 @@ impl MenuKey {
             };
         }
         Self::Dismiss
+    }
+}
+
+/// Keys intercepted while the in-buffer completion popup is open
+/// (Q#C3). Unlike [`SearchKey`] / [`MenuKey`] this is a **partial**
+/// shadow: `from_chord` returns `None` for every chord outside the
+/// popup-control set, and the dispatcher lets those fall through to
+/// normal dispatch --- printable keys keep self-inserting, motion keys
+/// keep moving (the post-dispatch validation then decides whether the
+/// session survives). The same decode runs in both frontends via the
+/// daemon's `FrontendEvent::Key` round-trip.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CompletionPopupKey {
+    /// Highlight the next candidate (Down / C-n).
+    Next,
+    /// Highlight the previous candidate (Up / C-p).
+    Prev,
+    /// Accept the highlighted candidate (TAB / RET).
+    Accept,
+    /// Close the popup without accepting (Esc / C-g).
+    Dismiss,
+}
+
+impl CompletionPopupKey {
+    /// Decode `chord` into a popup action, or `None` when the chord is
+    /// not popup control and must fall through to normal dispatch.
+    fn from_chord(chord: Chord) -> Option<Self> {
+        let ctrl = chord.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = chord.modifiers.contains(KeyModifiers::ALT);
+        if !ctrl && !alt {
+            return match chord.code {
+                KeyCode::Down => Some(Self::Next),
+                KeyCode::Up => Some(Self::Prev),
+                KeyCode::Tab | KeyCode::Enter => Some(Self::Accept),
+                KeyCode::Esc => Some(Self::Dismiss),
+                _ => None,
+            };
+        }
+        if ctrl
+            && !alt
+            && let KeyCode::Char(c) = chord.code
+        {
+            return match c {
+                'n' => Some(Self::Next),
+                'p' => Some(Self::Prev),
+                'g' => Some(Self::Dismiss),
+                _ => None,
+            };
+        }
+        None
     }
 }
 

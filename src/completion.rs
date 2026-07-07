@@ -30,8 +30,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 use unicode_width::UnicodeWidthChar;
 
-use crate::buffer::Buffer;
-use crate::cell::{Cell, CellCoord, CellGrid, Color, Glyph, Style};
+use crate::buffer::{Buffer, BufferId};
+use crate::cell::{CellCoord, CellGrid, Color, Glyph, Style};
+use crate::rope::Position;
 use crate::view::{View, Viewport};
 
 // ---------------------------------------------------------------------------
@@ -454,6 +455,114 @@ impl CompletionTriggers {
 }
 
 // ---------------------------------------------------------------------------
+// In-buffer completion popup session (Arc 1a, Q#C2)
+// ---------------------------------------------------------------------------
+
+/// One row of the in-buffer completion popup: a projection of a
+/// [`crate::completion_framework::CompletionCandidate`] carrying only
+/// what rendering and the accept path need. `insert_text` is already
+/// resolved (label fallback applied) so accept never re-derives it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PopupCandidate {
+    /// Display label.
+    pub label: String,
+    /// Item kind (drives the glyph column).
+    pub kind: CompletionItemKind,
+    /// Optional one-line detail rendered after the label.
+    pub detail: Option<String>,
+    /// Text that replaces `[anchor .. cursor]` on accept.
+    pub insert_text: String,
+}
+
+/// Live state of the in-buffer completion popup (Q#C2). Frontend-
+/// agnostic, mirroring [`crate::menu::MenuState`]: the Lua driver
+/// publishes into it, the TUI [`CompletionView`] overlay renders from
+/// it, the dispatcher's completion shadow navigates/accepts against
+/// it, and (phase 2) the semantic producer ships it to the GPU.
+///
+/// Unlike the menu's cell anchor, `anchor` is a **byte offset** (the
+/// prefix start) --- each frontend maps byte → screen position itself,
+/// so the instance never learns a pixel.
+pub struct CompletionPopupState {
+    /// Buffer the popup targets. The session closes the moment the
+    /// active buffer differs (Q#C3 validation).
+    pub buffer_id: BufferId,
+    /// Byte offset where the typed prefix starts. For a
+    /// trigger-character session (e.g. right after `.`) the prefix is
+    /// empty and `anchor` equals the cursor.
+    pub anchor: Position,
+    /// The prefix as of the last publish (refresh keeps it current).
+    pub prefix: String,
+    /// Candidates, best-first. The driver has already scored, dropped
+    /// non-matches, and capped.
+    pub candidates: Vec<PopupCandidate>,
+    /// Highlighted row index into `candidates`.
+    pub selected: usize,
+    /// Full candidate count before any cap the driver applied.
+    pub total: usize,
+}
+
+impl CompletionPopupState {
+    /// Build a session. Returns `None` when `candidates` is empty ---
+    /// an empty popup never opens (the driver enforces this too; this
+    /// is the belt to its suspenders).
+    #[must_use]
+    pub fn new(
+        buffer_id: BufferId,
+        anchor: Position,
+        prefix: String,
+        candidates: Vec<PopupCandidate>,
+        total: usize,
+    ) -> Option<Self> {
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(Self {
+            buffer_id,
+            anchor,
+            prefix,
+            candidates,
+            selected: 0,
+            total,
+        })
+    }
+
+    /// Move the highlight by `delta`, wrapping at the ends.
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "candidate indices are bounded by Vec::len() which fits in isize on every supported target"
+    )]
+    pub fn step(&mut self, delta: isize) {
+        let len = self.candidates.len() as isize;
+        if len == 0 {
+            return;
+        }
+        let mut next = (self.selected as isize + delta) % len;
+        if next < 0 {
+            next += len;
+        }
+        self.selected = next as usize;
+    }
+
+    /// The highlighted candidate.
+    #[must_use]
+    pub fn selected_candidate(&self) -> Option<&PopupCandidate> {
+        self.candidates.get(self.selected)
+    }
+}
+
+/// Shared handle to the open popup (`None` when closed). Held by
+/// [`crate::editor_core::EditorCore`] and read by [`CompletionView`],
+/// the completion twin of [`crate::menu::SharedMenu`].
+pub type SharedCompletionPopup = Arc<Mutex<Option<CompletionPopupState>>>;
+
+/// A fresh, closed shared popup.
+#[must_use]
+pub fn make_shared_popup() -> SharedCompletionPopup {
+    Arc::new(Mutex::new(None))
+}
+
+// ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 
@@ -461,6 +570,18 @@ impl CompletionTriggers {
 /// Wide enough for "method-name : detail" without wrapping the typical
 /// rust-analyzer reply.
 const DEFAULT_POPUP_WIDTH: u32 = 40;
+
+/// Rows the popup shows at once; when more candidates are live the
+/// visible slice windows around the selection (mirroring the
+/// minibuffer dropdown's `MB_VISIBLE` cap).
+const POPUP_MAX_ROWS: u32 = 10;
+
+/// Minimum popup width in cells (glyph column + a readable label).
+const POPUP_MIN_WIDTH: u32 = 12;
+
+/// Tab-stop width in display columns, matching [`crate::diag`] /
+/// [`crate::text_view`].
+const TAB_WIDTH: u32 = 8;
 
 /// Style for the currently-selected row (reverse video so it pops on
 /// any base palette).
@@ -475,111 +596,266 @@ fn selected_style() -> Style {
 fn kind_style() -> Style {
     Style {
         fg: Color::Indexed(8),
+        bg: Color::Indexed(236),
         ..Style::default()
     }
 }
 
-/// Popup view that draws the completion list at its viewport's
-/// origin. The viewport's `cell_size` bounds the popup; the host
-/// (Lua) decides where to put it.
+/// Popup background (non-selected rows) --- the same dim fill as the
+/// context menu, so the popup reads as a floating surface over the
+/// buffer text it occludes.
+fn popup_style() -> Style {
+    Style {
+        fg: Color::Indexed(252),
+        bg: Color::Indexed(236),
+        ..Style::default()
+    }
+}
+
+/// The visible slice of `n` candidates windowed around `selected`:
+/// returns `(start, len)`. Mirrors the minibuffer dropdown's centered
+/// window so the highlight stays in view as the user cycles.
+#[must_use]
+pub(crate) fn popup_window(n: usize, selected: usize, max: usize) -> (usize, usize) {
+    if n <= max {
+        return (0, n);
+    }
+    let half = max / 2;
+    let start = selected.saturating_sub(half).min(n - max);
+    (start, max)
+}
+
+/// Self-positioning popup overlay for the in-buffer completion session
+/// (Q#C4). Persistent on the active window once attached (deduped by
+/// [`View::kind`]); renders nothing while the popup is closed or the
+/// window shows a different buffer, mirroring [`crate::menu::MenuView`]'s
+/// self-suppressing model. Owns every cell inside the popup rectangle.
 ///
-/// Unlike [`crate::diag::DiagnosticView`], this view does **not**
-/// compose over a buffer's text --- it owns every cell inside its
-/// viewport. The `_buf` parameter is unused.
+/// Placement: the row *below* the anchor's screen row, with as many
+/// rows as fit; when nothing fits below, it flips *above* the anchor.
+/// The left edge sits at the anchor's display column, shifted left when
+/// the popup would overflow the window's right edge.
 pub struct CompletionView {
-    key: CompletionKey,
-    store: SharedCompletionStore,
+    popup: SharedCompletionPopup,
 }
 
 impl CompletionView {
-    /// Construct a popup view for `key` against `store`.
+    /// Build a view reading `popup`.
     #[must_use]
-    pub fn new(key: CompletionKey, store: SharedCompletionStore) -> Self {
-        Self { key, store }
+    pub fn new(popup: SharedCompletionPopup) -> Self {
+        Self { popup }
+    }
+}
+
+/// Display column of `byte_end` within `line_bytes` (tab-aware,
+/// UTF-8-aware). The completion twin of the diagnostic underline's
+/// column resolution.
+fn display_col_for_byte(line_bytes: &[u8], byte_end: u32) -> u32 {
+    let end = (byte_end as usize).min(line_bytes.len());
+    let text = String::from_utf8_lossy(&line_bytes[..end]);
+    let mut col = 0u32;
+    for ch in text.chars() {
+        if ch == '\t' {
+            col += TAB_WIDTH - (col % TAB_WIDTH);
+        } else {
+            col += char_display_width(ch);
+        }
+    }
+    col
+}
+
+/// Resolved popup rectangle, in window-relative cells.
+struct PopupRect {
+    /// First popup row, relative to the viewport's top.
+    top: u32,
+    /// Left edge, relative to the viewport's left.
+    left: u32,
+    /// Popup width in cells.
+    width: u32,
+    /// Rows actually shown (≤ the windowed candidate count).
+    shown: u32,
+}
+
+/// Map the popup's byte anchor to a clamped on-screen rectangle:
+/// below the anchor row when at least one row fits, flipped above
+/// otherwise; left edge at the anchor's display column, shifted back
+/// from the right margin. `None` when the anchor is scrolled out of
+/// the viewport or nothing fits.
+fn resolve_popup_rect(
+    buf: &Buffer,
+    viewport: Viewport,
+    anchor: Position,
+    rows: &[PopupCandidate],
+) -> Option<PopupRect> {
+    // Anchor byte → (screen row, display col), the diag-view walk.
+    let source: Vec<u8> = {
+        let mut bytes = vec![0u8; buf.len() as usize];
+        if !bytes.is_empty() {
+            buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
+        }
+        bytes
+    };
+    let anchor = (anchor as usize).min(source.len()) as u32;
+    let line_offsets = crate::diag::compute_line_offsets(&source);
+    let start_line = crate::diag::line_at_offset(&line_offsets, viewport.buffer_start as u32);
+    let anchor_line = crate::diag::line_at_offset(&line_offsets, anchor);
+    if anchor_line < start_line {
+        return None; // anchor scrolled above the viewport
+    }
+    let anchor_row = anchor_line - start_line;
+    let max_rows = viewport.cell_size.rows;
+    let max_cols = viewport.cell_size.cols;
+    if anchor_row >= max_rows || max_cols == 0 {
+        return None; // anchor scrolled below the viewport
+    }
+    let line_start = line_offsets[anchor_line as usize];
+    let line_end = line_offsets
+        .get(anchor_line as usize + 1)
+        .copied()
+        .unwrap_or(source.len() as u32);
+    let line_bytes = &source[line_start as usize..line_end as usize];
+    let anchor_col = display_col_for_byte(line_bytes, anchor - line_start);
+
+    // Vertical placement: below the anchor row when at least one row
+    // fits, else flipped above.
+    let want_rows = rows.len() as u32;
+    let below = max_rows - anchor_row - 1;
+    let (top, shown) = if below > 0 {
+        (anchor_row + 1, want_rows.min(below))
+    } else {
+        let shown = want_rows.min(anchor_row);
+        (anchor_row - shown, shown)
+    };
+    if shown == 0 {
+        return None;
     }
 
-    /// The key this view is keyed under.
-    #[must_use]
-    pub fn key(&self) -> &CompletionKey {
-        &self.key
+    // Width: glyph column + widest visible "label  detail", clamped to
+    // the window; left edge shifts back from the right margin.
+    let widest = rows
+        .iter()
+        .map(|c| {
+            let detail = c.detail.as_deref().map_or(0, |d| d.chars().count() + 2);
+            (c.label.chars().count() + detail) as u32
+        })
+        .max()
+        .unwrap_or(0);
+    let width = (widest + 3)
+        .clamp(POPUP_MIN_WIDTH, DEFAULT_POPUP_WIDTH)
+        .min(max_cols);
+    let left = anchor_col.min(max_cols - width);
+    Some(PopupRect {
+        top,
+        left,
+        width,
+        shown,
+    })
+}
+
+/// Paint one popup row (background fill, kind glyph, label + detail)
+/// at absolute row `r`, columns `[abs_left .. abs_left + width)`.
+fn paint_popup_row(
+    cells: &mut CellGrid<'_>,
+    item: &PopupCandidate,
+    r: u32,
+    abs_left: u32,
+    width: u32,
+    selected: bool,
+) {
+    let row_style = if selected {
+        selected_style()
+    } else {
+        popup_style()
+    };
+    // Paint the whole row's background first so the selected row's
+    // reverse video covers the trailing whitespace.
+    for c in 0..width {
+        let cell = cells.at(CellCoord::new(r, abs_left + c));
+        cell.glyph = Glyph::Char(' ');
+        cell.style = row_style;
+        cell.attachment = None;
+    }
+    // Column 0: kind glyph.
+    let kind_cell = cells.at(CellCoord::new(r, abs_left));
+    kind_cell.glyph = Glyph::Char(item.kind.glyph());
+    kind_cell.style = if selected {
+        selected_style()
+    } else {
+        kind_style()
+    };
+    // Columns 2..: label, optionally followed by the detail.
+    let mut text = String::with_capacity(item.label.len() + 4);
+    text.push_str(&item.label);
+    if let Some(detail) = item.detail.as_deref() {
+        text.push_str("  ");
+        text.push_str(detail);
+    }
+    let mut col: u32 = 2;
+    for ch in text.chars() {
+        if col >= width {
+            break;
+        }
+        let cw = char_display_width(ch);
+        if cw == 0 {
+            continue;
+        }
+        let cell = cells.at(CellCoord::new(r, abs_left + col));
+        cell.glyph = Glyph::Char(ch);
+        cell.style = row_style;
+        cell.attachment = None;
+        col += 1;
+        if cw == 2 && col < width {
+            let cont = cells.at(CellCoord::new(r, abs_left + col));
+            cont.glyph = Glyph::Continuation;
+            cont.style = row_style;
+            cont.attachment = None;
+            col += 1;
+        }
     }
 }
 
 impl View for CompletionView {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
-        let (items, selected) = {
-            let guard = self.store.lock().expect("completion store poisoned");
-            let items = guard.items(&self.key).to_vec();
-            (items, guard.selected(&self.key))
-        };
+    fn kind(&self) -> &'static str {
+        "completion-popup"
+    }
 
-        let max_rows = viewport.cell_size.rows;
-        let max_cols = viewport.cell_size.cols.max(1);
-        let origin = viewport.cell_origin;
-        let popup_cols = max_cols.min(DEFAULT_POPUP_WIDTH);
-
-        // Clear the popup region.
-        for r in 0..max_rows {
-            for c in 0..max_cols {
-                *cells.at(CellCoord::new(origin.row + r, origin.col + c)) = Cell::default();
+    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+        // Snapshot under the lock, then drop it before touching the rope.
+        let (anchor, rows_data, selected_in_window): (Position, Vec<PopupCandidate>, usize) = {
+            let guard = self.popup.lock().expect("completion popup poisoned");
+            let Some(popup) = guard.as_ref() else {
+                return;
+            };
+            if popup.buffer_id != buf.id() {
+                return; // this window shows a different buffer
             }
-        }
-        if items.is_empty() {
+            let (start, len) = popup_window(
+                popup.candidates.len(),
+                popup.selected,
+                POPUP_MAX_ROWS as usize,
+            );
+            (
+                popup.anchor,
+                popup.candidates[start..start + len].to_vec(),
+                popup.selected - start,
+            )
+        };
+        if rows_data.is_empty() {
             return;
         }
-
-        for row in 0..max_rows.min(items.len() as u32) {
-            let item = &items[row as usize];
-            let row_style = if row as usize == selected {
-                selected_style()
-            } else {
-                Style::default()
-            };
-            // Paint the whole row's background first so the selected
-            // row's reverse video covers the trailing whitespace.
-            for c in 0..popup_cols {
-                let cell = cells.at(CellCoord::new(origin.row + row, origin.col + c));
-                cell.glyph = Glyph::Char(' ');
-                cell.style = row_style;
-                cell.attachment = None;
-            }
-            // Column 0: kind glyph.
-            let kind_cell = cells.at(CellCoord::new(origin.row + row, origin.col));
-            kind_cell.glyph = Glyph::Char(item.kind.glyph());
-            kind_cell.style = if row as usize == selected {
-                selected_style()
-            } else {
-                kind_style()
-            };
-            // Columns 2..: label, optionally followed by " : detail".
-            let mut text = String::with_capacity(item.label.len() + 4);
-            text.push_str(&item.label);
-            if let Some(detail) = item.detail.as_deref() {
-                text.push_str("  ");
-                text.push_str(detail);
-            }
-            let mut col: u32 = 2;
-            for ch in text.chars() {
-                if col >= popup_cols {
-                    break;
-                }
-                let width = char_display_width(ch);
-                if width == 0 {
-                    continue;
-                }
-                let cell = cells.at(CellCoord::new(origin.row + row, origin.col + col));
-                cell.glyph = Glyph::Char(ch);
-                cell.style = row_style;
-                cell.attachment = None;
-                col += 1;
-                if width == 2 && col < popup_cols {
-                    let cont = cells.at(CellCoord::new(origin.row + row, origin.col + col));
-                    cont.glyph = Glyph::Continuation;
-                    cont.style = row_style;
-                    cont.attachment = None;
-                    col += 1;
-                }
-            }
+        let Some(rect) = resolve_popup_rect(buf, viewport, anchor, &rows_data) else {
+            return;
+        };
+        let origin = viewport.cell_origin;
+        for (i, item) in rows_data.iter().take(rect.shown as usize).enumerate() {
+            paint_popup_row(
+                cells,
+                item,
+                origin.row + rect.top + i as u32,
+                origin.col + rect.left,
+                rect.width,
+                i == selected_in_window,
+            );
         }
     }
 }
@@ -745,5 +1021,63 @@ mod tests {
         let r = CompletionResponse::from_lsp_value(&Value::Null);
         assert!(r.items.is_empty());
         assert!(!r.is_incomplete);
+    }
+
+    // ---- popup session (Arc 1a, Q#C2) ---------------------------------------
+
+    fn cand(label: &str) -> PopupCandidate {
+        PopupCandidate {
+            label: label.to_owned(),
+            kind: CompletionItemKind::Text,
+            detail: None,
+            insert_text: label.to_owned(),
+        }
+    }
+
+    #[test]
+    fn popup_state_refuses_empty_candidates() {
+        assert!(
+            CompletionPopupState::new(BufferId::from_raw(1), 0, String::new(), vec![], 0).is_none()
+        );
+    }
+
+    #[test]
+    fn popup_state_step_wraps_both_directions() {
+        let mut p = CompletionPopupState::new(
+            BufferId::from_raw(1),
+            0,
+            "ab".into(),
+            vec![cand("a"), cand("b"), cand("c")],
+            3,
+        )
+        .unwrap();
+        assert_eq!(p.selected, 0);
+        p.step(1);
+        assert_eq!(p.selected, 1);
+        p.step(4); // 1 + 4 = 5, mod 3 = 2
+        assert_eq!(p.selected, 2);
+        p.step(1); // wraps to the top
+        assert_eq!(p.selected, 0);
+        p.step(-1); // wraps to the bottom
+        assert_eq!(p.selected, 2);
+        assert_eq!(p.selected_candidate().unwrap().label, "c");
+    }
+
+    #[test]
+    fn popup_window_keeps_selection_visible() {
+        // Fits: identity window.
+        assert_eq!(popup_window(3, 0, 10), (0, 3));
+        // Overflow: centers on the selection…
+        assert_eq!(popup_window(30, 15, 10), (10, 10));
+        // …clamps at the top…
+        assert_eq!(popup_window(30, 0, 10), (0, 10));
+        assert_eq!(popup_window(30, 2, 10), (0, 10));
+        // …and at the bottom.
+        assert_eq!(popup_window(30, 29, 10), (20, 10));
+        // The selected index always falls inside the window.
+        for sel in 0..30 {
+            let (start, len) = popup_window(30, sel, 10);
+            assert!(sel >= start && sel < start + len, "sel {sel} escaped");
+        }
     }
 }
