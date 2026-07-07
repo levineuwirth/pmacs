@@ -1877,6 +1877,13 @@ fn handle_remote_crdt_op(
     // notify but the op still needs broadcasting (F17).
     if let Some(edit) = edit_opt.as_ref() {
         let mut core = editor.core.borrow_mut();
+        // Transient status messages clear on user input. The Key path
+        // gets this from `dispatch_key`'s entry clear; the optimistic
+        // path routes plain typing here instead, and since v15 ships
+        // `core.status` over `StatusFacts`, a stale "12 references"
+        // would otherwise stay wedged in a semantic frontend's band
+        // through ordinary typing.
+        core.status.clear();
         let post_edit_cursor = edit.range.start + edit.inserted_len;
 
         // Identify source's active window id (so we can skip it
@@ -2339,6 +2346,63 @@ mod tests {
         assert_eq!(
             count, 1,
             "buffer.after-edit must fire when handle_remote_crdt_op produces a text Edit"
+        );
+    }
+
+    /// v15 regression: an optimistic-path edit (the bulk of plain-char
+    /// typing from a semantic frontend) must clear the transient
+    /// status message, exactly as `dispatch_key`'s entry clear does
+    /// for round-tripped keys — otherwise "12 references" stays
+    /// wedged in the GPU band (which renders `StatusFacts.message`)
+    /// through ordinary typing.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn handle_remote_crdt_op_clears_the_transient_status() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+
+        let mut editor = EditorState::new();
+        let buffer_id = editor.core.borrow().active_window().buffer_id;
+        {
+            let core = editor.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(2)
+                .expect("upgrade to crdt");
+        }
+        let snapshot_bytes = {
+            let core = editor.core.borrow();
+            let reg = core.registry.borrow();
+            reg.get(buffer_id)
+                .expect("active buffer")
+                .crdt_state()
+                .expect("crdt-backed")
+                .export_snapshot()
+                .expect("export snapshot")
+        };
+        let peer = loro::LoroDoc::new();
+        peer.set_peer_id(99).expect("set peer id");
+        peer.import(&snapshot_bytes).expect("import snapshot");
+        let v_before = peer.oplog_vv();
+        peer.get_text("body").insert(0, "x").expect("peer insert");
+        let op_bytes = peer
+            .export(loro::ExportMode::updates(&v_before))
+            .expect("export op");
+
+        editor.core.borrow_mut().status = "12 references".to_owned();
+        super::handle_remote_crdt_op(
+            &mut editor,
+            FrontendId(99),
+            buffer_id,
+            crate::rope::CrdtOp {
+                peer_id: 99,
+                bytes: op_bytes,
+            },
+        );
+        assert!(
+            editor.core.borrow().status.is_empty(),
+            "an optimistic-path edit must clear the transient status"
         );
     }
 

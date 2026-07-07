@@ -749,6 +749,12 @@ struct MinibufferLocal {
 /// accept round-trip into the daemon's completion shadow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CompletionLocal {
+    /// Buffer the popup targets. Rendering and the key gates check
+    /// this against `current_buffer_id` so a popup can never act
+    /// against a buffer it wasn't opened in (buffer switches also
+    /// clear the whole mirror at the `BufferSnapshot` arm; this is
+    /// the belt to that suspender).
+    buffer_id: BufferId,
     /// Byte offset of the prefix start.
     anchor: u64,
     /// Bytes of typed prefix at `anchor` (reserved for a bolded-
@@ -927,7 +933,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let completion_open = self
                     .state
                     .as_ref()
-                    .is_some_and(|state| state.completion.is_some());
+                    .is_some_and(State::completion_open_for_current_buffer);
 
                 // Escape cancels an active intercept (e.g. a running
                 // search) or dismisses the completion popup; otherwise it
@@ -2428,6 +2434,14 @@ impl State {
                 // next PresenceUpdate / CursorByte arrives.
                 self.peer_presences.clear();
                 self.own_cursor = None;
+                // The completion popup too (Arc 1a): its anchor is a
+                // byte in the prior buffer, and the producer never
+                // ships a close for a viewport that no longer exists
+                // (first-sight of the new buffer stays silent) — a
+                // retained popup would render against the new rope AND
+                // keep hijacking Esc/RET/TAB. The daemon-side session
+                // was already invalidated by the switch.
+                self.completion = None;
                 self.cursor_fresh = false;
                 self.optimistic_cursor_floor = None;
                 self.optimistic_floor_set_at = None;
@@ -2864,6 +2878,7 @@ impl State {
                     return None;
                 }
                 self.completion = Some(CompletionLocal {
+                    buffer_id,
                     anchor,
                     prefix_len,
                     rows,
@@ -2875,6 +2890,16 @@ impl State {
             }
             _ => None,
         }
+    }
+
+    /// True while the completion popup is open **for the buffer this
+    /// window currently shows** — the predicate the key gates (Esc,
+    /// RET/TAB) and the render path share, so a stale mirror can
+    /// never act against a foreign buffer.
+    fn completion_open_for_current_buffer(&self) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(|c| Some(c.buffer_id) == self.current_buffer_id)
     }
 
     /// A `ViewportSend` for the current `view_range` if it differs from
@@ -3703,6 +3728,9 @@ impl State {
     /// scrolled out of the visible slice (the popup then simply
     /// doesn't draw this frame; scrolling back restores it).
     fn completion_anchor_px(&self) -> Option<(f32, f32, f32)> {
+        if !self.completion_open_for_current_buffer() {
+            return None; // never paint against a foreign buffer's rope
+        }
         let comp = self.completion.as_ref()?;
         let (vstart, vend) = self.view_range;
         if vend <= vstart {
@@ -7819,6 +7847,50 @@ mod tests {
         assert!(
             px.iter().any(|&b| b != first),
             "frame is a single uniform value — nothing appears to have rendered"
+        );
+    }
+
+    #[test]
+    fn completion_popup_is_scoped_to_its_buffer() {
+        // Buffer-switch regression (PR #93 validation finding 1): a
+        // retained popup mirror must be inert — no key gating, no
+        // anchor mapping — the moment `current_buffer_id` differs
+        // from the popup's buffer.
+        let Some(mut state) = headless_or_skip(320, 240, "hello_world he") else {
+            return;
+        };
+        let own = BufferId::next();
+        let other = BufferId::next();
+        state.current_buffer_id = Some(own);
+        // Headless states never declare a viewport; anchor mapping
+        // reads `view_range`, so pin it to the whole text.
+        state.view_range = (0, state.current_text.len() as u64);
+        state.completion = Some(CompletionLocal {
+            buffer_id: own,
+            anchor: 12,
+            prefix_len: 2,
+            rows: vec![CompletionPopupRow {
+                label: "hello_world".into(),
+                kind: 3,
+                detail: None,
+            }],
+            selected: Some(0),
+            total: 1,
+        });
+        assert!(state.completion_open_for_current_buffer());
+        assert!(
+            state.completion_anchor_px().is_some(),
+            "the popup anchors in its own buffer"
+        );
+        // The window switches buffers; the mirror is stale.
+        state.current_buffer_id = Some(other);
+        assert!(
+            !state.completion_open_for_current_buffer(),
+            "a foreign-buffer popup must not gate keys"
+        );
+        assert!(
+            state.completion_anchor_px().is_none(),
+            "a foreign-buffer popup must not paint"
         );
     }
 
