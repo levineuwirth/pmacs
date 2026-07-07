@@ -102,6 +102,32 @@ pub struct EditorState {
     mouse_click: Option<MouseClickState>,
 }
 
+impl Drop for EditorState {
+    /// Tear down the worker-pool threads.
+    ///
+    /// The `Rc<AsyncRuntime>` is cloned into dozens of Lua closures
+    /// (`pmacs.workers`, LSP request wrappers, ...), and several of
+    /// the registries those closures capture themselves store
+    /// `mlua::Function` values --- reference cycles through the Lua
+    /// VM that keep the `Rc` from ever reaching zero. Harmless for a
+    /// single editor per process (the OS reclaims at exit), but a
+    /// test binary that builds one `EditorState` per test would leak
+    /// one full worker pool (`cores - 1` threads, each waking every
+    /// 100ms) per test --- observed as 1000+ live threads in the m4
+    /// acceptance suite. Dropping the editor reaches the pool through
+    /// its own `Rc` clone and signals the threads down regardless of
+    /// the cycle; parked workers exit within their 100ms wakeup.
+    ///
+    /// Signal-only, NO join: a worker can be blocked publishing its
+    /// reply onto the bus that this (main) thread drains --- joining
+    /// here deadlocked the m4 suite at teardown for hours. A worker
+    /// stuck mid-handoff stays alive (bounded by its job), which is
+    /// still a ~15x improvement over leaking every pool whole.
+    fn drop(&mut self) {
+        self.async_runtime.shutdown_workers();
+    }
+}
+
 #[derive(Copy, Clone)]
 struct MouseClickState {
     frontend_id: FrontendId,
@@ -256,6 +282,16 @@ impl EditorState {
                 include_str!("../builtin/runtime/lsp.lua"),
             )
             .expect("load lsp builtin chunk");
+        // Arc 1a: the in-buffer completion popup driver. Loaded after
+        // lsp.lua because it drives `pmacs.lsp.request_completion` /
+        // `pmacs.lsp.attachment_for_request` and after the framework
+        // install above because it calls `pmacs.completion.collect`.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/completion.lua"),
+                include_str!("../builtin/runtime/completion.lua"),
+            )
+            .expect("load completion builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -493,6 +529,19 @@ impl EditorState {
             core.active_frontend = frontend_id;
         }
 
+        // Modal surfaces beat the completion popup (Q#C3): if a menu /
+        // search / minibuffer opened while the popup was up, close the
+        // popup before the modal shadow swallows this key --- otherwise
+        // it would linger, rendered but unreachable.
+        {
+            let mut core = self.core.borrow_mut();
+            if core.completion_popup_is_open()
+                && (core.menu_is_open() || core.search_active() || core.minibuffer.is_active())
+            {
+                core.completion_popup_close();
+            }
+        }
+
         // Context-menu interception (Q#CM1): while a menu is open every
         // key drives it (navigate / invoke / dismiss), shadowing the
         // global keymap like search and the minibuffer. Same shared path
@@ -519,6 +568,26 @@ impl EditorState {
         // C-g and resume normal dispatch.
         if self.core.borrow().minibuffer.is_active() {
             self.dispatch_minibuffer_key(chord);
+            return;
+        }
+
+        // In-buffer completion popup (Q#C3): a PARTIAL shadow, the
+        // fourth member of the family above. Only the popup-control
+        // chords (TAB / RET / C-n / C-p / Up / Down / Esc / C-g) are
+        // intercepted; every other key falls through to normal dispatch
+        // below, so typing keeps self-inserting and motion keys keep
+        // moving. The post-dispatch validation at the bottom of this
+        // function closes the session when a fallen-through key breaks
+        // the anchor/prefix invariant. A pending multi-key prefix owns
+        // the keyboard: while one is in flight (`C-x ...`) the popup
+        // must not steal its continuation or its `C-g` abort --- and
+        // the Pending arm below closes the popup anyway, so this guard
+        // only covers the same-dispatch race.
+        if self.core.borrow().completion_popup_is_open()
+            && self.dispatcher.pending().is_empty()
+            && let Some(key) = CompletionPopupKey::from_chord(chord)
+        {
+            self.dispatch_completion_key(key);
             return;
         }
 
@@ -552,7 +621,12 @@ impl EditorState {
             }
             Action::Pending { .. } => {
                 // The pending prefix is rendered from
-                // `dispatcher.pending()`; no command runs yet.
+                // `dispatcher.pending()`; no command runs yet. Starting
+                // a command sequence dismisses the completion popup:
+                // leaving it open would route the sequence's `C-g`
+                // abort (and its continuation chords) into the popup's
+                // shadow instead of the dispatcher.
+                self.core.borrow_mut().completion_popup_close();
             }
             Action::Unbound { sequence } => match printable_char(&sequence) {
                 Some(ch) => {
@@ -575,6 +649,13 @@ impl EditorState {
             self.lua_host
                 .run_hook("buffer.after-edit", mlua::MultiValue::new());
         }
+
+        // Q#C3 post-dispatch validation, deliberately AFTER the
+        // after-edit hook: the Lua driver may have just refreshed (or
+        // re-anchored) the popup for this very edit, and validation
+        // must judge the fresh session, not the stale one. A closed
+        // popup makes this a single mutex peek.
+        self.core.borrow_mut().completion_popup_validate();
     }
 
     /// Active buffer's edit revision, or `None` if the registry no
@@ -688,6 +769,28 @@ impl EditorState {
             SearchKey::ToggleRegex => self.core.borrow_mut().search_toggle_regex(),
             SearchKey::Insert(ch) => self.core.borrow_mut().search_input_char(ch),
             SearchKey::Ignore => {}
+        }
+    }
+
+    /// Drive the open completion popup from an intercepted control
+    /// chord (Q#C3). Accept (Q#C7) re-validates inside
+    /// [`EditorCore::completion_popup_accept`] and applies a single
+    /// Replace edit; when that edit lands, `buffer.after-edit` fires
+    /// here exactly as it does on the normal dispatch path, so LSP
+    /// `didChange` and styling refresh ride the existing machinery.
+    fn dispatch_completion_key(&mut self, key: CompletionPopupKey) {
+        match key {
+            CompletionPopupKey::Next => self.core.borrow_mut().completion_popup_step(1),
+            CompletionPopupKey::Prev => self.core.borrow_mut().completion_popup_step(-1),
+            CompletionPopupKey::Dismiss => self.core.borrow_mut().completion_popup_close(),
+            CompletionPopupKey::Accept => {
+                let pre_revision = self.active_buffer_revision();
+                self.core.borrow_mut().completion_popup_accept();
+                if pre_revision != self.active_buffer_revision() {
+                    self.lua_host
+                        .run_hook("buffer.after-edit", mlua::MultiValue::new());
+                }
+            }
         }
     }
 
@@ -1555,6 +1658,56 @@ impl MenuKey {
             };
         }
         Self::Dismiss
+    }
+}
+
+/// Keys intercepted while the in-buffer completion popup is open
+/// (Q#C3). Unlike [`SearchKey`] / [`MenuKey`] this is a **partial**
+/// shadow: `from_chord` returns `None` for every chord outside the
+/// popup-control set, and the dispatcher lets those fall through to
+/// normal dispatch --- printable keys keep self-inserting, motion keys
+/// keep moving (the post-dispatch validation then decides whether the
+/// session survives). The same decode runs in both frontends via the
+/// daemon's `FrontendEvent::Key` round-trip.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CompletionPopupKey {
+    /// Highlight the next candidate (Down / C-n).
+    Next,
+    /// Highlight the previous candidate (Up / C-p).
+    Prev,
+    /// Accept the highlighted candidate (TAB / RET).
+    Accept,
+    /// Close the popup without accepting (Esc / C-g).
+    Dismiss,
+}
+
+impl CompletionPopupKey {
+    /// Decode `chord` into a popup action, or `None` when the chord is
+    /// not popup control and must fall through to normal dispatch.
+    fn from_chord(chord: Chord) -> Option<Self> {
+        let ctrl = chord.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = chord.modifiers.contains(KeyModifiers::ALT);
+        if !ctrl && !alt {
+            return match chord.code {
+                KeyCode::Down => Some(Self::Next),
+                KeyCode::Up => Some(Self::Prev),
+                KeyCode::Tab | KeyCode::Enter => Some(Self::Accept),
+                KeyCode::Esc => Some(Self::Dismiss),
+                _ => None,
+            };
+        }
+        if ctrl
+            && !alt
+            && let KeyCode::Char(c) = chord.code
+        {
+            return match c {
+                'n' => Some(Self::Next),
+                'p' => Some(Self::Prev),
+                'g' => Some(Self::Dismiss),
+                _ => None,
+            };
+        }
+        None
     }
 }
 

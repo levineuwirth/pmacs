@@ -544,6 +544,25 @@ function pmacs.lsp.active_attachment()
   return attachments[tostring(buf)]
 end
 
+-- Flushing variant for request-issuing callers outside this file
+-- (Q#C8): when the active buffer already has a server attached,
+-- flush any debounced didChange first and return the record, so the
+-- caller's request is answered against the current text. Unlike the
+-- local `attached_for_active`, this NEVER triggers an attach: the
+-- in-buffer completion driver calls it on ordinary typing, and
+-- spawning language servers as a typing side effect is wrong (and,
+-- concretely, wedged the m4 suite with per-keystroke spawn attempts
+-- across parallel tests). Attachment remains buffer-open policy.
+function pmacs.lsp.attachment_for_request()
+  local buf = pmacs.window.buffer()
+  if not buf then return nil end
+  local key = tostring(buf)
+  local rec = attachments[key]
+  if not rec then return nil end
+  flush_did_change(key)
+  return rec
+end
+
 -- Hooks --------------------------------------------------------------------
 
 pmacs.hook.add("buffer.after-load", function()

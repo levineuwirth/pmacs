@@ -187,6 +187,12 @@ pub struct EditorCore {
     /// from the same state the dispatch path mutates — the menu twin of
     /// `search_store`.
     pub menu: crate::menu::SharedMenu,
+    /// Open in-buffer completion popup (Arc 1a, Q#C2), or `None` when
+    /// closed. Shared `Arc<Mutex>` so the TUI
+    /// [`crate::completion::CompletionView`] overlay renders from the
+    /// same state the dispatch path navigates and the Lua driver
+    /// publishes into — the completion twin of `menu`.
+    pub completion_popup: crate::completion::SharedCompletionPopup,
 }
 
 impl EditorCore {
@@ -226,6 +232,7 @@ impl EditorCore {
             clipboard_slot: Vec::new(),
             pending_clipboard: None,
             menu: crate::menu::make_shared_menu(),
+            completion_popup: crate::completion::make_shared_popup(),
         }
     }
 
@@ -1818,6 +1825,174 @@ impl EditorCore {
         }
     }
 
+    // ---- in-buffer completion popup (Arc 1a, Q#C2/Q#C3) --------------------
+
+    /// True while the in-buffer completion popup is open.
+    #[must_use]
+    pub fn completion_popup_is_open(&self) -> bool {
+        self.completion_popup
+            .lock()
+            .expect("completion popup poisoned")
+            .is_some()
+    }
+
+    /// Open (or replace) the completion popup session. Attaches the
+    /// self-suppressing [`crate::completion::CompletionView`] overlay to
+    /// the active window on first use (deduped by kind, like the menu).
+    /// Emptiness is enforced upstream:
+    /// [`crate::completion::CompletionPopupState::new`] refuses to build
+    /// a candidate-less session.
+    pub fn completion_popup_open(&mut self, mut state: crate::completion::CompletionPopupState) {
+        // Stamp the owning window (Lua publishers don't know window
+        // identity): only that window's overlay paints the popup, and
+        // a focus change invalidates the session.
+        state.window_id = Some(self.active_window_id());
+        *self
+            .completion_popup
+            .lock()
+            .expect("completion popup poisoned") = Some(state);
+        self.ensure_completion_overlay();
+    }
+
+    /// Close the popup (the overlay then self-suppresses).
+    pub fn completion_popup_close(&mut self) {
+        *self
+            .completion_popup
+            .lock()
+            .expect("completion popup poisoned") = None;
+    }
+
+    /// Move the popup highlight by `delta` (wrapping).
+    pub fn completion_popup_step(&mut self, delta: isize) {
+        if let Some(p) = self
+            .completion_popup
+            .lock()
+            .expect("completion popup poisoned")
+            .as_mut()
+        {
+            p.step(delta);
+        }
+    }
+
+    /// Q#C3 session invariant: the popup only survives while the
+    /// active buffer still matches, the cursor sits at or after the
+    /// anchor, and every byte between them is a word byte (`[A-Za-z0-9_]`
+    /// --- the same ASCII word definition the Lua driver uses). A
+    /// trigger-character session (empty prefix, `cursor == anchor`)
+    /// holds trivially. Returns the `(anchor, cursor)` pair while the
+    /// invariant holds.
+    #[must_use]
+    fn completion_session_holds(&self) -> Option<(Position, Position)> {
+        /// Longest byte run still plausibly a completion prefix; past
+        /// this the session is stale, not a prefix.
+        const MAX_PREFIX_BYTES: u64 = 512;
+
+        let (buffer_id, window_id, anchor) = {
+            let guard = self
+                .completion_popup
+                .lock()
+                .expect("completion popup poisoned");
+            let p = guard.as_ref()?;
+            (p.buffer_id, p.window_id, p.anchor)
+        };
+        if window_id != Some(self.active_window_id()) {
+            return None; // focus moved to another window/split
+        }
+        if self.active_buffer_id() != buffer_id {
+            return None;
+        }
+        let cursor = self.active_window().cursor;
+        if cursor < anchor || cursor - anchor > MAX_PREFIX_BYTES {
+            return None;
+        }
+        let reg = self.registry.borrow();
+        let buffer = reg.get(buffer_id).ok()?;
+        if cursor > buffer.len() {
+            return None;
+        }
+        let mut bytes = vec![0u8; (cursor - anchor) as usize];
+        if !bytes.is_empty() {
+            buffer.snapshot_rope().slice(anchor, cursor, &mut bytes);
+        }
+        bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            .then_some((anchor, cursor))
+    }
+
+    /// Q#C3 post-dispatch validation: close the popup unless the
+    /// session invariant still holds. Called by the dispatcher after
+    /// every fallen-through key (motion, edits, buffer switches) and
+    /// cheap enough to call unconditionally --- a closed popup is a
+    /// single mutex peek.
+    pub fn completion_popup_validate(&mut self) {
+        if self.completion_popup_is_open() && self.completion_session_holds().is_none() {
+            self.completion_popup_close();
+        }
+    }
+
+    /// Q#C7 accept: re-validate the session at the moment of accept,
+    /// close the popup, and --- only when the invariant still holds ---
+    /// replace `[anchor .. cursor]` with the highlighted candidate's
+    /// insert text as a **single** edit (one undo step, mirroring
+    /// [`Self::insert_char_over_region`]). Returns `true` iff the
+    /// buffer was edited (the dispatcher fires `buffer.after-edit`
+    /// off that signal).
+    pub fn completion_popup_accept(&mut self) -> bool {
+        let holds = self.completion_session_holds();
+        let snap = {
+            let guard = self
+                .completion_popup
+                .lock()
+                .expect("completion popup poisoned");
+            guard
+                .as_ref()
+                .and_then(|p| p.selected_candidate().map(|c| c.insert_text.clone()))
+        };
+        self.completion_popup_close();
+        let (Some((anchor, cursor)), Some(text)) = (holds, snap) else {
+            return false;
+        };
+        self.active_window_mut().goal_col = None;
+        // An empty range degenerates to a plain insert (the
+        // trigger-character case, where nothing was typed yet).
+        let result = if cursor > anchor {
+            self.apply_active_edit(EditOp::Replace {
+                range: Range {
+                    start: anchor,
+                    end: cursor,
+                },
+                bytes: text.as_bytes(),
+            })
+        } else {
+            self.apply_active_edit(EditOp::Insert {
+                pos: anchor,
+                bytes: text.as_bytes(),
+            })
+        };
+        if let Err(e) = result {
+            self.status = format!("completion accept failed: {e}");
+            return false;
+        }
+        let aw = self.active_window_mut();
+        aw.cursor = anchor + text.len() as u64;
+        aw.selection = None;
+        true
+    }
+
+    /// Ensure the active window carries a
+    /// [`crate::completion::CompletionView`] overlay (deduped by kind).
+    /// The view reads the shared popup, so one instance suffices; it
+    /// renders nothing while the popup is closed.
+    fn ensure_completion_overlay(&mut self) {
+        let popup = self.completion_popup.clone();
+        let wid = self.active_window_id();
+        let win = self.active_window_mut();
+        if !win.overlay_kinds().contains(&"completion-popup") {
+            win.push_overlay(Box::new(crate::completion::CompletionView::new(popup, wid)));
+        }
+    }
+
     /// Safely remove `buffer_id` from the registry. Any window that
     /// was displaying it is redirected to a fallback buffer (`*scratch*`,
     /// created on demand) so window state never refers to a missing id.
@@ -3071,5 +3246,168 @@ mod tests {
         s.search_toggle_regex(); // back to literal
         assert!(!s.search_is_regex());
         assert_eq!(s.search_match_summary().1, 1);
+    }
+
+    // ---- in-buffer completion popup (Arc 1a) --------------------------------
+
+    fn text_of(s: &EditorCore) -> String {
+        let id = s.active_buffer_id();
+        let reg = s.registry.borrow();
+        let buf = reg.get(id).expect("active buffer present");
+        let mut bytes = vec![0u8; buf.len() as usize];
+        if !bytes.is_empty() {
+            buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
+        }
+        String::from_utf8(bytes).expect("test buffers are UTF-8")
+    }
+
+    fn open_popup(s: &mut EditorCore, anchor: u64, prefix: &str, insert_text: &str) {
+        let state = crate::completion::CompletionPopupState::new(
+            s.active_buffer_id(),
+            anchor,
+            prefix.to_owned(),
+            vec![crate::completion::PopupCandidate {
+                label: insert_text.to_owned(),
+                kind: crate::completion::CompletionItemKind::Text,
+                detail: None,
+                insert_text: insert_text.to_owned(),
+            }],
+            1,
+        )
+        .expect("non-empty candidate list");
+        s.completion_popup_open(state);
+    }
+
+    #[test]
+    fn completion_popup_open_attaches_self_suppressing_overlay() {
+        let mut s = from_bytes(b"he\n");
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 0, "he", "hello");
+        assert!(s.completion_popup_is_open());
+        assert!(
+            s.active_window()
+                .overlay_kinds()
+                .contains(&"completion-popup")
+        );
+        // Re-opening dedups the overlay by kind.
+        open_popup(&mut s, 0, "he", "hello");
+        let kinds = s.active_window().overlay_kinds();
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "completion-popup").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn completion_popup_validate_survives_word_growth_and_empty_prefix() {
+        let mut s = from_bytes(b"he world\n");
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 0, "he", "hello");
+        s.completion_popup_validate();
+        assert!(s.completion_popup_is_open(), "prefix `he` holds");
+        // Typing extends the word: still valid.
+        s.insert_char('l');
+        s.completion_popup_validate();
+        assert!(s.completion_popup_is_open(), "prefix `hel` holds");
+        // Trigger-char shape (cursor == anchor, empty prefix) holds too.
+        s.completion_popup_close();
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 2, "", "llo");
+        s.completion_popup_validate();
+        assert!(s.completion_popup_is_open(), "empty prefix at anchor holds");
+    }
+
+    #[test]
+    fn completion_popup_validate_closes_when_invariant_breaks() {
+        let mut s = from_bytes(b"he world\n");
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 0, "he", "hello");
+        // Cursor moved past the word: `[anchor..cursor]` spans a space.
+        s.active_window_mut().cursor = 4;
+        s.completion_popup_validate();
+        assert!(!s.completion_popup_is_open(), "non-word bytes close it");
+
+        // Cursor moved before the anchor.
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 2, "", "x");
+        s.active_window_mut().cursor = 1;
+        s.completion_popup_validate();
+        assert!(!s.completion_popup_is_open(), "cursor < anchor closes it");
+
+        // Session bound to a buffer that is not the active one.
+        let other = s.registry.borrow_mut().create("*other*");
+        let state = crate::completion::CompletionPopupState::new(
+            other,
+            0,
+            String::new(),
+            vec![crate::completion::PopupCandidate {
+                label: "x".into(),
+                kind: crate::completion::CompletionItemKind::Text,
+                detail: None,
+                insert_text: "x".into(),
+            }],
+            1,
+        )
+        .unwrap();
+        s.completion_popup_open(state);
+        s.completion_popup_validate();
+        assert!(!s.completion_popup_is_open(), "wrong buffer closes it");
+    }
+
+    #[test]
+    fn completion_popup_accept_replaces_prefix_as_one_undo_step() {
+        let mut s = from_bytes(b"he and more\n");
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 0, "he", "hello_world");
+        assert!(s.completion_popup_accept());
+        assert_eq!(text_of(&s), "hello_world and more\n");
+        assert_eq!(s.active_window().cursor, 11);
+        assert!(!s.completion_popup_is_open(), "accept closes the popup");
+        // Q#C7: the replace is a single edit — one undo restores the
+        // original text (not an intermediate delete-then-insert state).
+        s.undo();
+        assert_eq!(text_of(&s), "he and more\n");
+    }
+
+    #[test]
+    fn completion_popup_accept_empty_prefix_inserts_at_anchor() {
+        let mut s = from_bytes(b"x.\n");
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 2, "", "method");
+        assert!(s.completion_popup_accept());
+        assert_eq!(text_of(&s), "x.method\n");
+        assert_eq!(s.active_window().cursor, 8);
+    }
+
+    #[test]
+    fn completion_popup_accept_is_noop_when_session_stale() {
+        let mut s = from_bytes(b"he world\n");
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 0, "he", "hello");
+        // Simulate a race: the cursor left the word before accept ran.
+        s.active_window_mut().cursor = 5;
+        assert!(!s.completion_popup_accept());
+        assert_eq!(text_of(&s), "he world\n", "buffer untouched");
+        assert!(!s.completion_popup_is_open(), "stale accept still closes");
+    }
+
+    #[test]
+    fn completion_popup_validate_closes_on_window_focus_change() {
+        // Two splits on the SAME buffer: the session is window-scoped,
+        // so moving focus (buffer unchanged!) must invalidate it ---
+        // this is also what keeps the persistent overlay in the other
+        // split from painting a popup it doesn't own.
+        let mut s = from_bytes(b"he world\n");
+        s.split_active(Orientation::Horizontal, true);
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 0, "he", "hello");
+        s.completion_popup_validate();
+        assert!(s.completion_popup_is_open(), "session holds in its window");
+        s.focus_next();
+        s.completion_popup_validate();
+        assert!(
+            !s.completion_popup_is_open(),
+            "focus change closes the session even with the same buffer"
+        );
     }
 }

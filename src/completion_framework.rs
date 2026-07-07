@@ -119,6 +119,11 @@ pub struct CompletionContext {
     pub project_root: Option<PathBuf>,
     /// What kicked off the request.
     pub trigger: CompletionTrigger,
+    /// Document URI of the buffer being completed (Q#C8 scoping).
+    /// When set, URI-keyed providers (LSP) surface only this
+    /// document's entries; when `None` they fall back to the legacy
+    /// global drain across every cached key.
+    pub uri: Option<String>,
 }
 
 impl CompletionContext {
@@ -133,6 +138,7 @@ impl CompletionContext {
             language: None,
             project_root: None,
             trigger: CompletionTrigger::Invoked,
+            uri: None,
         }
     }
 }
@@ -618,11 +624,18 @@ fn project_kind_to_completion_kind(k: &crate::project_index::SymbolKind) -> Comp
 /// the LSP completion store. The framework does **not** drive a
 /// fresh `textDocument/completion` request --- that's the editor's
 /// job; we just read whatever the async pipeline has produced so
-/// far, across every cached `(server_id, uri)` key. The registry's
-/// dedup collapses identical entries; the prefix score ranks them.
+/// far. Strictly scoped to `ctx.uri` (Q#C8): only that document's
+/// entries surface, across all servers keyed to it. **No URI → no
+/// LSP candidates** --- an unattached/scratch buffer must never show
+/// another file's cached completions (the original global drain did
+/// exactly that). The registry's dedup collapses identical entries;
+/// the prefix score ranks them.
 #[must_use]
 pub fn lsp_completion_provider(lsp: crate::lsp::SharedLspManager) -> ProviderFn {
-    Box::new(move |_ctx: &CompletionContext| -> Vec<CompletionItem> {
+    Box::new(move |ctx: &CompletionContext| -> Vec<CompletionItem> {
+        let Some(uri) = ctx.uri.clone() else {
+            return Vec::new();
+        };
         let store_handle = {
             let mgr = lsp.borrow();
             mgr.completion_store()
@@ -631,7 +644,7 @@ pub fn lsp_completion_provider(lsp: crate::lsp::SharedLspManager) -> ProviderFn 
             return Vec::new();
         };
         let mut out: Vec<CompletionItem> = Vec::new();
-        let keys: Vec<_> = store.keys().cloned().collect();
+        let keys: Vec<_> = store.keys().filter(|k| k.uri == uri).cloned().collect();
         for key in keys {
             for item in store.items(&key) {
                 out.push(item.clone());

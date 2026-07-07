@@ -602,6 +602,20 @@ impl AsyncRuntime {
         Self::with_pool(WorkerPool::new(size))
     }
 
+    /// Signal the worker-pool threads to exit (see
+    /// [`crate::worker::WorkerPool::signal_shutdown`]). Idempotent,
+    /// non-blocking. Called from [`crate::editor::EditorState`]'s
+    /// `Drop`: the runtime's `Rc` is captured into Lua-VM reference
+    /// cycles and never reaches a zero refcount, so without this
+    /// explicit teardown every editor instance leaks its whole pool
+    /// --- one leaked pool per test in a suite that builds real
+    /// editors. Signal-only (no join): a worker blocked handing its
+    /// reply to the main thread must not deadlock the main thread's
+    /// drop.
+    pub fn shutdown_workers(&self) {
+        self.pool.signal_shutdown();
+    }
+
     /// Returns the number of in-flight or settled-but-not-yet-taken
     /// pending entries.
     #[must_use]
