@@ -409,6 +409,10 @@ impl Frontend {
             // toggle; the cell-grid TUI reads its window's mode directly,
             // so it drops this silently like the other semantic families.
             | InstanceMessage::LineNumbers { .. }
+            // Arc 1a Q#C5 — CompletionPopup is the semantic-frontend
+            // completion dropdown; the TUI paints the popup via its
+            // CompletionView cell overlay, so it drops this silently.
+            | InstanceMessage::CompletionPopup { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

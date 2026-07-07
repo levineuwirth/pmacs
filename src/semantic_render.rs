@@ -91,6 +91,17 @@ type MenuPromptFacts = (Vec<MenuPromptRow>, Option<u32>);
 /// A `None` prompt means the minibuffer is closed.
 type MinibufferFacts = (Option<String>, String, u32, Vec<String>, Option<u32>, u32);
 
+/// Cached `CompletionPopup` payload for cached-compare suppression
+/// (Arc 1a Q#C5): `(anchor, prefix_len, rows-window, selected, total)`.
+/// A `None` anchor means the popup is closed.
+type CompletionPopupFacts = (
+    Option<u64>,
+    u32,
+    Vec<crate::protocol::CompletionPopupRow>,
+    Option<u32>,
+    u32,
+);
+
 /// How many completion candidates the minibuffer ships per frame — a
 /// scrolled window around the selection, not the full (≤1024) list.
 const MB_VISIBLE: usize = 10;
@@ -172,6 +183,10 @@ pub struct SemanticRenderState {
     /// not per-buffer, because the minibuffer is one global core
     /// instance.
     last_minibuffer: Option<MinibufferFacts>,
+    /// Last emitted `CompletionPopup` payload per buffer (Arc 1a
+    /// Q#C5), for cached-compare suppression (see
+    /// [`CompletionPopupFacts`]).
+    last_completion_popup: HashMap<BufferId, CompletionPopupFacts>,
     /// `StyleSpans` recompute gate (perf). `scoped_style_spans` runs
     /// the tree-sitter highlights query over the *whole declared
     /// viewport* (which the GPU frontend sets to the entire buffer)
@@ -243,6 +258,7 @@ impl SemanticRenderState {
             last_search_prompt: HashMap::new(),
             last_menu_prompt: HashMap::new(),
             last_minibuffer: None,
+            last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
             // Seed to the frontend's default (gutter off): a plain default
@@ -456,7 +472,88 @@ impl SemanticRenderState {
         out.extend(self.menu_prompt_msg(state, vp.buffer_id));
         // --- MinibufferPrompt (Q#MB1, protocol v12) ---
         out.extend(self.minibuffer_prompt_msg(state, vp.buffer_id));
+        // --- CompletionPopup (Arc 1a Q#C5, protocol v15) ---
+        out.extend(self.completion_popup_msg(state, vp.buffer_id));
         out
+    }
+
+    /// The `CompletionPopup` message for this frame, or `None` when the
+    /// popup state for `buffer_id` is unchanged (Arc 1a Q#C5). Only the
+    /// active buffer carries a live popup, and — the multi-frontend
+    /// rule — only the frontend whose *own window* owns the session
+    /// sees it open: the session is window-stamped at open
+    /// (`completion_popup_open`), and this producer state is
+    /// per-frontend, so a popup opened by TUI typing never renders in
+    /// an attached GPU and vice versa. Closed = `anchor: None`; first
+    /// sight of a buffer with no popup stays silent (like
+    /// `search_prompt_msg`). The daemon keeps the variant off wires
+    /// negotiated `< 15`.
+    fn completion_popup_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> Option<InstanceMessage> {
+        let facts: CompletionPopupFacts = {
+            let core = state.core.borrow();
+            if buffer_id != core.active_buffer_id() {
+                return None;
+            }
+            let own_window = core.views.get(&self.frontend_id).map(|v| v.active);
+            let guard = core
+                .completion_popup
+                .lock()
+                .expect("completion popup poisoned");
+            match guard.as_ref() {
+                Some(p)
+                    if p.buffer_id == buffer_id
+                        && p.window_id.is_some()
+                        && p.window_id == own_window =>
+                {
+                    let (start, len) = crate::completion::popup_window(
+                        p.candidates.len(),
+                        p.selected,
+                        crate::completion::POPUP_MAX_ROWS as usize,
+                    );
+                    let rows: Vec<crate::protocol::CompletionPopupRow> = p.candidates
+                        [start..start + len]
+                        .iter()
+                        .map(|c| crate::protocol::CompletionPopupRow {
+                            label: c.label.clone(),
+                            kind: c.kind as u8,
+                            detail: c.detail.clone(),
+                        })
+                        .collect();
+                    (
+                        Some(p.anchor),
+                        u32::try_from(p.prefix.len()).unwrap_or(u32::MAX),
+                        rows,
+                        u32::try_from(p.selected - start).ok(),
+                        u32::try_from(p.total).unwrap_or(u32::MAX),
+                    )
+                }
+                _ => (None, 0, Vec::new(), None, 0),
+            }
+        };
+        let cached = self.last_completion_popup.get(&buffer_id);
+        if cached == Some(&facts) {
+            return None;
+        }
+        // First sight of this buffer with no popup: nothing to clear,
+        // stay silent (the search-prompt rule).
+        if cached.is_none() && facts.0.is_none() {
+            self.last_completion_popup.insert(buffer_id, facts);
+            return None;
+        }
+        let msg = InstanceMessage::CompletionPopup {
+            buffer_id,
+            anchor: facts.0,
+            prefix_len: facts.1,
+            rows: facts.2.clone(),
+            selected: facts.3,
+            total: facts.4,
+        };
+        self.last_completion_popup.insert(buffer_id, facts);
+        Some(msg)
     }
 
     /// The `SearchPrompt` message for this frame, or `None` when the

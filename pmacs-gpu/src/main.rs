@@ -5201,6 +5201,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::ResourceOffer { .. } => "ResourceOffer",
         InstanceMessage::DispatchIdle { .. } => "DispatchIdle",
         InstanceMessage::LineNumbers { .. } => "LineNumbers",
+        InstanceMessage::CompletionPopup { .. } => "CompletionPopup",
     }
 }
 

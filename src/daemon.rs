@@ -1056,6 +1056,12 @@ fn dispatcher_loop(
                 let peer_knows_line_numbers = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 14);
+                // Arc 1a Q#C5 — CompletionPopup gated at v15; a v14 peer
+                // still completes via the daemon-side session + key
+                // round-trip, it just gets no GPU dropdown.
+                let peer_knows_completion_popup = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 15);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1083,6 +1089,11 @@ fn dispatcher_loop(
                     }
                     if !peer_knows_line_numbers
                         && matches!(msg, InstanceMessage::LineNumbers { .. })
+                    {
+                        continue;
+                    }
+                    if !peer_knows_completion_popup
+                        && matches!(msg, InstanceMessage::CompletionPopup { .. })
                     {
                         continue;
                     }

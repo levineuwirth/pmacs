@@ -922,6 +922,32 @@ pub enum InstanceMessage {
         /// The line-number gutter mode for that window.
         mode: LineNumberMode,
     },
+    /// In-buffer completion popup state for a semantic frontend
+    /// (Arc 1a Q#C5, protocol v15). Unlike the band-anchored
+    /// [`Self::MinibufferPrompt`], the popup is anchored *at a byte*
+    /// (the typed prefix's start) — the frontend maps byte → glyph
+    /// rect locally, exactly as it does for the caret, so the
+    /// instance never learns a pixel. Rows are display-only: accept
+    /// is a daemon round-trip (`dispatch_completion_key`), so insert
+    /// text never ships. `anchor: None` clears the popup.
+    /// Cached-compare suppressed like `SearchPrompt`; daemon-gated
+    /// `>= 15`.
+    CompletionPopup {
+        /// Buffer the popup targets.
+        buffer_id: crate::BufferId,
+        /// Byte offset of the prefix start, or `None` when closed.
+        anchor: Option<u64>,
+        /// Bytes of typed prefix at `anchor` (a frontend may embolden
+        /// the matched prefix within each label).
+        prefix_len: u32,
+        /// A windowed slice of the candidates (best-first, already
+        /// scored/filtered by the core), `<= POPUP_VISIBLE`.
+        rows: Vec<CompletionPopupRow>,
+        /// Highlighted row *within* `rows`, or `None`.
+        selected: Option<u32>,
+        /// Total candidate count (the window is a slice of this).
+        total: u32,
+    },
 }
 
 /// Line-number gutter mode for a window (UX gutter arc). Shared across the
@@ -974,6 +1000,21 @@ pub struct MenuPromptRow {
     pub label: String,
     /// `true` for a non-selectable group divider.
     pub separator: bool,
+}
+
+/// One row of the in-buffer completion popup on the wire
+/// ([`InstanceMessage::CompletionPopup`]). Display fields only ---
+/// accept resolves daemon-side against the core session, so the
+/// insert text stays off the wire.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CompletionPopupRow {
+    /// Display label.
+    pub label: String,
+    /// LSP `CompletionItemKind` numeric code (1..=25; frontends map
+    /// unknown codes to a plain-text glyph, per the LSP contract).
+    pub kind: u8,
+    /// Optional one-line detail rendered after the label.
+    pub detail: Option<String>,
 }
 
 /// Flat selection state for the wire.
@@ -1252,7 +1293,14 @@ pub enum ResourceBody {
 /// message. Encoding change to that variant; daemon-gated `< 14` (a v13
 /// peer negotiates v13 and receives no `LineNumbers` rather than
 /// mis-decoding the wider shape), same shape as the v10 `SearchPrompt` bump.
-pub const PROTOCOL_VERSION: u32 = 14;
+///
+/// Completion popup (Arc 1a Q#C5): bumped 14 → 15 for
+/// [`InstanceMessage::CompletionPopup`] — a new additive variant
+/// carrying the byte-anchored in-buffer completion dropdown.
+/// Daemon-gated `< 15`; a v14 peer negotiates v14 and simply receives
+/// no `CompletionPopup` (completion still works via the daemon's TUI
+/// rendering and the key round-trip), like every prior additive bump.
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1309,7 +1357,10 @@ pub const PROTOCOL_VERSION: u32 = 14;
 /// Q#MB1: extended to `[6, 7, 8, 9, 10, 11, 12]`.
 /// `InstanceMessage::MinibufferPrompt` is additive and daemon-gated per
 /// session, so the ladder resumes again.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14];
+///
+/// Q#C5: extended to `[6, ..., 15]`. `InstanceMessage::CompletionPopup`
+/// is additive and daemon-gated per session.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].
