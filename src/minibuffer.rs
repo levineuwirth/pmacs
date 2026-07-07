@@ -244,6 +244,16 @@ impl Minibuffer {
         s.selected = Some(usize::try_from(next).unwrap_or(0));
     }
 
+    /// Whether a completion dropdown is currently showing (the active
+    /// session has at least one candidate). Drives whether the Up/Down
+    /// arrows navigate the dropdown or step through command history.
+    #[must_use]
+    pub fn has_candidates(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| !s.candidates.is_empty())
+    }
+
     /// Replace the buffer contents with the currently-selected
     /// candidate, leaving the session active so the user can continue
     /// editing or accept. No-op when nothing is selected.
@@ -422,14 +432,21 @@ pub enum MinibufferAction {
     Cancel,
     /// Replace the buffer with the selected candidate (TAB / C-i).
     Complete,
-    /// Step backward through history (Up / C-p).
+    /// Step backward through history (C-p).
     HistoryPrev,
-    /// Step forward through history (Down / C-n).
+    /// Step forward through history (C-n).
     HistoryNext,
     /// Cycle the selected candidate forward (M-n).
     ScrollNext,
     /// Cycle the selected candidate backward (M-p).
     ScrollPrev,
+    /// Up arrow: move to the previous completion candidate when a
+    /// dropdown is showing, else step back through history. Resolved in
+    /// the dispatcher, which has the session state `from_chord` lacks.
+    PrevCandidateOrHistory,
+    /// Down arrow: move to the next completion candidate when a dropdown
+    /// is showing, else step forward through history.
+    NextCandidateOrHistory,
     /// Backspace.
     Backspace,
     /// Forward delete (DEL / C-d).
@@ -465,8 +482,8 @@ impl MinibufferAction {
                 KeyCode::Enter => return Self::Accept,
                 KeyCode::Esc => return Self::Cancel,
                 KeyCode::Tab => return Self::Complete,
-                KeyCode::Up => return Self::HistoryPrev,
-                KeyCode::Down => return Self::HistoryNext,
+                KeyCode::Up => return Self::PrevCandidateOrHistory,
+                KeyCode::Down => return Self::NextCandidateOrHistory,
                 KeyCode::Left => return Self::Left,
                 KeyCode::Right => return Self::Right,
                 KeyCode::Home => return Self::LineStart,
@@ -906,6 +923,28 @@ mod tests {
             MinibufferAction::SelfInsert('a') => {}
             other => panic!("expected SelfInsert('a'), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn from_chord_arrows_are_candidate_or_history() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        // Up/Down resolve to dropdown-or-history in the dispatcher; the
+        // chord decode just tags them (was HistoryPrev/HistoryNext, which
+        // ignored the completion dropdown entirely).
+        assert!(matches!(
+            MinibufferAction::from_chord(Chord {
+                code: KeyCode::Up,
+                modifiers: KeyModifiers::NONE,
+            }),
+            MinibufferAction::PrevCandidateOrHistory
+        ));
+        assert!(matches!(
+            MinibufferAction::from_chord(Chord {
+                code: KeyCode::Down,
+                modifiers: KeyModifiers::NONE,
+            }),
+            MinibufferAction::NextCandidateOrHistory
+        ));
     }
 
     #[test]

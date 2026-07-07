@@ -592,8 +592,10 @@ impl EditorState {
     /// * `RET` / `C-m`           --- accept (invoke `on_accept`).
     /// * `C-g`                   --- cancel (invoke `on_cancel`).
     /// * `TAB` / `C-i`           --- complete to selected candidate.
-    /// * `Up` / `C-p`            --- previous history entry.
-    /// * `Down` / `C-n`          --- next history entry.
+    /// * `Up`                    --- previous candidate with a dropdown, else previous history.
+    /// * `Down`                  --- next candidate with a dropdown, else next history.
+    /// * `C-p`                   --- previous history entry (always).
+    /// * `C-n`                   --- next history entry (always).
     /// * `BS`                    --- delete codepoint left of cursor.
     /// * `DEL` / `C-d`           --- delete codepoint at cursor.
     /// * `Left`  / `C-b`         --- cursor left.
@@ -620,6 +622,22 @@ impl EditorState {
             MinibufferAction::HistoryNext => self.with_minibuffer(Minibuffer::history_next),
             MinibufferAction::ScrollNext => self.with_minibuffer(|m| m.scroll_candidate(1)),
             MinibufferAction::ScrollPrev => self.with_minibuffer(|m| m.scroll_candidate(-1)),
+            // Arrows navigate the completion dropdown when one is showing
+            // (the intuitive default), else step through history.
+            MinibufferAction::PrevCandidateOrHistory => {
+                if self.core.borrow().minibuffer.has_candidates() {
+                    self.with_minibuffer(|m| m.scroll_candidate(-1));
+                } else {
+                    self.with_minibuffer(Minibuffer::history_prev);
+                }
+            }
+            MinibufferAction::NextCandidateOrHistory => {
+                if self.core.borrow().minibuffer.has_candidates() {
+                    self.with_minibuffer(|m| m.scroll_candidate(1));
+                } else {
+                    self.with_minibuffer(Minibuffer::history_next);
+                }
+            }
             MinibufferAction::Backspace => {
                 self.with_minibuffer(Minibuffer::backspace);
                 self.recompute_minibuffer_candidates();
@@ -6266,6 +6284,40 @@ mod tests {
         // Cursor is on the bottom row (in the minibuffer), not in
         // the buffer area.
         assert_eq!(cursor.unwrap().row, 23);
+    }
+
+    #[test]
+    fn arrow_keys_navigate_the_completion_dropdown() {
+        // Regression: Up/Down used to run command HISTORY even with a
+        // completion dropdown showing, so the highlight never moved. Now
+        // they navigate the dropdown when one is present.
+        let selected = |s: &EditorState| {
+            s.core
+                .borrow()
+                .minibuffer
+                .session
+                .as_ref()
+                .expect("session")
+                .selected
+        };
+        let mut s = fresh_with(b"");
+        s.dispatch_key(FrontendId::LOCAL, alt('x'));
+        assert!(
+            s.core.borrow().minibuffer.has_candidates(),
+            "M-x populates a completion dropdown"
+        );
+        let sel0 = selected(&s);
+
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Down));
+        let sel1 = selected(&s);
+        assert_ne!(sel0, sel1, "Down must move the completion selection");
+
+        s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Up));
+        assert_eq!(
+            selected(&s),
+            sel0,
+            "Up must move the completion selection back"
+        );
     }
 
     #[test]
