@@ -313,6 +313,47 @@ Also caught by the new acceptance suite pre-validation:
 `install_completion` rebuilt `pmacs.completion` and clobbered the
 popup bindings — all `pmacs.completion` installers now merge.
 
+## As-built notes — phase 2 (PR #93)
+
+Protocol v15 + the GPU dropdown, close to the framing with four
+divergences worth recording:
+
+1. **Q#C6 landed much narrower than framed.** The full
+   `is_completion_control_key` predicate proved unnecessary:
+   C-n/C-p/C-g already round-trip as command chords and Up/Down as
+   forwarded motion keys, so the daemon's completion shadow handles
+   them with zero GPU changes. Only two GPU defaults are wrong under
+   a popup and got gated on `completion_open`: **Esc** (round-trips
+   to dismiss instead of the local quit) and **RET/TAB** (skip the
+   optimistic insert so they accept instead of typing `\n`/`\t`).
+   Bet #1 (the family generalizes) and this simplification both held;
+   bet #3's ESC prediction was exactly right.
+2. **The producer needed a multi-frontend rule the family didn't
+   have**: the session is window-stamped and `SemanticRenderState` is
+   per-frontend, so `completion_popup_msg` emits the popup only to
+   the frontend whose own window owns the session — TUI typing never
+   raises the GPU dropdown, and vice versa.
+3. **v15 also carries `StatusFacts.message`** (validation finding):
+   `pmacs.editor.set_status` output — "12 references", LSP errors —
+   was TUI-only (the grid ships the bottom row; the wire never
+   carried the message). The band shows it echo-area style; its gate
+   moved 8 → 15 (encoding change). Corollary fix: the optimistic
+   CrdtOp path (`handle_remote_crdt_op`) now clears `core.status`
+   like `dispatch_key`'s entry clear, else a message wedges through
+   ordinary GPU typing.
+4. **Buffer switches need a local clear, not just wire closes**
+   (validation finding): the producer's first-sight-closed silence
+   means no close ever ships for a viewport that no longer exists, so
+   the `BufferSnapshot` arm clears the popup mirror, and
+   `CompletionLocal` carries its `buffer_id` with a shared
+   `completion_open_for_current_buffer()` predicate gating keys and
+   painting — a stale mirror can neither act nor draw against a
+   foreign buffer.
+
+Phase-3 items absorbed along the way: `isIncomplete` re-query and
+per-server trigger chars shipped with the phase-1 findings round;
+these as-built notes close the docs item.
+
 ## Deferred (named, not silently dropped)
 
 - Snippet tabstops/placeholders (v1 inserts bodies literally).
