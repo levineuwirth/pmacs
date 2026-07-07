@@ -102,6 +102,11 @@ const GUTTER_MONO_ADVANCE_FALLBACK: f32 = 9.6;
 /// `W` its width; it spans the full line height.
 const GUTTER_SIGN_X: f32 = 4.0;
 const GUTTER_SIGN_W: f32 = 4.0;
+/// Minimum text-area width (px) the gutter must leave. If reserving the
+/// gutter would crowd the text below this, the gutter is dropped for the
+/// frame — the GPU mirror of the TUI's too-narrow-window disable, so a
+/// narrow window or a very large file can never force `left >= right`.
+const MIN_TEXT_WIDTH_PX: f32 = 48.0;
 const MINIMAP_BG: [f32; 4] = [0.075, 0.075, 0.105, 0.92];
 const MINIMAP_DEFAULT_LINE: [f32; 4] = [0.23, 0.23, 0.29, 0.82];
 const MINIMAP_THUMB_FILL: [f32; 4] = [0.82, 0.82, 0.92, 0.18];
@@ -2818,7 +2823,19 @@ impl State {
             return 0.0;
         }
         let lines = self.current_line_starts.len().max(1);
-        decimal_digits(lines) as f32 * self.mono_advance() + GUTTER_GAP_PX
+        let want = decimal_digits(lines) as f32 * self.mono_advance() + GUTTER_GAP_PX;
+        // Fit guard (mirrors the TUI's too-narrow disable): never reserve so
+        // much gutter that the text area collapses. `text_bounds_right` is
+        // the text clip edge (minimap-aware); if the gutter would leave less
+        // than `MIN_TEXT_WIDTH_PX` past `TEXT_LEFT`, drop it this frame
+        // rather than shift `text_left` to or past the clip and render into
+        // a degenerate `left >= right` rectangle.
+        let avail = self.text_bounds_right() as f32 - TEXT_LEFT;
+        if want + MIN_TEXT_WIDTH_PX > avail {
+            0.0
+        } else {
+            want
+        }
     }
 
     /// The code's left origin in px: `TEXT_LEFT` plus the gutter. Every
@@ -2882,6 +2899,22 @@ impl State {
     /// line) → projected byte → run map → slice byte → + `vstart`.
     /// `None` when no buffer is attached or the position is outside
     /// anything hit-testable.
+    /// Text-relative x for hit testing, classifying the gutter band first
+    /// (UX gutter, Q#UX6). A click left of the text origin (`raw_x < 0`,
+    /// i.e. inside the gutter) is not a text hit — it clamps to `0.0`, the
+    /// line start, rather than feeding glyphon a negative x (undefined).
+    /// Mirrors the TUI's saturate-to-column-0 affordance and is the stable
+    /// seam a future gutter marker would branch on instead of relying on
+    /// glyphon's negative-x edge behavior.
+    fn gutter_aware_rel_x(&self, x: f64) -> f32 {
+        let raw_x = x as f32 - self.text_left();
+        if self.line_numbers.is_on() && raw_x < 0.0 {
+            0.0
+        } else {
+            raw_x
+        }
+    }
+
     fn hit_test_source_byte(&mut self, x: f64, y: f64) -> Option<u64> {
         self.current_buffer_id?;
         if self.hit_map_dirty {
@@ -2900,7 +2933,7 @@ impl State {
             self.projected_line_starts = projected_line_starts;
             self.hit_map_dirty = false;
         }
-        let rel_x = x as f32 - self.text_left();
+        let rel_x = self.gutter_aware_rel_x(x);
         let rel_y = y as f32 - TEXT_TOP;
         let cursor = self.buffer.hit(rel_x, rel_y)?;
         let line_start = *self.projected_line_starts.get(cursor.line)?;
@@ -7515,6 +7548,57 @@ mod tests {
         assert!(
             differing > 20,
             "relative numbering must differ from absolute ({differing} bytes differ)"
+        );
+    }
+
+    #[test]
+    fn gutter_aware_rel_x_clamps_the_gutter_band() {
+        // F1: a click in the gutter band (left of the text origin) clamps
+        // to the line start (rel_x 0), never a negative x into glyphon.
+        let text = "alpha\nbeta\ngamma\n";
+        let Some(mut s) = headless_or_skip(400, 300, text) else {
+            return;
+        };
+        s.line_numbers = LineNumberMode::Absolute;
+        let text_left = f64::from(s.text_left());
+        assert!(text_left > f64::from(TEXT_LEFT), "the gutter is present");
+
+        // Inside the gutter band and at the exact origin → clamped to 0.
+        assert!(s.gutter_aware_rel_x(text_left - 4.0).abs() < f32::EPSILON);
+        assert!(s.gutter_aware_rel_x(text_left).abs() < f32::EPSILON);
+        // Well into the text → a positive text-relative x.
+        assert!(s.gutter_aware_rel_x(text_left + 40.0) > 0.0);
+
+        // With the gutter off there's no band, so a left-of-origin x passes
+        // through negative (the pre-gutter behavior is unchanged).
+        s.line_numbers = LineNumberMode::Off;
+        assert!(s.gutter_aware_rel_x(f64::from(TEXT_LEFT) - 4.0) < 0.0);
+    }
+
+    #[test]
+    fn narrow_window_drops_the_gutter() {
+        // F2: a window too narrow to fit the gutter + a minimum text area
+        // drops the gutter for the frame (no `left >= right`), mirroring the
+        // TUI. A wide window keeps it.
+        let text = "l1\nl2\nl3\n";
+        let Some(mut narrow) = headless_or_skip(60, 200, text) else {
+            return;
+        };
+        narrow.line_numbers = LineNumberMode::Absolute;
+        assert!(
+            narrow.gutter_width_px() < f32::EPSILON,
+            "a 60px window can't fit gutter + min text → gutter dropped"
+        );
+        assert!(
+            (narrow.text_left() - TEXT_LEFT).abs() < f32::EPSILON,
+            "text origin unshifted when the gutter is dropped"
+        );
+
+        let mut wide = State::new_headless(800, 200, text).expect("adapter was just available");
+        wide.line_numbers = LineNumberMode::Absolute;
+        assert!(
+            wide.gutter_width_px() > 0.0,
+            "a wide window keeps the gutter"
         );
     }
 }
