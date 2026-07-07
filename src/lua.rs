@@ -239,6 +239,7 @@ impl LuaHost {
     /// or loading the builtin chunks.
     pub fn attach_editor(&mut self, core: &SharedCore) -> mlua::Result<()> {
         lua_bindings::install_editor(&self.lua, core)?;
+        lua_bindings::install_completion_popup(&self.lua, core)?;
         self.core = Some(core.clone());
         // Hooks first: command bodies in default.lua reference them.
         self.load_builtin(

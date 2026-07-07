@@ -256,6 +256,16 @@ impl EditorState {
                 include_str!("../builtin/runtime/lsp.lua"),
             )
             .expect("load lsp builtin chunk");
+        // Arc 1a: the in-buffer completion popup driver. Loaded after
+        // lsp.lua because it drives `pmacs.lsp.request_completion` /
+        // `pmacs.lsp.attachment_for_request` and after the framework
+        // install above because it calls `pmacs.completion.collect`.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/completion.lua"),
+                include_str!("../builtin/runtime/completion.lua"),
+            )
+            .expect("load completion builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it

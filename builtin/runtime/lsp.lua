@@ -544,6 +544,19 @@ function pmacs.lsp.active_attachment()
   return attachments[tostring(buf)]
 end
 
+-- Flushing variant for request-issuing callers outside this file
+-- (Q#C8): resolves (or attaches) the active buffer's server AND
+-- flushes any debounced didChange first, so the server answers the
+-- caller's request against the current text --- exactly what every
+-- interactive command in this file gets from the local
+-- `attached_for_active`. The in-buffer completion driver
+-- (builtin/runtime/completion.lua) calls this before
+-- textDocument/completion; a non-flushing peek would hand the server
+-- stale text after a typing burst.
+function pmacs.lsp.attachment_for_request()
+  return attached_for_active()
+end
+
 -- Hooks --------------------------------------------------------------------
 
 pmacs.hook.add("buffer.after-load", function()

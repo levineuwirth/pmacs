@@ -9638,7 +9638,7 @@ fn lua_table_to_completion_item(t: &Table) -> mlua::Result<crate::completion::Co
 }
 
 fn ctx_to_lua(lua: &Lua, ctx: &CompletionContext) -> mlua::Result<Table> {
-    let t = lua.create_table_with_capacity(0, 7)?;
+    let t = lua.create_table_with_capacity(0, 8)?;
     t.set("prefix", ctx.prefix.as_str())?;
     t.set("line", ctx.line)?;
     t.set("col", ctx.col)?;
@@ -9648,6 +9648,9 @@ fn ctx_to_lua(lua: &Lua, ctx: &CompletionContext) -> mlua::Result<Table> {
     }
     if let Some(p) = &ctx.project_root {
         t.set("project_root", p.display().to_string())?;
+    }
+    if let Some(u) = &ctx.uri {
+        t.set("uri", u.as_str())?;
     }
     let (trigger_tag, trigger_char): (&'static str, Option<String>) = match ctx.trigger {
         CompletionTrigger::Invoked => ("invoked", None),
@@ -9677,6 +9680,7 @@ fn lua_table_to_ctx(t: &Table) -> CompletionContext {
         Some("incomplete") => CompletionTrigger::Incomplete,
         _ => CompletionTrigger::Invoked,
     };
+    let uri: Option<String> = t.get::<Option<String>>("uri").ok().flatten();
     CompletionContext {
         prefix,
         line,
@@ -9685,6 +9689,7 @@ fn lua_table_to_ctx(t: &Table) -> CompletionContext {
         language,
         project_root: project_root.map(std::path::PathBuf::from),
         trigger,
+        uri,
     }
 }
 
@@ -9949,11 +9954,22 @@ pub fn install_completion_framework(
         // ctx_to_lua exposed as `pmacs.completion.context_for(...)`
         // for callers that need to construct a context table from
         // primitives. Convenience only --- callers can build their
-        // own.
+        // own. Trailing optionals: a "char" trigger needs its
+        // `trigger_char` (Q#C1 nit --- the helper previously could
+        // not express `CompletionTrigger::Char` at all), and `uri`
+        // scopes URI-keyed providers (Q#C8).
         m.set(
             "context_for",
             lua.create_function(move |lua, args: ContextForArgs| {
-                let (prefix, line, col, buffer_text, language, project_root, trigger) = args;
+                let (prefix, line, col, buffer_text, language, project_root, trigger, ch, uri) =
+                    args;
+                let trigger = match trigger.as_deref() {
+                    Some("incomplete") => CompletionTrigger::Incomplete,
+                    Some("char") => ch
+                        .and_then(|s| s.chars().next())
+                        .map_or(CompletionTrigger::Invoked, CompletionTrigger::Char),
+                    _ => CompletionTrigger::Invoked,
+                };
                 let ctx = CompletionContext {
                     prefix,
                     line: line.unwrap_or(0),
@@ -9961,11 +9977,8 @@ pub fn install_completion_framework(
                     buffer_text: Rc::from(buffer_text.unwrap_or_default()),
                     language,
                     project_root: project_root.map(std::path::PathBuf::from),
-                    trigger: if trigger.as_deref() == Some("incomplete") {
-                        CompletionTrigger::Incomplete
-                    } else {
-                        CompletionTrigger::Invoked
-                    },
+                    trigger,
+                    uri,
                 };
                 ctx_to_lua(lua, &ctx)
             })?,
@@ -10007,6 +10020,97 @@ pub fn make_completion_framework(
     Ok((registry, snippets))
 }
 
+/// Install the in-buffer completion popup surface (Arc 1a, Q#C2) into
+/// `pmacs.completion`: `popup_show{...}` publishes a session into the
+/// core's shared popup (the Lua driver's write path), `popup_hide()`
+/// closes it, `popup_visible()` peeks. Separate from
+/// [`install_completion_framework`] because these need the
+/// [`SharedCore`], which only exists once the editor attaches.
+pub fn install_completion_popup(lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    let m: Table = match pmacs.get::<Option<Table>>("completion")? {
+        Some(t) => t,
+        None => lua.create_table()?,
+    };
+
+    {
+        // popup_show{ buffer, anchor, prefix?, total?, candidates = {
+        //   { label, kind?, detail?, insert_text? }, ... } } -> bool
+        //
+        // Returns false (popup left closed) for an empty candidate
+        // list. `kind` uses the same string tags as
+        // `pmacs.completion.collect` rows, so driver code can pass
+        // collect() output straight through.
+        let cc = core.clone();
+        m.set(
+            "popup_show",
+            lua.create_function(move |_, spec: Table| {
+                let buffer: BufferIdLua = spec.get("buffer")?;
+                let anchor: u64 = spec.get("anchor")?;
+                let prefix: String = spec
+                    .get::<Option<String>>("prefix")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let rows: Table = spec.get("candidates")?;
+                let mut candidates = Vec::new();
+                for row in rows.sequence_values::<Table>() {
+                    let row = row?;
+                    let label: String = row.get("label")?;
+                    let kind_tag: Option<String> = row.get::<Option<String>>("kind").ok().flatten();
+                    let kind = kind_tag.as_deref().map_or(
+                        crate::completion::CompletionItemKind::Text,
+                        completion_kind_from_tag,
+                    );
+                    let detail: Option<String> = row.get::<Option<String>>("detail").ok().flatten();
+                    let insert_text: Option<String> =
+                        row.get::<Option<String>>("insert_text").ok().flatten();
+                    candidates.push(crate::completion::PopupCandidate {
+                        insert_text: insert_text.unwrap_or_else(|| label.clone()),
+                        label,
+                        kind,
+                        detail,
+                    });
+                }
+                let total: usize = spec
+                    .get::<Option<usize>>("total")
+                    .ok()
+                    .flatten()
+                    .unwrap_or(candidates.len());
+                let Some(state) = crate::completion::CompletionPopupState::new(
+                    buffer.0, anchor, prefix, candidates, total,
+                ) else {
+                    return Ok(false);
+                };
+                cc.borrow_mut().completion_popup_open(state);
+                Ok(true)
+            })?,
+        )?;
+    }
+
+    {
+        let cc = core.clone();
+        m.set(
+            "popup_hide",
+            lua.create_function(move |_, ()| {
+                cc.borrow_mut().completion_popup_close();
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let cc = core.clone();
+        m.set(
+            "popup_visible",
+            lua.create_function(move |_, ()| Ok(cc.borrow().completion_popup_is_open()))?,
+        )?;
+    }
+
+    pmacs.set("completion", m)?;
+    Ok(())
+}
+
 /// Argument tuple passed to a Lua-registered completion provider.
 /// Positional rather than table-based because the provider closure
 /// has no `&Lua` to build a table with at call time.
@@ -10019,6 +10123,7 @@ type LuaProviderArgs = (
     Option<String>,
     String,
     Option<String>,
+    Option<String>,
 );
 
 /// Argument tuple for `pmacs.completion.context_for`: positional
@@ -10027,6 +10132,8 @@ type ContextForArgs = (
     String,
     Option<u32>,
     Option<u32>,
+    Option<String>,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -10053,6 +10160,9 @@ fn lua_compat_ctx_args(ctx: &CompletionContext) -> LuaProviderArgs {
         ctx.project_root.as_ref().map(|p| p.display().to_string()),
         trigger_tag.to_owned(),
         trigger_char,
+        // Trailing addition (Q#C8): existing Lua providers that
+        // ignore the ninth positional arg are unaffected.
+        ctx.uri.clone(),
     )
 }
 
