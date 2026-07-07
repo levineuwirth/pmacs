@@ -582,8 +582,9 @@ const DEFAULT_POPUP_WIDTH: u32 = 40;
 
 /// Rows the popup shows at once; when more candidates are live the
 /// visible slice windows around the selection (mirroring the
-/// minibuffer dropdown's `MB_VISIBLE` cap).
-const POPUP_MAX_ROWS: u32 = 10;
+/// minibuffer dropdown's `MB_VISIBLE` cap). Shared with the semantic
+/// producer so the wire window matches the TUI overlay's.
+pub(crate) const POPUP_MAX_ROWS: u32 = 10;
 
 /// Minimum popup width in cells (glyph column + a readable label).
 const POPUP_MIN_WIDTH: u32 = 12;

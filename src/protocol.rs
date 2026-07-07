@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_fourteen_for_line_number_modes() {
+    fn protocol_version_is_fifteen_for_completion_popup() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1705,7 +1705,69 @@ mod tests {
         // (`InstanceMessage::LineNumbers`, additive + daemon-gated). UX
         // gutter modes bumped 13→14 (`LineNumbers` swapped `enabled: bool`
         // for a `LineNumberMode` enum — encoding change, still daemon-gated).
-        assert_eq!(PROTOCOL_VERSION, 14);
+        // Arc 1a Q#C5 bumped 14→15 (`InstanceMessage::CompletionPopup`,
+        // additive + daemon-gated).
+        assert_eq!(PROTOCOL_VERSION, 15);
+    }
+
+    #[test]
+    fn status_facts_round_trip_with_and_without_message() {
+        // v15 widened `StatusFacts` with the transient status message
+        // (its daemon gate moved 8 → 15). Pin both shapes.
+        let bid = crate::buffer::BufferId::next();
+        for message in [None, Some("12 references".to_owned())] {
+            let msg = InstanceMessage::StatusFacts {
+                buffer_id: bid,
+                name: "main.rs".into(),
+                modified: true,
+                diag_errors: 1,
+                diag_warnings: 2,
+                message,
+            };
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn completion_popup_round_trips_through_postcard() {
+        // Arc 1a Q#C5 (v15): the byte-anchored completion dropdown.
+        // Pin both the open and the closed shapes.
+        let bid = crate::buffer::BufferId::next();
+        for msg in [
+            InstanceMessage::CompletionPopup {
+                buffer_id: bid,
+                anchor: Some(4_096),
+                prefix_len: 2,
+                rows: vec![
+                    CompletionPopupRow {
+                        label: "hello_world".into(),
+                        kind: 3,
+                        detail: Some("fn() -> ()".into()),
+                    },
+                    CompletionPopupRow {
+                        label: "help".into(),
+                        kind: 14,
+                        detail: None,
+                    },
+                ],
+                selected: Some(1),
+                total: 42,
+            },
+            InstanceMessage::CompletionPopup {
+                buffer_id: bid,
+                anchor: None,
+                prefix_len: 0,
+                rows: Vec::new(),
+                selected: None,
+                total: 0,
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
     }
 
     #[test]
@@ -1714,24 +1776,22 @@ mod tests {
         // every cell-carrying message, ending the v1–v5 ladder —
         // pre-v6 peers are refused at the handshake (a clean
         // VersionMismatch) rather than garbling postcard mid-session.
-        // Q#M4 / Q#S1 / Q#SR5 / Q#RX6 / Q#CM1 / Q#MB1 / UX gutter: the
-        // ladder resumes above that floor — v7 (`TripleDown`), v8
-        // (`StatusFacts`), v9 + v10 (`SearchPrompt` + regex/invalid), v11
-        // (the context menu), v12 (the GUI minibuffer), v13 (`LineNumbers`),
-        // v14 (`LineNumberMode`) all interoperate, so v6 through v14 talk.
-        assert!(is_supported_protocol_version(6));
-        assert!(is_supported_protocol_version(7));
-        assert!(is_supported_protocol_version(8));
-        assert!(is_supported_protocol_version(9));
-        assert!(is_supported_protocol_version(10));
-        assert!(is_supported_protocol_version(11));
-        assert!(is_supported_protocol_version(12));
-        assert!(is_supported_protocol_version(13));
-        assert!(is_supported_protocol_version(14));
-        for rejected in [0, 1, 2, 3, 4, 5, 15, u32::MAX] {
+        // Q#M4 / Q#S1 / Q#SR5 / Q#RX6 / Q#CM1 / Q#MB1 / UX gutter /
+        // Arc 1a: the ladder resumes above that floor — v7
+        // (`TripleDown`), v8 (`StatusFacts`), v9 + v10 (`SearchPrompt` +
+        // regex/invalid), v11 (the context menu), v12 (the GUI
+        // minibuffer), v13 (`LineNumbers`), v14 (`LineNumberMode`), v15
+        // (`CompletionPopup`) all interoperate, so v6 through v15 talk.
+        for accepted in 6..=15 {
+            assert!(
+                is_supported_protocol_version(accepted),
+                "v{accepted} must be accepted"
+            );
+        }
+        for rejected in [0, 1, 2, 3, 4, 5, 16, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v14 binary"
+                "v{rejected} must be rejected by a v15 binary"
             );
         }
     }
