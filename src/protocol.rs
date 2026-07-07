@@ -2770,6 +2770,28 @@ mod tests {
     }
 
     #[test]
+    fn line_numbers_all_modes_round_trip_through_postcard() {
+        // UX gutter v14: `LineNumbers` swapped `enabled: bool` for a
+        // `LineNumberMode` enum. Pin every variant's postcard shape so a
+        // future enum reorder / addition can't silently change the wire.
+        let bid = crate::buffer::BufferId::next();
+        for mode in [
+            LineNumberMode::Off,
+            LineNumberMode::Absolute,
+            LineNumberMode::Relative,
+            LineNumberMode::Hybrid,
+        ] {
+            let msg = InstanceMessage::LineNumbers {
+                buffer_id: bid,
+                mode,
+            };
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
     fn frontend_event_viewport_round_trips_through_postcard() {
         let ev = FrontendEvent::Viewport {
             frontend_id: FrontendId(4),
