@@ -36,8 +36,8 @@ use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CrdtOp, Decoration, DecorationKind,
     DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, InstanceSignal,
-    Key as ProtocolKey, MenuPromptRow, Modifiers, PointerKind, SelectionSnapshot, StyleSegment,
-    StyleSpan,
+    Key as ProtocolKey, LineNumberMode, MenuPromptRow, Modifiers, PointerKind, SelectionSnapshot,
+    StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
@@ -650,10 +650,12 @@ struct State {
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
-    /// Line-number gutter toggle (UX gutter arc, GPU side). Frontend-local
-    /// (Q#UX5), set from the `--line-numbers` flag. Off ⇒ zero coordinate
-    /// change: `gutter_width_px()` is 0 and every shift site is a no-op.
-    line_numbers: bool,
+    /// Line-number gutter mode (UX gutter arc, GPU side). Shipped by the
+    /// daemon over `InstanceMessage::LineNumbers` (protocol v14). `Off` ⇒
+    /// zero coordinate change: `gutter_width_px()` is 0 and every shift site
+    /// is a no-op. Relative/Hybrid are rendered locally against the GPU's
+    /// own cursor line.
+    line_numbers: LineNumberMode,
     /// Shaped right-aligned line numbers, one per visible code line — its
     /// own text layer over the code, aligned row-for-row (same line height).
     gutter_buffer: Buffer,
@@ -1882,7 +1884,7 @@ impl State {
             mb_text_renderer,
             mb_bg_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_cache: None,
-            line_numbers: false,
+            line_numbers: LineNumberMode::Off,
             gutter_buffer,
             gutter_text_renderer,
         }
@@ -2532,12 +2534,12 @@ impl State {
                 self.request_redraw();
                 None
             }
-            // UX gutter (protocol v13): the daemon owns the per-window
-            // line-number toggle (`M-x window.toggle-line-numbers`); apply
-            // it to our local gutter state and repaint on change.
-            InstanceMessage::LineNumbers { enabled, .. } => {
-                if self.line_numbers != enabled {
-                    self.line_numbers = enabled;
+            // UX gutter (protocol v14): the daemon owns the per-window
+            // line-number mode; apply it to our local gutter state and
+            // repaint on change.
+            InstanceMessage::LineNumbers { mode, .. } => {
+                if self.line_numbers != mode {
+                    self.line_numbers = mode;
                     self.request_redraw();
                 }
                 None
@@ -2812,7 +2814,7 @@ impl State {
     /// disabled (UX gutter arc, Q#UX3): `digits * advance + gap`. Mirrors
     /// the TUI's `Window::gutter_width`; the unit here is pixels.
     fn gutter_width_px(&self) -> f32 {
-        if !self.line_numbers {
+        if !self.line_numbers.is_on() {
             return 0.0;
         }
         let lines = self.current_line_starts.len().max(1);
@@ -2826,24 +2828,43 @@ impl State {
         TEXT_LEFT + self.gutter_width_px()
     }
 
+    /// The GPU's own cursor's 0-based buffer line, or `0` when there's no
+    /// own cursor in the displayed buffer (relative/hybrid then count from
+    /// the top — a rare transient). Derived from the whole-buffer line
+    /// table, so it's independent of the shaped slice.
+    fn cursor_line(&self) -> usize {
+        let byte = match self.own_cursor.as_ref() {
+            Some(c) if Some(c.buffer_id) == self.current_buffer_id => c.byte,
+            _ => 0,
+        };
+        self.current_line_starts
+            .partition_point(|&start| start <= byte)
+            .saturating_sub(1)
+    }
+
     /// Reshape the gutter buffer to the right-aligned line numbers for the
     /// currently-shaped code lines (UX gutter arc). One number per code
     /// line starting at `shaped_top`, so the two buffers align row-for-row
     /// at the same `top` and line height. No-op when the gutter is off.
     fn refresh_gutter_buffer(&mut self) {
         use std::fmt::Write as _;
-        if !self.line_numbers {
+        if !self.line_numbers.is_on() {
             return;
         }
         let digits = decimal_digits(self.current_line_starts.len().max(1)) as usize;
         let first = self.shaped_top;
+        // Relative/Hybrid measure distance from the cursor's buffer line;
+        // Absolute ignores it. Rebuilt every render, so it tracks the cursor.
+        let cursor_line = self.cursor_line();
+        let mode = self.line_numbers;
         let n = self.buffer.lines.len();
         let mut text = String::new();
         for i in 0..n {
             if i > 0 {
                 text.push('\n');
             }
-            let _ = write!(text, "{:>digits$}", first + i + 1);
+            let num = mode.number_for(first + i, cursor_line).unwrap_or(0);
+            let _ = write!(text, "{num:>digits$}");
         }
         self.gutter_buffer.set_text(
             &mut self.font_system,
@@ -4020,7 +4041,7 @@ impl State {
         // main-text clip-left. Computed here as locals — calling `self.*`
         // inside the `prepare` args would conflict with its `&mut` borrows.
         let text_left = self.text_left();
-        let gutter_clip_left = if self.line_numbers {
+        let gutter_clip_left = if self.line_numbers.is_on() {
             text_left.floor() as i32
         } else {
             0
@@ -4087,7 +4108,7 @@ impl State {
         // UX gutter: prepare the line-number layer in the reserved left
         // strip (empty when off → renders nothing). Same `top` + line
         // height as the code, so numbers align row-for-row.
-        let gutter_areas: Vec<TextArea> = if self.line_numbers {
+        let gutter_areas: Vec<TextArea> = if self.line_numbers.is_on() {
             vec![TextArea {
                 buffer: &self.gutter_buffer,
                 left: TEXT_LEFT,
@@ -4360,7 +4381,7 @@ impl State {
         vstart: u64,
         vend: u64,
     ) {
-        if !self.line_numbers {
+        if !self.line_numbers.is_on() {
             return;
         }
         let slice_len = vend - vstart;
@@ -7415,7 +7436,7 @@ mod tests {
         let off_px = off.render_offscreen();
         let mut on = State::new_headless(400, 300, "alpha\nbeta\ngamma\ndelta\n")
             .expect("adapter was just available");
-        on.line_numbers = true;
+        on.line_numbers = LineNumberMode::Absolute;
         let on_px = on.render_offscreen();
         assert_eq!(off_px.len(), on_px.len());
         let differing = off_px.iter().zip(&on_px).filter(|(a, b)| a != b).count();
@@ -7434,14 +7455,14 @@ mod tests {
         let Some(mut plain) = headless_or_skip(400, 300, text) else {
             return;
         };
-        plain.line_numbers = true;
+        plain.line_numbers = LineNumberMode::Absolute;
         plain.current_buffer_id = Some(BufferId::next());
         plain.view_range = (0, text.len() as u64);
         let plain_px = plain.render_offscreen();
 
         let mut with_diag =
             State::new_headless(400, 300, text).expect("adapter was just available");
-        with_diag.line_numbers = true;
+        with_diag.line_numbers = LineNumberMode::Absolute;
         with_diag.current_buffer_id = Some(BufferId::next());
         with_diag.view_range = (0, text.len() as u64);
         with_diag.current_decorations.push(Decoration {
@@ -7459,6 +7480,41 @@ mod tests {
         assert!(
             differing > 20,
             "the diagnostic sign bar should add ink ({differing} bytes differ)"
+        );
+    }
+
+    #[test]
+    fn headless_relative_mode_renders_differently_from_absolute() {
+        // Sub-arc 3: with the cursor on line 2, relative numbering
+        // (2,1,0,1,2) must differ from absolute (1,2,3,4,5) — proving the
+        // GPU renders the mode against its own cursor line.
+        let text = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+        let bid = BufferId::next();
+        let cursor = OwnCursor {
+            buffer_id: bid,
+            byte: 13, // inside "gamma" (buffer line 2)
+        };
+        let Some(mut abs) = headless_or_skip(400, 300, text) else {
+            return;
+        };
+        abs.current_buffer_id = Some(bid);
+        abs.view_range = (0, text.len() as u64);
+        abs.own_cursor = Some(cursor);
+        abs.line_numbers = LineNumberMode::Absolute;
+        let abs_px = abs.render_offscreen();
+
+        let mut rel = State::new_headless(400, 300, text).expect("adapter was just available");
+        rel.current_buffer_id = Some(bid);
+        rel.view_range = (0, text.len() as u64);
+        rel.own_cursor = Some(cursor);
+        rel.line_numbers = LineNumberMode::Relative;
+        let rel_px = rel.render_offscreen();
+
+        assert_eq!(abs_px.len(), rel_px.len());
+        let differing = abs_px.iter().zip(&rel_px).filter(|(a, b)| a != b).count();
+        assert!(
+            differing > 20,
+            "relative numbering must differ from absolute ({differing} bytes differ)"
         );
     }
 }

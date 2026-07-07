@@ -1812,6 +1812,10 @@ fn paint_line_number_gutter(
     gutter_w: u32,
 ) {
     let line_count = window.text_view.line_count();
+    // Relative/Hybrid measure distance from the cursor's buffer line;
+    // Absolute ignores it. Computed once per frame (the gutter repaints on
+    // cursor motion, so this stays current).
+    let cursor_line = window.text_view.line_at_offset(window.cursor);
     let style = crate::cell::Style {
         fg: crate::cell::Color::Indexed(8),
         ..crate::cell::Style::default()
@@ -1833,10 +1837,14 @@ fn paint_line_number_gutter(
         if buffer_line >= line_count {
             continue; // past end-of-buffer: blank gutter
         }
-        // Write the 1-based number right-aligned, rightmost digit first,
-        // alloc-free. `field >= digits(line_count)` by construction, so
-        // the leftmost digit always leaves at least a leading pad cell.
-        let mut val = buffer_line + 1;
+        // The mode picks the number: absolute (`line+1`), relative
+        // distance, or hybrid (absolute on the cursor line, else relative).
+        // Written right-aligned, rightmost digit first, alloc-free.
+        // `field >= digits(line_count)` by construction, so the leftmost
+        // digit always leaves at least a leading pad cell.
+        let Some(mut val) = window.line_numbers.number_for(buffer_line, cursor_line) else {
+            continue;
+        };
         let mut col = field;
         loop {
             col -= 1;

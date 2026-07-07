@@ -222,8 +222,27 @@ cmd { name = "window.split-vertical",
 cmd { name = "window.toggle-line-numbers",
       description = "Toggle the active window's line-number gutter (off / absolute).",
       fn = function()
-        local cur = pmacs.window.line_numbers()
-        pmacs.window.set_line_numbers(cur == "off" and "absolute" or "off")
+        pmacs.window.set_line_numbers(
+          pmacs.window.line_numbers() == "off" and "absolute" or "off")
+      end }
+
+-- Pick a line-number mode directly from the completion dropdown, rather
+-- than cycling. Arrow-navigable candidates (off/absolute/relative/hybrid).
+cmd { name = "window.set-line-numbers",
+      description = "Set the active window's line-number mode (off/absolute/relative/hybrid).",
+      fn = function()
+        pmacs.minibuffer.read {
+          prompt = "Line numbers: ",
+          source = function() return { "off", "absolute", "relative", "hybrid" } end,
+          history = "line-numbers",
+          on_accept = function(mode)
+            if mode == nil or mode == "" then return end
+            local ok, err = pcall(pmacs.window.set_line_numbers, mode)
+            if not ok then
+              pmacs.editor.set_status("line-numbers: " .. (tostring(err):match("^[^\n]*") or ""))
+            end
+          end,
+        }
       end }
 cmd { name = "window.focus-next",
       description = "Move focus to the next window in iteration order.",

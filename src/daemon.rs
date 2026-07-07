@@ -1050,11 +1050,12 @@ fn dispatcher_loop(
                 let peer_knows_minibuffer_prompt = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 12);
-                // UX gutter — `LineNumbers` is a v13 additive variant; a
-                // v12 peer keeps its gutter off rather than mis-decoding it.
+                // UX gutter — `LineNumbers` carries a `LineNumberMode` since
+                // v14 (was `enabled: bool` in v13); a peer below 14 keeps
+                // its gutter off rather than mis-decoding the wider shape.
                 let peer_knows_line_numbers = session_registry
                     .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 13);
+                    .is_some_and(|s| s.negotiated_protocol_version >= 14);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })

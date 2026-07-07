@@ -10104,9 +10104,12 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
                 let m = match mode.as_str() {
                     "off" | "none" => crate::window::LineNumberMode::Off,
                     "absolute" | "abs" | "on" => crate::window::LineNumberMode::Absolute,
+                    "relative" | "rel" => crate::window::LineNumberMode::Relative,
+                    "hybrid" => crate::window::LineNumberMode::Hybrid,
                     other => {
                         return Err(mlua::Error::external(format!(
-                            "unknown line-number mode {other:?} (expected off|absolute)"
+                            "unknown line-number mode {other:?} \
+                             (expected off|absolute|relative|hybrid)"
                         )));
                     }
                 };
@@ -10125,6 +10128,8 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
                 let mode = match cc.borrow().active_window().line_numbers {
                     crate::window::LineNumberMode::Off => "off",
                     crate::window::LineNumberMode::Absolute => "absolute",
+                    crate::window::LineNumberMode::Relative => "relative",
+                    crate::window::LineNumberMode::Hybrid => "hybrid",
                 };
                 Ok(mode)
             })?,

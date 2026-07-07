@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_thirteen_for_line_numbers() {
+    fn protocol_version_is_fourteen_for_line_number_modes() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1702,8 +1702,10 @@ mod tests {
         // `MenuPrompt`, all additive; the message daemon-gated). Q#MB1
         // bumped 11→12 (`InstanceMessage::MinibufferPrompt`, additive +
         // daemon-gated). UX gutter bumped 12→13
-        // (`InstanceMessage::LineNumbers`, additive + daemon-gated).
-        assert_eq!(PROTOCOL_VERSION, 13);
+        // (`InstanceMessage::LineNumbers`, additive + daemon-gated). UX
+        // gutter modes bumped 13→14 (`LineNumbers` swapped `enabled: bool`
+        // for a `LineNumberMode` enum — encoding change, still daemon-gated).
+        assert_eq!(PROTOCOL_VERSION, 14);
     }
 
     #[test]
@@ -1715,8 +1717,8 @@ mod tests {
         // Q#M4 / Q#S1 / Q#SR5 / Q#RX6 / Q#CM1 / Q#MB1 / UX gutter: the
         // ladder resumes above that floor — v7 (`TripleDown`), v8
         // (`StatusFacts`), v9 + v10 (`SearchPrompt` + regex/invalid), v11
-        // (the context menu), v12 (the GUI minibuffer), v13 (`LineNumbers`)
-        // all interoperate, so v6 through v13 talk.
+        // (the context menu), v12 (the GUI minibuffer), v13 (`LineNumbers`),
+        // v14 (`LineNumberMode`) all interoperate, so v6 through v14 talk.
         assert!(is_supported_protocol_version(6));
         assert!(is_supported_protocol_version(7));
         assert!(is_supported_protocol_version(8));
@@ -1725,10 +1727,11 @@ mod tests {
         assert!(is_supported_protocol_version(11));
         assert!(is_supported_protocol_version(12));
         assert!(is_supported_protocol_version(13));
-        for rejected in [0, 1, 2, 3, 4, 5, 14, u32::MAX] {
+        assert!(is_supported_protocol_version(14));
+        for rejected in [0, 1, 2, 3, 4, 5, 15, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v13 binary"
+                "v{rejected} must be rejected by a v14 binary"
             );
         }
     }
