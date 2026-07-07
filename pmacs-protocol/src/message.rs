@@ -764,6 +764,16 @@ pub enum InstanceMessage {
         diag_errors: u32,
         /// Whole-file `Warning`-severity diagnostic count.
         diag_warnings: u32,
+        /// The core's transient status message (`pmacs.editor.
+        /// set_status` — LSP command summaries like "12 references",
+        /// error reports, ...), or `None` when clear. Added in v15:
+        /// the attached TUI gets the message for free through the
+        /// rendered cell grid's bottom row, but a semantic frontend
+        /// only sees what's on this wire — without it every modeline
+        /// summary was TUI-only. Encoding change to this variant; its
+        /// daemon gate moved `>= 8` → `>= 15` (the v10 `SearchPrompt`
+        /// / v14 `LineNumbers` precedent).
+        message: Option<String>,
     },
     /// T M11.1 — diff zones, folded-region placeholders, anything
     /// occupying its own vertical band. Anchored to the offset of the
@@ -1300,6 +1310,10 @@ pub enum ResourceBody {
 /// Daemon-gated `< 15`; a v14 peer negotiates v14 and simply receives
 /// no `CompletionPopup` (completion still works via the daemon's TUI
 /// rendering and the key round-trip), like every prior additive bump.
+/// v15 also widened `StatusFacts` with the transient status `message`
+/// (encoding change to that variant; its gate moved `>= 8` → `>= 15`,
+/// so a v14 peer's status band goes dark rather than mis-decoding —
+/// the v10 `SearchPrompt` / v14 `LineNumbers` shape).
 pub const PROTOCOL_VERSION: u32 = 15;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on

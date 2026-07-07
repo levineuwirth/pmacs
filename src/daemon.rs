@@ -1034,9 +1034,14 @@ fn dispatcher_loop(
                 // Q#S1 — `StatusFacts` is a v8 variant; an older peer
                 // would hard-error decoding it. Same per-session gate
                 // shape as `DispatchIdle` (v4).
+                // `StatusFacts` gained the transient status `message`
+                // in v15 (encoding change to the variant), so the gate
+                // moved 8 → 15: an older peer's band goes dark rather
+                // than mis-decoding the wider shape (the v10
+                // SearchPrompt / v14 LineNumbers precedent).
                 let peer_knows_status_facts = session_registry
                     .session_state(*fid)
-                    .is_some_and(|s| s.negotiated_protocol_version >= 8);
+                    .is_some_and(|s| s.negotiated_protocol_version >= 15);
                 // Q#SR5 / Q#RX6 — `SearchPrompt` gained regex/invalid
                 // fields in v10 (encoding change); gate at >= 10 so a v9
                 // peer is sent no SearchPrompt rather than the wider

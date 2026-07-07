@@ -1711,6 +1711,26 @@ mod tests {
     }
 
     #[test]
+    fn status_facts_round_trip_with_and_without_message() {
+        // v15 widened `StatusFacts` with the transient status message
+        // (its daemon gate moved 8 → 15). Pin both shapes.
+        let bid = crate::buffer::BufferId::next();
+        for message in [None, Some("12 references".to_owned())] {
+            let msg = InstanceMessage::StatusFacts {
+                buffer_id: bid,
+                name: "main.rs".into(),
+                modified: true,
+                diag_errors: 1,
+                diag_warnings: 2,
+                message,
+            };
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
     fn completion_popup_round_trips_through_postcard() {
         // Arc 1a Q#C5 (v15): the byte-anchored completion dropdown.
         // Pin both the open and the closed shapes.

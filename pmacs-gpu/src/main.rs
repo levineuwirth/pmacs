@@ -702,8 +702,8 @@ fn completion_kind_glyph(kind: u8) -> char {
     }
 }
 
-/// The wire-authoritative status facts (Q#S1, protocol v8),
-/// mirrored from `InstanceMessage::StatusFacts`.
+/// The wire-authoritative status facts (Q#S1, protocol v8; `message`
+/// since v15), mirrored from `InstanceMessage::StatusFacts`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StatusFactsLocal {
     buffer_id: BufferId,
@@ -711,6 +711,9 @@ struct StatusFactsLocal {
     modified: bool,
     diag_errors: u32,
     diag_warnings: u32,
+    /// The core's transient status message (`pmacs.editor.set_status`
+    /// — "12 references", LSP errors, ...), or `None` when clear.
+    message: Option<String>,
 }
 
 /// The live incremental-search prompt (Q#SR5/Q#RX6, protocol v10),
@@ -2626,14 +2629,17 @@ impl State {
                 self.apply_file_style_summary(buffer_id, generation, lines);
                 None
             }
-            // Q#S1 (protocol v8) — the wire-authoritative half of the
-            // status band: name, modified, whole-file diag counts.
+            // Q#S1 (protocol v8; `message` since v15) — the
+            // wire-authoritative half of the status band: name,
+            // modified, whole-file diag counts, and the transient
+            // status message (LSP command summaries).
             InstanceMessage::StatusFacts {
                 buffer_id,
                 name,
                 modified,
                 diag_errors,
                 diag_warnings,
+                message,
             } => {
                 self.status_facts = Some(StatusFactsLocal {
                     buffer_id,
@@ -2641,6 +2647,7 @@ impl State {
                     modified,
                     diag_errors,
                     diag_warnings,
+                    message,
                 });
                 self.request_redraw();
                 None
@@ -3425,6 +3432,19 @@ impl State {
                 format!(" ({}/{})", sp.active.map_or(0, |a| a + 1), sp.total)
             };
             return format!("{}{}{}", label, sp.query, count);
+        }
+        // A transient status message (v15 `StatusFacts.message` — LSP
+        // command summaries like "12 references", error reports) takes
+        // the band over echo-area style; the daemon clears it on the
+        // next keypress, which ships a fresh `StatusFacts` and returns
+        // the band to the buffer name.
+        if let Some(msg) = self
+            .status_facts
+            .as_ref()
+            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
+            .and_then(|f| f.message.as_deref())
+        {
+            return msg.to_owned();
         }
         match self
             .status_facts
