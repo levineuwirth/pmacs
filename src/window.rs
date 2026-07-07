@@ -132,7 +132,6 @@ pub struct Selection {
 /// Line-number display mode for a window's left gutter (UX gutter arc).
 /// `Off` reserves no gutter at all — text starts at column 0, and every
 /// coordinate is unchanged (the default, matching the Emacs tradition).
-/// Additional modes (relative, hybrid) arrive in a later sub-arc.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum LineNumberMode {
     /// No gutter; zero layout change.
@@ -140,6 +139,36 @@ pub enum LineNumberMode {
     Off,
     /// Absolute 1-based line numbers, right-aligned in the gutter.
     Absolute,
+    /// Distance from the cursor line (the cursor line shows `0`).
+    Relative,
+    /// Like `Relative`, but the cursor line shows its absolute 1-based
+    /// number instead of `0` (Vim `number` + `relativenumber`).
+    Hybrid,
+}
+
+impl LineNumberMode {
+    /// Whether this mode reserves a gutter at all (everything but `Off`).
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The displayed 0-or-1-based number for a buffer `line` given the
+    /// cursor's buffer line, or `None` in `Off`. `Relative`/`Hybrid` depend
+    /// on `cursor_line`; `Absolute` ignores it.
+    #[must_use]
+    pub fn number_for(self, line: usize, cursor_line: usize) -> Option<usize> {
+        match self {
+            Self::Off => None,
+            Self::Absolute => Some(line + 1),
+            Self::Relative => Some(line.abs_diff(cursor_line)),
+            Self::Hybrid => Some(if line == cursor_line {
+                line + 1
+            } else {
+                line.abs_diff(cursor_line)
+            }),
+        }
+    }
 }
 
 /// Cells of horizontal padding the line-number gutter adds around the
@@ -219,11 +248,15 @@ impl Window {
     /// reads this one function so the width stays consistent.
     #[must_use]
     pub fn gutter_width(&self) -> u32 {
-        match self.line_numbers {
-            LineNumberMode::Off => 0,
-            LineNumberMode::Absolute => {
-                decimal_digits(self.text_view.line_count().max(1)) + LINE_NUMBER_GUTTER_PAD
-            }
+        // Every on-mode reserves the same width — sized for the largest
+        // number any mode could show (the absolute line count, which
+        // bounds relative distances and hybrid's cursor-line number). A
+        // fixed width keeps the text from jittering as the cursor moves in
+        // relative/hybrid modes.
+        if self.line_numbers.is_on() {
+            decimal_digits(self.text_view.line_count().max(1)) + LINE_NUMBER_GUTTER_PAD
+        } else {
+            0
         }
     }
 
@@ -513,6 +546,26 @@ fn collapse_single_child_splits(node: &mut LayoutNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_number_mode_number_for_covers_all_modes() {
+        use LineNumberMode::{Absolute, Hybrid, Off, Relative};
+        // Cursor on buffer line 5 (0-based). Lines 3 and 7 are 2 away.
+        assert_eq!(Off.number_for(3, 5), None);
+        // Absolute ignores the cursor line: 1-based.
+        assert_eq!(Absolute.number_for(3, 5), Some(4));
+        assert_eq!(Absolute.number_for(5, 5), Some(6));
+        // Relative: distance from the cursor line; cursor line is 0.
+        assert_eq!(Relative.number_for(3, 5), Some(2));
+        assert_eq!(Relative.number_for(7, 5), Some(2));
+        assert_eq!(Relative.number_for(5, 5), Some(0));
+        // Hybrid: absolute on the cursor line, relative elsewhere.
+        assert_eq!(Hybrid.number_for(5, 5), Some(6));
+        assert_eq!(Hybrid.number_for(3, 5), Some(2));
+        // Every on-mode reserves a gutter; Off does not.
+        assert!(!Off.is_on());
+        assert!(Absolute.is_on() && Relative.is_on() && Hybrid.is_on());
+    }
 
     #[test]
     fn decimal_digits_counts_correctly() {
