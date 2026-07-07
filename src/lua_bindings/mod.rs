@@ -8165,7 +8165,14 @@ fn completion_item_to_lua(lua: &Lua, item: &CompletionItem) -> mlua::Result<Tabl
 #[allow(clippy::too_many_lines, reason = "linear list of raw bindings")]
 pub fn install_completion(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     let pmacs: Table = lua.globals().get("pmacs")?;
-    let m = lua.create_table()?;
+    // Merge into an existing `pmacs.completion` (the popup surface
+    // installs at editor-attach time, before the LSP manager exists)
+    // instead of clobbering it --- the same idiom as
+    // `install_completion_framework`.
+    let m: Table = match pmacs.get::<Option<Table>>("completion")? {
+        Some(t) => t,
+        None => lua.create_table()?,
+    };
 
     {
         let mgr = manager.clone();
