@@ -34,10 +34,10 @@ use glyphon::{
 };
 use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
-    AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CrdtOp, Decoration, DecorationKind,
-    DecorationSegment, FrontendId, InlineAdornment, InstanceMessage, InstanceSignal,
-    Key as ProtocolKey, LineNumberMode, MenuPromptRow, Modifiers, PointerKind, SelectionSnapshot,
-    StyleSegment, StyleSpan,
+    AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CompletionPopupRow, CrdtOp,
+    Decoration, DecorationKind, DecorationSegment, FrontendId, InlineAdornment, InstanceMessage,
+    InstanceSignal, Key as ProtocolKey, LineNumberMode, MenuPromptRow, Modifiers, PointerKind,
+    SelectionSnapshot, StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
 };
 use wgpu::MultisampleState;
@@ -652,6 +652,17 @@ struct State {
     mb_text_renderer: TextRenderer,
     /// Minibuffer dropdown background + selection quads (Q#MB1).
     mb_bg_vertex_buffer: ReusableVertexBuffer,
+    /// Arc 1a Q#C5 — the live in-buffer completion popup (protocol
+    /// v15), or `None` when closed.
+    completion: Option<CompletionLocal>,
+    /// Shaped row text for the completion dropdown, one line per
+    /// candidate ("glyph label  detail").
+    completion_buffer: Buffer,
+    /// Dedicated text renderer for the completion dropdown (its own
+    /// layer over the buffer, like the menu's / minibuffer's).
+    completion_text_renderer: TextRenderer,
+    /// Completion dropdown background + selection quads.
+    completion_bg_vertex_buffer: ReusableVertexBuffer,
     /// Minimap vertex bytes cached by [`MinimapCacheKey`] —
     /// rebuilding rescanned every line shape per frame.
     minimap_cache: Option<(MinimapCacheKey, Vec<u8>)>,
@@ -666,6 +677,29 @@ struct State {
     gutter_buffer: Buffer,
     /// Dedicated renderer for the gutter number layer (like the menu / mb).
     gutter_text_renderer: TextRenderer,
+}
+
+/// Kind-glyph column for a completion row: the LSP
+/// `CompletionItemKind` numeric code → the single-char glyph the TUI
+/// popup uses (`crate::completion::CompletionItemKind::glyph`'s
+/// mapping, replicated — the GPU crate doesn't depend on `pmacs`).
+/// Unknown codes fall back to the plain-text dot, per the LSP
+/// "accept extended kinds gracefully" contract.
+fn completion_kind_glyph(kind: u8) -> char {
+    match kind {
+        2..=4 => 'f',   // method / function / constructor
+        5 | 10 => 'p',  // field / property
+        6 | 21 => 'v',  // variable / constant
+        7 | 22 => 'C',  // class / struct
+        8 => 'I',       // interface
+        9 => 'M',       // module
+        13 | 20 => 'E', // enum / enum member
+        14 => 'k',      // keyword
+        15 => 's',      // snippet
+        25 => 't',      // type parameter
+        17 | 19 => '/', // file / folder
+        _ => '.',
+    }
 }
 
 /// The wire-authoritative status facts (Q#S1, protocol v8),
@@ -702,6 +736,34 @@ struct MinibufferLocal {
     cursor: u32,
     candidates: Vec<String>,
     selected: Option<u32>,
+    total: u32,
+}
+
+/// The live in-buffer completion popup (Arc 1a Q#C5, protocol v15),
+/// mirrored from a `CompletionPopup` whose `anchor` was `Some`. The
+/// dropdown anchors at the glyph rect of `anchor` (a byte offset —
+/// the caret mapping reused), one row per candidate; navigation and
+/// accept round-trip into the daemon's completion shadow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletionLocal {
+    /// Byte offset of the prefix start.
+    anchor: u64,
+    /// Bytes of typed prefix at `anchor` (reserved for a bolded-
+    /// prefix refinement; unused by the first render).
+    #[allow(
+        dead_code,
+        reason = "shipped on the wire for the bolded-prefix refinement"
+    )]
+    prefix_len: u32,
+    /// Windowed candidate rows (label / kind / detail), best-first.
+    rows: Vec<CompletionPopupRow>,
+    /// Highlighted row within `rows`.
+    selected: Option<u32>,
+    /// Total candidate count (reserved for an "i/total" hint).
+    #[allow(
+        dead_code,
+        reason = "shipped on the wire for the i/total hint refinement"
+    )]
     total: u32,
 }
 
@@ -849,10 +911,26 @@ impl ApplicationHandler<AppEvent> for App {
                     .as_ref()
                     .is_some_and(State::daemon_intercepts_keys);
 
+                // Arc 1a Q#C6 — the completion popup is NON-modal, so it
+                // never flips the intercept gate (typing stays
+                // optimistic; the daemon's after-edit refresh re-ships
+                // the popup). Only the keys whose *default GPU handling
+                // is wrong under a popup* need this flag: Esc (below,
+                // else it's the local quit) and RET/TAB (the optimistic
+                // gate further down, else they'd insert instead of
+                // accept). C-n/C-p/C-g already round-trip as command
+                // chords, Up/Down as forwarded motion keys — the daemon's
+                // completion shadow handles all of them.
+                let completion_open = self
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.completion.is_some());
+
                 // Escape cancels an active intercept (e.g. a running
-                // search); otherwise it stays the local quit.
+                // search) or dismisses the completion popup; otherwise it
+                // stays the local quit.
                 if matches!(key.logical_key, Key::Named(NamedKey::Escape)) {
-                    if intercept {
+                    if intercept || completion_open {
                         if let Some(client) = self.attach_client.as_ref()
                             && let Err(e) = client.send_key(ProtocolKey::Escape, Modifiers::NONE)
                         {
@@ -956,11 +1034,21 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
-                if let Some(op) = self.state.as_mut().and_then(|state| {
-                    state
-                        .optimistic_crdt_insert(pkey, pmods)
-                        .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
-                }) {
+                // Arc 1a Q#C6 — with the popup open, RET and TAB mean
+                // "accept", not "insert \n / \t": skip the optimistic
+                // path so they round-trip into the daemon's
+                // dispatch_completion_key. Everything else stays
+                // optimistic.
+                let completion_takes_key =
+                    completion_open && matches!(pkey, ProtocolKey::Enter | ProtocolKey::Tab);
+
+                if !completion_takes_key
+                    && let Some(op) = self.state.as_mut().and_then(|state| {
+                        state
+                            .optimistic_crdt_insert(pkey, pmods)
+                            .or_else(|| state.optimistic_crdt_delete(pkey, pmods))
+                    })
+                {
                     if debug_input() {
                         eprintln!(
                             "pmacs-gpu send_crdt: key={pkey:?} buf={:?} bytes={}B",
@@ -1744,6 +1832,9 @@ impl State {
         // Q#MB1 — a third renderer for the minibuffer dropdown layer.
         let mb_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        // Arc 1a Q#C5 — a renderer for the completion dropdown layer.
+        let completion_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         // UX gutter — a renderer for the line-number layer.
         let gutter_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
@@ -1792,6 +1883,17 @@ impl State {
             Metrics::new(MB_DROP_FONT_SIZE, MB_DROP_LINE_HEIGHT),
         );
         mb_buffer.set_size(
+            &mut font_system,
+            Some(MB_DROP_MAX_WIDTH),
+            Some(config.height as f32),
+        );
+        // Completion dropdown buffer (Arc 1a): the minibuffer
+        // dropdown's metrics, its own layer.
+        let mut completion_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(MB_DROP_FONT_SIZE, MB_DROP_LINE_HEIGHT),
+        );
+        completion_buffer.set_size(
             &mut font_system,
             Some(MB_DROP_MAX_WIDTH),
             Some(config.height as f32),
@@ -1888,6 +1990,10 @@ impl State {
             mb_buffer,
             mb_text_renderer,
             mb_bg_vertex_buffer: ReusableVertexBuffer::new(),
+            completion: None,
+            completion_buffer,
+            completion_text_renderer,
+            completion_bg_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_cache: None,
             line_numbers: LineNumberMode::Off,
             gutter_buffer,
@@ -2728,6 +2834,38 @@ impl State {
                 self.request_redraw();
                 None
             }
+            // Arc 1a Q#C5/Q#C6 — the in-buffer completion dropdown.
+            // A close (`anchor: None`) always applies — the daemon may
+            // ship it carrying a buffer this window just switched away
+            // from, and dropping it would wedge a stale popup. An OPEN
+            // for a buffer this window isn't showing is dropped (the
+            // CrdtOp rule).
+            InstanceMessage::CompletionPopup {
+                buffer_id,
+                anchor,
+                prefix_len,
+                rows,
+                selected,
+                total,
+            } => {
+                let Some(anchor) = anchor else {
+                    self.completion = None;
+                    self.request_redraw();
+                    return None;
+                };
+                if self.current_buffer_id != Some(buffer_id) {
+                    return None;
+                }
+                self.completion = Some(CompletionLocal {
+                    anchor,
+                    prefix_len,
+                    rows,
+                    selected,
+                    total,
+                });
+                self.request_redraw();
+                None
+            }
             _ => None,
         }
     }
@@ -3510,6 +3648,167 @@ impl State {
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
 
+    /// Re-shape the completion dropdown rows (Arc 1a Q#C5), one line
+    /// per candidate: kind glyph, label, then the dimmable detail.
+    /// Empty when the popup is closed.
+    fn refresh_completion_buffer(&mut self) {
+        let text = self.completion.as_ref().map_or_else(String::new, |comp| {
+            comp.rows
+                .iter()
+                .map(|row| {
+                    let glyph = completion_kind_glyph(row.kind);
+                    match row.detail.as_deref() {
+                        Some(detail) => format!("{glyph} {}  {detail}", row.label),
+                        None => format!("{glyph} {}", row.label),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        self.completion_buffer.set_text(
+            &mut self.font_system,
+            &text,
+            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            Shaping::Advanced,
+            None,
+        );
+        self.completion_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// The pixel position of the completion popup's byte anchor:
+    /// `(x, line_top_y, line_height)` of the glyph the anchor sits
+    /// before — the caret mapping (`caret_rect`) reused for a second
+    /// byte. `None` when the popup is closed or the anchor is
+    /// scrolled out of the visible slice (the popup then simply
+    /// doesn't draw this frame; scrolling back restores it).
+    fn completion_anchor_px(&self) -> Option<(f32, f32, f32)> {
+        let comp = self.completion.as_ref()?;
+        let (vstart, vend) = self.view_range;
+        if vend <= vstart {
+            return None;
+        }
+        let anchor = comp.anchor;
+        if anchor < vstart || anchor > vend {
+            return None;
+        }
+        let slice = &self.current_text[vstart as usize..vend as usize];
+        let line_offsets = line_byte_offsets(slice);
+        let slice_anchor = anchor - vstart;
+        let (line_lo, _) = source_line_range(slice, slice_anchor);
+        let text_left = self.text_left();
+        for run in self.buffer.layout_runs() {
+            if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
+                continue;
+            }
+            let mut x = text_left;
+            for glyph in run.glyphs {
+                if line_lo + glyph.start as u64 >= slice_anchor {
+                    x = text_left + glyph.x;
+                    break;
+                }
+                // Anchor is past this glyph; track its right edge so an
+                // anchor at line end lands after the final glyph.
+                x = text_left + glyph.x + glyph.w;
+            }
+            return Some((x, TEXT_TOP + run.line_top, run.line_height));
+        }
+        None
+    }
+
+    /// Layout of the completion dropdown: `(first_row, row_count,
+    /// left_x, top_y)`. Anchored on the row *below* the anchor's line
+    /// (growing downward toward the status band); flips above when
+    /// nothing fits below — the TUI overlay's placement rule. The
+    /// visible slice windows around the selection so it stays on
+    /// screen when fewer rows fit than the wire shipped (the F-007
+    /// discipline).
+    fn completion_dropdown_layout(&self) -> Option<(usize, usize, f32, f32)> {
+        let comp = self.completion.as_ref()?;
+        let n = comp.rows.len();
+        if n == 0 {
+            return None;
+        }
+        let (ax, line_top, line_h) = self.completion_anchor_px()?;
+        let band_top = text_area_bottom(self.config.height);
+        let below_px = band_top - (line_top + line_h);
+        let above_px = line_top - TEXT_TOP;
+        let max_below = (below_px / MB_DROP_ROW_HEIGHT).floor() as usize;
+        let max_above = (above_px / MB_DROP_ROW_HEIGHT).floor() as usize;
+        let (avail, below) = if max_below >= 1 {
+            (max_below, true)
+        } else {
+            (max_above, false)
+        };
+        if avail == 0 {
+            return None;
+        }
+        let count = n.min(avail);
+        let sel = comp.selected.map_or(0, |s| s as usize);
+        let first = if n <= count {
+            0
+        } else {
+            sel.saturating_sub(count / 2).min(n - count)
+        };
+        let top_y = if below {
+            line_top + line_h
+        } else {
+            line_top - count as f32 * MB_DROP_ROW_HEIGHT
+        };
+        Some((first, count, ax, top_y))
+    }
+
+    /// Dropdown geometry `(left, top_y, width)`: as wide as the widest
+    /// row (clamped, the minibuffer bounds), left edge at the anchor
+    /// column shifted back from the window's right margin.
+    /// `refresh_completion_buffer` must have run so the width
+    /// measurement is current.
+    fn completion_dropdown_rect(&self) -> Option<(f32, f32, f32)> {
+        let (_first, _count, ax, top_y) = self.completion_dropdown_layout()?;
+        let widest = self
+            .completion_buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0_f32, f32::max);
+        let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
+        let left = ax.min((self.config.width as f32 - width).max(0.0));
+        Some((left, top_y, width))
+    }
+
+    /// Completion dropdown background + selection-highlight quads.
+    /// Empty when closed or the anchor is off-screen.
+    fn completion_dropdown_vertex_bytes(&self) -> Vec<u8> {
+        let Some(comp) = self.completion.as_ref() else {
+            return Vec::new();
+        };
+        let Some((first, count, _ax, _ty)) = self.completion_dropdown_layout() else {
+            return Vec::new();
+        };
+        let Some((x, top_y, width)) = self.completion_dropdown_rect() else {
+            return Vec::new();
+        };
+        let mut rects = vec![MinimapRect {
+            x,
+            y: top_y,
+            w: width,
+            h: count as f32 * MB_DROP_ROW_HEIGHT,
+            color: MENU_BG,
+        }];
+        if let Some(sel) = comp.selected.map(|s| s as usize)
+            && sel >= first
+            && sel < first + count
+        {
+            rects.push(MinimapRect {
+                x,
+                y: top_y + (sel - first) as f32 * MB_DROP_ROW_HEIGHT,
+                w: width,
+                h: MB_DROP_ROW_HEIGHT,
+                color: MENU_SELECTED_BG,
+            });
+        }
+        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
     /// Bookkeeping for an outgoing Pointer event: it supersedes any
     /// unconfirmed optimistic-cursor prediction (the daemon's answer
     /// will be the click position, not the typing prediction), and
@@ -3988,6 +4287,23 @@ impl State {
                 &mb_vertices,
             )
             .cloned();
+        // Arc 1a Q#C5 — the completion dropdown quads (bg + selection),
+        // a layer over the code anchored at the popup's byte anchor.
+        // `refresh_completion_buffer` first so the width measurement in
+        // `completion_dropdown_vertex_bytes` is current.
+        self.refresh_completion_buffer();
+        let completion_vertices = self.completion_dropdown_vertex_bytes();
+        let completion_vertex_count =
+            (completion_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
+        let completion_bg_buffer = self
+            .completion_bg_vertex_buffer
+            .upload(
+                &self.device,
+                &self.queue,
+                "pmacs-gpu completion dropdown",
+                &completion_vertices,
+            )
+            .cloned();
         // The band's strip rides the bg quad batch so it draws under
         // the band text (text renders after the first quad draw).
         let mut bg_vertices = self.decoration_background_vertex_bytes();
@@ -4244,6 +4560,42 @@ impl State {
             )
             .expect("minibuffer text_renderer prepare");
 
+        // Arc 1a Q#C5 — prepare the completion dropdown glyphs in their
+        // layer. The buffer is shaped with *all* wire rows; the layout
+        // scrolls it up by `first` rows so row `first` lands at `top_y`,
+        // and `bounds` clips the rows outside the visible window (the
+        // minibuffer dropdown's F-007 shape).
+        let completion_areas: Vec<TextArea> = self
+            .completion_dropdown_layout()
+            .zip(self.completion_dropdown_rect())
+            .map(|((first, count, _ax, _ty), (x, top_y, width))| TextArea {
+                buffer: &self.completion_buffer,
+                left: x + MB_DROP_PAD_X,
+                top: top_y - first as f32 * MB_DROP_ROW_HEIGHT,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: x as i32,
+                    top: top_y as i32,
+                    right: (x + width).round() as i32,
+                    bottom: (top_y + count as f32 * MB_DROP_ROW_HEIGHT).round() as i32,
+                },
+                default_color: Color::rgb(232, 232, 238),
+                custom_glyphs: &[],
+            })
+            .into_iter()
+            .collect();
+        self.completion_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                completion_areas,
+                &mut self.swash_cache,
+            )
+            .expect("completion text_renderer prepare");
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -4307,6 +4659,17 @@ impl State {
             self.mb_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("minibuffer text_renderer render");
+            // Arc 1a Q#C5 — the completion dropdown floats over the
+            // code at its byte anchor: bg + selection quads, then its
+            // row glyphs on top (under the context menu, which stays
+            // the topmost surface).
+            if let Some(vertex_buffer) = completion_bg_buffer.as_ref() {
+                self.quad_renderer
+                    .render(&mut pass, vertex_buffer, completion_vertex_count);
+            }
+            self.completion_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("completion text_renderer render");
             // Q#CM1 — the context menu draws last: its bg/highlight quads
             // occlude everything beneath, then its glyphs on top.
             if let Some(vertex_buffer) = menu_bg_buffer.as_ref() {
