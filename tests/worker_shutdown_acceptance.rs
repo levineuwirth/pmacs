@@ -1,17 +1,25 @@
 //! Worker-pool teardown regression: dropping an `EditorState` must
 //! release its worker threads even though the `Rc<AsyncRuntime>` is
 //! trapped in Lua-VM reference cycles and never reaches refcount
-//! zero (`EditorState::drop` → `AsyncRuntime::shutdown_workers`).
+//! zero (`EditorState::drop` → `AsyncRuntime::shutdown_workers`,
+//! signal-only --- a join here deadlocks against workers blocked
+//! handing replies to the main thread).
 //!
 //! Before the fix, every `EditorState` ever constructed leaked a
 //! full `cores - 1` worker pool: the m4 acceptance suite (54 editor-
 //! building tests) accumulated 1000+ live threads, each waking every
 //! 100ms.
+//!
+//! The thread-count probe and the idempotence check share ONE test
+//! function: they both build `EditorState`s, and as separate tests
+//! libtest may run them concurrently, polluting the /proc-based
+//! baseline on high-core machines.
 
 use pmacs::editor::EditorState;
 
-/// Thread-count probe via /proc; Linux-only (macOS CI skips --- the
-/// leak and the fix are platform-independent, the *probe* isn't).
+/// Thread-count probe via /proc; Linux-only (macOS CI runs the
+/// non-Linux variant below --- the leak and the fix are platform-
+/// independent, the *probe* isn't).
 #[cfg(target_os = "linux")]
 fn live_threads() -> usize {
     std::fs::read_dir("/proc/self/task").map_or(0, std::iter::Iterator::count)
@@ -19,14 +27,14 @@ fn live_threads() -> usize {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn editor_state_drop_releases_worker_threads() {
+fn editor_state_drop_releases_workers_and_shutdown_is_idempotent() {
     let baseline = live_threads();
     for _ in 0..3 {
         let s = EditorState::new();
         drop(s);
     }
-    // Joins are synchronous in drop; the small sleep only covers
-    // detached per-process reaper threads finishing up.
+    // Signal-only shutdown: parked workers exit within their 100ms
+    // park timeout; give them a beat.
     std::thread::sleep(std::time::Duration::from_millis(300));
     let after = live_threads();
     assert!(
@@ -34,10 +42,17 @@ fn editor_state_drop_releases_worker_threads() {
         "worker threads leak across EditorState drop: \
          baseline {baseline}, after 3 create/drop cycles {after}"
     );
+
+    // Idempotence: explicit shutdown twice, then drop runs it a
+    // third time --- none may hang or panic.
+    let s = EditorState::new();
+    s.async_runtime.shutdown_workers();
+    s.async_runtime.shutdown_workers();
+    drop(s);
 }
 
-/// Platform-independent variant: the pool reports itself dead after
-/// an explicit shutdown, and shutdown is idempotent.
+/// Platform-independent idempotence check for hosts without /proc.
+#[cfg(not(target_os = "linux"))]
 #[test]
 fn explicit_shutdown_is_idempotent() {
     let s = EditorState::new();

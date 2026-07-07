@@ -578,8 +578,13 @@ impl EditorState {
         // below, so typing keeps self-inserting and motion keys keep
         // moving. The post-dispatch validation at the bottom of this
         // function closes the session when a fallen-through key breaks
-        // the anchor/prefix invariant.
+        // the anchor/prefix invariant. A pending multi-key prefix owns
+        // the keyboard: while one is in flight (`C-x ...`) the popup
+        // must not steal its continuation or its `C-g` abort --- and
+        // the Pending arm below closes the popup anyway, so this guard
+        // only covers the same-dispatch race.
         if self.core.borrow().completion_popup_is_open()
+            && self.dispatcher.pending().is_empty()
             && let Some(key) = CompletionPopupKey::from_chord(chord)
         {
             self.dispatch_completion_key(key);
@@ -616,7 +621,12 @@ impl EditorState {
             }
             Action::Pending { .. } => {
                 // The pending prefix is rendered from
-                // `dispatcher.pending()`; no command runs yet.
+                // `dispatcher.pending()`; no command runs yet. Starting
+                // a command sequence dismisses the completion popup:
+                // leaving it open would route the sequence's `C-g`
+                // abort (and its continuation chords) into the popup's
+                // shadow instead of the dispatcher.
+                self.core.borrow_mut().completion_popup_close();
             }
             Action::Unbound { sequence } => match printable_char(&sequence) {
                 Some(ch) => {

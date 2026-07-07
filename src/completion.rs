@@ -487,6 +487,14 @@ pub struct CompletionPopupState {
     /// Buffer the popup targets. The session closes the moment the
     /// active buffer differs (Q#C3 validation).
     pub buffer_id: BufferId,
+    /// Window the popup belongs to. Stamped by
+    /// [`crate::editor_core::EditorCore::completion_popup_open`]
+    /// (Lua publishers don't know window identity), `None` only
+    /// before that stamp. Two splits showing the same buffer each
+    /// carry a persistent overlay --- without this, both would paint
+    /// the popup; with it, only the owning window's overlay renders,
+    /// and a focus change closes the session (Q#C3).
+    pub window_id: Option<crate::window::WindowId>,
     /// Byte offset where the typed prefix starts. For a
     /// trigger-character session (e.g. right after `.`) the prefix is
     /// empty and `anchor` equals the cursor.
@@ -519,6 +527,7 @@ impl CompletionPopupState {
         }
         Some(Self {
             buffer_id,
+            window_id: None,
             anchor,
             prefix,
             candidates,
@@ -637,13 +646,19 @@ pub(crate) fn popup_window(n: usize, selected: usize, max: usize) -> (usize, usi
 /// the popup would overflow the window's right edge.
 pub struct CompletionView {
     popup: SharedCompletionPopup,
+    /// The window this overlay instance is attached to. Overlays
+    /// persist per window; only the one matching the session's
+    /// `window_id` paints, so same-buffer splits don't each show
+    /// the popup.
+    window_id: crate::window::WindowId,
 }
 
 impl CompletionView {
-    /// Build a view reading `popup`.
+    /// Build a view reading `popup`, rendering only when the open
+    /// session belongs to `window_id`.
     #[must_use]
-    pub fn new(popup: SharedCompletionPopup) -> Self {
-        Self { popup }
+    pub fn new(popup: SharedCompletionPopup, window_id: crate::window::WindowId) -> Self {
+        Self { popup, window_id }
     }
 }
 
@@ -826,6 +841,9 @@ impl View for CompletionView {
             let Some(popup) = guard.as_ref() else {
                 return;
             };
+            if popup.window_id != Some(self.window_id) {
+                return; // the session belongs to another window
+            }
             if popup.buffer_id != buf.id() {
                 return; // this window shows a different buffer
             }

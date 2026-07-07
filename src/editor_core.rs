@@ -1842,7 +1842,11 @@ impl EditorCore {
     /// Emptiness is enforced upstream:
     /// [`crate::completion::CompletionPopupState::new`] refuses to build
     /// a candidate-less session.
-    pub fn completion_popup_open(&mut self, state: crate::completion::CompletionPopupState) {
+    pub fn completion_popup_open(&mut self, mut state: crate::completion::CompletionPopupState) {
+        // Stamp the owning window (Lua publishers don't know window
+        // identity): only that window's overlay paints the popup, and
+        // a focus change invalidates the session.
+        state.window_id = Some(self.active_window_id());
         *self
             .completion_popup
             .lock()
@@ -1883,14 +1887,17 @@ impl EditorCore {
         /// this the session is stale, not a prefix.
         const MAX_PREFIX_BYTES: u64 = 512;
 
-        let (buffer_id, anchor) = {
+        let (buffer_id, window_id, anchor) = {
             let guard = self
                 .completion_popup
                 .lock()
                 .expect("completion popup poisoned");
             let p = guard.as_ref()?;
-            (p.buffer_id, p.anchor)
+            (p.buffer_id, p.window_id, p.anchor)
         };
+        if window_id != Some(self.active_window_id()) {
+            return None; // focus moved to another window/split
+        }
         if self.active_buffer_id() != buffer_id {
             return None;
         }
@@ -1979,9 +1986,10 @@ impl EditorCore {
     /// renders nothing while the popup is closed.
     fn ensure_completion_overlay(&mut self) {
         let popup = self.completion_popup.clone();
+        let wid = self.active_window_id();
         let win = self.active_window_mut();
         if !win.overlay_kinds().contains(&"completion-popup") {
-            win.push_overlay(Box::new(crate::completion::CompletionView::new(popup)));
+            win.push_overlay(Box::new(crate::completion::CompletionView::new(popup, wid)));
         }
     }
 
@@ -3381,5 +3389,25 @@ mod tests {
         assert!(!s.completion_popup_accept());
         assert_eq!(text_of(&s), "he world\n", "buffer untouched");
         assert!(!s.completion_popup_is_open(), "stale accept still closes");
+    }
+
+    #[test]
+    fn completion_popup_validate_closes_on_window_focus_change() {
+        // Two splits on the SAME buffer: the session is window-scoped,
+        // so moving focus (buffer unchanged!) must invalidate it ---
+        // this is also what keeps the persistent overlay in the other
+        // split from painting a popup it doesn't own.
+        let mut s = from_bytes(b"he world\n");
+        s.split_active(Orientation::Horizontal, true);
+        s.active_window_mut().cursor = 2;
+        open_popup(&mut s, 0, "he", "hello");
+        s.completion_popup_validate();
+        assert!(s.completion_popup_is_open(), "session holds in its window");
+        s.focus_next();
+        s.completion_popup_validate();
+        assert!(
+            !s.completion_popup_is_open(),
+            "focus change closes the session even with the same buffer"
+        );
     }
 }

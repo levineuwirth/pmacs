@@ -201,10 +201,68 @@ fn at_point_command_opens_below_threshold() {
     assert_eq!(text, "hello_world hello_world");
 }
 
-/// The Q#C8 URI scoping: with `ctx.uri` set, the LSP provider only
-/// surfaces the matching document's cached items; without it, the
-/// legacy global drain applies. Driven through the Lua collect
-/// surface against a hand-seeded store.
+/// A multi-key prefix owns the keyboard: starting `C-x` while the
+/// popup is open dismisses it, so the sequence's continuation (and a
+/// `C-g` abort) reaches the dispatcher instead of the popup shadow.
+#[test]
+fn pending_prefix_dismisses_popup_and_keeps_dispatcher_control() {
+    let mut s = EditorState::new();
+    type_str(&mut s, "hello_world he");
+    let (_, visible, _) = probe(&s);
+    assert!(visible);
+
+    // C-x starts a prefix: the popup must close immediately...
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    let (text, visible, _) = probe(&s);
+    assert_eq!(text, "hello_world he", "the prefix key edits nothing");
+    assert!(!visible, "a pending prefix dismisses the popup");
+
+    // ...so this C-g aborts the prefix (not a popup), and typing
+    // afterwards self-inserts normally.
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('g'), KeyModifiers::CONTROL),
+    );
+    type_str(&mut s, "x");
+    let (text, _, _) = probe(&s);
+    assert_eq!(
+        text, "hello_world hex",
+        "after the aborted prefix, keys dispatch normally"
+    );
+}
+
+/// LSP-only words must still query the server: when the synchronous
+/// providers return nothing at auto-open, a pending session is left
+/// behind and the request fires anyway (previously the request was
+/// gated on the popup having opened, so an empty dabbrev/snippet/
+/// index sweep meant the server was never asked).
+#[test]
+fn empty_sync_sweep_still_leaves_a_pending_session() {
+    let mut s = EditorState::new();
+    // A buffer whose only word is the one being typed: dabbrev is
+    // structurally empty, no LSP attached. The popup cannot open...
+    type_str(&mut s, "qz");
+    let (_, visible, _) = probe(&s);
+    assert!(!visible, "nothing to show without providers");
+    // ...but the driver's session mirror must be pending rather than
+    // absent, so a (mocked) late LSP arrival could materialize it.
+    // With no attachment at all the request path no-ops; what we can
+    // assert end-to-end is that the state machine stays consistent:
+    // further typing neither crashes nor opens a bogus popup.
+    type_str(&mut s, "q");
+    let (text, visible, _) = probe(&s);
+    assert_eq!(text, "qzq");
+    assert!(!visible);
+}
+
+/// The Q#C8 URI plumbing: `ctx.uri` reaches Lua providers as the
+/// ninth positional arg, so a URI-aware provider can scope itself
+/// (the BUILT-IN LSP provider is stricter still: no uri → no rows).
+/// Driven through the Lua collect surface with an emulating provider
+/// because the real LSP store is Rust-side.
 #[test]
 fn collect_scopes_lsp_candidates_to_ctx_uri() {
     let s = EditorState::new();

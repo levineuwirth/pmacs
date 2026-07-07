@@ -624,15 +624,18 @@ fn project_kind_to_completion_kind(k: &crate::project_index::SymbolKind) -> Comp
 /// the LSP completion store. The framework does **not** drive a
 /// fresh `textDocument/completion` request --- that's the editor's
 /// job; we just read whatever the async pipeline has produced so
-/// far. With `ctx.uri` set (Q#C8 scoping, the popup driver's path)
-/// only that document's entries surface --- across all servers keyed
-/// to it --- so a popup never shows another buffer's candidates.
-/// Without a URI the legacy global drain across every cached
-/// `(server_id, uri)` key applies. The registry's dedup collapses
-/// identical entries; the prefix score ranks them.
+/// far. Strictly scoped to `ctx.uri` (Q#C8): only that document's
+/// entries surface, across all servers keyed to it. **No URI → no
+/// LSP candidates** --- an unattached/scratch buffer must never show
+/// another file's cached completions (the original global drain did
+/// exactly that). The registry's dedup collapses identical entries;
+/// the prefix score ranks them.
 #[must_use]
 pub fn lsp_completion_provider(lsp: crate::lsp::SharedLspManager) -> ProviderFn {
     Box::new(move |ctx: &CompletionContext| -> Vec<CompletionItem> {
+        let Some(uri) = ctx.uri.clone() else {
+            return Vec::new();
+        };
         let store_handle = {
             let mgr = lsp.borrow();
             mgr.completion_store()
@@ -641,11 +644,7 @@ pub fn lsp_completion_provider(lsp: crate::lsp::SharedLspManager) -> ProviderFn 
             return Vec::new();
         };
         let mut out: Vec<CompletionItem> = Vec::new();
-        let keys: Vec<_> = store
-            .keys()
-            .filter(|k| ctx.uri.as_ref().is_none_or(|uri| k.uri == *uri))
-            .cloned()
-            .collect();
+        let keys: Vec<_> = store.keys().filter(|k| k.uri == uri).cloned().collect();
         for key in keys {
             for item in store.items(&key) {
                 out.push(item.clone());

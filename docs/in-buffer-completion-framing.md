@@ -277,6 +277,42 @@ and kill-ring are the named next table-stakes items).
    shows misfires, the fix is the named hook-payload PR, not
    heuristic patching.
 
+## As-built notes — phase 1 (PR #92)
+
+Landed close to the framing; the user's TUI validation pass surfaced
+five findings, all addressed in-branch:
+
+1. **LSP-only words never queried the server** — the auto-open path
+   fired `request_completion` only when the synchronous providers had
+   already produced rows. Now an empty sweep leaves a *pending*
+   session (the trigger-char shape) and the request always fires;
+   `isIncomplete` responses re-request on further typing via
+   `pmacs.completion.is_incomplete`. Corollary found while fixing:
+   `attachment_for_request` must flush-if-attached but **never
+   attach** — the first cut wrapped `attached_for_active`, which
+   spawns a server on demand, i.e. per-keystroke spawn attempts in
+   every unattached buffer (wedged the parallel m4 suite).
+   Attachment stays buffer-open policy.
+2. **Strict URI scoping** — the built-in LSP provider now returns
+   *nothing* without `ctx.uri` (the framing's "legacy global drain
+   when absent" allowed unattached/scratch buffers to show another
+   file's cached completions).
+3. **Pending prefixes own the keyboard** — `Action::Pending` (`C-x
+   ...`) dismisses the popup, and the popup shadow is additionally
+   guarded on `dispatcher.pending().is_empty()`, so a sequence's
+   continuation and its `C-g` abort reach the dispatcher.
+4. **Window-scoped sessions** — `CompletionPopupState.window_id`
+   (stamped by `completion_popup_open`; Lua never sees it): only the
+   owning window's overlay paints (same-buffer splits each carry a
+   persistent overlay), and a focus change invalidates the session.
+5. The worker-pool teardown fix (signal-only `EditorState::drop`)
+   rode along in the PR — unrelated to completion, surfaced by
+   running the m4 gate.
+
+Also caught by the new acceptance suite pre-validation:
+`install_completion` rebuilt `pmacs.completion` and clobbered the
+popup bindings — all `pmacs.completion` installers now merge.
+
 ## Deferred (named, not silently dropped)
 
 - Snippet tabstops/placeholders (v1 inserts bodies literally).

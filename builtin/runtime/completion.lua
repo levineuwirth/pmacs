@@ -176,7 +176,15 @@ pmacs.hook.add("buffer.after-edit", function()
       close_popup()
       return
     end
-    if not publish(buf, session.anchor, prefix, "incomplete", nil) then
+    if publish(buf, session.anchor, prefix, "incomplete", nil) then
+      -- isIncomplete contract: a partial server response must be
+      -- re-queried as the user keeps typing, not merely re-filtered.
+      local rec = pmacs.lsp.active_attachment()
+      if rec then
+        local ok, incomplete = pcall(pmacs.completion.is_incomplete, rec.server, rec.uri)
+        if ok and incomplete then request_lsp_then_refresh() end
+      end
+    else
       session = nil -- narrowed to nothing: the session is over
     end
     return
@@ -187,9 +195,14 @@ pmacs.hook.add("buffer.after-edit", function()
   if key ~= prev_key or not prev_cursor or cursor - prev_cursor ~= 1 then return end
   local prefix = word_prefix_before(buf, cursor)
   if #prefix >= MIN_PREFIX then
-    if publish(buf, cursor - #prefix, prefix, "invoked", nil) then
-      request_lsp_then_refresh()
+    -- Fire the LSP request even when the synchronous providers came
+    -- up empty: for an LSP-only word (no dabbrev/snippet/index hit,
+    -- cold store) the popup materializes when the response lands ---
+    -- the same pending-session shape as the trigger-char path.
+    if not publish(buf, cursor - #prefix, prefix, "invoked", nil) then
+      session = { key = key, anchor = cursor - #prefix, pending = true }
     end
+    request_lsp_then_refresh()
     return
   end
   if #prefix == 0 then
