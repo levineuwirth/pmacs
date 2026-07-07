@@ -3,7 +3,7 @@
 //! the Q#C3 partial dispatcher shadow, and Q#C7 validated accept, all
 //! driven through `dispatch_key` exactly as a terminal user would.
 //!
-//! The LSP provider's request path is covered by the m4_5 fake-LSP
+//! The LSP provider's request path is covered by the `m4_5` fake-LSP
 //! suite; these tests run hermetic (dabbrev + custom Lua providers)
 //! so no server binary is needed.
 //!

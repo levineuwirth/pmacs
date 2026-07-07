@@ -175,7 +175,17 @@ impl PoolShared {
 /// thread).
 pub struct WorkerPool {
     shared: Arc<PoolShared>,
-    workers: Vec<JoinHandle<()>>,
+    /// Join handles, drained exactly once by [`Self::shutdown`]
+    /// (directly or via `Drop`). Behind a `Mutex` so shutdown works
+    /// from a shared reference: the pool's owner is typically an
+    /// `Rc<AsyncRuntime>` cloned into Lua closures, and those clones
+    /// form VM reference cycles that keep the `Rc` from ever
+    /// reaching zero --- an embedder that merely *drops* its handle
+    /// would leak every worker thread. `EditorState::drop` calls
+    /// `shutdown()` explicitly instead.
+    workers: Mutex<Vec<JoinHandle<()>>>,
+    /// Thread count at construction (stable across shutdown).
+    size: usize,
 }
 
 impl WorkerPool {
@@ -194,7 +204,7 @@ impl WorkerPool {
             next_id: AtomicU64::new(0),
             parker: (Mutex::new(()), Condvar::new()),
         });
-        let workers = local_queues
+        let workers: Vec<JoinHandle<()>> = local_queues
             .into_iter()
             .enumerate()
             .map(|(idx, local)| {
@@ -205,7 +215,11 @@ impl WorkerPool {
                     .expect("spawn worker thread")
             })
             .collect();
-        Self { shared, workers }
+        Self {
+            shared,
+            size,
+            workers: Mutex::new(workers),
+        }
     }
 
     /// Build a pool sized at `available_parallelism - 1`, with a
@@ -218,10 +232,48 @@ impl WorkerPool {
         Self::new(cores.saturating_sub(1))
     }
 
-    /// Number of worker threads owned by this pool.
+    /// Number of worker threads this pool was built with.
     #[must_use]
     pub fn size(&self) -> usize {
-        self.workers.len()
+        self.size
+    }
+
+    /// Signal every worker to exit, without joining. Idle (parked)
+    /// workers observe the flag within their 100ms park timeout and
+    /// return; a worker mid-job exits when its job finishes. Queued
+    /// jobs that haven't been picked up are dropped without running;
+    /// jobs dispatched *after* the signal are never picked up.
+    ///
+    /// Exists as an explicit method (not just `Drop`) because the
+    /// pool's owning `Rc<AsyncRuntime>` is captured into Lua-VM
+    /// reference cycles and may never be reclaimed --- callers that
+    /// know the editor is going away (`EditorState::drop`) signal the
+    /// threads down regardless.
+    ///
+    /// Deliberately does NOT join: a worker can be blocked publishing
+    /// its reply onto the message bus that only the *main thread*
+    /// drains, so a main-thread join here is a deadlock (observed as
+    /// the m4 acceptance suite wedging for hours at teardown). Callers
+    /// that own the whole world and want the join use
+    /// [`Self::shutdown`] (or just drop the pool).
+    pub fn signal_shutdown(&self) {
+        self.shared.shutdown.store(true, Ordering::Release);
+        self.shared.notify_all();
+    }
+
+    /// [`Self::signal_shutdown`] plus a join of every worker thread.
+    /// Idempotent: the second call finds no handles and returns
+    /// immediately. Only safe where no worker can be blocked on the
+    /// caller's own thread (see `signal_shutdown`); `Drop` uses it
+    /// because a pool being dropped has no live bus consumer to
+    /// deadlock against in the bare-pool case.
+    pub fn shutdown(&self) {
+        self.signal_shutdown();
+        let handles: Vec<JoinHandle<()>> =
+            std::mem::take(&mut *self.workers.lock().expect("worker pool mutex poisoned"));
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 
     /// Submit `work` to be run on a worker. Returns a [`JobHandle`]
@@ -263,18 +315,11 @@ impl WorkerPool {
 }
 
 impl Drop for WorkerPool {
-    /// Shutdown semantics: dropping the pool signals every worker
-    /// to exit at its next idle wakeup and joins them. Running
-    /// jobs run to completion (or to their own cancellation
-    /// check); queued jobs that haven't been picked up are dropped
-    /// without running. Tests and callers that want explicit
-    /// shutdown just `drop(pool)`.
+    /// Dropping the pool is an implicit [`Self::shutdown`]: every
+    /// worker is signalled to exit at its next idle wakeup and
+    /// joined. No-op when `shutdown` already ran.
     fn drop(&mut self) {
-        self.shared.shutdown.store(true, Ordering::Release);
-        self.shared.notify_all();
-        for handle in self.workers.drain(..) {
-            let _ = handle.join();
-        }
+        self.shutdown();
     }
 }
 

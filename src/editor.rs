@@ -102,6 +102,32 @@ pub struct EditorState {
     mouse_click: Option<MouseClickState>,
 }
 
+impl Drop for EditorState {
+    /// Tear down the worker-pool threads.
+    ///
+    /// The `Rc<AsyncRuntime>` is cloned into dozens of Lua closures
+    /// (`pmacs.workers`, LSP request wrappers, ...), and several of
+    /// the registries those closures capture themselves store
+    /// `mlua::Function` values --- reference cycles through the Lua
+    /// VM that keep the `Rc` from ever reaching zero. Harmless for a
+    /// single editor per process (the OS reclaims at exit), but a
+    /// test binary that builds one `EditorState` per test would leak
+    /// one full worker pool (`cores - 1` threads, each waking every
+    /// 100ms) per test --- observed as 1000+ live threads in the m4
+    /// acceptance suite. Dropping the editor reaches the pool through
+    /// its own `Rc` clone and signals the threads down regardless of
+    /// the cycle; parked workers exit within their 100ms wakeup.
+    ///
+    /// Signal-only, NO join: a worker can be blocked publishing its
+    /// reply onto the bus that this (main) thread drains --- joining
+    /// here deadlocked the m4 suite at teardown for hours. A worker
+    /// stuck mid-handoff stays alive (bounded by its job), which is
+    /// still a ~15x improvement over leaking every pool whole.
+    fn drop(&mut self) {
+        self.async_runtime.shutdown_workers();
+    }
+}
+
 #[derive(Copy, Clone)]
 struct MouseClickState {
     frontend_id: FrontendId,
