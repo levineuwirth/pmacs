@@ -130,46 +130,12 @@ pub struct Selection {
 }
 
 /// Line-number display mode for a window's left gutter (UX gutter arc).
-/// `Off` reserves no gutter at all — text starts at column 0, and every
-/// coordinate is unchanged (the default, matching the Emacs tradition).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub enum LineNumberMode {
-    /// No gutter; zero layout change.
-    #[default]
-    Off,
-    /// Absolute 1-based line numbers, right-aligned in the gutter.
-    Absolute,
-    /// Distance from the cursor line (the cursor line shows `0`).
-    Relative,
-    /// Like `Relative`, but the cursor line shows its absolute 1-based
-    /// number instead of `0` (Vim `number` + `relativenumber`).
-    Hybrid,
-}
-
-impl LineNumberMode {
-    /// Whether this mode reserves a gutter at all (everything but `Off`).
-    #[must_use]
-    pub fn is_on(self) -> bool {
-        !matches!(self, Self::Off)
-    }
-
-    /// The displayed 0-or-1-based number for a buffer `line` given the
-    /// cursor's buffer line, or `None` in `Off`. `Relative`/`Hybrid` depend
-    /// on `cursor_line`; `Absolute` ignores it.
-    #[must_use]
-    pub fn number_for(self, line: usize, cursor_line: usize) -> Option<usize> {
-        match self {
-            Self::Off => None,
-            Self::Absolute => Some(line + 1),
-            Self::Relative => Some(line.abs_diff(cursor_line)),
-            Self::Hybrid => Some(if line == cursor_line {
-                line + 1
-            } else {
-                line.abs_diff(cursor_line)
-            }),
-        }
-    }
-}
+///
+/// Defined in `pmacs-protocol` so the wire, the daemon, and both frontends
+/// share one enum and one number rule ([`LineNumberMode::number_for`],
+/// Q#UX7); re-exported here so `crate::window::LineNumberMode` stays the
+/// in-crate path.
+pub use pmacs_protocol::LineNumberMode;
 
 /// Cells of horizontal padding the line-number gutter adds around the
 /// digit field: a leading and a trailing blank, so `gutter_w = digits +

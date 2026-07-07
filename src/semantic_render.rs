@@ -157,11 +157,11 @@ pub struct SemanticRenderState {
     /// `(name, modified, diag_errors, diag_warnings)` last emitted as
     /// `StatusFacts` (Q#S1) — cached-compare suppression.
     last_status: HashMap<BufferId, (String, bool, u32, u32)>,
-    /// Last-emitted line-number gutter enabled-flag (UX gutter arc,
-    /// protocol v13) — cached-compare suppression. Seeded to `Some(false)`
-    /// (the frontend's default) so an off gutter never emits. Per-frontend
-    /// (one value), since this state carries one frontend's `frontend_id`.
-    last_line_numbers: Option<bool>,
+    /// Last-emitted line-number gutter mode (UX gutter arc, protocol v14) —
+    /// cached-compare suppression. Seeded to `Some(Off)` (the frontend's
+    /// default) so an off gutter never emits. Per-frontend (one value),
+    /// since this state carries one frontend's `frontend_id`.
+    last_line_numbers: Option<crate::window::LineNumberMode>,
     /// Last emitted `SearchPrompt` payload per buffer, for
     /// cached-compare suppression (see [`SearchPromptFacts`]).
     last_search_prompt: HashMap<BufferId, SearchPromptFacts>,
@@ -249,7 +249,7 @@ impl SemanticRenderState {
             // window never emits `LineNumbers`, so the common case adds no
             // traffic and the first frame is unchanged. Only an actual
             // toggle-on (or later toggle-off) ships a message.
-            last_line_numbers: Some(false),
+            last_line_numbers: Some(crate::window::LineNumberMode::Off),
             last_style_gate: HashMap::new(),
             diag_line_cache: HashMap::new(),
         }
@@ -698,26 +698,26 @@ impl SemanticRenderState {
     }
 
     /// The `LineNumbers` message for this frame, or `None` when the gutter
-    /// mode hasn't changed (UX gutter arc, protocol v13). The toggle lives
-    /// on this frontend's active window (`M-x window.toggle-line-numbers`);
-    /// a semantic frontend renders the gutter locally but the daemon owns
-    /// the on/off state, so it ships the mode. The daemon's write loop
-    /// keeps the variant off wires negotiated `< 13`.
+    /// mode hasn't changed (UX gutter arc, protocol v14). The mode lives on
+    /// this frontend's active window; a semantic frontend renders the gutter
+    /// locally (it owns the text + its cursor line, so relative/hybrid need
+    /// no round trip) but the daemon owns the mode, so it ships which one.
+    /// The daemon's write loop keeps the variant off wires negotiated `< 14`.
     fn line_numbers_msg(
         &mut self,
         state: &EditorState,
         buffer_id: BufferId,
     ) -> Option<InstanceMessage> {
-        let enabled = {
+        let mode = {
             let core = state.core.borrow();
             core.active_window_for(self.frontend_id)
-                .is_some_and(|w| w.line_numbers != crate::window::LineNumberMode::Off)
+                .map_or(crate::window::LineNumberMode::Off, |w| w.line_numbers)
         };
-        if self.last_line_numbers == Some(enabled) {
+        if self.last_line_numbers == Some(mode) {
             return None;
         }
-        self.last_line_numbers = Some(enabled);
-        Some(InstanceMessage::LineNumbers { buffer_id, enabled })
+        self.last_line_numbers = Some(mode);
+        Some(InstanceMessage::LineNumbers { buffer_id, mode })
     }
 
     /// The `InlineAdornments` message for this frame, or `None` when
@@ -1748,14 +1748,19 @@ mod tests {
             "off gutter must not emit LineNumbers"
         );
 
-        // Toggle the active window on → next frame emits enabled = true.
+        // Toggle the active window on → next frame emits the mode.
         state.core.borrow_mut().active_window_mut().line_numbers =
             crate::window::LineNumberMode::Absolute;
         let on = s.render_frame(&state);
         assert!(
-            on.iter()
-                .any(|m| matches!(m, InstanceMessage::LineNumbers { enabled: true, .. })),
-            "toggling the gutter on must emit LineNumbers {{ enabled: true }}"
+            on.iter().any(|m| matches!(
+                m,
+                InstanceMessage::LineNumbers {
+                    mode: crate::window::LineNumberMode::Absolute,
+                    ..
+                }
+            )),
+            "toggling the gutter on must emit LineNumbers with the mode"
         );
 
         // No further change → suppressed.

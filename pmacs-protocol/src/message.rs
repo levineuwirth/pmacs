@@ -905,19 +905,66 @@ pub enum InstanceMessage {
         /// Total candidate count (the window is a slice of this).
         total: u32,
     },
-    /// UX gutter (protocol v13) — the per-window line-number gutter mode
-    /// for the frontend's active window. A semantic frontend renders line
-    /// numbers *locally* (it owns the text), but the on/off toggle lives
-    /// daemon-side (`M-x window.toggle-line-numbers`), so the daemon ships
-    /// the mode. Additive + daemon-gated `>= 13` — an older peer would
-    /// hard-error decoding it, so it stays off wires negotiated below 13.
+    /// UX gutter — the per-window line-number gutter *mode* for the
+    /// frontend's active window. A semantic frontend renders line numbers
+    /// *locally* (it owns the text + its own cursor line, so it can draw
+    /// relative/hybrid without a round trip), but the mode toggle lives
+    /// daemon-side, so the daemon ships which mode. Bumped 13 → 14: the
+    /// v13 shape carried a bare `enabled: bool` (off/absolute only); v14
+    /// carries the full [`LineNumberMode`] so relative/hybrid can ride the
+    /// same message. Daemon-gated `>= 14` — a v13 peer negotiates v13 and
+    /// receives no `LineNumbers` (its gutter stays off) rather than
+    /// mis-decoding the wider shape.
     LineNumbers {
         /// Buffer the active window shows (routing/consistency; the mode
         /// is a window property, not a buffer one).
         buffer_id: crate::BufferId,
-        /// Whether the line-number gutter is enabled for that window.
-        enabled: bool,
+        /// The line-number gutter mode for that window.
+        mode: LineNumberMode,
     },
+}
+
+/// Line-number gutter mode for a window (UX gutter arc). Shared across the
+/// wire, the daemon, and both frontends so the *number rule* — what value
+/// each line shows — is identical everywhere (Q#UX7). `pmacs` re-exports
+/// this as `crate::window::LineNumberMode`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineNumberMode {
+    /// No gutter; zero layout change (the default, Emacs tradition).
+    #[default]
+    Off,
+    /// Absolute 1-based line numbers.
+    Absolute,
+    /// Distance from the cursor line (the cursor line shows `0`).
+    Relative,
+    /// Like `Relative`, but the cursor line shows its absolute 1-based
+    /// number instead of `0` (Vim `number` + `relativenumber`).
+    Hybrid,
+}
+
+impl LineNumberMode {
+    /// Whether this mode reserves a gutter at all (everything but `Off`).
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The displayed number for a 0-based buffer `line` given the cursor's
+    /// 0-based buffer line, or `None` in `Off`. `Relative`/`Hybrid` depend
+    /// on `cursor_line`; `Absolute` ignores it.
+    #[must_use]
+    pub fn number_for(self, line: usize, cursor_line: usize) -> Option<usize> {
+        match self {
+            Self::Off => None,
+            Self::Absolute => Some(line + 1),
+            Self::Relative => Some(line.abs_diff(cursor_line)),
+            Self::Hybrid => Some(if line == cursor_line {
+                line + 1
+            } else {
+                line.abs_diff(cursor_line)
+            }),
+        }
+    }
 }
 
 /// One row of an open menu on the wire ([`InstanceMessage::MenuPrompt`]).
@@ -1199,7 +1246,13 @@ pub enum ResourceBody {
 /// Daemon-gated `< 13`; a v12 peer negotiates v12 and receives no
 /// `LineNumbers` (its gutter simply stays off), like every prior additive
 /// bump.
-pub const PROTOCOL_VERSION: u32 = 13;
+///
+/// UX gutter modes: bumped 13 → 14 — `LineNumbers` swapped its `enabled:
+/// bool` for a [`LineNumberMode`] enum so relative/hybrid ride the same
+/// message. Encoding change to that variant; daemon-gated `< 14` (a v13
+/// peer negotiates v13 and receives no `LineNumbers` rather than
+/// mis-decoding the wider shape), same shape as the v10 `SearchPrompt` bump.
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1256,7 +1309,7 @@ pub const PROTOCOL_VERSION: u32 = 13;
 /// Q#MB1: extended to `[6, 7, 8, 9, 10, 11, 12]`.
 /// `InstanceMessage::MinibufferPrompt` is additive and daemon-gated per
 /// session, so the ladder resumes again.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13];
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].
