@@ -281,4 +281,48 @@ while eyeballing this sub-arc against the two-frontend setup.)
 highlight sticks / doesn't wrap on arrow-up; reproduces on the "normal"
 nav path but not the alternate one. Its own thread.
 
+**Sub-arc 3 — relative + hybrid line-number modes (TUI + GPU, protocol v14).**
+
+The last two of the framed modes (Q#UX4): **Relative** (each line shows its
+distance from the cursor line; cursor = 0) and **Hybrid** (cursor line shows
+its absolute number, others relative — Vim `number`+`relativenumber`).
+
+- **One enum, one number rule.** `LineNumberMode {Off, Absolute, Relative,
+  Hybrid}` + `number_for(line, cursor_line)` live in **pmacs-protocol** so
+  the wire, daemon, TUI, and GPU all compute the same value (Q#UX7);
+  `pmacs` re-exports it as `crate::window::LineNumberMode`.
+- **Protocol v14 (the scored-false Q#UX1 debt, part two).** Sub-arc 1
+  shipped `LineNumbers { enabled: bool }` (off/absolute) as a deliberate
+  placeholder; relative/hybrid need the mode, so the variant now carries
+  `mode: LineNumberMode`. Encoding change → 13 → 14, daemon-gated `< 14`
+  (a v13 peer gets no `LineNumbers`), same shape as the v10 `SearchPrompt`
+  bump.
+- **Cursor-line dependency + repaint-on-move.** Relative numbers change as
+  the cursor moves, not just on scroll. TUI: the full-frame render already
+  repaints on cursor motion, and `paint_line_number_gutter` reads the
+  cursor's buffer line (`text_view.line_at_offset(cursor)`) — free. GPU:
+  `refresh_gutter_buffer` rebuilds every render (which cursor moves already
+  trigger) using `cursor_line()` off `current_line_starts` — also free.
+- **Stable width.** `gutter_width` is sized by `digits(line_count)` for
+  every on-mode, so the text never jitters as the cursor moves.
+- **Selection UX (chosen over a 4-way cycle):** `window.toggle-line-numbers`
+  stays a binary off/absolute toggle; `window.set-line-numbers` opens the
+  minibuffer with an arrow-navigable completion dropdown
+  (off|absolute|relative|hybrid) — dogfooding the #89 arrow-nav fix.
+
+Validated: `fmt` + `clippy --all-targets` clean both flavors + gpu; 1446
+lib (incl. `number_for` across all modes), 12 protocol, 55 pmacs-gpu (incl.
+a headless render proving relative ≠ absolute). Both frontends eyeballed,
+including live cursor-move renumbering.
+
+## Arc close
+
+All four sub-arcs shipped: 1) gutter + absolute (v13), 2) diagnostic signs,
+3) relative/hybrid (v14). Q#UX1 ("no protocol change") **scored false** —
+the gutter cost two protocol bumps (v13 daemon-owned toggle, v14 mode) —
+because the *control* is daemon-owned even though *rendering* is
+frontend-local. Deferred, riding the gutter when someone wants them:
+signs-without-numbers mode; whitespace/indent guides; folding placeholders;
+git change markers.
+
 <!-- next sub-arcs appended here -->
