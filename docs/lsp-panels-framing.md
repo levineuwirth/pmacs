@@ -1,13 +1,23 @@
 # LSP panels — framing (Arc 1b)
 
-pmacs's LSP data layer answers references, document symbols, code
-actions, and hover in full — and then renders one line in the
-modeline. `lsp.find-references` reports "12 references" and throws
-eleven away; `lsp.code-actions` applies `acts[1]` blind;
-`lsp.document-symbols` prints a count; multi-line hover shows its
-first line. Every one of these is flagged "future UX work" in
-`builtin/runtime/lsp.lua`. This arc builds that UX — as **buffers**,
-not new UI surfaces, so both frontends get it for free.
+> **Status: ARC COMPLETE** (PRs #94 + #95 merged 2026-07-08; this doc
+> is the as-built record). The framing below is preserved as written;
+> the intro and "What already exists" sections describe the state
+> *before* the arc (present tense = the pre-arc baseline), and the
+> scored bets + as-built divergences at the end record what actually
+> shipped and diverged.
+
+*(Pre-arc baseline.)* pmacs's LSP data layer answers references,
+document symbols, code actions, and hover in full — and then renders
+one line in the modeline. `lsp.find-references` reports "12
+references" and throws eleven away; `lsp.code-actions` applies
+`acts[1]` blind; `lsp.document-symbols` prints a count; multi-line
+hover shows its first line. Every one of these is flagged "future UX
+work" in `builtin/runtime/lsp.lua`. This arc builds that UX — as
+**buffers**, not new UI surfaces, so both frontends get it for free.
+*(As-built: all four now open panels — references/outline/hover-doc
+via `listview`, code actions via the minibuffer picker. See the
+scored bets at the end.)*
 
 Roadmap context: `docs/roadmap-2026-07.md` Arc 1b (also the panel
 substrate DAP will reuse). Direct trigger: the PR #93 validation note
@@ -22,12 +32,14 @@ error checking").
   (`scope = "buffer"` binds, installed once, never torn down), a
   `line_to_buffer` row→item map read via `pmacs.editor.cursor_line()`,
   `prev_buffer_id` capture + `q` restore, and a refresh that manually
-  re-seats the cursor (because `switch_active_buffer` zeroes
-  cursor/overlays — `editor_core.rs:2052-2071`). Gaps: no read-only
-  enforcement, logic not reusable.
+  re-seats the cursor (because `EditorCore::switch_active_buffer`
+  zeroes cursor/overlays). Gaps: no read-only enforcement, logic not
+  reusable.
 - **Read surfaces are uniform** `pmacs.<domain>.{getter, clear}(sid,
   uri)` over Rust stores: references = `pmacs.references.locations`
-  (rows `{uri, line, col}`, 0-based, the byte==UTF-16 v0.1 caveat);
+  (rows `{uri, line, col}`, 0-based; `col` is a pmacs byte offset —
+  the transport layer converts to/from the server's negotiated
+  encoding, see Q#P7);
   outline = `pmacs.document_symbol.symbols` (**flat** rows with
   `depth` + optional `container` — indent, don't recurse); actions =
   `pmacs.code_action.actions` (the full ordered array; each item
@@ -35,8 +47,10 @@ error checking").
   hover = `pmacs.hover.current` (`contents` is the full multi-line
   string).
 - **The cross-file visit template** is `go_to_definition`'s SP-4 path
-  (`lsp.lua:1187-1213`): `push_jump` → `path_for_uri` →
-  `find_or_open` → `move_active_cursor_to`.
+  (the "Cross-file (SP-4)" block in `builtin/runtime/lsp.lua`):
+  `push_jump` → `path_for_uri` → `find_or_open` →
+  `move_active_cursor_to`. *(As-built: extracted as the shared
+  `visit_location` helper, which references and outline both call.)*
 - **The picker substrate** is `pmacs.minibuffer.read { source =
   function() return {...} end, on_accept }` — the
   `window.set-line-numbers` shape (`default.lua:231-246`), already
@@ -140,9 +154,21 @@ not be open — deferred, named.
 
 ### Q#P7 — Coordinates
 
-Panels inherit the v0.1 byte==UTF-16 assumption exactly as
-`go_to_definition` does today (`lsp.lua:658-662`); the v0.2
-position-encoding hardening remains one deferral, not four new ones.
+Panels inherit whatever the existing cross-file visit does — no new
+coordinate handling. **As-built correction (the wire encoding has
+since landed):** the LSP *transport* now negotiates
+`general.positionEncoding` and converts every `Position` at the
+request/response boundary (`PositionEncoding` +
+`char_to_byte`/`byte_to_char` in `src/lsp.rs`), so location rows reach
+Lua as pmacs byte offsets — the "byte==UTF-16 on the wire" caveat this
+section originally cited is resolved, not deferred. The one residual
+is narrower and shared with `go_to_definition`, not introduced here:
+`move_active_cursor_to` (`builtin/runtime/lsp.lua`) walks `col` as
+codepoint steps (`move_right`), exact for single-byte-per-codepoint
+text but off for multi-byte lines. Panels call the same helper, so
+they are exactly as correct as go-to-definition — the framing's
+"inherit, don't multiply" intent holds; only the *residual* is a
+cursor-walk detail, not a wire-encoding gap.
 
 ## Phasing (each phase green + user-validated)
 

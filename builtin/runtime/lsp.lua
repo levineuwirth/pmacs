@@ -675,11 +675,15 @@ end
 
 -- Cursor positioning ------------------------------------------------------
 --
--- LSP positions are 0-based (line, character). pmacs.editor.cursor_line
--- and pmacs.editor.cursor_col already return 0-based byte counts; for
--- ASCII / UTF-8 text without astral codepoints, byte == UTF-16 code
--- unit, which is what every shipped server actually accepts. Multi-byte
--- conversion lands with the v0.2 LSP hardening pass.
+-- LSP positions are 0-based (line, character). The `character` field
+-- crossing the wire is already converted to/from a pmacs byte offset
+-- by the transport layer (`PositionEncoding` negotiation +
+-- `char_to_byte`/`byte_to_char` in src/lsp.rs), so `col` here is a
+-- byte offset, not a UTF-16 unit. The one residual: the walk below
+-- steps `col` times with `move_right` (one codepoint per step), which
+-- equals the byte offset only for single-byte-per-codepoint text —
+-- multi-byte lines land the cursor short. Byte-accurate cursor
+-- placement is the remaining position-encoding follow-up.
 
 local function move_active_cursor_to(line, col)
   -- Walk via primitives so all overlay observers see the navigation.
