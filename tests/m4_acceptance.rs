@@ -6099,3 +6099,222 @@ fn m4_5_symbols_and_highlight_round_trip() {
     assert_eq!(g("_dh1k"), "2", "explicit DocumentHighlightKind (Read)");
     assert_eq!(g("_dh2k"), "1", "absent kind defaults to Text(1)");
 }
+
+// ===========================================================================
+// Arc 1b phase 2 --- LSP panels (outline, hover-doc) end-to-end
+// ===========================================================================
+
+/// The *outline* panel end-to-end against the fake server's
+/// hierarchical documentSymbol response ("Outer" class > "inner"
+/// method): open, depth-indented rows, RET jump-ring visit to the
+/// symbol's selectionRange, M-, back to the outline row, q restore.
+#[test]
+fn outline_panel_opens_visits_and_restores() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(
+        &a_path,
+        b"l0\nl1\nl2\nl3 inner here\nl4\nl5\nl6\nl7\nl8\nl9\n",
+    )
+    .expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.lsp.config.rust = {{ command = '{fake}' }}"))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.lsp.document_symbols()")
+        .exec()
+        .expect("invoke document symbols");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "pmacs.describe.buffer(pmacs.window.buffer()).name == '*outline*'",
+            5,
+        ),
+        "the outline panel never opened"
+    );
+
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+        .eval()
+        .expect("outline text");
+    assert!(
+        text.contains("Outer  [class]"),
+        "top-level symbol row with kind tag; got {text:?}"
+    );
+    assert!(
+        text.contains("\n  inner  [method]"),
+        "depth-1 symbol indents two spaces; got {text:?}"
+    );
+
+    // n moves to the second row (inner); RET visits its
+    // selectionRange (line 3, col 7 in the fake's response).
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+    );
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+    let (name, line, col): (String, i64, i64) = state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local d = pmacs.describe.buffer(pmacs.window.buffer())
+            return d.name, pmacs.editor.cursor_line(), pmacs.editor.cursor_col()
+            ",
+        )
+        .eval()
+        .expect("post-visit probe");
+    assert!(name.ends_with("a.rs"), "RET returns to the source buffer");
+    assert_eq!(
+        (line, col),
+        (3, 7),
+        "cursor lands on inner's selectionRange"
+    );
+
+    // M-, returns to the outline row (the visit pushed the jump ring
+    // from the panel).
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.editor.jump_back()")
+        .exec()
+        .expect("jump back");
+    let name: String = state
+        .lua_host
+        .lua()
+        .load("return pmacs.describe.buffer(pmacs.window.buffer()).name")
+        .eval()
+        .expect("post-jump-back probe");
+    assert_eq!(name, "*outline*", "M-, returns to the outline panel");
+
+    // q restores the source buffer.
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    );
+    let name: String = state
+        .lua_host
+        .lua()
+        .load("return pmacs.describe.buffer(pmacs.window.buffer()).name")
+        .eval()
+        .expect("post-q probe");
+    assert!(name.ends_with("a.rs"), "q restores the source buffer");
+}
+
+/// The *lsp-help* panel end-to-end, driven through the real `C-c H`
+/// keybinding (shifted-letter chord --- this test is also the
+/// binding's parse check): full multi-line hover contents render,
+/// q restores.
+#[test]
+fn hover_doc_panel_shows_full_contents_via_binding() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("h.rs");
+    std::fs::write(&a_path, b"fn main() {}\n").expect("write h");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.lsp.config.rust = {{ command = '{fake}' }}"))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open h.rs");
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+
+    // The real chord: C-c, then Shift+h (terminals deliver uppercase
+    // Char('H') with the SHIFT modifier set).
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT),
+    );
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "pmacs.describe.buffer(pmacs.window.buffer()).name == '*lsp-help*'",
+            5,
+        ),
+        "C-c H never opened the hover panel (chord parse or binding gap)"
+    );
+
+    let text: String = state
+        .lua_host
+        .lua()
+        .load("local b = pmacs.window.buffer() return b:slice(0, b:len())")
+        .eval()
+        .expect("hover panel text");
+    assert!(
+        text.contains("Synthetic hover content"),
+        "the full hover body renders; got {text:?}"
+    );
+    assert!(
+        text.contains("# pmacs-fake-lsp"),
+        "multi-line contents keep their first line; got {text:?}"
+    );
+
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    );
+    let name: String = state
+        .lua_host
+        .lua()
+        .load("return pmacs.describe.buffer(pmacs.window.buffer()).name")
+        .eval()
+        .expect("post-q probe");
+    assert!(name.ends_with("h.rs"), "q restores the source buffer");
+}
