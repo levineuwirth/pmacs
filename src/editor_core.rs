@@ -493,6 +493,27 @@ impl EditorCore {
         self.active_window().view_top
     }
 
+    /// Set the active window's cursor to a byte offset, clamped to the
+    /// buffer extent (Arc 3 Q#PS1 — saveplace/desktop restore). Resets
+    /// the goal column. Since `switch_active_buffer` zeroes the cursor,
+    /// restore calls this *after* the open/switch.
+    pub fn set_cursor_byte(&mut self, byte: u64) {
+        let clamped = byte.min(self.active_buffer_len());
+        let aw = self.active_window_mut();
+        aw.cursor = clamped;
+        aw.goal_col = None;
+    }
+
+    /// Set the active window's `view_top` (first visible source line),
+    /// clamped to the buffer's line count (Arc 3 Q#PS1 — desktop
+    /// restore). A file that shrank since the desktop was saved can't
+    /// scroll past its end.
+    pub fn set_view_top(&mut self, top: usize) {
+        let lines = self.active_window().text_view.line_count();
+        let clamped = top.min(lines.saturating_sub(1));
+        self.active_window_mut().view_top = clamped;
+    }
+
     /// Active buffer's byte length.
     #[must_use]
     pub fn active_buffer_len(&self) -> u64 {

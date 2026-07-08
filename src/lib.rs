@@ -123,6 +123,7 @@ pub mod semantic_render;
 pub mod semantic_tokens;
 pub mod signature;
 pub mod socket_path;
+pub mod state;
 pub mod symbol;
 pub mod syntax;
 pub mod text_view;

@@ -1961,8 +1961,80 @@ pub fn install(
     pmacs.set("instance", install_instance_module(lua, registry)?)?;
     pmacs.set("ansi", install_ansi_module(lua)?)?;
     pmacs.set("packages", install_packages_module(lua)?)?;
+    pmacs.set("state", install_state_module(lua)?)?;
     lua.globals().set("pmacs", pmacs)?;
     Ok(())
+}
+
+/// The configured base state directory (Arc 3, Q#PS2). Present as Lua
+/// app-data only when a real dir was resolved at startup; its absence
+/// (the `cfg(test)` case, and any host without `HOME`/`XDG_STATE_HOME`)
+/// makes every `pmacs.state.*` call a no-op, so default-on persistence
+/// builtins never touch disk in `cargo test`.
+pub struct StateDir(pub std::path::PathBuf);
+
+/// `pmacs.state.{write,read,remove,path}` — the confined key→file store
+/// (Q#PS2). All keys pass [`crate::state::validate_name`], so a state
+/// call can never read or write outside the state directory. When the
+/// state dir is unconfigured every call is inert: `write`/`remove`
+/// return `false`, `read`/`path` return `nil`.
+fn install_state_module(lua: &Lua) -> mlua::Result<Table> {
+    let m = lua.create_table()?;
+
+    m.set(
+        "write",
+        lua.create_function(|lua, (name, content): (String, mlua::String)| {
+            let Some(base) = lua.app_data_ref::<StateDir>() else {
+                return Ok(false);
+            };
+            crate::state::write(&base.0, &name, &content.as_bytes())
+                .map_err(mlua::Error::external)?;
+            Ok(true)
+        })?,
+    )?;
+
+    m.set(
+        "read",
+        lua.create_function(|lua, name: String| {
+            let Some(base) = lua.app_data_ref::<StateDir>() else {
+                return Ok(None);
+            };
+            crate::state::read(&base.0, &name).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    m.set(
+        "remove",
+        lua.create_function(|lua, name: String| {
+            let Some(base) = lua.app_data_ref::<StateDir>() else {
+                return Ok(false);
+            };
+            crate::state::remove(&base.0, &name).map_err(mlua::Error::external)?;
+            Ok(true)
+        })?,
+    )?;
+
+    m.set(
+        "path",
+        lua.create_function(|lua, name: String| {
+            let Some(base) = lua.app_data_ref::<StateDir>() else {
+                return Ok(None);
+            };
+            match crate::state::resolve(&base.0, &name) {
+                Ok(p) => Ok(Some(p.display().to_string())),
+                Err(e) => Err(mlua::Error::external(e)),
+            }
+        })?,
+    )?;
+
+    // True when a state directory is configured — lets Lua modules tell
+    // "unconfigured (test / no HOME)" from "configured but empty".
+    m.set(
+        "available",
+        lua.create_function(|lua, ()| Ok(lua.app_data_ref::<StateDir>().is_some()))?,
+    )?;
+
+    Ok(m)
 }
 
 /// Build the `pmacs.attach` Lua function (T M5.6d).
@@ -10678,6 +10750,46 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             lua.create_function(move |_, ()| {
                 let c = cc.borrow();
                 i64::try_from(c.cursor()).map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+    {
+        // goto_byte(pos): set the active cursor to a byte offset
+        // (clamped). The byte-exact restore saveplace/desktop need
+        // (Arc 3) — `move_to_line` is line-based, and switch zeroes the
+        // cursor, so restore sets it here after opening.
+        let cc = core.clone();
+        editor.set(
+            "goto_byte",
+            lua.create_function(move |_, pos: i64| {
+                let byte = u64::try_from(pos).map_err(mlua::Error::external)?;
+                cc.borrow_mut().set_cursor_byte(byte);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // view_top(): the active window's first visible source line.
+        // The saveplace getter (Arc 3) — pairs with set_view_top so a
+        // reopen restores the viewport, not just the cursor.
+        let cc = core.clone();
+        editor.set(
+            "view_top",
+            lua.create_function(move |_, ()| {
+                i64::try_from(cc.borrow().view_top()).map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+    {
+        // set_view_top(line): set the first visible source line
+        // (clamped to the buffer's line count) — desktop restore.
+        let cc = core.clone();
+        editor.set(
+            "set_view_top",
+            lua.create_function(move |_, top: i64| {
+                let top = usize::try_from(top).map_err(mlua::Error::external)?;
+                cc.borrow_mut().set_view_top(top);
+                Ok(())
             })?,
         )?;
     }
