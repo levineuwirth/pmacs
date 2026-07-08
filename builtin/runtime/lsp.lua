@@ -569,6 +569,26 @@ pmacs.hook.add("buffer.after-load", function()
   pcall(attach_buffer, pmacs.window.buffer())
 end)
 
+pmacs.hook.add("buffer.after-switch", function()
+  -- Arc 1b: switching buffers clears the window's overlays, and
+  -- `attach_buffer` early-returns for a live attachment without
+  -- touching views — so a switch back to an attached buffer must
+  -- re-push the LSP style + diagnostic views itself. The just-
+  -- cleared window makes this exactly-once per switch; the dedup
+  -- tables keep gating the after-load path only. Without this,
+  -- navigating between attached buffers looked like "the LSP
+  -- deactivated" (no semantic color, no underlines).
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  local key = tostring(buf)
+  local rec = attachments[key]
+  if not rec then return end
+  local ok_s, attached_s = pcall(pmacs.lsp._attach_style, buf)
+  if ok_s and attached_s then styled_buffers[key] = true end
+  local ok_d, attached_d = pcall(pmacs.diag._attach_view, buf, rec.uri)
+  if ok_d and attached_d then diag_viewed_buffers[key] = true end
+end)
+
 pmacs.hook.add("buffer.after-edit", function()
   local buf = pmacs.window.buffer()
   if not buf then return end

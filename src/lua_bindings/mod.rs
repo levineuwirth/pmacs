@@ -2402,6 +2402,11 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                             .switch_active_buffer(existing)
                             .map_err(mlua::Error::external)?;
                     }
+                    // Arc 1b: switching clears the window's overlays;
+                    // subscribers (syntax highlight, LSP style/diag
+                    // views) re-attach theirs. The fresh-load branch
+                    // below fires `buffer.after-load` instead.
+                    run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
                     return Ok(BufferIdLua(existing));
                 }
                 let (bytes, meta) = crate::file_io::load_file(&path_buf).map_err(|source| {
@@ -10348,10 +10353,17 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
         let cc = core.clone();
         win.set(
             "switch_buffer",
-            lua.create_function(move |_, id: BufferIdLua| -> mlua::Result<()> {
+            lua.create_function(move |lua, id: BufferIdLua| -> mlua::Result<()> {
                 cc.borrow_mut()
                     .switch_active_buffer(id.0)
-                    .map_err(mlua::Error::external)
+                    .map_err(mlua::Error::external)?;
+                // Arc 1b: switching clears the window's overlays;
+                // subscribers (syntax highlight, LSP style/diag views)
+                // re-attach theirs here — without this, C-x b / panel
+                // navigation permanently stripped styling from the
+                // session.
+                run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
+                Ok(())
             })?,
         )?;
     }
