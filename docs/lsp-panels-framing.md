@@ -1,13 +1,23 @@
 # LSP panels — framing (Arc 1b)
 
-pmacs's LSP data layer answers references, document symbols, code
-actions, and hover in full — and then renders one line in the
-modeline. `lsp.find-references` reports "12 references" and throws
-eleven away; `lsp.code-actions` applies `acts[1]` blind;
-`lsp.document-symbols` prints a count; multi-line hover shows its
-first line. Every one of these is flagged "future UX work" in
-`builtin/runtime/lsp.lua`. This arc builds that UX — as **buffers**,
-not new UI surfaces, so both frontends get it for free.
+> **Status: ARC COMPLETE** (PRs #94 + #95 merged 2026-07-08; this doc
+> is the as-built record). The framing below is preserved as written;
+> the intro and "What already exists" sections describe the state
+> *before* the arc (present tense = the pre-arc baseline), and the
+> scored bets + as-built divergences at the end record what actually
+> shipped and diverged.
+
+*(Pre-arc baseline.)* pmacs's LSP data layer answers references,
+document symbols, code actions, and hover in full — and then renders
+one line in the modeline. `lsp.find-references` reports "12
+references" and throws eleven away; `lsp.code-actions` applies
+`acts[1]` blind; `lsp.document-symbols` prints a count; multi-line
+hover shows its first line. Every one of these is flagged "future UX
+work" in `builtin/runtime/lsp.lua`. This arc builds that UX — as
+**buffers**, not new UI surfaces, so both frontends get it for free.
+*(As-built: all four now open panels — references/outline/hover-doc
+via `listview`, code actions via the minibuffer picker. See the
+scored bets at the end.)*
 
 Roadmap context: `docs/roadmap-2026-07.md` Arc 1b (also the panel
 substrate DAP will reuse). Direct trigger: the PR #93 validation note
@@ -22,12 +32,14 @@ error checking").
   (`scope = "buffer"` binds, installed once, never torn down), a
   `line_to_buffer` row→item map read via `pmacs.editor.cursor_line()`,
   `prev_buffer_id` capture + `q` restore, and a refresh that manually
-  re-seats the cursor (because `switch_active_buffer` zeroes
-  cursor/overlays — `editor_core.rs:2052-2071`). Gaps: no read-only
-  enforcement, logic not reusable.
+  re-seats the cursor (because `EditorCore::switch_active_buffer`
+  zeroes cursor/overlays). Gaps: no read-only enforcement, logic not
+  reusable.
 - **Read surfaces are uniform** `pmacs.<domain>.{getter, clear}(sid,
   uri)` over Rust stores: references = `pmacs.references.locations`
-  (rows `{uri, line, col}`, 0-based, the byte==UTF-16 v0.1 caveat);
+  (rows `{uri, line, col}`, 0-based; `col` is a pmacs byte offset —
+  the transport layer converts to/from the server's negotiated
+  encoding, see Q#P7);
   outline = `pmacs.document_symbol.symbols` (**flat** rows with
   `depth` + optional `container` — indent, don't recurse); actions =
   `pmacs.code_action.actions` (the full ordered array; each item
@@ -35,8 +47,10 @@ error checking").
   hover = `pmacs.hover.current` (`contents` is the full multi-line
   string).
 - **The cross-file visit template** is `go_to_definition`'s SP-4 path
-  (`lsp.lua:1187-1213`): `push_jump` → `path_for_uri` →
-  `find_or_open` → `move_active_cursor_to`.
+  (the "Cross-file (SP-4)" block in `builtin/runtime/lsp.lua`):
+  `push_jump` → `path_for_uri` → `find_or_open` →
+  `move_active_cursor_to`. *(As-built: extracted as the shared
+  `visit_location` helper, which references and outline both call.)*
 - **The picker substrate** is `pmacs.minibuffer.read { source =
   function() return {...} end, on_accept }` — the
   `window.set-line-numbers` shape (`default.lua:231-246`), already
@@ -140,9 +154,21 @@ not be open — deferred, named.
 
 ### Q#P7 — Coordinates
 
-Panels inherit the v0.1 byte==UTF-16 assumption exactly as
-`go_to_definition` does today (`lsp.lua:658-662`); the v0.2
-position-encoding hardening remains one deferral, not four new ones.
+Panels inherit whatever the existing cross-file visit does — no new
+coordinate handling. **As-built correction (the wire encoding has
+since landed):** the LSP *transport* now negotiates
+`general.positionEncoding` and converts every `Position` at the
+request/response boundary (`PositionEncoding` +
+`char_to_byte`/`byte_to_char` in `src/lsp.rs`), so location rows reach
+Lua as pmacs byte offsets — the "byte==UTF-16 on the wire" caveat this
+section originally cited is resolved, not deferred. The one residual
+is narrower and shared with `go_to_definition`, not introduced here:
+`move_active_cursor_to` (`builtin/runtime/lsp.lua`) walks `col` as
+codepoint steps (`move_right`), exact for single-byte-per-codepoint
+text but off for multi-byte lines. Panels call the same helper, so
+they are exactly as correct as go-to-definition — the framing's
+"inherit, don't multiply" intent holds; only the *residual* is a
+cursor-walk detail, not a wire-encoding gap.
 
 ## Phasing (each phase green + user-validated)
 
@@ -156,22 +182,51 @@ position-encoding hardening remains one deferral, not four new ones.
 
 Arc 2 interleave point (query-replace) after phase 2.
 
-## Categorical bets (score at close)
+## Categorical bets (scored at close — ARC COMPLETE, PRs #94 + #95)
 
 1. **The listview module covers all three panels without per-panel
-   Rust.** The whole arc lands with one small core seam (Q#P6) and
-   zero protocol change.
-2. **Cursor-zeroing bites once.** `switch_active_buffer` clears
-   cursor/overlays; some flow (refresh, visit-then-return) will land
-   the cursor somewhere surprising before the re-seat discipline is
-   applied everywhere.
-3. **GPU panels render via the existing BufferSnapshot/F29 path with
-   no GPU changes.** The mechanism exists (mid-session CRDT upgrade +
-   snapshot push); a panel buffer exercising it from a `switch_buffer`
-   is the untested claim in this arc.
-4. **Round-trip routing has one gap somewhere** — a key that neither
-   round-trips nor falls through correctly while a panel is focused
-   (the Q#C6-class finding of this arc).
+   Rust — HELD.** One core seam (Q#P6: a `HashSet` + one binding +
+   one `dispatch_idle` clause), zero protocol change; outline,
+   references, and hover-doc are all pure Lua `listview.open` calls,
+   and the code-action picker reused the minibuffer dropdown with no
+   panel at all.
+2. **Cursor-zeroing bites once — HELD** (mild): the re-seat
+   discipline (`seat_cursor` after every render/switch) was applied
+   from the start, so the predicted surprise never surfaced in the
+   panels; the *latent* form of it bit elsewhere (bet #3's finding 2).
+3. **GPU panels render with no GPU changes — SCORED FALSE, the
+   arc's load-bearing finding.** Two blocking bugs at GPU validation,
+   neither a GPU change but both invisible to the bet as framed: (a)
+   the F29 snapshot push fires only on the *upgrade* tick, so
+   switching *back* to a known buffer sent nothing and the GPU froze
+   on the old buffer while input targeted the new one — fixed with a
+   daemon active-buffer-*follow* path (semantic sessions only; a
+   first cut gated on `crdt_replica` duplicated the TUI's init-once
+   snapshot and broke *all* attach — round-2 regression). (b) A
+   long-latent bug the panels made constant: `switch_active_buffer`
+   clears window overlays and the runtime dedup tables blocked
+   re-attach, so *every* buffer switch (plain `C-x b` included) had
+   been stripping syntax/LSP/diagnostic styling — fixed with a new
+   `buffer.after-switch` hook. **Lesson: "the mechanism exists" is
+   not "the mechanism fires on this trigger" — snapshot delivery was
+   coupled to CRDT *upgrade*, not active-buffer *change*.**
+4. **Round-trip routing has one gap somewhere — NOT OBSERVED.** Q#P6
+   held cleanly in both frontends; no key mis-routed while a panel
+   was focused.
+
+## As-built divergences
+
+- **Code actions took no panel.** The picker is `minibuffer.read`
+  with `"N: title"` candidates (bare index also accepts), not a
+  `listview` — a single action still applies directly. Cleaner than a
+  list buffer for a pick-one-and-close flow.
+- **The two blocking findings were daemon/runtime, not panel Lua**
+  (bet #3) — the panel code itself needed no correctness fixes across
+  either PR.
+- **Coverage caught a process gap**: the phase-2 tests initially
+  shipped with a `too-many-lines` clippy deny masked by a swallowed
+  exit code in a chained local gate command. Run `clippy` as its own
+  gate step, not `&&`-chained after a test whose exit code you read.
 
 ## Deferred (named, not silently dropped)
 
