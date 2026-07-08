@@ -992,15 +992,29 @@ fn dispatcher_loop(
                 // typing-into-a-buffer-you-can't-see hazard. Ship the
                 // now-active buffer's snapshot to THIS frontend only
                 // (its own view changed; nobody else's did).
-                let active_now = {
-                    let core = editor.core.borrow();
-                    core.active_window_for(*fid).map(|w| w.buffer_id)
-                };
-                if let Some(active_now) = active_now
-                    && last_active_buffer_sent.get(fid) != Some(&active_now)
+                //
+                // SEMANTIC sessions only: display-follows-snapshot is
+                // a grid-less-frontend concept, and the GPU rebuilds
+                // its replica wholesale on every snapshot. The grid
+                // TUI renders via CellDelta and its `BufferMirror` is
+                // init-once — a follow send there is a guaranteed
+                // duplicate that errors ("already has a CRDT snapshot
+                // applied") on every attach and every buffer switch
+                // (the PR #94 round-2 startup regression).
+                if session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_capabilities.semantic_render)
                 {
-                    send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
-                    last_active_buffer_sent.insert(*fid, active_now);
+                    let active_now = {
+                        let core = editor.core.borrow();
+                        core.active_window_for(*fid).map(|w| w.buffer_id)
+                    };
+                    if let Some(active_now) = active_now
+                        && last_active_buffer_sent.get(fid) != Some(&active_now)
+                    {
+                        send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
+                        last_active_buffer_sent.insert(*fid, active_now);
+                    }
                 }
             }
             #[cfg(not(feature = "crdt"))]
