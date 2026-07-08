@@ -726,30 +726,25 @@ impl History {
 /// var is set.
 #[must_use]
 pub fn user_history_dir() -> Option<PathBuf> {
-    resolve_history_dir(
-        std::env::var_os("XDG_STATE_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )
+    // Route through the shared state-dir resolver so history honors the
+    // `PMACS_STATE_HOME` override too (Arc 3 Q#PS2).
+    crate::state::user_state_dir().map(|d| d.join("history"))
 }
 
 /// Pure helper for [`user_history_dir`], factored out so tests can
 /// inject paths directly without touching the process environment
 /// (R55: `unsafe_code = "forbid"` rules out `env::set_var`).
+///
+/// History lives under the shared editor state dir
+/// ([`crate::state::state_dir`], Arc 3 Q#PS2) in a `history/`
+/// subdirectory. A blank `XDG_STATE_HOME` now falls through to `HOME`
+/// instead of yielding a relative path (the empty-XDG fix).
 #[must_use]
 pub fn resolve_history_dir(
     xdg_state: Option<&std::ffi::OsStr>,
     home: Option<&std::ffi::OsStr>,
 ) -> Option<PathBuf> {
-    if let Some(xdg) = xdg_state {
-        return Some(PathBuf::from(xdg).join("pmacs").join("history"));
-    }
-    home.map(|h| {
-        PathBuf::from(h)
-            .join(".local")
-            .join("state")
-            .join("pmacs")
-            .join("history")
-    })
+    crate::state::state_dir(xdg_state, home).map(|d| d.join("history"))
 }
 
 fn history_path(dir: &Path, bucket: &str) -> PathBuf {

@@ -172,6 +172,15 @@ impl EditorState {
             if let Some(dir) = crate::minibuffer::user_history_dir() {
                 core.borrow_mut().minibuffer.history_dir = Some(dir);
             }
+            // Arc 3 (Q#PS2): configure the `pmacs.state.*` base dir. Its
+            // absence under `cfg(test)` (this whole block is skipped) is
+            // what keeps default-on saveplace/recentf from writing to a
+            // developer's real state dir during the lib suite.
+            if let Some(dir) = crate::state::user_state_dir() {
+                lua_host
+                    .lua()
+                    .set_app_data(crate::lua_bindings::StateDir(dir));
+            }
         }
         // The async runtime: install pmacs._async raw helpers, then
         // load the friendly Lua surface (`pmacs.async`, Handle class,
@@ -301,6 +310,22 @@ impl EditorState {
                 include_str!("../builtin/runtime/completion.lua"),
             )
             .expect("load completion builtin chunk");
+        // Arc 3: persistence builtins (saveplace + recentf). Load after
+        // the LSP/completion runtimes; they subscribe to buffer hooks
+        // and drive `pmacs.state` (inert until the state dir is
+        // configured — never in `cfg(test)`).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/saveplace.lua"),
+                include_str!("../builtin/runtime/saveplace.lua"),
+            )
+            .expect("load saveplace builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/recentf.lua"),
+                include_str!("../builtin/runtime/recentf.lua"),
+            )
+            .expect("load recentf builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -4128,9 +4153,13 @@ mod tests {
         assert!(info.get::<String>("source").unwrap().contains(':'));
         let callbacks: mlua::Table = info.get("callbacks").unwrap();
         let len = callbacks.len().unwrap();
-        assert_eq!(len, 2, "expected 2 callbacks; describe says {len}");
-        let cb1: mlua::Table = callbacks.get(1).unwrap();
-        let cb2: mlua::Table = callbacks.get(2).unwrap();
+        // A builtin (saveplace) also subscribes to `buffer.before-save`,
+        // registered at startup, so it precedes the two the test adds.
+        // Assert on the *last two* callbacks — the ones this chunk just
+        // registered — rather than the exact total (robust to builtins).
+        assert!(len >= 2, "expected >= 2 callbacks; describe says {len}");
+        let cb1: mlua::Table = callbacks.get(len - 1).unwrap();
+        let cb2: mlua::Table = callbacks.get(len).unwrap();
         let s1: String = cb1.get("source").unwrap();
         let s2: String = cb2.get("source").unwrap();
         // Both registrations come from the test chunk; the second
