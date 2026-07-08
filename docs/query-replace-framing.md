@@ -60,7 +60,20 @@ interactive y/n phase). Mirror the structure instead:
 `editor.rs` — the fifth member of the shadow family (minibuffer,
 search, menu, completion, **query-replace**). Add
 `query_replace_active()` to the `dispatch_idle()` disjunction and the
-modal-close guard, exactly as the others.
+completion-popup modal-close guard, exactly as the others.
+
+**Pin to the origin buffer (as-built fix).** The session records its
+origin buffer, but every edit and cursor move goes through the
+*active* window/buffer — and focus can drift mid-session (a click into
+another split, a key from another frontend, both of which change the
+active buffer outside the shadow). Applying an origin-buffer match to
+whatever became active is buffer corruption. Guard it:
+`query_replace_on_origin()` checks the active buffer still equals the
+origin buffer before every edit and **aborts the session without
+editing** on mismatch (never corrupt an unrelated buffer). The
+`buffer.after-edit` revision compare (above) targets the *origin*
+buffer specifically, not the active one, so a focus-drift abort — which
+edits nothing — never spuriously fires the hook.
 
 **`buffer.after-edit` must fire from inside the shadow (P1).** A modal
 shadow `return`s before `dispatch_key`'s normal post-command edit

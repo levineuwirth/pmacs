@@ -1,9 +1,12 @@
 //! Query-replace acceptance (Arc 2) — the interactive phase end-to-end
 //! through `dispatch_key`, exactly as a user (or a round-tripping GPU)
-//! drives it: the `M-%` / `C-M-%` bindings, the y/n/!/./q vocabulary,
-//! the three quit paths + nothing-matched-restores-origin, empty-to
-//! deletion, offset-shift correctness, regex, the `buffer.after-edit`
-//! hook firing on replaced text, and the `dispatch_idle`-false gate.
+//! drives it: the `M-%` / `C-M-%` bindings; the full key vocabulary
+//! (`y`/`SPC` replace, `n`/`DEL` skip, `!` all, `.` last); every quit
+//! path (`q`, `RET`, `Esc`, `C-g`) keeping replacements, plus
+//! nothing-matched-restores-origin; empty-to deletion; offset-shift
+//! correctness (`a`→`aa` doesn't loop); regex; the `buffer.after-edit`
+//! hook (once per `y`, and exactly once for an `!` batch); the
+//! `dispatch_idle`-false gate; and the wrong-buffer/focus-drift abort.
 //!
 //! Framing: docs/query-replace-framing.md.
 
@@ -278,5 +281,138 @@ fn replace_fires_after_edit_hook() {
     assert!(
         after > before,
         "buffer.after-edit fired for the replacement (before {before}, after {after})"
+    );
+}
+
+#[test]
+fn bang_fires_after_edit_hook_once_for_the_batch() {
+    // Q#QR1: `!` applies many replacements under one keypress, but the
+    // debounced didChange wants a single after-edit — the shadow
+    // compares revision once across the whole handler.
+    let mut s = EditorState::new();
+    s.lua_host
+        .lua()
+        .load(
+            r"
+            _G.EDITS = 0
+            pmacs.hook.add('buffer.after-edit', function() _G.EDITS = _G.EDITS + 1 end)
+            ",
+        )
+        .exec()
+        .expect("install after-edit counter");
+    type_str(&mut s, "a a a a");
+    goto_start(&s);
+    // Zero out the counter after the typing edits.
+    s.lua_host.lua().load("_G.EDITS = 0").exec().ok();
+    start_query_replace(&mut s, "a", "b", false);
+    s.lua_host.lua().load("_G.EDITS = 0").exec().ok();
+    press(&mut s, KeyCode::Char('!')); // four replacements in one keypress
+    let edits: i64 = s
+        .lua_host
+        .lua()
+        .load("return _G.EDITS")
+        .eval()
+        .expect("read counter");
+    let (text, _) = probe(&s);
+    assert_eq!(text, "b b b b", "! replaced all four");
+    assert_eq!(edits, 1, "after-edit fires exactly once for the ! batch");
+}
+
+#[test]
+fn quit_via_ret_and_esc_keeps_replacements() {
+    // Q#QR10: RET and Esc both quit (keeping replacements), not just q.
+    for quit in [KeyCode::Enter, KeyCode::Esc] {
+        let mut s = EditorState::new();
+        type_str(&mut s, "a a a");
+        goto_start(&s);
+        start_query_replace(&mut s, "a", "b", false);
+        press(&mut s, KeyCode::Char('y')); // replace the first
+        press(&mut s, quit); // quit before the rest
+        let (text, active) = probe(&s);
+        assert_eq!(text, "b a a", "quit keeps the one replacement ({quit:?})");
+        assert!(!active, "{quit:?} ends the session");
+    }
+}
+
+#[test]
+fn ctrl_g_quits_keeping_replacements() {
+    // Q#QR10: C-g exits and KEEPS replacements (unlike isearch's C-g).
+    let mut s = EditorState::new();
+    type_str(&mut s, "a a a");
+    goto_start(&s);
+    start_query_replace(&mut s, "a", "b", false);
+    press(&mut s, KeyCode::Char('y'));
+    s.dispatch_key(
+        FrontendId::LOCAL,
+        key(KeyCode::Char('g'), KeyModifiers::CONTROL),
+    );
+    let (text, active) = probe(&s);
+    assert_eq!(text, "b a a", "C-g keeps replacements (not an undo)");
+    assert!(!active);
+}
+
+#[test]
+fn del_key_skips_like_n() {
+    let mut s = EditorState::new();
+    type_str(&mut s, "a a a");
+    goto_start(&s);
+    start_query_replace(&mut s, "a", "b", false);
+    press(&mut s, KeyCode::Backspace); // DEL/Backspace → skip first
+    press(&mut s, KeyCode::Char('y')); // replace second
+    press(&mut s, KeyCode::Char('q'));
+    let (text, _) = probe(&s);
+    assert_eq!(
+        text, "a b a",
+        "DEL skipped the first, y replaced the second"
+    );
+}
+
+#[test]
+fn focus_drift_mid_session_aborts_without_touching_either_buffer() {
+    // The merge-blocker, end-to-end: a click into another buffer
+    // (simulated by switch_buffer, which the pointer path also uses)
+    // while query-replace is active. The next y must abort, not apply
+    // the origin-buffer match to the now-active unrelated buffer.
+    let mut s = EditorState::new();
+    type_str(&mut s, "foo foo");
+    goto_start(&s);
+    start_query_replace(&mut s, "foo", "bar", false);
+    assert!(probe(&s).1, "session active on the first match");
+
+    // Focus drifts to a fresh, unrelated buffer.
+    s.lua_host
+        .lua()
+        .load(
+            r"
+            _G.OTHER = pmacs.buffer.create('*drift*')
+            pmacs.window.switch_buffer(_G.OTHER)
+            ",
+        )
+        .exec()
+        .expect("switch to another buffer");
+
+    press(&mut s, KeyCode::Char('y')); // the replace key, now drifted
+    assert!(!probe(&s).1, "drift aborts the session");
+    let (drift_text, _) = probe(&s); // active buffer is *drift*
+    assert_eq!(drift_text, "", "the unrelated buffer was not edited");
+
+    // The origin buffer is also intact — switch back and check.
+    s.lua_host
+        .lua()
+        .load(
+            r"
+            for _, id in ipairs(pmacs.buffer.list()) do
+              if pmacs.describe.buffer(id).name == '*scratch*' then
+                pmacs.window.switch_buffer(id)
+              end
+            end
+            ",
+        )
+        .exec()
+        .ok();
+    assert_eq!(
+        probe(&s).0,
+        "foo foo",
+        "origin buffer untouched by the aborted replace"
     );
 }

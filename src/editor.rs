@@ -553,7 +553,10 @@ impl EditorState {
         {
             let mut core = self.core.borrow_mut();
             if core.completion_popup_is_open()
-                && (core.menu_is_open() || core.search_active() || core.minibuffer.is_active())
+                && (core.menu_is_open()
+                    || core.search_active()
+                    || core.query_replace_active()
+                    || core.minibuffer.is_active())
             {
                 core.completion_popup_close();
             }
@@ -692,6 +695,13 @@ impl EditorState {
     /// mid-dispatch).
     fn active_buffer_revision(&self) -> Option<u64> {
         let id = self.core.borrow().active_buffer_id();
+        self.buffer_revision(id)
+    }
+
+    /// Edit revision of a specific buffer, or `None` if the registry no
+    /// longer knows it. Used by the query-replace shadow to compare the
+    /// *edited* (origin) buffer, not whichever is active.
+    fn buffer_revision(&self, id: crate::buffer::BufferId) -> Option<u64> {
         let reg = self.lua_host.registry().borrow();
         reg.get(id).ok().map(crate::buffer::Buffer::revision)
     }
@@ -832,7 +842,11 @@ impl EditorState {
     /// the hook once for the batch, which is what the debounced
     /// `didChange` wants.
     fn dispatch_query_replace_key(&mut self, chord: Chord) {
-        let pre_revision = self.active_buffer_revision();
+        // Compare the *origin* buffer's revision (the one query-replace
+        // edits), not the active buffer's — they can differ if focus
+        // drifted, and the wrong-buffer guard may abort without editing.
+        let origin_buf = self.core.borrow().query_replace_origin_buffer();
+        let pre = origin_buf.and_then(|id| self.buffer_revision(id));
         match QueryReplaceKey::from_chord(chord) {
             QueryReplaceKey::Replace => self.core.borrow_mut().query_replace_replace(),
             QueryReplaceKey::Skip => self.core.borrow_mut().query_replace_skip(),
@@ -843,7 +857,10 @@ impl EditorState {
             QueryReplaceKey::Quit => self.core.borrow_mut().query_replace_finish(),
             QueryReplaceKey::Ignore => {}
         }
-        if pre_revision != self.active_buffer_revision() {
+        // `!` applies many edits under one keypress; the single compare
+        // fires `buffer.after-edit` once for the batch (Q#QR1).
+        let post = origin_buf.and_then(|id| self.buffer_revision(id));
+        if origin_buf.is_some() && pre != post {
             self.lua_host
                 .run_hook("buffer.after-edit", mlua::MultiValue::new());
         }

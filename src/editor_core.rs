@@ -824,6 +824,40 @@ impl EditorCore {
         self.query_replace.is_some()
     }
 
+    /// The buffer a running query-replace is pinned to, or `None`. The
+    /// dispatcher reads this so the `buffer.after-edit` revision compare
+    /// targets the *edited* buffer, not whichever is active.
+    #[must_use]
+    pub fn query_replace_origin_buffer(&self) -> Option<BufferId> {
+        self.query_replace.as_ref().map(|s| s.origin.0)
+    }
+
+    /// Query-replace's wrong-buffer guard. Every edit and cursor move it
+    /// makes goes through the *active* window/buffer, but the session is
+    /// pinned to the buffer it started in — and focus can drift
+    /// mid-session (a click into another split, a key from another
+    /// frontend). Before touching the buffer, verify the active buffer
+    /// is still the origin buffer; if not, **abort without editing** so
+    /// a match found in the origin buffer can never be applied to an
+    /// unrelated one. Returns `true` when it is safe to proceed.
+    fn query_replace_on_origin(&mut self) -> bool {
+        let Some(origin_bid) = self.query_replace.as_ref().map(|s| s.origin.0) else {
+            return false;
+        };
+        if self.active_buffer_id() == origin_bid {
+            return true;
+        }
+        // Focus moved off the origin buffer — abort, don't corrupt.
+        if let Some(session) = self.query_replace.take() {
+            self.search_store
+                .lock()
+                .expect("search store mutex poisoned")
+                .clear(session.origin.0);
+        }
+        self.status = "query-replace aborted: active buffer changed".into();
+        false
+    }
+
     /// Begin a query-replace from the cursor forward (Q#QR8). `regex`
     /// selects `query-replace-regexp` (Q#QR9). An invalid regex refuses
     /// to start (Q#QR2). Immediately advances to (and prompts on) the
@@ -866,8 +900,8 @@ impl EditorCore {
             return;
         };
         let bid = session.origin.0;
-        let start = session.next_from.min(self.active_buffer_len()) as usize;
         let bytes = self.buffer_bytes(bid);
+        let start = (session.next_from as usize).min(bytes.len());
         let found = match &session.re {
             Some(re) => crate::search::find_first_regex_from(&bytes, re, start),
             None => crate::search::find_first_from(&bytes, &session.from, start),
@@ -940,13 +974,16 @@ impl EditorCore {
 
     /// `y` / `SPC` — replace the current match, then advance to the next.
     pub fn query_replace_replace(&mut self) {
-        if self.query_replace_apply_current() {
+        if self.query_replace_on_origin() && self.query_replace_apply_current() {
             self.query_replace_advance();
         }
     }
 
     /// `n` / `DEL` — leave the current match, advance past it to the next.
     pub fn query_replace_skip(&mut self) {
+        if !self.query_replace_on_origin() {
+            return;
+        }
         if let Some(session) = self.query_replace.as_mut()
             && let Some(range) = session.current
         {
@@ -960,6 +997,9 @@ impl EditorCore {
     /// prompting, then finish (Q#QR6). One `after-edit` hook fires for
     /// the batch (the dispatcher compares revision across the handler).
     pub fn query_replace_all(&mut self) {
+        if !self.query_replace_on_origin() {
+            return;
+        }
         while self.query_replace_apply_current() {
             // Find the next match (mirrors advance's search, without the
             // highlight/prompt work — we're not stopping to ask).
@@ -967,8 +1007,8 @@ impl EditorCore {
                 break;
             };
             let bid = session.origin.0;
-            let start = session.next_from.min(self.active_buffer_len()) as usize;
             let bytes = self.buffer_bytes(bid);
+            let start = (session.next_from as usize).min(bytes.len());
             let found = match &session.re {
                 Some(re) => crate::search::find_first_regex_from(&bytes, re, start),
                 None => crate::search::find_first_from(&bytes, &session.from, start),
@@ -987,6 +1027,9 @@ impl EditorCore {
 
     /// `.` — replace the current match, then finish (Q#QR6).
     pub fn query_replace_replace_and_quit(&mut self) {
+        if !self.query_replace_on_origin() {
+            return;
+        }
         self.query_replace_apply_current();
         self.query_replace_finish();
     }
@@ -3745,6 +3788,46 @@ mod tests {
         s.query_replace_begin("k".into(), "K".into(), false);
         s.query_replace_all();
         assert_eq!(text_of(&s), "k _ K\n", "only the match at/after point");
+    }
+
+    #[test]
+    fn query_replace_aborts_when_active_buffer_changes() {
+        // The wrong-buffer merge-blocker: a session started in buffer X
+        // must never apply its match to a buffer that became active
+        // mid-session. Focus drifts (a click / cross-frontend key), then
+        // the next replace key aborts safely instead of corrupting.
+        let mut s = from_bytes(b"foo foo\n");
+        let x = s.active_buffer_id();
+        s.query_replace_begin("foo".into(), "bar".into(), false);
+        assert!(s.query_replace_active());
+
+        // Switch the active buffer to an unrelated one (focus drift).
+        let y = s.registry.borrow_mut().create("*other*");
+        {
+            let reg = s.registry.borrow();
+            let buf = reg.get(y).unwrap();
+            let tv = crate::text_view::TextView::new(buf);
+            drop(reg);
+            let win = s.active_window_mut();
+            win.buffer_id = y;
+            win.text_view = tv;
+            win.cursor = 0;
+        }
+        assert_eq!(s.active_buffer_id(), y);
+
+        s.query_replace_replace(); // the y/replace key while drifted
+        assert!(!s.query_replace_active(), "drift aborts the session");
+        assert_eq!(s.status, "query-replace aborted: active buffer changed");
+        // Neither buffer was mutated by the aborted replace.
+        {
+            let reg = s.registry.borrow();
+            let bx = reg.get(x).unwrap();
+            let mut xb = vec![0u8; bx.len() as usize];
+            bx.snapshot_rope().slice(0, bx.len(), &mut xb);
+            assert_eq!(&xb, b"foo foo\n", "origin buffer X untouched");
+            let by = reg.get(y).unwrap();
+            assert_eq!(by.len(), 0, "unrelated buffer Y untouched");
+        }
     }
 
     #[test]
