@@ -83,6 +83,25 @@ pmacs.hook.add("buffer.after-load", function()
   end
 end)
 
+pmacs.hook.add("buffer.after-switch", function()
+  -- Arc 1b: switching buffers clears the window's overlays
+  -- (`switch_active_buffer` resets window view state), so the
+  -- highlight view must be re-pushed for the now-active buffer.
+  -- Dropping the `highlighted_buffers` entry first lets
+  -- `attach_for_active_buffer` re-attach; the just-cleared window
+  -- makes that exactly-once per switch. Without this, C-x b /
+  -- panel navigation permanently stripped syntax color.
+  local ok, err = pcall(function()
+    local buf = pmacs.window.buffer()
+    if not buf then return end
+    highlighted_buffers[tostring(buf)] = nil
+    attach_for_active_buffer()
+  end)
+  if not ok and pmacs.error then
+    pmacs.error("syntax.after-switch: " .. tostring(err))
+  end
+end)
+
 local function reparse_active_buffer_after_edit()
   local buf = pmacs.window.buffer()
   if not buf then return end

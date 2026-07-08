@@ -2367,6 +2367,25 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
+        // Arc 1b Q#P6: mark (or unmark) a buffer as requiring
+        // round-trip input. While a marked buffer is active,
+        // `dispatch_idle` reports false, so semantic frontends'
+        // optimistic-apply stays off — RET reaches the buffer-local
+        // bindings (a panel's visit) and typing reaches the read-only
+        // intercept instead of landing as a CRDT import that bypasses
+        // it. `pmacs.listview` marks every panel it creates.
+        buffer.set(
+            "set_round_trip_input",
+            lua.create_function(move |lua, (id, on): (BufferIdLua, bool)| {
+                if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                    core.borrow_mut().set_round_trip_input(id.0, on);
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
         // T M4.5 L1: find-or-open. If a buffer is already bound to
         // `path`, switch to it (preserving unsaved edits — no
         // reload); otherwise behave like `from_file`. The dedup is
@@ -2383,6 +2402,11 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                             .switch_active_buffer(existing)
                             .map_err(mlua::Error::external)?;
                     }
+                    // Arc 1b: switching clears the window's overlays;
+                    // subscribers (syntax highlight, LSP style/diag
+                    // views) re-attach theirs. The fresh-load branch
+                    // below fires `buffer.after-load` instead.
+                    run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
                     return Ok(BufferIdLua(existing));
                 }
                 let (bytes, meta) = crate::file_io::load_file(&path_buf).map_err(|source| {
@@ -10329,10 +10353,17 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
         let cc = core.clone();
         win.set(
             "switch_buffer",
-            lua.create_function(move |_, id: BufferIdLua| -> mlua::Result<()> {
+            lua.create_function(move |lua, id: BufferIdLua| -> mlua::Result<()> {
                 cc.borrow_mut()
                     .switch_active_buffer(id.0)
-                    .map_err(mlua::Error::external)
+                    .map_err(mlua::Error::external)?;
+                // Arc 1b: switching clears the window's overlays;
+                // subscribers (syntax highlight, LSP style/diag views)
+                // re-attach theirs here — without this, C-x b / panel
+                // navigation permanently stripped styling from the
+                // session.
+                run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
+                Ok(())
             })?,
         )?;
     }

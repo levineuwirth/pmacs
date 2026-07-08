@@ -842,6 +842,16 @@ fn dispatcher_loop(
     // attach emits an initial `DispatchIdle` so the frontend starts
     // from a known idle state (its default is pessimistic-`false`).
     let mut last_dispatch_idle_sent: HashMap<FrontendId, bool> = HashMap::new();
+    // Arc 1b — the buffer each replica frontend last received a
+    // `BufferSnapshot` for via the active-buffer-follow path. Absence
+    // means "never sent": the first tick after attach ships the
+    // frontend its own active buffer, which also repairs the
+    // attach-time last-snapshot-wins ambiguity (the initial
+    // `send_buffer_snapshots` sweep sends every buffer; the display
+    // follows whichever arrived last, not necessarily the active one).
+    // Declared for both flavors (the follow path is crdt-gated; the
+    // detach cleanup isn't).
+    let mut last_active_buffer_sent: HashMap<FrontendId, crate::buffer::BufferId> = HashMap::new();
     let mut session_registry = SessionRegistry::new();
     // T M10.11 Q8 — jitter PRNG, seeded once so the
     // convergence-under-jitter scenario is deterministically
@@ -966,6 +976,45 @@ fn dispatcher_loop(
                         &session_registry,
                         &mut streams,
                     );
+                    // The broadcast just delivered this buffer to this
+                    // frontend too; record it so the follow check below
+                    // doesn't send a duplicate on the same tick.
+                    last_active_buffer_sent.insert(*fid, upgraded);
+                }
+
+                // Arc 1b — follow this frontend's active buffer. The
+                // F29 push above only fires on the *upgrade* tick;
+                // switching to an already-CRDT-backed buffer (a
+                // panel's `q`, `find_or_open` of an open file, plain
+                // `C-x b`) previously sent nothing, so a semantic
+                // frontend kept rendering the old buffer while
+                // daemon-side input targeted the new one — a
+                // typing-into-a-buffer-you-can't-see hazard. Ship the
+                // now-active buffer's snapshot to THIS frontend only
+                // (its own view changed; nobody else's did).
+                //
+                // SEMANTIC sessions only: display-follows-snapshot is
+                // a grid-less-frontend concept, and the GPU rebuilds
+                // its replica wholesale on every snapshot. The grid
+                // TUI renders via CellDelta and its `BufferMirror` is
+                // init-once — a follow send there is a guaranteed
+                // duplicate that errors ("already has a CRDT snapshot
+                // applied") on every attach and every buffer switch
+                // (the PR #94 round-2 startup regression).
+                if session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_capabilities.semantic_render)
+                {
+                    let active_now = {
+                        let core = editor.core.borrow();
+                        core.active_window_for(*fid).map(|w| w.buffer_id)
+                    };
+                    if let Some(active_now) = active_now
+                        && last_active_buffer_sent.get(fid) != Some(&active_now)
+                    {
+                        send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
+                        last_active_buffer_sent.insert(*fid, active_now);
+                    }
                 }
             }
             #[cfg(not(feature = "crdt"))]
@@ -1181,6 +1230,7 @@ fn dispatcher_loop(
                 semantic_states.remove(fid);
                 term_sizes.remove(fid);
                 last_dispatch_idle_sent.remove(fid);
+                last_active_buffer_sent.remove(fid);
                 session_registry.unregister_session(*fid);
                 editor.core.borrow_mut().unregister_frontend_view(*fid);
             }
@@ -1221,6 +1271,7 @@ fn dispatcher_loop(
                     &mut streams,
                     &mut term_sizes,
                     &mut last_dispatch_idle_sent,
+                    &mut last_active_buffer_sent,
                     &mut session_registry,
                 );
                 // Drain a burst of immediately-available events to
@@ -1236,6 +1287,7 @@ fn dispatcher_loop(
                         &mut streams,
                         &mut term_sizes,
                         &mut last_dispatch_idle_sent,
+                        &mut last_active_buffer_sent,
                         &mut session_registry,
                     );
                 }
@@ -1341,6 +1393,7 @@ fn handle_dispatcher_event(
     streams: &mut HashMap<FrontendId, UnixStream>,
     term_sizes: &mut HashMap<FrontendId, CellSize>,
     last_dispatch_idle_sent: &mut HashMap<FrontendId, bool>,
+    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
     session_registry: &mut SessionRegistry,
 ) {
     match event {
@@ -1515,6 +1568,7 @@ fn handle_dispatcher_event(
             streams.remove(&frontend_id);
             term_sizes.remove(&frontend_id);
             last_dispatch_idle_sent.remove(&frontend_id);
+            last_active_buffer_sent.remove(&frontend_id);
             session_registry.unregister_session(frontend_id);
             editor
                 .core
@@ -1691,6 +1745,55 @@ fn ensure_active_buffer_crdt_backed(
 /// send is small (snapshot bytes for the upgrade-instant state,
 /// which is the empty / freshly-loaded buffer content the replica
 /// already has) and only fires on the actual upgrade tick.
+/// Export `buffer_id`'s CRDT snapshot bytes, or `None` (logged) when
+/// the buffer is missing, not CRDT-backed, or the export fails.
+#[cfg(feature = "crdt")]
+fn export_buffer_snapshot(
+    editor: &EditorState,
+    buffer_id: crate::buffer::BufferId,
+) -> Option<Vec<u8>> {
+    let core = editor.core.borrow();
+    let registry = core.registry.borrow();
+    let buf = registry.get(buffer_id).ok()?;
+    let crdt = buf.crdt_state()?;
+    match crdt.export_snapshot() {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            eprintln!("pmacs: export_snapshot for {buffer_id:?} failed: {e:?}");
+            None
+        }
+    }
+}
+
+/// Arc 1b — send `buffer_id`'s snapshot to ONE frontend. The
+/// active-buffer-follow path (see the per-tick loop) uses this when a
+/// semantic frontend's own active buffer changes to an
+/// already-CRDT-backed buffer: the F29 broadcast only fires on the
+/// upgrade tick, so without this a frontend that switched *back* to a
+/// known buffer (a panel's `q`, `find_or_open` of an open file) kept
+/// displaying the old buffer while daemon-side input targeted the new
+/// one.
+#[cfg(feature = "crdt")]
+fn send_buffer_snapshot_to_frontend(
+    editor: &EditorState,
+    buffer_id: crate::buffer::BufferId,
+    fid: FrontendId,
+    streams: &mut HashMap<FrontendId, UnixStream>,
+) {
+    let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
+        return;
+    };
+    let msg = InstanceMessage::BufferSnapshot {
+        buffer_id,
+        crdt_snapshot: snapshot_bytes,
+    };
+    if let Some(stream) = streams.get_mut(&fid)
+        && let Err(e) = write_message(stream, &msg)
+    {
+        eprintln!("pmacs: send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
+    }
+}
+
 #[cfg(feature = "crdt")]
 fn broadcast_buffer_snapshot_to_replicas(
     editor: &EditorState,
@@ -1698,22 +1801,8 @@ fn broadcast_buffer_snapshot_to_replicas(
     session_registry: &SessionRegistry,
     streams: &mut HashMap<FrontendId, UnixStream>,
 ) {
-    let snapshot_bytes = {
-        let core = editor.core.borrow();
-        let registry = core.registry.borrow();
-        let Ok(buf) = registry.get(buffer_id) else {
-            return;
-        };
-        let Some(crdt) = buf.crdt_state() else {
-            return;
-        };
-        match crdt.export_snapshot() {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("pmacs: F29 export_snapshot for {buffer_id:?} failed: {e:?}");
-                return;
-            }
-        }
+    let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
+        return;
     };
     let msg = InstanceMessage::BufferSnapshot {
         buffer_id,

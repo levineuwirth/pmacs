@@ -569,6 +569,26 @@ pmacs.hook.add("buffer.after-load", function()
   pcall(attach_buffer, pmacs.window.buffer())
 end)
 
+pmacs.hook.add("buffer.after-switch", function()
+  -- Arc 1b: switching buffers clears the window's overlays, and
+  -- `attach_buffer` early-returns for a live attachment without
+  -- touching views — so a switch back to an attached buffer must
+  -- re-push the LSP style + diagnostic views itself. The just-
+  -- cleared window makes this exactly-once per switch; the dedup
+  -- tables keep gating the after-load path only. Without this,
+  -- navigating between attached buffers looked like "the LSP
+  -- deactivated" (no semantic color, no underlines).
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  local key = tostring(buf)
+  local rec = attachments[key]
+  if not rec then return end
+  local ok_s, attached_s = pcall(pmacs.lsp._attach_style, buf)
+  if ok_s and attached_s then styled_buffers[key] = true end
+  local ok_d, attached_d = pcall(pmacs.diag._attach_view, buf, rec.uri)
+  if ok_d and attached_d then diag_viewed_buffers[key] = true end
+end)
+
 pmacs.hook.add("buffer.after-edit", function()
   local buf = pmacs.window.buffer()
   if not buf then return end
@@ -1214,6 +1234,41 @@ function pmacs.lsp.go_to_definition()
   end)
 end
 
+-- Visit one LSP location (Arc 1b): the SP-4 cross-file template ---
+-- jump ring, find-or-open, cursor walk. Same-buffer hits skip the
+-- open. Shared by the references panel (and the outline in phase 2).
+local function visit_location(loc)
+  local path = pmacs.lsp.path_for_uri(loc.uri)
+  if not path then
+    pmacs.editor.set_status("LSP: cannot decode target uri " .. tostring(loc.uri))
+    return
+  end
+  pmacs.editor.push_jump()
+  local ok, err = pcall(pmacs.buffer.find_or_open, path)
+  if not ok then
+    -- Open failed: drop the origin we just pushed so M-, isn't left
+    -- pointing at a jump that never happened.
+    pmacs.editor.jump_back()
+    pmacs.editor.set_status("LSP: failed to open " .. path .. ": " .. tostring(err))
+    return
+  end
+  move_active_cursor_to(loc.line, loc.col)
+end
+
+-- Shorten `path` against the project root of `relative_to` (a path in
+-- the same project) for panel display; falls back to the full path.
+local function display_path(path, relative_to)
+  local ok, proj = pcall(pmacs.project.detect, relative_to or path)
+  if ok and proj and proj.root then
+    local root = proj.root
+    if root:sub(-1) ~= "/" then root = root .. "/" end
+    if path:sub(1, #root) == root then
+      return path:sub(#root + 1)
+    end
+  end
+  return path
+end
+
 function pmacs.lsp.find_references()
   local rec = attached_for_active()
   if not rec then
@@ -1236,13 +1291,27 @@ function pmacs.lsp.find_references()
       pmacs.editor.set_status("LSP: no references found")
       return
     end
-    -- v1 surfaces a modeline summary (count + first hit); a
-    -- references list buffer is future UX work, like the hover panel.
-    local first = locs[1]
+    -- Arc 1b: a browsable *references* panel. RET visits (jump ring
+    -- included, so M-, returns); q restores this buffer.
+    local here = pmacs.lsp.path_for_uri(rec.uri)
+    local rows = {}
+    for _, loc in ipairs(locs) do
+      local path = pmacs.lsp.path_for_uri(loc.uri) or loc.uri
+      rows[#rows + 1] = {
+        text = string.format("%s:%d:%d", display_path(path, here), loc.line + 1, loc.col + 1),
+        item = loc,
+      }
+    end
+    pmacs.listview.open {
+      name = "*references*",
+      header = string.format(
+        "%d reference%s   RET visit  n/p move  q quit",
+        #locs, (#locs == 1 and "" or "s")),
+      rows = rows,
+      on_visit = visit_location,
+    }
     pmacs.editor.set_status(string.format(
-      "LSP: %d reference%s; first at %s:%d:%d",
-      #locs, (#locs == 1 and "" or "s"),
-      first.uri, first.line + 1, first.col + 1))
+      "LSP: %d reference%s", #locs, (#locs == 1 and "" or "s")))
   end)
 end
 

@@ -45,6 +45,16 @@ define {
 }
 
 define {
+  name = "buffer.after-switch",
+  description = "Fired after the active window switches to a different, " ..
+                "already-open buffer (C-x b, panel visits, find_or_open of " ..
+                "an open file). Switching clears the window's overlays; " ..
+                "syntax/LSP subscribers re-attach theirs here. Fresh loads " ..
+                "fire buffer.after-load instead.",
+  kind = "all-must-succeed",
+}
+
+define {
   name = "buffer.after-save",
   description = "Fired after a successful save. LSP did_save and " ..
                 "format-on-save subscribers fire here.",
