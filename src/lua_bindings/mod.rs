@@ -10601,6 +10601,29 @@ fn install_search(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<
             lua.create_function(move |_, ()| Ok(cc.borrow().search_active()))?,
         )?;
     }
+    {
+        // query_replace_start(from, to, regex): begin an interactive
+        // query-replace from the cursor forward (Arc 2). The Lua
+        // `query-replace` command collects `from`/`to` via chained
+        // minibuffer prompts, then calls this; the interactive y/n/!/./q
+        // phase is a core dispatcher shadow from here on.
+        let cc = core.clone();
+        editor.set(
+            "query_replace_start",
+            lua.create_function(move |_, (from, to, regex): (String, String, bool)| {
+                cc.borrow_mut().query_replace_begin(from, to, regex);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // query_replace_active(): true during the interactive phase.
+        let cc = core.clone();
+        editor.set(
+            "query_replace_active",
+            lua.create_function(move |_, ()| Ok(cc.borrow().query_replace_active()))?,
+        )?;
+    }
     Ok(())
 }
 

@@ -66,6 +66,10 @@ bind("C-r", "search.backward")
 bind("C-M-s", "search.forward-regex")
 bind("C-M-r", "search.backward-regex")
 
+-- Query-replace (Arc 2): M-% literal, C-M-% regexp (Emacs bindings).
+bind("M-%", "query-replace")
+bind("C-M-%", "query-replace-regexp")
+
 -- CUA-style word-level deletion (the same shortcuts users expect from
 -- IDEs, browsers, terminals on Linux/Windows). C-BS deletes back to
 -- the start of the previous word; C-DEL deletes forward through the

@@ -88,6 +88,41 @@ pub struct SearchSession {
     invalid: bool,
 }
 
+/// Live state of an in-progress query-replace (Arc 2, Q#QR1).
+///
+/// Present only while a query-replace's interactive phase is running
+/// (`EditorCore::query_replace`); `None` otherwise. Unlike
+/// [`SearchSession`], the buffer is usually already mutated by the
+/// time this ends, so `origin` is used *only* for the nothing-matched
+/// restore (Q#QR10); every other exit leaves point at the inspected
+/// match. Matching runs forward from `next_from` on the *live* buffer
+/// (Q#QR2), so offset shifts and never-re-matching-replacements fall
+/// out for free.
+#[derive(Clone, Debug)]
+pub struct QueryReplaceSession {
+    /// The literal substring or regex source being replaced.
+    from: String,
+    /// The replacement text (may be empty — Q#QR3 deletion).
+    to: String,
+    /// Compiled regex engine when in regex mode (Q#QR9), cached for
+    /// the whole run so `!` stays linear; `None` = smart-case literal.
+    re: Option<regex::bytes::Regex>,
+    /// Buffer + cursor when the session began. Restored on cancel
+    /// *only* when nothing ever matched (Q#QR10).
+    origin: (BufferId, Position),
+    /// Byte offset the next forward search starts from — advanced past
+    /// each replacement so inserted text is never re-matched.
+    next_from: Position,
+    /// The match currently being prompted, or `None` before the first
+    /// advance / after finishing.
+    current: Option<crate::protocol::ByteRange>,
+    /// Number of replacements applied so far.
+    replaced: usize,
+    /// Whether any match was ever found (distinguishes "nothing
+    /// matched → restore origin" from "matched, then quit").
+    found_any: bool,
+}
+
 /// The world state mutated by editor commands.
 pub struct EditorCore {
     /// Shared buffer registry. The registry is the canonical owner
@@ -203,6 +238,10 @@ pub struct EditorCore {
     /// write would bypass the intercept chain entirely. Marked from
     /// Lua via `pmacs.buffer.set_round_trip_input`; pruned on kill.
     round_trip_buffers: std::collections::HashSet<BufferId>,
+    /// Live query-replace interactive session (Arc 2), or `None`. The
+    /// query-replace twin of `search`; drives the fifth dispatcher
+    /// shadow.
+    query_replace: Option<QueryReplaceSession>,
 }
 
 impl EditorCore {
@@ -244,6 +283,7 @@ impl EditorCore {
             menu: crate::menu::make_shared_menu(),
             completion_popup: crate::completion::make_shared_popup(),
             round_trip_buffers: std::collections::HashSet::new(),
+            query_replace: None,
         }
     }
 
@@ -772,6 +812,206 @@ impl EditorCore {
         let aw = self.active_window_mut();
         aw.cursor = clamped;
         aw.goal_col = None;
+    }
+
+    // ---- query-replace (Arc 2, Q#QR1-10) -----------------------------------
+
+    /// True while a query-replace interactive session is running (the
+    /// fifth dispatcher-shadow predicate; also drives `dispatch_idle`
+    /// and the modal-close guard).
+    #[must_use]
+    pub fn query_replace_active(&self) -> bool {
+        self.query_replace.is_some()
+    }
+
+    /// Begin a query-replace from the cursor forward (Q#QR8). `regex`
+    /// selects `query-replace-regexp` (Q#QR9). An invalid regex refuses
+    /// to start (Q#QR2). Immediately advances to (and prompts on) the
+    /// first match, or finishes with "No matches" when there are none.
+    pub fn query_replace_begin(&mut self, from: String, to: String, regex: bool) {
+        if self.query_replace.is_some() || from.is_empty() {
+            return;
+        }
+        let re = if regex {
+            let Some(re) = crate::search::compile_search_regex(&from) else {
+                self.status = format!("Invalid regex: {from}");
+                return;
+            };
+            Some(re)
+        } else {
+            None
+        };
+        let origin = (self.active_buffer_id(), self.cursor());
+        // Reuse the isearch match-wash overlay to highlight the current
+        // match in the TUI; the GPU gets it via SearchMatch decorations.
+        self.ensure_search_overlay();
+        self.query_replace = Some(QueryReplaceSession {
+            from,
+            to,
+            re,
+            origin,
+            next_from: origin.1,
+            current: None,
+            replaced: 0,
+            found_any: false,
+        });
+        self.query_replace_advance();
+    }
+
+    /// Find the next match at/after `next_from` on the live buffer. On
+    /// a hit: highlight it, reveal it (cursor to its start, Q#QR2), and
+    /// prompt. On a miss: finish (natural end / nothing-matched).
+    fn query_replace_advance(&mut self) {
+        let Some(session) = self.query_replace.as_ref() else {
+            return;
+        };
+        let bid = session.origin.0;
+        let start = session.next_from.min(self.active_buffer_len()) as usize;
+        let bytes = self.buffer_bytes(bid);
+        let found = match &session.re {
+            Some(re) => crate::search::find_first_regex_from(&bytes, re, start),
+            None => crate::search::find_first_from(&bytes, &session.from, start),
+        };
+        let Some(range) = found else {
+            self.query_replace_finish();
+            return;
+        };
+        let from = session.from.clone();
+        if let Some(session) = self.query_replace.as_mut() {
+            session.current = Some(range);
+            session.found_any = true;
+        }
+        // Highlight just this match: a single-element store set renders
+        // it as SearchMatchActive in both frontends (Q#QR5).
+        {
+            let mut guard = self
+                .search_store
+                .lock()
+                .expect("search store mutex poisoned");
+            guard.set(bid, from, vec![range]);
+        }
+        self.search_place_cursor(range.start);
+        self.query_replace_set_prompt();
+    }
+
+    /// Set `core.status` to the per-match prompt (Q#QR4) — shown in
+    /// both frontends via the v15 `StatusFacts.message` band.
+    fn query_replace_set_prompt(&mut self) {
+        if let Some(session) = self.query_replace.as_ref() {
+            self.status = format!(
+                "Query replacing '{}' with '{}' (y/n, ! all, . last, q quit)",
+                session.from, session.to
+            );
+        }
+    }
+
+    /// Replace the current match with the to-string as a single edit
+    /// (Q#QR7), advancing `next_from` past the inserted text so it is
+    /// never re-matched (Q#QR2). Returns `true` when an edit was
+    /// applied. Does NOT advance to the next match — callers chain
+    /// `query_replace_advance` (or finish) as their flow needs.
+    fn query_replace_apply_current(&mut self) -> bool {
+        let Some(session) = self.query_replace.as_ref() else {
+            return false;
+        };
+        let Some(range) = session.current else {
+            return false;
+        };
+        let to = session.to.clone();
+        if let Err(e) = self.apply_active_edit(EditOp::Replace {
+            range: Range {
+                start: range.start,
+                end: range.end,
+            },
+            bytes: to.as_bytes(),
+        }) {
+            self.status = format!("query-replace: {e}");
+            return false;
+        }
+        let new_next = range.start + to.len() as u64;
+        if let Some(session) = self.query_replace.as_mut() {
+            session.next_from = new_next;
+            session.current = None;
+            session.replaced += 1;
+        }
+        self.search_place_cursor(new_next);
+        true
+    }
+
+    /// `y` / `SPC` — replace the current match, then advance to the next.
+    pub fn query_replace_replace(&mut self) {
+        if self.query_replace_apply_current() {
+            self.query_replace_advance();
+        }
+    }
+
+    /// `n` / `DEL` — leave the current match, advance past it to the next.
+    pub fn query_replace_skip(&mut self) {
+        if let Some(session) = self.query_replace.as_mut()
+            && let Some(range) = session.current
+        {
+            session.next_from = range.end;
+            session.current = None;
+        }
+        self.query_replace_advance();
+    }
+
+    /// `!` — replace the current match and all remaining without
+    /// prompting, then finish (Q#QR6). One `after-edit` hook fires for
+    /// the batch (the dispatcher compares revision across the handler).
+    pub fn query_replace_all(&mut self) {
+        while self.query_replace_apply_current() {
+            // Find the next match (mirrors advance's search, without the
+            // highlight/prompt work — we're not stopping to ask).
+            let Some(session) = self.query_replace.as_ref() else {
+                break;
+            };
+            let bid = session.origin.0;
+            let start = session.next_from.min(self.active_buffer_len()) as usize;
+            let bytes = self.buffer_bytes(bid);
+            let found = match &session.re {
+                Some(re) => crate::search::find_first_regex_from(&bytes, re, start),
+                None => crate::search::find_first_from(&bytes, &session.from, start),
+            };
+            match found {
+                Some(range) => {
+                    if let Some(session) = self.query_replace.as_mut() {
+                        session.current = Some(range);
+                    }
+                }
+                None => break,
+            }
+        }
+        self.query_replace_finish();
+    }
+
+    /// `.` — replace the current match, then finish (Q#QR6).
+    pub fn query_replace_replace_and_quit(&mut self) {
+        self.query_replace_apply_current();
+        self.query_replace_finish();
+    }
+
+    /// End the session (Q#QR10): clear the highlight, restore the origin
+    /// cursor *only* if nothing ever matched, and set the count status.
+    /// Every other exit leaves point where the last step put it.
+    pub fn query_replace_finish(&mut self) {
+        let Some(session) = self.query_replace.take() else {
+            return;
+        };
+        let bid = session.origin.0;
+        self.search_store
+            .lock()
+            .expect("search store mutex poisoned")
+            .clear(bid);
+        if session.found_any {
+            let n = session.replaced;
+            self.status = format!("Replaced {n} occurrence{}", if n == 1 { "" } else { "s" });
+        } else {
+            if self.active_buffer_id() == bid {
+                self.search_place_cursor(session.origin.1);
+            }
+            self.status = format!("No matches for '{}'", session.from);
+        }
     }
 
     /// Snapshot a buffer's full byte content (empty if the id is
@@ -3440,5 +3680,87 @@ mod tests {
             !s.completion_popup_is_open(),
             "focus change closes the session even with the same buffer"
         );
+    }
+
+    // ---- query-replace core (Arc 2) ----------------------------------------
+
+    #[test]
+    fn query_replace_all_replaces_and_counts() {
+        let mut s = from_bytes(b"foo foo foo\n");
+        s.query_replace_begin("foo".into(), "bar".into(), false);
+        assert!(s.query_replace_active(), "session opens on the first match");
+        s.query_replace_all();
+        assert_eq!(text_of(&s), "bar bar bar\n");
+        assert!(!s.query_replace_active(), "! finishes the session");
+        assert_eq!(s.status, "Replaced 3 occurrences");
+    }
+
+    #[test]
+    fn query_replace_growing_replacement_does_not_loop() {
+        // The a→aa shape: replacing must not re-match the inserted text.
+        let mut s = from_bytes(b"a a a\n");
+        s.query_replace_begin("a".into(), "aa".into(), false);
+        s.query_replace_all();
+        assert_eq!(text_of(&s), "aa aa aa\n", "each 'a' replaced exactly once");
+        assert_eq!(s.status, "Replaced 3 occurrences");
+    }
+
+    #[test]
+    fn query_replace_empty_to_deletes() {
+        let mut s = from_bytes(b"a-b-c\n");
+        s.query_replace_begin("-".into(), String::new(), false);
+        s.query_replace_all();
+        assert_eq!(text_of(&s), "abc\n", "empty replacement deletes matches");
+    }
+
+    #[test]
+    fn query_replace_skip_then_replace_is_selective() {
+        let mut s = from_bytes(b"x x x\n");
+        s.query_replace_begin("x".into(), "y".into(), false);
+        s.query_replace_skip(); // leave the first x
+        s.query_replace_replace(); // replace the second x, advance to third
+        s.query_replace_replace_and_quit(); // replace the third, quit
+        assert_eq!(text_of(&s), "x y y\n", "first skipped, rest replaced");
+        assert!(!s.query_replace_active());
+    }
+
+    #[test]
+    fn query_replace_nothing_matched_restores_origin() {
+        let mut s = from_bytes(b"hello world\n");
+        s.active_window_mut().cursor = 6; // on "world"
+        s.query_replace_begin("zzz".into(), "q".into(), false);
+        assert!(
+            !s.query_replace_active(),
+            "no match → session never stays open"
+        );
+        assert_eq!(text_of(&s), "hello world\n", "buffer untouched");
+        assert_eq!(s.active_window().cursor, 6, "origin cursor restored");
+        assert_eq!(s.status, "No matches for 'zzz'");
+    }
+
+    #[test]
+    fn query_replace_starts_from_cursor_forward() {
+        let mut s = from_bytes(b"k _ k\n");
+        s.active_window_mut().cursor = 2; // between the two k's
+        s.query_replace_begin("k".into(), "K".into(), false);
+        s.query_replace_all();
+        assert_eq!(text_of(&s), "k _ K\n", "only the match at/after point");
+    }
+
+    #[test]
+    fn query_replace_regex_replaces_and_invalid_refuses() {
+        let mut s = from_bytes(b"a1 b2 c3\n");
+        s.query_replace_begin("[0-9]".into(), "#".into(), true);
+        s.query_replace_all();
+        assert_eq!(text_of(&s), "a# b# c#\n", "regex matches digits");
+
+        // Invalid regex refuses to start and leaves a status.
+        let mut s2 = from_bytes(b"abc\n");
+        s2.query_replace_begin("(unclosed".into(), "x".into(), true);
+        assert!(
+            !s2.query_replace_active(),
+            "invalid regex never opens a session"
+        );
+        assert!(s2.status.starts_with("Invalid regex"));
     }
 }
