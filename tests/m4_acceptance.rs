@@ -3850,6 +3850,24 @@ fn m4_14_code_action_command_drives_apply_edit() {
         .exec()
         .expect("invoke code actions");
 
+    // Arc 1b phase 2: with two actions available, `code_actions` now
+    // opens the minibuffer picker instead of blind-applying the
+    // first. Pump until the prompt is live, then pick action 1 (the
+    // command-only action, preserving this test's original subject)
+    // by typed index + RET.
+    assert!(
+        pump_lua_flag(&mut state, "#pmacs.minibuffer.candidates() > 0", 5),
+        "code-action picker never opened"
+    );
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+    );
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
+
     // The applyEdit pump runs on the async tick; it applies the
     // server's out-of-band edit, turning line 1 "___zzz" -> "ED2zzz".
     assert!(
@@ -3943,6 +3961,24 @@ fn m4_15_workspace_edit_resource_ops_apply_in_order() {
         .load("pmacs.lsp.code_actions()")
         .exec()
         .expect("invoke code actions");
+
+    // Arc 1b phase 2: with two actions available, `code_actions` now
+    // opens the minibuffer picker instead of blind-applying the
+    // first. Pump until the prompt is live, then pick action 1 (the
+    // command-only action, preserving this test's original subject)
+    // by typed index + RET.
+    assert!(
+        pump_lua_flag(&mut state, "#pmacs.minibuffer.candidates() > 0", 5),
+        "code-action picker never opened"
+    );
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+    );
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
 
     // Completion signal: the created file exists on disk. Tick the
     // full frame order (processes → lsp → async) so the

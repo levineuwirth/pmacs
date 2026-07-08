@@ -1234,6 +1234,15 @@ function pmacs.lsp.go_to_definition()
   end)
 end
 
+-- LSP SymbolKind (1..=26) -> short outline tag (Arc 1b phase 2).
+local SYMBOL_KIND_TAGS = {
+  "file", "module", "namespace", "package", "class", "method",
+  "property", "field", "constructor", "enum", "interface", "function",
+  "variable", "constant", "string", "number", "boolean", "array",
+  "object", "key", "null", "enum-member", "struct", "event",
+  "operator", "type-parameter",
+}
+
 -- Visit one LSP location (Arc 1b): the SP-4 cross-file template ---
 -- jump ring, find-or-open, cursor walk. Same-buffer hits skip the
 -- open. Shared by the references panel (and the outline in phase 2).
@@ -1335,14 +1344,38 @@ function pmacs.lsp.document_symbols()
       pmacs.editor.set_status("LSP: no symbols")
       return
     end
-    -- v1 modeline summary (count + first symbol); a structured
-    -- outline buffer driven off this store is future UX work, like
-    -- the references list and hover panel.
-    local first = syms[1]
+    -- Arc 1b phase 2: a browsable *outline* panel. Symbols arrive
+    -- FLAT with a `depth` field --- indent, don't recurse. RET
+    -- visits (jump ring: M-, returns to the outline row); q restores.
+    local source_buf = rec.buffer
+    local rows = {}
+    for _, sym in ipairs(syms) do
+      local tag = SYMBOL_KIND_TAGS[sym.kind] or "symbol"
+      rows[#rows + 1] = {
+        text = string.format(
+          "%s%s  [%s]", string.rep("  ", sym.depth or 0), sym.name, tag),
+        item = sym,
+      }
+    end
+    pmacs.listview.open {
+      name = "*outline*",
+      header = string.format(
+        "%d symbol%s   RET visit  n/p move  q quit",
+        #syms, (#syms == 1 and "" or "s")),
+      rows = rows,
+      on_visit = function(sym)
+        pmacs.editor.push_jump()
+        local okv = pcall(pmacs.window.switch_buffer, source_buf)
+        if not okv then
+          pmacs.editor.jump_back()
+          pmacs.editor.set_status("LSP: outline source buffer is gone")
+          return
+        end
+        move_active_cursor_to(sym.line, sym.col)
+      end,
+    }
     pmacs.editor.set_status(string.format(
-      "LSP: %d symbol%s; first '%s' at %d:%d",
-      #syms, (#syms == 1 and "" or "s"),
-      first.name, first.line + 1, first.col + 1))
+      "LSP: %d symbol%s", #syms, (#syms == 1 and "" or "s")))
   end)
 end
 
@@ -1569,6 +1602,38 @@ end
 -- the pump installed below). A selection UI over multiple actions is
 -- future UX work, like the references list and hover panel — v1
 -- acts on the first and reports how many were offered.
+-- Apply one code action (Arc 1b phase 2: shared by the direct path
+-- and the picker). Runs its WorkspaceEdit inline and/or awaits its
+-- executeCommand, then reports what happened. Must run inside a
+-- `pmacs.async` coroutine.
+local function apply_code_action(rec, act)
+  local bits = {}
+  if act.has_edit then
+    local n, files, res = apply_workspace_edit(act.edit)
+    if not n then
+      pmacs.editor.set_status("LSP: code action aborted: " .. tostring(files))
+      return
+    end
+    local b = string.format("%d edit(s) / %d file(s)", n, files)
+    if res and res > 0 then b = b .. string.format(" / %d file op(s)", res) end
+    table.insert(bits, b)
+  end
+  if act.command then
+    local ok, cerr = pcall(function()
+      pmacs.lsp.request_execute_command(
+        rec.server, act.command.command, act.command.arguments):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: command failed: " .. lsp_await_error(cerr))
+      return
+    end
+    table.insert(bits, "ran '" .. act.command.command .. "'")
+  end
+  local detail = (#bits > 0) and (" — " .. table.concat(bits, ", ")) or ""
+  pmacs.editor.set_status(string.format(
+    "LSP: code action '%s'%s", act.title, detail))
+end
+
 function pmacs.lsp.code_actions()
   local rec = attached_for_active()
   if not rec then
@@ -1592,33 +1657,35 @@ function pmacs.lsp.code_actions()
       pmacs.editor.set_status("LSP: no code actions")
       return
     end
-    local first = acts[1]
-    local bits = {}
-    if first.has_edit then
-      local n, files, res = apply_workspace_edit(first.edit)
-      if not n then
-        pmacs.editor.set_status("LSP: code action aborted: " .. tostring(files))
-        return
-      end
-      local b = string.format("%d edit(s) / %d file(s)", n, files)
-      if res and res > 0 then b = b .. string.format(" / %d file op(s)", res) end
-      table.insert(bits, b)
+    -- Arc 1b phase 2: one action applies directly (today's behavior,
+    -- now correct instead of lucky); several open the minibuffer
+    -- dropdown so the USER picks — v1 applied acts[1] blind.
+    if #acts == 1 then
+      apply_code_action(rec, acts[1])
+      return
     end
-    if first.command then
-      local ok2, cerr = pcall(function()
-        pmacs.lsp.request_execute_command(
-          rec.server, first.command.command, first.command.arguments):await()
-      end)
-      if not ok2 then
-        pmacs.editor.set_status("LSP: command failed: " .. lsp_await_error(cerr))
-        return
-      end
-      table.insert(bits, "ran '" .. first.command.command .. "'")
+    local labels = {}
+    for i, a in ipairs(acts) do
+      labels[i] = string.format("%d: %s", i, a.title)
     end
-    local detail = (#bits > 0) and (" — " .. table.concat(bits, ", ")) or ""
-    pmacs.editor.set_status(string.format(
-      "LSP: code action '%s'%s (%d available)",
-      first.title, detail, #acts))
+    pmacs.minibuffer.read {
+      prompt = string.format("Code action (%d): ", #acts),
+      source = function() return labels end,
+      on_accept = function(choice)
+        if not choice or choice == "" then return end
+        -- Accept both the completed candidate ("2: Inline fix")
+        -- and a bare typed index ("2").
+        local idx = tonumber(choice:match("^(%d+)"))
+        local act = idx and acts[idx]
+        if not act then
+          pmacs.editor.set_status("LSP: no such code action")
+          return
+        end
+        pmacs.async(function()
+          apply_code_action(rec, act)
+        end)
+      end,
+    }
   end)
 end
 
@@ -1649,6 +1716,44 @@ function pmacs.lsp.hover_at_cursor()
     -- here when the keybinding is meant to surface one.
     local first = (hover.contents or ""):match("^[^\n]*") or ""
     pmacs.editor.set_status(first ~= "" and ("LSP: " .. first) or "LSP: hover empty")
+  end)
+end
+
+-- Arc 1b phase 2: the full (multi-line) hover body in a *lsp-help*
+-- panel --- `lsp.hover` keeps its one-line echo-area summary; this is
+-- the "show me everything" companion. Rows are non-visitable
+-- (item = nil, so RET is a no-op); q restores the source buffer.
+function pmacs.lsp.hover_doc()
+  local rec = attached_for_active()
+  if not rec then
+    pmacs.editor.set_status("LSP: no server for active buffer")
+    return
+  end
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
+  pmacs.hover.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok, err = pcall(function()
+      pmacs.lsp.request_hover(rec.server, rec.uri, line, col):await()
+    end)
+    if not ok then
+      pmacs.editor.set_status("LSP: " .. lsp_await_error(err))
+      return
+    end
+    local hover = pmacs.hover.current(rec.server, rec.uri)
+    if not hover or not hover.contents or hover.contents == "" then
+      pmacs.editor.set_status("LSP: no hover info")
+      return
+    end
+    local rows = {}
+    for l in (hover.contents .. "\n"):gmatch("(.-)\n") do
+      rows[#rows + 1] = { text = l }
+    end
+    pmacs.listview.open {
+      name = "*lsp-help*",
+      header = "hover documentation   q quit",
+      rows = rows,
+    }
   end)
 end
 
@@ -1691,6 +1796,12 @@ pmacs.command.define {
   name = "lsp.format-buffer",
   description = "Format the active buffer through the attached LSP server.",
   fn = pmacs.lsp.format_buffer,
+}
+
+pmacs.command.define {
+  name = "lsp.hover-doc",
+  description = "Show the full hover documentation in a *lsp-help* panel.",
+  fn = pmacs.lsp.hover_doc,
 }
 
 pmacs.command.define {
@@ -1767,6 +1878,7 @@ pmacs.keymap.bind { scope = "global", sequence = "C-c a", command = "lsp.code-ac
 pmacs.keymap.bind { scope = "global", sequence = "C-c i", command = "lsp.inlay-hints" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c y", command = "lsp.semantic-tokens" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c h", command = "lsp.hover" }
+pmacs.keymap.bind { scope = "global", sequence = "C-c H", command = "lsp.hover-doc" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c s", command = "lsp.signature-help" }
 pmacs.keymap.bind { scope = "global", sequence = "C-c f", command = "lsp.format-buffer" }
 
