@@ -2367,6 +2367,25 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
+        // Arc 1b Q#P6: mark (or unmark) a buffer as requiring
+        // round-trip input. While a marked buffer is active,
+        // `dispatch_idle` reports false, so semantic frontends'
+        // optimistic-apply stays off — RET reaches the buffer-local
+        // bindings (a panel's visit) and typing reaches the read-only
+        // intercept instead of landing as a CRDT import that bypasses
+        // it. `pmacs.listview` marks every panel it creates.
+        buffer.set(
+            "set_round_trip_input",
+            lua.create_function(move |lua, (id, on): (BufferIdLua, bool)| {
+                if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                    core.borrow_mut().set_round_trip_input(id.0, on);
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
         // T M4.5 L1: find-or-open. If a buffer is already bound to
         // `path`, switch to it (preserving unsaved edits — no
         // reload); otherwise behave like `from_file`. The dedup is

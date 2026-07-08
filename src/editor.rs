@@ -276,6 +276,15 @@ impl EditorState {
         // auto-attach buffer hooks, key-bound commands. Loaded last so
         // every dependency table (`pmacs.lsp`, `pmacs.parse`,
         // `pmacs.window`, etc.) already exists.
+        // Arc 1b: the reusable list-panel module. Loaded before
+        // lsp.lua, whose panel commands (references, outline) call
+        // `pmacs.listview.open`.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/listview.lua"),
+                include_str!("../builtin/runtime/listview.lua"),
+            )
+            .expect("load listview builtin chunk");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/lsp.lua"),
@@ -508,8 +517,15 @@ impl EditorState {
         let core = self.core.borrow();
         // A live context menu shadows the keymap too (Q#CM1): keys must
         // round-trip so the daemon's `dispatch_menu_key` drives the menu
-        // rather than the frontend self-inserting.
-        !core.minibuffer.is_active() && !core.search_active() && !core.menu_is_open()
+        // rather than the frontend self-inserting. A round-trip buffer
+        // (Arc 1b Q#P6 — a focused panel) is the buffer-shaped member of
+        // the same family: RET must reach its buffer-local bindings and
+        // typing must reach its read-only intercept, neither of which an
+        // optimistic local edit would do.
+        !core.minibuffer.is_active()
+            && !core.search_active()
+            && !core.menu_is_open()
+            && !core.active_buffer_round_trips()
     }
 
     /// `frontend_id` records which frontend produced the event. v0.1

@@ -193,6 +193,16 @@ pub struct EditorCore {
     /// same state the dispatch path navigates and the Lua driver
     /// publishes into — the completion twin of `menu`.
     pub completion_popup: crate::completion::SharedCompletionPopup,
+    /// Buffers whose input must round-trip (Arc 1b, Q#P6). While one
+    /// of these is the active buffer,
+    /// [`crate::editor::EditorState::dispatch_idle`] reports `false`,
+    /// so semantic frontends' optimistic-apply stays off: RET reaches
+    /// buffer-local bindings (a panel's visit) instead of locally
+    /// inserting `\n`, and plain typing dispatches into the edit path
+    /// where a read-only intercept can reject it — a CRDT-import
+    /// write would bypass the intercept chain entirely. Marked from
+    /// Lua via `pmacs.buffer.set_round_trip_input`; pruned on kill.
+    round_trip_buffers: std::collections::HashSet<BufferId>,
 }
 
 impl EditorCore {
@@ -233,6 +243,7 @@ impl EditorCore {
             pending_clipboard: None,
             menu: crate::menu::make_shared_menu(),
             completion_popup: crate::completion::make_shared_popup(),
+            round_trip_buffers: std::collections::HashSet::new(),
         }
     }
 
@@ -1980,6 +1991,25 @@ impl EditorCore {
         true
     }
 
+    // ---- round-trip input buffers (Arc 1b, Q#P6) ----------------------------
+
+    /// Mark (or unmark) `buffer_id` as requiring round-trip input.
+    /// See the field doc on `round_trip_buffers` for the semantics.
+    pub fn set_round_trip_input(&mut self, buffer_id: BufferId, on: bool) {
+        if on {
+            self.round_trip_buffers.insert(buffer_id);
+        } else {
+            self.round_trip_buffers.remove(&buffer_id);
+        }
+    }
+
+    /// True while the active buffer requires round-trip input (a
+    /// panel or other buffer-local-keymap surface is focused).
+    #[must_use]
+    pub fn active_buffer_round_trips(&self) -> bool {
+        self.round_trip_buffers.contains(&self.active_buffer_id())
+    }
+
     /// Ensure the active window carries a
     /// [`crate::completion::CompletionView`] overlay (deduped by kind).
     /// The view reads the shared popup, so one instance suffices; it
@@ -2012,6 +2042,7 @@ impl EditorCore {
                 return Err("cannot kill the last remaining buffer".into());
             }
         }
+        self.round_trip_buffers.remove(&buffer_id);
         let fallback = {
             let mut reg = self.registry.borrow_mut();
             match reg.find_by_name("*scratch*") {
