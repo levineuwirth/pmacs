@@ -156,22 +156,51 @@ position-encoding hardening remains one deferral, not four new ones.
 
 Arc 2 interleave point (query-replace) after phase 2.
 
-## Categorical bets (score at close)
+## Categorical bets (scored at close — ARC COMPLETE, PRs #94 + #95)
 
 1. **The listview module covers all three panels without per-panel
-   Rust.** The whole arc lands with one small core seam (Q#P6) and
-   zero protocol change.
-2. **Cursor-zeroing bites once.** `switch_active_buffer` clears
-   cursor/overlays; some flow (refresh, visit-then-return) will land
-   the cursor somewhere surprising before the re-seat discipline is
-   applied everywhere.
-3. **GPU panels render via the existing BufferSnapshot/F29 path with
-   no GPU changes.** The mechanism exists (mid-session CRDT upgrade +
-   snapshot push); a panel buffer exercising it from a `switch_buffer`
-   is the untested claim in this arc.
-4. **Round-trip routing has one gap somewhere** — a key that neither
-   round-trips nor falls through correctly while a panel is focused
-   (the Q#C6-class finding of this arc).
+   Rust — HELD.** One core seam (Q#P6: a `HashSet` + one binding +
+   one `dispatch_idle` clause), zero protocol change; outline,
+   references, and hover-doc are all pure Lua `listview.open` calls,
+   and the code-action picker reused the minibuffer dropdown with no
+   panel at all.
+2. **Cursor-zeroing bites once — HELD** (mild): the re-seat
+   discipline (`seat_cursor` after every render/switch) was applied
+   from the start, so the predicted surprise never surfaced in the
+   panels; the *latent* form of it bit elsewhere (bet #3's finding 2).
+3. **GPU panels render with no GPU changes — SCORED FALSE, the
+   arc's load-bearing finding.** Two blocking bugs at GPU validation,
+   neither a GPU change but both invisible to the bet as framed: (a)
+   the F29 snapshot push fires only on the *upgrade* tick, so
+   switching *back* to a known buffer sent nothing and the GPU froze
+   on the old buffer while input targeted the new one — fixed with a
+   daemon active-buffer-*follow* path (semantic sessions only; a
+   first cut gated on `crdt_replica` duplicated the TUI's init-once
+   snapshot and broke *all* attach — round-2 regression). (b) A
+   long-latent bug the panels made constant: `switch_active_buffer`
+   clears window overlays and the runtime dedup tables blocked
+   re-attach, so *every* buffer switch (plain `C-x b` included) had
+   been stripping syntax/LSP/diagnostic styling — fixed with a new
+   `buffer.after-switch` hook. **Lesson: "the mechanism exists" is
+   not "the mechanism fires on this trigger" — snapshot delivery was
+   coupled to CRDT *upgrade*, not active-buffer *change*.**
+4. **Round-trip routing has one gap somewhere — NOT OBSERVED.** Q#P6
+   held cleanly in both frontends; no key mis-routed while a panel
+   was focused.
+
+## As-built divergences
+
+- **Code actions took no panel.** The picker is `minibuffer.read`
+  with `"N: title"` candidates (bare index also accepts), not a
+  `listview` — a single action still applies directly. Cleaner than a
+  list buffer for a pick-one-and-close flow.
+- **The two blocking findings were daemon/runtime, not panel Lua**
+  (bet #3) — the panel code itself needed no correctness fixes across
+  either PR.
+- **Coverage caught a process gap**: the phase-2 tests initially
+  shipped with a `too-many-lines` clippy deny masked by a swallowed
+  exit code in a chained local gate command. Run `clippy` as its own
+  gate step, not `&&`-chained after a test whose exit code you read.
 
 ## Deferred (named, not silently dropped)
 
