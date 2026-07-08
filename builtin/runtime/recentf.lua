@@ -83,4 +83,3 @@ pmacs.command.define {
 }
 
 pmacs.keymap.bind { scope = "global", sequence = "C-x C-r", command = "recent-files" }
-

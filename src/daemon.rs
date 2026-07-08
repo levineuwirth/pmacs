@@ -466,6 +466,8 @@ pub fn run_daemon(socket_path: PathBuf, instance_name: Option<String>) -> Result
     // The editor outlives any single attachment; constructed once on
     // the dispatcher thread and used until daemon shutdown.
     let mut editor = EditorState::new();
+    // Real session: wire up on-disk persistence (history + pmacs.state).
+    editor.install_state_dirs();
     // Mirror the daemon's `--socket NAME` and start time into the
     // editor's `LocalInstanceInfo` so `pmacs.instance.identity()`
     // (T M5.6f) reports the same identity the daemon hands back over

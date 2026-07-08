@@ -25,11 +25,21 @@ use std::path::PathBuf;
 /// `None` rather than a relative path.
 #[must_use]
 pub fn state_dir(xdg_state: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    // `XDG_STATE_HOME` must be an absolute path per the XDG spec; a
+    // relative value would root state at a *cwd-relative* `pmacs/...`
+    // (the same latent bug the empty case had). Ignore relative values
+    // and fall through to `HOME`, which likewise must be absolute.
     if let Some(xdg) = xdg_state.filter(|s| !is_blank(s)) {
-        return Some(PathBuf::from(xdg).join("pmacs"));
+        let p = PathBuf::from(xdg);
+        if p.is_absolute() {
+            return Some(p.join("pmacs"));
+        }
     }
-    home.filter(|s| !is_blank(s))
-        .map(|h| PathBuf::from(h).join(".local").join("state").join("pmacs"))
+    home.filter(|s| !is_blank(s)).and_then(|h| {
+        let p = PathBuf::from(h);
+        p.is_absolute()
+            .then(|| p.join(".local").join("state").join("pmacs"))
+    })
 }
 
 /// Resolve the base state directory from the process environment.
@@ -46,7 +56,12 @@ pub fn user_state_dir() -> Option<PathBuf> {
         .as_deref()
         .filter(|s| !is_blank(s))
     {
-        return Some(PathBuf::from(over).join("pmacs"));
+        // The override must also be absolute — a relative redirect would
+        // reintroduce the cwd-relative-state footgun.
+        let p = PathBuf::from(over);
+        if p.is_absolute() {
+            return Some(p.join("pmacs"));
+        }
     }
     state_dir(
         std::env::var_os("XDG_STATE_HOME").as_deref(),
@@ -113,17 +128,36 @@ pub fn validate_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Resolve a validated key to its absolute path under `base`, with a
-/// canonical-prefix belt: the joined path must still start with `base`.
+/// Resolve a validated key to its path under `base`, refusing any
+/// route that could escape the state directory.
+///
+/// Two guards beyond [`validate_name`]'s lexical rules:
+/// 1. a `starts_with(base)` belt (redundant with `validate_name`, kept
+///    as defense in depth);
+/// 2. **symlink confinement** — every *existing* component the key adds
+///    under `base` is `lstat`'d, and a symlink (live *or* broken) is
+///    rejected. Without this, a `base/autosave` symlink pointing at
+///    `/tmp/out` would let `state.write("autosave/x", …)` write outside
+///    `base` — the lexical check alone can't catch it. `base` itself may
+///    be a symlink (a dotfile-managed `~/.local/state`); only the
+///    components the *key* contributes are guarded.
 ///
 /// # Errors
-/// Propagates [`validate_name`], or errors if the join escapes `base`
-/// (which [`validate_name`] already prevents — this is defense in depth).
+/// Propagates [`validate_name`], or errors on an escaping / symlinked key.
 pub fn resolve(base: &Path, name: &str) -> Result<PathBuf, &'static str> {
     validate_name(name)?;
     let path = base.join(name);
     if !path.starts_with(base) {
         return Err("state key escapes the state directory");
+    }
+    let mut cur = base.to_path_buf();
+    for part in name.split('/') {
+        cur.push(part);
+        if let Ok(meta) = std::fs::symlink_metadata(&cur)
+            && meta.file_type().is_symlink()
+        {
+            return Err("state key traverses a symlink");
+        }
     }
     Ok(path)
 }
@@ -251,6 +285,43 @@ mod tests {
             PathBuf::from("/state/pmacs/autosave/x")
         );
         assert!(resolve(&base, "../escape").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_rejects_symlink_components() {
+        let root = std::env::temp_dir().join(format!("pmacs-symlink-{}", std::process::id()));
+        let base = root.join("pmacs");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // A live symlink `base/evil -> outside` must be refused (else a
+        // write through it escapes the state dir).
+        let evil = base.join("evil");
+        std::os::unix::fs::symlink(&outside, &evil).unwrap();
+        assert!(resolve(&base, "evil/x").is_err(), "live symlink escape");
+        assert!(write(&base, "evil/x", b"nope").is_err());
+        assert!(!outside.join("x").exists(), "nothing was written outside");
+
+        // A broken symlink component is also refused (lstat sees it).
+        let broken = base.join("broken");
+        std::os::unix::fs::symlink(root.join("does-not-exist"), &broken).unwrap();
+        assert!(resolve(&base, "broken/y").is_err(), "broken symlink escape");
+
+        // A plain subdir is fine.
+        assert!(resolve(&base, "autosave/ok").is_ok());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn relative_xdg_and_home_are_ignored() {
+        // A relative XDG_STATE_HOME (spec violation) must not root state
+        // at a cwd-relative path; it falls through to HOME.
+        let d = state_dir(Some(OsStr::new("relstate")), Some(OsStr::new("/home/u"))).unwrap();
+        assert_eq!(d, PathBuf::from("/home/u/.local/state/pmacs"));
+        // Relative XDG and relative HOME → None, never a relative root.
+        assert!(state_dir(Some(OsStr::new("rel")), Some(OsStr::new("relhome"))).is_none());
     }
 
     #[test]

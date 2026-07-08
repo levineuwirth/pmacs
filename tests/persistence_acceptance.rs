@@ -12,6 +12,7 @@
 
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::StateDir;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 /// A fresh editor whose state dir is a private, empty tempdir (unique
@@ -72,9 +73,16 @@ fn state_round_trips_and_rejects_escapes() {
 
 #[test]
 fn state_is_inert_when_unconfigured() {
+    // A plain EditorState::new() must NOT configure a state dir — that
+    // is what keeps the whole integration-test suite (which links the
+    // lib without cfg(test)) from writing to a developer's real
+    // ~/.local/state/pmacs. Only the real entry points call
+    // install_state_dirs(); tests construct EditorState directly.
     let s = EditorState::new();
-    // Simulate no state dir (the cfg(test) lib case, or no HOME).
-    s.lua_host.lua().remove_app_data::<StateDir>();
+    assert!(
+        s.lua_host.lua().app_data_ref::<StateDir>().is_none(),
+        "new() must leave the state dir unconfigured"
+    );
     let (avail, wrote, read): (bool, bool, Option<String>) = s
         .lua_host
         .lua()
@@ -116,29 +124,38 @@ fn recentf_records_dedups_and_orders_mru() {
 }
 
 #[test]
-fn saveplace_restores_cursor_on_reopen() {
+fn saveplace_restores_cursor_and_view_top_on_reopen() {
     let (s, dir) = editor_with_state_dir();
-    let f = write_file(&dir, "place.rs", "line0\nline1\nline2\nline3\n");
-    // Open, move to byte 12 ("line2"), save (before-save records the
-    // place), then KILL the buffer — so the reopen is a fresh load
+    // A tall file so view_top can be non-zero.
+    let mut body = String::new();
+    for i in 0..40 {
+        let _ = writeln!(body, "line{i}");
+    }
+    let f = write_file(&dir, "place.rs", &body);
+    // Open, scroll to view_top 7, put the cursor at byte 48 (start of
+    // "line8", within that viewport), save (before-save records the
+    // place), then KILL — so the reopen is a fresh load
     // (buffer.after-load), the cross-session path saveplace targets.
-    let cursor: i64 = s
+    // "line0\n".."line9\n" are 6 bytes each → line8 begins at byte 48.
+    let (cursor, view_top): (i64, i64) = s
         .lua_host
         .lua()
         .load(format!(
             r#"
             local b = pmacs.buffer.find_or_open({f:?})
-            pmacs.editor.goto_byte(12)
+            pmacs.editor.set_view_top(7)
+            pmacs.editor.goto_byte(48)
             pmacs.command.invoke("buffer.save")
             pmacs.buffer.kill(b)
             -- Reopen from scratch: after-load fires → saveplace restores.
             pmacs.buffer.find_or_open({f:?})
-            return pmacs.editor.cursor()
+            return pmacs.editor.cursor(), pmacs.editor.view_top()
             "#
         ))
         .eval()
         .expect("place + save + kill + reopen");
-    assert_eq!(cursor, 12, "saveplace restored the cursor byte on reload");
+    assert_eq!(cursor, 48, "saveplace restored the cursor byte on reload");
+    assert_eq!(view_top, 7, "saveplace restored the viewport (view_top)");
     std::fs::remove_dir_all(&dir).ok();
 }
 

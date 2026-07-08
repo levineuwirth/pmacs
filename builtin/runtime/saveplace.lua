@@ -57,7 +57,7 @@ local function record_active()
   if not active_ready() then return end
   local path = pmacs.editor.file_path()
   local cursor = pmacs.editor.cursor()
-  local view_top = pmacs.editor.view_top and pmacs.editor.view_top() or 0
+  local view_top = pmacs.editor.view_top()
   local list, index = load_places()
   if index[path] then table.remove(list, index[path]) end
   table.insert(list, 1, { path = path, cursor = cursor, view_top = view_top })
@@ -73,7 +73,7 @@ local function restore_active()
   if not i then return end
   local e = list[i]
   pmacs.editor.goto_byte(e.cursor)
-  if pmacs.editor.set_view_top then pmacs.editor.set_view_top(e.view_top) end
+  pmacs.editor.set_view_top(e.view_top)
 end
 
 -- Record on save and on quit; restore on open. before-save /

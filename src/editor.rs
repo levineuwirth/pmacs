@@ -163,25 +163,14 @@ impl EditorState {
         lua_host
             .attach_editor(&core)
             .expect("editor bindings + builtin chunks");
-        // Resolve the on-disk history directory before user config
-        // runs (so the user could in principle override it from
-        // `init.lua`). Skipped in test mode for the same reason as
-        // user config: don't touch the developer's real state dir.
-        #[cfg(not(test))]
-        {
-            if let Some(dir) = crate::minibuffer::user_history_dir() {
-                core.borrow_mut().minibuffer.history_dir = Some(dir);
-            }
-            // Arc 3 (Q#PS2): configure the `pmacs.state.*` base dir. Its
-            // absence under `cfg(test)` (this whole block is skipped) is
-            // what keeps default-on saveplace/recentf from writing to a
-            // developer's real state dir during the lib suite.
-            if let Some(dir) = crate::state::user_state_dir() {
-                lua_host
-                    .lua()
-                    .set_app_data(crate::lua_bindings::StateDir(dir));
-            }
-        }
+        // The on-disk state dirs (minibuffer history + pmacs.state) are
+        // deliberately NOT configured here — see `install_state_dirs`,
+        // called by the real entry points (`run` / `run_daemon`) only.
+        // Constructing an `EditorState` — which unit AND integration
+        // tests do directly — leaves them unconfigured, so default-on
+        // persistence (recentf/saveplace) writes nothing to a
+        // developer's real state dir during `cargo test`. Tests that
+        // exercise persistence inject a `StateDir` app-data explicitly.
         // The async runtime: install pmacs._async raw helpers, then
         // load the friendly Lua surface (`pmacs.async`, Handle class,
         // `pmacs.workers.*`). Both must run before user config so a
@@ -455,6 +444,24 @@ impl EditorState {
         let _ = self
             .lua_host
             .eval(Some("@pmacs/runtime/async.lua:tick"), "pmacs._async.tick()");
+    }
+
+    /// Configure the on-disk state directories (minibuffer history +
+    /// `pmacs.state`) from the environment. The **real** entry points
+    /// (`run`, `run_daemon`) call this after construction; tests do not,
+    /// so neither the unit suite nor integration tests (which link the
+    /// lib without `cfg(test)`) touch a developer's real
+    /// `~/.local/state/pmacs`. Honors the `PMACS_STATE_HOME` override
+    /// (see [`crate::state::user_state_dir`]).
+    pub fn install_state_dirs(&self) {
+        if let Some(dir) = crate::minibuffer::user_history_dir() {
+            self.core.borrow_mut().minibuffer.history_dir = Some(dir);
+        }
+        if let Some(dir) = crate::state::user_state_dir() {
+            self.lua_host
+                .lua()
+                .set_app_data(crate::lua_bindings::StateDir(dir));
+        }
     }
 
     /// Construct an editor for a path. Empty buffer with `[new file]`
@@ -1516,6 +1523,8 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
         Some(path) => EditorState::open(path)?,
         None => EditorState::new(),
     };
+    // Real session: wire up on-disk persistence (history + pmacs.state).
+    state.install_state_dirs();
 
     // Post-init dispatch: read whatever init.lua left in the
     // RequestedAttach slot and decide whether to run local or hand

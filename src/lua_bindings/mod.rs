@@ -10769,6 +10769,18 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         )?;
     }
     {
+        // view_top(): the active window's first visible source line.
+        // The saveplace getter (Arc 3) — pairs with set_view_top so a
+        // reopen restores the viewport, not just the cursor.
+        let cc = core.clone();
+        editor.set(
+            "view_top",
+            lua.create_function(move |_, ()| {
+                i64::try_from(cc.borrow().view_top()).map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+    {
         // set_view_top(line): set the first visible source line
         // (clamped to the buffer's line count) — desktop restore.
         let cc = core.clone();
