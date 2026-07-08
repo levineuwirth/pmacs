@@ -6104,24 +6104,10 @@ fn m4_5_symbols_and_highlight_round_trip() {
 // Arc 1b phase 2 --- LSP panels (outline, hover-doc) end-to-end
 // ===========================================================================
 
-/// The *outline* panel end-to-end against the fake server's
-/// hierarchical documentSymbol response ("Outer" class > "inner"
-/// method): open, depth-indented rows, RET jump-ring visit to the
-/// symbol's selectionRange, M-, back to the outline row, q restore.
-#[test]
-fn outline_panel_opens_visits_and_restores() {
-    use pmacs::editor::EditorState;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let a_path = dir.path().join("a.rs");
-    std::fs::write(
-        &a_path,
-        b"l0\nl1\nl2\nl3 inner here\nl4\nl5\nl6\nl7\nl8\nl9\n",
-    )
-    .expect("write a");
-    let a_disp = a_path.display().to_string();
-
-    let mut state = EditorState::new();
+/// Open `path` against the fake server and wait for initialization
+/// (shared bootstrap for the panel tests).
+fn open_against_fake(path: &std::path::Path) -> pmacs::editor::EditorState {
+    let mut state = pmacs::editor::EditorState::new();
     let fake = fake_lsp_path();
     state
         .lua_host
@@ -6132,9 +6118,9 @@ fn outline_panel_opens_visits_and_restores() {
     state
         .lua_host
         .lua()
-        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .load(format!("pmacs.buffer.find_or_open('{}')", path.display()))
         .exec()
-        .expect("open a.rs");
+        .expect("open file against fake");
     assert!(
         pump_lua_flag(
             &mut state,
@@ -6145,6 +6131,24 @@ fn outline_panel_opens_visits_and_restores() {
         ),
         "fake never initialized"
     );
+    state
+}
+
+/// The *outline* panel end-to-end against the fake server's
+/// hierarchical documentSymbol response ("Outer" class > "inner"
+/// method): open, depth-indented rows, RET jump-ring visit to the
+/// symbol's selectionRange, M-, back to the outline row, q restore.
+#[test]
+fn outline_panel_opens_visits_and_restores() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(
+        &a_path,
+        b"l0\nl1\nl2\nl3 inner here\nl4\nl5\nl6\nl7\nl8\nl9\n",
+    )
+    .expect("write a");
+
+    let mut state = open_against_fake(&a_path);
 
     state
         .lua_host
@@ -6240,37 +6244,11 @@ fn outline_panel_opens_visits_and_restores() {
 /// q restores.
 #[test]
 fn hover_doc_panel_shows_full_contents_via_binding() {
-    use pmacs::editor::EditorState;
-
     let dir = tempfile::tempdir().expect("tempdir");
     let a_path = dir.path().join("h.rs");
     std::fs::write(&a_path, b"fn main() {}\n").expect("write h");
-    let a_disp = a_path.display().to_string();
 
-    let mut state = EditorState::new();
-    let fake = fake_lsp_path();
-    state
-        .lua_host
-        .lua()
-        .load(format!("pmacs.lsp.config.rust = {{ command = '{fake}' }}"))
-        .exec()
-        .expect("override rust config");
-    state
-        .lua_host
-        .lua()
-        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
-        .exec()
-        .expect("open h.rs");
-    assert!(
-        pump_lua_flag(
-            &mut state,
-            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
-               if r.state and r.state.kind=='initialized' then return true end \
-             end return false end)()",
-            5,
-        ),
-        "fake never initialized"
-    );
+    let mut state = open_against_fake(&a_path);
 
     // The real chord: C-c, then Shift+h (terminals deliver uppercase
     // Char('H') with the SHIFT modifier set).
