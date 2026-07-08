@@ -524,6 +524,7 @@ impl EditorState {
         // optimistic local edit would do.
         !core.minibuffer.is_active()
             && !core.search_active()
+            && !core.query_replace_active()
             && !core.menu_is_open()
             && !core.active_buffer_round_trips()
     }
@@ -552,7 +553,10 @@ impl EditorState {
         {
             let mut core = self.core.borrow_mut();
             if core.completion_popup_is_open()
-                && (core.menu_is_open() || core.search_active() || core.minibuffer.is_active())
+                && (core.menu_is_open()
+                    || core.search_active()
+                    || core.query_replace_active()
+                    || core.minibuffer.is_active())
             {
                 core.completion_popup_close();
             }
@@ -575,6 +579,18 @@ impl EditorState {
         // `FrontendEvent::Key` round-trip lands here too.
         if self.core.borrow().search_active() {
             self.dispatch_search_key(chord);
+            return;
+        }
+
+        // Query-replace interception (Arc 2): the fifth modal shadow.
+        // While the interactive phase runs, every key drives it
+        // (y/n/!/./q), shadowing the global keymap like search. Both
+        // frontends reach this via the `FrontendEvent::Key` round-trip
+        // (`dispatch_idle` is false while it runs). The handler fires
+        // `buffer.after-edit` itself — a modal shadow returns before the
+        // normal post-command edit check below (Q#QR1).
+        if self.core.borrow().query_replace_active() {
+            self.dispatch_query_replace_key(chord);
             return;
         }
 
@@ -679,6 +695,13 @@ impl EditorState {
     /// mid-dispatch).
     fn active_buffer_revision(&self) -> Option<u64> {
         let id = self.core.borrow().active_buffer_id();
+        self.buffer_revision(id)
+    }
+
+    /// Edit revision of a specific buffer, or `None` if the registry no
+    /// longer knows it. Used by the query-replace shadow to compare the
+    /// *edited* (origin) buffer, not whichever is active.
+    fn buffer_revision(&self, id: crate::buffer::BufferId) -> Option<u64> {
         let reg = self.lua_host.registry().borrow();
         reg.get(id).ok().map(crate::buffer::Buffer::revision)
     }
@@ -807,6 +830,39 @@ impl EditorState {
                         .run_hook("buffer.after-edit", mlua::MultiValue::new());
                 }
             }
+        }
+    }
+
+    /// Drive an active query-replace from a keystroke (Arc 2, Q#QR6).
+    /// Fires `buffer.after-edit` itself when the key produced an edit
+    /// (Q#QR1): a modal shadow returns before `dispatch_key`'s normal
+    /// post-command edit check, so LSP `didChange` / syntax reparse
+    /// would otherwise never see the replaced text. `!` applies many
+    /// edits in one keypress; the single revision compare here fires
+    /// the hook once for the batch, which is what the debounced
+    /// `didChange` wants.
+    fn dispatch_query_replace_key(&mut self, chord: Chord) {
+        // Compare the *origin* buffer's revision (the one query-replace
+        // edits), not the active buffer's — they can differ if focus
+        // drifted, and the wrong-buffer guard may abort without editing.
+        let origin_buf = self.core.borrow().query_replace_origin_buffer();
+        let pre = origin_buf.and_then(|id| self.buffer_revision(id));
+        match QueryReplaceKey::from_chord(chord) {
+            QueryReplaceKey::Replace => self.core.borrow_mut().query_replace_replace(),
+            QueryReplaceKey::Skip => self.core.borrow_mut().query_replace_skip(),
+            QueryReplaceKey::All => self.core.borrow_mut().query_replace_all(),
+            QueryReplaceKey::ReplaceAndQuit => {
+                self.core.borrow_mut().query_replace_replace_and_quit();
+            }
+            QueryReplaceKey::Quit => self.core.borrow_mut().query_replace_finish(),
+            QueryReplaceKey::Ignore => {}
+        }
+        // `!` applies many edits under one keypress; the single compare
+        // fires `buffer.after-edit` once for the batch (Q#QR1).
+        let post = origin_buf.and_then(|id| self.buffer_revision(id));
+        if origin_buf.is_some() && pre != post {
+            self.lua_host
+                .run_hook("buffer.after-edit", mlua::MultiValue::new());
         }
     }
 
@@ -1626,6 +1682,47 @@ impl SearchKey {
             return Self::ToggleRegex;
         }
         Self::Ignore
+    }
+}
+
+/// Keys handled while a query-replace's interactive phase runs (Arc 2,
+/// Q#QR6). A full modal shadow like [`SearchKey`]: an active
+/// query-replace eats every key, and the same decode runs in both
+/// frontends via the `FrontendEvent::Key` round-trip.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum QueryReplaceKey {
+    /// `y` / `SPC` — replace this match, advance.
+    Replace,
+    /// `n` / `DEL` — skip this match, advance.
+    Skip,
+    /// `!` — replace this and all remaining without prompting.
+    All,
+    /// `.` — replace this, then quit.
+    ReplaceAndQuit,
+    /// `q` / `RET` / `Esc` / `C-g` — quit (replacements are kept).
+    Quit,
+    /// Any other key — eaten (no-op), like an active isearch.
+    Ignore,
+}
+
+impl QueryReplaceKey {
+    fn from_chord(chord: Chord) -> Self {
+        let ctrl = chord.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl {
+            // C-g quits; every other control chord is eaten.
+            return match chord.code {
+                KeyCode::Char('g') => Self::Quit,
+                _ => Self::Ignore,
+            };
+        }
+        match chord.code {
+            KeyCode::Char('y' | ' ') => Self::Replace,
+            KeyCode::Char('n') | KeyCode::Backspace | KeyCode::Delete => Self::Skip,
+            KeyCode::Char('!') => Self::All,
+            KeyCode::Char('.') => Self::ReplaceAndQuit,
+            KeyCode::Char('q') | KeyCode::Enter | KeyCode::Esc => Self::Quit,
+            _ => Self::Ignore,
+        }
     }
 }
 

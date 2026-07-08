@@ -140,6 +140,40 @@ cmd { name = "search.backward-regex",
       description = "Start an incremental regex search backward from the cursor.",
       fn = function() ed.search_start(false, true) end }
 
+-- Query-replace (Arc 2). Two chained minibuffer prompts collect the
+-- from/to strings (separate history buckets so search patterns and
+-- replacement text don't mix), then ed.query_replace_start begins the
+-- core interactive session (y/n/!/./q handled by a dispatcher shadow).
+-- An empty FROM is rejected (nothing to search); an empty TO is valid
+-- and means deletion (Q#QR3).
+local function begin_query_replace(regex)
+  pmacs.minibuffer.read {
+    prompt = regex and "Query replace regexp: " or "Query replace: ",
+    history = "query-replace-from",
+    on_accept = function(from)
+      if from == nil or from == "" then
+        pmacs.editor.set_status("query-replace: empty search string")
+        return
+      end
+      pmacs.minibuffer.read {
+        prompt = string.format(
+          regex and "Query replace regexp %s with: " or "Query replace %s with: ", from),
+        history = "query-replace-to",
+        on_accept = function(to)
+          ed.query_replace_start(from, to or "", regex)
+        end,
+      }
+    end,
+  }
+end
+
+cmd { name = "query-replace",
+      description = "Interactively replace a string from the cursor forward (M-%).",
+      fn = function() begin_query_replace(false) end }
+cmd { name = "query-replace-regexp",
+      description = "Interactively replace a regexp from the cursor forward (C-M-%).",
+      fn = function() begin_query_replace(true) end }
+
 -- History --------------------------------------------------------------------
 
 cmd { name = "buffer.undo", description = "Undo the most recent edit.",

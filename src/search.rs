@@ -255,13 +255,7 @@ pub fn find_all_regex(haystack: &[u8], pattern: &str) -> Option<Vec<ByteRange>> 
     if pattern.is_empty() {
         return Some(Vec::new());
     }
-    let case_insensitive = !pattern.chars().any(char::is_uppercase);
-    let re = if case_insensitive {
-        regex::bytes::Regex::new(&format!("(?i){pattern}"))
-    } else {
-        regex::bytes::Regex::new(pattern)
-    }
-    .ok()?;
+    let re = compile_search_regex(pattern)?;
     let matches = re
         .find_iter(haystack)
         .filter(|m| m.end() > m.start())
@@ -271,6 +265,80 @@ pub fn find_all_regex(haystack: &[u8], pattern: &str) -> Option<Vec<ByteRange>> 
         })
         .collect();
     Some(matches)
+}
+
+/// Compile `pattern` with the same smart-case rule the search paths use
+/// (case-insensitive unless the pattern has an uppercase letter, via a
+/// `(?i)` prefix), or `None` if it fails to compile. Shared by
+/// [`find_all_regex`] and the query-replace session (which caches the
+/// compiled engine for the whole run — Q#QR2).
+#[must_use]
+pub fn compile_search_regex(pattern: &str) -> Option<regex::bytes::Regex> {
+    let case_insensitive = !pattern.chars().any(char::is_uppercase);
+    if case_insensitive {
+        regex::bytes::Regex::new(&format!("(?i){pattern}"))
+    } else {
+        regex::bytes::Regex::new(pattern)
+    }
+    .ok()
+}
+
+/// The first smart-case literal match of `query` in `haystack` at or
+/// after byte `start` (Q#QR2: query-replace's forward step). Same
+/// case-folding as [`find_all`]. An empty query, or `start` past the
+/// last possible match, yields `None`.
+#[must_use]
+pub fn find_first_from(haystack: &[u8], query: &str, start: usize) -> Option<ByteRange> {
+    let q = query.as_bytes();
+    if q.is_empty() || start > haystack.len() || haystack.len() - start < q.len() {
+        return None;
+    }
+    let case_sensitive = query.chars().any(char::is_uppercase);
+    let mut i = start;
+    while i + q.len() <= haystack.len() {
+        let hit = haystack[i..i + q.len()].iter().zip(q).all(|(&h, &n)| {
+            if case_sensitive {
+                h == n
+            } else {
+                h.eq_ignore_ascii_case(&n)
+            }
+        });
+        if hit {
+            return Some(ByteRange {
+                start: i as u64,
+                end: (i + q.len()) as u64,
+            });
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The first non-zero-width match of the pre-compiled `re` in
+/// `haystack` at or after byte `start` (Q#QR2). Uses `find_at` so the
+/// engine keeps look-around context (`\b`, `^`) correct at the seam,
+/// and skips zero-width matches (`a*`, anchors) by advancing one byte —
+/// a zero-width hit never moves `next_from`, so it would otherwise
+/// loop.
+#[must_use]
+pub fn find_first_regex_from(
+    haystack: &[u8],
+    re: &regex::bytes::Regex,
+    start: usize,
+) -> Option<ByteRange> {
+    let mut pos = start;
+    while pos <= haystack.len() {
+        let m = re.find_at(haystack, pos)?;
+        if m.end() > m.start() {
+            return Some(ByteRange {
+                start: m.start() as u64,
+                end: m.end() as u64,
+            });
+        }
+        // Zero-width match: step past it to guarantee progress.
+        pos = m.start() + 1;
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +585,62 @@ mod tests {
         assert_eq!(find_all_regex(b"baab", "a*"), Some(vec![r(1, 3)]));
         // An empty pattern yields no matches (not one-per-position).
         assert_eq!(find_all_regex(b"abc", ""), Some(vec![]));
+    }
+
+    // ---- find_first_from (query-replace forward step, Q#QR2) ---------------
+
+    #[test]
+    fn find_first_from_scans_forward() {
+        assert_eq!(find_first_from(b"a.a.a", "a", 0), Some(r(0, 1)));
+        // Start past the first hit → the next one.
+        assert_eq!(find_first_from(b"a.a.a", "a", 1), Some(r(2, 3)));
+        assert_eq!(find_first_from(b"a.a.a", "a", 3), Some(r(4, 5)));
+        // No match at/after start.
+        assert_eq!(find_first_from(b"a.a.a", "a", 5), None);
+        assert_eq!(find_first_from(b"abc", "z", 0), None);
+        // Empty query never matches.
+        assert_eq!(find_first_from(b"abc", "", 0), None);
+    }
+
+    #[test]
+    fn find_first_from_is_smart_case() {
+        // Lowercase query folds case; uppercase query is exact.
+        assert_eq!(find_first_from(b"xFoo", "foo", 0), Some(r(1, 4)));
+        assert_eq!(find_first_from(b"xFoo", "Foo", 0), Some(r(1, 4)));
+        assert_eq!(find_first_from(b"xfoo", "Foo", 0), None);
+    }
+
+    #[test]
+    fn find_first_from_does_not_reloop_on_growing_replacement() {
+        // The a→aa shape: after replacing the 'a' at 0 with "aa", the
+        // next search must start PAST the replacement (byte 2), not
+        // re-match the inserted text. Simulated here by starting the
+        // scan at the replacement end.
+        assert_eq!(find_first_from(b"aa_a", "a", 2), Some(r(3, 4)));
+    }
+
+    #[test]
+    fn find_first_regex_from_scans_and_skips_zero_width() {
+        let re = compile_search_regex("a+").unwrap();
+        assert_eq!(find_first_regex_from(b"_aa_a", &re, 0), Some(r(1, 3)));
+        assert_eq!(find_first_regex_from(b"_aa_a", &re, 3), Some(r(4, 5)));
+        assert_eq!(find_first_regex_from(b"_aa_a", &re, 5), None);
+        // Zero-width pattern `x*` never yields a match (all filtered),
+        // and crucially terminates rather than looping.
+        let z = compile_search_regex("x*").unwrap();
+        assert_eq!(find_first_regex_from(b"abc", &z, 0), None);
+    }
+
+    #[test]
+    fn compile_search_regex_smart_case_and_invalid() {
+        // Lowercase → case-insensitive.
+        let re = compile_search_regex("foo").unwrap();
+        assert!(re.is_match(b"FOO"));
+        // Uppercase → case-sensitive.
+        let re = compile_search_regex("Foo").unwrap();
+        assert!(!re.is_match(b"foo"));
+        // Invalid pattern → None (the session refuses to start).
+        assert!(compile_search_regex("(unclosed").is_none());
     }
 
     #[test]
