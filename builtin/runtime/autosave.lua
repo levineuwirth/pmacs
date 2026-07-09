@@ -48,19 +48,26 @@ function pmacs.autosave.interval_ms(ms)
   return interval
 end
 
--- sweep() --- force a pass now. Returns (written, blocked). `blocked`
--- counts buffers whose sweep was refused because an unclaimed crash
--- recovery sits at their key: overwriting it would destroy exactly what
--- autosave protects. Recovering or discarding that copy resumes autosave.
+-- sweep() --- force a pass now. Returns (written, blocked, conflicted).
+--   blocked    --- an unclaimed crash recovery sits at the buffer's key.
+--                  Overwriting it would destroy exactly what autosave
+--                  protects; recovering or discarding it resumes autosave.
+--   conflicted --- another buffer already owns that file's recovery slot.
+--                  Recovery files are keyed by path, so when two buffers
+--                  visit one file only the first can be protected.
 function pmacs.autosave.sweep()
-  if not enabled then return 0, 0 end
-  local written, blocked = pmacs.autosave._sweep()
+  if not enabled then return 0, 0, 0 end
+  local written, blocked, conflicted = pmacs.autosave._sweep()
   if blocked and blocked > 0 then
     pmacs.editor.set_status(
       "autosave paused for " .. blocked .. " file(s) with unclaimed recovery"
         .. " --- M-x recover-file or M-x discard-recovery")
+  elseif conflicted and conflicted > 0 then
+    pmacs.editor.set_status(
+      "autosave paused for " .. conflicted .. " buffer(s): another buffer"
+        .. " is visiting the same file")
   end
-  return written, blocked
+  return written, blocked, conflicted
 end
 
 local function basename(path)

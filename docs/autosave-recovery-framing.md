@@ -296,6 +296,37 @@ not autosaved — and the user is told so, every sweep. Losing the new
 edits to a second crash is recoverable by retyping; losing the original
 crash copy is not.
 
+### Q#AS13 — One buffer owns a path's recovery slot
+
+`pmacs.buffer.from_file` does **not** dedup: a second buffer can visit an
+already-open path. The recovery file must stay keyed by path — a later
+session knows only paths, never old `BufferId`s — so two dirty duplicates
+cannot both be protected under one key. The naive behavior (finding) is
+the worst one: both write to the same key, the later write wins on disk,
+and *both* buffers are recorded as protected, so the loser silently skips
+future sweeps while its contents are unrecoverable. Either buffer's
+save/kill could also retire the other's copy.
+
+So ownership is `path_hash → BufferId`, not a path-wide set:
+
+- the **first** modified buffer to reach a free slot claims it (including
+  within a single sweep pass — the write loop updates `owner`, so the
+  gather loop tracks slots queued this pass);
+- any other buffer on that path is counted **`conflicted`** and reported —
+  *"autosave paused for N buffer(s): another buffer is visiting the same
+  file"* — never silently mis-protected. It records no `written` entry, so
+  it re-attempts each sweep rather than believing itself saved;
+- `discard_buffer` (save/kill) retires **only slots this buffer owns**, so
+  a duplicate cannot delete the owner's recovery;
+- when the owner is saved or killed, the slot is released and the
+  duplicate claims it on the next sweep;
+- `recover-file` adopting into a buffer makes *that* buffer the owner —
+  the file's contents are now its contents, and the previous owner
+  truthfully becomes conflicted.
+
+This is honest rather than clever: pmacs cannot protect two divergent
+buffers over one file, and says so.
+
 ### Q#AS7 — Cleanup lifecycle (keyed by buffer, not by a captured path)
 
 - **`buffer.after-save`** → `discard_buffer(active buffer)`.
@@ -468,6 +499,10 @@ commands, cleanup wiring) → tests.
   adopted copy *is* retired, not left to be re-offered.
 - **Explicit `discard-recovery` on a still-dirty buffer** → the next
   sweep re-protects it at once, with no intervening edit.
+- **Two dirty buffers on one path (Q#AS13)** → `(written, blocked,
+  conflicted) == (1, 0, 1)`; the owner's copy is on disk; the duplicate
+  never wins the slot by editing, its save never retires the owner's
+  copy, and killing the owner frees the slot for it.
 - **Path change**: rename a buffer's path (`set_buffer_path`) without
   editing it → next sweep writes the new key **and** removes the old
   recovery file (the `(path_hash, revision)` cache).

@@ -18,7 +18,7 @@
 //! Framing: docs/autosave-recovery-framing.md.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use mlua::Lua;
@@ -139,16 +139,26 @@ struct CacheInner {
     /// remembers *where a buffer's recovery currently lives*, which is
     /// what makes cleanup work after a rename.
     written: HashMap<BufferId, (String, u64)>,
-    /// Path hashes whose recovery file **this session** wrote or has
-    /// adopted (Q#AS12).
+    /// Which buffer owns each recovery slot: `path_hash → BufferId`
+    /// (Q#AS12, Q#AS13).
     ///
-    /// A recovery file we did *not* write is unclaimed crash data. If the
-    /// user reopens the file and starts editing, sweeping would overwrite
-    /// the crash copy with the current buffer — destroying exactly what
-    /// autosave exists to protect. So an unowned recovery file *blocks*
-    /// the sweep for that buffer until `recover-file` adopts it or
-    /// `discard-recovery` removes it.
-    owned: HashSet<String>,
+    /// Two roles in one map:
+    ///
+    /// * **Absent** = the recovery file at that hash (if any) is
+    ///   *unclaimed crash data* — this session did not write it. Sweeping
+    ///   would overwrite the crash copy with the current buffer,
+    ///   destroying exactly what autosave protects. So it blocks the
+    ///   sweep until `recover-file` adopts it or `discard-recovery`
+    ///   removes it, and neither save nor kill may delete it.
+    /// * **Present** = the slot belongs to exactly *one* buffer. A
+    ///   recovery file is keyed by path (a later session knows only
+    ///   paths, never old `BufferId`s), but `pmacs.buffer.from_file` can
+    ///   open a *second* buffer on the same path. Both cannot be
+    ///   protected under one key: the later write would win on disk while
+    ///   both buffers believed themselves saved. So the first modified
+    ///   buffer claims the slot and any other buffer on that path is
+    ///   reported as conflicted, not silently mis-protected.
+    owner: HashMap<String, BufferId>,
 }
 
 /// Encode a header + contents into the one-file envelope.
@@ -238,26 +248,103 @@ struct Pending {
 /// Unlike desktop-save this is **not** daemon-gated — autosave is
 /// per-buffer, not per-frontend, and a daemon holds the unsaved work.
 ///
-/// Returns `(written, blocked)` — `blocked` counts buffers whose sweep
-/// was refused because an **unclaimed** recovery file already sits at
-/// their key (Q#AS12).
+/// Returns `(written, blocked, conflicted)`:
+///
+/// * `blocked` — an **unclaimed** recovery file already sits at the
+///   buffer's key (Q#AS12): crash data this session did not write.
+/// * `conflicted` — another buffer already owns that path's recovery
+///   slot (Q#AS13): two buffers visit the same file and only one can be
+///   protected under a path-keyed recovery file.
 ///
 /// # Errors
 /// A state-write failure. Individual buffers never abort the pass.
-pub fn sweep(lua: &Lua) -> Result<(usize, usize), String> {
+pub fn sweep(lua: &Lua) -> Result<(usize, usize, usize), String> {
     let Some(base) = base_dir(lua) else {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     };
     let core = lua
         .app_data_ref::<SharedCore>()
         .ok_or("no editor core")?
         .clone();
+    let gathered = gather(lua, &core, &base)?;
+    let Gathered {
+        writes,
+        orphans,
+        live,
+        blocked,
+        conflicted,
+    } = gathered;
 
-    // Gather under a borrow; do all IO after releasing it.
+    let mut written = 0usize;
+    {
+        let cache = lua
+            .app_data_ref::<AutosaveCache>()
+            .ok_or("no autosave cache")?;
+        let mut cache = cache.0.borrow_mut();
+        // A buffer whose path moved leaves its old recovery behind.
+        for old in orphans {
+            let _ = crate::state::remove(&base, &format!("autosave/{old}"));
+            cache.owner.remove(&old);
+        }
+        // GC: a buffer that left the registry (killed) takes its recovery
+        // copy with it. This is the backstop that covers `[new file]`
+        // buffers, which fire no `after-load` and so never get a
+        // per-buffer removal callback registered. Only the slot's owner
+        // may retire it.
+        let dead: Vec<(BufferId, String)> = cache
+            .written
+            .iter()
+            .filter(|(id, _)| !live.contains(id))
+            .map(|(id, (hash, _))| (*id, hash.clone()))
+            .collect();
+        for (id, hash) in dead {
+            if cache.owner.get(&hash) == Some(&id) {
+                let _ = crate::state::remove(&base, &format!("autosave/{hash}"));
+                cache.owner.remove(&hash);
+            }
+            cache.written.remove(&id);
+        }
+        for p in writes {
+            let header = Header {
+                version: AUTOSAVE_VERSION,
+                path: p.path,
+                origin: p.origin,
+            };
+            let bytes = encode(&header, &p.contents)?;
+            crate::state::write_private(&base, &format!("autosave/{}", p.path_hash), &bytes)
+                .map_err(|e| e.to_string())?;
+            cache.owner.insert(p.path_hash.clone(), p.id);
+            cache.written.insert(p.id, (p.path_hash, p.revision));
+            written += 1;
+        }
+    }
+    Ok((written, blocked, conflicted))
+}
+
+/// What one pass of the registry decided, before any IO.
+struct Gathered {
+    writes: Vec<Pending>,
+    /// Recovery keys left behind by buffers whose path moved.
+    orphans: Vec<String>,
+    /// Every buffer still in the registry (drives the dead-buffer GC).
+    live: Vec<BufferId>,
+    blocked: usize,
+    conflicted: usize,
+}
+
+/// Walk the registry under a single borrow and decide what to write.
+/// All IO happens in [`sweep`] after this returns, because a recovery
+/// write must not run while the core is borrowed.
+fn gather(lua: &Lua, core: &SharedCore, base: &Path) -> Result<Gathered, String> {
     let mut writes: Vec<Pending> = Vec::new();
     let mut orphans: Vec<String> = Vec::new();
     let mut live: Vec<BufferId> = Vec::new();
     let mut blocked = 0usize;
+    let mut conflicted = 0usize;
+    // Slots claimed earlier in *this* pass. `owner` is only updated in the
+    // write loop, so without this two dirty duplicates of one path would
+    // both queue a write to the same key.
+    let mut queued: HashMap<String, BufferId> = HashMap::new();
     {
         let cache = lua
             .app_data_ref::<AutosaveCache>()
@@ -279,6 +366,31 @@ pub fn sweep(lua: &Lua) -> Result<(usize, usize), String> {
             let path_s = path.display().to_string();
             let path_hash = sha256_hex(&path_s);
             let revision = buf.revision();
+            // Exactly one buffer may own a path's recovery slot (Q#AS13):
+            // the file is keyed by path, so a second buffer on the same
+            // path cannot also be protected — the later write would win on
+            // disk while both believed themselves saved.
+            let slot_owner = cache
+                .owner
+                .get(&path_hash)
+                .or_else(|| queued.get(&path_hash));
+            match slot_owner {
+                Some(&owner_id) if owner_id != id => {
+                    conflicted += 1;
+                    continue;
+                }
+                Some(_) => {} // we already own the slot
+                None => {
+                    // Unowned. Never clobber unclaimed crash data (Q#AS12):
+                    // a recovery file this session did not write is the
+                    // crash copy the user has not recovered yet.
+                    if crate::state::exists(base, &format!("autosave/{path_hash}")).unwrap_or(false)
+                    {
+                        blocked += 1;
+                        continue;
+                    }
+                }
+            }
             if let Some((prev_hash, prev_rev)) = cache.written.get(&id) {
                 if prev_hash == &path_hash && *prev_rev == revision {
                     continue; // unchanged since its last copy
@@ -288,16 +400,7 @@ pub fn sweep(lua: &Lua) -> Result<(usize, usize), String> {
                     orphans.push(prev_hash.clone());
                 }
             }
-            // Never clobber unclaimed crash data (Q#AS12). A recovery file
-            // this session did not write is the crash copy the user has
-            // not recovered yet; overwriting it with the current buffer
-            // would destroy exactly what autosave protects.
-            if !cache.owned.contains(&path_hash)
-                && crate::state::exists(&base, &format!("autosave/{path_hash}")).unwrap_or(false)
-            {
-                blocked += 1;
-                continue;
-            }
+            queued.insert(path_hash.clone(), id);
             let len = buf.len();
             let mut contents = vec![0u8; usize::try_from(len).unwrap_or(0)];
             if len > 0 {
@@ -314,46 +417,13 @@ pub fn sweep(lua: &Lua) -> Result<(usize, usize), String> {
         }
     }
 
-    for old in orphans {
-        let _ = crate::state::remove(&base, &format!("autosave/{old}"));
-    }
-
-    let mut written = 0usize;
-    {
-        let cache = lua
-            .app_data_ref::<AutosaveCache>()
-            .ok_or("no autosave cache")?;
-        let mut cache = cache.0.borrow_mut();
-        // GC: a buffer that left the registry (killed) takes its recovery
-        // copy with it. This is the backstop that covers `[new file]`
-        // buffers, which fire no `after-load` and so never get a
-        // per-buffer removal callback registered.
-        let dead: Vec<(BufferId, String)> = cache
-            .written
-            .iter()
-            .filter(|(id, _)| !live.contains(id))
-            .map(|(id, (hash, _))| (*id, hash.clone()))
-            .collect();
-        for (id, hash) in dead {
-            let _ = crate::state::remove(&base, &format!("autosave/{hash}"));
-            cache.written.remove(&id);
-            cache.owned.remove(&hash);
-        }
-        for p in writes {
-            let header = Header {
-                version: AUTOSAVE_VERSION,
-                path: p.path,
-                origin: p.origin,
-            };
-            let bytes = encode(&header, &p.contents)?;
-            crate::state::write_private(&base, &format!("autosave/{}", p.path_hash), &bytes)
-                .map_err(|e| e.to_string())?;
-            cache.owned.insert(p.path_hash.clone());
-            cache.written.insert(p.id, (p.path_hash, p.revision));
-            written += 1;
-        }
-    }
-    Ok((written, blocked))
+    Ok(Gathered {
+        writes,
+        orphans,
+        live,
+        blocked,
+        conflicted,
+    })
 }
 
 /// Claim `buffer`'s recovery file for this session (Q#AS12). Called by
@@ -381,7 +451,12 @@ pub fn adopt(lua: &Lua, id: BufferId) {
     drop(core);
     if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
         let mut cache = cache.0.borrow_mut();
-        cache.owned.insert(entry.0.clone());
+        // Recovering into this buffer makes it the slot's owner — its
+        // contents are now what the file holds. Any previous owner of the
+        // slot (a duplicate buffer on the same path) loses the claim and
+        // will report as conflicted on the next sweep, which is truthful:
+        // the file no longer corresponds to it.
+        cache.owner.insert(entry.0.clone(), id);
         cache.written.insert(id, entry);
     }
 }
@@ -401,7 +476,7 @@ pub fn discard_path(lua: &Lua, path: &Path) -> bool {
     let hash = sha256_hex(&path.display().to_string());
     if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
         let mut cache = cache.0.borrow_mut();
-        cache.owned.remove(&hash);
+        cache.owner.remove(&hash);
         cache.written.retain(|_, (h, _)| h != &hash);
     }
     discard(&base, path)
@@ -448,17 +523,20 @@ pub fn discard_buffer(lua: &Lua, id: BufferId) {
         return;
     };
     let mut cache = cache.0.borrow_mut();
-    keys.retain(|h| cache.owned.contains(h));
+    // Retire only slots **this buffer** owns. Two guards in one check:
+    //   * an unowned slot is unclaimed crash data — saving or killing the
+    //     buffer you reopened after a crash must not destroy it (Q#AS12);
+    //   * a slot owned by a *different* buffer belongs to that buffer's
+    //     recovery — a duplicate buffer on the same path must not retire
+    //     it (Q#AS13).
+    keys.retain(|h| cache.owner.get(h) == Some(&id));
     for hash in &keys {
         let _ = crate::state::remove(&base, &format!("autosave/{hash}"));
-        cache.owned.remove(hash);
+        cache.owner.remove(hash);
     }
-    // The skip-cache entry only ever names a key we owned, so it goes
-    // whenever we retired that key — and a buffer that owned nothing has
-    // no entry to drop.
-    if !keys.is_empty() {
-        cache.written.remove(&id);
-    }
+    // This buffer's own bookkeeping goes regardless: it is being saved or
+    // killed, so any skip-cache entry for it is spent.
+    cache.written.remove(&id);
 }
 
 /// Every open file buffer that has a recovery file, with its status

@@ -57,6 +57,21 @@ fn sweep2(s: &EditorState) -> (i64, i64) {
     eval(s, "return pmacs.autosave.sweep()")
 }
 
+/// Force a sweep; returns `(written, blocked, conflicted)`.
+fn sweep3(s: &EditorState) -> (i64, i64, i64) {
+    eval(s, "return pmacs.autosave.sweep()")
+}
+
+/// Open `path`, dirty it, then open a SECOND buffer on the same path via
+/// `from_file` (which does not dedup) and dirty that differently.
+/// Returns with the duplicate active.
+fn two_buffers_one_path(s: &EditorState, path: &str) {
+    exec(s, &format!("_G.a = pmacs.buffer.find_or_open({path:?})"));
+    exec(s, "pmacs.window.buffer():insert(0, 'AAA ')");
+    exec(s, &format!("_G.b = pmacs.buffer.from_file({path:?})"));
+    exec(s, "pmacs.window.buffer():insert(0, 'BBB ')");
+}
+
 fn recovered(s: &EditorState, path: &str) -> Vec<u8> {
     let b: mlua::String = eval(
         s,
@@ -287,6 +302,84 @@ fn sweep_never_overwrites_unclaimed_crash_recovery() {
     let (written, blocked) = sweep2(&s2);
     assert_eq!((written, blocked), (1, 0), "adopted → sweeps again");
     assert_eq!(recovered(&s2, &f), b"more new edits on disk\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn duplicate_buffers_on_one_path_conflict_instead_of_corrupting() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    two_buffers_one_path(&s, &f);
+
+    // A recovery file is keyed by path, so only ONE of the two dirty
+    // buffers can be protected. The first claims the slot; the other is
+    // reported, never silently mis-protected.
+    let (written, blocked, conflicted) = sweep3(&s);
+    assert_eq!((written, blocked, conflicted), (1, 0, 1));
+    assert_eq!(
+        recovered(&s, &f),
+        b"AAA on disk\n",
+        "the slot's owner is what is on disk"
+    );
+
+    // The loser must NOT be marked protected: it keeps conflicting, and
+    // its contents never silently overwrite the owner's copy.
+    let (written, _, conflicted) = sweep3(&s);
+    assert_eq!(
+        (written, conflicted),
+        (0, 1),
+        "owner unchanged, dup still conflicts"
+    );
+    exec(&s, "pmacs.window.switch_buffer(_G.b)");
+    exec(&s, "pmacs.window.buffer():insert(0, 'more ')");
+    let (written, _, conflicted) = sweep3(&s);
+    assert_eq!(
+        (written, conflicted),
+        (0, 1),
+        "editing the dup does not win the slot"
+    );
+    assert_eq!(recovered(&s, &f), b"AAA on disk\n", "owner's copy intact");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_duplicate_buffers_save_does_not_retire_the_owners_recovery() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    two_buffers_one_path(&s, &f);
+    assert_eq!(sweep3(&s), (1, 0, 1));
+    let owner_copy = recovered(&s, &f);
+
+    // Save the DUPLICATE. Its cleanup must not touch the other buffer's
+    // recovery — that copy is the only record of the owner's unsaved work.
+    exec(&s, "pmacs.window.switch_buffer(_G.b)");
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    assert_ne!(status(&s, &f), "none", "the owner's recovery survives");
+    assert_eq!(recovered(&s, &f), owner_copy);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn killing_the_owner_frees_the_slot_for_the_duplicate() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    two_buffers_one_path(&s, &f);
+    assert_eq!(sweep3(&s), (1, 0, 1));
+
+    // Killing the owner retires its copy and releases the slot; the
+    // duplicate can then claim it and finally be protected.
+    exec(&s, "pmacs.buffer.kill(_G.a)");
+    assert_eq!(status(&s, &f), "none", "owner's copy retired with it");
+    let (written, blocked, conflicted) = sweep3(&s);
+    assert_eq!(
+        (written, blocked, conflicted),
+        (1, 0, 0),
+        "dup claims the slot"
+    );
+    assert_eq!(recovered(&s, &f), b"BBB on disk\n");
     std::fs::remove_dir_all(&dir).ok();
 }
 
