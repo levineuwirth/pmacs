@@ -468,6 +468,13 @@ pub fn run_daemon(socket_path: PathBuf, instance_name: Option<String>) -> Result
     let mut editor = EditorState::new();
     // Real session: wire up on-disk persistence (history + pmacs.state).
     editor.install_state_dirs();
+    // Mark this process a daemon so `pmacs.session.desktop_mode` keeps
+    // desktop save/restore local-only in v1 (Q#DS9): the daemon has a
+    // layout per attached frontend and none at construction.
+    editor
+        .lua_host
+        .lua()
+        .set_app_data(crate::lua_bindings::DaemonMode);
     // Mirror the daemon's `--socket NAME` and start time into the
     // editor's `LocalInstanceInfo` so `pmacs.instance.identity()`
     // (T M5.6f) reports the same identity the daemon hands back over

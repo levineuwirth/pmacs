@@ -66,6 +66,7 @@ pub mod buffer_mirror;
 pub mod daemon;
 pub mod daemon_attach;
 pub mod definition;
+pub mod desktop;
 pub mod diag;
 pub mod document_highlight;
 pub mod editor;

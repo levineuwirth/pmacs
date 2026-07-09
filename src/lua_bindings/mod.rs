@@ -1962,8 +1962,69 @@ pub fn install(
     pmacs.set("ansi", install_ansi_module(lua)?)?;
     pmacs.set("packages", install_packages_module(lua)?)?;
     pmacs.set("state", install_state_module(lua)?)?;
+    pmacs.set("session", install_session_module(lua)?)?;
     lua.globals().set("pmacs", pmacs)?;
     Ok(())
+}
+
+/// Marker app-data set by `pmacs.session.arm_restore()` (Arc 3 phase 2,
+/// Q#DS7). Its presence tells the `RunLocal` startup trigger to attempt
+/// a desktop restore; `desktop_mode(true)` in init.lua arms it.
+pub struct DesktopRestoreArmed;
+
+/// Marker app-data set by `run_daemon` (Arc 3 phase 2, Q#DS9). Desktop
+/// save/restore is local-only in v1 (the daemon has a layout per
+/// attached frontend and no frontend at construction), so `desktop.lua`
+/// checks `pmacs.session.is_daemon()` and no-ops there.
+pub struct DaemonMode;
+
+/// Fire `buffer.after-load` from Rust with the current active buffer —
+/// the seam desktop-restore uses (Q#DS3). `pub(crate)` so
+/// [`crate::desktop`] can drive it.
+pub(crate) fn fire_after_load_hook(lua: &Lua) {
+    run_hook_if_defined(lua, "buffer.after-load", mlua::MultiValue::new());
+}
+
+/// `pmacs.session.*` — desktop-save (Arc 3 phase 2). All-Rust because
+/// the layout serde + structural rebuild can't live in Lua (Q#DS1).
+/// The thin `desktop.lua` builtin wires `desktop_mode` on top of these.
+fn install_session_module(lua: &Lua) -> mlua::Result<Table> {
+    let m = lua.create_table()?;
+
+    // arm_restore(): mark that a desktop restore should run at startup.
+    m.set(
+        "arm_restore",
+        lua.create_function(|lua, ()| {
+            lua.set_app_data(DesktopRestoreArmed);
+            Ok(())
+        })?,
+    )?;
+
+    // is_daemon(): keep desktop save/restore local-only in v1 (Q#DS9).
+    m.set(
+        "is_daemon",
+        lua.create_function(|lua, ()| Ok(lua.app_data_ref::<DaemonMode>().is_some()))?,
+    )?;
+
+    // save_desktop(): serialize the current session. Returns true when
+    // a desktop was written (false = nothing to save / no state dir).
+    m.set(
+        "save_desktop",
+        lua.create_function(|lua, ()| {
+            crate::desktop::save_session(lua).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    // restore_desktop(): rebuild the saved session (manual command;
+    // the startup path goes through EditorState::restore_desktop_if_armed).
+    m.set(
+        "restore_desktop",
+        lua.create_function(|lua, ()| {
+            crate::desktop::restore_session(lua).map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    Ok(m)
 }
 
 /// The configured base state directory (Arc 3, Q#PS2). Present as Lua
