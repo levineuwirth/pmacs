@@ -1229,11 +1229,61 @@ impl EditorCore {
     /// `buffer.save` Lua command) use the return value to gate
     /// `buffer.after-save` firing.
     pub fn save(&mut self) -> bool {
+        self.save_inner(false)
+    }
+
+    /// [`save`](Self::save), overwriting the file even though it changed on
+    /// disk since this buffer read it. The escape hatch for when the user
+    /// has looked and decided their buffer wins.
+    pub fn save_ignoring_disk_changes(&mut self) -> bool {
+        self.save_inner(true)
+    }
+
+    /// True when writing this buffer to `path` would destroy content the
+    /// buffer has never seen — i.e. a file exists there whose identity
+    /// differs from the [`FileMeta`] recorded when the buffer last read or
+    /// wrote it.
+    ///
+    /// Two cases count as "changed":
+    ///
+    /// * the buffer recorded a meta and the on-disk meta differs — someone
+    ///   else edited the file (another editor, a `git checkout`);
+    /// * the buffer recorded **no** meta (a `[new file]`, or a buffer whose
+    ///   path was set without reading) yet a file now exists — it was
+    ///   created underneath us, and we have never seen its contents.
+    ///
+    /// A **missing** file is not a clobber: there is nothing there to
+    /// destroy, so recreating a deleted file saves normally. An unstattable
+    /// path likewise falls through, and `save_atomic` reports the real
+    /// error.
+    #[must_use]
+    pub fn save_would_clobber(&self, id: BufferId, path: &Path) -> bool {
+        let Ok(current) = crate::file_io::current_meta(path) else {
+            return false; // absent, or we cannot stat it
+        };
+        let reg = self.registry.borrow();
+        let Ok(buffer) = reg.get(id) else {
+            return false;
+        };
+        buffer.file_meta() != Some(&current)
+    }
+
+    fn save_inner(&mut self, force: bool) -> bool {
         let id = self.active_buffer_id();
         let Some(path) = self.active_buffer_path() else {
             self.status = "no file (M1: open a file from argv)".into();
             return false;
         };
+        // Refuse to silently overwrite a file that changed underneath us.
+        // Without this, pmacs clobbers another editor's (or a `git
+        // checkout`'s) writes with a buffer that never saw them.
+        if !force && self.save_would_clobber(id, &path) {
+            self.status = format!(
+                "{} changed on disk since it was read --- M-x buffer.save-anyway to overwrite",
+                path.display()
+            );
+            return false;
+        }
         let len_and_bytes = {
             let reg = self.registry.borrow();
             let buffer = match reg.get(id) {

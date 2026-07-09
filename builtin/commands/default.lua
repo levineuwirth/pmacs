@@ -227,7 +227,22 @@ cmd { name = "buffer.save", description = "Save the current buffer to its backin
           ed.set_status("save vetoed by buffer.before-save")
           return
         end
+        -- `ed.save()` refuses when the file changed on disk since this
+        -- buffer read it, rather than clobbering the other writer. It
+        -- reports how to override; `buffer.after-save` must not fire.
         if ed.save() then
+          pmacs.hook.run("buffer.after-save")
+        end
+      end }
+
+cmd { name = "buffer.save-anyway",
+      description = "Save, overwriting a file that changed on disk since it was read.",
+      fn = function()
+        if not pmacs.hook.run("buffer.before-save") then
+          ed.set_status("save vetoed by buffer.before-save")
+          return
+        end
+        if ed.save_ignoring_disk_changes() then
           pmacs.hook.run("buffer.after-save")
         end
       end }
