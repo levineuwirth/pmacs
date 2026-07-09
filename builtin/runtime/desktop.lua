@@ -23,9 +23,9 @@ function pmacs.session.desktop_mode(on)
     return false
   end
   enabled = on
-  if on then
-    pmacs.session.arm_restore()
-  end
+  -- Arm (or, when disabling, unarm) restore-on-startup, so an
+  -- enable-then-disable in init.lua does not still restore.
+  pmacs.session.arm_restore(on)
   return enabled
 end
 

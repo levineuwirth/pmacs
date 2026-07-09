@@ -1991,11 +1991,17 @@ pub(crate) fn fire_after_load_hook(lua: &Lua) {
 fn install_session_module(lua: &Lua) -> mlua::Result<Table> {
     let m = lua.create_table()?;
 
-    // arm_restore(): mark that a desktop restore should run at startup.
+    // arm_restore(on): arm (or, with `false`, unarm) restore-on-startup.
+    // A boolean app-data path so `desktop_mode(false)` can undo a prior
+    // `desktop_mode(true)` — the marker is not one-way.
     m.set(
         "arm_restore",
-        lua.create_function(|lua, ()| {
-            lua.set_app_data(DesktopRestoreArmed);
+        lua.create_function(|lua, on: Option<bool>| {
+            if on.unwrap_or(true) {
+                lua.set_app_data(DesktopRestoreArmed);
+            } else {
+                lua.remove_app_data::<DesktopRestoreArmed>();
+            }
             Ok(())
         })?,
     )?;

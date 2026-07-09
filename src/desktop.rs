@@ -15,7 +15,7 @@
 //!
 //! Framing: docs/desktop-save-framing.md.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use mlua::Lua;
@@ -243,6 +243,18 @@ pub fn resolve_active_leaf(
 // SharedCore / StateDir / LocalInstanceInfo app-data).
 // ---------------------------------------------------------------------------
 
+/// True when this process is a daemon (multi-frontend). Desktop
+/// save/restore is local-only in v1 (Q#DS9); this is the **reliable**
+/// enforcement — the `DaemonMode` marker is set right after the daemon's
+/// `EditorState::new()`, so it is present for every save/restore that
+/// can run after startup (the before-quit hook, manual commands, direct
+/// binding calls), even though `init.lua` runs before it is set. Both
+/// `save_session` and `restore_session` no-op when it holds.
+fn is_daemon(lua: &Lua) -> bool {
+    lua.app_data_ref::<crate::lua_bindings::DaemonMode>()
+        .is_some()
+}
+
 /// The desktop session key for this process (`cwd.<hash>` in local mode).
 fn session_key_from_lua(lua: &Lua) -> String {
     match lua
@@ -313,6 +325,9 @@ pub fn snapshot(core: &EditorCore, session_key: String) -> Option<SavedDesktop> 
 /// # Errors
 /// A state-write / serialization failure (surfaced for manual save).
 pub fn save_session(lua: &Lua) -> Result<bool, String> {
+    if is_daemon(lua) {
+        return Ok(false); // local-only in v1 (Q#DS9)
+    }
     let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
         return Ok(false);
     };
@@ -340,6 +355,9 @@ pub fn save_session(lua: &Lua) -> Result<bool, String> {
 /// Parse / state-read failures; a missing individual file collapses its
 /// leaf rather than failing the whole restore.
 pub fn restore_session(lua: &Lua) -> Result<(), String> {
+    if is_daemon(lua) {
+        return Ok(()); // local-only in v1 (Q#DS9)
+    }
     let key = session_key_from_lua(lua);
     let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
         return Ok(());
@@ -368,8 +386,6 @@ pub fn restore_session(lua: &Lua) -> Result<(), String> {
 /// activate-then-fire pass (Q#DS3).
 struct RestoreLeaf {
     window: WindowId,
-    buffer: BufferId,
-    newly_loaded: bool,
     cursor: u64,
     view_top: usize,
 }
@@ -436,16 +452,22 @@ pub fn restore_into(
         active
     };
 
-    // (5) activate-then-fire: after-load must observe the restored leaf
-    // as active (saveplace/recentf/syntax/LSP read active state). Fire
-    // once per newly-loaded buffer, then write the exact per-leaf
-    // cursor/view_top so desktop wins over saveplace.
-    let mut fired: HashSet<BufferId> = HashSet::new();
+    // (5) activate-then-fire, once **per leaf** (per window). after-load
+    // must observe the restored leaf as active (saveplace/recentf/syntax/
+    // LSP read active state). Firing per leaf — not per buffer — gives
+    // each pane its own per-window overlay (syntax attaches to the active
+    // window), while LSP's `attach_buffer` is idempotent, so the same
+    // file in two panes still attaches LSP once but syntax to both.
+    // Writing the exact per-leaf cursor/view_top *after* the hook lets
+    // desktop win over saveplace.
+    //
+    // NOTE (Q#DS3, hidden buffers): a restored buffer with NO leaf (open
+    // but hidden) is loaded into the registry but does not fire
+    // after-load here — it attaches syntax on first visit (after-switch)
+    // and LSP when it is next shown/opened. Registry-only in v1.
     for leaf in &leaves {
-        if leaf.newly_loaded && fired.insert(leaf.buffer) {
-            core.borrow_mut().set_active_window_id(leaf.window);
-            fire_after_load();
-        }
+        core.borrow_mut().set_active_window_id(leaf.window);
+        fire_after_load();
         let mut c = core.borrow_mut();
         if let Some(win) = c.windows.get_mut(&leaf.window) {
             win.cursor = leaf.cursor;
@@ -469,7 +491,7 @@ fn build_restore_node(
 ) -> Option<LayoutNode> {
     match node {
         SavedNode::Leaf(leaf) => {
-            let Some(&(buffer_id, newly_loaded)) = opened.get(&leaf.path) else {
+            let Some(&(buffer_id, _newly)) = opened.get(&leaf.path) else {
                 save_slots.push(None); // file missing → leaf collapses
                 return None;
             };
@@ -491,8 +513,6 @@ fn build_restore_node(
             core.windows.insert(wid, win);
             leaves.push(RestoreLeaf {
                 window: wid,
-                buffer: buffer_id,
-                newly_loaded,
                 cursor,
                 view_top,
             });

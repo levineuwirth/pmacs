@@ -220,7 +220,7 @@ fn after_load_fires_with_the_restored_leaf_active() {
 }
 
 #[test]
-fn same_file_in_two_panes_keeps_distinct_positions() {
+fn same_file_in_two_panes_keeps_distinct_positions_and_fires_per_pane() {
     let dir = fresh_state_dir();
     let src = editor(&dir);
     let a = write_file(&dir, "a.txt", "aaaa\nbbbb\ncccc\ndddd\n");
@@ -236,11 +236,71 @@ fn same_file_in_two_panes_keeps_distinct_positions() {
     assert!(save(&src));
 
     let mut dst = editor(&dir);
+    // after-load must fire once PER PANE (not once per buffer) so each
+    // window gets its own per-window overlay (syntax attaches to the
+    // active window; LSP attach is idempotent).
+    exec(
+        &dst,
+        "_G.fires = 0; pmacs.hook.add('buffer.after-load', function() _G.fires = _G.fires + 1 end)",
+    );
     restore(&mut dst);
+    let fires: i64 = dst.lua_host.lua().load("return _G.fires").eval().unwrap();
+    assert_eq!(
+        fires, 2,
+        "after-load fires once per pane for the same buffer"
+    );
     let ls = leaves(&dst);
     assert_eq!(ls.len(), 2);
     assert_eq!(ls[0], (a.clone(), 2, 0));
     assert_eq!(ls[1], (a, 15, 0));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn daemon_mode_disables_save_and_restore() {
+    let dir = fresh_state_dir();
+    // Seed a desktop from a normal (non-daemon) editor.
+    let src = editor(&dir);
+    let a = write_file(&dir, "a.txt", "aaaa\n");
+    exec(&src, &format!("pmacs.buffer.find_or_open({a:?})"));
+    assert!(save(&src));
+
+    // A daemon editor must not save or restore (local-only, Q#DS9) —
+    // the Rust gate holds regardless of what init did.
+    let mut daemon = editor(&dir);
+    daemon
+        .lua_host
+        .lua()
+        .set_app_data(pmacs::lua_bindings::DaemonMode);
+    assert!(!save(&daemon), "daemon save is a no-op");
+    restore(&mut daemon);
+    assert!(
+        leaves(&daemon).iter().all(|(p, _, _)| p != &a),
+        "daemon restore is a no-op"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn disabling_desktop_mode_unarms_restore() {
+    let dir = fresh_state_dir();
+    let src = editor(&dir);
+    let a = write_file(&dir, "a.txt", "aaaa\n");
+    exec(&src, &format!("pmacs.buffer.find_or_open({a:?})"));
+    assert!(save(&src));
+
+    // Enable then disable desktop_mode → the startup restore must NOT
+    // fire (arming is a boolean; disable unarms).
+    let mut dst = editor(&dir);
+    exec(
+        &dst,
+        "pmacs.session.desktop_mode(true); pmacs.session.desktop_mode(false)",
+    );
+    dst.restore_desktop_if_armed(false);
+    assert!(
+        leaves(&dst).iter().all(|(p, _, _)| p != &a),
+        "disabled desktop_mode leaves restore unarmed"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

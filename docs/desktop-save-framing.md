@@ -135,20 +135,29 @@ switch focus, so restore sequences activation explicitly.
    to `core.views[LOCAL]` from `core.windows` (not just the startup
    scratch window — leftover windows would linger in the `pub` map and
    still take part in edit notifications and buffer-liveness checks,
-   finding). 
+   finding).
 4. Build a fresh `LayoutNode` from `SavedNode` with new `WindowId`s and
    a `Window` per surviving leaf (weights copied verbatim), install it
    as `core.views[LOCAL].layout.root`.
-5. **Fire `after-load` with the right leaf active**: for each surviving
-   leaf in preorder, set its window active; the first time a given
-   buffer is seen, fire `buffer.after-load` (once per newly-loaded
-   buffer, so saveplace/LSP/syntax attach against the correct active
-   buffer); then set that window's exact `cursor`/`view_top` from the
-   leaf. Desktop's per-leaf write lands *after* the hook, so it wins
-   over saveplace for precision — and same-file-two-leaves keeps
-   distinct positions a single saveplace entry could not.
+5. **Fire `after-load` with the right leaf active, once per leaf**: for
+   each surviving leaf in preorder, set its window active, fire
+   `buffer.after-load`, then set that window's exact `cursor`/`view_top`.
+   Firing **per leaf** (not per buffer) is deliberate — syntax attaches
+   its overlay to the *active window*, so each pane needs its own fire;
+   LSP's `attach_buffer` is idempotent, so the same file in two panes
+   attaches LSP once but syntax to both (finding, round 3). The per-leaf
+   `cursor`/`view_top` write lands *after* the hook, so desktop wins over
+   saveplace — and same-file-two-leaves keeps distinct positions a single
+   saveplace entry could not.
 6. Set `active` to the `active_leaf` window (Q#DS10 fallback if that
    leaf didn't survive).
+
+**Hidden buffers are registry-only in v1** (finding, round 3): a
+restored `SavedBuffer` with no leaf (open but not shown) is loaded into
+the registry — it is not lost, it is in the buffer list / recentf — but
+it does not fire `after-load`, so it attaches syntax on first visit
+(`after-switch`) and LSP when next shown. Full initial attach for hidden
+buffers is deferred.
 
 Structural construction against the `pub` fields — no new tree-builder
 API, matching how the window unit tests already assemble layouts.
@@ -186,7 +195,9 @@ buffers had unsaved changes when the desktop was saved") via
 
 Restore is **armed, never inline in init** — `desktop_mode(true)` runs
 inside `new()` (before the file opens), so it only sets the flag +
-before-quit hook. The Rust startup trigger fires restore:
+before-quit hook. Arming is a **boolean** (`arm_restore(on)`), so
+`desktop_mode(false)` *unarms* — an enable-then-disable in init does not
+still restore (finding, round 3). The Rust startup trigger fires restore:
 
 - `editor::run`: capture `let had_file = file.is_some();` **before** the
   `match file` at `src/editor.rs:1522` consumes `file`. But fire restore
@@ -217,13 +228,15 @@ to restore *into* until first attach. v1 targets **only** the local
 `editor::run` path (single `LOCAL` frontend view built at startup).
 
 **`desktop_mode(true)` auto-save and auto-restore are both no-ops in
-daemon mode** — not half-enabled. Serializing "wherever a layout exists"
-is ambiguous with multiple frontend layouts sharing one key, so the
-before-quit save simply doesn't register (or early-returns) when the
-process is a daemon; a diagnostic notes desktop-save is local-only in
-v1. Daemon + GPU-attach save/restore is **deferred** to the first-attach
-design. (Manual `desktop-save`/`desktop-restore` commands likewise
-refuse in daemon mode in v1.)
+daemon mode** — not half-enabled. The **enforcement is in Rust, not just
+Lua** (finding, round 3): `save_session`/`restore_session` early-return
+when the `DaemonMode` app-data marker is present. That marker is set
+right after the daemon's `EditorState::new()`, so it holds for every
+save/restore that can run after startup — the before-quit hook, manual
+commands, and direct binding calls — even though `init.lua` (where
+`desktop_mode` runs) executes before it is set, when `is_daemon()` in
+Lua would still read false. Daemon + GPU-attach save/restore is
+**deferred** to the first-attach design.
 
 ### Q#DS10 — Active-focus fallback
 
