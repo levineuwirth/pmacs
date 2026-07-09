@@ -32,6 +32,10 @@
 //!   `rootUri` received in `initialize` to the file named by
 //!   `PMACS_FAKE_LSP_ROOT_SINK`, so a test can assert the
 //!   auto-attach path derives the project root from the opened file.
+//! * If launched with `PMACS_FAKE_LSP_MODE=sighelp`: additionally
+//!   advertises `signatureHelpProvider` with `(` / `,` triggers, so a
+//!   test can drive the Arc 1d auto-trigger. Every other mode omits the
+//!   capability and therefore never auto-triggers.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -153,6 +157,16 @@ fn main() {
                 if mode == "prepare" || mode == "preprefuse" {
                     resp["result"]["capabilities"]["renameProvider"] =
                         serde_json::json!({ "prepareProvider": true });
+                }
+                // Arc 1d: advertise signature help only in `sighelp`, so
+                // every other mode keeps the no-auto-trigger path (the
+                // `textDocument/signatureHelp` arm below still answers
+                // the manual `M-x lsp.signature-help` in any mode).
+                if mode == "sighelp" {
+                    resp["result"]["capabilities"]["signatureHelpProvider"] = serde_json::json!({
+                        "triggerCharacters": ["("],
+                        "retriggerCharacters": [","]
+                    });
                 }
                 // T M4.5 hardening `rooturi`: record the `rootUri` the
                 // client sent in `initialize` to a side-channel file
