@@ -261,6 +261,9 @@ local pending_did_change = {}
 -- Forward declaration — defined below (needs helpers that follow);
 -- `flush_did_change` re-pulls inlay hints after each coalesced send.
 local pull_inlay_hints_quiet
+-- Same, for semantic tokens (Arc 1c). They are pull-model too, and
+-- nothing was pulling them.
+local pull_semantic_tokens_quiet
 
 local function flush_did_change(key)
   local pending = pending_did_change[key]
@@ -282,6 +285,8 @@ local function flush_did_change(key)
   -- supersede-keyed per (server, method, uri), so a burst of flushes
   -- cancels its own predecessors rather than piling up.
   pcall(pull_inlay_hints_quiet, rec)
+  -- Semantic tokens are pull-model on exactly the same terms (Arc 1c).
+  pcall(pull_semantic_tokens_quiet, rec)
 end
 
 local function flush_did_change_for(rec)
@@ -447,6 +452,47 @@ function pull_inlay_hints_quiet(rec)
   end)
 end
 
+local function server_supports_semantic_tokens(sid)
+  local ok, caps = pcall(pmacs.lsp.capabilities, sid)
+  if not ok or not caps then return false end
+  local p = caps.semanticTokensProvider
+  return p ~= nil and p ~= false
+end
+
+-- Arc 1c. Semantic tokens are pull-model, exactly like inlay hints: the
+-- server never volunteers them, and the store only fills from a
+-- `textDocument/semanticTokens/*` response. Until now the ONLY automatic
+-- pull was in reply to a server-initiated `workspace/semanticTokens
+-- /refresh` --- which most servers never send --- so semantic styling
+-- silently never appeared unless the user ran `M-x lsp.semantic-tokens`
+-- by hand. Attach and edit-flush now pull it, the same two points that
+-- already pull inlay hints.
+--
+-- Assigns the forward-declared local above (a fresh `local function`
+-- here would shadow it, leaving `flush_did_change`'s upvalue nil).
+function pull_semantic_tokens_quiet(rec)
+  if not rec or not server_is_initialized(rec.server) then return end
+  if not server_supports_semantic_tokens(rec.server) then return end
+  -- The server must see the current text before computing token
+  -- positions against it. A no-op when called from `flush_did_change`
+  -- itself (the pending entry is removed before the send).
+  flush_did_change_for(rec)
+  -- Delta when we hold a `resultId` (the server only returns one when it
+  -- supports delta), full otherwise --- matching `pmacs.lsp
+  -- .semantic_tokens()`. Never clear the store first: a delta splices
+  -- against the retained raw stream.
+  local prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
+  pmacs.async(function()
+    pcall(function()
+      if prev then
+        pmacs.lsp.request_semantic_tokens_delta(rec.server, rec.uri, prev):await()
+      else
+        pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+      end
+    end)
+  end)
+end
+
 -- M_B1: buffers that already had an `LspStyleView` overlay pushed,
 -- so the after-load / on-demand attach paths don't stack duplicate
 -- overlays. Mirrors `highlighted_buffers` in `syntax.lua`; the entry
@@ -514,6 +560,9 @@ local function attach_buffer(buf)
     if ok and attached then diag_viewed_buffers[key] = true end
   end
   pull_inlay_hints_quiet(rec)
+  -- Arc 1c: the LspStyleView was just attached above, but nothing ever
+  -- filled the semantic-token store it reads. Pull once on attach.
+  pull_semantic_tokens_quiet(rec)
   return rec
 end
 
@@ -589,6 +638,67 @@ pmacs.hook.add("buffer.after-switch", function()
   if ok_d and attached_d then diag_viewed_buffers[key] = true end
 end)
 
+-- Arc 1d: signature-help auto-trigger ----------------------------------
+--
+-- `buffer.after-edit` carries no payload, so a *typed character* is
+-- reconstructed from state exactly the way `completion.lua` does (Q#C9):
+-- same buffer, cursor advanced by exactly one byte. Paste, undo, kill,
+-- and remote CRDT edits produce any other delta and never auto-trigger.
+-- (Trigger characters are ASCII, so a one-byte advance is sound.)
+local last_typed = { key = nil, cursor = nil }
+
+local function char_before(buf, cursor)
+  if cursor <= 0 then return nil end
+  local ok, s = pcall(function() return buf:slice(cursor - 1, cursor) end)
+  if not ok or type(s) ~= "string" or #s ~= 1 then return nil end
+  return s
+end
+
+-- The set of characters that should (re)open signature help, as the
+-- server declares them. `retriggerCharacters` (usually `,`) refreshes an
+-- open call's active parameter. A provider that declares neither still
+-- gets the universal pair, which is what `(` auto-trigger means in
+-- practice; no provider means no auto-trigger at all.
+local function signature_trigger_chars(sid)
+  local ok, caps = pcall(pmacs.lsp.capabilities, sid)
+  if not ok or not caps then return nil end
+  local p = caps.signatureHelpProvider
+  if not p or p == false then return nil end
+  local chars = {}
+  for _, c in ipairs(p.triggerCharacters or {}) do chars[c] = true end
+  for _, c in ipairs(p.retriggerCharacters or {}) do chars[c] = true end
+  if next(chars) == nil then
+    chars["("] = true
+    chars[","] = true
+  end
+  return chars
+end
+
+-- Like `pmacs.lsp.signature_help_at_cursor`, but silent: an auto-trigger
+-- that announced "no signature help" on every `(` in a comment would be
+-- unusable. Only a real signature reaches the status line.
+local function signature_help_quiet(rec)
+  if not server_is_initialized(rec.server) then return end
+  -- The server must see the character we just typed before it can tell
+  -- us which parameter we are inside of.
+  flush_did_change_for(rec)
+  local line = pmacs.editor.cursor_line()
+  local col = pmacs.editor.cursor_col()
+  pmacs.signature.clear(rec.server, rec.uri)
+  pmacs.async(function()
+    local ok = pcall(function()
+      pmacs.lsp.request_signature_help(rec.server, rec.uri, line, col):await()
+    end)
+    if not ok then return end
+    local help = pmacs.signature.current(rec.server, rec.uri)
+    if not help or not help.signatures or #help.signatures == 0 then return end
+    local active = help.signatures[(help.active_signature or 0) + 1]
+    if active and active.label then
+      pmacs.editor.set_status("LSP: " .. active.label)
+    end
+  end)
+end
+
 pmacs.hook.add("buffer.after-edit", function()
   local buf = pmacs.window.buffer()
   if not buf then return end
@@ -600,6 +710,13 @@ pmacs.hook.add("buffer.after-edit", function()
   -- O(file) didChange send below is coalesced: render families
   -- anchored to pre-edit positions are hidden from this edit on.
   pcall(pmacs.lsp._mark_document_stale, rec.uri)
+  -- Arc 1d: did the user just type a signature trigger character?
+  -- Recorded before the early-outs below so the snapshot stays accurate
+  -- for the *next* edit even when this one doesn't trigger.
+  local cursor = pmacs.editor.cursor()
+  local prev_key, prev_cursor = last_typed.key, last_typed.cursor
+  last_typed.key, last_typed.cursor = key, cursor
+  local typed_one = key == prev_key and prev_cursor and cursor - prev_cursor == 1
   local now = pmacs.editor.monotonic_ms()
   local pending = pending_did_change[key]
   if pending and pending.rec == rec then
@@ -607,6 +724,14 @@ pmacs.hook.add("buffer.after-edit", function()
   else
     pending_did_change[key] = { rec = rec, first_ms = now, last_ms = now }
   end
+  -- Fire *after* queuing the pending didChange: `signature_help_quiet`
+  -- flushes it, so the server sees the character we are asking about.
+  if not typed_one then return end
+  local ch = char_before(buf, cursor)
+  if not ch then return end
+  local triggers = signature_trigger_chars(rec.server)
+  if not (triggers and triggers[ch]) then return end
+  pcall(signature_help_quiet, rec)
 end)
 
 -- Async request surface (T M4.5 async bridge). The Rust manager
@@ -1148,8 +1273,15 @@ local function handle_server_requests()
           pcall(unregister_file_watchers, sid,
             ev.params and ev.params.unregisterations)
         elseif ev.kind == "initialized" then
+          -- Buffers attach before the server finishes initializing, so
+          -- the pulls in `attach_buffer` are no-ops for the FIRST file
+          -- (their `server_is_initialized` guard is false). This is the
+          -- site that actually lands them. Inlay hints were pulled here;
+          -- semantic tokens were not, which is why semantic styling never
+          -- appeared on the file that started the server (Arc 1c).
           repull_for_attachments(sid, function(_, _, rec)
             pull_inlay_hints_quiet(rec)
+            pull_semantic_tokens_quiet(rec)
           end)
         end
       end

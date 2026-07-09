@@ -4297,6 +4297,240 @@ fn m4_19_semantic_tokens_refresh_repulls_via_server_request() {
     );
 }
 
+/// Arc 1c — semantic tokens auto-pull **on attach**.
+///
+/// Regression for a shipped bug: semantic tokens are pull-model, but the
+/// only automatic pull was in reply to a server-initiated
+/// `workspace/semanticTokens/refresh`. Most servers never send one, so
+/// semantic styling silently never appeared unless the user ran
+/// `M-x lsp.semantic-tokens` by hand — while inlay hints, on the very
+/// same pull model, were pulled on attach and on edit-flush.
+///
+/// The **default** fake advertises `semanticTokensProvider` and never
+/// sends a refresh, which is exactly the broken case.
+#[test]
+fn arc1c_semantic_tokens_auto_pull_on_attach() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.lsp.config.rust = {{ command = '{fake}' }}"))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    let flag = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local t = pmacs.semantic_tokens.tokens(sid, 'file://{a_disp}') \
+           return t ~= nil and #t > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &flag, 5),
+        "attach never auto-pulled semantic tokens (no manual call, no server refresh)"
+    );
+}
+
+/// Arc 1c — semantic tokens re-pull **on edit-flush**, the second point
+/// inlay hints already pulled from. Clears the store, types a character,
+/// and waits for the debounced `didChange` flush to refill it.
+#[test]
+fn arc1c_semantic_tokens_repull_after_edit_flush() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.lsp.config.rust = {{ command = '{fake}' }}"))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    let has_tokens = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local t = pmacs.semantic_tokens.tokens(sid, 'file://{a_disp}') \
+           return t ~= nil and #t > 0 \
+         end)()"
+    );
+    assert!(pump_lua_flag(&mut state, &has_tokens, 5), "attach pull");
+
+    // Empty the store, then type — the flush must refill it.
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then \
+                 pmacs.semantic_tokens.clear(r.id, 'file://{a_disp}') \
+               end \
+             end"
+        ))
+        .exec()
+        .expect("clear the token store");
+    state.dispatch_key(
+        pmacs::protocol::FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    );
+    assert!(
+        pump_lua_flag(&mut state, &has_tokens, 5),
+        "edit-flush never re-pulled semantic tokens"
+    );
+}
+
+/// Arc 1d — signature help auto-triggers on a server-declared trigger
+/// character. Typing `(` (a one-byte cursor advance, the same typed-char
+/// signature `completion.lua` uses) surfaces the active signature.
+#[test]
+fn arc1d_signature_help_auto_triggers_on_trigger_char() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'sighelp' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    let initialized = "(function() \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then return true end \
+           end \
+           return false \
+         end)()";
+    assert!(pump_lua_flag(&mut state, initialized, 5), "server init");
+
+    // The first keystroke only seeds the typed-char snapshot; the second
+    // is the trigger. (A trigger char cannot fire off the very first edit
+    // in a buffer, which is correct: there is no prior cursor to compare.)
+    for c in ['f', '('] {
+        state.dispatch_key(
+            pmacs::protocol::FrontendId::LOCAL,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw = false;
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        if state.core.borrow().status.contains("fn echo(") {
+            saw = true;
+            break;
+        }
+    }
+    assert!(saw, "typing `(` did not auto-trigger signature help");
+}
+
+/// Arc 1d — an ordinary character does **not** auto-trigger, and neither
+/// does a multi-byte edit (paste/undo/remote): only the one-byte typed
+/// signature does. Guards against a signature request on every keystroke.
+#[test]
+fn arc1d_signature_help_does_not_trigger_on_ordinary_typing() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'sighelp' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    let initialized = "(function() \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then return true end \
+           end \
+           return false \
+         end)()";
+    assert!(pump_lua_flag(&mut state, initialized, 5), "server init");
+
+    for c in ['f', 'o', 'o'] {
+        state.dispatch_key(
+            pmacs::protocol::FrontendId::LOCAL,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        assert!(
+            !state.core.borrow().status.contains("fn echo("),
+            "ordinary typing must not request signature help"
+        );
+    }
+}
+
 /// T M4.5 — `textDocument/semanticTokens/range` through the Lua
 /// surface. Same decode path as `/full`, scoped to a range; the
 /// fake returns one token.
