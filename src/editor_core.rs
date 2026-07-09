@@ -480,6 +480,32 @@ impl EditorCore {
         }
     }
 
+    /// Find the buffer already showing `path`, or load it fresh from
+    /// disk into a new buffer — **without** switching the active window
+    /// (Arc 3 desktop-restore builds its windows explicitly). Returns
+    /// `(id, newly_loaded)`; `newly_loaded` is `false` on a dedup hit
+    /// (the same file in two split panes) so the caller fires
+    /// `buffer.after-load` at most once per buffer.
+    ///
+    /// # Errors
+    /// Propagates a load failure (e.g. a since-deleted file) so restore
+    /// can skip that leaf rather than abort.
+    pub fn get_or_load_buffer(&mut self, path: &Path) -> std::io::Result<(BufferId, bool)> {
+        let normalized = normalize_buffer_path(path.to_path_buf());
+        if let Some(id) = self.registry.borrow().find_by_path(&normalized) {
+            return Ok((id, false));
+        }
+        let (bytes, meta) = crate::file_io::load_file(path)?;
+        let display_name = path.display().to_string();
+        let id = self
+            .registry
+            .borrow_mut()
+            .create_from_bytes(display_name, &bytes);
+        self.set_buffer_path(id, Some(normalized));
+        self.set_buffer_meta(id, Some(meta));
+        Ok((id, true))
+    }
+
     /// Cursor of the active window (compatibility shim for callers
     /// migrated from pre-M2.8 code).
     #[must_use]

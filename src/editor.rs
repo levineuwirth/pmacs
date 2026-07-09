@@ -315,6 +315,12 @@ impl EditorState {
                 include_str!("../builtin/runtime/recentf.lua"),
             )
             .expect("load recentf builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/desktop.lua"),
+                include_str!("../builtin/runtime/desktop.lua"),
+            )
+            .expect("load desktop builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -461,6 +467,25 @@ impl EditorState {
             self.lua_host
                 .lua()
                 .set_app_data(crate::lua_bindings::StateDir(dir));
+        }
+    }
+
+    /// Restore the session saved under this desktop's key, if armed
+    /// (`pmacs.session.desktop_mode(true)` called it) and no positional
+    /// file arg was given (Q#DS7). Called from the `RunLocal` arm of
+    /// [`run`]. All the work lives in [`crate::desktop::restore_session`]
+    /// (driven off the Lua host's app-data + hook mechanism).
+    pub fn restore_desktop_if_armed(&mut self, had_file: bool) {
+        let armed = self
+            .lua_host
+            .lua()
+            .app_data_ref::<crate::lua_bindings::DesktopRestoreArmed>()
+            .is_some();
+        if armed
+            && !had_file
+            && let Err(e) = crate::desktop::restore_session(self.lua_host.lua())
+        {
+            self.core.borrow_mut().status = format!("desktop-restore: {e}");
         }
     }
 
@@ -1519,6 +1544,9 @@ impl Default for EditorState {
 /// local-TUI for the terminal.
 pub fn run(file: Option<PathBuf>) -> io::Result<()> {
     install_panic_hook();
+    // Capture before the `match` consumes `file`: a positional file arg
+    // means "open this", not "restore my desktop" (Q#DS7).
+    let had_file = file.is_some();
     let mut state = match file {
         Some(path) => EditorState::open(path)?,
         None => EditorState::new(),
@@ -1535,6 +1563,11 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
     let requested = state.lua_host.take_requested_attach();
     match crate::attach_dispatch::dispatch_attach(requested) {
         crate::attach_dispatch::AttachDispatch::RunLocal => {
+            // Committed to local mode: restore the desktop if armed and
+            // no file arg was given (Q#DS7). Done here, not right after
+            // construction, so a hand-off to attach mode (above) never
+            // populates an EditorState it's about to drop.
+            state.restore_desktop_if_armed(had_file);
             // Fall through to the local TUI loop below.
         }
         crate::attach_dispatch::AttachDispatch::RunAttachLocalSocket(socket) => {
