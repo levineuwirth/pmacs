@@ -1988,13 +1988,13 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
         lua.create_function(|lua, ()| crate::autosave::sweep(lua).map_err(mlua::Error::external))?,
     )?;
 
-    // _adopt(path): claim a recovery file for this session, so later
-    // sweeps may overwrite it. `recover-file` calls this once the
-    // contents are safely installed in the buffer.
+    // _adopt(buf): claim a buffer's recovery file for this session, so
+    // later sweeps may overwrite it and a kill can retire it.
+    // `recover-file` calls this once the contents are installed.
     m.set(
         "_adopt",
-        lua.create_function(|lua, path: String| {
-            crate::autosave::adopt(lua, std::path::Path::new(&path));
+        lua.create_function(|lua, id: BufferIdLua| {
+            crate::autosave::adopt(lua, id.0);
             Ok(())
         })?,
     )?;

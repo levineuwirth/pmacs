@@ -356,55 +356,79 @@ pub fn sweep(lua: &Lua) -> Result<(usize, usize), String> {
     Ok((written, blocked))
 }
 
-/// Claim the recovery file at `path` for this session (Q#AS12), so
-/// subsequent sweeps may overwrite it. Called by `recover-file` once its
-/// contents are installed in the buffer — the crash data now lives in the
-/// buffer, so the copy is no longer irreplaceable.
-pub fn adopt(lua: &Lua, path: &Path) {
+/// Claim `buffer`'s recovery file for this session (Q#AS12). Called by
+/// `recover-file` once the contents are installed in the buffer — the
+/// crash data now lives in the buffer, so the copy is no longer
+/// irreplaceable.
+///
+/// It records a `written` entry as well as the ownership, because after a
+/// recover the file's contents *are* the buffer's contents. That makes
+/// two things right at once: the skip cache correctly declines to rewrite
+/// it, and `discard_buffer` can find and retire it — including from a
+/// removal callback that fires *after* the buffer is gone, when there is
+/// no path left to read (finding).
+pub fn adopt(lua: &Lua, id: BufferId) {
+    let Some(core) = lua.app_data_ref::<SharedCore>() else {
+        return;
+    };
+    let entry = {
+        let c = core.borrow();
+        let reg = c.registry.borrow();
+        let Ok(buf) = reg.get(id) else { return };
+        let Some(p) = buf.file_path() else { return };
+        (sha256_hex(&p.display().to_string()), buf.revision())
+    };
+    drop(core);
     if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
-        cache
-            .0
-            .borrow_mut()
-            .owned
-            .insert(sha256_hex(&path.display().to_string()));
+        let mut cache = cache.0.borrow_mut();
+        cache.owned.insert(entry.0.clone());
+        cache.written.insert(id, entry);
     }
 }
 
-/// Forget any claim on `path` (so a foreign recovery appearing there
-/// later still blocks a sweep).
-fn unown(lua: &Lua, path: &Path) {
-    if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
-        cache
-            .0
-            .borrow_mut()
-            .owned
-            .remove(&sha256_hex(&path.display().to_string()));
-    }
-}
-
-/// Delete the recovery file for `path` and drop any claim on it.
+/// Delete the recovery file for `path` and drop every claim and skip-cache
+/// entry pointing at it.
+///
+/// This is the **explicit** release path (`discard-recovery`), so it
+/// ignores ownership — the user asked. Clearing the matching `written`
+/// entries matters (finding): otherwise a still-dirty buffer would hit the
+/// unchanged-`(path_hash, revision)` fast path on the next sweep and go
+/// unprotected until its next edit.
 pub fn discard_path(lua: &Lua, path: &Path) -> bool {
     let Some(base) = base_dir(lua) else {
         return false;
     };
-    unown(lua, path);
+    let hash = sha256_hex(&path.display().to_string());
+    if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
+        let mut cache = cache.0.borrow_mut();
+        cache.owned.remove(&hash);
+        cache.written.retain(|_, (h, _)| h != &hash);
+    }
     discard(&base, path)
 }
 
 /// Retire the recovery copy of a specific **buffer** (Q#AS12).
 ///
 /// Keyed by `BufferId`, not by the path captured when the buffer loaded:
-/// it removes both the buffer's *current* path key (if it is still live)
-/// and the key its last recovery was actually **written** under. Those
-/// differ after a rename — an LSP `WorkspaceEdit` changes the path while
-/// the `BufferId` stays — and a path-captured callback would leave the
-/// real recovery file behind.
+/// it considers both the buffer's *current* path key (if it is still
+/// live) and the key its last recovery was actually **written** under.
+/// Those differ after a rename — an LSP `WorkspaceEdit` changes the path
+/// while the `BufferId` stays — and a path-captured callback would leave
+/// the real recovery file behind.
+///
+/// **Only keys this session owns are removed** (Q#AS12, finding). Saving
+/// or killing a buffer you reopened after a crash must *not* destroy the
+/// unclaimed recovery copy sitting at its path — you never recovered it.
+/// Only `recover-file` (which adopts) or an explicit `discard-recovery`
+/// releases unclaimed crash data.
 pub fn discard_buffer(lua: &Lua, id: BufferId) {
     let Some(base) = base_dir(lua) else {
         return;
     };
     let mut keys: Vec<String> = Vec::new();
-    // The key the last sweep actually wrote for this buffer.
+    // The key the last sweep (or an adopt) recorded for this buffer. This
+    // is the only source that still works once the buffer is gone — a
+    // removal callback fires after it has left the registry.
     if let Some(cache) = lua.app_data_ref::<AutosaveCache>()
         && let Some((hash, _)) = cache.0.borrow().written.get(&id)
     {
@@ -420,15 +444,20 @@ pub fn discard_buffer(lua: &Lua, id: BufferId) {
             keys.push(sha256_hex(&p.display().to_string()));
         }
     }
+    let Some(cache) = lua.app_data_ref::<AutosaveCache>() else {
+        return;
+    };
+    let mut cache = cache.0.borrow_mut();
+    keys.retain(|h| cache.owned.contains(h));
     for hash in &keys {
         let _ = crate::state::remove(&base, &format!("autosave/{hash}"));
+        cache.owned.remove(hash);
     }
-    if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
-        let mut cache = cache.0.borrow_mut();
+    // The skip-cache entry only ever names a key we owned, so it goes
+    // whenever we retired that key — and a buffer that owned nothing has
+    // no entry to drop.
+    if !keys.is_empty() {
         cache.written.remove(&id);
-        for hash in &keys {
-            cache.owned.remove(hash);
-        }
     }
 }
 

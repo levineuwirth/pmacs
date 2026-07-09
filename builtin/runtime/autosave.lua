@@ -185,16 +185,20 @@ pmacs.command.define {
           return
         end
         buf:replace(0, buf:len(), bytes)
+        -- The crash data now lives in the buffer, so the copy is no
+        -- longer irreplaceable: claim it (Q#AS12). Claiming by BUFFER,
+        -- right after the replace, records the recovery under this
+        -- buffer's id at the revision whose contents it holds -- which
+        -- un-blocks autosave for the path AND lets a later kill retire
+        -- the copy (a removal callback runs after the buffer is gone,
+        -- with no path left to read).
+        pmacs.autosave._adopt(buf)
         -- The mutators notify windows and queue CRDT but do NOT fire
         -- `buffer.after-edit` --- that comes from dispatch_key's
         -- post-command revision check, which the minibuffer shadow
         -- returns before. Fire it so LSP didChange and the syntax
         -- reparse see the recovered contents.
         pmacs.hook.run("buffer.after-edit")
-        -- The crash data now lives in the buffer, so the copy is no
-        -- longer irreplaceable: claim it, which un-blocks autosave for
-        -- this path (Q#AS12).
-        pmacs.autosave._adopt(path)
         pmacs.editor.set_status("recovered from autosave --- save to keep it")
       end,
     }

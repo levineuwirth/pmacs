@@ -280,10 +280,114 @@ fn sweep_never_overwrites_unclaimed_crash_recovery() {
     assert_eq!(status(&s2, &f), "fresh", "still offered to the user");
 
     // Once recover-file adopts it, autosave resumes for that path.
-    exec(&s2, &format!("pmacs.autosave._adopt({f:?})"));
+    exec(&s2, "pmacs.autosave._adopt(pmacs.window.buffer())");
+    // Adopt records the copy at the buffer's *current* revision, so the
+    // very next sweep sees no change; an edit makes it write again.
+    exec(&s2, "pmacs.window.buffer():insert(0, 'more ')");
     let (written, blocked) = sweep2(&s2);
     assert_eq!((written, blocked), (1, 0), "adopted → sweeps again");
-    assert_eq!(recovered(&s2, &f), b"new edits on disk\n");
+    assert_eq!(recovered(&s2, &f), b"more new edits on disk\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn saving_without_recovering_preserves_unclaimed_crash_data() {
+    let dir = fresh_state_dir();
+    // Session 1 crashes with unsaved work.
+    let s1 = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    open_and_dirty(&s1, &f, "CRASH WORK ");
+    assert_eq!(sweep(&s1), 1);
+    let crash_copy = recovered(&s1, &f);
+
+    // Session 2 reopens, edits, and SAVES — without ever recovering or
+    // discarding. The save must not destroy the crash copy: only
+    // recover-file (adopt) or discard-recovery may release it.
+    let s2 = editor(&dir);
+    exec(&s2, &format!("pmacs.buffer.find_or_open({f:?})"));
+    exec(&s2, "pmacs.window.buffer():insert(0, 'new ')");
+    exec(&s2, "pmacs.command.invoke('buffer.save')");
+    assert_ne!(
+        status(&s2, &f),
+        "none",
+        "saving must not delete unclaimed crash data"
+    );
+    assert_eq!(
+        recovered(&s2, &f),
+        crash_copy,
+        "the crash recovery survives a save"
+    );
+    // It is now stale (the file changed on disk), so it is never
+    // auto-offered — but it is still there to recover or discard.
+    assert_eq!(status(&s2, &f), "stale");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn killing_without_recovering_preserves_unclaimed_crash_data() {
+    let dir = fresh_state_dir();
+    let s1 = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    open_and_dirty(&s1, &f, "CRASH ");
+    assert_eq!(sweep(&s1), 1);
+    let crash_copy = recovered(&s1, &f);
+
+    let s2 = editor(&dir);
+    exec(&s2, &format!("_G.b = pmacs.buffer.find_or_open({f:?})"));
+    exec(&s2, "pmacs.buffer.kill(_G.b)");
+    assert_eq!(recovered(&s2, &f), crash_copy, "kill preserves it too");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn recover_then_kill_retires_the_adopted_recovery() {
+    let dir = fresh_state_dir();
+    let s1 = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    open_and_dirty(&s1, &f, "crash ");
+    assert_eq!(sweep(&s1), 1);
+
+    // Reopen, recover, then kill immediately — before any save or sweep.
+    // The removal callback fires after the buffer is gone, so the only
+    // way to find the copy is the entry `_adopt` recorded for its id.
+    let s2 = editor(&dir);
+    exec(&s2, &format!("_G.b = pmacs.buffer.find_or_open({f:?})"));
+    exec(
+        &s2,
+        &format!(
+            "
+            local bytes = pmacs.autosave._recover_bytes({f:?})
+            local b = pmacs.window.buffer()
+            b:replace(0, b:len(), bytes)
+            pmacs.autosave._adopt(b)
+            "
+        ),
+    );
+    exec(&s2, "pmacs.buffer.kill(_G.b)");
+    assert_eq!(
+        status(&s2, &f),
+        "none",
+        "an adopted recovery is retired on kill, not left to be re-offered"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn discard_recovery_lets_the_next_sweep_reprotect_immediately() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "mine ");
+    assert_eq!(sweep(&s), 1);
+    assert_eq!(sweep(&s), 0, "unchanged → skipped");
+
+    // Explicitly discard while the buffer is still dirty. The next sweep
+    // must re-create protection at once: a stale skip-cache entry would
+    // leave the buffer unprotected until its next edit.
+    exec(&s, &format!("pmacs.autosave._discard({f:?})"));
+    assert_eq!(status(&s, &f), "none");
+    assert_eq!(sweep(&s), 1, "protection restored without needing an edit");
+    assert_eq!(recovered(&s, &f), b"mine body\n");
     std::fs::remove_dir_all(&dir).ok();
 }
 

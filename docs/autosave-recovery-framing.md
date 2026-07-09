@@ -262,17 +262,34 @@ the file, and start editing *before* running `recover-file`. The next
 sweep writes the current buffer to the same key — **destroying the crash
 copy**, which is precisely what autosave exists to protect.
 
-So the sweep tracks **ownership**. A per-session `owned` set records
-which path hashes *this session* wrote or adopted. A recovery file
-present at a key we do not own is unclaimed crash data:
+So autosave tracks **ownership**. A per-session `owned` set records which
+path hashes *this session* wrote or adopted. A recovery file at a key we
+do not own is unclaimed crash data, and the rule is total:
 
-- the sweep **refuses to write** that buffer and counts it as `blocked`;
-- `sweep()` surfaces *"autosave paused for N file(s) with unclaimed
-  recovery — M-x recover-file or M-x discard-recovery"*;
-- `recover-file` **adopts** the copy once its contents are installed in
-  the buffer (the crash data now lives in the buffer, so the file is no
-  longer irreplaceable), and `discard-recovery` removes it. Either action
-  resumes normal autosave for that path.
+> **Exactly two things may release an unclaimed recovery file:**
+> `recover-file` (which *adopts* it) and `discard-recovery` (explicit
+> user intent). Nothing else — not a sweep, not a save, not a kill.
+
+Concretely:
+
+- the **sweep refuses to write** that buffer, counts it `blocked`, and
+  surfaces *"autosave paused for N file(s) with unclaimed recovery — M-x
+  recover-file or M-x discard-recovery"*;
+- **`save` and `kill` delete only keys this session owns** (finding). You
+  reopen a crashed file, edit, and save without recovering: the on-disk
+  file now holds your new work, but the crash copy still holds work that
+  was *never written anywhere*. Deleting it would be the same data loss by
+  a different door. It survives — as `Stale`, so it is never auto-offered,
+  but it is still there to recover or discard.
+- `recover-file` **adopts by buffer**, not by path (finding). Adopt
+  records a `written` entry for that `BufferId` at the revision whose
+  contents the file now holds. That makes the skip cache correct *and*
+  lets a later kill retire the copy — a removal callback fires after the
+  buffer has left the registry, when there is no path left to read.
+- `discard-recovery` clears the matching `written` entries too (finding),
+  so a still-dirty buffer is re-protected on the very next sweep instead
+  of hitting the unchanged-`(path_hash, revision)` fast path and going
+  unprotected until its next edit.
 
 The trade is deliberate: while blocked, edits made *after* the reopen are
 not autosaved — and the user is told so, every sweep. Losing the new
@@ -444,6 +461,13 @@ commands, cleanup wiring) → tests.
   crashes with a recovery copy; session 2 reopens, edits, sweeps →
   `(written, blocked) == (0, 1)` and the crash copy is byte-identical.
   `_adopt` (what `recover-file` calls) or `_discard` resumes the sweep.
+- **…nor deleted by a save or a kill**: session 2 reopens, edits, and
+  saves (or kills) without recovering → the crash copy survives
+  byte-identical, now reported `Stale`.
+- **Recover then kill immediately** (before any save or sweep) → the
+  adopted copy *is* retired, not left to be re-offered.
+- **Explicit `discard-recovery` on a still-dirty buffer** → the next
+  sweep re-protects it at once, with no intervening edit.
 - **Path change**: rename a buffer's path (`set_buffer_path`) without
   editing it → next sweep writes the new key **and** removes the old
   recovery file (the `(path_hash, revision)` cache).
