@@ -68,6 +68,15 @@ define {
 }
 
 define {
+  name = "frontend.detached",
+  description = "Fired when an attached frontend's session ends. " ..
+                "Receives the raw frontend id (integer). Modules keying " ..
+                "state by pmacs.frontend.id() (kill-ring sessions) drop " ..
+                "that id's entries here (Q#KR11).",
+  kind = "all-must-succeed",
+}
+
+define {
   name = "process.after-tick",
   description = "Fired once per editor frame, immediately after the process " ..
                 "supervisor's tick drains pending I/O and exit events. " ..

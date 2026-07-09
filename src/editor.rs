@@ -327,6 +327,12 @@ impl EditorState {
                 include_str!("../builtin/runtime/autosave.lua"),
             )
             .expect("load autosave builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/killring.lua"),
+                include_str!("../builtin/runtime/killring.lua"),
+            )
+            .expect("load killring builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -706,6 +712,10 @@ impl EditorState {
 
         match action {
             Action::Run { command, .. } => {
+                // Kill ring Q#KR2: record the command boundary before the
+                // body runs, so the body's own `ed.last_command()` reads
+                // its *predecessor* (Emacs `last-command` semantics).
+                self.core.borrow_mut().rotate_command(frontend_id, &command);
                 if let Err(e) = self
                     .lua_host
                     .invoke_command(&command, mlua::MultiValue::new())
@@ -723,20 +733,28 @@ impl EditorState {
                 // shadow instead of the dispatcher.
                 self.core.borrow_mut().completion_popup_close();
             }
-            Action::Unbound { sequence } => match printable_char(&sequence) {
-                Some(ch) => {
+            Action::Unbound { sequence } => {
+                if let Some(ch) = printable_char(&sequence) {
+                    // Typing a character is a command too (Q#KR2): it
+                    // must break a kill chain — `C-k x C-k` is two ring
+                    // entries, not an append.
+                    self.core
+                        .borrow_mut()
+                        .rotate_command(frontend_id, "buffer.self-insert");
                     let mut args = mlua::MultiValue::new();
                     args.push_back(mlua::Value::Integer(ch as i64));
                     if let Err(e) = self.lua_host.invoke_command("buffer.self-insert", args) {
                         self.core.borrow_mut().status =
                             format!("self-insert failed: {}", first_line(&e.to_string()));
                     }
-                }
-                None => {
+                } else {
+                    // An unbound key still breaks the chain (Q#KR2) —
+                    // Emacs's `undefined` runs as a command.
+                    self.core.borrow_mut().break_command_chain(frontend_id);
                     self.core.borrow_mut().status =
                         format!("{}: not bound", display_sequence(&sequence));
                 }
-            },
+            }
         }
 
         let post_revision = self.active_buffer_revision();
@@ -759,6 +777,32 @@ impl EditorState {
     fn active_buffer_revision(&self) -> Option<u64> {
         let id = self.core.borrow().active_buffer_id();
         self.buffer_revision(id)
+    }
+
+    /// Run `f`, then fire `buffer.after-edit` if the active buffer's
+    /// revision changed — the same compare `dispatch_key` performs
+    /// after a keybound command (kill ring Q#KR10b).
+    ///
+    /// For call sites that execute edits *outside* `dispatch_key`'s
+    /// post-command check: the minibuffer accept callback (`M-x`), the
+    /// menu invoke, and the unified paste route. Without it, those
+    /// edits are invisible to LSP `didChange`, the syntax reparse, and
+    /// autosave's observers.
+    ///
+    /// Scope, honestly: the *active-buffer* before/after compare is
+    /// sound for these paths (all edit the active buffer and stay
+    /// there) but is not a general any-buffer guarantee — a callback
+    /// that edits buffer A then switches to B evades it. The general
+    /// fix is a buffer-aware edit epoch; deferred, named in the
+    /// kill-ring framing.
+    pub(crate) fn with_after_edit_check(&mut self, f: impl FnOnce(&mut Self)) {
+        let pre = self.active_buffer_revision();
+        f(self);
+        let post = self.active_buffer_revision();
+        if pre != post {
+            self.lua_host
+                .run_hook("buffer.after-edit", mlua::MultiValue::new());
+        }
     }
 
     /// Edit revision of a specific buffer, or `None` if the registry no
@@ -946,13 +990,28 @@ impl EditorState {
     fn menu_invoke_active(&mut self) {
         let command = self.core.borrow().menu_active_command();
         self.core.borrow_mut().menu_close();
-        if let Some(command) = command
-            && let Err(e) = self
-                .lua_host
-                .invoke_command(&command, mlua::MultiValue::new())
-        {
-            self.core.borrow_mut().status =
-                format!("error in {command}: {}", first_line(&e.to_string()));
+        if let Some(command) = command {
+            // A menu item is an interactive command (kill ring Q#KR2):
+            // rotate the boundary so a menu Cut chains like a keybound
+            // one. The invoke below bypasses dispatch_key, which would
+            // otherwise leave the boundary stale.
+            {
+                let mut core = self.core.borrow_mut();
+                let fid = core.active_frontend;
+                core.rotate_command(fid, &command);
+            }
+            // Q#KR10b: menu invocation bypasses dispatch_key's
+            // revision check — a menu Cut's edit must still fire
+            // `buffer.after-edit`.
+            self.with_after_edit_check(|state| {
+                if let Err(e) = state
+                    .lua_host
+                    .invoke_command(&command, mlua::MultiValue::new())
+                {
+                    state.core.borrow_mut().status =
+                        format!("error in {command}: {}", first_line(&e.to_string()));
+                }
+            });
         }
     }
 
@@ -1062,12 +1121,18 @@ impl EditorState {
                 .create_string(&contents)
                 .expect("Lua VM out of memory while building minibuffer callback args"),
         ));
-        if let Err(e) = on_accept.call::<mlua::MultiValue>(args) {
-            self.core.borrow_mut().status = format!(
-                "minibuffer on_accept failed: {}",
-                first_line(&e.to_string())
-            );
-        }
+        // Q#KR10b: the accept callback runs outside dispatch_key's
+        // post-command revision check (the minibuffer interception
+        // returns before it), so an M-x'd editing command would never
+        // fire `buffer.after-edit` without this wrapper.
+        self.with_after_edit_check(|state| {
+            if let Err(e) = on_accept.call::<mlua::MultiValue>(args) {
+                state.core.borrow_mut().status = format!(
+                    "minibuffer on_accept failed: {}",
+                    first_line(&e.to_string())
+                );
+            }
+        });
     }
 
     fn minibuffer_cancel(&mut self) {
@@ -1159,6 +1224,12 @@ impl EditorState {
                     self.mouse_click = None;
                     return; // Mode-line click: reserved.
                 }
+                // Point moves: break the command chain (kill ring
+                // Q#KR2). Scroll arms below deliberately do NOT — a
+                // wheel that only moves the viewport preserves a kill
+                // chain, as in Emacs (`mwheel-scroll` vs
+                // `mouse-set-point`).
+                self.core.borrow_mut().break_command_chain(frontend_id);
                 let click_cell = CellCoord::new(cell_row, cell_col);
                 let is_double_click = self.is_double_click(frontend_id, win_id, click_cell);
                 self.activate_and_position(win_id, local_row, local_col);
@@ -1181,10 +1252,12 @@ impl EditorState {
                 if local_row >= inner_rows {
                     return;
                 }
+                self.core.borrow_mut().break_command_chain(frontend_id);
                 self.activate_and_position(win_id, local_row, local_col);
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let mut core = self.core.borrow_mut();
+                core.break_command_chain(frontend_id);
                 if let Some(sel) = core.active_window().selection
                     && sel.anchor == core.cursor()
                 {
@@ -1197,6 +1270,8 @@ impl EditorState {
                     return; // Mode-line right-click: reserved.
                 }
                 self.mouse_click = None;
+                // Opening the menu is a pointer gesture too (Q#KR2).
+                self.core.borrow_mut().break_command_chain(frontend_id);
                 self.open_context_menu(win_id, local_row, local_col, (cell_row, cell_col));
             }
             MouseEventKind::ScrollUp => {
@@ -1271,6 +1346,12 @@ impl EditorState {
             return;
         }
         core.set_active_window_id(win_id);
+        // Every PointerKind moves point or changes the selection (the
+        // GPU scrolls locally via Viewport, which never reaches here),
+        // so any pointer gesture breaks the frontend's command chain
+        // (kill ring Q#KR2) — clicking away and killing again must not
+        // append, and M-y after a click must refuse.
+        core.break_command_chain(frontend_id);
         let byte = {
             let registry = core.registry.clone();
             let reg = registry.borrow();
