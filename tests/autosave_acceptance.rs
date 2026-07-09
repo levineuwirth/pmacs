@@ -384,6 +384,66 @@ fn killing_the_owner_frees_the_slot_for_the_duplicate() {
 }
 
 #[test]
+fn adopting_clears_the_previous_owners_stale_skip_cache() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    two_buffers_one_path(&s, &f);
+    // A owns the slot; B is the conflicted duplicate.
+    assert_eq!(sweep3(&s), (1, 0, 1));
+    assert_eq!(recovered(&s, &f), b"AAA on disk\n");
+
+    // B recovers (adopts), stealing the slot. A keeps its dirty contents.
+    exec(&s, "pmacs.window.switch_buffer(_G.b)");
+    exec(&s, "pmacs.autosave._adopt(pmacs.window.buffer())");
+
+    // Now kill B without saving: the slot is freed and its file deleted.
+    exec(&s, "pmacs.buffer.kill(_G.b)");
+    assert_eq!(status(&s, &f), "none");
+
+    // A is still dirty and now unprotected. The next sweep must write it.
+    // A stale `written[A]` (same hash, same revision) would make the skip
+    // cache call it "unchanged since its last copy" and leave it exposed.
+    let (written, blocked, conflicted) = sweep3(&s);
+    assert_eq!(
+        (written, blocked, conflicted),
+        (1, 0, 0),
+        "the old owner is re-protected once the slot frees, without an edit"
+    );
+    assert_eq!(recovered(&s, &f), b"AAA on disk\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_failing_sweep_is_reported_not_swallowed() {
+    let dir = fresh_state_dir();
+    // Plant a regular file where the `autosave/` directory must go, so
+    // every recovery write fails (stands in for ENOSPC / a read-only
+    // state dir).
+    std::fs::write(dir.join("autosave"), b"not a directory").unwrap();
+
+    let s = editor(&dir);
+    let f = write_file(&dir, "a.txt", "body\n");
+    open_and_dirty(&s, &f, "precious ");
+
+    // The raw sweep surfaces the error rather than returning 0 silently.
+    let ok: bool = eval(&s, "return (pcall(pmacs.autosave.sweep))");
+    assert!(!ok, "a write failure must not look like a successful sweep");
+
+    // And the quit path reports it instead of swallowing it — a failure
+    // there means the quit is about to discard unprotected work.
+    s.core.borrow_mut().status.clear();
+    let not_vetoed: bool = eval(&s, "return pmacs.hook.run('editor.before-quit')");
+    assert!(not_vetoed, "reporting must still never veto quit");
+    let status = s.core.borrow().status.clone();
+    assert!(
+        status.contains("autosave FAILED") && status.contains("NOT being protected"),
+        "the failure is surfaced: {status:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn saving_without_recovering_preserves_unclaimed_crash_data() {
     let dir = fresh_state_dir();
     // Session 1 crashes with unsaved work.

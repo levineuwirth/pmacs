@@ -327,6 +327,31 @@ So ownership is `path_hash → BufferId`, not a path-wide set:
 This is honest rather than clever: pmacs cannot protect two divergent
 buffers over one file, and says so.
 
+The bookkeeping invariant that makes it safe is
+**`written[id] ⟹ owner[hash] == id`**: a skip-cache entry only ever names
+a slot its buffer owns. `adopt` is the one operation that transfers a
+slot, so it drops the previous owner's entry (finding). Without that:
+adopt into B, then kill B without saving — `discard_buffer` frees the slot
+and deletes the file, but A's stale `written[A] = (hash, revA)` survives,
+so the next sweep sees A dirty at an unchanged revision, calls it
+"unchanged since its last copy", and leaves it **unprotected** until its
+next edit.
+
+### Q#AS14 — A failing sweep is loud
+
+`write_private` can fail: a full disk, a permission change, a clobbered
+state dir. Swallowing that (`pcall(...)` and drop the error, finding)
+is the worst possible behavior for a data-protection feature — the user
+keeps working, believing their edits are being captured, while nothing is
+written.
+
+So both the tick and the `before-quit` sweep go through a reporting
+wrapper: the status line says *"autosave FAILED: … — your work is NOT
+being protected"* on every failing sweep, and each distinct fault is
+logged once via `pmacs.error`. The quit path reports too — a failure
+there means the quit is about to discard work that was never written
+anywhere — and still never vetoes.
+
 ### Q#AS7 — Cleanup lifecycle (keyed by buffer, not by a captured path)
 
 - **`buffer.after-save`** → `discard_buffer(active buffer)`.
@@ -503,6 +528,12 @@ commands, cleanup wiring) → tests.
   conflicted) == (1, 0, 1)`; the owner's copy is on disk; the duplicate
   never wins the slot by editing, its save never retires the owner's
   copy, and killing the owner frees the slot for it.
+- **Adopt transfers the slot cleanly**: A owns, B adopts, B is killed
+  unsaved → the freed slot lets the *next* sweep re-protect the still-dirty
+  A with no intervening edit (the `written ⟹ owner` invariant).
+- **A failing sweep is reported (Q#AS14)**: with `autosave/` unwritable,
+  `sweep()` raises rather than returning `0`, and `before-quit` surfaces
+  *"autosave FAILED … NOT being protected"* while still not vetoing quit.
 - **Path change**: rename a buffer's path (`set_buffer_path`) without
   editing it → next sweep writes the new key **and** removes the old
   recovery file (the `(path_hash, revision)` cache).

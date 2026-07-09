@@ -451,13 +451,25 @@ pub fn adopt(lua: &Lua, id: BufferId) {
     drop(core);
     if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
         let mut cache = cache.0.borrow_mut();
+        let (hash, revision) = entry;
         // Recovering into this buffer makes it the slot's owner — its
         // contents are now what the file holds. Any previous owner of the
         // slot (a duplicate buffer on the same path) loses the claim and
         // will report as conflicted on the next sweep, which is truthful:
         // the file no longer corresponds to it.
-        cache.owner.insert(entry.0.clone(), id);
-        cache.written.insert(id, entry);
+        //
+        // Dropping the old owner's skip-cache entry maintains the
+        // invariant `written[id] ⟹ owner[hash] == id` (finding). Without
+        // it: adopt into B, then kill B without saving. `discard_buffer`
+        // frees the slot and deletes the file, but A's stale
+        // `written[A] = (hash, revA)` survives — so the next sweep sees A
+        // dirty at an unchanged revision, calls it "unchanged since its
+        // last copy", and leaves it unprotected until its next edit.
+        cache
+            .written
+            .retain(|&other, (h, _)| other == id || h != &hash);
+        cache.owner.insert(hash.clone(), id);
+        cache.written.insert(id, (hash, revision));
     }
 }
 

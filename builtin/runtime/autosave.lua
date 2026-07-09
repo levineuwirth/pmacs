@@ -74,6 +74,29 @@ local function basename(path)
   return path:match("[^/]+$") or path
 end
 
+-- The last sweep failure we reported, so a persistent fault (ENOSPC, a
+-- read-only state dir) logs once but keeps warning in the status line.
+local last_error = nil
+
+-- Run a sweep, surfacing any failure. `write_private` can fail --- a full
+-- disk, a permission change, a clobbered state dir --- and this is a
+-- data-protection feature: silently swallowing the error would leave the
+-- user believing their work is safe when nothing is being written.
+local function sweep_reporting()
+  local ok, err = pcall(pmacs.autosave.sweep)
+  if ok then
+    last_error = nil
+    return
+  end
+  local msg = "autosave FAILED: " .. tostring(err)
+  pmacs.editor.set_status(msg .. " --- your work is NOT being protected")
+  -- Log once per distinct fault; the status line keeps nagging every sweep.
+  if msg ~= last_error then
+    last_error = msg
+    if pmacs.error then pcall(pmacs.error, msg) end
+  end
+end
+
 -- One aggregate message however many files are recoverable. N synchronous
 -- `after-load` fires (a desktop restore) collapse into a single report.
 local function report_pending()
@@ -106,7 +129,7 @@ pmacs.hook.add("process.after-tick", function()
   end
   if now - last_sweep_ms >= interval then
     last_sweep_ms = now
-    pcall(pmacs.autosave.sweep)
+    sweep_reporting()
   end
 end)
 
@@ -135,10 +158,12 @@ pmacs.hook.add("buffer.after-save", function()
 end)
 
 -- A final synchronous sweep on quit: async ticks stop after this, so a
--- quit with unsaved changes must capture them here. Returns nil --
--- before-quit is short-circuit and this must never veto.
+-- quit with unsaved changes must capture them here. A failure here means
+-- the quit is about to discard work that was never written anywhere, so
+-- it is reported rather than swallowed. Returns nil -- before-quit is
+-- short-circuit and this must never veto.
 pmacs.hook.add("editor.before-quit", function()
-  pcall(pmacs.autosave.sweep)
+  sweep_reporting()
 end)
 
 pmacs.command.define {
