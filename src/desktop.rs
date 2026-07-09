@@ -20,10 +20,10 @@ use std::path::Path;
 
 use mlua::Lua;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::buffer::BufferId;
 use crate::editor_core::EditorCore;
+use crate::hash::sha256_hex;
 use crate::lua_bindings::{LocalInstanceInfo, SharedCore, StateDir, fire_after_load_hook};
 use crate::protocol::FrontendId;
 use crate::text_view::TextView;
@@ -139,18 +139,6 @@ pub fn session_key(instance_name: Option<&str>, working_directory: &str) -> Stri
 #[must_use]
 pub fn desktop_state_key(session_key: &str) -> String {
     format!("desktop/{session_key}")
-}
-
-fn sha256_hex(s: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(s.as_bytes());
-    let digest = h.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 /// Build the serializable layout tree from a core [`LayoutNode`],
