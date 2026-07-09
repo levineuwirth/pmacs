@@ -10870,6 +10870,16 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
             lua.create_function(move |_, ()| Ok(cc.borrow_mut().save()))?,
         )?;
     }
+    {
+        // Overwrite even though the file changed on disk since this buffer
+        // read it. `save()` refuses that case rather than silently
+        // clobbering another writer; this is the deliberate override.
+        let cc = core.clone();
+        editor.set(
+            "save_ignoring_disk_changes",
+            lua.create_function(move |_, ()| Ok(cc.borrow_mut().save_ignoring_disk_changes()))?,
+        )?;
+    }
     register(editor, lua, core, "quit", |c| c.quit = true)?;
     register(editor, lua, core, "cancel", |c| {
         c.status = "Quit".into();
