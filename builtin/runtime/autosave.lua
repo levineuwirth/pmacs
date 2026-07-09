@@ -48,10 +48,19 @@ function pmacs.autosave.interval_ms(ms)
   return interval
 end
 
--- sweep() --- force a pass now. Returns how many buffers were written.
+-- sweep() --- force a pass now. Returns (written, blocked). `blocked`
+-- counts buffers whose sweep was refused because an unclaimed crash
+-- recovery sits at their key: overwriting it would destroy exactly what
+-- autosave protects. Recovering or discarding that copy resumes autosave.
 function pmacs.autosave.sweep()
-  if not enabled then return 0 end
-  return pmacs.autosave._sweep()
+  if not enabled then return 0, 0 end
+  local written, blocked = pmacs.autosave._sweep()
+  if blocked and blocked > 0 then
+    pmacs.editor.set_status(
+      "autosave paused for " .. blocked .. " file(s) with unclaimed recovery"
+        .. " --- M-x recover-file or M-x discard-recovery")
+  end
+  return written, blocked
 end
 
 local function basename(path)
@@ -90,7 +99,7 @@ pmacs.hook.add("process.after-tick", function()
   end
   if now - last_sweep_ms >= interval then
     last_sweep_ms = now
-    pcall(pmacs.autosave._sweep)
+    pcall(pmacs.autosave.sweep)
   end
 end)
 
@@ -98,21 +107,24 @@ end)
 -- inside the hook -- a desktop restore fires this once per leaf).
 pmacs.hook.add("buffer.after-load", function()
   needs_report = true
-  -- A clean save or a kill retires the recovery copy. There is no global
-  -- kill hook, so register per buffer, capturing the path now (the buffer
-  -- may be gone by the time the callback runs).
-  local path = pmacs.editor.file_path()
-  if not path then return end
+  -- A kill retires the recovery copy. There is no global kill hook, so
+  -- register per buffer. `_discard_buffer` is keyed by BufferId, not by a
+  -- path captured here: after a rename the buffer's recovery lives under
+  -- a different key than the path it loaded with. Buffers that fire no
+  -- after-load (argv `[new file]`) are covered by the sweep-time GC.
   local buf = pmacs.window.buffer()
   if not buf then return end
-  pcall(pmacs.buffer.on_removed, buf, function()
-    pcall(pmacs.autosave._discard, path)
+  pcall(pmacs.buffer.on_removed, buf, function(dead)
+    pcall(pmacs.autosave._discard_buffer, dead or buf)
   end)
 end)
 
+-- A clean save retires the recovery copy. Keyed by buffer, so a renamed
+-- buffer's real recovery key (written under the *old* path) is removed
+-- too, not just the current path's.
 pmacs.hook.add("buffer.after-save", function()
-  local path = pmacs.editor.file_path()
-  if path then pcall(pmacs.autosave._discard, path) end
+  local buf = pmacs.window.buffer()
+  if buf then pcall(pmacs.autosave._discard_buffer, buf) end
 end)
 
 -- A final synchronous sweep on quit: async ticks stop after this, so a
@@ -144,6 +156,14 @@ pmacs.command.define {
     if st == "stale" then
       warn = " [WARNING: file changed on disk since the autosave]"
     end
+    -- Pin to the exact BUFFER we started on, not merely its path: two
+    -- buffers can visit the same path (`pmacs.buffer.from_file` does not
+    -- dedup), so a path check alone could recover into the wrong one.
+    local origin_buf = pmacs.window.buffer()
+    if not origin_buf then
+      pmacs.editor.set_status("recover-file: no buffer")
+      return
+    end
     pmacs.minibuffer.read {
       prompt = "Recover from autosave?" .. warn .. " (yes/no): ",
       source = function() return { "yes", "no" } end,
@@ -152,10 +172,10 @@ pmacs.command.define {
           pmacs.editor.set_status("recover-file: cancelled")
           return
         end
-        -- Pin to the buffer we started on: focus can drift while the
-        -- prompt is up, and recovering into the wrong buffer is
-        -- unrecoverable.
-        if pmacs.editor.file_path() ~= path then
+        -- Focus can drift while the prompt is up, and recovering into the
+        -- wrong buffer is unrecoverable.
+        local buf = pmacs.window.buffer()
+        if buf ~= origin_buf or pmacs.editor.file_path() ~= path then
           pmacs.editor.set_status("recover-file: buffer changed; aborted")
           return
         end
@@ -164,7 +184,6 @@ pmacs.command.define {
           pmacs.editor.set_status("recover-file: recovery unreadable")
           return
         end
-        local buf = pmacs.window.buffer()
         buf:replace(0, buf:len(), bytes)
         -- The mutators notify windows and queue CRDT but do NOT fire
         -- `buffer.after-edit` --- that comes from dispatch_key's
@@ -172,6 +191,10 @@ pmacs.command.define {
         -- returns before. Fire it so LSP didChange and the syntax
         -- reparse see the recovered contents.
         pmacs.hook.run("buffer.after-edit")
+        -- The crash data now lives in the buffer, so the copy is no
+        -- longer irreplaceable: claim it, which un-blocks autosave for
+        -- this path (Q#AS12).
+        pmacs.autosave._adopt(path)
         pmacs.editor.set_status("recovered from autosave --- save to keep it")
       end,
     }

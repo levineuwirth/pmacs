@@ -18,7 +18,7 @@
 //! Framing: docs/autosave-recovery-framing.md.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use mlua::Lua;
@@ -123,15 +123,33 @@ pub fn key_for(path: &Path) -> String {
     format!("autosave/{}", sha256_hex(&path.display().to_string()))
 }
 
-/// Skip cache: `BufferId → (path_hash, revision)` (Q#AS8).
-///
-/// Keyed on the **path hash as well as the revision**, not the revision
-/// alone: a buffer keeps its `BufferId` across a path change (an LSP
-/// `WorkspaceEdit` rename calls `set_buffer_path`), so a revision-only
-/// cache would skip the write, never create the recovery file under the
-/// new key, and orphan the old one.
+/// Per-session autosave bookkeeping.
 #[derive(Default)]
-pub struct AutosaveCache(RefCell<HashMap<BufferId, (String, u64)>>);
+pub struct AutosaveCache(RefCell<CacheInner>);
+
+#[derive(Default)]
+struct CacheInner {
+    /// Skip cache: `BufferId → (path_hash, revision)` (Q#AS8).
+    ///
+    /// Keyed on the **path hash as well as the revision**, not the
+    /// revision alone: a buffer keeps its `BufferId` across a path change
+    /// (an LSP `WorkspaceEdit` rename calls `set_buffer_path`), so a
+    /// revision-only cache would skip the write, never create the
+    /// recovery file under the new key, and orphan the old one. It also
+    /// remembers *where a buffer's recovery currently lives*, which is
+    /// what makes cleanup work after a rename.
+    written: HashMap<BufferId, (String, u64)>,
+    /// Path hashes whose recovery file **this session** wrote or has
+    /// adopted (Q#AS12).
+    ///
+    /// A recovery file we did *not* write is unclaimed crash data. If the
+    /// user reopens the file and starts editing, sweeping would overwrite
+    /// the crash copy with the current buffer — destroying exactly what
+    /// autosave exists to protect. So an unowned recovery file *blocks*
+    /// the sweep for that buffer until `recover-file` adopts it or
+    /// `discard-recovery` removes it.
+    owned: HashSet<String>,
+}
 
 /// Encode a header + contents into the one-file envelope.
 fn encode(header: &Header, contents: &[u8]) -> Result<Vec<u8>, String> {
@@ -220,11 +238,15 @@ struct Pending {
 /// Unlike desktop-save this is **not** daemon-gated — autosave is
 /// per-buffer, not per-frontend, and a daemon holds the unsaved work.
 ///
+/// Returns `(written, blocked)` — `blocked` counts buffers whose sweep
+/// was refused because an **unclaimed** recovery file already sits at
+/// their key (Q#AS12).
+///
 /// # Errors
 /// A state-write failure. Individual buffers never abort the pass.
-pub fn sweep(lua: &Lua) -> Result<usize, String> {
+pub fn sweep(lua: &Lua) -> Result<(usize, usize), String> {
     let Some(base) = base_dir(lua) else {
-        return Ok(0);
+        return Ok((0, 0));
     };
     let core = lua
         .app_data_ref::<SharedCore>()
@@ -235,6 +257,7 @@ pub fn sweep(lua: &Lua) -> Result<usize, String> {
     let mut writes: Vec<Pending> = Vec::new();
     let mut orphans: Vec<String> = Vec::new();
     let mut live: Vec<BufferId> = Vec::new();
+    let mut blocked = 0usize;
     {
         let cache = lua
             .app_data_ref::<AutosaveCache>()
@@ -256,7 +279,7 @@ pub fn sweep(lua: &Lua) -> Result<usize, String> {
             let path_s = path.display().to_string();
             let path_hash = sha256_hex(&path_s);
             let revision = buf.revision();
-            if let Some((prev_hash, prev_rev)) = cache.get(&id) {
+            if let Some((prev_hash, prev_rev)) = cache.written.get(&id) {
                 if prev_hash == &path_hash && *prev_rev == revision {
                     continue; // unchanged since its last copy
                 }
@@ -264,6 +287,16 @@ pub fn sweep(lua: &Lua) -> Result<usize, String> {
                     // The path moved: the old key is now an orphan.
                     orphans.push(prev_hash.clone());
                 }
+            }
+            // Never clobber unclaimed crash data (Q#AS12). A recovery file
+            // this session did not write is the crash copy the user has
+            // not recovered yet; overwriting it with the current buffer
+            // would destroy exactly what autosave protects.
+            if !cache.owned.contains(&path_hash)
+                && crate::state::exists(&base, &format!("autosave/{path_hash}")).unwrap_or(false)
+            {
+                blocked += 1;
+                continue;
             }
             let len = buf.len();
             let mut contents = vec![0u8; usize::try_from(len).unwrap_or(0)];
@@ -291,8 +324,21 @@ pub fn sweep(lua: &Lua) -> Result<usize, String> {
             .app_data_ref::<AutosaveCache>()
             .ok_or("no autosave cache")?;
         let mut cache = cache.0.borrow_mut();
-        // Drop entries for buffers that no longer exist.
-        cache.retain(|id, _| live.contains(id));
+        // GC: a buffer that left the registry (killed) takes its recovery
+        // copy with it. This is the backstop that covers `[new file]`
+        // buffers, which fire no `after-load` and so never get a
+        // per-buffer removal callback registered.
+        let dead: Vec<(BufferId, String)> = cache
+            .written
+            .iter()
+            .filter(|(id, _)| !live.contains(id))
+            .map(|(id, (hash, _))| (*id, hash.clone()))
+            .collect();
+        for (id, hash) in dead {
+            let _ = crate::state::remove(&base, &format!("autosave/{hash}"));
+            cache.written.remove(&id);
+            cache.owned.remove(&hash);
+        }
         for p in writes {
             let header = Header {
                 version: AUTOSAVE_VERSION,
@@ -302,11 +348,88 @@ pub fn sweep(lua: &Lua) -> Result<usize, String> {
             let bytes = encode(&header, &p.contents)?;
             crate::state::write_private(&base, &format!("autosave/{}", p.path_hash), &bytes)
                 .map_err(|e| e.to_string())?;
-            cache.insert(p.id, (p.path_hash, p.revision));
+            cache.owned.insert(p.path_hash.clone());
+            cache.written.insert(p.id, (p.path_hash, p.revision));
             written += 1;
         }
     }
-    Ok(written)
+    Ok((written, blocked))
+}
+
+/// Claim the recovery file at `path` for this session (Q#AS12), so
+/// subsequent sweeps may overwrite it. Called by `recover-file` once its
+/// contents are installed in the buffer — the crash data now lives in the
+/// buffer, so the copy is no longer irreplaceable.
+pub fn adopt(lua: &Lua, path: &Path) {
+    if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
+        cache
+            .0
+            .borrow_mut()
+            .owned
+            .insert(sha256_hex(&path.display().to_string()));
+    }
+}
+
+/// Forget any claim on `path` (so a foreign recovery appearing there
+/// later still blocks a sweep).
+fn unown(lua: &Lua, path: &Path) {
+    if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
+        cache
+            .0
+            .borrow_mut()
+            .owned
+            .remove(&sha256_hex(&path.display().to_string()));
+    }
+}
+
+/// Delete the recovery file for `path` and drop any claim on it.
+pub fn discard_path(lua: &Lua, path: &Path) -> bool {
+    let Some(base) = base_dir(lua) else {
+        return false;
+    };
+    unown(lua, path);
+    discard(&base, path)
+}
+
+/// Retire the recovery copy of a specific **buffer** (Q#AS12).
+///
+/// Keyed by `BufferId`, not by the path captured when the buffer loaded:
+/// it removes both the buffer's *current* path key (if it is still live)
+/// and the key its last recovery was actually **written** under. Those
+/// differ after a rename — an LSP `WorkspaceEdit` changes the path while
+/// the `BufferId` stays — and a path-captured callback would leave the
+/// real recovery file behind.
+pub fn discard_buffer(lua: &Lua, id: BufferId) {
+    let Some(base) = base_dir(lua) else {
+        return;
+    };
+    let mut keys: Vec<String> = Vec::new();
+    // The key the last sweep actually wrote for this buffer.
+    if let Some(cache) = lua.app_data_ref::<AutosaveCache>()
+        && let Some((hash, _)) = cache.0.borrow().written.get(&id)
+    {
+        keys.push(hash.clone());
+    }
+    // The buffer's current path, which may have moved since that write.
+    if let Some(core) = lua.app_data_ref::<SharedCore>() {
+        let c = core.borrow();
+        let reg = c.registry.borrow();
+        if let Ok(buf) = reg.get(id)
+            && let Some(p) = buf.file_path()
+        {
+            keys.push(sha256_hex(&p.display().to_string()));
+        }
+    }
+    for hash in &keys {
+        let _ = crate::state::remove(&base, &format!("autosave/{hash}"));
+    }
+    if let Some(cache) = lua.app_data_ref::<AutosaveCache>() {
+        let mut cache = cache.0.borrow_mut();
+        cache.written.remove(&id);
+        for hash in &keys {
+            cache.owned.remove(hash);
+        }
+    }
 }
 
 /// Every open file buffer that has a recovery file, with its status

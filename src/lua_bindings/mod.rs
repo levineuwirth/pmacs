@@ -1981,9 +1981,33 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
     lua.set_app_data(crate::autosave::AutosaveCache::default());
     let m = lua.create_table()?;
 
+    // _sweep() -> (written, blocked). `blocked` counts buffers whose
+    // sweep was refused because unclaimed crash data sits at their key.
     m.set(
         "_sweep",
         lua.create_function(|lua, ()| crate::autosave::sweep(lua).map_err(mlua::Error::external))?,
+    )?;
+
+    // _adopt(path): claim a recovery file for this session, so later
+    // sweeps may overwrite it. `recover-file` calls this once the
+    // contents are safely installed in the buffer.
+    m.set(
+        "_adopt",
+        lua.create_function(|lua, path: String| {
+            crate::autosave::adopt(lua, std::path::Path::new(&path));
+            Ok(())
+        })?,
+    )?;
+
+    // _discard_buffer(buf): retire a buffer's recovery copy by BufferId —
+    // removes both its current-path key and the key its last sweep wrote
+    // (they differ after a rename).
+    m.set(
+        "_discard_buffer",
+        lua.create_function(|lua, id: BufferIdLua| {
+            crate::autosave::discard_buffer(lua, id.0);
+            Ok(())
+        })?,
     )?;
 
     m.set(
@@ -2009,13 +2033,14 @@ fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    // _discard(path): delete a recovery file and drop any claim on it.
     m.set(
         "_discard",
         lua.create_function(|lua, path: String| {
-            let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
-                return Ok(false);
-            };
-            Ok(crate::autosave::discard(&base, std::path::Path::new(&path)))
+            Ok(crate::autosave::discard_path(
+                lua,
+                std::path::Path::new(&path),
+            ))
         })?,
     )?;
 

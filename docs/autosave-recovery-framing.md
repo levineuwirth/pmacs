@@ -235,8 +235,11 @@ So the report is **pull-based and aggregated on the tick we already own**
 
 Recovery itself happens through an explicit command:
 
-- **`recover-file`** — confirms via `minibuffer.read` (typed `yes`), then
-  `buf:replace(0, buf:len(), recovery_bytes)` on the active buffer,
+- **`recover-file`** — confirms via `minibuffer.read` (typed `yes`),
+  **pins to the origin *buffer handle*, not merely its path** (finding:
+  `pmacs.buffer.from_file` does not dedup, so two buffers can visit one
+  path and a path check alone could recover into the wrong one), then
+  `buf:replace(0, buf:len(), recovery_bytes)`,
   **then explicitly `pmacs.hook.run("buffer.after-edit")`**. That last
   step is load-bearing (finding): the mutators only notify windows and
   queue CRDT, and `after-edit` is fired by `dispatch_key`'s post-command
@@ -252,14 +255,45 @@ Recovery itself happens through an explicit command:
 This also sidesteps re-entrancy: no modal surface is opened from inside a
 hook fired by Rust.
 
-### Q#AS7 — Cleanup lifecycle
+### Q#AS12 — Never overwrite unclaimed crash data (the ownership rule)
 
-- **`buffer.after-save`** → `discard(active path)`. A clean save means the
-  recovery copy is obsolete. (Hook exists, active-buffer, no args needed.)
-- **Buffer killed** → `discard(path)`. There is no global kill hook, so
-  `after-load` registers a per-buffer `pmacs.buffer.on_removed(id, fn)`
-  closing over the path (captured then, since the buffer may be gone when
-  the callback runs). Killing a modified buffer is a deliberate discard.
+The failure this closes (finding): you crash with unsaved work, reopen
+the file, and start editing *before* running `recover-file`. The next
+sweep writes the current buffer to the same key — **destroying the crash
+copy**, which is precisely what autosave exists to protect.
+
+So the sweep tracks **ownership**. A per-session `owned` set records
+which path hashes *this session* wrote or adopted. A recovery file
+present at a key we do not own is unclaimed crash data:
+
+- the sweep **refuses to write** that buffer and counts it as `blocked`;
+- `sweep()` surfaces *"autosave paused for N file(s) with unclaimed
+  recovery — M-x recover-file or M-x discard-recovery"*;
+- `recover-file` **adopts** the copy once its contents are installed in
+  the buffer (the crash data now lives in the buffer, so the file is no
+  longer irreplaceable), and `discard-recovery` removes it. Either action
+  resumes normal autosave for that path.
+
+The trade is deliberate: while blocked, edits made *after* the reopen are
+not autosaved — and the user is told so, every sweep. Losing the new
+edits to a second crash is recoverable by retyping; losing the original
+crash copy is not.
+
+### Q#AS7 — Cleanup lifecycle (keyed by buffer, not by a captured path)
+
+- **`buffer.after-save`** → `discard_buffer(active buffer)`.
+- **Buffer killed** → `discard_buffer(id)`. There is no global kill hook,
+  so `after-load` registers a per-buffer `pmacs.buffer.on_removed`.
+- Both go through **`discard_buffer(BufferId)`**, not a path captured at
+  load time (finding). It removes *both* the buffer's current-path key
+  and the key its last sweep actually **wrote** under — which differ
+  after a rename (an LSP `WorkspaceEdit` changes the path while the
+  `BufferId` stays). A path-captured callback would delete the wrong key
+  and leave the real recovery file behind.
+- **Sweep-time GC** is the backstop: any cache entry whose `BufferId` has
+  left the registry has its recovery file deleted. This is what covers
+  argv **`[new file]`** buffers, which fire no `after-load` and so never
+  get a removal callback registered (finding).
 - **`editor.before-quit`** → one **final synchronous sweep**, then return
   nil (never veto). Async ticks stop after quit, so this must be a direct
   call. Result: quitting with unsaved changes leaves a recovery copy that
@@ -311,7 +345,13 @@ So this PR makes autosave storage private:
   momentarily visible at `0644`. (A chmod-after-write leaves exactly that
   window.) Plain `save_atomic` delegates with `None`.
 - **`state::write_private(base, name, content)`** — creates the parent
-  with `DirBuilder::mode(0o700)` and writes the file `0600`.
+  with `DirBuilder::mode(0o700)` and writes the file `0600`. It also
+  **tightens a pre-existing lax `autosave/`** to `0700` (finding): the
+  birth-mode only applies to directories *that call* creates, so a
+  `0755` directory left by an older run would still leak recovery-file
+  names, sizes, and mtimes despite `0600` contents. It never re-modes
+  `base` itself — the state root is shared with history/recentf/desktop
+  and may predate us.
 - Recovery files use it; the `autosave/` directory is `0700`.
 - Unix-only (`PermissionsExt` / `DirBuilderExt` are safe under
   `#![forbid(unsafe_code)]`); on other platforms it degrades to today's
@@ -400,10 +440,19 @@ commands, cleanup wiring) → tests.
   each recovery file is `0600` — asserted, not assumed.
 - Sweep skips clean buffers, scratch buffers, and buffers unchanged
   since the last sweep (no second write).
+- **Unclaimed crash data is never overwritten (Q#AS12)**: session 1
+  crashes with a recovery copy; session 2 reopens, edits, sweeps →
+  `(written, blocked) == (0, 1)` and the crash copy is byte-identical.
+  `_adopt` (what `recover-file` calls) or `_discard` resumes the sweep.
 - **Path change**: rename a buffer's path (`set_buffer_path`) without
   editing it → next sweep writes the new key **and** removes the old
   recovery file (the `(path_hash, revision)` cache).
 - `after-save` → recovery deleted. Kill buffer → recovery deleted.
+- **Rename then save with no intervening sweep** → the recovery written
+  under the *old* key is removed (buffer-keyed cleanup, Q#AS7).
+- **Killing a `[new file]` buffer** → the sweep-time GC removes its
+  recovery (no `after-load` fired, so no removal callback exists).
+- **A pre-existing `0755` `autosave/` dir is tightened to `0700`.**
 - Open a file with a **`Fresh`** recovery → the aggregate report names
   it; buffer contents are still the on-disk ones (no silent
   substitution).

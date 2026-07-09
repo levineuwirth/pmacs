@@ -48,7 +48,21 @@ fn eval<T: mlua::FromLuaMulti>(s: &EditorState, src: &str) -> T {
 
 /// Force a sweep; returns how many buffers were written.
 fn sweep(s: &EditorState) -> i64 {
+    let (written, _blocked): (i64, i64) = eval(s, "return pmacs.autosave.sweep()");
+    written
+}
+
+/// Force a sweep; returns `(written, blocked)`.
+fn sweep2(s: &EditorState) -> (i64, i64) {
     eval(s, "return pmacs.autosave.sweep()")
+}
+
+fn recovered(s: &EditorState, path: &str) -> Vec<u8> {
+    let b: mlua::String = eval(
+        s,
+        &format!("return pmacs.autosave._recover_bytes({path:?})"),
+    );
+    b.as_bytes().to_vec()
 }
 
 fn status(s: &EditorState, path: &str) -> String {
@@ -237,6 +251,142 @@ fn pending_aggregates_and_names_a_single_file() {
     assert_eq!(fresh.len(), 3, "all three reported in ONE call");
     assert_eq!(corrupt, 0);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn sweep_never_overwrites_unclaimed_crash_recovery() {
+    let dir = fresh_state_dir();
+    // Session 1 crashes with unsaved work: a recovery copy is on disk.
+    let s1 = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    open_and_dirty(&s1, &f, "CRASH WORK ");
+    assert_eq!(sweep(&s1), 1);
+    let crash_copy = recovered(&s1, &f);
+    assert_eq!(&crash_copy, b"CRASH WORK on disk\n");
+
+    // Session 2 reopens the file (on-disk contents) and edits it BEFORE
+    // running recover-file. Sweeping must NOT clobber the crash copy.
+    let s2 = editor(&dir);
+    exec(&s2, &format!("pmacs.buffer.find_or_open({f:?})"));
+    exec(&s2, "pmacs.window.buffer():insert(0, 'new edits ')");
+    let (written, blocked) = sweep2(&s2);
+    assert_eq!(written, 0, "must not write over unclaimed crash data");
+    assert_eq!(blocked, 1, "the sweep is blocked and reported");
+    assert_eq!(
+        recovered(&s2, &f),
+        crash_copy,
+        "the crash recovery survives intact"
+    );
+    assert_eq!(status(&s2, &f), "fresh", "still offered to the user");
+
+    // Once recover-file adopts it, autosave resumes for that path.
+    exec(&s2, &format!("pmacs.autosave._adopt({f:?})"));
+    let (written, blocked) = sweep2(&s2);
+    assert_eq!((written, blocked), (1, 0), "adopted → sweeps again");
+    assert_eq!(recovered(&s2, &f), b"new edits on disk\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn discarding_an_unclaimed_recovery_unblocks_the_sweep() {
+    let dir = fresh_state_dir();
+    let s1 = editor(&dir);
+    let f = write_file(&dir, "a.txt", "on disk\n");
+    open_and_dirty(&s1, &f, "crash ");
+    assert_eq!(sweep(&s1), 1);
+
+    let s2 = editor(&dir);
+    exec(&s2, &format!("pmacs.buffer.find_or_open({f:?})"));
+    exec(&s2, "pmacs.window.buffer():insert(0, 'mine ')");
+    assert_eq!(sweep2(&s2), (0, 1), "blocked");
+
+    exec(&s2, &format!("pmacs.autosave._discard({f:?})"));
+    assert_eq!(sweep2(&s2), (1, 0), "discarded → sweeps again");
+    assert_eq!(recovered(&s2, &f), b"mine on disk\n");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn killing_a_new_file_buffer_gcs_its_recovery() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    // A `[new file]` fires no after-load, so no per-buffer removal
+    // callback is registered — the sweep-time GC is the backstop.
+    let missing = dir.join("draft.txt");
+    exec(
+        &s,
+        "_G.nb = pmacs.buffer.create('draft.txt'); pmacs.window.switch_buffer(_G.nb)",
+    );
+    {
+        let id = s.core.borrow().active_buffer_id();
+        s.core
+            .borrow_mut()
+            .set_buffer_path(id, Some(missing.clone()));
+    }
+    exec(&s, "pmacs.window.buffer():insert(0, 'draft')");
+    let p = missing.display().to_string();
+    assert_eq!(sweep(&s), 1);
+    assert_eq!(status(&s, &p), "fresh");
+
+    exec(&s, "pmacs.buffer.kill(_G.nb)");
+    // The next sweep GCs the dead buffer's recovery copy.
+    sweep(&s);
+    assert_eq!(
+        status(&s, &p),
+        "none",
+        "killed new-file buffer is cleaned up"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn saving_after_a_rename_removes_the_recovery_written_under_the_old_path() {
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let old = write_file(&dir, "old.txt", "body\n");
+    let new = dir.join("new.txt").display().to_string();
+    open_and_dirty(&s, &old, "dirty ");
+    assert_eq!(sweep(&s), 1, "recovery written under the OLD key");
+
+    // Rename, then save — without an intervening sweep. A path-captured
+    // cleanup would delete the new key and leave the old one behind.
+    std::fs::rename(&old, &new).unwrap();
+    {
+        let id = s.core.borrow().active_buffer_id();
+        s.core
+            .borrow_mut()
+            .set_buffer_path(id, Some(PathBuf::from(&new)));
+    }
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    assert_eq!(status(&s, &old), "none", "old key removed");
+    assert_eq!(status(&s, &new), "none", "new key removed");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_pre_existing_lax_autosave_dir_is_tightened() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = fresh_state_dir();
+        // Someone (an older pmacs, or the user) left autosave/ at 0755.
+        let autosave_dir = dir.join("autosave");
+        std::fs::create_dir_all(&autosave_dir).unwrap();
+        std::fs::set_permissions(&autosave_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let s = editor(&dir);
+        let f = write_file(&dir, "a.txt", "body\n");
+        open_and_dirty(&s, &f, "secret ");
+        assert_eq!(sweep(&s), 1);
+
+        let dmode = std::fs::metadata(&autosave_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dmode, 0o700, "a lax autosave dir is tightened, not left");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[test]

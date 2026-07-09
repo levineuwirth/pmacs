@@ -204,6 +204,15 @@ pub fn write_private(base: &Path, name: &str, content: &[u8]) -> Result<(), Stat
     write_inner(base, name, content, Some(0o600))
 }
 
+/// True when a state file exists (no read, no parse).
+///
+/// # Errors
+/// Invalid key.
+pub fn exists(base: &Path, name: &str) -> Result<bool, StateError> {
+    let path = resolve(base, name).map_err(StateError::Name)?;
+    Ok(path.exists())
+}
+
 fn write_inner(
     base: &Path,
     name: &str,
@@ -213,14 +222,25 @@ fn write_inner(
     let path = resolve(base, name).map_err(StateError::Name)?;
     if let Some(parent) = path.parent() {
         create_dir_all_with_mode(parent, mode.map(|_| 0o700)).map_err(StateError::Io)?;
+        // A directory *we* own beneath the state root (e.g. `autosave/`)
+        // must actually be `0700`, even if a previous run — or a user —
+        // created it laxer. Otherwise the mode only applies to the dirs
+        // this call happened to create, and a pre-existing `0755`
+        // `autosave/` would still leak recovery-file names, sizes, and
+        // mtimes despite the `0600` contents.
+        //
+        // Never re-mode `base` itself: the state root is a directory the
+        // user may already have, shared with history/recentf/desktop.
+        if mode.is_some() && parent != base {
+            enforce_dir_mode(parent, 0o700).map_err(StateError::Io)?;
+        }
     }
     crate::file_io::save_atomic_with_mode(&path, content, mode).map_err(StateError::Save)?;
     Ok(())
 }
 
-/// `create_dir_all`, optionally forcing the mode of directories this call
-/// creates. An already-existing directory keeps its mode (we do not
-/// re-mode a directory the user already has).
+/// `create_dir_all`, birthing any directory this call creates at `mode`
+/// (so it is never briefly world-readable).
 fn create_dir_all_with_mode(dir: &Path, mode: Option<u32>) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(m) = mode {
@@ -233,6 +253,22 @@ fn create_dir_all_with_mode(dir: &Path, mode: Option<u32>) -> std::io::Result<()
     #[cfg(not(unix))]
     let _ = mode;
     std::fs::create_dir_all(dir)
+}
+
+/// Tighten an existing directory to `mode` if it is laxer. No-op on
+/// non-Unix, and cheap when already correct.
+fn enforce_dir_mode(dir: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let current = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+        if current != mode {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (dir, mode);
+    Ok(())
 }
 
 /// Read a state file's raw bytes, or `Ok(None)` when it does not exist.
