@@ -1963,8 +1963,98 @@ pub fn install(
     pmacs.set("packages", install_packages_module(lua)?)?;
     pmacs.set("state", install_state_module(lua)?)?;
     pmacs.set("session", install_session_module(lua)?)?;
+    pmacs.set("autosave", install_autosave_module(lua)?)?;
     lua.globals().set("pmacs", pmacs)?;
     Ok(())
+}
+
+/// `pmacs.autosave.*` — the Rust half of autosave + crash recovery
+/// (Arc 3 phase 3). Lua cannot enumerate non-active buffers' paths, and
+/// `FileMeta` is neither Lua-visible nor serde, so the sweep and the
+/// external-change guard live in Rust (Q#AS1). `autosave.lua` layers the
+/// cadence, the configurable interval, and the recovery UX on top.
+///
+/// The `_`-prefixed names are the raw primitives; `autosave.lua` adds the
+/// public `enable` / `interval_ms` / `sweep` onto the same table.
+fn install_autosave_module(lua: &Lua) -> mlua::Result<Table> {
+    // The skip cache lives for the life of the VM.
+    lua.set_app_data(crate::autosave::AutosaveCache::default());
+    let m = lua.create_table()?;
+
+    // _sweep() -> (written, blocked). `blocked` counts buffers whose
+    // sweep was refused because unclaimed crash data sits at their key.
+    m.set(
+        "_sweep",
+        lua.create_function(|lua, ()| crate::autosave::sweep(lua).map_err(mlua::Error::external))?,
+    )?;
+
+    // _adopt(buf): claim a buffer's recovery file for this session, so
+    // later sweeps may overwrite it and a kill can retire it.
+    // `recover-file` calls this once the contents are installed.
+    m.set(
+        "_adopt",
+        lua.create_function(|lua, id: BufferIdLua| {
+            crate::autosave::adopt(lua, id.0);
+            Ok(())
+        })?,
+    )?;
+
+    // _discard_buffer(buf): retire a buffer's recovery copy by BufferId —
+    // removes both its current-path key and the key its last sweep wrote
+    // (they differ after a rename).
+    m.set(
+        "_discard_buffer",
+        lua.create_function(|lua, id: BufferIdLua| {
+            crate::autosave::discard_buffer(lua, id.0);
+            Ok(())
+        })?,
+    )?;
+
+    m.set(
+        "_status",
+        lua.create_function(|lua, path: String| {
+            let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
+                return Ok("none");
+            };
+            Ok(crate::autosave::status(&base, std::path::Path::new(&path)).as_str())
+        })?,
+    )?;
+
+    m.set(
+        "_recover_bytes",
+        lua.create_function(|lua, path: String| {
+            let Some(base) = lua.app_data_ref::<StateDir>().map(|d| d.0.clone()) else {
+                return Ok(None);
+            };
+            match crate::autosave::recover_bytes(&base, std::path::Path::new(&path)) {
+                Some(bytes) => Ok(Some(lua.create_string(&bytes)?)),
+                None => Ok(None),
+            }
+        })?,
+    )?;
+
+    // _discard(path): delete a recovery file and drop any claim on it.
+    m.set(
+        "_discard",
+        lua.create_function(|lua, path: String| {
+            Ok(crate::autosave::discard_path(
+                lua,
+                std::path::Path::new(&path),
+            ))
+        })?,
+    )?;
+
+    // _pending() -> (fresh_paths, corrupt_count). Enumerates in Rust so
+    // argv `[new file]` buffers — which fire no hook — are covered too.
+    m.set(
+        "_pending",
+        lua.create_function(|lua, ()| {
+            let (fresh, corrupt) = crate::autosave::pending(lua);
+            Ok((fresh, corrupt))
+        })?,
+    )?;
+
+    Ok(m)
 }
 
 /// Marker app-data set by `pmacs.session.arm_restore()` (Arc 3 phase 2,

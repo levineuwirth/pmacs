@@ -321,6 +321,12 @@ impl EditorState {
                 include_str!("../builtin/runtime/desktop.lua"),
             )
             .expect("load desktop builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/autosave.lua"),
+                include_str!("../builtin/runtime/autosave.lua"),
+            )
+            .expect("load autosave builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it

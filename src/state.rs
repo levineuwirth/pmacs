@@ -182,12 +182,110 @@ pub fn read(base: &Path, name: &str) -> Result<Option<String>, StateError> {
 /// # Errors
 /// Invalid key, or a save failure.
 pub fn write(base: &Path, name: &str, content: &[u8]) -> Result<(), StateError> {
+    write_inner(base, name, content, None)
+}
+
+/// Like [`write`], but the parent directory is created `0700` and the
+/// file written `0600` (Arc 3 Q#AS11).
+///
+/// Autosave stores **unsaved file contents**, a different class of secret
+/// from saveplace's cursor offsets or recentf's path list. The default
+/// path would give a new recovery file the umask default (typically
+/// `0644`) and its directory `0755` — leaving a recovery copy of an
+/// unsaved edit to a `0600` file *more exposed than the original*. The
+/// mode is applied to the temp before the rename, so there is no window
+/// at a laxer mode.
+///
+/// Permissions are Unix-only; elsewhere this is [`write`].
+///
+/// # Errors
+/// Invalid key, or a save failure.
+pub fn write_private(base: &Path, name: &str, content: &[u8]) -> Result<(), StateError> {
+    write_inner(base, name, content, Some(0o600))
+}
+
+/// True when a state file exists (no read, no parse).
+///
+/// # Errors
+/// Invalid key.
+pub fn exists(base: &Path, name: &str) -> Result<bool, StateError> {
+    let path = resolve(base, name).map_err(StateError::Name)?;
+    Ok(path.exists())
+}
+
+fn write_inner(
+    base: &Path,
+    name: &str,
+    content: &[u8],
+    mode: Option<u32>,
+) -> Result<(), StateError> {
     let path = resolve(base, name).map_err(StateError::Name)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(StateError::Io)?;
+        create_dir_all_with_mode(parent, mode.map(|_| 0o700)).map_err(StateError::Io)?;
+        // A directory *we* own beneath the state root (e.g. `autosave/`)
+        // must actually be `0700`, even if a previous run — or a user —
+        // created it laxer. Otherwise the mode only applies to the dirs
+        // this call happened to create, and a pre-existing `0755`
+        // `autosave/` would still leak recovery-file names, sizes, and
+        // mtimes despite the `0600` contents.
+        //
+        // Never re-mode `base` itself: the state root is a directory the
+        // user may already have, shared with history/recentf/desktop.
+        if mode.is_some() && parent != base {
+            enforce_dir_mode(parent, 0o700).map_err(StateError::Io)?;
+        }
     }
-    crate::file_io::save_atomic(&path, content).map_err(StateError::Save)?;
+    crate::file_io::save_atomic_with_mode(&path, content, mode).map_err(StateError::Save)?;
     Ok(())
+}
+
+/// `create_dir_all`, birthing any directory this call creates at `mode`
+/// (so it is never briefly world-readable).
+fn create_dir_all_with_mode(dir: &Path, mode: Option<u32>) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(m) = mode {
+        use std::os::unix::fs::DirBuilderExt as _;
+        return std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(m)
+            .create(dir);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    std::fs::create_dir_all(dir)
+}
+
+/// Tighten an existing directory to `mode` if it is laxer. No-op on
+/// non-Unix, and cheap when already correct.
+fn enforce_dir_mode(dir: &Path, mode: u32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let current = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+        if current != mode {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (dir, mode);
+    Ok(())
+}
+
+/// Read a state file's raw bytes, or `Ok(None)` when it does not exist.
+///
+/// [`read`] returns a `String` (`read_to_string`), which fails on
+/// non-UTF-8 content. pmacs buffers hold arbitrary bytes, so an autosave
+/// recovery file cannot be read that way (Arc 3 Q#AS4).
+///
+/// # Errors
+/// Invalid key, or an IO error other than not-found.
+pub fn read_bytes(base: &Path, name: &str) -> Result<Option<Vec<u8>>, StateError> {
+    let path = resolve(base, name).map_err(StateError::Name)?;
+    match std::fs::read(&path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(StateError::Io(e)),
+    }
 }
 
 /// Remove a state file. Missing file is success (idempotent).
@@ -340,6 +438,55 @@ mod tests {
         // An invalid key errors rather than escaping.
         assert!(read(&dir, "../x").is_err());
         assert!(write(&dir, "/abs", b"x").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_bytes_round_trips_non_utf8() {
+        let dir = std::env::temp_dir().join(format!("pmacs-bytes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Invalid UTF-8 — what `read` (read_to_string) would choke on.
+        let raw = [0xffu8, 0xfe, b'\n', 0x00, b'a'];
+        write(&dir, "blob", &raw).unwrap();
+        assert_eq!(read_bytes(&dir, "blob").unwrap().as_deref(), Some(&raw[..]));
+        assert!(read(&dir, "blob").is_err(), "read_to_string rejects it");
+        assert!(read_bytes(&dir, "absent").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_uses_0700_dir_and_0600_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("pmacs-priv-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_private(&dir, "autosave/secret", b"unsaved contents").unwrap();
+
+        let file = dir.join("autosave").join("secret");
+        let fmode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(fmode, 0o600, "recovery file is 0600, not umask default");
+        let dmode = std::fs::metadata(dir.join("autosave"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dmode, 0o700, "autosave dir is 0700");
+
+        // Rewriting keeps the private mode (save_atomic inherits it).
+        write_private(&dir, "autosave/secret", b"more").unwrap();
+        let fmode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(fmode, 0o600);
+
+        // The plain `write` path is unchanged (umask default, not 0600).
+        write(&dir, "plain", b"x").unwrap();
+        let pmode = std::fs::metadata(dir.join("plain"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_ne!(pmode, 0o600, "plain write keeps existing behavior");
         std::fs::remove_dir_all(&dir).ok();
     }
 

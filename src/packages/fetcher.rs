@@ -62,7 +62,6 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -512,19 +511,11 @@ fn dot_git_strip_applies(u: &str) -> bool {
 /// The cache dir is keyed by a hash of the (attacker-adjacent) repo URL,
 /// so a *cryptographic* digest is used: a non-cryptographic hash like the
 /// former 64-bit FNV-1a is trivially collidable, and a deliberate
-/// collision would make two URLs share one bare mirror + lock file. `sha2`
-/// is already a dependency (M7.6 lockfile content hashing).
-fn sha256_hex(s: &str) -> String {
-    use std::fmt::Write as _;
-    let mut hasher = Sha256::new();
-    hasher.update(s.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for b in digest {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
-}
+/// collision would make two URLs share one bare mirror + lock file.
+///
+/// The implementation now lives in [`crate::hash`] — shared with the
+/// desktop session key and the autosave recovery key (Q#AS9).
+use crate::hash::sha256_hex;
 
 // ---------------------------------------------------------------------------
 // LockGuard --- per-cache-entry flock(2)

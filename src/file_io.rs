@@ -130,7 +130,32 @@ impl Drop for TempCleanup {
 /// identity for future change-detection comparisons.
 ///
 /// Threading: any thread.
+///
+/// # Errors
+/// See [`SaveError`].
 pub fn save_atomic(path: &Path, content: &[u8]) -> Result<FileMeta, SaveError> {
+    save_atomic_with_mode(path, content, None)
+}
+
+/// [`save_atomic`], but forcing the target's Unix mode to `mode` instead
+/// of inheriting the existing file's mode (or the umask default for a new
+/// file).
+///
+/// The mode is applied to the **temp file before the rename**, so the
+/// target never exists — not even momentarily — at a laxer mode. A
+/// `chmod` after the write would leave exactly that window, which matters
+/// because autosave (Arc 3 Q#AS11) stores *unsaved file contents*: a
+/// recovery copy must never be briefly world-readable.
+///
+/// `mode` is ignored on non-Unix platforms (the write is still atomic).
+///
+/// # Errors
+/// See [`SaveError`].
+pub fn save_atomic_with_mode(
+    path: &Path,
+    content: &[u8],
+    mode: Option<u32>,
+) -> Result<FileMeta, SaveError> {
     // `Path::parent` returns:
     //  * `None` for `/` or `""` --- no place to put a sibling temp file;
     //  * `Some("")` for a bare filename like `notes.txt` --- means cwd, fine;
@@ -140,10 +165,22 @@ pub fn save_atomic(path: &Path, content: &[u8]) -> Result<FileMeta, SaveError> {
         return Err(SaveError::NoParent(path.to_path_buf()));
     }
 
-    // Snapshot the target's current permissions so an existing file keeps
-    // its mode across the replace (F-006) — e.g. a `0755` script stays
-    // executable. `None` for a new file, which then gets the default mode.
-    let existing_perms = fs::metadata(path).ok().map(|m| m.permissions());
+    // An explicit `mode` wins; otherwise snapshot the target's current
+    // permissions so an existing file keeps its mode across the replace
+    // (F-006) — e.g. a `0755` script stays executable. `None` for a new
+    // file, which then gets the default mode.
+    #[cfg(unix)]
+    let existing_perms = mode
+        .map(|m| {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::Permissions::from_mode(m)
+        })
+        .or_else(|| fs::metadata(path).ok().map(|m| m.permissions()));
+    #[cfg(not(unix))]
+    let existing_perms = {
+        let _ = mode; // no mode concept; the write is still atomic
+        fs::metadata(path).ok().map(|m| m.permissions())
+    };
 
     // Open a fresh temp, retrying on the rare name collision (a stale temp
     // left by a crashed prior run whose pid+nanos recurs) instead of
