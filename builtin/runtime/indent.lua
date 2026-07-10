@@ -33,14 +33,25 @@ local function line_start_before(buf, pos)
 end
 
 -- The indent to carry over a split at `split` (Q#AI3):
--- bytes[line_start .. min(first_non_ws, split)]. Slicing the line head
--- up to the split point and taking its leading `[ \t]*` run IS that
--- clip — the match cannot run past the slice's end. `[ \t]` rather
+-- bytes[line_start .. min(first_non_ws, split)]. Forward chunked scan
+-- from the line start, stopping at the first non-whitespace byte —
+-- never materializing more of the line than the indent itself plus
+-- one chunk (Enter at the end of a giant minified line must not copy
+-- the whole line just to produce an empty indent). `[ \t]` rather
 -- than `%s` so a CR on a CRLF line never counts as indent.
 local function indent_before(buf, split)
   local start = line_start_before(buf, split)
-  if split <= start then return "" end
-  return buf:slice(start, split):match("^[ \t]*")
+  local parts = {}
+  local p = start
+  while p < split do
+    local chunk_to = math.min(p + 4096, split)
+    local chunk = buf:slice(p, chunk_to)
+    local ws = chunk:match("^[ \t]*")
+    table.insert(parts, ws)
+    if #ws < #chunk then break end
+    p = chunk_to
+  end
+  return table.concat(parts)
 end
 
 -- Right-gravity translation of `pos` through the effective edit

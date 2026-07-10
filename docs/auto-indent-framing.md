@@ -7,12 +7,14 @@ language-agnostic, as one undoable edit. Second-to-last Arc 2 item;
 auto-pairing follows as its own framing + PR.
 
 Roadmap: `docs/roadmap-2026-07.md` Arc 2 ("auto-indent on newline").
-Revision 5: Q#AI9 is success-gated (`insert_char` reports success;
-clear only on Ok — a rejected edit must not mutate selection state),
-and Q#AI2 names the one deliberate behavior change `buffer.newline`
-inherits through the shared primitive. Earlier: live-origin
-translation (Q#AI8), M6.4 same-kind intercept contract (Q#AI5),
-empty-selection core fix with the GPU residual named (Q#AI9).
+Revision 6 (PR #109 round 1): Q#AI8's invalidation is one helper
+invoked from all four edit paths — dispatch, direct notification,
+undo, redo — and the empty-anchor clear moved daemon-side, closing
+the optimistic case for BOTH frontends (the residual was never
+GPU-only: the TUI mirror tracks no selection state). The acceptance
+matrix now matches what the suites actually pin. Earlier revisions:
+success-gated Q#AI9, live-origin translation, M6.4 same-kind
+intercept contract, modal-context corrections.
 
 ## Ground truth (as of `efa41cb`)
 
@@ -310,14 +312,17 @@ anyway.
 
 Three parts, all required:
 
-1. **Mark**: `notify_buffer_edit` gains the same
-   `SearchStore::mark_stale` call `apply_active_edit` already makes.
-   One place, all three callers fixed: applied CRDT ops
-   (`src/daemon.rs:2133`), general Lua mutator edits
-   (`src/lua_bindings/mod.rs:1390-1395`), and the errors-buffer
-   append (`src/lua.rs:442` — normally a no-op, unless the *errors*
-   buffer itself carries accepted search state, in which case
-   marking it stale is exactly right).
+1. **Mark**: one helper, `search_invalidate_for_edit` (mark stale +
+   translate the origin), invoked from **all four edit paths**:
+   `apply_active_edit` (dispatch), `notify_buffer_edit` (applied CRDT
+   ops `src/daemon.rs:2133`, general Lua mutator edits
+   `src/lua_bindings/mod.rs:1390-1395`, and the errors-buffer append
+   `src/lua.rs:442` — normally a no-op, unless the *errors* buffer
+   itself carries accepted search state, in which case marking it
+   stale is exactly right), and — round-1 finding — `undo` / `redo`,
+   which receive precise `Edit` values but previously invalidated
+   nothing. Generated-buffer rebuilds via `rebuild_views_for` remain
+   a named lower-frequency bypass (deferral).
 2. **Honor (fail closed)**: `SearchStore::step` returns `None` while
    stale — C-s / `search.next` stops navigating byte ranges that no
    longer exist instead of teleporting the cursor to them — and
@@ -363,14 +368,22 @@ input, on both frontends' round-trip paths, and makes
 `insert_char_over_region`'s existing "any selection is cleared" doc
 claim true.
 
-**Out of scope, named**: the GPU optimistic path inherits the bug
-independently — its eligibility gate reads Selection *decorations*,
-which an empty selection never paints (ground truth), and the
-daemon's CRDT-apply arm clears no anchors. Optimistic typing over an
-empty anchor therefore still arms a surprise selection that the next
-round-tripped key can consume. Fixing that means teaching the CRDT
-arm about anchors — deferred alongside the substrate window-state
-reconciliation work, explicitly, not silently.
+**Also in scope (round 1: the residual was never GPU-only)**: the
+TUI attach mirror tracks buffers and cursors but no selection state
+(`src/buffer_mirror.rs:113`), and its optimistic gate checks cursor
+freshness and EOL only (`src/optimistic.rs:250`) — so both
+frontends' optimistic paths could re-arm the type-over. The fix
+lives in the daemon's CRDT source arm (`handle_remote_crdt_op`):
+before applying the source cursor update, a selection whose anchor
+equals the pre-edit cursor — i.e. one that was EMPTY — is cleared.
+Nonempty selections stand untouched.
+
+**Out of scope, named**: the TUI optimistic gate performs no
+type-over check at all — a NONEMPTY selection ending at EOL
+optimistically inserts instead of consuming the region (the GPU
+gates on Selection decorations, which nonempty selections do paint,
+so it round-trips correctly there). That is a pre-existing TUI gate
+gap, deferred with the substrate reconciliation work.
 
 ## Bets
 
@@ -409,10 +422,12 @@ reconciliation work, explicitly, not silently.
   per-command — including windows other than the acting one), and
   aligning comment.lua's transformed-intercept fix-up with Q#AI5's
   translate-and-clamp discipline.
-- **GPU-optimistic empty-anchor residual** (Q#AI9): the daemon CRDT
-  arm clears no selection anchors, and an empty anchor paints no
-  Selection decoration to gate on — optimistic typing can still arm
-  a type-over one keystroke later.
+- **TUI optimistic type-over gate gap** (Q#AI9 round 1): the TUI
+  attach gate consults no selection state, so a NONEMPTY selection
+  ending at EOL optimistically inserts instead of type-over. (The
+  empty-anchor half was fixed daemon-side in round 1.)
+- **Generated-buffer rebuilds** (`rebuild_views_for`) bypass search
+  invalidation — a lower-frequency Q#AI8 gap, named not handled.
 - Auto-recompute of a stale search from the stored query on step
   (Q#AI8 fails closed instead).
 - Unifying the five hardcoded tab-width sites (4× core `TAB_WIDTH=8`,
@@ -459,26 +474,30 @@ reconciliation work, explicitly, not silently.
   untouched — the original window's validity after such an intercept
   belongs to the substrate-reconciliation deferral, and the test does
   not claim it.
-- **Search staleness** (Q#AI8):
-  - isearch, accept, RET → accepted highlights marked stale; a
-    direct `buf:insert` case pins the notify-path level.
-  - Direct/remote edit during **active** isearch → `C-s` is a no-op
-    (cursor unmoved, no jump to obsolete offsets) and the n/m summary
-    reads `(None, 0)`; typing the next pattern char refreshes and
-    stepping resumes.
-  - **Origin translation**: during a live search, an external insert
-    and a delete strictly before the origin → the next pattern
-    character focuses relative to the translated origin, and cancel
-    restores the cursor to the translated position — exercised via
-    both the notify path (Lua mutator/CRDT) and the other-frontend
-    dispatch path.
-  - Post-accept edit → `search.next` no-op instead of stale
-    navigation.
+- **Search staleness** (Q#AI8; acceptance + lib split, per what each
+  seam can reach):
+  - Acceptance: isearch, accept, RET → post-accept `search_step`
+    no-op; the same via a direct `buf:insert` (notify path).
+  - Lib (editor_core): edit during **active** isearch → step no-op
+    and summary `(None, 0)`, then the next pattern keystroke
+    refreshes and stepping resumes; origin translation through
+    **inserts and deletes on both edit paths** (dispatch and
+    notify), pinning recompute focus and cancel restore; **undo and
+    redo** stale accepted matches and translate the live origin.
+  - Lib (search store): stale `step` fails closed; a fresh `set`
+    un-sticks it.
+  - Lib (daemon, `--features crdt`): the optimistic source arm
+    clears an EMPTY anchor and leaves a NONEMPTY selection alone.
 - `after-edit` fires exactly once per RET (keybound and `M-x`).
 - Kill-chain break: `C-k`, RET, `C-k` → two ring entries.
-- Modal contexts unaffected: isearch accept, query-replace prompt,
-  context-menu invoke, minibuffer accept (the `m_x` helper exercises
-  it), completion-popup accept.
+- Modal contexts: isearch accept and minibuffer accept pinned here
+  (plus buffer-list RET below). Query-replace, context-menu, and
+  completion-popup RET are pinned by their own suites
+  (`tests/query_replace_acceptance.rs`, the menu/completion
+  acceptance suites), which run in the gates — not re-pinned here.
+- Giant minified line (64 KiB, unindented and indented): splits
+  correctly — pins the forward-chunked indent scan's behavior
+  (boundedness is by construction).
 - Buffer-list RET still visits via dispatch (now also reachable from
   the GPU frontend).
 - `this_command()` after RET is `edit.newline-and-indent`.

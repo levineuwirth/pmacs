@@ -150,6 +150,27 @@ fn zero_indent_and_empty_buffer_match_plain_newline() {
 }
 
 #[test]
+fn giant_minified_line_splits_correctly() {
+    // PR #109 round 1 finding 4: the indent scan is forward-chunked
+    // and stops at the first non-whitespace byte, so Enter at the end
+    // of a huge unindented line never materializes the line. This
+    // pins the behavior; boundedness is by construction.
+    let long = "x".repeat(64 * 1024);
+    let mut s = editor_with(&long);
+    exec(&s, &format!("pmacs.editor.goto_byte({})", long.len()));
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(buffer_text(&s), format!("{long}\n"));
+    assert_eq!(cursor(&s) as usize, long.len() + 1);
+
+    // And an indented giant line still carries exactly its indent.
+    let body = format!("  {long}");
+    let mut s = editor_with(&body);
+    exec(&s, &format!("pmacs.editor.goto_byte({})", body.len()));
+    press(&mut s, KeyCode::Enter);
+    assert_eq!(buffer_text(&s), format!("{body}\n  "));
+}
+
+#[test]
 fn whitespace_only_line_copies_and_the_abandoned_line_keeps_its_whitespace() {
     // Named non-goal (Q#AI3): no trailing-whitespace cleanup on the
     // line being left behind.

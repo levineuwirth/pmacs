@@ -1192,17 +1192,28 @@ impl EditorCore {
                 .push((CrdtOpOrigin::DaemonKey, buffer_id, (**crdt_op).clone()));
         }
         // Search matches were computed against the pre-edit text, so
-        // their byte positions are now wrong. Mark the buffer's matches
-        // stale (M11.8): the producer / TUI overlay suppress them until
-        // a fresh search re-runs against the current content. No-op for
-        // a buffer with no search state. The headline isearch bet —
-        // "stale-after-edit linger" — is closed here.
+        // their byte positions are now wrong (M11.8): the producer /
+        // TUI overlay suppress them until a fresh search re-runs. The
+        // headline isearch bet — "stale-after-edit linger" — is
+        // closed here.
+        self.search_invalidate_for_edit(buffer_id, &edit);
+        Ok(edit.new_rope.len())
+    }
+
+    /// Q#AI8 search invalidation for a landed edit: mark the buffer's
+    /// matches stale (no-op without search state) and right-gravity-
+    /// translate the live session origin. ONE helper so every edit
+    /// path — dispatch ([`Self::apply_active_edit`]), direct
+    /// notification ([`Self::notify_buffer_edit`]), and history
+    /// ([`Self::undo`] / [`Self::redo`]) — invalidates identically;
+    /// a path that skips this leaves highlights, step targets, and
+    /// the n/m count pointing at pre-edit offsets.
+    fn search_invalidate_for_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
         self.search_store
             .lock()
             .expect("search store mutex poisoned")
             .mark_stale(buffer_id);
-        self.translate_search_origin(buffer_id, &edit);
-        Ok(edit.new_rope.len())
+        self.translate_search_origin(buffer_id, edit);
     }
 
     /// Right-gravity-translate the live search origin through an edit
@@ -1247,11 +1258,7 @@ impl EditorCore {
     /// highlights and the session origin survive at pre-edit offsets
     /// for every Lua mutator edit and applied CRDT op.
     pub fn notify_buffer_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
-        self.search_store
-            .lock()
-            .expect("search store mutex poisoned")
-            .mark_stale(buffer_id);
-        self.translate_search_origin(buffer_id, edit);
+        self.search_invalidate_for_edit(buffer_id, edit);
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
             return;
@@ -1897,6 +1904,9 @@ impl EditorCore {
                     }
                 }
                 drop(reg);
+                // Q#AI8 (PR #109 round 1): history edits move bytes
+                // like any other edit — invalidate search state.
+                self.search_invalidate_for_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27: undo on a CRDT-backed
                 // buffer produces a crdt_op that must broadcast to
                 // every replica frontend (including the one whose
@@ -1935,6 +1945,8 @@ impl EditorCore {
                     }
                 }
                 drop(reg);
+                // Q#AI8 — same as undo above.
+                self.search_invalidate_for_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27 — same as undo above.
                 self.queue_daemon_origin_crdt_op(buffer_id, &edit);
             }
@@ -3824,6 +3836,138 @@ mod tests {
             3,
             "cancel restores the origin translated through the direct edit"
         );
+    }
+
+    #[test]
+    fn undo_and_redo_stale_accepted_search_navigation() {
+        // Q#AI8 (PR #109 round 1): history edits move bytes like any
+        // other edit — undo/redo must invalidate search state.
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 0;
+        assert!(s.insert_char('x')); // the history entry: "xfoo bar foo"
+        s.search_begin(true, false);
+        type_query(&mut s, "foo");
+        s.search_finish(true); // accept
+        assert_eq!(s.search_match_summary(), (Some(0), 2));
+        s.undo(); // back to "foo bar foo": offsets moved
+        assert_eq!(
+            s.search_match_summary(),
+            (None, 0),
+            "undo stales the accepted matches"
+        );
+        let before = s.cursor();
+        s.search_step(true);
+        assert_eq!(s.cursor(), before, "stale step is a no-op after undo");
+
+        // Redo the same way: refresh the matches first (a fresh set
+        // clears staleness), then redo must stale them again.
+        s.search_begin(true, false);
+        type_query(&mut s, "foo");
+        s.search_finish(true);
+        assert_eq!(s.search_match_summary().1, 2);
+        s.redo(); // forward to "xfoo bar foo" again
+        assert_eq!(
+            s.search_match_summary(),
+            (None, 0),
+            "redo stales the accepted matches"
+        );
+    }
+
+    #[test]
+    fn undo_translates_the_live_search_origin() {
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 0;
+        assert!(s.insert_char('x')); // "xfoo bar foo"
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true, false); // origin 5 ('b' of "bar")
+        type_query(&mut s, "foo");
+        s.undo(); // removes the 'x' at 0: origin must shift to 4
+        s.search_finish(false); // cancel
+        assert_eq!(
+            s.cursor(),
+            4,
+            "cancel lands on the origin translated through the undo"
+        );
+    }
+
+    #[test]
+    fn origin_translates_through_deletes_on_both_paths() {
+        // Dispatch path (apply_active_edit): backspace before the
+        // origin.
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true, false); // origin 5
+        type_query(&mut s, "foo");
+        s.active_window_mut().cursor = 2;
+        s.backspace(); // deletes byte 1: origin 5 -> 4
+        s.search_finish(false);
+        assert_eq!(s.cursor(), 4, "origin shifted left by the deleted byte");
+
+        // Direct-notification path: a delete edit through
+        // notify_buffer_edit.
+        let mut s = from_bytes(b"foo bar foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true, false); // origin 5
+        type_query(&mut s, "foo");
+        let edit = {
+            let mut reg = s.registry.borrow_mut();
+            let buffer = reg.get_mut(bid).expect("buffer");
+            buffer
+                .apply_edit(crate::buffer::EditOp::Delete {
+                    range: Range::new(0, 2),
+                })
+                .expect("direct delete")
+        };
+        s.notify_buffer_edit(bid, &edit);
+        s.search_finish(false);
+        assert_eq!(
+            s.cursor(),
+            3,
+            "origin shifted left by the two directly deleted bytes"
+        );
+    }
+
+    #[test]
+    fn active_search_fails_closed_while_stale_and_recovers_on_retype() {
+        // Q#AI8 during a LIVE session: an external edit mid-search
+        // makes step and summary fail closed; the next pattern
+        // keystroke recomputes (set clears staleness) and resumes.
+        let mut s = from_bytes(b"foo bar foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true, false);
+        type_query(&mut s, "fo");
+        assert_eq!(s.search_match_summary().1, 2);
+        let edit = {
+            let mut reg = s.registry.borrow_mut();
+            let buffer = reg.get_mut(bid).expect("buffer");
+            buffer
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"zz",
+                })
+                .expect("direct insert")
+        };
+        s.notify_buffer_edit(bid, &edit);
+        assert_eq!(
+            s.search_match_summary(),
+            (None, 0),
+            "summary fails closed mid-search"
+        );
+        let before = s.cursor();
+        s.search_step(true);
+        assert_eq!(s.cursor(), before, "step fails closed mid-search");
+        // Growing the query recomputes against the current text.
+        type_query(&mut s, "o");
+        assert_eq!(
+            s.search_match_summary().1,
+            2,
+            "the next pattern keystroke refreshes the match set"
+        );
+        assert_eq!(s.cursor(), 2, "focus lands from the translated origin");
+        s.search_step(true);
+        assert_eq!(s.cursor(), 10, "stepping resumes after the refresh");
     }
 
     #[test]
