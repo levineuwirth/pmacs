@@ -339,6 +339,12 @@ impl EditorState {
                 include_str!("../builtin/runtime/comment.lua"),
             )
             .expect("load comment builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/indent.lua"),
+                include_str!("../builtin/runtime/indent.lua"),
+            )
+            .expect("load indent builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -2854,6 +2860,82 @@ mod tests {
         let mut s = fresh_with(b"");
         s.dispatch_key(FrontendId::LOCAL, plain(KeyCode::Enter));
         assert_eq!(s.core.borrow().active_buffer_len(), 1);
+    }
+
+    #[test]
+    fn empty_selection_is_cleared_by_a_landed_self_insert() {
+        // Q#AI9: an armed anchor at the cursor reports no region, so
+        // 'x' inserts plainly — but the insert moves the cursor off
+        // the anchor, and without the clear the region goes live and
+        // 'y' type-overs the 'x'.
+        let mut s = fresh_with(b"");
+        s.lua_host
+            .lua()
+            .load("pmacs.editor.begin_selection(0)")
+            .exec()
+            .unwrap();
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(KeyCode::Char('y'), KeyModifiers::NONE),
+        );
+        let core = s.core.borrow();
+        assert_eq!(
+            core.active_buffer_len(),
+            2,
+            "'y' must append, not type-over the freshly inserted 'x'"
+        );
+        assert!(
+            core.active_window().selection.is_none(),
+            "a landed self-insert clears the lingering anchor"
+        );
+    }
+
+    #[test]
+    fn rejected_self_insert_leaves_the_empty_selection_anchor() {
+        // Q#AI9 failure regression: a rejecting intercept means NO
+        // state mutation — the armed anchor must survive.
+        let mut s = fresh_with(b"");
+        s.lua_host
+            .lua()
+            .load(
+                r#"
+                _G.reject_once = true
+                pmacs.buffer.add_intercept(pmacs.window.buffer(), function(_op)
+                  if _G.reject_once then
+                    _G.reject_once = false
+                    error("rejected by test intercept")
+                  end
+                  return nil
+                end)
+                pmacs.editor.begin_selection(0)
+                "#,
+            )
+            .exec()
+            .unwrap();
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        {
+            let core = s.core.borrow();
+            assert_eq!(core.active_buffer_len(), 0, "the insert was rejected");
+            assert!(
+                core.active_window().selection.is_some(),
+                "a rejected insert must not clear the anchor"
+            );
+        }
+        // The next (allowed) insert lands and clears it.
+        s.dispatch_key(
+            FrontendId::LOCAL,
+            key(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        let core = s.core.borrow();
+        assert_eq!(core.active_buffer_len(), 1);
+        assert!(core.active_window().selection.is_none());
     }
 
     #[test]

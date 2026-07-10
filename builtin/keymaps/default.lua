@@ -49,7 +49,7 @@ bind("C-v",        "cursor.page-down")
 bind("BS",  "buffer.delete-backward")
 bind("DEL", "buffer.delete-forward")
 bind("C-d", "buffer.delete-forward")
-bind("RET", "buffer.newline")
+bind("RET", "edit.newline-and-indent")
 bind("TAB", "buffer.tab")
 
 -- Incremental search ---------------------------------------------------------
