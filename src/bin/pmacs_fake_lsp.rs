@@ -32,6 +32,19 @@
 //!   `rootUri` received in `initialize` to the file named by
 //!   `PMACS_FAKE_LSP_ROOT_SINK`, so a test can assert the
 //!   auto-attach path derives the project root from the opened file.
+//! * If launched with `PMACS_FAKE_LSP_MODE=fullonly`: advertises a
+//!   full-only `semanticTokensProvider` (`"full": true`, no delta
+//!   member) and rejects `semanticTokens/full/delta` with a JSON-RPC
+//!   error — a conforming full-only server, for testing that the
+//!   client never requests delta without the negotiated capability.
+//! * If launched with `PMACS_FAKE_LSP_MODE=rangeonly`: advertises a
+//!   range-only `semanticTokensProvider` (`"range": true`, no `full`)
+//!   and rejects `semanticTokens/full` — per LSP, `full` and `range`
+//!   are optional, independent capabilities.
+//! * If launched with `PMACS_FAKE_LSP_MODE=rangeonly16`: `rangeonly`
+//!   plus UTF-16 position encoding, with strict UTF-16 bounds
+//!   validation on `/range` — rejects a client that sent raw byte
+//!   columns for non-ASCII text.
 //! * If launched with `PMACS_FAKE_LSP_MODE=sighelp`: additionally
 //!   advertises `signatureHelpProvider` with `(` / `,` triggers, so a
 //!   test can drive the Arc 1d auto-trigger. Every other mode omits the
@@ -54,6 +67,8 @@ fn main() {
     let mut stdout = io::stdout().lock();
     let mut crashed_after_init = false;
     let mut open_docs: HashMap<String, String> = HashMap::new();
+    // `fullonly` observability: counts /full responses (rid-1, rid-2…).
+    let mut full_count: u32 = 0;
     loop {
         let body = match read_frame(&mut stdin) {
             Ok(Some(b)) => b,
@@ -138,7 +153,12 @@ fn main() {
                                     "tokenTypes": ["namespace", "function", "variable"],
                                     "tokenModifiers": ["declaration", "readonly"]
                                 },
-                                "full": true
+                                // The default mode implements /full/delta, so
+                                // it truthfully NEGOTIATES delta. Clients may
+                                // only send /full/delta when `full` is
+                                // `{ "delta": true }`; a bare `true` (the
+                                // `fullonly` override below) is full-only.
+                                "full": { "delta": true }
                             }
                         },
                         "serverInfo": { "name": "pmacs-fake-lsp", "version": "0.1.0" }
@@ -158,13 +178,43 @@ fn main() {
                     resp["result"]["capabilities"]["renameProvider"] =
                         serde_json::json!({ "prepareProvider": true });
                 }
+                // `fullonly`: a conforming FULL-ONLY semantic-token
+                // server — advertises `"full": true` (no delta member)
+                // and REJECTS /full/delta below. Exercises the client
+                // rule that a stored resultId alone must never cause a
+                // delta request.
+                if mode == "fullonly" {
+                    resp["result"]["capabilities"]["semanticTokensProvider"]["full"] =
+                        serde_json::Value::from(true);
+                }
+                // `rangeonly`: LSP allows a provider to advertise
+                // `range` WITHOUT `full` — the /full arm below rejects
+                // in this mode, so a client that ignores the split gets
+                // a visible failure instead of silent staleness.
+                if mode.starts_with("rangeonly") {
+                    let p = &mut resp["result"]["capabilities"]["semanticTokensProvider"];
+                    if let Some(obj) = p.as_object_mut() {
+                        obj.remove("full");
+                        obj.insert("range".into(), serde_json::Value::from(true));
+                    }
+                }
+                // `rangeonly16` additionally negotiates UTF-16, so the
+                // /range arm can validate that the client converted its
+                // byte columns to UTF-16 code units.
+                if mode == "rangeonly16" {
+                    resp["result"]["capabilities"]["positionEncoding"] =
+                        serde_json::Value::from("utf-16");
+                }
                 // Arc 1d: advertise signature help only in `sighelp`, so
                 // every other mode keeps the no-auto-trigger path (the
                 // `textDocument/signatureHelp` arm below still answers
                 // the manual `M-x lsp.signature-help` in any mode).
                 if mode == "sighelp" {
+                    // "«" (U+00AB, 2 UTF-8 bytes) exercises the rule
+                    // that LSP trigger characters are strings, not
+                    // ASCII bytes.
                     resp["result"]["capabilities"]["signatureHelpProvider"] = serde_json::json!({
-                        "triggerCharacters": ["("],
+                        "triggerCharacters": ["(", "\u{ab}"],
                         "retriggerCharacters": [","]
                     });
                 }
@@ -749,6 +799,37 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/full", Some(idv)) => {
+                // `rangeonly`: a range-only provider rejects /full —
+                // the client should have sent a range request.
+                if mode.starts_with("rangeonly") {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": {
+                            "code": -32601,
+                            "message": "semanticTokens/full not supported"
+                        }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
+                // `fullonly`: bump the resultId per request so a test
+                // can observe WHICH pull refreshed the store — a
+                // repull that wrongly went to /full/delta is rejected
+                // and leaves the previous rid in place.
+                if mode == "fullonly" {
+                    full_count += 1;
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "result": {
+                            "resultId": format!("rid-{full_count}"),
+                            "data": [0, 0, 4, 1, 1, 0, 5, 3, 2, 0, 2, 2, 7, 0, 2]
+                        }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5: relative-encoded `data`. Three tokens:
                 //   [0,0,4,1,1]  line 0 col 0 len 4, function, decl
                 //   [0,5,3,2,0]  same line col 5 len 3, variable
@@ -764,6 +845,27 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/range", Some(idv)) => {
+                // `rangeonly16`: strict bounds validation in UTF-16
+                // units. A client that sent raw byte columns for
+                // non-ASCII text overshoots the last line's UTF-16
+                // length and is rejected — the fixture for the
+                // outbound-position conversion.
+                if mode == "rangeonly16"
+                    && let Ok(sink) = std::env::var("PMACS_FAKE_RANGE_SINK")
+                {
+                    let _ = std::fs::write(&sink, format!("{params}"));
+                }
+                if mode == "rangeonly16"
+                    && let Some(message) = utf16_range_error(&params, &open_docs)
+                {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": { "code": -32602, "message": message }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5: same shape as /full, scoped to a range.
                 // One token: line 1 col 0 len 3, variable.
                 let resp = serde_json::json!({
@@ -774,6 +876,22 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/full/delta", Some(idv)) => {
+                // `fullonly`: a conforming full-only server rejects a
+                // delta request outright — the client should never have
+                // sent it (capabilities advertised `"full": true` with
+                // no delta member).
+                if mode == "fullonly" {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": {
+                            "code": -32601,
+                            "message": "semanticTokens/full/delta not supported"
+                        }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5: a `SemanticTokensDelta` over the /full data
                 // `[0,0,4,1,1, 0,5,3,2,0, 2,2,7,0,2]` — replace the
                 // last 5-int group (idx 10..15) with [3,0,9,1,0], so
@@ -965,6 +1083,47 @@ fn document_end_position(text: &str) -> (u64, u64) {
         }
     }
     (line, col)
+}
+
+/// `rangeonly16` bounds validation: the request's end position must not
+/// exceed the document end measured in UTF-16 code units (the
+/// negotiated encoding). Byte-column overshoot on non-ASCII text is
+/// exactly the client bug this catches.
+fn utf16_range_error(
+    params: &serde_json::Value,
+    open_docs: &HashMap<String, String>,
+) -> Option<String> {
+    // Fail-CLOSED: a fixture that silently skips validation on an
+    // unexpected state (missing uri / unrecorded doc) reads as a pass.
+    let Some(uri) = params
+        .get("textDocument")
+        .and_then(|t| t.get("uri"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Some("range request carried no textDocument.uri".into());
+    };
+    let Some(text) = open_docs.get(uri) else {
+        return Some(format!("no didOpen text recorded for {uri}"));
+    };
+    let (mut line, mut col) = (0u64, 0u64);
+    for ch in text.chars() {
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16() as u64;
+        }
+    }
+    let end = params.get("range")?.get("end")?;
+    let end_line = end.get("line")?.as_u64()?;
+    let end_col = end.get("character")?.as_u64()?;
+    if end_line > line || (end_line == line && end_col > col) {
+        Some(format!(
+            "invalid utf-16 range end {end_line}:{end_col}; document ends at {line}:{col}"
+        ))
+    } else {
+        None
+    }
 }
 
 fn inlay_range_error(

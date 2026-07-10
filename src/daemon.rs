@@ -1978,6 +1978,28 @@ fn handle_inbound_paste(
     });
 }
 
+/// True when `edit` inserted exactly one UTF-8 codepoint: the leading
+/// byte's sequence length equals `inserted_len` (kill ring review
+/// round 4 — the typed-character classification for optimistic edits).
+#[cfg(feature = "crdt")]
+fn is_single_codepoint_insert(edit: &crate::rope::Edit) -> bool {
+    let len = edit.inserted_len;
+    if !(1..=4).contains(&len) {
+        return false;
+    }
+    let mut first = [0u8; 1];
+    edit.new_rope
+        .slice(edit.range.start, edit.range.start + 1, &mut first);
+    let expected = match first[0] {
+        b if b < 0x80 => 1,
+        b if b < 0xC0 => return false, // bare continuation byte
+        b if b < 0xE0 => 2,
+        b if b < 0xF0 => 3,
+        _ => 4,
+    };
+    expected == len
+}
+
 /// T M10.10 (post-audit) — apply a *pre-validated*
 /// `FrontendEvent::CrdtOp`. Identity, capability, and scope checks
 /// happen upstream in `validate_remote_crdt_op`; this function trusts
@@ -2008,11 +2030,16 @@ fn handle_remote_crdt_op(
     buffer_id: crate::buffer::BufferId,
     op: crate::rope::CrdtOp,
 ) {
-    // Kill ring Q#KR2: an optimistic edit is non-command input — GPU
-    // typing, Enter/Tab, Backspace/Delete all arrive here without ever
-    // touching dispatch_key. It must break the source frontend's
-    // command chain, or `C-k x C-k` on the GPU would append across the
-    // typed character.
+    // Kill ring Q#KR2: an optimistic edit arrives here without ever
+    // touching dispatch_key, so the source's command boundary must be
+    // updated — or `C-k x C-k` on the GPU would append across the typed
+    // character. Break first (covers every early-return path); a
+    // successful apply refines this below: a single-codepoint insert is
+    // re-classified as `buffer.self-insert`, giving typed characters the
+    // same boundary on both frontends. That keeps kill-chain semantics
+    // identical (self-insert is not a kill) while making `this_command`
+    // a usable input-origin signal for typed-char consumers (signature
+    // help; the completion popup can migrate later).
     editor.core.borrow_mut().break_command_chain(source);
     // Effect 1: apply to buffer's CRDT + rope. Capture the Edit
     // (or `None` for an op that imported cleanly but produced no
@@ -2045,6 +2072,19 @@ fn handle_remote_crdt_op(
     // notify but the op still needs broadcasting (F17).
     if let Some(edit) = edit_opt.as_ref() {
         let mut core = editor.core.borrow_mut();
+        // The input-origin refinement promised above. The optimistic
+        // layer emits exactly one op per keystroke, so an empty-range
+        // insert of EXACTLY ONE codepoint is a typed character —
+        // Backspace/Delete/Undo produce deletes or larger shapes and
+        // stay chain-breaks. Decoding the inserted bytes (they are in
+        // the post-edit rope) rather than trusting `inserted_len`
+        // alone: a 2-byte insert of "a(" is two ASCII codepoints and
+        // must NOT classify as typing (review round 4 — it would
+        // spuriously auto-trigger signature help). Exact provenance on
+        // the wire op is the named deferred general fix.
+        if edit.range.start == edit.range.end && is_single_codepoint_insert(edit) {
+            core.rotate_command(source, "buffer.self-insert");
+        }
         // Transient status messages clear on user input. The Key path
         // gets this from `dispatch_key`'s entry clear; the optimistic
         // path routes plain typing here instead, and since v15 ships
@@ -2511,13 +2551,15 @@ mod tests {
         );
     }
 
-    /// Kill ring Q#KR2 — an optimistic edit is non-command input: GPU
-    /// typing arrives here without touching dispatch_key, so it must
-    /// break the source frontend's command chain or `C-k x C-k` on the
-    /// GPU would append across the typed character.
+    /// Kill ring Q#KR2 — GPU typing arrives here without touching
+    /// dispatch_key, so it must update the source frontend's command
+    /// boundary or `C-k x C-k` on the GPU would append across the typed
+    /// character. A single-codepoint insert classifies as
+    /// `buffer.self-insert` (the input-origin signal for signature
+    /// help); anything else breaks the chain outright.
     #[cfg(feature = "crdt")]
     #[test]
-    fn handle_remote_crdt_op_breaks_the_source_command_chain() {
+    fn handle_remote_crdt_op_classifies_typed_input_and_ends_kill_chains() {
         use crate::editor::EditorState;
         use crate::protocol::FrontendId;
 
@@ -2573,11 +2615,72 @@ mod tests {
         );
 
         let core = editor.core.borrow();
-        assert!(
+        // A single-codepoint optimistic insert classifies as a typed
+        // character: the boundary rotates to buffer.self-insert (the
+        // input-origin signal), which — not being a kill command —
+        // still breaks the kill chain exactly like the TUI typed-char
+        // path.
+        assert_eq!(
             core.command_history
                 .get(&source)
-                .is_none_or(|b| b.this.is_none()),
-            "the optimistic edit must break the source's chain"
+                .and_then(|b| b.this.as_deref()),
+            Some("buffer.self-insert"),
+            "a typed optimistic insert classifies as self-insert"
+        );
+        assert_eq!(
+            core.command_history
+                .get(&source)
+                .and_then(|b| b.last.as_deref()),
+            None,
+            "the pre-existing kill chain is gone (break-then-classify): a \
+             following kill reads last = self-insert after its own rotation \
+             and never appends"
+        );
+        drop(core);
+
+        // A TWO-codepoint insert ("a(") must NOT classify as typing
+        // (review round 4): its 2-byte length satisfies a naive 1-4
+        // predicate, but decoding shows two ASCII codepoints — a typed
+        // key never produces that, and classifying it would let a
+        // multi-char op spuriously auto-trigger signature help.
+        editor
+            .core
+            .borrow_mut()
+            .rotate_command(source, "edit.kill-line");
+        let snapshot_bytes = {
+            let core = editor.core.borrow();
+            let reg = core.registry.borrow();
+            reg.get(buffer_id)
+                .expect("buffer")
+                .crdt_state()
+                .expect("crdt-backed")
+                .export_snapshot()
+                .expect("export snapshot")
+        };
+        let peer2 = loro::LoroDoc::new();
+        peer2.set_peer_id(7).expect("set peer id");
+        peer2.import(&snapshot_bytes).expect("import snapshot");
+        let v_before = peer2.oplog_vv();
+        peer2.get_text("body").insert(0, "a(").expect("peer insert");
+        let op_bytes = peer2
+            .export(loro::ExportMode::updates(&v_before))
+            .expect("export op");
+        handle_remote_crdt_op(
+            &mut editor,
+            source,
+            buffer_id,
+            crate::rope::CrdtOp {
+                peer_id: 7,
+                bytes: op_bytes,
+            },
+        );
+        let core = editor.core.borrow();
+        assert_eq!(
+            core.command_history
+                .get(&source)
+                .and_then(|b| b.this.as_deref()),
+            None,
+            "a multi-codepoint insert breaks the chain instead of classifying as typing"
         );
         assert_eq!(
             core.command_history

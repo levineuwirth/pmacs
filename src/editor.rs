@@ -930,6 +930,17 @@ impl EditorState {
             CompletionPopupKey::Prev => self.core.borrow_mut().completion_popup_step(-1),
             CompletionPopupKey::Dismiss => self.core.borrow_mut().completion_popup_close(),
             CompletionPopupKey::Accept => {
+                // Accepting a completion is its own command boundary
+                // (review round 4): without this stamp, `this_command`
+                // could still read "buffer.self-insert" from the typing
+                // that raised the popup, and the after-edit fired below
+                // would let a candidate ending in "(" spuriously
+                // auto-trigger signature help.
+                {
+                    let mut core = self.core.borrow_mut();
+                    let fid = core.active_frontend;
+                    core.rotate_command(fid, "completion.accept");
+                }
                 let pre_revision = self.active_buffer_revision();
                 self.core.borrow_mut().completion_popup_accept();
                 if pre_revision != self.active_buffer_revision() {

@@ -4451,15 +4451,13 @@ fn arc1d_signature_help_auto_triggers_on_trigger_char() {
          end)()";
     assert!(pump_lua_flag(&mut state, initialized, 5), "server init");
 
-    // The first keystroke only seeds the typed-char snapshot; the second
-    // is the trigger. (A trigger char cannot fire off the very first edit
-    // in a buffer, which is correct: there is no prior cursor to compare.)
-    for c in ['f', '('] {
-        state.dispatch_key(
-            pmacs::protocol::FrontendId::LOCAL,
-            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-        );
-    }
+    // The very FIRST character typed in the buffer is the trigger: the
+    // input-origin signal (this_command == buffer.self-insert) needs no
+    // prior-edit snapshot, so there is no warm-up keystroke.
+    state.dispatch_key(
+        pmacs::protocol::FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('('), KeyModifiers::NONE),
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw = false;
     while Instant::now() < deadline {
@@ -4529,6 +4527,321 @@ fn arc1d_signature_help_does_not_trigger_on_ordinary_typing() {
             "ordinary typing must not request signature help"
         );
     }
+}
+
+/// Arc 1c review fix — a RANGE-ONLY provider (LSP: `full` and `range`
+/// are optional, independent capabilities). The client must serve it a
+/// whole-document /range request, never /full — the fake rejects /full
+/// outright, so a client ignoring the split gets an empty store and
+/// this test fails.
+#[test]
+fn arc1c_range_only_server_is_served_range_requests() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'rangeonly' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    // The rangeonly fake's /range reply carries one token; its
+    // presence proves the auto-pull went through the range path.
+    let has_tokens = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local t = pmacs.semantic_tokens.tokens(sid, 'file://{a_disp}') \
+           return t ~= nil and #t > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &has_tokens, 5),
+        "a range-only provider must be served a whole-document /range request"
+    );
+}
+
+/// Arc 1c review fix — a range-only server that negotiated UTF-16.
+/// The whole-document range's columns are derived from pmacs byte
+/// offsets; they must go through `outbound_position` like every other
+/// outbound position. The last line ends in non-ASCII ("é" = 2 bytes,
+/// 1 UTF-16 unit), and the fake validates the end bound strictly in
+/// UTF-16 units — raw byte columns overshoot and are rejected, leaving
+/// the store empty and this test failing.
+#[test]
+fn arc1c_range_only_utf16_server_gets_converted_bounds() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, "fn a() {}\nlet x = \u{e9}\u{e9};".as_bytes()).expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'rangeonly16' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    let has_tokens = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local t = pmacs.semantic_tokens.tokens(sid, 'file://{a_disp}') \
+           return t ~= nil and #t > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &has_tokens, 5),
+        "a UTF-16 range-only server must receive converted (not byte) columns"
+    );
+}
+
+/// Arc 1d — a server-declared NON-ASCII trigger character works. LSP
+/// trigger characters are strings; the fake declares "«" (2 UTF-8
+/// bytes), and the codepoint-aware `char_before` must match it.
+#[test]
+fn arc1d_signature_help_triggers_on_non_ascii_trigger_char() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'sighelp' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    let initialized = "(function() \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then return true end \
+           end \
+           return false \
+         end)()";
+    assert!(pump_lua_flag(&mut state, initialized, 5), "server init");
+
+    state.dispatch_key(
+        pmacs::protocol::FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('\u{ab}'), KeyModifiers::NONE),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw = false;
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        if state.core.borrow().status.contains("fn echo(") {
+            saw = true;
+            break;
+        }
+    }
+    assert!(saw, "a non-ASCII trigger character must auto-trigger");
+}
+
+/// Arc 1d — an edit that is NOT a typed character never triggers, even
+/// when it inserts exactly one trigger byte. The input-origin signal
+/// (`this_command`) distinguishes it; a cursor-delta heuristic could
+/// not (a one-byte programmatic insert of `(` looks identical).
+#[test]
+fn arc1d_signature_help_ignores_non_typed_edits() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'sighelp' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+    let initialized = "(function() \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then return true end \
+           end \
+           return false \
+         end)()";
+    assert!(pump_lua_flag(&mut state, initialized, 5), "server init");
+
+    // A movement command stamps this_command = cursor.*; then a
+    // programmatic one-byte insert of "(" fires after-edit. Under the
+    // old cursor-delta heuristic this was indistinguishable from
+    // typing.
+    state.dispatch_key(
+        pmacs::protocol::FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    );
+    state
+        .lua_host
+        .lua()
+        .load(
+            "pmacs.window.buffer():insert(pmacs.editor.cursor(), '(') \n\
+             pmacs.hook.run('buffer.after-edit')",
+        )
+        .exec()
+        .expect("programmatic insert");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        assert!(
+            !state.core.borrow().status.contains("fn echo("),
+            "a non-typed one-byte '(' insert must not trigger signature help"
+        );
+    }
+}
+
+/// Arc 1c review fix — a conforming FULL-ONLY server (advertises
+/// `"full": true`, rejects /full/delta). Holding a resultId from the
+/// first /full pull must NOT cause a delta request: the repull after an
+/// edit goes to /full again and the store refreshes. Before the fix,
+/// the delta request was rejected, the error swallowed, and semantic
+/// styling stayed silently stale after the first edit.
+#[test]
+fn arc1c_full_only_server_repulls_via_full_not_delta() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'fullonly' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    let has_tokens = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local t = pmacs.semantic_tokens.tokens(sid, 'file://{a_disp}') \
+           return t ~= nil and #t > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &has_tokens, 5),
+        "attach /full pull"
+    );
+
+    // The fullonly fake bumps its resultId per /full response, so the
+    // store's rid says WHICH pull refreshed it. After the attach pull it
+    // is rid-1; the post-edit repull must advance it via /full. A repull
+    // that wrongly went to /full/delta (the pre-fix behavior: a stored
+    // resultId alone triggered delta) is rejected by the server, the
+    // error swallowed, and the rid stays rid-1 — silently stale.
+    let rid_is = |n: u32| {
+        format!(
+            "(function() \
+               local sid \
+               for _,r in ipairs(pmacs.lsp.list()) do \
+                 if r.state and r.state.kind=='initialized' then sid=r.id end \
+               end \
+               if not sid then return false end \
+               return pmacs.semantic_tokens.result_id(sid, 'file://{a_disp}') == 'rid-{n}' \
+             end)()"
+        )
+    };
+    assert!(
+        pump_lua_flag(&mut state, &rid_is(1), 5),
+        "attach pull is rid-1"
+    );
+    state.dispatch_key(
+        pmacs::protocol::FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    );
+    assert!(
+        pump_lua_flag(&mut state, &rid_is(2), 5),
+        "a full-only server's repull must refresh via /full, not stale-out on a rejected delta"
+    );
 }
 
 /// T M4.5 — `textDocument/semanticTokens/range` through the Lua

@@ -11000,6 +11000,18 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         )?;
     }
     {
+        // this_command(): the command currently executing for the
+        // active frontend — the input-origin signal. Inside
+        // `buffer.after-edit`, "buffer.self-insert" means the edit was
+        // a typed character; nil means a non-command input (paste,
+        // pointer gesture, optimistic delete/undo). Per-frontend.
+        let cc = core.clone();
+        editor.set(
+            "this_command",
+            lua.create_function(move |_, ()| Ok(cc.borrow().this_command().map(str::to_owned)))?,
+        )?;
+    }
+    {
         // view_top(): the active window's first visible source line.
         // The saveplace getter (Arc 3) — pairs with set_view_top so a
         // reopen restores the viewport, not just the cursor.

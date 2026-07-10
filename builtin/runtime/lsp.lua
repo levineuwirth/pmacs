@@ -452,11 +452,28 @@ function pull_inlay_hints_quiet(rec)
   end)
 end
 
-local function server_supports_semantic_tokens(sid)
+-- LSP defines `semanticTokensProvider.full` and `.range` as optional,
+-- INDEPENDENT capabilities: a provider may be range-only, and sending
+-- it /full gets a rejection the pull path would swallow. Gate each
+-- request kind on its own capability.
+local function semantic_provider(sid)
   local ok, caps = pcall(pmacs.lsp.capabilities, sid)
-  if not ok or not caps then return false end
+  if not ok or not caps then return nil end
   local p = caps.semanticTokensProvider
-  return p ~= nil and p ~= false
+  if p == nil or p == false then return nil end
+  return p
+end
+
+local function server_supports_semantic_full(sid)
+  local p = semantic_provider(sid)
+  if type(p) ~= "table" then return false end
+  return p.full == true or type(p.full) == "table"
+end
+
+local function server_supports_semantic_range(sid)
+  local p = semantic_provider(sid)
+  if type(p) ~= "table" then return false end
+  return p.range == true or type(p.range) == "table"
 end
 
 -- Arc 1c. Semantic tokens are pull-model, exactly like inlay hints: the
@@ -470,24 +487,50 @@ end
 --
 -- Assigns the forward-declared local above (a fresh `local function`
 -- here would shadow it, leaving `flush_did_change`'s upvalue nil).
+-- Whether the server negotiated DELTA semantic-token support:
+-- `semanticTokensProvider.full` must be a table with `delta == true`.
+-- Holding a `resultId` does NOT imply delta capability — servers may
+-- return one from /full regardless — and a conforming full-only server
+-- rejects /full/delta. The pull path swallows request errors, so
+-- requesting delta without the capability would leave styling silently
+-- stale after the first edit.
+local function server_supports_semantic_delta(sid)
+  local p = semantic_provider(sid)
+  if type(p) ~= "table" then return false end
+  return type(p.full) == "table" and p.full.delta == true
+end
+
 function pull_semantic_tokens_quiet(rec)
   if not rec or not server_is_initialized(rec.server) then return end
-  if not server_supports_semantic_tokens(rec.server) then return end
+  local has_full = server_supports_semantic_full(rec.server)
+  local has_range = server_supports_semantic_range(rec.server)
+  if not has_full and not has_range then return end
   -- The server must see the current text before computing token
   -- positions against it. A no-op when called from `flush_did_change`
   -- itself (the pending entry is removed before the send).
   flush_did_change_for(rec)
-  -- Delta when we hold a `resultId` (the server only returns one when it
-  -- supports delta), full otherwise --- matching `pmacs.lsp
-  -- .semantic_tokens()`. Never clear the store first: a delta splices
-  -- against the retained raw stream.
-  local prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
+  -- /full when negotiated (delta only when full.delta == true and a
+  -- prior resultId is held); a RANGE-ONLY provider gets a
+  -- whole-document /range request instead — never an unsupported
+  -- /full. Never clear the store first: a delta splices against the
+  -- retained raw stream.
+  local prev = nil
+  if has_full and server_supports_semantic_delta(rec.server) then
+    prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
+  end
+  local end_line, end_col
+  if not has_full then
+    end_line, end_col = document_end_position(buffer_text(rec.buffer))
+  end
   pmacs.async(function()
     pcall(function()
       if prev then
         pmacs.lsp.request_semantic_tokens_delta(rec.server, rec.uri, prev):await()
-      else
+      elseif has_full then
         pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+      else
+        pmacs.lsp.request_semantic_tokens_range(
+          rec.server, rec.uri, 0, 0, end_line, end_col):await()
       end
     end)
   end)
@@ -640,18 +683,31 @@ end)
 
 -- Arc 1d: signature-help auto-trigger ----------------------------------
 --
--- `buffer.after-edit` carries no payload, so a *typed character* is
--- reconstructed from state exactly the way `completion.lua` does (Q#C9):
--- same buffer, cursor advanced by exactly one byte. Paste, undo, kill,
--- and remote CRDT edits produce any other delta and never auto-trigger.
--- (Trigger characters are ASCII, so a one-byte advance is sound.)
-local last_typed = { key = nil, cursor = nil }
+-- A *typed character* is recognized by the input-origin signal, not by
+-- cursor-delta inference: inside `buffer.after-edit`,
+-- `pmacs.editor.this_command() == "buffer.self-insert"` names an edit
+-- produced by typing — on either frontend (the daemon classifies
+-- single-codepoint optimistic inserts the same way), per-frontend (no
+-- cross-frontend misclassification), with no prior-edit snapshot (the
+-- first character typed in a buffer triggers). Paste, undo, kill,
+-- pointer, and every other input leave `this_command` as something
+-- else — a one-byte paste of "(" can never trigger.
 
+-- The last full UTF-8 codepoint ending at `cursor`, as a string. LSP
+-- trigger characters are strings, not ASCII bytes, so this must be
+-- codepoint-aware: read up to 4 bytes back and take the suffix from
+-- the last non-continuation byte.
 local function char_before(buf, cursor)
   if cursor <= 0 then return nil end
-  local ok, s = pcall(function() return buf:slice(cursor - 1, cursor) end)
-  if not ok or type(s) ~= "string" or #s ~= 1 then return nil end
-  return s
+  local from = cursor - 4
+  if from < 0 then from = 0 end
+  local ok, s = pcall(function() return buf:slice(from, cursor) end)
+  if not ok or type(s) ~= "string" or #s == 0 then return nil end
+  for i = #s, 1, -1 do
+    local b = s:byte(i)
+    if b < 0x80 or b >= 0xC0 then return s:sub(i) end
+  end
+  return nil
 end
 
 -- The set of characters that should (re)open signature help, as the
@@ -710,13 +766,10 @@ pmacs.hook.add("buffer.after-edit", function()
   -- O(file) didChange send below is coalesced: render families
   -- anchored to pre-edit positions are hidden from this edit on.
   pcall(pmacs.lsp._mark_document_stale, rec.uri)
-  -- Arc 1d: did the user just type a signature trigger character?
-  -- Recorded before the early-outs below so the snapshot stays accurate
-  -- for the *next* edit even when this one doesn't trigger.
-  local cursor = pmacs.editor.cursor()
-  local prev_key, prev_cursor = last_typed.key, last_typed.cursor
-  last_typed.key, last_typed.cursor = key, cursor
-  local typed_one = key == prev_key and prev_cursor and cursor - prev_cursor == 1
+  -- Arc 1d: was this edit a typed character? The input-origin signal
+  -- (see the trigger block below).
+  local typed = pmacs.editor.this_command
+    and pmacs.editor.this_command() == "buffer.self-insert"
   local now = pmacs.editor.monotonic_ms()
   local pending = pending_did_change[key]
   if pending and pending.rec == rec then
@@ -726,8 +779,8 @@ pmacs.hook.add("buffer.after-edit", function()
   end
   -- Fire *after* queuing the pending didChange: `signature_help_quiet`
   -- flushes it, so the server sees the character we are asking about.
-  if not typed_one then return end
-  local ch = char_before(buf, cursor)
+  if not typed then return end
+  local ch = char_before(buf, pmacs.editor.cursor())
   if not ch then return end
   local triggers = signature_trigger_chars(rec.server)
   if not (triggers and triggers[ch]) then return end
@@ -1578,14 +1631,33 @@ function pmacs.lsp.semantic_tokens()
     return
   end
   -- Don't clear: a delta splices against the retained raw stream.
-  local prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
+  -- Same gating as the auto-pull path: /full only when negotiated
+  -- (delta only under full.delta); a range-only provider gets a
+  -- whole-document /range request.
+  local has_full = server_supports_semantic_full(rec.server)
+  local has_range = server_supports_semantic_range(rec.server)
+  if not has_full and not has_range then
+    pmacs.editor.set_status("LSP: server has no semantic-token support")
+    return
+  end
+  local prev = nil
+  if has_full and server_supports_semantic_delta(rec.server) then
+    prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
+  end
+  local end_line, end_col
+  if not has_full then
+    end_line, end_col = document_end_position(buffer_text(rec.buffer))
+  end
   pmacs.async(function()
     local ok, err = pcall(function()
       if prev then
         pmacs.lsp.request_semantic_tokens_delta(
           rec.server, rec.uri, prev):await()
-      else
+      elseif has_full then
         pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+      else
+        pmacs.lsp.request_semantic_tokens_range(
+          rec.server, rec.uri, 0, 0, end_line, end_col):await()
       end
     end)
     if not ok then
