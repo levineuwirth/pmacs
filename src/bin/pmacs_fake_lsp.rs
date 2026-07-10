@@ -593,6 +593,20 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/prepareRename", Some(idv)) => {
+                // `posecho` negotiates UTF-16. Validate the request
+                // position before replying so the position-codec test
+                // below catches byte-column regressions in this builder.
+                if mode == "posecho"
+                    && let Some(message) = utf16_position_error(&params, &open_docs)
+                {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": { "code": -32602, "message": message }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5: `preprefuse` → null (not renameable here);
                 // otherwise the `{ range, placeholder }` shape over
                 // the line-0 cols 3..6 span ("foo").
@@ -615,6 +629,19 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/rename", Some(idv)) => {
+                // Same UTF-16 validation as prepareRename: rename and
+                // prepareRename both carry a single Position.
+                if mode == "posecho"
+                    && let Some(message) = utf16_position_error(&params, &open_docs)
+                {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": { "code": -32602, "message": message }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5 L2: reply with a `WorkspaceEdit`. The edit
                 // replaces the 3-char span at line 0, cols 3..6 with
                 // the requested `newName` (so the test can assert the
@@ -1120,6 +1147,51 @@ fn utf16_range_error(
     if end_line > line || (end_line == line && end_col > col) {
         Some(format!(
             "invalid utf-16 range end {end_line}:{end_col}; document ends at {line}:{col}"
+        ))
+    } else {
+        None
+    }
+}
+
+/// `posecho` validation for single-position requests. Unlike the
+/// whole-document range fixture, this checks the requested line itself
+/// so an overlarge byte column cannot hide behind a later line.
+fn utf16_position_error(
+    params: &serde_json::Value,
+    open_docs: &HashMap<String, String>,
+) -> Option<String> {
+    let Some(uri) = params
+        .get("textDocument")
+        .and_then(|t| t.get("uri"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Some("position request carried no textDocument.uri".into());
+    };
+    let Some(text) = open_docs.get(uri) else {
+        return Some(format!("no didOpen text recorded for {uri}"));
+    };
+    let Some(position) = params.get("position") else {
+        return Some("position request carried no position".into());
+    };
+    let Some(line) = position.get("line").and_then(serde_json::Value::as_u64) else {
+        return Some("position request carried no numeric line".into());
+    };
+    let Some(col) = position
+        .get("character")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return Some("position request carried no numeric character".into());
+    };
+    let Ok(line_index) = usize::try_from(line) else {
+        return Some(format!("invalid utf-16 position line {line}"));
+    };
+    let Some(line_text) = text.split('\n').nth(line_index) else {
+        return Some(format!("invalid utf-16 position line {line}"));
+    };
+    let max_col = line_text.chars().map(char::len_utf16).sum::<usize>() as u64;
+    if col > max_col {
+        Some(format!(
+            "invalid utf-16 position {line}:{col}; line ends at {line}:{max_col}"
         ))
     } else {
         None

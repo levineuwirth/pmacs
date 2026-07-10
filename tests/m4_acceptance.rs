@@ -6470,6 +6470,42 @@ fn m4_5_position_encoding_utf16_round_trips_non_ascii() {
     );
 }
 
+/// T M4.5 Option B — rename and prepareRename are single-Position
+/// requests too. At byte offset 3 (the end of `éx`), a UTF-16 server
+/// must receive character 2, not byte column 3. The `posecho` fake
+/// rejects an out-of-bounds UTF-16 position, so both response stores
+/// appearing proves both request builders used `outbound_position`.
+#[test]
+fn m4_5_utf16_rename_and_prepare_rename_convert_positions() {
+    use pmacs::editor::EditorState;
+
+    let mut state = EditorState::new();
+    spawn_lsp_and_init(&mut state, Some("posecho"));
+    let uri = "file:///tmp/m4_5_rename_utf16.rs";
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.did_open(_G._lsp, '{uri}', 1, 'éx')\n\
+             pmacs.lsp.request_prepare_rename(_G._lsp, '{uri}', 0, 3)\n\
+             pmacs.lsp.request_rename(_G._lsp, '{uri}', 0, 3, 'renamed')"
+        ))
+        .exec()
+        .expect("dispatch UTF-16 rename requests");
+
+    let both_landed = format!(
+        "(function() \
+           local pr = pmacs.prepare_rename.result(_G._lsp, '{uri}') \
+           local ops = pmacs.rename.ops(_G._lsp, '{uri}') \
+           return pr ~= nil and ops ~= nil and #ops > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &both_landed, 5),
+        "rename and prepareRename must send UTF-16, not byte, columns"
+    );
+}
+
 /// T M4.5: pmacs answers the server→client `workspace/configuration`
 /// pull from the per-server `settings` (the capability gopls /
 /// pyright / clangd rely on). The `wsconfig` fake issues the request
