@@ -1,0 +1,189 @@
+# Agent handoff — cross-machine continuity
+
+**Last updated: 2026-07-10, on the desktop, by the session that shipped
+PR #107.** This file is the bridge between development machines. If you
+are an agent reading this on a fresh clone: this document plus the
+`docs/*-framing.md` files ARE your memory. Read this fully before
+taking on work, seed your persistent memory from it, and **update this
+file (and commit it) whenever project state changes materially** — the
+next machine reads it the way you just did.
+
+## 1. Where the project stands (2026-07-10)
+
+- `main` @ `2dde4b8`, protocol **v15** (`SUPPORTED=[6..15]`).
+- **PR #107 OPEN**: comment/uncomment toggle on `M-;` (Arc 2). Awaiting
+  the user's review findings. If it's merged by the time you read this,
+  Arc 2 has only auto-indent and auto-pairing left. Check
+  `gh pr list --state open` first thing.
+- Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
+  - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
+    (#92/#93), panels/references/outline/hover (#94–#96), plus
+    hardening follow-ups (#102, #105, #106).
+  - **Arc 2 (editing table stakes) NEARLY COMPLETE** — query-replace
+    (#97), kill ring + `M-y` (#103/#105/#106), comment-toggle (#107).
+    **Remaining: auto-indent on newline, then auto-pairing.** These are
+    the agreed next work items, in that order, each as its own small
+    framing + PR.
+  - **Arc 3 (persistence) COMPLETE** — saveplace/recentf (#98),
+    desktop-save (#99), autosave/crash-recovery (#100), save-clobber
+    fix (#101).
+  - **After Arc 2 closes**: the user wants a decision discussion —
+    compile-mode (Arc 5 stage 1) vs themes (Arc 4). Do not pick
+    unilaterally; frame the tradeoff and ask.
+
+## 2. How we work (the part that must not drift)
+
+The user is expert and reviews deeply — they falsify framings and find
+real bugs in round after round. The cadence that has worked for ~40 PRs:
+
+1. **Scout ground truth** in the code before proposing anything.
+2. **Write a framing doc** — `docs/<feature>-framing.md`, numbered
+   decisions (`Q#XY1…`), explicit "Ground truth", "Bets", "Deferred
+   (named)", and an acceptance-test list. Present it and **wait for
+   explicit approval** ("Go for it" / "Ready to roll"). Expect 1–3
+   rounds of findings first; revise the doc, don't argue.
+3. **Branch off main** (one feature = one branch = one PR). Commit the
+   framing as the first commit.
+4. Implement. **Every reviewer finding gets a bite-verified fix** — a
+   test that fails without the fix. Watch for vacuously-passing tests.
+5. Run the full gate suite (§3). Open the PR with `gh`.
+6. The user replies with "Findings" lists on the PR rounds too. Same
+   discipline. They say when to merge — **never merge unprompted**.
+7. After merge: update this handoff + your memory.
+
+Commit/PR conventions: commit messages via `git commit -F <file>` (no
+inline backticks through the shell); end with the Claude co-author
+line. PR bodies end with the Claude Code attribution. Clippy runs as
+its own step, never `&&`-chained.
+
+## 3. Gate suite (all green before any PR)
+
+```
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings   # own step
+cargo test --lib                                        # ~1500
+cargo test --lib --features crdt                        # ~1672
+cargo test --test <the new/touched acceptance suites>
+cargo test --test m4_acceptance -- --skip basedpyright
+PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu             # 58
+cargo test --workspace -- --skip basedpyright           # full sweep
+git diff --check
+```
+
+Machine-specific caveats that were true on the DESKTOP — re-verify on
+this machine before trusting them:
+
+- **basedpyright**: the desktop's local binary is broken and HANGS the
+  `m4_5_basedpyright` tests — hence the `--skip`. If this machine has a
+  working basedpyright, the skip may be droppable (verify once).
+- **m8 daemon tests are FLAKY** (timing). A lone m8 failure → rerun
+  before investigating.
+- **GPU tests** need a Vulkan device. `PMACS_REQUIRE_GPU=1` makes
+  absence a hard failure instead of a silent skip. Headless option:
+  lavapipe (see `docs/repository-audit-2026-07-03.md` for the CI
+  harness how-to). On a laptop without discrete GPU, mesa/lavapipe
+  works.
+- **The desktop's shell is fish** (no `$(...)`, use `(...)`; no
+  `$UID`, use `(id -u)`). Check `$SHELL` here before assuming.
+
+## 4. Substrate invariants (do not undo; tests enforce most of these)
+
+**Command boundaries (Arc 2 kill-ring substrate)** —
+`EditorCore.command_history: HashMap<FrontendId, CommandBoundary{this, last}>`,
+per frontend. Rotate on: keybound command, self-insert, menu invoke,
+`invoke_interactive` (the M-x path). Break on: unbound key, GPU
+optimistic CRDT edits, pointer gestures (wheel scroll deliberately does
+NOT break), unified paste. **Plain `pmacs.command.invoke` stamps
+nothing** (programmatic API); `invoke_interactive` rotates-then-invokes
+(Emacs M-x semantics). Single-codepoint optimistic CRDT inserts
+classify as `buffer.self-insert` (exact decode; `"a("` breaks instead).
+Lua: `ed.this_command()` / `ed.last_command()`.
+
+**Effective-edit returns** — `buf:insert/delete/replace` return the
+post-intercept `(start, end, inserted_len)`. Callers that care
+(killring, comment) compare EXACTLY against the request; length-delta
+and text-at-position checks are documented defeated patterns. Always
+`pcall` the mutator: a rejecting intercept must report, not throw
+through, and failed ops must leave no state (kill chains, yank
+sessions).
+
+**Kill ring** — entries `{id, text}` with stable monotonic ids; chains
+and yank sessions are per-frontend and id-checked (an index is not
+stable under other frontends' pushes). OS clipboard mirrors to the
+acting frontend only. Paste is a unified daemon arm keyed by the
+dispatcher's AUTHENTICATED source — never a payload frontend_id.
+
+**LSP outbound positions** — every Position/Range builder in
+`src/lsp.rs` routes through `outbound_position` (byte → negotiated
+encoding). Any new request builder must too; UTF-16 servers reject raw
+byte columns on non-ASCII text. Semantic tokens: `full`, `full.delta`,
+and `range` are three INDEPENDENT capabilities — gate each.
+
+**Persistence (Arc 3)** — state-dir wiring lives in
+`install_state_dirs()` on real entry points only, NOT `EditorState::new()`
+(tests stay hermetic); `PMACS_STATE_HOME` overrides. Autosave: one
+buffer owns a path's recovery slot; only recover/discard release
+unclaimed crash data; adopt clears the old owner's skip cache.
+
+**Protocol** — encoding-breaking bumps are deliberate and versioned
+(`SUPPORTED=[6..15]`). v15 = `CompletionPopup` + `StatusFacts.message`.
+New wire surface ⇒ bump + both-frontends support + acceptance.
+
+**Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
+`rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),
+`sighelp`. Use these for capability-matrix tests, not real servers.
+
+## 5. Hard-won ops lessons
+
+- **The checkout may be shared with the user.** Check `git status` for
+  foreign uncommitted work before any stash/checkout/branch surgery;
+  never assume dirty files are yours. (Their uncommitted fix was nearly
+  orphaned once.)
+- **Stacked PRs**: retarget the child to main BEFORE merging the
+  parent — GitHub auto-closes a PR whose base branch is deleted and
+  cannot reopen it (#104 → re-opened as #105).
+- **Scripted edits (sed/python) in files with repeated similar blocks**
+  (`src/lsp.rs` JSON builders): anchor on a unique line or you will
+  silently edit the wrong block. This produced a vacuously-passing test
+  and cost an hour.
+- **Acceptance fixtures that open `.rs`/`.py` files** must empty
+  `pmacs.lsp.config` first — the after-load hook spawns real servers
+  (rust/python/c have default configs). Language *detection*
+  (grammars + `pmacs.lsp.filetypes`) is unaffected.
+- Test scratch buffers have no path ⇒ no language; use tempdir files
+  when language matters.
+
+## 6. Named deferrals (the standing backlog, consolidated)
+
+Editing: word kills (`M-d`/`M-BS` — need bytes-returning deleters +
+prepend-on-backward append), `C-SPC` set-mark, `C-u C-y` / `C-M-w`,
+kill-ring browser + persistence, clipboard watching, block comments +
+mid-line comment spans, comment-dwim append-at-EOL, per-language
+comment padding.
+Substrate: buffer-aware edit epoch (after-edit currently compares the
+ACTIVE buffer only), wire provenance for CRDT self-insert
+classification, Lua intercept probe, completion.lua still on the old
+cursor-delta heuristic (migrate to `this_command`).
+LSP/persistence: hidden-buffer LSP attach, daemon desktop-restore, the
+*warning* half of external-change detection (verify-visited-file-
+modtime), config registry (no unified config surface yet).
+GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
+riders (whitespace guides, folding, git markers).
+Housekeeping: F-016 `lua_bindings/mod.rs` split paused mid-way
+(tranches 0–2 landed, ~5–8 PRs left; see
+`docs/lua-bindings-split-framing.md`).
+
+## 7. Machine-local facts (desktop) that do NOT travel
+
+Three untracked files live only on the desktop working tree and are
+deliberately never committed: `docs/pmacs-gpu-editing-perf-handoff.md`,
+`docs/session-5-stale-styling-handover.md`, `python_experiment.md`.
+Don't expect them in a clone; on the desktop, never delete them.
+
+## 8. Update protocol for this file
+
+When a PR merges, an arc opens/closes, or a decision lands: edit the
+snapshot (§1), append lessons (§5) and deferrals (§6) as they arise,
+bump the date line at the top, and commit — usually riding the same PR
+as the work. Keep it under ~250 lines: this is a briefing, not a log;
+prune sections that stop being true.
