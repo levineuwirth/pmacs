@@ -12,13 +12,16 @@ next machine reads it the way you just did.
 
 - `main` @ `efa41cb`, protocol **v15** (`SUPPORTED=[6..15]`).
 - **Auto-indent on newline (Arc 2) in flight on this branch** —
-  framing `docs/auto-indent-framing.md` went through five review
-  rounds before approval. RET now binds `edit.newline-and-indent`;
-  plain Enter is no longer GPU-optimistic (round-trips like the TUI).
-  Rode along: Q#AI8 search-staleness substrate fix (mark stale in
-  `notify_buffer_edit`, fail-closed step/summary, live-origin
-  translation) and Q#AI9 empty-selection fix (`insert_char` reports
-  success; the no-region arm clears a lingering anchor only on Ok).
+  framing `docs/auto-indent-framing.md` is at revision 6 (five
+  pre-branch review rounds plus PR #109 round 1). RET now binds
+  `edit.newline-and-indent`; plain Enter is no longer GPU-optimistic
+  (round-trips like the TUI). Rode along: Q#AI8 search invalidation is
+  shared by dispatch, direct notification, undo, and redo (stale
+  step/summary fail closed; live origins translate through edits), and
+  Q#AI9 clears empty selections only after successful core inserts and
+  in the daemon's optimistic CRDT source arm for both frontends. The
+  TUI's missing nonempty-selection optimistic type-over gate and
+  generated-buffer search invalidation remain named deferrals.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus

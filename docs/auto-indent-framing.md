@@ -491,10 +491,11 @@ gap, deferred with the substrate reconciliation work.
 - `after-edit` fires exactly once per RET (keybound and `M-x`).
 - Kill-chain break: `C-k`, RET, `C-k` → two ring entries.
 - Modal contexts: isearch accept and minibuffer accept pinned here
-  (plus buffer-list RET below). Query-replace, context-menu, and
-  completion-popup RET are pinned by their own suites
-  (`tests/query_replace_acceptance.rs`, the menu/completion
-  acceptance suites), which run in the gates — not re-pinned here.
+  (plus buffer-list RET below). Query-replace and completion-popup RET
+  are pinned by `tests/query_replace_acceptance.rs` and
+  `tests/completion_popup_acceptance.rs`; context-menu RET is pinned by
+  `editor::tests::menu_enter_invokes_command_and_closes`. Those tests
+  run in the gates and are not duplicated here.
 - Giant minified line (64 KiB, unindented and indented): splits
   correctly — pins the forward-chunked indent scan's behavior
   (boundedness is by construction).
