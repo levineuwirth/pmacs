@@ -1951,7 +1951,7 @@ impl LspManager {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
-            "position": { "line": line, "character": col },
+            "position": self.outbound_position(sid, &uri, line, col),
             "newName": new_name.into(),
         });
         let req_id = self.send_request(sid, "textDocument/rename", params)?;
@@ -1976,7 +1976,7 @@ impl LspManager {
         let uri = uri.into();
         let params = json!({
             "textDocument": { "uri": uri.clone() },
-            "position": { "line": line, "character": col },
+            "position": self.outbound_position(sid, &uri, line, col),
         });
         let req_id = self.send_request(sid, "textDocument/prepareRename", params)?;
         let job_id = self.register_awaiter(sid, req_id, "textDocument/prepareRename", &uri);
