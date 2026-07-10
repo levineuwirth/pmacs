@@ -200,21 +200,19 @@ cmd { name = "region.cancel",
 -- bracketed paste also refreshes. The default bindings are the Emacs
 -- kill/yank set (M-w / C-w / C-y, C-x h), which were all free.
 
+-- The cut/copy/paste trio delegates to the kill ring (Arc 2): kills
+-- accumulate, C-y yanks the head, M-y cycles older entries. Resolution
+-- happens at invoke time, so chunk load order doesn't matter; the
+-- context menu invokes these by name and inherits the ring for free.
 cmd { name = "edit.copy",
-      description = "Copy the active region to the clipboard.",
-      fn = function()
-        if not ed.clipboard_copy() then ed.set_status("no region") end
-      end }
+      description = "Save the active region to the kill ring (and OS clipboard).",
+      fn = function() pmacs.killring.copy() end }
 cmd { name = "edit.cut",
-      description = "Cut the active region to the clipboard.",
-      fn = function()
-        if not ed.clipboard_cut() then ed.set_status("no region") end
-      end }
+      description = "Kill the active region into the kill ring (and OS clipboard).",
+      fn = function() pmacs.killring.cut() end }
 cmd { name = "edit.paste",
-      description = "Paste the clipboard at the cursor, replacing any region.",
-      fn = function()
-        if not ed.clipboard_paste() then ed.set_status("clipboard empty") end
-      end }
+      description = "Yank the most recent kill at the cursor, replacing any region.",
+      fn = function() pmacs.killring.yank() end }
 cmd { name = "edit.select-all",
       description = "Select the whole buffer.",
       fn = function() ed.select_all() end }
@@ -628,7 +626,11 @@ cmd { name = "editor.execute-command",
           history = "command",
           on_accept = function(name)
             if name == nil or name == "" then return end
-            local ok, err = pcall(pmacs.command.invoke, name)
+            -- invoke_interactive records the command boundary (kill
+            -- ring Q#KR2), so chain-sensitive commands behave as under
+            -- Emacs's execute-extended-command: M-x kill-line then C-k
+            -- appends; C-k then M-x kill-line does not.
+            local ok, err = pcall(pmacs.command.invoke_interactive, name)
             if not ok then
               -- mlua's `tostring(err)` includes a Lua stack traceback
               -- separated by newlines. The status line is one row;

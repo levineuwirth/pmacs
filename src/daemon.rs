@@ -1540,6 +1540,30 @@ fn handle_dispatcher_event(
                         editor.dispatch_menu_pointer(source, index, invoke);
                     }
                 }
+                FrontendEvent::Paste {
+                    frontend_id: claimed_fid,
+                    data,
+                } => {
+                    // Kill ring Q#KR10a — the unified paste route, for
+                    // BOTH attachment kinds. Handled here (not in
+                    // `apply_event`) for two reasons:
+                    //
+                    //  1. The semantic input dispatcher used to drop
+                    //     `Paste` entirely, so GPU Ctrl-V was a no-op
+                    //     (pmacs-gpu always negotiates semantic render).
+                    //  2. The authenticated `source` is in scope. The
+                    //     event's `claimed_fid` is client-supplied and
+                    //     not trusted (the CrdtOp / Viewport / Pointer
+                    //     source-trust rule); the old grid arm set
+                    //     `active_frontend` from it, letting a forged id
+                    //     paste into another frontend's active window.
+                    //
+                    // The paste is a non-command edit, so it breaks the
+                    // source's command chain (Q#KR2), and it fires
+                    // `buffer.after-edit` like any other edit (Q#KR10b)
+                    // — previously it never did, so LSP missed pastes.
+                    handle_inbound_paste(editor, source, claimed_fid, &data);
+                }
                 _ => {
                     let term_size = *term_sizes
                         .get(&source)
@@ -1579,10 +1603,21 @@ fn handle_dispatcher_event(
             last_dispatch_idle_sent.remove(&frontend_id);
             last_active_buffer_sent.remove(&frontend_id);
             session_registry.unregister_session(frontend_id);
-            editor
-                .core
-                .borrow_mut()
-                .unregister_frontend_view(frontend_id);
+            {
+                let mut core = editor.core.borrow_mut();
+                core.unregister_frontend_view(frontend_id);
+                // Kill ring Q#KR11: frontend ids are monotonic, so
+                // per-frontend state must not outlive the session.
+                core.command_history.remove(&frontend_id);
+            }
+            // Q#KR11: let Lua modules holding per-frontend tables
+            // (killring sessions / kill flags) drop this id's entries.
+            // The first frontend-lifecycle hook; carries the raw id.
+            let mut args = mlua::MultiValue::new();
+            args.push_back(mlua::Value::Integer(
+                i64::try_from(frontend_id.0).unwrap_or(i64::MAX),
+            ));
+            editor.lua_host.run_hook("frontend.detached", args);
         }
     }
 }
@@ -1914,6 +1949,35 @@ fn validate_remote_crdt_op(
     Ok(())
 }
 
+/// The unified inbound-paste route (kill ring Q#KR10a) — one handler
+/// for grid *and* semantic sessions, keyed by the dispatcher's
+/// authenticated `source`. `claimed` is the event payload's
+/// client-supplied id: never trusted (a forged id must not paste into
+/// another frontend's active window), only logged on mismatch. The
+/// paste breaks the source's command chain (a non-command edit, Q#KR2)
+/// and fires `buffer.after-edit` when the buffer changed (Q#KR10b).
+fn handle_inbound_paste(
+    editor: &mut EditorState,
+    source: FrontendId,
+    claimed: FrontendId,
+    data: &[u8],
+) {
+    if claimed != source {
+        eprintln!(
+            "pmacs daemon: Paste claimed {claimed:?} but came \
+             from {source:?}; using the authenticated source"
+        );
+    }
+    editor.core.borrow_mut().active_frontend = source;
+    editor.with_after_edit_check(|state| {
+        let mut core = state.core.borrow_mut();
+        core.break_command_chain(source);
+        if let Err(e) = core.paste_inbound(data) {
+            eprintln!("pmacs: inbound paste failed: {e}");
+        }
+    });
+}
+
 /// T M10.10 (post-audit) — apply a *pre-validated*
 /// `FrontendEvent::CrdtOp`. Identity, capability, and scope checks
 /// happen upstream in `validate_remote_crdt_op`; this function trusts
@@ -1944,6 +2008,12 @@ fn handle_remote_crdt_op(
     buffer_id: crate::buffer::BufferId,
     op: crate::rope::CrdtOp,
 ) {
+    // Kill ring Q#KR2: an optimistic edit is non-command input — GPU
+    // typing, Enter/Tab, Backspace/Delete all arrive here without ever
+    // touching dispatch_key. It must break the source frontend's
+    // command chain, or `C-k x C-k` on the GPU would append across the
+    // typed character.
+    editor.core.borrow_mut().break_command_chain(source);
     // Effect 1: apply to buffer's CRDT + rope. Capture the Edit
     // (or `None` for an op that imported cleanly but produced no
     // text delta — F17).
@@ -2193,9 +2263,10 @@ fn build_presence_snapshot(editor: &EditorState, frontend_id: FrontendId) -> Pre
 /// arms of [`apply_event`] but takes no `RenderState` — a semantic
 /// frontend lays out locally, so the only state these events touch is
 /// the editor core (cursor, buffer, commands), which `dispatch_key` /
-/// `dispatch_mouse` operate on directly. `Resize` / `Paste` / `Focus`
-/// have no grid-less effect yet and are dropped; `Viewport` / `CrdtOp`
-/// are handled in their own dispatcher arms and never reach here.
+/// `dispatch_mouse` operate on directly. `Resize` / `Focus` have no
+/// grid-less effect yet and are dropped; `Viewport` / `CrdtOp` /
+/// `Paste` (Q#KR10a) are handled in their own dispatcher arms and
+/// never reach here.
 #[allow(clippy::needless_pass_by_value)] // consumes the event, mirroring `apply_event`.
 fn apply_semantic_input_event(editor: &mut EditorState, ev: FrontendEvent, term_size: CellSize) {
     match ev {
@@ -2238,20 +2309,13 @@ fn apply_event(
             render_state.resize(size);
             *term_size = size;
         }
-        FrontendEvent::Paste { frontend_id, data } => {
-            // Q#CM6 — inbound OS paste (terminal bracketed paste, or
-            // GPU Ctrl-V reading `arboard`). Insert at the cursor of the
-            // originating frontend's active window, replacing any region,
-            // and refresh the clipboard slot so a later in-app paste
-            // repeats the same text. (Previously dropped: pmacs had
-            // never honored a paste.)
-            let mut core = editor.core.borrow_mut();
-            core.active_frontend = frontend_id;
-            if let Err(e) = core.paste_inbound(&data) {
-                eprintln!("pmacs: inbound paste failed: {e}");
-            }
-        }
-        FrontendEvent::FocusGained(_)
+        // Q#KR10a — Paste is handled in the dispatcher's own
+        // `FrontendEvent::Paste` arm (unified for grid and semantic
+        // sessions, keyed by the authenticated source), and never
+        // reaches here. Listed explicitly so a future reshuffle can't
+        // silently re-route it through this payload-trusting path.
+        FrontendEvent::Paste { .. }
+        | FrontendEvent::FocusGained(_)
         | FrontendEvent::FocusLost(_)
         // T M11.1: the semantic-frontend viewport declaration. Its
         // consumer is the instance-side projection seam
@@ -2444,6 +2508,188 @@ mod tests {
         assert_eq!(
             count, 1,
             "buffer.after-edit must fire when handle_remote_crdt_op produces a text Edit"
+        );
+    }
+
+    /// Kill ring Q#KR2 — an optimistic edit is non-command input: GPU
+    /// typing arrives here without touching dispatch_key, so it must
+    /// break the source frontend's command chain or `C-k x C-k` on the
+    /// GPU would append across the typed character.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn handle_remote_crdt_op_breaks_the_source_command_chain() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+
+        let mut editor = EditorState::new();
+        let source = FrontendId(7);
+        // A live kill chain for the source frontend...
+        editor
+            .core
+            .borrow_mut()
+            .rotate_command(source, "edit.kill-line");
+        // ...and one for a bystander that must survive.
+        editor
+            .core
+            .borrow_mut()
+            .rotate_command(FrontendId::LOCAL, "edit.kill-line");
+
+        let buffer_id = editor.core.borrow().active_window().buffer_id;
+        {
+            let core = editor.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(2)
+                .expect("upgrade to crdt");
+        }
+        let snapshot_bytes = {
+            let core = editor.core.borrow();
+            let reg = core.registry.borrow();
+            reg.get(buffer_id)
+                .expect("buffer")
+                .crdt_state()
+                .expect("crdt-backed")
+                .export_snapshot()
+                .expect("export snapshot")
+        };
+        let peer = loro::LoroDoc::new();
+        peer.set_peer_id(7).expect("set peer id");
+        peer.import(&snapshot_bytes).expect("import snapshot");
+        let v_before = peer.oplog_vv();
+        peer.get_text("body").insert(0, "x").expect("peer insert");
+        let op_bytes = peer
+            .export(loro::ExportMode::updates(&v_before))
+            .expect("export op");
+
+        handle_remote_crdt_op(
+            &mut editor,
+            source,
+            buffer_id,
+            crate::rope::CrdtOp {
+                peer_id: 7,
+                bytes: op_bytes,
+            },
+        );
+
+        let core = editor.core.borrow();
+        assert!(
+            core.command_history
+                .get(&source)
+                .is_none_or(|b| b.this.is_none()),
+            "the optimistic edit must break the source's chain"
+        );
+        assert_eq!(
+            core.command_history
+                .get(&FrontendId::LOCAL)
+                .and_then(|b| b.this.as_deref()),
+            Some("edit.kill-line"),
+            "a bystander frontend's chain is untouched"
+        );
+    }
+
+    /// Kill ring Q#KR10a — the unified paste route trusts only the
+    /// dispatcher's authenticated source. A forged payload id must not
+    /// paste into another frontend's active window, and the paste
+    /// breaks the SOURCE's chain (not the claimed frontend's) and
+    /// fires `buffer.after-edit` exactly once.
+    #[test]
+    fn inbound_paste_uses_authenticated_source_not_the_claimed_id() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use crate::text_view::TextView;
+        use crate::window::{FrontendView, Layout, Window, WindowId};
+
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .eval(
+                Some("test"),
+                r#"
+                _G.PASTE_AFTER_EDIT = 0
+                pmacs.hook.add("buffer.after-edit", function()
+                    _G.PASTE_AFTER_EDIT = _G.PASTE_AFTER_EDIT + 1
+                end)
+                "#,
+            )
+            .expect("install after-edit hook");
+
+        // Give the attacker frontend its OWN view onto its own buffer,
+        // so "which window did the text land in" is observable.
+        let source = FrontendId(7);
+        let victim = FrontendId::LOCAL;
+        let attacker_buf = {
+            let core = editor.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.create("attacker-buffer")
+        };
+        {
+            let mut core = editor.core.borrow_mut();
+            let tv = {
+                let reg = core.registry.borrow();
+                TextView::new(reg.get(attacker_buf).expect("attacker buffer"))
+            };
+            let wid = WindowId::next();
+            core.windows.insert(wid, Window::new(wid, attacker_buf, tv));
+            core.register_frontend_view(
+                source,
+                FrontendView {
+                    layout: Layout::single(wid),
+                    active: wid,
+                },
+            );
+        }
+        let victim_buf = editor.core.borrow().active_window().buffer_id;
+        // Seed a live chain on the victim: the forged paste must not
+        // break it (only the authenticated source's chain breaks).
+        editor
+            .core
+            .borrow_mut()
+            .rotate_command(victim, "edit.kill-line");
+
+        // The payload CLAIMS to be the victim.
+        handle_inbound_paste(&mut editor, source, victim, b"FORGED");
+
+        let core = editor.core.borrow();
+        let text_of = |id| {
+            let reg = core.registry.borrow();
+            let buf = reg.get(id).expect("buffer");
+            let len = buf.len();
+            let mut out = vec![0u8; usize::try_from(len).unwrap_or(0)];
+            if len > 0 {
+                buf.snapshot_rope().slice(0, len, &mut out);
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        assert!(
+            text_of(attacker_buf).contains("FORGED"),
+            "the paste lands in the AUTHENTICATED source's active window"
+        );
+        assert!(
+            !text_of(victim_buf).contains("FORGED"),
+            "a forged payload id must not paste into the claimed frontend's window"
+        );
+        assert!(
+            core.command_history
+                .get(&source)
+                .is_none_or(|b| b.this.is_none()),
+            "the paste breaks the source's chain"
+        );
+        assert_eq!(
+            core.command_history
+                .get(&victim)
+                .and_then(|b| b.this.as_deref()),
+            Some("edit.kill-line"),
+            "the claimed frontend's chain is untouched"
+        );
+        drop(core);
+        let count = editor
+            .lua_host
+            .eval(Some("test-readback"), "return _G.PASTE_AFTER_EDIT")
+            .expect("read counter");
+        assert!(
+            matches!(count, mlua::Value::Integer(1)),
+            "paste fires buffer.after-edit exactly once, got {count:?}"
         );
     }
 

@@ -1198,7 +1198,7 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
                 bypass_intercept,
             )?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
-            Ok(())
+            effective_edit_triple(&edit)
         },
     );
 
@@ -1209,7 +1209,7 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
             let bypass_intercept = parse_bypass_intercept(opts.as_ref())?;
             let edit = run_buffer_edit(lua, this.0, EditOp::Delete { range }, bypass_intercept)?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
-            Ok(())
+            effective_edit_triple(&edit)
         },
     );
 
@@ -1229,7 +1229,7 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
                 bypass_intercept,
             )?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
-            Ok(())
+            effective_edit_triple(&edit)
         },
     );
 }
@@ -1241,6 +1241,22 @@ fn parse_bypass_intercept(opts: Option<&Table>) -> mlua::Result<bool> {
             .unwrap_or(false),
         None => false,
     })
+}
+
+/// The mutators' Lua return value: the **effective** edit after buffer
+/// intercepts ran — `(start, end, inserted_len)` of the operation that
+/// was actually applied (kill ring review round 4). An intercept may
+/// legally rewrite an op's range; callers that must know exactly what
+/// happened (killring's C-k / M-y) compare these against what they
+/// requested instead of inferring from length deltas, which an
+/// equal-length rewrite defeats.
+fn effective_edit_triple(edit: &crate::rope::Edit) -> mlua::Result<(i64, i64, i64)> {
+    let cvt = |v: u64| i64::try_from(v).map_err(mlua::Error::external);
+    Ok((
+        cvt(edit.range.start)?,
+        cvt(edit.range.end)?,
+        cvt(edit.inserted_len)?,
+    ))
 }
 
 fn run_buffer_edit(
@@ -4638,6 +4654,42 @@ fn install_command_module(lua: &Lua, commands: &SharedCommandRegistry) -> mlua::
                 // a command body that itself calls back into
                 // pmacs.command.invoke would otherwise hit a
                 // double-mut-borrow panic.
+                let body = {
+                    let r = cmds.borrow();
+                    r.get(&name)
+                        .ok_or_else(|| {
+                            mlua::Error::external(CommandError::NotFound { name: name.clone() })
+                        })?
+                        .body
+                        .clone()
+                };
+                body.call::<Variadic<Value>>(args)
+            })?,
+        )?;
+    }
+
+    {
+        // invoke_interactive(name, ...): like `invoke`, but records a
+        // command boundary first (kill ring Q#KR2) — `last = this;
+        // this = name` for the active frontend. Used by
+        // `editor.execute-command` (M-x) so the invoked command's
+        // chain semantics match Emacs's `execute-extended-command`
+        // (which sets `this-command`): `M-x edit.kill-line` then `C-k`
+        // appends, while `C-k` then `M-x edit.kill-line` does not.
+        //
+        // Plain `invoke` deliberately stamps NOTHING: it is a public
+        // programmatic API called from wrappers, hooks, and async
+        // callbacks, and must never pollute interactive command
+        // history.
+        let cmds = commands.clone();
+        command.set(
+            "invoke_interactive",
+            lua.create_function(move |lua, (name, args): (String, Variadic<Value>)| {
+                if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                    let mut core = core.borrow_mut();
+                    let fid = core.active_frontend;
+                    core.rotate_command(fid, &name);
+                }
                 let body = {
                     let r = cmds.borrow();
                     r.get(&name)
@@ -10936,6 +10988,18 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         )?;
     }
     {
+        // last_command(): the active frontend's previous interactive
+        // command — Emacs's `last-command` as seen from inside the
+        // running command (kill ring Q#KR2). `nil` after a non-command
+        // input (optimistic edit, pointer gesture, paste, unbound key)
+        // broke the chain.
+        let cc = core.clone();
+        editor.set(
+            "last_command",
+            lua.create_function(move |_, ()| Ok(cc.borrow().last_command().map(str::to_owned)))?,
+        )?;
+    }
+    {
         // view_top(): the active window's first visible source line.
         // The saveplace getter (Arc 3) — pairs with set_view_top so a
         // reopen restores the viewport, not just the cursor.
@@ -11104,6 +11168,35 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
                 cc.borrow_mut()
                     .clipboard_paste()
                     .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+    {
+        // clipboard_set(bytes): set the slot + queue the OS publish to
+        // the acting frontend (kill ring Q#KR1). The ring's kills have
+        // no region for clipboard_copy to read.
+        let cc = core.clone();
+        editor.set(
+            "clipboard_set",
+            lua.create_function(move |_, bytes: mlua::String| {
+                cc.borrow_mut().clipboard_set(bytes.as_bytes().to_vec());
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // clipboard_get() -> string?: the slot's bytes (kill ring
+        // Q#KR6 — yank's "did external content arrive via a paste
+        // since our last kill" check). nil when empty.
+        let cc = core.clone();
+        editor.set(
+            "clipboard_get",
+            lua.create_function(move |lua, ()| {
+                let cc = cc.borrow();
+                match cc.clipboard_get() {
+                    Some(bytes) => Ok(Some(lua.create_string(bytes)?)),
+                    None => Ok(None),
+                }
             })?,
         )?;
     }

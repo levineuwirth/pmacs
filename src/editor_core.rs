@@ -123,6 +123,25 @@ pub struct QueryReplaceSession {
     found_any: bool,
 }
 
+/// One frontend's command boundary — Emacs's `this-command` /
+/// `last-command` pair (kill ring, Q#KR2).
+///
+/// `this` is the command currently (or most recently) executing for the
+/// frontend; `last` is the one before it. A chain-sensitive command
+/// (kill append, `M-y`) reads `last` *while it runs* — its own rotation
+/// already moved its predecessor there. `this = None` is a broken
+/// chain: some non-command input (an optimistic CRDT edit, a pointer
+/// gesture, a paste, an unbound key) intervened, so the next rotation
+/// makes `last = None` and every chain check fails.
+#[derive(Debug, Clone, Default)]
+pub struct CommandBoundary {
+    /// The command executing now / most recently, or `None` after a
+    /// non-command input.
+    pub this: Option<String>,
+    /// The command before `this`.
+    pub last: Option<String>,
+}
+
 /// The world state mutated by editor commands.
 pub struct EditorCore {
     /// Shared buffer registry. The registry is the canonical owner
@@ -217,6 +236,15 @@ pub struct EditorCore {
     /// frontend, which writes the OS clipboard (OSC 52 in the TUI,
     /// `arboard` in the GPU). Drained per-tick like `pending_crdt_ops`.
     pending_clipboard: Option<(FrontendId, Vec<u8>)>,
+    /// Per-frontend command boundaries (kill ring, Q#KR2) — Emacs's
+    /// `this-command` / `last-command`, tracked **per frontend**: two
+    /// attached frontends interleave their own command streams, and a
+    /// kill chain or yank session on frontend A must not survive into
+    /// frontend B's checks. Every input path updates this — commands
+    /// rotate; non-command inputs (optimistic CRDT edits, pointer
+    /// gestures, pastes, unbound keys) break the chain. Entries are
+    /// pruned on `SessionDetached` (Q#KR11).
+    pub command_history: HashMap<FrontendId, CommandBoundary>,
     /// Open context menu (Q#CM1), or `None` when closed. Shared
     /// `Arc<Mutex>` so the TUI [`crate::menu::MenuView`] overlay renders
     /// from the same state the dispatch path mutates — the menu twin of
@@ -280,6 +308,7 @@ impl EditorCore {
             search: None,
             clipboard_slot: Vec::new(),
             pending_clipboard: None,
+            command_history: HashMap::new(),
             menu: crate::menu::make_shared_menu(),
             completion_popup: crate::completion::make_shared_popup(),
             round_trip_buffers: std::collections::HashSet::new(),
@@ -2043,6 +2072,38 @@ impl EditorCore {
         Some(out)
     }
 
+    // ---- command boundaries (kill ring, Q#KR2) --------------------------
+
+    /// Record `name` as `fid`'s executing command: `last = this;
+    /// this = name`. Called once per interactive command dispatch —
+    /// keybound commands, the self-insert fallback, menu items, and
+    /// `pmacs.command.invoke_interactive` (`M-x`).
+    pub fn rotate_command(&mut self, fid: FrontendId, name: &str) {
+        let entry = self.command_history.entry(fid).or_default();
+        entry.last = entry.this.take();
+        entry.this = Some(name.to_owned());
+    }
+
+    /// Break `fid`'s command chain: a non-command input happened (an
+    /// optimistic CRDT edit, a point-moving pointer gesture, an inbound
+    /// paste, an unbound key). Sets `this = None`, so the next
+    /// rotation yields `last = None` and every chain-sensitive check
+    /// (kill append, `M-y`) fails.
+    pub fn break_command_chain(&mut self, fid: FrontendId) {
+        self.command_history.entry(fid).or_default().this = None;
+    }
+
+    /// The active frontend's previous command — Emacs's `last-command`
+    /// as observed *from inside* the currently-running command (its own
+    /// rotation already happened).
+    #[must_use]
+    pub fn last_command(&self) -> Option<&str> {
+        self.command_history
+            .get(&self.active_frontend)?
+            .last
+            .as_deref()
+    }
+
     /// Copy the active region into the clipboard slot and queue an
     /// outbound OS-clipboard publish to the originating frontend.
     /// Returns `false` (a no-op) when there is no region.
@@ -2067,6 +2128,28 @@ impl EditorCore {
         }
         self.delete_region()?;
         Ok(true)
+    }
+
+    /// Set the clipboard slot to arbitrary bytes and queue the
+    /// OS-clipboard publish to the acting frontend (kill ring Q#KR1).
+    /// The ring's kills have no region for [`Self::clipboard_copy`] to
+    /// read (`C-k`'s killed line, an appended chain), so the Lua ring
+    /// pushes the exact bytes here.
+    pub fn clipboard_set(&mut self, bytes: Vec<u8>) {
+        self.clipboard_slot.clone_from(&bytes);
+        self.pending_clipboard = Some((self.active_frontend, bytes));
+    }
+
+    /// The clipboard slot's current bytes, or `None` when empty (kill
+    /// ring Q#KR6 — the yank-time "did external content arrive via a
+    /// paste since our last kill" check).
+    #[must_use]
+    pub fn clipboard_get(&self) -> Option<&[u8]> {
+        if self.clipboard_slot.is_empty() {
+            None
+        } else {
+            Some(&self.clipboard_slot)
+        }
     }
 
     /// Paste the clipboard slot at the cursor, replacing the active
