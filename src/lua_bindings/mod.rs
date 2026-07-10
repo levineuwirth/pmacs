@@ -1198,7 +1198,7 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
                 bypass_intercept,
             )?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
-            Ok(())
+            effective_edit_triple(&edit)
         },
     );
 
@@ -1209,7 +1209,7 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
             let bypass_intercept = parse_bypass_intercept(opts.as_ref())?;
             let edit = run_buffer_edit(lua, this.0, EditOp::Delete { range }, bypass_intercept)?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
-            Ok(())
+            effective_edit_triple(&edit)
         },
     );
 
@@ -1229,7 +1229,7 @@ fn add_mutation_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
                 bypass_intercept,
             )?;
             notify_buffer_edit_to_windows(lua, this.0, &edit);
-            Ok(())
+            effective_edit_triple(&edit)
         },
     );
 }
@@ -1241,6 +1241,22 @@ fn parse_bypass_intercept(opts: Option<&Table>) -> mlua::Result<bool> {
             .unwrap_or(false),
         None => false,
     })
+}
+
+/// The mutators' Lua return value: the **effective** edit after buffer
+/// intercepts ran — `(start, end, inserted_len)` of the operation that
+/// was actually applied (kill ring review round 4). An intercept may
+/// legally rewrite an op's range; callers that must know exactly what
+/// happened (killring's C-k / M-y) compare these against what they
+/// requested instead of inferring from length deltas, which an
+/// equal-length rewrite defeats.
+fn effective_edit_triple(edit: &crate::rope::Edit) -> mlua::Result<(i64, i64, i64)> {
+    let cvt = |v: u64| i64::try_from(v).map_err(mlua::Error::external);
+    Ok((
+        cvt(edit.range.start)?,
+        cvt(edit.range.end)?,
+        cvt(edit.inserted_len)?,
+    ))
 }
 
 fn run_buffer_edit(

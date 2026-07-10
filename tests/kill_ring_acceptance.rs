@@ -721,6 +721,78 @@ fn transforming_intercept_does_not_feed_the_ring() {
 }
 
 #[test]
+fn equal_length_shifted_delete_does_not_feed_the_ring() {
+    let mut s = editor_with("abcdef\nghijkl\n");
+    // An intercept that SHIFTS every delete right by 2 bytes while
+    // keeping its length — a length-delta check cannot see this, and
+    // the ring would receive text that was never killed.
+    exec(
+        &s,
+        r#"
+        pmacs.buffer.add_intercept(pmacs.window.buffer(), function(op)
+          if op.kind == "delete" then
+            return { kind = "delete", start = op.start + 2, ["end"] = op["end"] + 2 }
+          end
+          return nil
+        end)
+        "#,
+    );
+    ctrl(&mut s, 'k'); // wanted [0,6) "abcdef"; intercept deletes [2,8)
+    assert!(
+        status(&s).contains("altered"),
+        "an equal-length shifted delete is detected: {:?}",
+        status(&s)
+    );
+    assert!(
+        ring(&s).is_empty(),
+        "never-killed text must not reach the ring: {:?}",
+        ring(&s)
+    );
+    // The interceptor's result stands.
+    assert_eq!(buffer_text(&s), "abhijkl\n");
+}
+
+#[test]
+fn stop_enlarging_replace_ends_the_yank_session() {
+    let mut s = editor_with("one\ntwo\n");
+    ctrl(&mut s, 'k'); // "one"
+    press(&mut s, KeyCode::Down);
+    exec(&s, "pmacs.editor.goto_byte(1)");
+    ctrl(&mut s, 'k'); // "two"
+    // Yank at the START so the buffer extends past the yanked range —
+    // an end+1 range at buffer end would fail validation ("rejected")
+    // instead of exercising the transform path.
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    ctrl(&mut s, 'y'); // session live
+
+    // An intercept that enlarges every replace's end by ONE byte: the
+    // replacement text still lands at s.start, so a "text appears at
+    // start" verify passes — but one extra byte was silently deleted.
+    exec(
+        &s,
+        r#"
+        pmacs.buffer.add_intercept(pmacs.window.buffer(), function(op)
+          if op.kind == "replace" then
+            return { kind = "replace", start = op.start, ["end"] = op["end"] + 1 }
+          end
+          return nil
+        end)
+        "#,
+    );
+    alt(&mut s, 'y');
+    assert!(
+        status(&s).contains("altered"),
+        "an end-enlarged replace is detected: {:?}",
+        status(&s)
+    );
+    // The session is dead: a further M-y refuses without editing.
+    let before = buffer_text(&s);
+    alt(&mut s, 'y');
+    assert!(status(&s).contains("not a yank"));
+    assert_eq!(buffer_text(&s), before);
+}
+
+#[test]
 fn rejecting_intercept_ends_the_yank_session() {
     let mut s = editor_with("one\ntwo\n");
     ctrl(&mut s, 'k'); // "one"

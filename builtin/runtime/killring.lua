@@ -116,21 +116,26 @@ function pmacs.killring.cut()
     ed.set_status("no region")
     return false
   end
-  local text = buf:slice(region.start, region["end"])
-  -- Same intercept discipline as kill_line: a rejected or transformed
-  -- delete must not feed the ring or leave a live chain.
-  local len_before = buf:len()
-  local dok, deleted = pcall(ed.delete_region)
-  if not dok or not deleted then
+  local rstart, rstop = region.start, region["end"]
+  local text = buf:slice(rstart, rstop)
+  -- Same intercept discipline as kill_line, via the mutator so the
+  -- EFFECTIVE edit is checkable exactly. The selection is cleared
+  -- explicitly (ed.delete_region did that as a side effect).
+  local dok, estart, estop, einserted = pcall(function()
+    return buf:delete(rstart, rstop)
+  end)
+  ed.clear_selection()
+  if not dok then
     fail_kill(fid)
-    ed.set_status(dok and "no region" or "kill rejected by buffer intercept")
+    ed.set_status("kill rejected by buffer intercept")
     return false
   end
-  if len_before - buf:len() ~= #text then
+  if estart ~= rstart or estop ~= rstop or einserted ~= 0 then
     fail_kill(fid)
     ed.set_status("kill altered by buffer intercept; ring not updated")
     return false
   end
+  ed.goto_byte(rstart)
   kill_push(fid, text)
   return true
 end
@@ -199,16 +204,19 @@ function pmacs.killring.kill_line()
   -- kill chain (or the next C-k would append to a kill that never
   -- happened); a transformation means the bytes actually removed are
   -- not `text`, so pushing `text` would put never-killed bytes on the
-  -- ring and the OS clipboard. Verify by length delta: only a clean,
-  -- untransformed delete feeds the ring.
-  local len_before = buf:len()
-  local ok = pcall(function() buf:delete(cursor, kill_to) end)
+  -- ring and the OS clipboard. The mutators return the EFFECTIVE edit
+  -- (post-intercept start/end/inserted), so this is an exact check —
+  -- a length delta would be defeated by an equal-length rewrite to a
+  -- different range.
+  local ok, estart, estop, einserted = pcall(function()
+    return buf:delete(cursor, kill_to)
+  end)
   if not ok then
     fail_kill(fid)
     ed.set_status("kill rejected by buffer intercept")
     return false
   end
-  if len_before - buf:len() ~= #text then
+  if estart ~= cursor or estop ~= kill_to or einserted ~= 0 then
     fail_kill(fid)
     ed.set_status("kill altered by buffer intercept; ring not updated")
     return false
@@ -301,24 +309,22 @@ function pmacs.killring.yank_pop()
     return false
   end
   local entry = ring[pos % #ring + 1]
-  -- The replace runs buffer intercepts, which may REJECT by erroring.
-  -- A rejection must still end the session — letting the error
-  -- propagate would leave `sessions[fid]` live, and a second M-y
-  -- could reuse the supposedly-invalid session.
-  local rok = pcall(function() buf:replace(s.start, s.stop, entry.text) end)
+  -- The replace runs buffer intercepts, which may REJECT (error) or
+  -- TRANSFORM. A rejection must still end the session — letting the
+  -- error propagate would leave `sessions[fid]` live for a second M-y
+  -- to reuse. And the verification must be EXACT: the mutator returns
+  -- the effective edit, and any deviation from the requested
+  -- (start, stop, #text) — e.g. an intercept enlarging `stop` by one
+  -- byte, silently deleting extra content — ends the session (the
+  -- interceptor's result stands; accepted post-hoc semantics, Q#KR7).
+  local rok, estart, estop, einserted = pcall(function()
+    return buf:replace(s.start, s.stop, entry.text)
+  end)
   if not rok then
     drop_session(fid, "yank-pop rejected by buffer intercept")
     return false
   end
-  -- Verify the applied edit: buffer intercepts may alter or reject a
-  -- replace. Accepted post-hoc semantics (Q#KR7): on mismatch the
-  -- interceptor's result stands, the session ends, and we say so.
-  -- pcall'd for the same reason as the guard above: an intercept that
-  -- shrank the buffer must invalidate, not throw.
-  local vok, applied = pcall(function()
-    return buf:slice(s.start, s.start + #entry.text)
-  end)
-  if not vok or applied ~= entry.text then
+  if estart ~= s.start or estop ~= s.stop or einserted ~= #entry.text then
     drop_session(fid, "yank-pop altered by buffer intercept; stopped")
     return false
   end
