@@ -2003,11 +2003,16 @@ impl LspManager {
         diagnostics: &[Value],
     ) -> Result<JobId, String> {
         let uri = uri.into();
+        // Same encoding rule as every outbound range: columns are pmacs
+        // byte offsets and must convert to the negotiated units — a
+        // UTF-16 server receiving byte columns resolves the wrong range
+        // for non-ASCII lines (same bug class as the semantic-token
+        // range fix in this change).
         let params = json!({
             "textDocument": { "uri": uri.clone() },
             "range": {
-                "start": { "line": start_line, "character": start_col },
-                "end":   { "line": end_line,   "character": end_col   },
+                "start": self.outbound_position(sid, &uri, start_line, start_col),
+                "end": self.outbound_position(sid, &uri, end_line, end_col),
             },
             "context": { "diagnostics": diagnostics },
         });
@@ -2038,7 +2043,7 @@ impl LspManager {
             "textDocument": { "uri": uri.clone() },
             "range": {
                 "start": self.outbound_position(sid, &uri, start_line, start_col),
-                "end":   self.outbound_position(sid, &uri, end_line, end_col),
+                "end": self.outbound_position(sid, &uri, end_line, end_col),
             },
         });
         let req_id = self.send_request(sid, "textDocument/inlayHint", params)?;
@@ -2081,11 +2086,17 @@ impl LspManager {
         end_col: u32,
     ) -> Result<JobId, String> {
         let uri = uri.into();
+        // Columns arrive as pmacs byte offsets; convert per the
+        // negotiated position encoding, exactly like the inlay-hint
+        // range. A UTF-16 server receiving raw byte columns gets an
+        // invalid end character for non-ASCII text ("é" is two bytes
+        // but one UTF-16 unit) and may reject the request — fatal for
+        // a range-only provider whose ONLY pull path this is.
         let params = json!({
             "textDocument": { "uri": uri.clone() },
             "range": {
-                "start": { "line": start_line, "character": start_col },
-                "end":   { "line": end_line,   "character": end_col   },
+                "start": self.outbound_position(sid, &uri, start_line, start_col),
+                "end": self.outbound_position(sid, &uri, end_line, end_col),
             },
         });
         let req_id = self.send_request(sid, "textDocument/semanticTokens/range", params)?;
