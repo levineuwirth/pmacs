@@ -344,6 +344,9 @@ local function active_buffer_language()
   local ext = path:match("%.([%w_]+)$")
   return ext and pmacs.lsp.filetypes[ext] or nil
 end
+-- Public: the comment-toggle module (and future language-aware Lua)
+-- reuses this grammar+filetypes chain instead of replicating it.
+pmacs.lsp.active_buffer_language = active_buffer_language
 
 -- Directory component of a path, or nil if it has none.
 local function dir_of(path)

@@ -333,6 +333,12 @@ impl EditorState {
                 include_str!("../builtin/runtime/killring.lua"),
             )
             .expect("load killring builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/comment.lua"),
+                include_str!("../builtin/runtime/comment.lua"),
+            )
+            .expect("load comment builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
