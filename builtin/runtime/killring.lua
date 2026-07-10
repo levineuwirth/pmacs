@@ -117,9 +117,18 @@ function pmacs.killring.cut()
     return false
   end
   local text = buf:slice(region.start, region["end"])
-  if not ed.delete_region() then
+  -- Same intercept discipline as kill_line: a rejected or transformed
+  -- delete must not feed the ring or leave a live chain.
+  local len_before = buf:len()
+  local dok, deleted = pcall(ed.delete_region)
+  if not dok or not deleted then
     fail_kill(fid)
-    ed.set_status("no region")
+    ed.set_status(dok and "no region" or "kill rejected by buffer intercept")
+    return false
+  end
+  if len_before - buf:len() ~= #text then
+    fail_kill(fid)
+    ed.set_status("kill altered by buffer intercept; ring not updated")
     return false
   end
   kill_push(fid, text)
@@ -185,7 +194,25 @@ function pmacs.killring.kill_line()
     kill_to = eol or len -- rest of the line (or of a final bare line)
   end
   local text = buf:slice(cursor, kill_to)
-  buf:delete(cursor, kill_to)
+  -- The delete runs the buffer's edit intercepts, which may REJECT
+  -- (error) or TRANSFORM the operation. A rejection must clear the
+  -- kill chain (or the next C-k would append to a kill that never
+  -- happened); a transformation means the bytes actually removed are
+  -- not `text`, so pushing `text` would put never-killed bytes on the
+  -- ring and the OS clipboard. Verify by length delta: only a clean,
+  -- untransformed delete feeds the ring.
+  local len_before = buf:len()
+  local ok = pcall(function() buf:delete(cursor, kill_to) end)
+  if not ok then
+    fail_kill(fid)
+    ed.set_status("kill rejected by buffer intercept")
+    return false
+  end
+  if len_before - buf:len() ~= #text then
+    fail_kill(fid)
+    ed.set_status("kill altered by buffer intercept; ring not updated")
+    return false
+  end
   kill_push(fid, text)
   return true
 end
@@ -274,7 +301,15 @@ function pmacs.killring.yank_pop()
     return false
   end
   local entry = ring[pos % #ring + 1]
-  buf:replace(s.start, s.stop, entry.text)
+  -- The replace runs buffer intercepts, which may REJECT by erroring.
+  -- A rejection must still end the session — letting the error
+  -- propagate would leave `sessions[fid]` live, and a second M-y
+  -- could reuse the supposedly-invalid session.
+  local rok = pcall(function() buf:replace(s.start, s.stop, entry.text) end)
+  if not rok then
+    drop_session(fid, "yank-pop rejected by buffer intercept")
+    return false
+  end
   -- Verify the applied edit: buffer intercepts may alter or reject a
   -- replace. Accepted post-hoc semantics (Q#KR7): on mismatch the
   -- interceptor's result stands, the session ends, and we say so.

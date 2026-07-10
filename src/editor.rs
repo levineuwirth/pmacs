@@ -1429,6 +1429,12 @@ impl EditorState {
                 return;
             }
             core.set_active_window_id(win_id);
+            // A context right-click is a pointer gesture (kill ring
+            // Q#KR2): it must break the chain like the grid path's
+            // right-click does. The semantic dispatcher routes
+            // PointerKind::Context here directly, bypassing
+            // dispatch_pointer's break.
+            core.break_command_chain(frontend_id);
             if core.active_region().is_none() {
                 let snapped = {
                     let registry = core.registry.clone();

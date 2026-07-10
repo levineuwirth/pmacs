@@ -640,6 +640,131 @@ fn cap_is_validated_and_shrink_trims() {
 }
 
 #[test]
+fn semantic_context_right_click_breaks_the_chain() {
+    let mut s = editor_with("one\ntwo\n");
+    ctrl(&mut s, 'k'); // "one" — chain live
+    // The semantic dispatcher routes PointerKind::Context straight to
+    // open_menu_at_byte, bypassing dispatch_pointer — the GPU
+    // right-click path.
+    let buf_id = s.core.borrow().active_window().buffer_id;
+    s.open_menu_at_byte(FrontendId::LOCAL, buf_id, 3);
+    // Dismiss the menu without invoking anything.
+    s.core.borrow_mut().menu_close();
+    ctrl(&mut s, 'k');
+    assert_eq!(
+        ring(&s).len(),
+        2,
+        "a semantic right-click must break the kill chain: {:?}",
+        ring(&s)
+    );
+}
+
+#[test]
+fn rejecting_intercept_clears_the_kill_chain() {
+    let mut s = editor_with("one\ntwo\nthree\n");
+    ctrl(&mut s, 'k'); // "one" — chain live, ring ["one"]
+    // An intercept that rejects exactly the NEXT edit, then allows.
+    exec(
+        &s,
+        r#"
+        _G.reject_once = true
+        pmacs.buffer.add_intercept(pmacs.window.buffer(), function(_op)
+          if _G.reject_once then
+            _G.reject_once = false
+            error("rejected by test intercept")
+          end
+          return nil
+        end)
+        "#,
+    );
+    ctrl(&mut s, 'k'); // rejected — must clear the chain, push nothing
+    assert!(
+        status(&s).contains("rejected"),
+        "rejection is reported: {:?}",
+        status(&s)
+    );
+    assert_eq!(ring(&s), vec!["one"], "a rejected kill feeds nothing");
+    ctrl(&mut s, 'k'); // allowed again — must push FRESH, not append
+    assert_eq!(
+        ring(&s),
+        vec!["\n", "one"],
+        "the chain did not survive the rejection"
+    );
+}
+
+#[test]
+fn transforming_intercept_does_not_feed_the_ring() {
+    let mut s = editor_with("alpha\nbeta\n");
+    // An intercept that shrinks every delete to its first byte: the
+    // bytes actually removed are not what C-k sliced, so pushing the
+    // sliced text would put never-killed bytes on the ring.
+    exec(
+        &s,
+        r#"
+        pmacs.buffer.add_intercept(pmacs.window.buffer(), function(op)
+          if op.kind == "delete" then
+            return { kind = "delete", start = op.start, ["end"] = op.start + 1 }
+          end
+          return nil
+        end)
+        "#,
+    );
+    ctrl(&mut s, 'k');
+    assert!(
+        status(&s).contains("altered"),
+        "transformation is reported: {:?}",
+        status(&s)
+    );
+    assert!(ring(&s).is_empty(), "a transformed kill feeds nothing");
+    // The interceptor's result stands (accepted post-hoc semantics).
+    assert_eq!(buffer_text(&s), "lpha\nbeta\n");
+}
+
+#[test]
+fn rejecting_intercept_ends_the_yank_session() {
+    let mut s = editor_with("one\ntwo\n");
+    ctrl(&mut s, 'k'); // "one"
+    press(&mut s, KeyCode::Down);
+    exec(&s, "pmacs.editor.goto_byte(1)");
+    ctrl(&mut s, 'k'); // "two"
+    assert_eq!(ring(&s).len(), 2);
+
+    let len: i64 = eval(&s, "local b = pmacs.window.buffer(); return b:len()");
+    exec(&s, &format!("pmacs.editor.goto_byte({len})"));
+    ctrl(&mut s, 'y'); // session live
+
+    // Reject the next edit (the M-y replace).
+    exec(
+        &s,
+        r#"
+        _G.reject_once = true
+        pmacs.buffer.add_intercept(pmacs.window.buffer(), function(_op)
+          if _G.reject_once then
+            _G.reject_once = false
+            error("rejected by test intercept")
+          end
+          return nil
+        end)
+        "#,
+    );
+    alt(&mut s, 'y'); // rejected — must END the session, not throw through
+    assert!(
+        status(&s).contains("rejected"),
+        "rejection reported: {:?}",
+        status(&s)
+    );
+    // A second M-y must refuse on "no session", not reuse the dead one.
+    let before = buffer_text(&s);
+    alt(&mut s, 'y');
+    assert!(
+        status(&s).contains("not a yank"),
+        "the rejected session is gone: {:?}",
+        status(&s)
+    );
+    assert_eq!(buffer_text(&s), before, "no splice from a dead session");
+}
+
+#[test]
 fn frontend_detached_drops_per_frontend_state() {
     let mut s = editor_with("one\ntwo\n");
     ctrl_as(&mut s, B, 'k'); // B kills → B has last_kill_id
