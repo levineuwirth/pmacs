@@ -32,6 +32,11 @@
 //!   `rootUri` received in `initialize` to the file named by
 //!   `PMACS_FAKE_LSP_ROOT_SINK`, so a test can assert the
 //!   auto-attach path derives the project root from the opened file.
+//! * If launched with `PMACS_FAKE_LSP_MODE=fullonly`: advertises a
+//!   full-only `semanticTokensProvider` (`"full": true`, no delta
+//!   member) and rejects `semanticTokens/full/delta` with a JSON-RPC
+//!   error — a conforming full-only server, for testing that the
+//!   client never requests delta without the negotiated capability.
 //! * If launched with `PMACS_FAKE_LSP_MODE=sighelp`: additionally
 //!   advertises `signatureHelpProvider` with `(` / `,` triggers, so a
 //!   test can drive the Arc 1d auto-trigger. Every other mode omits the
@@ -54,6 +59,8 @@ fn main() {
     let mut stdout = io::stdout().lock();
     let mut crashed_after_init = false;
     let mut open_docs: HashMap<String, String> = HashMap::new();
+    // `fullonly` observability: counts /full responses (rid-1, rid-2…).
+    let mut full_count: u32 = 0;
     loop {
         let body = match read_frame(&mut stdin) {
             Ok(Some(b)) => b,
@@ -138,7 +145,12 @@ fn main() {
                                     "tokenTypes": ["namespace", "function", "variable"],
                                     "tokenModifiers": ["declaration", "readonly"]
                                 },
-                                "full": true
+                                // The default mode implements /full/delta, so
+                                // it truthfully NEGOTIATES delta. Clients may
+                                // only send /full/delta when `full` is
+                                // `{ "delta": true }`; a bare `true` (the
+                                // `fullonly` override below) is full-only.
+                                "full": { "delta": true }
                             }
                         },
                         "serverInfo": { "name": "pmacs-fake-lsp", "version": "0.1.0" }
@@ -158,13 +170,25 @@ fn main() {
                     resp["result"]["capabilities"]["renameProvider"] =
                         serde_json::json!({ "prepareProvider": true });
                 }
+                // `fullonly`: a conforming FULL-ONLY semantic-token
+                // server — advertises `"full": true` (no delta member)
+                // and REJECTS /full/delta below. Exercises the client
+                // rule that a stored resultId alone must never cause a
+                // delta request.
+                if mode == "fullonly" {
+                    resp["result"]["capabilities"]["semanticTokensProvider"]["full"] =
+                        serde_json::Value::from(true);
+                }
                 // Arc 1d: advertise signature help only in `sighelp`, so
                 // every other mode keeps the no-auto-trigger path (the
                 // `textDocument/signatureHelp` arm below still answers
                 // the manual `M-x lsp.signature-help` in any mode).
                 if mode == "sighelp" {
+                    // "«" (U+00AB, 2 UTF-8 bytes) exercises the rule
+                    // that LSP trigger characters are strings, not
+                    // ASCII bytes.
                     resp["result"]["capabilities"]["signatureHelpProvider"] = serde_json::json!({
-                        "triggerCharacters": ["("],
+                        "triggerCharacters": ["(", "\u{ab}"],
                         "retriggerCharacters": [","]
                     });
                 }
@@ -749,6 +773,23 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/full", Some(idv)) => {
+                // `fullonly`: bump the resultId per request so a test
+                // can observe WHICH pull refreshed the store — a
+                // repull that wrongly went to /full/delta is rejected
+                // and leaves the previous rid in place.
+                if mode == "fullonly" {
+                    full_count += 1;
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "result": {
+                            "resultId": format!("rid-{full_count}"),
+                            "data": [0, 0, 4, 1, 1, 0, 5, 3, 2, 0, 2, 2, 7, 0, 2]
+                        }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5: relative-encoded `data`. Three tokens:
                 //   [0,0,4,1,1]  line 0 col 0 len 4, function, decl
                 //   [0,5,3,2,0]  same line col 5 len 3, variable
@@ -774,6 +815,22 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/full/delta", Some(idv)) => {
+                // `fullonly`: a conforming full-only server rejects a
+                // delta request outright — the client should never have
+                // sent it (capabilities advertised `"full": true` with
+                // no delta member).
+                if mode == "fullonly" {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": {
+                            "code": -32601,
+                            "message": "semanticTokens/full/delta not supported"
+                        }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // T M4.5: a `SemanticTokensDelta` over the /full data
                 // `[0,0,4,1,1, 0,5,3,2,0, 2,2,7,0,2]` — replace the
                 // last 5-int group (idx 10..15) with [3,0,9,1,0], so

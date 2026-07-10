@@ -2008,11 +2008,16 @@ fn handle_remote_crdt_op(
     buffer_id: crate::buffer::BufferId,
     op: crate::rope::CrdtOp,
 ) {
-    // Kill ring Q#KR2: an optimistic edit is non-command input — GPU
-    // typing, Enter/Tab, Backspace/Delete all arrive here without ever
-    // touching dispatch_key. It must break the source frontend's
-    // command chain, or `C-k x C-k` on the GPU would append across the
-    // typed character.
+    // Kill ring Q#KR2: an optimistic edit arrives here without ever
+    // touching dispatch_key, so the source's command boundary must be
+    // updated — or `C-k x C-k` on the GPU would append across the typed
+    // character. Break first (covers every early-return path); a
+    // successful apply refines this below: a single-codepoint insert is
+    // re-classified as `buffer.self-insert`, giving typed characters the
+    // same boundary on both frontends. That keeps kill-chain semantics
+    // identical (self-insert is not a kill) while making `this_command`
+    // a usable input-origin signal for typed-char consumers (signature
+    // help; the completion popup can migrate later).
     editor.core.borrow_mut().break_command_chain(source);
     // Effect 1: apply to buffer's CRDT + rope. Capture the Edit
     // (or `None` for an op that imported cleanly but produced no
@@ -2045,6 +2050,14 @@ fn handle_remote_crdt_op(
     // notify but the op still needs broadcasting (F17).
     if let Some(edit) = edit_opt.as_ref() {
         let mut core = editor.core.borrow_mut();
+        // The input-origin refinement promised above. The optimistic
+        // layer emits exactly one op per keystroke, so an empty-range
+        // insert of one codepoint (1–4 UTF-8 bytes) IS a typed
+        // character — Backspace/Delete/Undo produce deletes or larger
+        // shapes and stay chain-breaks.
+        if edit.range.start == edit.range.end && (1..=4).contains(&edit.inserted_len) {
+            core.rotate_command(source, "buffer.self-insert");
+        }
         // Transient status messages clear on user input. The Key path
         // gets this from `dispatch_key`'s entry clear; the optimistic
         // path routes plain typing here instead, and since v15 ships
@@ -2511,13 +2524,15 @@ mod tests {
         );
     }
 
-    /// Kill ring Q#KR2 — an optimistic edit is non-command input: GPU
-    /// typing arrives here without touching dispatch_key, so it must
-    /// break the source frontend's command chain or `C-k x C-k` on the
-    /// GPU would append across the typed character.
+    /// Kill ring Q#KR2 — GPU typing arrives here without touching
+    /// dispatch_key, so it must update the source frontend's command
+    /// boundary or `C-k x C-k` on the GPU would append across the typed
+    /// character. A single-codepoint insert classifies as
+    /// `buffer.self-insert` (the input-origin signal for signature
+    /// help); anything else breaks the chain outright.
     #[cfg(feature = "crdt")]
     #[test]
-    fn handle_remote_crdt_op_breaks_the_source_command_chain() {
+    fn handle_remote_crdt_op_classifies_typed_input_and_ends_kill_chains() {
         use crate::editor::EditorState;
         use crate::protocol::FrontendId;
 
@@ -2573,11 +2588,26 @@ mod tests {
         );
 
         let core = editor.core.borrow();
-        assert!(
+        // A single-codepoint optimistic insert classifies as a typed
+        // character: the boundary rotates to buffer.self-insert (the
+        // input-origin signal), which — not being a kill command —
+        // still breaks the kill chain exactly like the TUI typed-char
+        // path.
+        assert_eq!(
             core.command_history
                 .get(&source)
-                .is_none_or(|b| b.this.is_none()),
-            "the optimistic edit must break the source's chain"
+                .and_then(|b| b.this.as_deref()),
+            Some("buffer.self-insert"),
+            "a typed optimistic insert classifies as self-insert"
+        );
+        assert_eq!(
+            core.command_history
+                .get(&source)
+                .and_then(|b| b.last.as_deref()),
+            None,
+            "the pre-existing kill chain is gone (break-then-classify): a \
+             following kill reads last = self-insert after its own rotation \
+             and never appends"
         );
         assert_eq!(
             core.command_history

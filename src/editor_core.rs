@@ -2104,6 +2104,21 @@ impl EditorCore {
             .as_deref()
     }
 
+    /// The active frontend's *current* command — Emacs's `this-command`.
+    /// Inside a `buffer.after-edit` hook this names the command that
+    /// produced the edit, which is the **input-origin signal**:
+    /// `"buffer.self-insert"` means the edit was a typed character
+    /// (keybound or optimistic), while a paste / pointer / unbound input
+    /// left it `None`. Per-frontend, so two attached frontends never
+    /// misclassify each other's input.
+    #[must_use]
+    pub fn this_command(&self) -> Option<&str> {
+        self.command_history
+            .get(&self.active_frontend)?
+            .this
+            .as_deref()
+    }
+
     /// Copy the active region into the clipboard slot and queue an
     /// outbound OS-clipboard publish to the originating frontend.
     /// Returns `false` (a no-op) when there is no region.
