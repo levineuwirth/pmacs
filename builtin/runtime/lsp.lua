@@ -452,11 +452,28 @@ function pull_inlay_hints_quiet(rec)
   end)
 end
 
-local function server_supports_semantic_tokens(sid)
+-- LSP defines `semanticTokensProvider.full` and `.range` as optional,
+-- INDEPENDENT capabilities: a provider may be range-only, and sending
+-- it /full gets a rejection the pull path would swallow. Gate each
+-- request kind on its own capability.
+local function semantic_provider(sid)
   local ok, caps = pcall(pmacs.lsp.capabilities, sid)
-  if not ok or not caps then return false end
+  if not ok or not caps then return nil end
   local p = caps.semanticTokensProvider
-  return p ~= nil and p ~= false
+  if p == nil or p == false then return nil end
+  return p
+end
+
+local function server_supports_semantic_full(sid)
+  local p = semantic_provider(sid)
+  if type(p) ~= "table" then return false end
+  return p.full == true or type(p.full) == "table"
+end
+
+local function server_supports_semantic_range(sid)
+  local p = semantic_provider(sid)
+  if type(p) ~= "table" then return false end
+  return p.range == true or type(p.range) == "table"
 end
 
 -- Arc 1c. Semantic tokens are pull-model, exactly like inlay hints: the
@@ -478,33 +495,42 @@ end
 -- requesting delta without the capability would leave styling silently
 -- stale after the first edit.
 local function server_supports_semantic_delta(sid)
-  local ok, caps = pcall(pmacs.lsp.capabilities, sid)
-  if not ok or not caps then return false end
-  local p = caps.semanticTokensProvider
+  local p = semantic_provider(sid)
   if type(p) ~= "table" then return false end
   return type(p.full) == "table" and p.full.delta == true
 end
 
 function pull_semantic_tokens_quiet(rec)
   if not rec or not server_is_initialized(rec.server) then return end
-  if not server_supports_semantic_tokens(rec.server) then return end
+  local has_full = server_supports_semantic_full(rec.server)
+  local has_range = server_supports_semantic_range(rec.server)
+  if not has_full and not has_range then return end
   -- The server must see the current text before computing token
   -- positions against it. A no-op when called from `flush_did_change`
   -- itself (the pending entry is removed before the send).
   flush_did_change_for(rec)
-  -- Delta only when the server NEGOTIATED it (full.delta == true) and a
-  -- prior resultId is held; /full otherwise. Never clear the store
-  -- first: a delta splices against the retained raw stream.
+  -- /full when negotiated (delta only when full.delta == true and a
+  -- prior resultId is held); a RANGE-ONLY provider gets a
+  -- whole-document /range request instead — never an unsupported
+  -- /full. Never clear the store first: a delta splices against the
+  -- retained raw stream.
   local prev = nil
-  if server_supports_semantic_delta(rec.server) then
+  if has_full and server_supports_semantic_delta(rec.server) then
     prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
+  end
+  local end_line, end_col
+  if not has_full then
+    end_line, end_col = document_end_position(buffer_text(rec.buffer))
   end
   pmacs.async(function()
     pcall(function()
       if prev then
         pmacs.lsp.request_semantic_tokens_delta(rec.server, rec.uri, prev):await()
-      else
+      elseif has_full then
         pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+      else
+        pmacs.lsp.request_semantic_tokens_range(
+          rec.server, rec.uri, 0, 0, end_line, end_col):await()
       end
     end)
   end)
@@ -1605,19 +1631,33 @@ function pmacs.lsp.semantic_tokens()
     return
   end
   -- Don't clear: a delta splices against the retained raw stream.
-  -- Delta only when negotiated (full.delta) — same rule as the
-  -- auto-pull path; a resultId alone does not imply delta support.
+  -- Same gating as the auto-pull path: /full only when negotiated
+  -- (delta only under full.delta); a range-only provider gets a
+  -- whole-document /range request.
+  local has_full = server_supports_semantic_full(rec.server)
+  local has_range = server_supports_semantic_range(rec.server)
+  if not has_full and not has_range then
+    pmacs.editor.set_status("LSP: server has no semantic-token support")
+    return
+  end
   local prev = nil
-  if server_supports_semantic_delta(rec.server) then
+  if has_full and server_supports_semantic_delta(rec.server) then
     prev = pmacs.semantic_tokens.result_id(rec.server, rec.uri)
+  end
+  local end_line, end_col
+  if not has_full then
+    end_line, end_col = document_end_position(buffer_text(rec.buffer))
   end
   pmacs.async(function()
     local ok, err = pcall(function()
       if prev then
         pmacs.lsp.request_semantic_tokens_delta(
           rec.server, rec.uri, prev):await()
-      else
+      elseif has_full then
         pmacs.lsp.request_semantic_tokens(rec.server, rec.uri):await()
+      else
+        pmacs.lsp.request_semantic_tokens_range(
+          rec.server, rec.uri, 0, 0, end_line, end_col):await()
       end
     end)
     if not ok then

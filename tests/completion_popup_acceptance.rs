@@ -72,6 +72,23 @@ fn typing_opens_popup_and_tab_accepts() {
     assert_eq!(text, "hello_world hello_world", "TAB replaces the prefix");
     assert!(!visible, "accept closes the popup");
     assert_eq!(cursor, 23, "cursor lands just past the inserted text");
+
+    // Kill ring review round 4: accepting a completion is its own
+    // command boundary. Without the stamp, this_command would still
+    // read "buffer.self-insert" from the typing that raised the popup,
+    // and a candidate ending in "(" would spuriously auto-trigger
+    // signature help from the accept's after-edit.
+    let this: Option<String> = s
+        .lua_host
+        .lua()
+        .load("return pmacs.editor.this_command()")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        this.as_deref(),
+        Some("completion.accept"),
+        "accept stamps its own boundary, not the typing's self-insert"
+    );
 }
 
 /// C-n moves the highlight before RET accepts, so the second

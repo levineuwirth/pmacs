@@ -37,6 +37,10 @@
 //!   member) and rejects `semanticTokens/full/delta` with a JSON-RPC
 //!   error — a conforming full-only server, for testing that the
 //!   client never requests delta without the negotiated capability.
+//! * If launched with `PMACS_FAKE_LSP_MODE=rangeonly`: advertises a
+//!   range-only `semanticTokensProvider` (`"range": true`, `full`
+//!   null) and rejects `semanticTokens/full` — per LSP, `full` and
+//!   `range` are optional, independent capabilities.
 //! * If launched with `PMACS_FAKE_LSP_MODE=sighelp`: additionally
 //!   advertises `signatureHelpProvider` with `(` / `,` triggers, so a
 //!   test can drive the Arc 1d auto-trigger. Every other mode omits the
@@ -178,6 +182,17 @@ fn main() {
                 if mode == "fullonly" {
                     resp["result"]["capabilities"]["semanticTokensProvider"]["full"] =
                         serde_json::Value::from(true);
+                }
+                // `rangeonly`: LSP allows a provider to advertise
+                // `range` WITHOUT `full` — the /full arm below rejects
+                // in this mode, so a client that ignores the split gets
+                // a visible failure instead of silent staleness.
+                if mode == "rangeonly" {
+                    let p = &mut resp["result"]["capabilities"]["semanticTokensProvider"];
+                    if let Some(obj) = p.as_object_mut() {
+                        obj.remove("full");
+                        obj.insert("range".into(), serde_json::Value::from(true));
+                    }
                 }
                 // Arc 1d: advertise signature help only in `sighelp`, so
                 // every other mode keeps the no-auto-trigger path (the
@@ -773,6 +788,20 @@ fn main() {
                 write_frame(&mut stdout, &resp);
             }
             ("textDocument/semanticTokens/full", Some(idv)) => {
+                // `rangeonly`: a range-only provider rejects /full —
+                // the client should have sent a range request.
+                if mode == "rangeonly" {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": {
+                            "code": -32601,
+                            "message": "semanticTokens/full not supported"
+                        }
+                    });
+                    write_frame(&mut stdout, &resp);
+                    continue;
+                }
                 // `fullonly`: bump the resultId per request so a test
                 // can observe WHICH pull refreshed the store — a
                 // repull that wrongly went to /full/delta is rejected

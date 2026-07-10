@@ -4529,6 +4529,59 @@ fn arc1d_signature_help_does_not_trigger_on_ordinary_typing() {
     }
 }
 
+/// Arc 1c review fix — a RANGE-ONLY provider (LSP: `full` and `range`
+/// are optional, independent capabilities). The client must serve it a
+/// whole-document /range request, never /full — the fake rejects /full
+/// outright, so a client ignoring the split gets an empty store and
+/// this test fails.
+#[test]
+fn arc1c_range_only_server_is_served_range_requests() {
+    use pmacs::editor::EditorState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a_path = dir.path().join("a.rs");
+    std::fs::write(&a_path, b"fn a() {}\n\n").expect("write a");
+    let a_disp = a_path.display().to_string();
+
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_MODE = 'rangeonly' }},
+             }}"
+        ))
+        .exec()
+        .expect("override rust config");
+    state
+        .lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{a_disp}')"))
+        .exec()
+        .expect("open a.rs");
+
+    // The rangeonly fake's /range reply carries one token; its
+    // presence proves the auto-pull went through the range path.
+    let has_tokens = format!(
+        "(function() \
+           local sid \
+           for _,r in ipairs(pmacs.lsp.list()) do \
+             if r.state and r.state.kind=='initialized' then sid=r.id end \
+           end \
+           if not sid then return false end \
+           local t = pmacs.semantic_tokens.tokens(sid, 'file://{a_disp}') \
+           return t ~= nil and #t > 0 \
+         end)()"
+    );
+    assert!(
+        pump_lua_flag(&mut state, &has_tokens, 5),
+        "a range-only provider must be served a whole-document /range request"
+    );
+}
+
 /// Arc 1d — a server-declared NON-ASCII trigger character works. LSP
 /// trigger characters are strings; the fake declares "«" (2 UTF-8
 /// bytes), and the codepoint-aware `char_before` must match it.
