@@ -145,8 +145,15 @@ impl SearchStore {
 
     /// Step the active match forward or backward, wrapping. Returns
     /// the new active match's range, or `None` when the buffer has no
-    /// matches.
+    /// matches — or when they are stale (Q#AI8 fail-closed): stale
+    /// ranges were computed against pre-edit text, and stepping
+    /// through them would teleport the cursor to offsets that no
+    /// longer exist. A live search un-sticks on the next pattern
+    /// keystroke ([`Self::set`] clears staleness).
     pub fn step(&mut self, buffer_id: BufferId, forward: bool) -> Option<ByteRange> {
+        if self.stale.contains(&buffer_id) {
+            return None;
+        }
         let s = self.by_buffer.get_mut(&buffer_id)?;
         let n = s.matches.len();
         if n == 0 {
@@ -829,5 +836,21 @@ mod tests {
         let other = BufferId::next();
         s.mark_stale(other);
         assert!(!s.is_stale(other));
+    }
+
+    #[test]
+    fn step_fails_closed_while_stale() {
+        // Q#AI8: stale ranges were computed against pre-edit text;
+        // stepping through them would teleport the cursor to offsets
+        // that no longer exist.
+        let mut s = SearchStore::new();
+        let bid = BufferId::next();
+        s.set(bid, "x", vec![r(0, 1), r(4, 5)]);
+        assert!(s.step(bid, true).is_some(), "fresh matches step");
+        s.mark_stale(bid);
+        assert!(s.step(bid, true).is_none(), "stale matches do not");
+        // A re-run (`set`) clears staleness and stepping resumes.
+        s.set(bid, "x", vec![r(0, 1), r(4, 5)]);
+        assert!(s.step(bid, true).is_some(), "fresh set un-sticks stepping");
     }
 }

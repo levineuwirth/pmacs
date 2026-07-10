@@ -1068,9 +1068,10 @@ impl ApplicationHandler<AppEvent> for App {
                     if let Err(e) = client.send_crdt_op(op.buffer_id, op.op) {
                         eprintln!("pmacs-gpu: send_crdt_op failed: {e}");
                     }
-                    // An optimistic Enter near the bottom edge can
-                    // scroll; re-declare the scoped viewport so
-                    // the producer styles the newly visible lines.
+                    // An optimistic edit near the viewport edge can
+                    // scroll (a wrap-inducing insert, a Backspace
+                    // above the top); re-declare the scoped viewport
+                    // so the producer styles the newly visible lines.
                     if let Some(vp) = op.viewport
                         && let Err(e) =
                             client.send_viewport(vp.buffer_id, vp.visible, vp.generation)
@@ -1508,22 +1509,25 @@ fn optimistic_delete_range(
 /// The literal text `key` inserts when handled optimistically, or
 /// `None` for keys that must round-trip through the daemon.
 ///
-/// `Enter` and `Tab` qualify alongside printable chars because their
-/// default bindings (`buffer.newline` / `buffer.tab`) reduce to plain
-/// `insert_char(10)` / `insert_char(9)` — byte-identical to a
-/// self-insert, so the local application cannot diverge from what the
-/// daemon will do with the same op. Two caveats are the caller's job:
+/// `Tab` qualifies alongside printable chars because its default
+/// binding (`buffer.tab`) reduces to a plain `insert_char(9)` —
+/// byte-identical to a self-insert, so the local application cannot
+/// diverge from what the daemon will do with the same op. `Enter`
+/// does NOT: since Q#AI1 (docs/auto-indent-framing.md) RET binds
+/// `edit.newline-and-indent`, whose inserted text depends on the
+/// current line's indentation — and round-tripping is also what makes
+/// RET rebindings (e.g. the buffer list's visit binding) reachable
+/// from this frontend at all. Two caveats are the caller's job:
 /// `optimistic_crdt_insert` round-trips when an own-window selection
 /// is active (the daemon commands consume the region first — CUA
-/// type-over — which a raw op can't), and modified variants (`S-RET`,
-/// `C-TAB`, …) return `None` here: a keymap may bind them to anything.
+/// type-over — which a raw op can't), and modified variants (`C-TAB`,
+/// …) return `None` here: a keymap may bind them to anything.
 fn optimistic_insert_text(key: ProtocolKey, mods: Modifiers, chbuf: &mut [u8; 4]) -> Option<&str> {
     if !is_plain_text_modifiers(mods) {
         return None;
     }
     match key {
         ProtocolKey::Char(ch) if !ch.is_control() => Some(ch.encode_utf8(chbuf)),
-        ProtocolKey::Enter if mods.is_empty() => Some("\n"),
         ProtocolKey::Tab if mods.is_empty() => Some("\t"),
         _ => None,
     }
@@ -2195,10 +2199,10 @@ impl State {
         self.optimistic_cursor_floor = Some(predicted);
         self.optimistic_floor_set_at = Some(std::time::Instant::now());
         // Follow the caret NOW rather than when the daemon's
-        // `CursorByte` confirms — an optimistic Enter on the bottom
-        // visible line (or a Backspace pulling the caret above the
-        // top) moves it outside the slice, and waiting a round trip
-        // to scroll reads as a hitch.
+        // `CursorByte` confirms — an optimistic edit on the bottom
+        // visible line that wraps (or a Backspace pulling the caret
+        // above the top) moves it outside the slice, and waiting a
+        // round trip to scroll reads as a hitch.
         let viewport = if self.scroll_to_cursor() {
             self.rebuild_lines_reusing_scroll();
             self.viewport_send_if_changed(predicted.buffer_id)
@@ -7055,7 +7059,7 @@ mod tests {
     }
 
     #[test]
-    fn optimistic_insert_text_covers_plain_chars_enter_and_tab() {
+    fn optimistic_insert_text_covers_plain_chars_and_tab_but_not_enter() {
         let mut buf = [0u8; 4];
         let none = Modifiers::NONE;
         let shift = Modifiers::SHIFT;
@@ -7072,8 +7076,10 @@ mod tests {
         );
         assert_eq!(
             optimistic_insert_text(ProtocolKey::Enter, none, &mut buf),
-            Some("\n"),
-            "RET is bound to buffer.newline = insert_char(10): identical to a self-insert"
+            None,
+            "RET binds edit.newline-and-indent (Q#AI1): the inserted text depends \
+             on the current line, so plain Enter must round-trip — this is also \
+             what makes RET rebindings reachable from the GPU frontend"
         );
         assert_eq!(
             optimistic_insert_text(ProtocolKey::Tab, none, &mut buf),

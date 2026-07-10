@@ -2111,6 +2111,19 @@ fn handle_remote_crdt_op(
                 continue;
             }
             if Some(*wid) == source_active_window_id {
+                // Q#AI9 (PR #109 round 1): an empty anchor armed at
+                // the pre-edit cursor must not survive the cursor
+                // moving off it — otherwise the optimistic paths
+                // (GPU always; TUI mirror, which tracks no selection
+                // state) re-arm the type-over that
+                // `insert_char_over_region`'s no-region clear fixed
+                // on the dispatch path. Nonempty selections stand:
+                // the TUI gate's missing type-over check is a named
+                // deferral, and guessing here would destroy a real
+                // selection.
+                if win.selection.map(|sel| sel.anchor) == Some(win.cursor) {
+                    win.selection = None;
+                }
                 // Source window: set directly to optimistic post-edit
                 // position (matches the source frontend's mirror
                 // cursor after advance/retreat).
@@ -2549,6 +2562,114 @@ mod tests {
             count, 1,
             "buffer.after-edit must fire when handle_remote_crdt_op produces a text Edit"
         );
+    }
+
+    /// Q#AI9 (PR #109 round 1): the optimistic-apply arm clears an
+    /// EMPTY anchor on the source window — the GPU always takes this
+    /// path, and the TUI attach mirror tracks no selection state, so
+    /// neither frontend's gate stops an armed-empty-anchor sequence
+    /// from re-creating the type-over that
+    /// `insert_char_over_region`'s no-region clear fixed on the
+    /// dispatch path. A NONEMPTY selection must survive untouched
+    /// (the TUI gate's missing type-over check is a named deferral).
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn handle_remote_crdt_op_clears_only_an_empty_source_anchor() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use crate::window::Selection;
+
+        // Shared fixture: CRDT-backed active buffer + a peer doc that
+        // produces the optimistic op, sourced from LOCAL (which has a
+        // registered view, so the source-window arm runs).
+        fn apply_peer_insert(editor: &mut EditorState, buffer_id: crate::buffer::BufferId) {
+            let snapshot_bytes = {
+                let core = editor.core.borrow();
+                let reg = core.registry.borrow();
+                let buf = reg.get(buffer_id).expect("buffer");
+                buf.crdt_state()
+                    .expect("crdt-backed")
+                    .export_snapshot()
+                    .expect("export snapshot")
+            };
+            let peer = loro::LoroDoc::new();
+            peer.set_peer_id(u64::from(FrontendId::LOCAL.0))
+                .expect("set peer id");
+            peer.import(&snapshot_bytes).expect("import snapshot");
+            let v_before = peer.oplog_vv();
+            peer.get_text("body").insert(0, "x").expect("peer insert");
+            let op_bytes = peer
+                .export(loro::ExportMode::updates(&v_before))
+                .expect("export op");
+            super::handle_remote_crdt_op(
+                editor,
+                FrontendId::LOCAL,
+                buffer_id,
+                crate::rope::CrdtOp {
+                    peer_id: FrontendId::LOCAL.0,
+                    bytes: op_bytes,
+                },
+            );
+        }
+
+        // Case 1: empty anchor at the cursor (S-Left-at-BOF shape) —
+        // cleared by the optimistic apply.
+        let mut editor = EditorState::new();
+        let buffer_id = editor.core.borrow().active_window().buffer_id;
+        {
+            let core = editor.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(2)
+                .expect("upgrade to crdt");
+        }
+        {
+            let mut core = editor.core.borrow_mut();
+            let at = core.active_window().cursor;
+            core.active_window_mut().selection = Some(Selection { anchor: at });
+        }
+        apply_peer_insert(&mut editor, buffer_id);
+        {
+            let core = editor.core.borrow();
+            assert!(
+                core.active_window().selection.is_none(),
+                "an empty anchor must not survive an optimistic source edit"
+            );
+            assert_eq!(
+                core.active_window().cursor,
+                1,
+                "cursor at post-edit position"
+            );
+        }
+
+        // Case 2: nonempty selection — the arm must not touch it.
+        let mut editor = EditorState::new();
+        let buffer_id = editor.core.borrow().active_window().buffer_id;
+        editor.core.borrow_mut().insert_char('a');
+        editor.core.borrow_mut().insert_char('b');
+        {
+            let core = editor.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(2)
+                .expect("upgrade to crdt");
+        }
+        {
+            let mut core = editor.core.borrow_mut();
+            core.active_window_mut().selection = Some(Selection { anchor: 0 });
+            // cursor is at 2 after the two inserts: nonempty region.
+        }
+        apply_peer_insert(&mut editor, buffer_id);
+        {
+            let core = editor.core.borrow();
+            assert_eq!(
+                core.active_window().selection,
+                Some(Selection { anchor: 0 }),
+                "a nonempty selection survives the optimistic source edit"
+            );
+        }
     }
 
     /// Kill ring Q#KR2 — GPU typing arrives here without touching

@@ -1,7 +1,7 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-10, on the desktop, by the session that shipped
-PR #107.** This file is the bridge between development machines. If you
+**Last updated: 2026-07-10, on the laptop, by the auto-indent
+session.** This file is the bridge between development machines. If you
 are an agent reading this on a fresh clone: this document plus the
 `docs/*-framing.md` files ARE your memory. Read this fully before
 taking on work, seed your persistent memory from it, and **update this
@@ -10,20 +10,26 @@ next machine reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-10)
 
-- `main` @ `2dde4b8`, protocol **v15** (`SUPPORTED=[6..15]`).
-- **PR #107 OPEN**: comment/uncomment toggle on `M-;` (Arc 2). Awaiting
-  the user's review findings. If it's merged by the time you read this,
-  Arc 2 has only auto-indent and auto-pairing left. Check
-  `gh pr list --state open` first thing.
+- `main` @ `efa41cb`, protocol **v15** (`SUPPORTED=[6..15]`).
+- **Auto-indent on newline (Arc 2) in flight on this branch** —
+  framing `docs/auto-indent-framing.md` is at revision 6 (five
+  pre-branch review rounds plus PR #109 round 1). RET now binds
+  `edit.newline-and-indent`; plain Enter is no longer GPU-optimistic
+  (round-trips like the TUI). Rode along: Q#AI8 search invalidation is
+  shared by dispatch, direct notification, undo, and redo (stale
+  step/summary fail closed; live origins translate through edits), and
+  Q#AI9 clears empty selections only after successful core inserts and
+  in the daemon's optimistic CRDT source arm for both frontends. The
+  TUI's missing nonempty-selection optimistic type-over gate and
+  generated-buffer search invalidation remain named deferrals.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
     hardening follow-ups (#102, #105, #106).
-  - **Arc 2 (editing table stakes) NEARLY COMPLETE** — query-replace
-    (#97), kill ring + `M-y` (#103/#105/#106), comment-toggle (#107).
-    **Remaining: auto-indent on newline, then auto-pairing.** These are
-    the agreed next work items, in that order, each as its own small
-    framing + PR.
+  - **Arc 2 (editing table stakes)** — query-replace (#97), kill ring
+    + `M-y` (#103/#105/#106), comment-toggle (#107), auto-indent (this
+    branch). **Remaining after this merges: auto-pairing**, as its own
+    small framing + PR.
   - **Arc 3 (persistence) COMPLETE** — saveplace/recentf (#98),
     desktop-save (#99), autosave/crash-recovery (#100), save-clobber
     fix (#101).
@@ -70,12 +76,15 @@ cargo test --workspace -- --skip basedpyright           # full sweep
 git diff --check
 ```
 
-Machine-specific caveats that were true on the DESKTOP — re-verify on
-this machine before trusting them:
+Machine-specific caveats — re-verify on a machine you haven't used
+before trusting them:
 
-- **basedpyright**: the desktop's local binary is broken and HANGS the
-  `m4_5_basedpyright` tests — hence the `--skip`. If this machine has a
-  working basedpyright, the skip may be droppable (verify once).
+- **basedpyright**: the DESKTOP's local binary is broken and HANGS the
+  `m4_5_basedpyright` tests — hence the `--skip` there. The LAPTOP has
+  a working basedpyright 1.39.9 (verified 2026-07-10: the m4_5 test
+  passes in 0.18s), so the skip is droppable on the laptop.
+- **GPU on the laptop**: AMD Radeon 780M (RADV) — native Vulkan,
+  `PMACS_REQUIRE_GPU=1` works without lavapipe.
 - **m8 daemon tests are FLAKY** (timing). A lone m8 failure → rerun
   before investigating.
 - **GPU tests** need a Vulkan device. `PMACS_REQUIRE_GPU=1` makes

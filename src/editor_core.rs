@@ -714,7 +714,9 @@ impl EditorCore {
 
     /// `(active_index, total)` for the active buffer's matches, for the
     /// prompt's "n/m" readout. `active_index` is 0-based and `None`
-    /// when there are no matches.
+    /// when there are no matches. Stale matches read as absent (Q#AI8
+    /// fail-closed): the highlights they count are already suppressed,
+    /// so the prompt must not advertise them either.
     #[must_use]
     pub fn search_match_summary(&self) -> (Option<usize>, usize) {
         let bid = self.active_buffer_id();
@@ -722,6 +724,9 @@ impl EditorCore {
             .search_store
             .lock()
             .expect("search store mutex poisoned");
+        if guard.is_stale(bid) {
+            return (None, 0);
+        }
         guard
             .for_buffer(bid)
             .map_or((None, 0), |s| (s.active_index(), s.len()))
@@ -1156,17 +1161,22 @@ impl EditorCore {
     /// Returns a stringified error on buffer or view failure.
     pub fn apply_active_edit(&mut self, op: EditOp<'_>) -> Result<u64, String> {
         let buffer_id = self.active_buffer_id();
-        let mut reg = self.registry.borrow_mut();
-        let buffer = reg.get_mut(buffer_id).map_err(|e| e.to_string())?;
-        let edit = buffer.apply_edit(op).map_err(|e| e.to_string())?;
-        for win in self.windows.values_mut() {
-            if win.buffer_id == buffer_id {
-                let _ = win.text_view.on_edit(buffer, &edit);
-                for overlay in &mut win.overlays {
-                    let _ = overlay.on_edit(buffer, &edit);
+        // Scope the registry borrow: the origin translation below needs
+        // `&mut self` after the views have been notified.
+        let edit = {
+            let mut reg = self.registry.borrow_mut();
+            let buffer = reg.get_mut(buffer_id).map_err(|e| e.to_string())?;
+            let edit = buffer.apply_edit(op).map_err(|e| e.to_string())?;
+            for win in self.windows.values_mut() {
+                if win.buffer_id == buffer_id {
+                    let _ = win.text_view.on_edit(buffer, &edit);
+                    for overlay in &mut win.overlays {
+                        let _ = overlay.on_edit(buffer, &edit);
+                    }
                 }
             }
-        }
+            edit
+        };
         // T M10.8 Day 4 — capture CRDT op (if the buffer was in
         // CRDT mode and produced one) for the dispatcher to
         // broadcast on the next tick.
@@ -1182,16 +1192,53 @@ impl EditorCore {
                 .push((CrdtOpOrigin::DaemonKey, buffer_id, (**crdt_op).clone()));
         }
         // Search matches were computed against the pre-edit text, so
-        // their byte positions are now wrong. Mark the buffer's matches
-        // stale (M11.8): the producer / TUI overlay suppress them until
-        // a fresh search re-runs against the current content. No-op for
-        // a buffer with no search state. The headline isearch bet —
-        // "stale-after-edit linger" — is closed here.
+        // their byte positions are now wrong (M11.8): the producer /
+        // TUI overlay suppress them until a fresh search re-runs. The
+        // headline isearch bet — "stale-after-edit linger" — is
+        // closed here.
+        self.search_invalidate_for_edit(buffer_id, &edit);
+        Ok(edit.new_rope.len())
+    }
+
+    /// Q#AI8 search invalidation for a landed edit: mark the buffer's
+    /// matches stale (no-op without search state) and right-gravity-
+    /// translate the live session origin. ONE helper so every edit
+    /// path — dispatch ([`Self::apply_active_edit`]), direct
+    /// notification ([`Self::notify_buffer_edit`]), and history
+    /// ([`Self::undo`] / [`Self::redo`]) — invalidates identically;
+    /// a path that skips this leaves highlights, step targets, and
+    /// the n/m count pointing at pre-edit offsets.
+    fn search_invalidate_for_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
         self.search_store
             .lock()
             .expect("search store mutex poisoned")
             .mark_stale(buffer_id);
-        Ok(edit.new_rope.len())
+        self.translate_search_origin(buffer_id, edit);
+    }
+
+    /// Right-gravity-translate the live search origin through an edit
+    /// to `buffer_id` (Q#AI8; the `src/daemon.rs` optimistic-arm
+    /// shape). The origin is a raw byte offset captured at
+    /// [`Self::search_begin`]; without translation an insert/delete
+    /// before it skews every later recompute focus and the cancel
+    /// restore, even when the match set itself is fresh.
+    fn translate_search_origin(&mut self, buffer_id: BufferId, edit: &Edit) {
+        let Some(session) = self.search.as_mut() else {
+            return;
+        };
+        if session.origin.0 != buffer_id {
+            return;
+        }
+        let start = edit.range.start;
+        let end = edit.range.end;
+        let pos = session.origin.1;
+        session.origin.1 = if pos < start {
+            pos
+        } else if pos > end {
+            pos - (end - start) + edit.inserted_len
+        } else {
+            start + edit.inserted_len
+        };
     }
 
     /// Notify every window displaying `buffer_id` that the buffer was
@@ -1204,7 +1251,14 @@ impl EditorCore {
     /// edited buffer would keep a stale [`crate::text_view::TextView`]
     /// line cache, causing later cursor motions to land at offsets the
     /// view cannot map back to display coordinates.
+    ///
+    /// Q#AI8: direct edits must also invalidate search state exactly
+    /// like [`Self::apply_active_edit`] does — mark the matches stale
+    /// and translate the live origin — otherwise accepted-match
+    /// highlights and the session origin survive at pre-edit offsets
+    /// for every Lua mutator edit and applied CRDT op.
     pub fn notify_buffer_edit(&mut self, buffer_id: BufferId, edit: &Edit) {
+        self.search_invalidate_for_edit(buffer_id, edit);
         let reg = self.registry.borrow();
         let Ok(buffer) = reg.get(buffer_id) else {
             return;
@@ -1677,8 +1731,11 @@ impl EditorCore {
         aw.goal_col = None;
     }
 
-    /// Insert a single character at the cursor.
-    pub fn insert_char(&mut self, ch: char) {
+    /// Insert a single character at the cursor. Returns `true` iff the
+    /// edit landed: a rejecting buffer intercept reports via the status
+    /// line and returns `false`, and callers must not mutate dependent
+    /// state (e.g. selection anchors) on a failed insert (Q#AI9).
+    pub fn insert_char(&mut self, ch: char) -> bool {
         self.active_window_mut().goal_col = None;
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf);
@@ -1686,9 +1743,10 @@ impl EditorCore {
         let pos = self.active_window().cursor;
         if let Err(e) = self.apply_active_edit(EditOp::Insert { pos, bytes }) {
             self.status = format!("insert failed: {e}");
-            return;
+            return false;
         }
         self.active_window_mut().cursor += bytes.len() as u64;
+        true
     }
 
     /// CUA type-over: insert `ch`, replacing the active region if one
@@ -1699,7 +1757,14 @@ impl EditorCore {
     /// lands just past the inserted bytes and any selection is cleared.
     pub fn insert_char_over_region(&mut self, ch: char) {
         let Some((lo, hi)) = self.active_region() else {
-            self.insert_char(ch);
+            // Q#AI9: an empty selection (anchor == cursor) reports no
+            // region yet stays armed — the insert moves the cursor off
+            // the anchor and the very NEXT key type-overs the fresh
+            // text. Clear it, but only when the edit landed: a
+            // rejecting intercept must leave the anchor untouched.
+            if self.insert_char(ch) {
+                self.active_window_mut().selection = None;
+            }
             return;
         };
         self.active_window_mut().goal_col = None;
@@ -1839,6 +1904,9 @@ impl EditorCore {
                     }
                 }
                 drop(reg);
+                // Q#AI8 (PR #109 round 1): history edits move bytes
+                // like any other edit — invalidate search state.
+                self.search_invalidate_for_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27: undo on a CRDT-backed
                 // buffer produces a crdt_op that must broadcast to
                 // every replica frontend (including the one whose
@@ -1877,6 +1945,8 @@ impl EditorCore {
                     }
                 }
                 drop(reg);
+                // Q#AI8 — same as undo above.
+                self.search_invalidate_for_edit(buffer_id, &edit);
                 // Post-audit-round-5 F27 — same as undo above.
                 self.queue_daemon_origin_crdt_op(buffer_id, &edit);
             }
@@ -3667,6 +3737,237 @@ mod tests {
                 .is_some(),
             "accept keeps matches for highlight + navigation"
         );
+    }
+
+    #[test]
+    fn stale_matches_fail_closed_for_step_and_summary() {
+        // Q#AI8: once an edit marks matches stale, the highlights are
+        // suppressed — stepping and the n/m prompt must fail closed
+        // with them instead of navigating/advertising dead offsets.
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true, false);
+        type_query(&mut s, "foo");
+        s.search_finish(true); // accept keeps the matches
+        assert_eq!(s.search_match_summary(), (Some(0), 2));
+        s.active_window_mut().cursor = 0;
+        assert!(s.insert_char('x'), "plain insert lands");
+        assert_eq!(
+            s.search_match_summary(),
+            (None, 0),
+            "stale counts must not reach the prompt"
+        );
+        let before = s.cursor();
+        s.search_step(true);
+        assert_eq!(s.cursor(), before, "stale step is a no-op");
+    }
+
+    #[test]
+    fn live_search_origin_translates_through_local_edits() {
+        // Q#AI8: the session origin is a raw byte offset; an edit
+        // before it must shift it (right-gravity) so cancel restores
+        // the same TEXT position, not the same number.
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true, false); // origin byte 5
+        type_query(&mut s, "foo");
+        assert_eq!(s.cursor(), 8, "focused the match after the origin");
+        s.active_window_mut().cursor = 0;
+        assert!(s.insert_char('x'));
+        assert!(s.insert_char('y'));
+        s.search_finish(false); // cancel
+        assert_eq!(
+            s.cursor(),
+            7,
+            "cancel restores the translated origin (5 + 2 inserted bytes)"
+        );
+    }
+
+    #[test]
+    fn live_search_recompute_focuses_from_the_translated_origin() {
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 1;
+        s.search_begin(true, false); // origin byte 1
+        type_query(&mut s, "fo");
+        assert_eq!(s.cursor(), 8, "first match at/after the origin");
+        s.active_window_mut().cursor = 0;
+        assert!(s.insert_char('x'));
+        assert!(s.insert_char('y'));
+        assert!(s.insert_char('z'));
+        // "xyzfoo bar foo": origin 1 -> 4. Growing the query recomputes
+        // and must focus from the TRANSLATED origin: the match at 11,
+        // not the pre-edit offset 1's neighbor at 3.
+        type_query(&mut s, "o");
+        assert_eq!(
+            s.cursor(),
+            11,
+            "recompute focuses the first match at/after the translated origin"
+        );
+    }
+
+    #[test]
+    fn notify_buffer_edit_marks_stale_and_translates_the_origin() {
+        // Q#AI8 at the direct-edit seam (Lua mutators / applied CRDT
+        // ops): notify_buffer_edit must invalidate matches and shift
+        // the live origin exactly like apply_active_edit does.
+        let mut s = from_bytes(b"foo bar foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 1;
+        s.search_begin(true, false); // origin byte 1
+        type_query(&mut s, "foo");
+        let edit = {
+            let mut reg = s.registry.borrow_mut();
+            let buffer = reg.get_mut(bid).expect("buffer");
+            buffer
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"zz",
+                })
+                .expect("direct insert")
+        };
+        s.notify_buffer_edit(bid, &edit);
+        assert!(
+            s.search_store.lock().expect("store").is_stale(bid),
+            "direct edits mark the matches stale"
+        );
+        s.search_finish(false); // cancel
+        assert_eq!(
+            s.cursor(),
+            3,
+            "cancel restores the origin translated through the direct edit"
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_stale_accepted_search_navigation() {
+        // Q#AI8 (PR #109 round 1): history edits move bytes like any
+        // other edit — undo/redo must invalidate search state.
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 0;
+        assert!(s.insert_char('x')); // the history entry: "xfoo bar foo"
+        s.search_begin(true, false);
+        type_query(&mut s, "foo");
+        s.search_finish(true); // accept
+        assert_eq!(s.search_match_summary(), (Some(0), 2));
+        s.undo(); // back to "foo bar foo": offsets moved
+        assert_eq!(
+            s.search_match_summary(),
+            (None, 0),
+            "undo stales the accepted matches"
+        );
+        let before = s.cursor();
+        s.search_step(true);
+        assert_eq!(s.cursor(), before, "stale step is a no-op after undo");
+
+        // Redo the same way: refresh the matches first (a fresh set
+        // clears staleness), then redo must stale them again.
+        s.search_begin(true, false);
+        type_query(&mut s, "foo");
+        s.search_finish(true);
+        assert_eq!(s.search_match_summary().1, 2);
+        s.redo(); // forward to "xfoo bar foo" again
+        assert_eq!(
+            s.search_match_summary(),
+            (None, 0),
+            "redo stales the accepted matches"
+        );
+    }
+
+    #[test]
+    fn undo_translates_the_live_search_origin() {
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 0;
+        assert!(s.insert_char('x')); // "xfoo bar foo"
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true, false); // origin 5 ('b' of "bar")
+        type_query(&mut s, "foo");
+        s.undo(); // removes the 'x' at 0: origin must shift to 4
+        s.search_finish(false); // cancel
+        assert_eq!(
+            s.cursor(),
+            4,
+            "cancel lands on the origin translated through the undo"
+        );
+    }
+
+    #[test]
+    fn origin_translates_through_deletes_on_both_paths() {
+        // Dispatch path (apply_active_edit): backspace before the
+        // origin.
+        let mut s = from_bytes(b"foo bar foo");
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true, false); // origin 5
+        type_query(&mut s, "foo");
+        s.active_window_mut().cursor = 2;
+        s.backspace(); // deletes byte 1: origin 5 -> 4
+        s.search_finish(false);
+        assert_eq!(s.cursor(), 4, "origin shifted left by the deleted byte");
+
+        // Direct-notification path: a delete edit through
+        // notify_buffer_edit.
+        let mut s = from_bytes(b"foo bar foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 5;
+        s.search_begin(true, false); // origin 5
+        type_query(&mut s, "foo");
+        let edit = {
+            let mut reg = s.registry.borrow_mut();
+            let buffer = reg.get_mut(bid).expect("buffer");
+            buffer
+                .apply_edit(crate::buffer::EditOp::Delete {
+                    range: Range::new(0, 2),
+                })
+                .expect("direct delete")
+        };
+        s.notify_buffer_edit(bid, &edit);
+        s.search_finish(false);
+        assert_eq!(
+            s.cursor(),
+            3,
+            "origin shifted left by the two directly deleted bytes"
+        );
+    }
+
+    #[test]
+    fn active_search_fails_closed_while_stale_and_recovers_on_retype() {
+        // Q#AI8 during a LIVE session: an external edit mid-search
+        // makes step and summary fail closed; the next pattern
+        // keystroke recomputes (set clears staleness) and resumes.
+        let mut s = from_bytes(b"foo bar foo");
+        let bid = s.active_buffer_id();
+        s.active_window_mut().cursor = 0;
+        s.search_begin(true, false);
+        type_query(&mut s, "fo");
+        assert_eq!(s.search_match_summary().1, 2);
+        let edit = {
+            let mut reg = s.registry.borrow_mut();
+            let buffer = reg.get_mut(bid).expect("buffer");
+            buffer
+                .apply_edit(crate::buffer::EditOp::Insert {
+                    pos: 0,
+                    bytes: b"zz",
+                })
+                .expect("direct insert")
+        };
+        s.notify_buffer_edit(bid, &edit);
+        assert_eq!(
+            s.search_match_summary(),
+            (None, 0),
+            "summary fails closed mid-search"
+        );
+        let before = s.cursor();
+        s.search_step(true);
+        assert_eq!(s.cursor(), before, "step fails closed mid-search");
+        // Growing the query recomputes against the current text.
+        type_query(&mut s, "o");
+        assert_eq!(
+            s.search_match_summary().1,
+            2,
+            "the next pattern keystroke refreshes the match set"
+        );
+        assert_eq!(s.cursor(), 2, "focus lands from the translated origin");
+        s.search_step(true);
+        assert_eq!(s.cursor(), 10, "stepping resumes after the refresh");
     }
 
     #[test]
