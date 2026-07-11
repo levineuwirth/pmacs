@@ -2000,6 +2000,25 @@ fn is_single_codepoint_insert(edit: &crate::rope::Edit) -> bool {
     expected == len
 }
 
+/// The exact codepoint a single-codepoint insert landed (auto-pairing
+/// Q#AP9). Preconditions are [`is_single_codepoint_insert`]'s; the
+/// inserted bytes live in the post-edit rope at `range.start`. `None`
+/// on malformed UTF-8 (a classification the byte-length check above
+/// already rejects, kept fail-closed rather than panicking).
+#[cfg(feature = "crdt")]
+fn decoded_single_codepoint(edit: &crate::rope::Edit) -> Option<char> {
+    let len = usize::try_from(edit.inserted_len)
+        .ok()
+        .filter(|l| *l <= 4)?;
+    let mut buf = [0u8; 4];
+    edit.new_rope.slice(
+        edit.range.start,
+        edit.range.start + edit.inserted_len,
+        &mut buf[..len],
+    );
+    std::str::from_utf8(&buf[..len]).ok()?.chars().next()
+}
+
 /// T M10.10 (post-audit) — apply a *pre-validated*
 /// `FrontendEvent::CrdtOp`. Identity, capability, and scope checks
 /// happen upstream in `validate_remote_crdt_op`; this function trusts
@@ -2082,9 +2101,18 @@ fn handle_remote_crdt_op(
         // must NOT classify as typing (review round 4 — it would
         // spuriously auto-trigger signature help). Exact provenance on
         // the wire op is the named deferred general fix.
-        if edit.range.start == edit.range.end && is_single_codepoint_insert(edit) {
-            core.rotate_command(source, "buffer.self-insert");
-        }
+        let typed_codepoint =
+            if edit.range.start == edit.range.end && is_single_codepoint_insert(edit) {
+                core.rotate_command(source, "buffer.self-insert");
+                // Auto-pairing Q#AP9: the optimistic arm is the second
+                // typed self-insert producer. The decoded codepoint plus
+                // this Edit build the same exact provenance record the
+                // dispatch fallback arms — remote CRDT imports run no
+                // intercepts, so requested == effective and clean == true.
+                decoded_single_codepoint(edit)
+            } else {
+                None
+            };
         // Transient status messages clear on user input. The Key path
         // gets this from `dispatch_key`'s entry clear; the optimistic
         // path routes plain typing here instead, and since v15 ships
@@ -2144,6 +2172,36 @@ fn handle_remote_crdt_op(
         }
 
         core.notify_buffer_edit(buffer_id, edit);
+        // Auto-pairing Q#AP9: arm the typed-edit record for the one
+        // after-edit fan-out below — but only when the source's
+        // active window actually displays the edited buffer, so
+        // `post_cursor` (set to the optimistic post-edit position in
+        // the window loop above) is that window's real cursor. A
+        // synthetic replica editing a background buffer gets no
+        // record: absence fails closed, silently.
+        if let Some(ch) = typed_codepoint
+            && let Some(wid) = source_active_window_id
+            && core
+                .windows
+                .get(&wid)
+                .is_some_and(|w| w.buffer_id == buffer_id)
+        {
+            core.typed_edit_set_armed(
+                source,
+                crate::editor_core::TypedEditRecord {
+                    buffer: buffer_id,
+                    window: wid,
+                    codepoint: ch,
+                    requested_start: edit.range.start,
+                    requested_end: edit.range.end,
+                    effective_start: edit.range.start,
+                    effective_end: edit.range.end,
+                    inserted_len: edit.inserted_len,
+                    post_cursor: post_edit_cursor,
+                    clean: true,
+                },
+            );
+        }
         // T M11.9 — temporarily switch active_frontend to source so
         // the `buffer.after-edit` hook's Lua observers (notably the
         // LSP `did_change` glue in `builtin/runtime/lsp.lua`) read
@@ -2167,6 +2225,9 @@ fn handle_remote_crdt_op(
         editor
             .lua_host
             .run_hook("buffer.after-edit", mlua::MultiValue::new());
+        // Q#AP9: drop any untaken record the moment the fan-out
+        // returns — the slot must never leak into a later hook run.
+        editor.core.borrow_mut().typed_edit_clear_armed();
     }
 
     // Effect 4: queue for broadcast. The source frontend's mirror

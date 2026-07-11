@@ -34,7 +34,7 @@
 
 use crate::buffer::BufferId;
 use crate::buffer_mirror::{BufferMirror, BufferMirrorError};
-use crate::protocol::{FrontendEvent, FrontendId, Key, KeyEvent, Modifiers};
+use crate::protocol::{FrontendEvent, FrontendId, Key, KeyEvent, Modifiers, is_builtin_pair_char};
 use crate::rope::CrdtOp;
 use unicode_width::UnicodeWidthChar;
 
@@ -135,7 +135,13 @@ pub fn classify_key(key: Key, mods: Modifiers) -> OptimisticAction {
         return OptimisticAction::RoundTrip;
     }
     match key {
-        Key::Char(c) if !c.is_control() => OptimisticAction::Insert(c),
+        // Auto-pairing Q#AP1: the built-in pair charset always
+        // round-trips so the opener and the pairing hook's closer are
+        // adjacent daemon-peer undo units (and dispatch-path CUA
+        // type-over applies). An optimistic pair char would be a
+        // source-peer op whose reaction closer lives on the daemon
+        // peer — uncleanly undoable from either frontend.
+        Key::Char(c) if !c.is_control() && !is_builtin_pair_char(c) => OptimisticAction::Insert(c),
         Key::Backspace => OptimisticAction::DeleteBack,
         Key::Delete => OptimisticAction::DeleteForward,
         _ => OptimisticAction::RoundTrip,
@@ -456,6 +462,29 @@ mod tests {
             assert_eq!(
                 classify_key(Key::Char(c), Modifiers::NONE),
                 OptimisticAction::Insert(c)
+            );
+        }
+    }
+
+    #[test]
+    fn classify_builtin_pair_chars_round_trip() {
+        // Auto-pairing Q#AP1: the nine built-in pair chars must reach
+        // the daemon's dispatch so the opener and the hook's closer are
+        // adjacent daemon-peer undo units. Both modifier shapes real
+        // keyboards produce are pinned: `[`/`]`/`'`/`` ` `` arrive
+        // unshifted, `(`/`)`/`{`/`}`/`"` arrive with SHIFT set — a gate
+        // that only caught `Modifiers::NONE` would leak every shifted
+        // pair char back onto the optimistic path.
+        for c in crate::protocol::BUILTIN_PAIR_CHARS {
+            assert_eq!(
+                classify_key(Key::Char(c), Modifiers::NONE),
+                OptimisticAction::RoundTrip,
+                "unshifted {c:?} must round-trip"
+            );
+            assert_eq!(
+                classify_key(Key::Char(c), Modifiers::SHIFT),
+                OptimisticAction::RoundTrip,
+                "shifted {c:?} must round-trip"
             );
         }
     }
