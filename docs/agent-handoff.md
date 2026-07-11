@@ -1,6 +1,6 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-10, on the laptop, by the auto-indent
+**Last updated: 2026-07-11, on the laptop, by the auto-pairing
 session.** This file is the bridge between development machines. If you
 are an agent reading this on a fresh clone: this document plus the
 `docs/*-framing.md` files ARE your memory. Read this fully before
@@ -8,28 +8,31 @@ taking on work, seed your persistent memory from it, and **update this
 file (and commit it) whenever project state changes materially** — the
 next machine reads it the way you just did.
 
-## 1. Where the project stands (2026-07-10)
+## 1. Where the project stands (2026-07-11)
 
-- `main` @ `efa41cb`, protocol **v15** (`SUPPORTED=[6..15]`).
-- **Auto-indent on newline (Arc 2) in flight on this branch** —
-  framing `docs/auto-indent-framing.md` is at revision 6 (five
-  pre-branch review rounds plus PR #109 round 1). RET now binds
-  `edit.newline-and-indent`; plain Enter is no longer GPU-optimistic
-  (round-trips like the TUI). Rode along: Q#AI8 search invalidation is
-  shared by dispatch, direct notification, undo, and redo (stale
-  step/summary fail closed; live origins translate through edits), and
-  Q#AI9 clears empty selections only after successful core inserts and
-  in the daemon's optimistic CRDT source arm for both frontends. The
+- `main` @ `7e127ab` (auto-indent #109 merged), protocol **v15**
+  (`SUPPORTED=[6..15]`).
+- **Auto-pairing (Arc 2, last item) in flight on this branch** —
+  framing `docs/auto-pairing-framing.md` at revision 3 (two
+  pre-branch review rounds). Shape: pair chars leave both frontends'
+  optimistic classifiers (dispatch-routed, daemon-peer undo units);
+  reaction hook in `builtin/runtime/pair.lua` loaded BEFORE lsp.lua;
+  exact one-shot typed-edit provenance via
+  `pmacs.editor.take_typed_edit()` (Q#AP9). When this merges, Arc 2
+  closes.
+- Auto-indent (#109) landed: RET binds `edit.newline-and-indent`;
+  plain Enter round-trips on both frontends. Rode along: shared
+  search invalidation across dispatch/notification/undo/redo (Q#AI8),
+  empty-selection clearing after successful inserts (Q#AI9). The
   TUI's missing nonempty-selection optimistic type-over gate and
-  generated-buffer search invalidation remain named deferrals.
+  generated-buffer search invalidation remain named deferrals (§6).
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
     hardening follow-ups (#102, #105, #106).
   - **Arc 2 (editing table stakes)** — query-replace (#97), kill ring
-    + `M-y` (#103/#105/#106), comment-toggle (#107), auto-indent (this
-    branch). **Remaining after this merges: auto-pairing**, as its own
-    small framing + PR.
+    + `M-y` (#103/#105/#106), comment-toggle (#107), auto-indent
+    (#109), auto-pairing (this branch — the last item).
   - **Arc 3 (persistence) COMPLETE** — saveplace/recentf (#98),
     desktop-save (#99), autosave/crash-recovery (#100), save-clobber
     fix (#101).
@@ -172,7 +175,12 @@ comment padding.
 Substrate: buffer-aware edit epoch (after-edit currently compares the
 ACTIVE buffer only), wire provenance for CRDT self-insert
 classification, Lua intercept probe, completion.lua still on the old
-cursor-delta heuristic (migrate to `this_command`).
+cursor-delta heuristic (migrate to `this_command`), the TUI's
+nonempty-selection optimistic type-over gate, generated-buffer search
+invalidation, cross-peer chronological undo arbitration (mixed
+source/daemon history; pinned by auto-pairing acceptance),
+origin-pinned `buffer.after-edit` fan-out (a context-switching
+intercept changes what later callbacks — LSP, completion — observe).
 LSP/persistence: hidden-buffer LSP attach, daemon desktop-restore, the
 *warning* half of external-change detection (verify-visited-file-
 modtime), config registry (no unified config surface yet).
