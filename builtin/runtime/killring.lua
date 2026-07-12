@@ -34,8 +34,24 @@ local max_entries = DEFAULT_MAX
 local last_kill_id = {} -- fid -> ring-entry id of that frontend's last kill
 local sessions = {} -- fid -> { buffer, start, stop, entry_id, text }
 
--- Commands whose success may extend a kill chain (Q#KR4).
-local KILL_CHAIN = { ["edit.kill-line"] = true, ["edit.cut"] = true }
+-- Commands whose success may extend a kill chain (Q#KR4; the zap
+-- pair joined via the editing-conveniences framing Q#EC6 — their
+-- kills run inside a minibuffer accept, where the boundary state is
+-- the invoking dispatch's, preserved by the minibuffer key shadow).
+local KILL_CHAIN = {
+  ["edit.kill-line"] = true,
+  ["edit.cut"] = true,
+  ["edit.zap-to-char"] = true,
+  ["edit.zap-up-to-char"] = true,
+}
+
+-- Q#EC6 pending-prompt marker: fid -> true while a kill-producing
+-- minibuffer prompt is armed but not yet committed. Minibuffer::begin
+-- replaces a live session WITHOUT running its on_cancel, so a
+-- silently-discarded zap prompt leaves no callback to break the
+-- chain; the marker lives here, where every kill can see it, and an
+-- ordinary kill that meets it uncommitted refuses to append.
+local pending_kill_prompt = {} -- fid -> true
 
 local function trim()
   while #ring > max_entries do
@@ -63,9 +79,13 @@ function pmacs.killring.list()
   return out
 end
 
--- Test/debug seam (Q#KR11 lifecycle assertions).
+-- Test/debug seam (Q#KR11 lifecycle assertions; Q#EC6 marker).
 function pmacs.killring._debug_state(fid)
-  return { session = sessions[fid], last_kill_id = last_kill_id[fid] }
+  return {
+    session = sessions[fid],
+    last_kill_id = last_kill_id[fid],
+    pending_kill_prompt = pending_kill_prompt[fid],
+  }
 end
 
 -- Push `text` as a fresh entry (duplicate-of-head collapses, keeping
@@ -79,9 +99,13 @@ local function push_entry(text)
 end
 
 -- A kill-family command failed or was a no-op: it must not leave a
--- live chain for the next kill to append to (Q#KR4).
+-- live chain for the next kill to append to (Q#KR4). Also drops any
+-- armed-but-uncommitted prompt marker (Q#EC6): every failure path
+-- routes through here, and clearing both state components together
+-- is what makes break_chain sufficient.
 local function fail_kill(fid)
   last_kill_id[fid] = nil
+  pending_kill_prompt[fid] = nil
 end
 
 -- Chain-aware kill (Q#KR4): append to the head iff the previous
@@ -90,6 +114,17 @@ end
 -- not ours — append would corrupt their entry). Mirrors the head to
 -- the acting frontend's OS clipboard either way.
 local function kill_push(fid, text)
+  -- Q#EC6 fail-safe: an uncommitted prompt marker means an armed
+  -- kill prompt never resolved (silent session replacement bypasses
+  -- on_cancel). Refuse to append no matter what last_command and the
+  -- id say — force a fresh entry and clear the marker.
+  if pending_kill_prompt[fid] then
+    pending_kill_prompt[fid] = nil
+    local head = push_entry(text)
+    last_kill_id[fid] = head.id
+    ed.clipboard_set(head.text)
+    return head
+  end
   local chained = KILL_CHAIN[ed.last_command() or ""]
     and last_kill_id[fid] ~= nil
     and ring[1] ~= nil
@@ -335,11 +370,100 @@ function pmacs.killring.yank_pop()
   return true
 end
 
+-- ---- editing-conveniences exports (Q#EC6) --------------------------
+-- The chain-aware surface zap needs from its minibuffer accept: a
+-- range kill with killring's exact-effective-edit discipline, a
+-- targeted chain break (the frontend whose chain must break is the
+-- INVOKING one, which need not be the acting one), and the
+-- pending-prompt marker lifecycle.
+
+-- Kill [start, stop) of the ACTIVE buffer into the ring, chain-aware.
+-- Returns true on a clean kill; false, "rejected" when an intercept
+-- threw (nothing landed); false, "transformed", estart, estop,
+-- einserted when the effective edit deviated (the intercept's result
+-- stands — the caller owns any cursor repair). Both failure paths
+-- break the acting frontend's chain and report status. Invalid
+-- arguments error BEFORE any ring or buffer mutation: misuse of a
+-- programmatic API, not a user outcome.
+function pmacs.killring.kill_range(start, stop)
+  local buf = pmacs.window.buffer()
+  if not buf then
+    error("pmacs.killring.kill_range: no active buffer")
+  end
+  local function ok_int(n)
+    return type(n) == "number" and n == n and n ~= math.huge
+      and n == math.floor(n) and n >= 0
+  end
+  if not (ok_int(start) and ok_int(stop))
+    or start >= stop or stop > buf:len() then
+    error("pmacs.killring.kill_range: expected integers "
+      .. "0 <= start < stop <= buffer length")
+  end
+  local fid = pmacs.frontend.id()
+  local text = buf:slice(start, stop)
+  local ok, estart, estop, einserted = pcall(function()
+    return buf:delete(start, stop)
+  end)
+  if not ok then
+    fail_kill(fid)
+    ed.set_status("kill rejected by buffer intercept")
+    return false, "rejected"
+  end
+  if estart ~= start or estop ~= stop or einserted ~= 0 then
+    fail_kill(fid)
+    ed.set_status("kill altered by buffer intercept; ring not updated")
+    return false, "transformed", estart, estop, einserted
+  end
+  kill_push(fid, text)
+  return true
+end
+
+-- Public chain break. Targets `fid` when given (the origin guard
+-- passes the INVOKING frontend, which may differ from the acting
+-- one), else the acting frontend.
+function pmacs.killring.break_chain(fid)
+  if fid == nil then
+    fid = pmacs.frontend.id()
+  elseif type(fid) ~= "number" or fid ~= fid or fid == math.huge
+    or fid ~= math.floor(fid) or fid < 0 then
+    error("pmacs.killring.break_chain: fid must be a nonnegative integer")
+  end
+  fail_kill(fid)
+end
+
+-- Arm the acting frontend's pending-prompt marker (zap, at invoke
+-- time, before minibuffer.read). Does NOT touch last_kill_id —
+-- backward chaining (C-k then a completed zap appends) needs the id
+-- alive. An ALREADY-set marker means the previous armed prompt was
+-- silently discarded without resolution (replaced session, no
+-- on_cancel): break that chain first, or a second zap would commit
+-- the stale marker away and falsely append to the pre-abandonment
+-- kill.
+function pmacs.killring.arm_kill_prompt()
+  local fid = pmacs.frontend.id()
+  if pending_kill_prompt[fid] then
+    last_kill_id[fid] = nil
+  end
+  pending_kill_prompt[fid] = true
+end
+
+-- Clear the acting frontend's marker, reporting whether one was
+-- still armed. Callers kill only on true: a false return means some
+-- other Lua consumed the marker while the prompt was open, and the
+-- armed state is no longer trustworthy (fail closed).
+function pmacs.killring.commit_kill_prompt()
+  local fid = pmacs.frontend.id()
+  local was_armed = pending_kill_prompt[fid] ~= nil
+  pending_kill_prompt[fid] = nil
+  return was_armed
+end
+
 -- Q#KR11: a detached frontend's chain/session state must not outlive
 -- it (ids are monotonic; these tables would grow forever).
 pmacs.hook.add("frontend.detached", function(fid)
   sessions[fid] = nil
   last_kill_id[fid] = nil
+  pending_kill_prompt[fid] = nil
 end)
 
 pmacs.command.define {
