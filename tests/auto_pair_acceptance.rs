@@ -323,6 +323,52 @@ fn multibyte_pair_entries_pair_and_skip() {
 }
 
 #[test]
+fn opener_before_malformed_buffer_bytes_does_not_pair() {
+    // PR #110 round 3, finding 1: the predicate's raw-byte posture,
+    // pinned from the BUFFER side. A byte that begins no well-formed
+    // sequence (0xFF) sits after the cursor; `char_at` must surface
+    // it as a raw byte the predicate treats as word-like — a
+    // regression back to nil would read it as end-of-buffer and pair
+    // before the junk.
+    let mut s = editor_with("");
+    exec(&s, "pmacs.window.buffer():insert(0, string.char(0xFF))");
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    type_str(&mut s, "(");
+    let len: i64 = eval(&s, "return pmacs.window.buffer():len()");
+    assert_eq!(len, 2, "opener + junk byte only — a closer would make 3");
+    let shape_ok: bool = eval(
+        &s,
+        "local b = pmacs.window.buffer() \
+         return b:slice(0, 1) == \"(\" and b:slice(1, 2):byte(1) == 0xFF",
+    );
+    assert!(
+        shape_ok,
+        "the opener stands alone before the malformed byte"
+    );
+    assert!(
+        !status(&s).contains("auto-pair"),
+        "declining the predicate is silent; got: {:?}",
+        status(&s)
+    );
+}
+
+#[test]
+fn non_table_sets_container_fails_closed_without_erroring() {
+    // PR #110 round 3, finding 2: the TOP-LEVEL container guard,
+    // pinned. `set_for` degrades a non-table `pmacs.pair.sets` to the
+    // empty set; the callback must not throw.
+    let mut s = editor_with("");
+    exec(&s, "pmacs.pair.sets = 42");
+    type_str(&mut s, "(");
+    assert_eq!(buffer_text(&s), "(", "a non-table container pairs nothing");
+    let log = s.lua_host.errors_buffer_text();
+    assert!(
+        !log.contains("pair"),
+        "the pairing callback must not error over a config typo; *errors*:\n{log}"
+    );
+}
+
+#[test]
 fn non_table_default_set_fails_closed_without_erroring() {
     // PR #110 round 2, finding 3: a config typo assigning a STRING
     // where the set table belongs must behave as an empty set — not

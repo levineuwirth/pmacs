@@ -47,6 +47,13 @@ context-switching command no longer attributes them to the
 destination buffer); and non-table set containers degrade
 language→default→empty instead of throwing from the callback.
 
+Revision 6: PR #110 round 3 — coverage pins only, no code changes:
+the predicate's raw-byte posture is pinned from the buffer side
+(`(` typed before a lone `0xFF` inserts no closer; a regression to
+nil-on-malformed would read junk as end-of-buffer), and the
+top-level non-table `pmacs.pair.sets` container is pinned alongside
+the per-entry cases (pairs nothing, clean `*errors*`).
+
 ## Ground truth (as of `7e127ab`)
 
 - **Dispatch is keymap-first for printables** — `Char('(')` resolves
@@ -488,9 +495,11 @@ facility is the only way a consumed record outlives its fan-out (R4).
   and skips at byte-correct cursors. Ill-formed UTF-8 closers (R5) —
   truncated `"(\xC2x"`, overlong `"(\xC0\xAF"`, surrogate
   `"(\xED\xA0\x80"`, beyond-U+10FFFF `"(\xF5\x80\x80\x80"` — all
-  pair nothing. Non-table containers (R5): a string `default` pairs
-  nothing without erroring; a junk language entry falls back to the
-  default set.
+  pair nothing. Non-table containers (R5/R6): a string `default` and
+  a non-table `pmacs.pair.sets` itself pair nothing without erroring;
+  a junk language entry falls back to the default set. Malformed
+  BUFFER bytes (R6): `(` typed immediately before a lone `0xFF`
+  stays unpaired — junk is word-like, not EOL-like.
 - Source-buffer relevance (R5): `'` typed in Rust with a
   context-switching command landing in Python stays silent; the
   inverse Python→Rust route still reports "source context changed".
