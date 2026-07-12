@@ -50,55 +50,85 @@ pmacs.pair.sets = {
   bash = { "()", "[]", "{}", '""', "''" },
 }
 
--- UTF-8 sequence length from a leading byte; nil on a continuation
--- byte (not a codepoint boundary).
-local function cp_len(b)
-  if b < 0x80 then return 1 end
-  if b < 0xC0 then return nil end
-  if b < 0xE0 then return 2 end
-  if b < 0xF0 then return 3 end
+-- Length of the well-formed UTF-8 sequence starting at `s[i]`, or nil
+-- for anything ill-formed (Unicode 15, Table 3-7): continuation-byte
+-- shapes are checked on EVERY trailing byte, and the narrowed
+-- second-byte ranges exclude overlong encodings (C0/C1 leads,
+-- E0 80–9F, F0 80–8F), UTF-16 surrogates (ED A0–BF), and codepoints
+-- beyond U+10FFFF (F5+ leads, F4 90+). Length-from-lead-byte alone
+-- accepted "(\xC2x" as two "codepoints" (PR #110 round 2, finding 1).
+local function utf8_seq_len(s, i)
+  local b1 = s:byte(i)
+  if not b1 then return nil end
+  if b1 < 0x80 then return 1 end
+  if b1 < 0xC2 or b1 > 0xF4 then return nil end
+  local b2 = s:byte(i + 1)
+  if not b2 or b2 < 0x80 or b2 > 0xBF then return nil end
+  if b1 < 0xE0 then return 2 end
+  if b1 == 0xE0 and b2 < 0xA0 then return nil end
+  if b1 == 0xED and b2 > 0x9F then return nil end
+  if b1 == 0xF0 and b2 < 0x90 then return nil end
+  if b1 == 0xF4 and b2 > 0x8F then return nil end
+  local b3 = s:byte(i + 2)
+  if not b3 or b3 < 0x80 or b3 > 0xBF then return nil end
+  if b1 < 0xF0 then return 3 end
+  local b4 = s:byte(i + 3)
+  if not b4 or b4 < 0x80 or b4 > 0xBF then return nil end
   return 4
 end
 
--- The first full UTF-8 codepoint starting at byte `pos`, as a string,
--- or nil at end-of-buffer / on a non-boundary byte. Forward twin of
--- lsp.lua's `char_before`; reads at most 4 bytes.
+-- The first full UTF-8 codepoint starting at byte `pos`, as a string;
+-- nil at end-of-buffer. Bytes that do not begin a well-formed
+-- sequence (malformed file content, a truncated sequence at EOF)
+-- yield the single raw byte instead: it matches neither whitespace
+-- nor any validated closer, so the predicate conservatively treats
+-- junk like a word character — never like EOL, which nil would mean.
 local function char_at(buf, pos)
   local len = buf:len()
   if pos >= len then return nil end
   local to = math.min(pos + 4, len)
   local ok, s = pcall(function() return buf:slice(pos, to) end)
   if not ok or type(s) ~= "string" or #s == 0 then return nil end
-  local n = cp_len(s:byte(1))
-  if not n or n > #s then return nil end
+  local n = utf8_seq_len(s, 1)
+  if not n or n > #s then return s:sub(1, 1) end
   return s:sub(1, n)
 end
 
--- Split a pair entry into (opener, closer): EXACTLY two codepoints,
--- no trailing bytes (PR #110 round 1, finding 3 — "()x" must be
--- skipped entirely, never honored as `(` → `)x`). nil for malformed
--- user additions: skipped, not errors — the hook must never throw
--- over a config typo.
+-- Split a pair entry into (opener, closer): EXACTLY two well-formed
+-- UTF-8 codepoints, no trailing bytes (PR #110 round 1 finding 3 +
+-- round 2 finding 1 — "()x" and "(\xC2x" must be skipped entirely,
+-- never partially honored). nil for malformed user additions:
+-- skipped, not errors — the hook must never throw over a config typo.
 local function split_pair(s)
   if type(s) ~= "string" or #s < 2 then return nil end
-  local n1 = cp_len(s:byte(1))
+  local n1 = utf8_seq_len(s, 1)
   if not n1 or n1 >= #s then return nil end
-  local n2 = cp_len(s:byte(n1 + 1))
+  local n2 = utf8_seq_len(s, n1 + 1)
   if not n2 or n1 + n2 ~= #s then return nil end
   return s:sub(1, n1), s:sub(n1 + 1)
 end
 
--- The active buffer's pair set: language entry if the language is
--- known and configured, else `default`. `pmacs.lsp` is looked up
--- lazily and nil-guarded — this chunk loads before lsp.lua (Q#AP7),
--- and language detection is an LSP-runtime service.
-local function active_set()
+-- The pair set for `buf`: its language's entry if configured, else
+-- `default`. Language resolves against the buffer the typed-edit
+-- record names — NOT the currently active buffer, which a
+-- context-switching command may have replaced by callback time
+-- (PR #110 round 2, finding 2). `pmacs.lsp` is looked up lazily and
+-- nil-guarded — this chunk loads before lsp.lua (Q#AP7). Non-table
+-- values anywhere (a config typo like `pmacs.pair.sets.default =
+-- "()"`) degrade to the default set, then to empty — never a throw
+-- from the after-edit callback (round 2, finding 3).
+local function set_for(buf)
   local lang
-  if pmacs.lsp and pmacs.lsp.active_buffer_language then
-    local ok, l = pcall(pmacs.lsp.active_buffer_language)
+  if pmacs.lsp and pmacs.lsp.buffer_language then
+    local ok, l = pcall(pmacs.lsp.buffer_language, buf)
     if ok then lang = l end
   end
-  return (lang and pmacs.pair.sets[lang]) or pmacs.pair.sets.default
+  local sets = pmacs.pair.sets
+  if type(sets) ~= "table" then return {} end
+  local set = lang and sets[lang]
+  if type(set) ~= "table" then set = sets.default end
+  if type(set) ~= "table" then return {} end
+  return set
 end
 
 -- opener → closer, and the set of closer codepoints.
@@ -172,11 +202,15 @@ pmacs.hook.add("buffer.after-edit", function()
   if not buf then return end
 
   -- Relevance first (PR #110 round 1, finding 2): pairing has no
-  -- interest in characters outside the active set, so a transformed
-  -- or relocated ordinary `a` must stay silent — the reports below
-  -- are for pair characters only.
+  -- interest in characters outside the set, so a transformed or
+  -- relocated ordinary `a` must stay silent — the reports below are
+  -- for pair characters only. The set is the SOURCE buffer's (round
+  -- 2, finding 2): `'` typed in Rust stays silent even when a
+  -- context-switching command lands in Python, and `'` typed in
+  -- Python still draws the context-change report when it lands in
+  -- Rust.
   local ch = rec.char
-  local openers, closers = maps_for(active_set())
+  local openers, closers = maps_for(set_for(rec.buffer))
   if not (openers[ch] or closers[ch]) then return end
 
   -- Fail closed on a transformed source self-insert (Q#AP3): the

@@ -36,6 +36,17 @@ is scoped as best-effort under the active-buffer edit-epoch limit —
 an equal-revision context switch skips the fan-out and fails closed
 silently.
 
+Revision 5: PR #110 round 2 — set entries validate full UTF-8
+well-formedness (Table 3-7: continuation bytes, overlong encodings,
+surrogates, beyond-U+10FFFF all disqualify; lead-byte length alone
+had accepted `"(\xC2x"`), and the predicate treats malformed buffer
+bytes as word-like (no pairing before junk), never as EOL; relevance
+and reporting resolve against the SOURCE buffer's language via the
+new `pmacs.lsp.buffer_language(buf)` / `buf:path()` (a
+context-switching command no longer attributes them to the
+destination buffer); and non-table set containers degrade
+language→default→empty instead of throwing from the callback.
+
 ## Ground truth (as of `7e127ab`)
 
 - **Dispatch is keymap-first for printables** — `Char('(')` resolves
@@ -209,10 +220,17 @@ full fix deferred with the pre-existing mixed-history problem
 `pmacs.pair.sets` — the `pmacs.comment.strings` shape: language →
 array of pair strings, plus a `default` entry used when the language
 is unknown or has no entry (pairing is useful in scratch buffers).
-An entry is EXACTLY two codepoints — opener then closer, multibyte
-allowed (`"«»"`); malformed entries (trailing bytes, non-boundary
-first byte) are skipped entirely, never partially honored (R4: a
-`"()x"` typo must not turn `(` into `()x`):
+An entry is EXACTLY two **well-formed** UTF-8 codepoints — opener
+then closer, multibyte allowed (`"«»"`); malformed entries are
+skipped entirely, never partially honored (R4: a `"()x"` typo must
+not turn `(` into `()x`; R5: well-formedness per Unicode Table 3-7,
+so truncated sequences, overlong encodings, surrogates, and
+beyond-U+10FFFF closers like `"(\xC2x"` also disqualify). A
+non-table container anywhere — a typo like `pmacs.pair.sets.default
+= "()"` — degrades language→default→empty rather than throwing from
+the after-edit callback (R5). The set (and the language behind it)
+always resolves against the buffer the typed-edit record names, via
+`pmacs.lsp.buffer_language(buf)` (R5):
 
 - `default = { "()", "[]", "{}", '""' }` — no `'` (prose
   apostrophes), no backtick.
@@ -252,13 +270,16 @@ React when ALL hold:
   it; a surviving nonempty region means the edit arrived through the
   TUI's selection-blind optimistic gate (custom chars only), where
   reacting would pile a closer onto an unconsumed region;
-- the record's exact typed codepoint is an opener in the buffer's pair
-  set (language via `pmacs.lsp.active_buffer_language()`, resolved
-  **at callback time**, nil-guarded — pair.lua loads before lsp.lua,
-  Q#AP7). `char_before` is not input provenance;
+- the record's exact typed codepoint is an opener in the SOURCE
+  buffer's pair set (language via `pmacs.lsp.buffer_language(buf)` on
+  the record's buffer, resolved **at callback time**, nil-guarded —
+  pair.lua loads before lsp.lua, Q#AP7; R5: the active buffer is the
+  wrong buffer whenever a context-switching command ran).
+  `char_before` is not input provenance;
 - **conservative predicate**: the char at the cursor is EOL,
   whitespace, or a closing bracket from the pair set — `foo|bar` +
-  `(` gives `(bar`, never `()bar`;
+  `(` gives `(bar`, never `()bar`. Malformed bytes at the cursor are
+  word-like (no pairing before junk), not EOL-like (R5);
 - for symmetric pairs (quotes), the skip check (Q#AP4) runs first.
 
 Reaction: one pcall'd `buf:insert(cursor, closer)`. Outcomes,
@@ -464,7 +485,15 @@ facility is the only way a consumed record outlives its fan-out (R4).
   default set.
 - Set-entry parsing (R4): a malformed `"()x"` (and an overlong
   multibyte `"«»x"`) pairs nothing; a valid multibyte `"«»"` pairs
-  and skips at byte-correct cursors.
+  and skips at byte-correct cursors. Ill-formed UTF-8 closers (R5) —
+  truncated `"(\xC2x"`, overlong `"(\xC0\xAF"`, surrogate
+  `"(\xED\xA0\x80"`, beyond-U+10FFFF `"(\xF5\x80\x80\x80"` — all
+  pair nothing. Non-table containers (R5): a string `default` pairs
+  nothing without erroring; a junk language entry falls back to the
+  default set.
+- Source-buffer relevance (R5): `'` typed in Rust with a
+  context-switching command landing in Python stays silent; the
+  inverse Python→Rust route still reports "source context changed".
 - Non-typed provenance, with the callback actually exercised:
   production `FrontendEvent::Paste("(")` after a prior self-insert
   leaves a lone pasted opener; `buf:insert("(")` followed by explicit

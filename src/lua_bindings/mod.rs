@@ -1167,6 +1167,20 @@ fn add_query_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
         with_registry(lua, |r| Ok(resolve(r, this.0)?.name().to_owned()))
     });
 
+    // Backing file path, or nil for pathless buffers (scratch,
+    // generated). The per-buffer twin of `pmacs.editor.file_path()`:
+    // consumers that hold a buffer handle from earlier in a hook
+    // fan-out (auto-pairing's typed-edit record) must resolve
+    // language/URIs against THAT buffer, not whatever is active by
+    // the time their callback runs.
+    methods.add_method("path", |lua, this, ()| {
+        with_registry(lua, |r| {
+            Ok(resolve(r, this.0)?
+                .file_path()
+                .map(|p| p.display().to_string()))
+        })
+    });
+
     methods.add_method("is_modified", |lua, this, ()| {
         with_registry(lua, |r| Ok(resolve(r, this.0)?.is_modified()))
     });

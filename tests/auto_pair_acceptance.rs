@@ -282,6 +282,34 @@ fn malformed_pair_entries_are_skipped_not_partially_honored() {
 }
 
 #[test]
+fn malformed_utf8_pair_entries_are_rejected() {
+    // PR #110 round 2, finding 1: byte-length-from-lead-byte alone is
+    // not validation. Every ill-formed closer shape from Unicode
+    // Table 3-7 must disqualify the entry — never land in the buffer.
+    let cases = [
+        // Truncated 2-byte sequence with a trailing ASCII byte: the
+        // lead byte "promises" 2 bytes, so lead-length parsing counts
+        // "\xC2x" as one codepoint.
+        ("string.char(0xC2) .. \"x\"", "truncated sequence"),
+        // Overlong encoding of `/` (C0 AF).
+        ("string.char(0xC0, 0xAF)", "overlong encoding"),
+        // UTF-16 surrogate D800 (ED A0 80).
+        ("string.char(0xED, 0xA0, 0x80)", "surrogate encoding"),
+        // Beyond U+10FFFF (F5 80 80 80).
+        ("string.char(0xF5, 0x80, 0x80, 0x80)", "beyond U+10FFFF"),
+    ];
+    for (closer, what) in cases {
+        let mut s = editor_with("");
+        exec(
+            &s,
+            &format!("pmacs.pair.sets.default = {{ \"(\" .. {closer} }}"),
+        );
+        type_str(&mut s, "(");
+        assert_eq!(buffer_text(&s), "(", "a {what} closer must pair nothing");
+    }
+}
+
+#[test]
 fn multibyte_pair_entries_pair_and_skip() {
     // Two-codepoint entries with multibyte members are valid: guillemets.
     let mut s = editor_with("");
@@ -292,6 +320,41 @@ fn multibyte_pair_entries_pair_and_skip() {
     type_str(&mut s, "\u{bb}");
     assert_eq!(buffer_text(&s), "\u{ab}\u{bb}", "the closer skips");
     assert_eq!(cursor(&s), 4);
+}
+
+#[test]
+fn non_table_default_set_fails_closed_without_erroring() {
+    // PR #110 round 2, finding 3: a config typo assigning a STRING
+    // where the set table belongs must behave as an empty set — not
+    // throw from the after-edit callback on every keystroke.
+    let mut s = editor_with("");
+    exec(&s, "pmacs.pair.sets.default = \"()\"");
+    type_str(&mut s, "(");
+    assert_eq!(buffer_text(&s), "(", "a non-table set pairs nothing");
+    let log = s.lua_host.errors_buffer_text();
+    assert!(
+        !log.contains("pair"),
+        "the pairing callback must not error over a config typo; *errors*:\n{log}"
+    );
+}
+
+#[test]
+fn non_table_language_set_falls_back_to_default() {
+    // The language entry being junk falls back to `default` (the
+    // buffer still deserves pairing), and nothing throws.
+    let mut s = editor_visiting("a.rs", "");
+    exec(&s, "pmacs.pair.sets.rust = 42");
+    type_str(&mut s, "(");
+    assert_eq!(
+        buffer_text(&s),
+        "()",
+        "a junk language entry falls back to the default set"
+    );
+    let log = s.lua_host.errors_buffer_text();
+    assert!(
+        !log.contains("pair"),
+        "the pairing callback must not error over a config typo; *errors*:\n{log}"
+    );
 }
 
 #[test]
@@ -733,6 +796,96 @@ fn source_context_switch_fails_closed() {
     );
     let other_text: String = eval(&s, "return _G.other:slice(0, _G.other:len())");
     assert_eq!(other_text, "z", "the switched-to buffer is untouched");
+}
+
+#[test]
+fn context_switch_relevance_is_the_source_buffers_rust_to_python_is_silent() {
+    // PR #110 round 2, finding 2: `'` typed in Rust is not a pair
+    // char THERE — that the context-switching command lands in a
+    // Python buffer (where `''` pairs) must not conjure an irrelevant
+    // "source context changed" report. Relevance and reporting are
+    // attributed to the buffer the record names.
+    let dir = fresh_state_dir();
+    let mut s = editor(&dir);
+    let py = write_file(&dir, "b.py", "");
+    let rs = write_file(&dir, "a.rs", "");
+    exec(&s, &format!("pmacs.buffer.find_or_open({py:?})"));
+    exec(&s, "_G.py = pmacs.window.buffer()");
+    exec(&s, &format!("pmacs.buffer.find_or_open({rs:?})"));
+    exec(&s, "_G.rs = pmacs.window.buffer()");
+    // Revision skew so the fan-out runs after the switch (the
+    // buffer-aware edit epoch is a named substrate deferral).
+    type_str(&mut s, "xy");
+    exec(
+        &s,
+        r#"
+        pmacs.command.unregister("buffer.self-insert")
+        pmacs.command.define {
+          name = "buffer.self-insert",
+          description = "test override: insert, then switch context",
+          fn = function(cp)
+            pmacs.editor.insert_char_over_region(cp)
+            pmacs.window.switch_buffer(_G.py)
+          end,
+        }
+        "#,
+    );
+    type_str(&mut s, "'");
+    assert!(
+        !status(&s).contains("auto-pair"),
+        "`'` is outside the SOURCE (rust) set; got: {:?}",
+        status(&s)
+    );
+    let rs_text: String = eval(&s, "return _G.rs:slice(0, _G.rs:len())");
+    assert_eq!(
+        rs_text, "xy'",
+        "the quote landed in the rust buffer, no pair"
+    );
+    let py_text: String = eval(&s, "return _G.py:slice(0, _G.py:len())");
+    assert_eq!(py_text, "", "the python buffer is untouched");
+}
+
+#[test]
+fn context_switch_relevance_is_the_source_buffers_python_to_rust_reports() {
+    // The inverse route: `'` typed in Python IS a pair char there, so
+    // the context-change report must fire even though the destination
+    // (rust) set would have suppressed it under active-buffer lookup.
+    let dir = fresh_state_dir();
+    let mut s = editor(&dir);
+    let rs = write_file(&dir, "a.rs", "");
+    let py = write_file(&dir, "b.py", "");
+    exec(&s, &format!("pmacs.buffer.find_or_open({rs:?})"));
+    exec(&s, "_G.rs = pmacs.window.buffer()");
+    exec(&s, &format!("pmacs.buffer.find_or_open({py:?})"));
+    exec(&s, "_G.py = pmacs.window.buffer()");
+    type_str(&mut s, "xy");
+    exec(
+        &s,
+        r#"
+        pmacs.command.unregister("buffer.self-insert")
+        pmacs.command.define {
+          name = "buffer.self-insert",
+          description = "test override: insert, then switch context",
+          fn = function(cp)
+            pmacs.editor.insert_char_over_region(cp)
+            pmacs.window.switch_buffer(_G.rs)
+          end,
+        }
+        "#,
+    );
+    type_str(&mut s, "'");
+    assert!(
+        status(&s).contains("auto-pair skipped: source context changed"),
+        "`'` is in the SOURCE (python) set, so the report fires; got: {:?}",
+        status(&s)
+    );
+    let py_text: String = eval(&s, "return _G.py:slice(0, _G.py:len())");
+    assert_eq!(
+        py_text, "xy'",
+        "the quote landed in the python buffer, no pair"
+    );
+    let rs_text: String = eval(&s, "return _G.rs:slice(0, _G.rs:len())");
+    assert_eq!(rs_text, "", "the rust buffer is untouched");
 }
 
 #[test]
