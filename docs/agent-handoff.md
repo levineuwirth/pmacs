@@ -1,7 +1,7 @@
 # Agent handoff — cross-machine continuity
 
 **Last updated: 2026-07-12, on the laptop, by the editops session
-(merging the auto-pairing #110 post-merge sync).** This file is the
+(post-#111 merge; scripts/bite micro-PR).** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -11,22 +11,23 @@ reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-12)
 
-- `main` @ `4174f3e` (auto-pairing #110 merged), protocol **v15**
+- `main` @ `f0a05c5` (editops #111 merged), protocol **v15**
   (`SUPPORTED=[6..15]`).
-- **Editing-conveniences pack (editops) in flight: PR #111** — the
-  Lua parallel lane, branch `editops`. Framing
-  `docs/editing-conveniences-framing.md` at revision 6 (three
-  pre-branch rounds, one adopted post-approval hardening, and PR
-  round 1: full UTF-8 scalar validation, per-word capitalize with
-  the `_`-constituent deviation named, trim-on-save dual-channel
-  error reporting). goto-line, case ops, transpose, zap-to-char
-  (kill-chain member with an origin guard and killring's new
-  pending-prompt marker), line move/duplicate/join, region
-  sort/reverse/dedupe, delete-trailing-whitespace + opt-in
-  trim-on-save. killring.lua gains `kill_range` /
-  `break_chain([fid])` / the marker lifecycle. On the laptop this
-  branch lives in a git worktree at `../pmacs-editops`; fold it
-  back after merge.
+- **Editing-conveniences pack (editops, #111) landed** — the Lua
+  parallel lane. Framing `docs/editing-conveniences-framing.md` at
+  revision 6 (three pre-branch rounds, one adopted post-approval
+  hardening, one PR round: full UTF-8 scalar validation, per-word
+  capitalize with the `_`-constituent deviation named, trim-on-save
+  dual-channel error reporting). Ships goto-line, case ops,
+  transpose, zap-to-char (kill-chain member with an origin guard
+  and killring's pending-prompt marker), line move/duplicate/join,
+  region sort/reverse/dedupe, delete-trailing-whitespace + opt-in
+  `pmacs.editops.trim_on_save`. New substrate other code can use:
+  `pmacs.killring.kill_range` / `break_chain([fid])` /
+  `arm_kill_prompt`+`commit_kill_prompt` (the marker lifecycle),
+  and the origin-guard pattern for chain-sensitive minibuffer
+  commands. The development worktree at `../pmacs-editops` has been
+  folded back.
 - **Auto-pairing (#110) landed — Arc 2 is COMPLETE.** Framing
   `docs/auto-pairing-framing.md` at revision 6 (two pre-branch rounds
   + three PR rounds). Shape that shipped: the nine built-in pair
@@ -168,7 +169,18 @@ New wire surface ⇒ bump + both-frontends support + acceptance.
 - **The checkout may be shared with the user.** Check `git status` for
   foreign uncommitted work before any stash/checkout/branch surgery;
   never assume dirty files are yours. (Their uncommitted fix was nearly
-  orphaned once.)
+  orphaned once.) A clean status goes stale within minutes when two
+  lanes are active — for parallel work, `git worktree add` a sibling
+  directory off main instead of switching the shared checkout.
+- **Never `git stash` in this repo.** The stash namespace is
+  REPO-GLOBAL — one list shared across every worktree and with the
+  user; a scripted push/pop can pop a human's years-old stash into
+  your tree (happened during #111: a failed `stash push` chained
+  into `stash pop`, which grabbed the user's PR-#17-era entry). For
+  run-tests-against-an-old-version swaps, use `scripts/bite` — a
+  trap-guarded one-file swap over read-only `git show`, with an
+  inverted verdict (exit 0 iff the tests FAIL against the old
+  version), making bite-verification machine-checkable.
 - **Stacked PRs**: retarget the child to main BEFORE merging the
   parent — GitHub auto-closes a PR whose base branch is deleted and
   cannot reopen it (#104 → re-opened as #105).
