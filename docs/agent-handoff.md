@@ -1,44 +1,48 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-11, on the laptop, by the auto-pairing
-session.** This file is the bridge between development machines. If you
-are an agent reading this on a fresh clone: this document plus the
-`docs/*-framing.md` files ARE your memory. Read this fully before
-taking on work, seed your persistent memory from it, and **update this
-file (and commit it) whenever project state changes materially** — the
-next machine reads it the way you just did.
+**Last updated: 2026-07-12, on the laptop, by the auto-pairing
+session (post-merge sync).** This file is the bridge between
+development machines. If you are an agent reading this on a fresh
+clone: this document plus the `docs/*-framing.md` files ARE your
+memory. Read this fully before taking on work, seed your persistent
+memory from it, and **update this file (and commit it) whenever
+project state changes materially** — the next machine reads it the
+way you just did.
 
-## 1. Where the project stands (2026-07-11)
+## 1. Where the project stands (2026-07-12)
 
-- `main` @ `7e127ab` (auto-indent #109 merged), protocol **v15**
+- `main` @ `4174f3e` (auto-pairing #110 merged), protocol **v15**
   (`SUPPORTED=[6..15]`).
-- **Auto-pairing (Arc 2, last item) in flight on this branch** —
-  framing `docs/auto-pairing-framing.md` at revision 3 (two
-  pre-branch review rounds). Shape: pair chars leave both frontends'
-  optimistic classifiers (dispatch-routed, daemon-peer undo units);
-  reaction hook in `builtin/runtime/pair.lua` loaded BEFORE lsp.lua;
-  exact one-shot typed-edit provenance via
-  `pmacs.editor.take_typed_edit()` (Q#AP9). When this merges, Arc 2
-  closes.
-- Auto-indent (#109) landed: RET binds `edit.newline-and-indent`;
-  plain Enter round-trips on both frontends. Rode along: shared
-  search invalidation across dispatch/notification/undo/redo (Q#AI8),
-  empty-selection clearing after successful inserts (Q#AI9). The
-  TUI's missing nonempty-selection optimistic type-over gate and
-  generated-buffer search invalidation remain named deferrals (§6).
+- **Auto-pairing (#110) landed — Arc 2 is COMPLETE.** Framing
+  `docs/auto-pairing-framing.md` at revision 6 (two pre-branch rounds
+  + three PR rounds). Shape that shipped: the nine built-in pair
+  chars leave both frontends' optimistic classifiers
+  (`BUILTIN_PAIR_CHARS` in pmacs-protocol; dispatch-routed →
+  adjacent daemon-peer undo units); reaction hook
+  `builtin/runtime/pair.lua` loads BEFORE lsp.lua (first-didChange
+  ordering contract); exact one-shot typed-edit provenance via
+  `pmacs.editor.take_typed_edit()` with a buffer-revision
+  postcondition (Q#AP9). New substrate other code can use:
+  `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
+  `PMACS_FAKE_LSP_CHANGE_SINK` (fake-LSP doc-sync replay),
+  `TestDaemon::spawn_with_config` (init.lua-carrying daemon fixture).
+- **NEXT: the user wants a decision discussion — compile-mode (Arc 5
+  stage 1) vs themes (Arc 4). Do not pick unilaterally; frame the
+  tradeoff and ask.**
+- Auto-indent (#109) landed earlier: RET binds
+  `edit.newline-and-indent`; plain Enter round-trips on both
+  frontends; shared search invalidation (Q#AI8), empty-selection
+  clearing (Q#AI9).
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
     hardening follow-ups (#102, #105, #106).
-  - **Arc 2 (editing table stakes)** — query-replace (#97), kill ring
-    + `M-y` (#103/#105/#106), comment-toggle (#107), auto-indent
-    (#109), auto-pairing (this branch — the last item).
+  - **Arc 2 (editing table stakes) COMPLETE** — query-replace (#97),
+    kill ring + `M-y` (#103/#105/#106), comment-toggle (#107),
+    auto-indent (#109), auto-pairing (#110).
   - **Arc 3 (persistence) COMPLETE** — saveplace/recentf (#98),
     desktop-save (#99), autosave/crash-recovery (#100), save-clobber
     fix (#101).
-  - **After Arc 2 closes**: the user wants a decision discussion —
-    compile-mode (Arc 5 stage 1) vs themes (Arc 4). Do not pick
-    unilaterally; frame the tradeoff and ask.
 
 ## 2. How we work (the part that must not drift)
 
@@ -171,7 +175,11 @@ Editing: word kills (`M-d`/`M-BS` — need bytes-returning deleters +
 prepend-on-backward append), `C-SPC` set-mark, `C-u C-y` / `C-M-w`,
 kill-ring browser + persistence, clipboard watching, block comments +
 mid-line comment spans, comment-dwim append-at-EOL, per-language
-comment padding.
+comment padding. Pairing (framing "Deferred"): wrap-region on opener,
+pair-aware backspace, RET-inside-pair closer-on-own-line,
+in-string/in-comment inhibit (needs node-at-byte `pmacs.parse`),
+undo amalgamation (pair = one step), balance-aware quotes,
+per-buffer toggle (config-registry-blocked).
 Substrate: buffer-aware edit epoch (after-edit currently compares the
 ACTIVE buffer only), wire provenance for CRDT self-insert
 classification, Lua intercept probe, completion.lua still on the old
