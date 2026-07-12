@@ -23,6 +23,19 @@ unrelated text, the context-switch/LSP limit is stated rather than
 hidden by the cursor guard, non-typed acceptance now drives callbacks
 that actually fire, and redo is exercised rather than merely named.
 
+Revision 4: PR #110 round 1 — the typed-edit record pins the edited
+buffer's revision after the completing edit and dies at dispatch end
+if the command edited again (a redefined self-insert that replaces
+the typed char can no longer leave a stale-but-clean record);
+pair-set relevance is established before any provenance report
+(transformed non-pair characters stay silent); pair entries parse as
+exactly two codepoints (malformed entries are skipped entirely, never
+partially honored); the record-capture seam is an opt-in test
+facility, off in production; and the source-context-change *report*
+is scoped as best-effort under the active-buffer edit-epoch limit —
+an equal-revision context switch skips the fan-out and fails closed
+silently.
+
 ## Ground truth (as of `7e127ab`)
 
 - **Dispatch is keymap-first for printables** — `Char('(')` resolves
@@ -194,9 +207,12 @@ full fix deferred with the pre-existing mixed-history problem
 ### Q#AP2 — Pair sets: per-language table, conservative default
 
 `pmacs.pair.sets` — the `pmacs.comment.strings` shape: language →
-array of 2-byte pair strings, plus a `default` entry used when the
-language is unknown or has no entry (pairing is useful in scratch
-buffers):
+array of pair strings, plus a `default` entry used when the language
+is unknown or has no entry (pairing is useful in scratch buffers).
+An entry is EXACTLY two codepoints — opener then closer, multibyte
+allowed (`"«»"`); malformed entries (trailing bytes, non-boundary
+first byte) are skipped entirely, never partially honored (R4: a
+`"()x"` typo must not turn `(` into `()x`):
 
 - `default = { "()", "[]", "{}", '""' }` — no `'` (prose
   apostrophes), no backtick.
@@ -212,6 +228,10 @@ React when ALL hold:
 - `this_command() == "buffer.self-insert"` **and** Q#AP9 returns a
   live typed-edit record for this callback (pastes, manual hook runs,
   and programmatic inserts have no record and never pair);
+- **relevance first (R4)**: the record's exact typed codepoint is in
+  the active pair set at all (opener or closer). Characters outside
+  the set exit silently BEFORE any gate below can report — a
+  transformed ordinary `a` is not auto-pairing's business;
 - the record's buffer/window match the current context, its source
   edit is clean (effective triple equals the requested insert or
   replace), and the current cursor equals its recorded post-edit
@@ -220,7 +240,13 @@ React when ALL hold:
   reaction. A non-clean triple reports *"auto-pair skipped: source
   self-insert transformed"*; a context/cursor mismatch reports
   *"auto-pair skipped: source context changed"*. This is the
-  fail-closed answer to R2 finding 2;
+  fail-closed answer to R2 finding 2. The context-change *report* is
+  best-effort (R4): it requires the after-edit fan-out to run, and
+  the dispatcher's active-buffer revision compare (the named
+  buffer-aware edit-epoch deferral) skips the fan-out when a
+  context-switching command lands on a buffer whose revision
+  coincidentally equals the origin's — the record dies un-armed and
+  pairing fails closed silently;
 - **no active region survives the edit** (`ed.region() == nil`) —
   on the dispatch path type-over has already consumed and cleared
   it; a surviving nonempty region means the edit arrived through the
@@ -366,6 +392,19 @@ currently discards the effective range on its way back to
 `insert_char`; payload immutability means the codepoint itself remains
 authoritative.
 
+The record additionally pins the edited buffer's revision immediately
+after the completing edit — a producer-side postcondition, not
+consumer surface (R4). At dispatch end, before arming, the revision
+is re-read: if the command edited again after the self-insert (a
+redefined `buffer.self-insert` that replaces or removes the typed
+character while leaving the cursor in place), the record no longer
+describes the buffer and dies un-armed. Note the switch-context case
+is reachable only through such a redefined command: a
+context-switching *intercept* cannot exist on the dispatch
+self-insert path (the core borrow is held across it; the
+borrow-released three-phase discipline belongs to the Lua-mutator
+path the reaction uses).
+
 The pair callback takes the record; later callbacks and a nested
 manual re-run of `buffer.after-edit` see nil. The dispatcher/daemon
 also clears any untaken slot immediately after the hook returns,
@@ -373,10 +412,12 @@ including error paths and the no-revision-change path. Plain
 `pmacs.hook.run`, paste, programmatic mutation, and a stale
 `this_command == "buffer.self-insert"` therefore see nil. Pairing
 requires `clean == true`, matching buffer/window, and
-`cursor == post_cursor`; otherwise it reports and does nothing. This
-is deliberately narrower than teaching every command to expose its
-edit: one producer class, one consumer contract, and no persistent
-history.
+`cursor == post_cursor`; otherwise it reports (pair-set characters
+only, R4) and does nothing. This is deliberately narrower than
+teaching every command to expose its edit: one producer class, one
+consumer contract, and no persistent history. Record retention is
+zero in production: the opt-in `pmacs.pair._capture_records` test
+facility is the only way a consumed record outlives its fan-out (R4).
 
 ## Bets
 
@@ -421,6 +462,9 @@ history.
 - Quotes pair under the predicate.
 - Per-language: `'` pairs in `.py`, not in `.rs`; scratch pairs the
   default set.
+- Set-entry parsing (R4): a malformed `"()x"` (and an overlong
+  multibyte `"«»x"`) pairs nothing; a valid multibyte `"«»"` pairs
+  and skips at byte-correct cursors.
 - Non-typed provenance, with the callback actually exercised:
   production `FrontendEvent::Paste("(")` after a prior self-insert
   leaves a lone pasted opener; `buf:insert("(")` followed by explicit
@@ -440,8 +484,14 @@ history.
   translate-and-clamp. The **source self-insert** gets separate cases:
   relocated opener and expanded/relocated type-over produce exactly
   the intercept's positional result, Q#AP9 reports/skips, and no
-  unrelated closer is inserted; a source context switch likewise
-  fails closed.
+  unrelated closer is inserted; a source context switch (via a
+  redefined `buffer.self-insert` — the only legal producer, see
+  Q#AP9) likewise fails closed, in BOTH revision shapes (R4): skewed
+  revisions report "source context changed"; equal revisions skip the
+  fan-out entirely and fail closed silently. A relocated **non-pair**
+  character draws no auto-pair report at all (R4), and a redefined
+  self-insert that edits again after the insert (replacing the typed
+  char, cursor unmoved) kills the record — no `[)` (R4).
 - Context-switching **reaction** intercept → pair cursor repair
   skipped, new context's text/cursor untouched by pair.lua. A probe
   callback registered after pair.lua observes the switched context,
@@ -459,7 +509,10 @@ history.
   self-insert hooks; a second take (including a nested manual
   after-edit run) is nil. It is also nil before/after the fan-out, for
   paste, for standalone manual hook runs, and after a rejecting edit.
-  Two frontends cannot see or consume each other's slot.
+  Two frontends cannot see or consume each other's slot. Exact-record
+  observation goes through the opt-in `_capture_records` facility;
+  with it off (production), no consumed record is retained anywhere
+  (R4).
 
 Classifier flips (in-crate): GPU `optimistic_insert_text` returns
 `None` for the nine pair chars (test updated alongside Enter's);

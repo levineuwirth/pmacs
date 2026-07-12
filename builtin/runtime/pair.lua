@@ -50,6 +50,16 @@ pmacs.pair.sets = {
   bash = { "()", "[]", "{}", '""', "''" },
 }
 
+-- UTF-8 sequence length from a leading byte; nil on a continuation
+-- byte (not a codepoint boundary).
+local function cp_len(b)
+  if b < 0x80 then return 1 end
+  if b < 0xC0 then return nil end
+  if b < 0xE0 then return 2 end
+  if b < 0xF0 then return 3 end
+  return 4
+end
+
 -- The first full UTF-8 codepoint starting at byte `pos`, as a string,
 -- or nil at end-of-buffer / on a non-boundary byte. Forward twin of
 -- lsp.lua's `char_before`; reads at most 4 bytes.
@@ -59,44 +69,23 @@ local function char_at(buf, pos)
   local to = math.min(pos + 4, len)
   local ok, s = pcall(function() return buf:slice(pos, to) end)
   if not ok or type(s) ~= "string" or #s == 0 then return nil end
-  local b = s:byte(1)
-  local n
-  if b < 0x80 then
-    n = 1
-  elseif b < 0xC0 then
-    return nil -- continuation byte: pos is not a codepoint boundary
-  elseif b < 0xE0 then
-    n = 2
-  elseif b < 0xF0 then
-    n = 3
-  else
-    n = 4
-  end
-  if n > #s then return nil end
+  local n = cp_len(s:byte(1))
+  if not n or n > #s then return nil end
   return s:sub(1, n)
 end
 
--- Split a pair entry into (opener, closer): the first codepoint and
--- the rest. nil for entries that aren't two-or-more bytes of
--- opener-then-closer (malformed user additions are skipped, not
--- errors — the hook must never throw over a config typo).
+-- Split a pair entry into (opener, closer): EXACTLY two codepoints,
+-- no trailing bytes (PR #110 round 1, finding 3 — "()x" must be
+-- skipped entirely, never honored as `(` → `)x`). nil for malformed
+-- user additions: skipped, not errors — the hook must never throw
+-- over a config typo.
 local function split_pair(s)
   if type(s) ~= "string" or #s < 2 then return nil end
-  local b = s:byte(1)
-  local n
-  if b < 0x80 then
-    n = 1
-  elseif b < 0xC0 then
-    return nil
-  elseif b < 0xE0 then
-    n = 2
-  elseif b < 0xF0 then
-    n = 3
-  else
-    n = 4
-  end
-  if n >= #s then return nil end
-  return s:sub(1, n), s:sub(n + 1)
+  local n1 = cp_len(s:byte(1))
+  if not n1 or n1 >= #s then return nil end
+  local n2 = cp_len(s:byte(n1 + 1))
+  if not n2 or n1 + n2 ~= #s then return nil end
+  return s:sub(1, n1), s:sub(n1 + 1)
 end
 
 -- The active buffer's pair set: language entry if the language is
@@ -158,23 +147,37 @@ local function repair_cursor(win0, buf0, cursor0, estart, estop, einserted)
   ed.goto_byte(translate(cursor0, estart, estop, einserted))
 end
 
+-- Test facility (leading underscore = not stable API), OFF by
+-- default: the one-shot record must stay ephemeral in production —
+-- retaining every consumed record in a public field would defeat the
+-- Q#AP9 contract the take API enforces (PR #110 round 1, finding 4).
+-- Acceptance tests flip `_capture_records` on; each fan-out then
+-- publishes the record it observed (or nil) to `_last_record`, which
+-- is how tests read the exact codepoint / effective triple and prove
+-- one-shot-ness (this callback registers first and consumes it).
+pmacs.pair._capture_records = false
+
 pmacs.hook.add("buffer.after-edit", function()
   -- One-shot provenance (Q#AP9). Absence — paste, programmatic edit,
-  -- manual hook run, rejected insert, stale `this_command` — is a
-  -- silent non-event; only a live record that then fails a gate
+  -- manual hook run, rejected insert, a post-insert mutation by the
+  -- command, stale `this_command` — is a silent non-event; only a
+  -- live record for a pair-set character that then fails a gate
   -- reports.
   local rec = ed.take_typed_edit and ed.take_typed_edit()
-  -- Test seam (leading underscore = not stable API, like
-  -- `pmacs.window._overlay_kinds`): the record this fan-out yielded,
-  -- or nil. This callback registers first and consumes the one-shot
-  -- record, so acceptance tests observe the exact codepoint /
-  -- effective triple here — and prove one-shot-ness by taking again.
-  pmacs.pair._last_record = rec
+  if pmacs.pair._capture_records then pmacs.pair._last_record = rec end
   if not rec then return end
   if not (ed.this_command and ed.this_command() == "buffer.self-insert") then return end
 
   local buf = pmacs.window.buffer()
   if not buf then return end
+
+  -- Relevance first (PR #110 round 1, finding 2): pairing has no
+  -- interest in characters outside the active set, so a transformed
+  -- or relocated ordinary `a` must stay silent — the reports below
+  -- are for pair characters only.
+  local ch = rec.char
+  local openers, closers = maps_for(active_set())
+  if not (openers[ch] or closers[ch]) then return end
 
   -- Fail closed on a transformed source self-insert (Q#AP3): the
   -- intercept's positional result stands as produced; pairing on top
@@ -185,7 +188,12 @@ pmacs.hook.add("buffer.after-edit", function()
   end
   -- Fail closed when the source edit's context is no longer current:
   -- an intercept switched window/buffer, or something moved the
-  -- cursor off the post-insert position.
+  -- cursor off the post-insert position. Best-effort by construction:
+  -- the report needs this fan-out to run at all, and dispatch's
+  -- active-buffer revision compare (the named buffer-aware edit-epoch
+  -- deferral) skips the fan-out when a context-switching command
+  -- lands on a buffer with a coincidentally equal revision — pairing
+  -- still fails closed there, silently (the record dies un-armed).
   if buf ~= rec.buffer
     or pmacs.window.current() ~= rec.window
     or ed.cursor() ~= rec.post_cursor then
@@ -199,9 +207,7 @@ pmacs.hook.add("buffer.after-edit", function()
   -- onto an unconsumed region.
   if ed.region() ~= nil then return end
 
-  local ch = rec.char
   local cursor = rec.post_cursor
-  local openers, closers = maps_for(active_set())
 
   -- Skip-over-close (Q#AP4), checked before insertion so symmetric
   -- pairs (quotes) step over their own closer: typing `)` at `(|)`

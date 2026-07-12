@@ -2186,6 +2186,16 @@ fn handle_remote_crdt_op(
                 .get(&wid)
                 .is_some_and(|w| w.buffer_id == buffer_id)
         {
+            // Revision postcondition anchor: this arm consumes the
+            // record in the same fan-out (no command body runs after
+            // the import), so the current revision is trivially the
+            // post-edit one.
+            let revision = core
+                .registry
+                .borrow()
+                .get(buffer_id)
+                .ok()
+                .map_or(0, crate::buffer::Buffer::revision);
             core.typed_edit_set_armed(
                 source,
                 crate::editor_core::TypedEditRecord {
@@ -2199,6 +2209,7 @@ fn handle_remote_crdt_op(
                     inserted_len: edit.inserted_len,
                     post_cursor: post_edit_cursor,
                     clean: true,
+                    revision,
                 },
             );
         }

@@ -261,6 +261,40 @@ fn single_quote_pairs_in_python_but_not_rust() {
 }
 
 #[test]
+fn malformed_pair_entries_are_skipped_not_partially_honored() {
+    // PR #110 round 1, finding 3: an entry is exactly two codepoints.
+    // "()x" must be ignored entirely — never "type `(`, get `)x`".
+    let mut s = editor_with("");
+    exec(&s, "pmacs.pair.sets.default = { \"()x\" }");
+    type_str(&mut s, "(");
+    assert_eq!(buffer_text(&s), "(", "a malformed entry pairs nothing");
+    assert_eq!(cursor(&s), 1);
+
+    // Overlong multibyte entry: same rule after a 2-byte opener.
+    let mut s2 = editor_with("");
+    exec(&s2, "pmacs.pair.sets.default = { \"\u{ab}\u{bb}x\" }"); // "«»x"
+    type_str(&mut s2, "\u{ab}");
+    assert_eq!(
+        buffer_text(&s2),
+        "\u{ab}",
+        "an overlong entry pairs nothing"
+    );
+}
+
+#[test]
+fn multibyte_pair_entries_pair_and_skip() {
+    // Two-codepoint entries with multibyte members are valid: guillemets.
+    let mut s = editor_with("");
+    exec(&s, "pmacs.pair.sets.default = { \"\u{ab}\u{bb}\" }"); // "«»"
+    type_str(&mut s, "\u{ab}");
+    assert_eq!(buffer_text(&s), "\u{ab}\u{bb}");
+    assert_eq!(cursor(&s), 2, "cursor between the pair (byte offset)");
+    type_str(&mut s, "\u{bb}");
+    assert_eq!(buffer_text(&s), "\u{ab}\u{bb}", "the closer skips");
+    assert_eq!(cursor(&s), 4);
+}
+
+#[test]
 fn scratch_buffer_pairs_the_default_set() {
     let mut s = editor_with("");
     type_str(&mut s, "{");
@@ -293,9 +327,14 @@ fn scratch_buffer_pairs_the_default_set() {
 #[test]
 fn paste_of_opener_does_not_pair() {
     let mut s = editor_with("");
+    exec(&s, "pmacs.pair._capture_records = true");
     // A prior self-insert, so a heuristic keyed only on buffer text or
-    // `char_before` would be primed to misfire.
+    // `char_before` would be primed to misfire. (It also proves the
+    // capture seam live: the nil assertion below is a transition from
+    // this keystroke's captured record, not an unset field.)
     type_str(&mut s, "a");
+    let primed: bool = eval(&s, "return pmacs.pair._last_record ~= nil");
+    assert!(primed, "the typed `a` captured a record");
     // The daemon's unified inbound-paste route, faithfully: break the
     // source's command chain, insert, fire the after-edit hook
     // (`handle_inbound_paste` + `with_after_edit_check`).
@@ -311,6 +350,7 @@ fn paste_of_opener_does_not_pair() {
 #[test]
 fn programmatic_insert_with_stale_this_command_does_not_pair() {
     let mut s = editor_with("");
+    exec(&s, "pmacs.pair._capture_records = true");
     // Type 'a' so `this_command` is (and stays) "buffer.self-insert" —
     // the deliberately stale signal the provenance gate must ignore.
     type_str(&mut s, "a");
@@ -331,6 +371,7 @@ fn programmatic_insert_with_stale_this_command_does_not_pair() {
 #[test]
 fn command_invoke_self_insert_does_not_pair() {
     let s = editor_with("");
+    exec(&s, "pmacs.pair._capture_records = true");
     // Plain `pmacs.command.invoke` is the programmatic API: it stamps
     // no boundary and arms no record.
     exec(&s, "pmacs.command.invoke(\"buffer.self-insert\", 40)"); // '('
@@ -524,6 +565,68 @@ fn expanded_skip_delete_lands_reported_and_cursor_clamped() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn post_insert_mutation_by_the_command_kills_the_record() {
+    // PR #110 round 1, finding 1: a redefined `buffer.self-insert`
+    // that inserts the char and then REPLACES it — leaving the cursor
+    // untouched — must not pair off the stale record. The record pins
+    // the buffer revision after the completing edit; any further edit
+    // by the same command kills it before the fan-out.
+    let mut s = editor_with("");
+    exec(
+        &s,
+        r#"
+        pmacs.command.unregister("buffer.self-insert")
+        pmacs.command.define {
+          name = "buffer.self-insert",
+          description = "test override: insert, then replace the typed char",
+          fn = function(cp)
+            pmacs.editor.insert_char_over_region(cp)
+            pmacs.window.buffer():replace(0, 1, "[")
+          end,
+        }
+        "#,
+    );
+    type_str(&mut s, "(");
+    assert_eq!(
+        buffer_text(&s),
+        "[",
+        "the typed `(` no longer exists; a `)` reaction would produce `[)`"
+    );
+    assert_eq!(cursor(&s), 1);
+    assert!(
+        !status(&s).contains("auto-pair"),
+        "a dead record is a silent non-event; got: {:?}",
+        status(&s)
+    );
+}
+
+#[test]
+fn transformed_non_pair_char_stays_silent() {
+    // PR #110 round 1, finding 2: pairing has no interest in `a`; an
+    // intercept relocating it must not draw an auto-pair report.
+    let mut s = editor_with("xy");
+    exec(&s, "pmacs.editor.goto_byte(2)");
+    exec(
+        &s,
+        r#"
+        pmacs.buffer.add_intercept(pmacs.window.buffer(), function(op)
+          if op.kind == "insert" and op.bytes == "a" then
+            return { kind = "insert", pos = 0, bytes = op.bytes }
+          end
+          return nil
+        end)
+        "#,
+    );
+    type_str(&mut s, "a");
+    assert_eq!(buffer_text(&s), "axy");
+    assert!(
+        !status(&s).contains("auto-pair"),
+        "chars outside the active pair set must stay silent; got: {:?}",
+        status(&s)
+    );
+}
+
+#[test]
 fn relocated_opener_gets_no_pair_reaction() {
     let mut s = editor_with("ab");
     exec(&s, "pmacs.editor.goto_byte(2)");
@@ -632,6 +735,50 @@ fn source_context_switch_fails_closed() {
     assert_eq!(other_text, "z", "the switched-to buffer is untouched");
 }
 
+#[test]
+fn source_context_switch_with_equal_revisions_fails_closed_silently() {
+    // PR #110 round 1, finding 5: the twin of the test above WITHOUT
+    // the revision bump. Dispatch's active-buffer revision compare
+    // (pre = scratch@0, post = other@0) sees no delta, so the
+    // after-edit fan-out never runs: no reaction anywhere, and no
+    // context-change report either — the record dies un-armed. The
+    // report is best-effort until the buffer-aware edit epoch lands
+    // (named substrate deferral); failing closed is unconditional.
+    let dir = fresh_state_dir();
+    let mut s = editor(&dir);
+    let other = write_file(&dir, "other.txt", "z");
+    exec(&s, "_G.scratch = pmacs.window.buffer()");
+    exec(&s, &format!("pmacs.buffer.find_or_open({other:?})"));
+    exec(&s, "_G.other = pmacs.window.buffer()");
+    exec(&s, "pmacs.window.switch_buffer(_G.scratch)");
+    exec(
+        &s,
+        r#"
+        pmacs.command.unregister("buffer.self-insert")
+        pmacs.command.define {
+          name = "buffer.self-insert",
+          description = "test override: insert, then switch context",
+          fn = function(cp)
+            pmacs.editor.insert_char_over_region(cp)
+            pmacs.window.switch_buffer(_G.other)
+          end,
+        }
+        "#,
+    );
+    type_str(&mut s, "(");
+    let scratch_text: String = eval(&s, "return _G.scratch:slice(0, _G.scratch:len())");
+    assert_eq!(scratch_text, "(", "the opener landed in scratch, no closer");
+    let other_text: String = eval(&s, "return _G.other:slice(0, _G.other:len())");
+    assert_eq!(other_text, "z", "the switched-to buffer is untouched");
+    assert!(
+        !status(&s).contains("auto-pair"),
+        "no fan-out ran, so no report is possible; got: {:?}",
+        status(&s)
+    );
+    let take_nil: bool = eval(&s, "return pmacs.editor.take_typed_edit() == nil");
+    assert!(take_nil, "the record was never armed");
+}
+
 // ---------------------------------------------------------------------------
 // Context-switching REACTION intercept: repair skipped, deferral pinned
 // ---------------------------------------------------------------------------
@@ -728,6 +875,7 @@ fn typed_edit_record_is_exact_and_one_shot() {
     exec(
         &s,
         r#"
+        pmacs.pair._capture_records = true
         _G.second_take = "unset"
         pmacs.hook.add("buffer.after-edit", function()
           _G.second_take = pmacs.editor.take_typed_edit()
@@ -768,6 +916,7 @@ fn nested_manual_after_edit_run_sees_no_record() {
     exec(
         &s,
         r#"
+        pmacs.pair._capture_records = true
         _G.outer = nil
         _G.ran_nested = false
         pmacs.hook.add("buffer.after-edit", function()
@@ -786,6 +935,18 @@ fn nested_manual_after_edit_run_sees_no_record() {
     let nested_nil: bool = eval(&s, "return pmacs.pair._last_record == nil");
     assert!(nested_nil, "a nested manual re-run must see nil");
     assert_eq!(buffer_text(&s), "()", "and must insert no second closer");
+}
+
+#[test]
+fn record_capture_is_off_by_default() {
+    // PR #110 round 1, finding 4: without the explicit test facility,
+    // no consumed record is retained anywhere — the one-shot take API
+    // is the only access, and it is empty after the fan-out.
+    let mut s = editor_with("");
+    type_str(&mut s, "(");
+    assert_eq!(buffer_text(&s), "()");
+    let leaked: bool = eval(&s, "return pmacs.pair._last_record ~= nil");
+    assert!(!leaked, "production keystrokes must retain no record");
 }
 
 #[test]
@@ -823,6 +984,7 @@ fn frontends_cannot_consume_each_others_slot() {
         inserted_len: 1,
         post_cursor: 1,
         clean: true,
+        revision: 0,
     };
     let a = FrontendId::LOCAL;
     let b = FrontendId(a.0 + 1);

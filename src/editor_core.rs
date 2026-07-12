@@ -181,6 +181,15 @@ pub struct TypedEditRecord {
     pub post_cursor: u64,
     /// True iff the effective triple equals the request.
     pub clean: bool,
+    /// The edited buffer's revision immediately after the completing
+    /// edit — a producer-side postcondition, not consumer surface (it
+    /// is not exposed on the Lua record). `typed_edit_finish` drops
+    /// the record when the buffer's revision has moved past this: a
+    /// redefined `buffer.self-insert` that edits again after the
+    /// insert (removing or replacing the typed character) must not
+    /// leave a stale-but-"clean" record for the pairing hook (PR #110
+    /// round 1, finding 1).
+    pub revision: u64,
 }
 
 /// In-flight arm for a [`TypedEditRecord`] (auto-pairing Q#AP9): the
@@ -2333,6 +2342,17 @@ impl EditorCore {
         if !matches {
             return;
         }
+        // The revision postcondition anchor: if the buffer vanished
+        // (killed mid-command), no record — absence fails closed.
+        let Some(revision) = self
+            .registry
+            .borrow()
+            .get(context.0)
+            .ok()
+            .map(Buffer::revision)
+        else {
+            return;
+        };
         let clean = edit.range == requested && edit.inserted_len == requested_len;
         let record = TypedEditRecord {
             buffer: context.0,
@@ -2345,6 +2365,7 @@ impl EditorCore {
             inserted_len: edit.inserted_len,
             post_cursor: self.active_window().cursor,
             clean,
+            revision,
         };
         if let Some(p) = self.typed_edit_pending.as_mut() {
             p.record = Some(record);
@@ -2355,12 +2376,30 @@ impl EditorCore {
     /// yielding the completed record (or `None` if the self-insert
     /// never landed — rejected edit, command error). Always clears the
     /// pending state: an arm never survives its dispatch cycle.
+    ///
+    /// Postcondition (PR #110 round 1, finding 1): the record is
+    /// yielded only if the edited buffer's revision still equals the
+    /// one captured at completion. A command body that edited again
+    /// after the self-insert — replacing or removing the typed
+    /// character while leaving the cursor in place — produced state
+    /// the record no longer describes; the record dies here, before
+    /// it can be armed for the hook.
     pub fn typed_edit_finish(&mut self, fid: FrontendId) -> Option<TypedEditRecord> {
         let pending = self.typed_edit_pending.take()?;
         if pending.fid != fid {
             return None;
         }
-        pending.record
+        let record = pending.record?;
+        let current = self
+            .registry
+            .borrow()
+            .get(record.buffer)
+            .ok()
+            .map(Buffer::revision);
+        if current != Some(record.revision) {
+            return None;
+        }
+        Some(record)
     }
 
     /// Arm `record` for consumption during the `buffer.after-edit`
