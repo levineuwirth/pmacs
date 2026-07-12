@@ -110,28 +110,49 @@ local function is_cont_byte(b)
   return b >= 0x80 and b <= 0xBF
 end
 
-local function cp_len(lead)
-  if lead < 0x80 then return 1 end
-  if lead >= 0xC2 and lead <= 0xDF then return 2 end
-  if lead >= 0xE0 and lead <= 0xEF then return 3 end
-  if lead >= 0xF0 and lead <= 0xF4 then return 4 end
+-- Byte-length of the VALID UTF-8 scalar starting at index `i` of
+-- `s`, or nil. Enforces the full second-byte constraint table —
+-- overlong encodings (C0/C1, E0 80..9F, F0 80..8F), surrogates
+-- (ED A0..BF), and > U+10FFFF (F4 90..BF, F5..FF) all fail, not
+-- just bad lead/continuation ranges. Every consumer of "one
+-- codepoint" routes through here so malformed bytes fail closed.
+local function scalar_len(s, i)
+  local b1 = s:byte(i)
+  if not b1 then return nil end
+  if b1 < 0x80 then return 1 end
+  local b2 = s:byte(i + 1)
+  if not b2 or not is_cont_byte(b2) then return nil end
+  if b1 >= 0xC2 and b1 <= 0xDF then
+    return 2
+  end
+  if b1 >= 0xE0 and b1 <= 0xEF then
+    if b1 == 0xE0 and b2 < 0xA0 then return nil end
+    if b1 == 0xED and b2 > 0x9F then return nil end
+    local b3 = s:byte(i + 2)
+    if not b3 or not is_cont_byte(b3) then return nil end
+    return 3
+  end
+  if b1 >= 0xF0 and b1 <= 0xF4 then
+    if b1 == 0xF0 and b2 < 0x90 then return nil end
+    if b1 == 0xF4 and b2 > 0x8F then return nil end
+    local b3 = s:byte(i + 2)
+    if not b3 or not is_cont_byte(b3) then return nil end
+    local b4 = s:byte(i + 3)
+    if not b4 or not is_cont_byte(b4) then return nil end
+    return 4
+  end
   return nil
 end
 
 local function single_codepoint(s)
-  if #s == 0 then return false end
-  local n = cp_len(s:byte(1))
-  if not n or n ~= #s then return false end
-  for i = 2, #s do
-    if not is_cont_byte(s:byte(i)) then return false end
-  end
-  return true
+  return #s > 0 and scalar_len(s, 1) == #s
 end
 
 -- Start of the codepoint ending just before `pos`. Returns nil at
 -- BOB; nil, "malformed" when the preceding bytes are not one valid
--- UTF-8 codepoint (fail closed — goto_byte guarantees no boundary
--- alignment).
+-- UTF-8 scalar (fail closed — goto_byte guarantees no boundary
+-- alignment, and a length-consistent overlong/surrogate span must
+-- not be treated as a character).
 local function prev_cp_start(buf, pos)
   if pos <= 0 then return nil end
   local q = pos - 1
@@ -142,9 +163,8 @@ local function prev_cp_start(buf, pos)
     q = q - 1
     steps = steps + 1
   end
-  local lead = buf:slice(q, q + 1):byte(1)
-  local n = cp_len(lead)
-  if not n or q + n ~= pos then return nil, "malformed" end
+  local span = buf:slice(q, pos)
+  if scalar_len(span, 1) ~= pos - q then return nil, "malformed" end
   return q
 end
 
@@ -162,25 +182,29 @@ local function ascii_lower(s)
   end))
 end
 
--- First word byte upcased when it is a letter; every other letter
--- downcased (single-span semantics, Q#EC4).
+-- Per-word capitalize across the span (Emacs capitalize-region
+-- parity, verified against Emacs 30.2: "hello WORLD" -> "Hello
+-- World", "9abc" -> "9abc", "a9bc" -> "A9bc"): each word's first
+-- byte is upcased when it is a letter, every other letter is
+-- downcased. Words per the pack's ASCII class — `_` and digits are
+-- word constituents here, so "foo_bar" gives "Foo_bar" where
+-- Emacs's symbol-syntax `_` gives "Foo_Bar" (named deviation,
+-- Q#EC4).
 local function ascii_capitalize(s)
-  local first = nil
+  local out = {}
+  local in_word = false
   for i = 1, #s do
-    if is_word_byte(s:byte(i)) then
-      first = i
-      break
+    local b = s:byte(i)
+    local w = is_word_byte(b)
+    if w and not in_word then
+      if b >= 97 and b <= 122 then b = b - 32 end
+    elseif w then
+      if b >= 65 and b <= 90 then b = b + 32 end
     end
+    in_word = w
+    out[#out + 1] = string.char(b)
   end
-  local lowered = ascii_lower(s)
-  if not first then return lowered end
-  local b = lowered:byte(first)
-  if b >= 97 and b <= 122 then
-    return lowered:sub(1, first - 1)
-      .. string.char(b - 32)
-      .. lowered:sub(first + 1)
-  end
-  return lowered
+  return table.concat(out)
 end
 
 -- ---- Q#EC2 shared discipline ---------------------------------------
@@ -353,13 +377,17 @@ pmacs.command.define {
           or "transpose-chars: not enough characters")
         return
       end
-      local n2 = cp_len(at_b)
-      if not n2 or cursor + n2 > len then
+      -- Validate the WHOLE scalar at the cursor, trailing bytes
+      -- included — a valid lead followed by non-continuation bytes
+      -- must fail closed, not ride along as "one character".
+      local head = buf:slice(cursor, math.min(cursor + 4, len))
+      local n2 = scalar_len(head, 1)
+      if not n2 then
         ed.set_status("transpose-chars: malformed UTF-8 at the cursor")
         return
       end
       local cp1 = buf:slice(s1, cursor)
-      local cp2 = buf:slice(cursor, cursor + n2)
+      local cp2 = head:sub(1, n2)
       guarded_replace("transpose-chars", buf, s1, cursor + n2, cp2 .. cp1,
         cursor + n2)
     end
@@ -824,13 +852,26 @@ end
 -- loads before saveplace.lua (the loader ordering contract, Q#EC9).
 pmacs.hook.add("buffer.before-save", function()
   -- Outer pcall: a raised error in a short-circuit hook vetoes the
-  -- save; trim failure must report via status, never block a save.
-  pcall(function()
+  -- save; trim failure must never block a save. But it must not be
+  -- silently discarded either — an unexpected error is a bug, and
+  -- swallowing it hides the bug. Report on both channels the
+  -- autosave sweep uses: the status line (visible when the save
+  -- itself fails or is vetoed; a successful save overwrites it with
+  -- "saved ...") and the *errors* buffer via pmacs.error (durable
+  -- either way). Both reports are pcall'd — a broken reporting
+  -- channel must not resurrect the veto.
+  local ok, err = pcall(function()
     if trim_enabled then
       trim_active("delete-trailing-whitespace (on save)")
     end
   end)
-  -- nil return: never a veto.
+  if not ok then
+    local msg = "delete-trailing-whitespace (on save) failed: "
+      .. tostring(err)
+    pcall(ed.set_status, msg)
+    if pmacs.error then pcall(pmacs.error, msg) end
+  end
+  -- nil return either way: never a veto.
 end)
 
 -- ---- bindings (Q#EC1: all verified free across builtin bind sites) --

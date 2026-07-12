@@ -306,9 +306,27 @@ fn capitalize_word_and_region() {
     alt(&mut s, 'c');
     assert_eq!(
         buffer_text(&s),
-        "Hello world",
-        "single-span capitalize: first word char up, rest down"
+        "Hello World",
+        "per-word capitalize across the region (Emacs capitalize-region)"
     );
+}
+
+#[test]
+fn capitalize_is_per_word_with_the_packs_word_class() {
+    // Emacs 30.2 parity rows: a digit-led word keeps its letters
+    // lowercase; a letter after a digit is not a word start.
+    let mut s = editor_with("9abc a9bc");
+    exec(&s, "pmacs.editor.begin_selection(0)");
+    exec(&s, "pmacs.editor.goto_byte(9)");
+    alt(&mut s, 'c');
+    assert_eq!(buffer_text(&s), "9abc A9bc");
+    // The named deviation: `_` is a word constituent in this pack's
+    // ASCII class (Emacs's symbol-syntax `_` would give "Foo_Bar").
+    let mut s = editor_with("foo_bar baz");
+    exec(&s, "pmacs.editor.begin_selection(0)");
+    exec(&s, "pmacs.editor.goto_byte(11)");
+    alt(&mut s, 'c');
+    assert_eq!(buffer_text(&s), "Foo_bar Baz");
 }
 
 #[test]
@@ -404,6 +422,55 @@ fn transpose_chars_fails_closed_on_a_continuation_byte() {
     ctrl(&mut s, 't');
     assert_eq!(buffer_text(&s), "éx", "no edit");
     assert!(status(&s).contains("multi-byte"));
+}
+
+/// Seed raw (possibly malformed) bytes via Lua \x escapes and compare
+/// byte-identically Lua-side (`from_utf8_lossy` would mask differences).
+fn seed_raw(s: &EditorState, lua_bytes: &str) {
+    exec(
+        s,
+        &format!("local b = pmacs.window.buffer(); b:replace(0, b:len(), \"{lua_bytes}\")"),
+    );
+    exec(s, "pmacs.editor.goto_byte(0)");
+}
+
+fn raw_equals(s: &EditorState, lua_bytes: &str) -> bool {
+    eval(
+        s,
+        &format!("local b = pmacs.window.buffer(); return b:slice(0, b:len()) == \"{lua_bytes}\""),
+    )
+}
+
+#[test]
+fn transpose_chars_fails_closed_on_invalid_trailing_bytes() {
+    // A valid lead (C3) followed by a non-continuation byte: the
+    // scalar at the cursor must be validated whole, not length-only.
+    let mut s = editor_with("");
+    seed_raw(&s, "a\\xC3xb");
+    exec(&s, "pmacs.editor.goto_byte(1)");
+    ctrl(&mut s, 't');
+    assert!(raw_equals(&s, "a\\xC3xb"), "no edit on a malformed scalar");
+    assert!(status(&s).contains("malformed UTF-8 at the cursor"));
+}
+
+#[test]
+fn transpose_chars_fails_closed_on_invalid_scalars_behind_the_cursor() {
+    // Length-consistent but scalar-invalid spans behind the cursor:
+    // an overlong three-byte encoding and a beyond-U+10FFFF four-byte
+    // encoding. Both scan back cleanly (lead + continuations) and
+    // must still fail closed.
+    let cases = [("\\xE0\\x80\\x80b", 3i64), ("\\xF4\\x90\\x80\\x80b", 4)];
+    for (bytes, cursor_pos) in cases {
+        let mut s = editor_with("");
+        seed_raw(&s, bytes);
+        exec(&s, &format!("pmacs.editor.goto_byte({cursor_pos})"));
+        ctrl(&mut s, 't');
+        assert!(raw_equals(&s, bytes), "no edit for {bytes}");
+        assert!(
+            status(&s).contains("malformed UTF-8 before the cursor"),
+            "fail-closed status for {bytes}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,6 +1238,53 @@ fn trim_on_save_failure_never_vetoes_the_save() {
         std::fs::read_to_string(&path).unwrap(),
         "x  \n",
         "the save proceeded (with the untrimmed bytes)"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn trim_on_save_unexpected_error_reports_and_still_saves() {
+    let path = temp_path("unexpected.txt");
+    std::fs::write(&path, "x  \n").unwrap();
+    let mut s = EditorState::new();
+    exec(&s, "pmacs.editops.trim_on_save(true)");
+    // Capture the pmacs.error log (the m9_6 stub pattern — the
+    // `if pmacs.error` branch is a no-op without it).
+    exec(
+        &s,
+        r"
+        PMACS_ERROR_LOG = {}
+        pmacs.error = function(msg)
+            PMACS_ERROR_LOG[#PMACS_ERROR_LOG + 1] = msg
+        end
+        ",
+    );
+    exec(
+        &s,
+        &format!(
+            "pmacs.buffer.from_file({})",
+            lua_str(path.to_str().unwrap())
+        ),
+    );
+    // Force an error INSIDE trim, past the per-edit pcalls: trim's
+    // context snapshot reads pmacs.window.current(), which nothing
+    // else on the save path touches.
+    exec(
+        &s,
+        "TRIM_ORIG_WC = pmacs.window.current; pmacs.window.current = function() error('boom') end",
+    );
+    ctrl(&mut s, 'x');
+    ctrl(&mut s, 's');
+    exec(&s, "pmacs.window.current = TRIM_ORIG_WC");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "x  \n",
+        "the save proceeded (trim aborted before any edit)"
+    );
+    let logged: String = eval(&s, "return PMACS_ERROR_LOG[1] or ''");
+    assert!(
+        logged.contains("delete-trailing-whitespace (on save) failed:"),
+        "the unexpected error reached the pmacs.error log, got: {logged}"
     );
     let _ = std::fs::remove_file(&path);
 }

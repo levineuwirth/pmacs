@@ -58,6 +58,17 @@ Revision 5 (post-approval, R3's optional hardening adopted):
 zap fails closed — no kill, chain broken — when public Lua consumed
 the marker while the prompt was open.
 
+Revision 6 (PR #111 round 1): codepoint recognition is full UTF-8
+scalar validation (second-byte constraint table; transpose
+validates the cursor scalar trailing-bytes-included, and a
+length-consistent overlong/surrogate span behind the cursor fails
+closed); capitalize is per-word across the span (Emacs
+capitalize-region parity, empirically verified, with the pack's
+`_`-is-a-word-constituent deviation named); trim-on-save reports
+unexpected errors on the status line AND the `*errors*` buffer via
+`pmacs.error` instead of silently discarding them, still never
+vetoing.
+
 ## Ground truth (as of `7e127ab`)
 
 - **The taken-chord registry is wider than `builtin/keymaps/
@@ -337,7 +348,16 @@ range gsub with a byte map — NOT `string.upper/lower` and NOT
 backend (ground truth); this also keeps Lua 5.4 and LuaJIT
 identical. Non-ASCII bytes pass through untouched — pinned in
 acceptance (an `é` in the span is byte-identical after the op).
-Capitalize = first word char upcased, rest of span downcased.
+
+Capitalize is PER-WORD across the span — Emacs capitalize-region
+parity (PR #111 R1 finding 2; empirical, Emacs 30.2 `-Q --batch`:
+`"hello WORLD"` → `"Hello World"`, `"9abc a9bc"` → `"9abc A9bc"`):
+each word's first byte is upcased when it is a letter, every other
+letter downcased; a digit-led word keeps its letters lowercase. One
+named deviation remains: `_` is a word constituent in this pack's
+class (the `word_at_cursor` precedent) but symbol-syntax in Emacs,
+so `foo_bar` capitalizes as `Foo_bar` here versus Emacs's
+`Foo_Bar`.
 
 ### Q#EC5 — Transpose: codepoint-aware chars, Emacs-verified word boundaries
 
@@ -345,13 +365,24 @@ Capitalize = first word char upcased, rest of span downcased.
 cursor, cursor ends after both (Emacs drag-forward). At EOL (next
 char is `\n` or EOF) with ≥2 preceding codepoints: swap the two
 before the cursor (Emacs special case). Fewer than two reachable
-codepoints → status, no edit. Codepoint boundaries by UTF-8
-lead-byte scan on a small slice around the cursor; **a continuation
-byte at the cursor position fails closed** (status, no edit) —
-`goto_byte` does not guarantee boundary alignment, and "never split
-a codepoint" must hold against a misaligned start, not assume it
-away. Newlines participate (transpose across lines works). One
-replace spanning exactly the two codepoints.
+codepoints → status, no edit. Codepoint recognition is FULL scalar
+validation, not lead/continuation range checks (PR #111 R1 finding
+1): a shared validator enforces the UTF-8 second-byte constraint
+table — overlongs (`C0`/`C1`, `E0 80..9F`, `F0 80..8F`), surrogates
+(`ED A0..BF`), and beyond-`U+10FFFF` (`F4 90..BF`, `F5..FF`) all
+fail — and the scalar AT the cursor is validated trailing bytes
+included (a valid lead followed by non-continuation bytes must not
+ride along as "one character"). Failures fail closed: a
+continuation byte at the cursor, a malformed scalar at the cursor,
+and a length-consistent-but-invalid span behind it each report and
+leave the buffer untouched — `goto_byte` does not guarantee
+boundary alignment, and buffers are byte-clean, so malformed input
+is reachable. (Zap's single-codepoint input check uses the same
+validator as defense-in-depth; minibuffer contents arrive as
+Rust-side UTF-8 — `set_contents` is `String`-typed — so the
+buffer-facing checks are the load-bearing ones.) Newlines
+participate (transpose across lines works). One replace spanning
+exactly the two codepoints.
 
 `edit.transpose-words` (M-t), specified against the Emacs 30.2
 table in Ground truth:
@@ -581,9 +612,15 @@ saveplace's cursor-record within the before-save fan-out (recorded
 places see post-trim text). The ENTIRE callback body is wrapped in
 pcall with a `nil` return on both paths (the saveplace pattern):
 returning `nil` never vetoes, but a raised error in a
-short-circuit hook vetoes immediately (`src/hook.rs:299`) — trim
-failure of any kind must report via status and never block the
-save.
+short-circuit hook vetoes immediately (`src/hook.rs:299`). An
+unexpected error caught by that pcall is NOT silently discarded
+(PR #111 R1 finding 3) — it reports on both channels the autosave
+sweep uses: the status line (visible when the save fails or is
+vetoed; a successful save overwrites it with "saved ...") and the
+`*errors*` buffer via `pmacs.error` (durable either way; the
+async/mcp/syntax/autosave convention). Both reports are
+themselves pcall'd so a broken reporting channel cannot resurrect
+the veto.
 
 ### Q#EC10 — Cut from the pack: recenter
 
@@ -658,12 +695,21 @@ harness the kill-ring suite already uses.
   separators skips forward to the next word; no word forward → no
   edit; `é` in the span is byte-identical while ASCII neighbors
   flip — and stays byte-identical regardless of process locale
-  (explicit-range pin).
+  (explicit-range pin); capitalize: region `"hello WORLD"` →
+  `"Hello World"` (per-word, the Emacs parity row), `"9abc a9bc"` →
+  `"9abc A9bc"` (digit-led word keeps letters lowercase), and
+  `"foo_bar baz"` → `"Foo_bar Baz"` (the named `_` deviation,
+  pinned).
 - Transpose-chars: mid-line swap + cursor advance; EOL two-before
   swap; BOB/single-char no-op; multi-byte: swapping `é` and `x`
   yields intact UTF-8 both orders; across-newline swap; **cursor
   parked on a continuation byte → status, no edit** (fail-closed
-  pin). Undo restores the original in ONE step (grain pin).
+  pin); **malformed-scalar pins**: a valid lead with a
+  non-continuation trailing byte at the cursor (`a\xC3xb`), an
+  overlong span behind the cursor (`\xE0\x80\x80b`), and a
+  beyond-`U+10FFFF` span behind it (`\xF4\x90\x80\x80b`) each →
+  status, buffer byte-identical. Undo restores the original in ONE
+  step (grain pin).
 - Transpose-words: the full nine-position Emacs table from Ground
   truth, byte-for-byte including final cursor positions for the
   seven mutating rows; the two no-successor rows assert NO edit and
@@ -751,7 +797,11 @@ harness the kill-ring suite already uses.
   (default) → save writes bytes untouched; **veto-immunity pin**: a
   rejecting intercept during on-save trim → the save still
   proceeds with a status report; another before-save callback's
-  veto still vetoes (trim's `nil` return masks nothing).
+  veto still vetoes (trim's `nil` return masks nothing);
+  **unexpected-error pin**: an error raised inside the on-save trim
+  (beyond the per-edit pcalls) → the save still proceeds AND the
+  failure lands in the `pmacs.error` log (stubbed, the m9_6
+  pattern) — never silently discarded.
 
 No CRDT-specific suite: every editops edit is a daemon-peer edit on
 the dispatch or minibuffer-accept path with no optimistic-classifier
