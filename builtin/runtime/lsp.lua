@@ -333,9 +333,9 @@ local function active_buffer_path()
   return pmacs.editor.file_path()
 end
 
-local function active_buffer_language()
-  local path = active_buffer_path()
-  if not path then return nil end
+local function buffer_language(buf)
+  local ok, path = pcall(function() return buf and buf:path() end)
+  if not ok or not path then return nil end
   -- Grammar-backed detection first (keeps rust/.rs etc. exactly as
   -- before); fall back to the LSP-only filetype map so languages
   -- with a server but no tree-sitter grammar (Python) still attach.
@@ -343,6 +343,16 @@ local function active_buffer_language()
   if lang then return lang end
   local ext = path:match("%.([%w_]+)$")
   return ext and pmacs.lsp.filetypes[ext] or nil
+end
+-- Public: the per-buffer language chain. Auto-pairing resolves
+-- relevance against the buffer its typed-edit record names — which a
+-- context-switching command may have left inactive by callback time —
+-- so the parameterized form is the primitive and the active-buffer
+-- form delegates.
+pmacs.lsp.buffer_language = buffer_language
+
+local function active_buffer_language()
+  return buffer_language(pmacs.window.buffer())
 end
 -- Public: the comment-toggle module (and future language-aware Lua)
 -- reuses this grammar+filetypes chain instead of replicating it.

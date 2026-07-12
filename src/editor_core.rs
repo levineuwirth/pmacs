@@ -142,6 +142,73 @@ pub struct CommandBoundary {
     pub last: Option<String>,
 }
 
+/// Exact provenance of one typed self-insert (auto-pairing Q#AP9).
+///
+/// `this_command() == "buffer.self-insert"` proves only the *input
+/// class*; it cannot say which character was typed, where the edit
+/// actually landed after intercepts, or whether the command that ran
+/// under that name performed the insert at all. This record carries
+/// the exact facts for the one consumer contract that needs them (the
+/// pairing hook): the decoded codepoint, the requested and effective
+/// ranges, and the post-edit cursor, plus a `clean` verdict (effective
+/// triple equals the request). It is ephemeral — armed by the two
+/// self-insert producers (dispatch fallback, optimistic CRDT arm) for
+/// exactly one `buffer.after-edit` fan-out, consumable once via
+/// `pmacs.editor.take_typed_edit()`, and cleared when the fan-out
+/// returns. Paste, programmatic mutation, manual hook runs, and a
+/// stale `this_command` therefore observe nil, not a leftover record.
+#[derive(Debug, Clone)]
+pub struct TypedEditRecord {
+    /// Buffer the self-insert landed in.
+    pub buffer: BufferId,
+    /// Window that was active when the self-insert ran.
+    pub window: WindowId,
+    /// The exact typed codepoint (payload immutability makes this
+    /// authoritative even when an intercept relocated the edit).
+    pub codepoint: char,
+    /// Requested edit range: `start == end` for a plain insert; a CUA
+    /// type-over requests a `Replace` over the consumed region.
+    pub requested_start: u64,
+    /// End of the requested range (see `requested_start`).
+    pub requested_end: u64,
+    /// Effective (post-intercept) range start in the old rope.
+    pub effective_start: u64,
+    /// Effective (post-intercept) range end in the old rope.
+    pub effective_end: u64,
+    /// Bytes actually inserted at `effective_start`.
+    pub inserted_len: u64,
+    /// The window cursor immediately after the self-insert.
+    pub post_cursor: u64,
+    /// True iff the effective triple equals the request.
+    pub clean: bool,
+    /// The edited buffer's revision immediately after the completing
+    /// edit — a producer-side postcondition, not consumer surface (it
+    /// is not exposed on the Lua record). `typed_edit_finish` drops
+    /// the record when the buffer's revision has moved past this: a
+    /// redefined `buffer.self-insert` that edits again after the
+    /// insert (removing or replacing the typed character) must not
+    /// leave a stale-but-"clean" record for the pairing hook (PR #110
+    /// round 1, finding 1).
+    pub revision: u64,
+}
+
+/// In-flight arm for a [`TypedEditRecord`] (auto-pairing Q#AP9): the
+/// dispatch fallback declares "the next matching self-insert edit is
+/// the typed one" before invoking `buffer.self-insert`; the insert
+/// primitives complete the record when the edit lands. Private —
+/// nothing outside the arm/complete/finish trio observes the pending
+/// state.
+#[derive(Debug)]
+struct TypedEditPending {
+    /// Frontend whose dispatch armed this.
+    fid: FrontendId,
+    /// The codepoint the dispatcher decoded from the keystroke; a
+    /// completing edit must match it exactly.
+    codepoint: char,
+    /// Filled by the first matching insert primitive.
+    record: Option<TypedEditRecord>,
+}
+
 /// The world state mutated by editor commands.
 pub struct EditorCore {
     /// Shared buffer registry. The registry is the canonical owner
@@ -270,6 +337,19 @@ pub struct EditorCore {
     /// query-replace twin of `search`; drives the fifth dispatcher
     /// shadow.
     query_replace: Option<QueryReplaceSession>,
+    /// In-flight typed-edit arm (auto-pairing Q#AP9): set by the
+    /// dispatch fallback just before it invokes `buffer.self-insert`,
+    /// completed by the insert primitives, taken back by the
+    /// dispatcher via [`Self::typed_edit_finish`] in the same
+    /// dispatch. Never survives a dispatch cycle.
+    typed_edit_pending: Option<TypedEditPending>,
+    /// The armed typed-edit record (auto-pairing Q#AP9), exposed to
+    /// Lua as `pmacs.editor.take_typed_edit()` for the duration of
+    /// exactly one `buffer.after-edit` fan-out. Keyed by frontend so
+    /// two attached frontends can never see or consume each other's
+    /// slot; the producer clears any untaken record when the fan-out
+    /// returns.
+    typed_edit_armed: Option<(FrontendId, TypedEditRecord)>,
 }
 
 impl EditorCore {
@@ -313,6 +393,8 @@ impl EditorCore {
             completion_popup: crate::completion::make_shared_popup(),
             round_trip_buffers: std::collections::HashSet::new(),
             query_replace: None,
+            typed_edit_pending: None,
+            typed_edit_armed: None,
         }
     }
 
@@ -1154,12 +1236,15 @@ impl EditorCore {
     // ---- editing primitives ------------------------------------------------
 
     /// Apply `op` to the active buffer; notify every window
-    /// displaying that buffer. Returns the new buffer length.
+    /// displaying that buffer. Returns the effective [`Edit`] — the
+    /// post-intercept range and inserted length (auto-pairing Q#AP9
+    /// needs the effective triple; every other caller reads
+    /// `new_rope.len()` or discards it).
     ///
     /// # Errors
     ///
     /// Returns a stringified error on buffer or view failure.
-    pub fn apply_active_edit(&mut self, op: EditOp<'_>) -> Result<u64, String> {
+    pub fn apply_active_edit(&mut self, op: EditOp<'_>) -> Result<Edit, String> {
         let buffer_id = self.active_buffer_id();
         // Scope the registry borrow: the origin translation below needs
         // `&mut self` after the views have been notified.
@@ -1197,7 +1282,7 @@ impl EditorCore {
         // headline isearch bet — "stale-after-edit linger" — is
         // closed here.
         self.search_invalidate_for_edit(buffer_id, &edit);
-        Ok(edit.new_rope.len())
+        Ok(edit)
     }
 
     /// Q#AI8 search invalidation for a landed edit: mark the buffer's
@@ -1741,11 +1826,26 @@ impl EditorCore {
         let s = ch.encode_utf8(&mut buf);
         let bytes = s.as_bytes();
         let pos = self.active_window().cursor;
-        if let Err(e) = self.apply_active_edit(EditOp::Insert { pos, bytes }) {
-            self.status = format!("insert failed: {e}");
-            return false;
-        }
+        // Q#AP9: the buffer/window the request was made in, captured
+        // BEFORE the edit — a legal intercept may switch the active
+        // context mid-edit, and the record must name where the
+        // self-insert actually landed, not where the intercept went.
+        let (buffer_id, window_id) = (self.active_buffer_id(), self.active_window_id());
+        let edit = match self.apply_active_edit(EditOp::Insert { pos, bytes }) {
+            Ok(edit) => edit,
+            Err(e) => {
+                self.status = format!("insert failed: {e}");
+                return false;
+            }
+        };
         self.active_window_mut().cursor += bytes.len() as u64;
+        self.typed_edit_complete(
+            ch,
+            (buffer_id, window_id),
+            Range::new(pos, pos),
+            bytes.len() as u64,
+            &edit,
+        );
         true
     }
 
@@ -1770,16 +1870,29 @@ impl EditorCore {
         self.active_window_mut().goal_col = None;
         let mut buf = [0u8; 4];
         let bytes = ch.encode_utf8(&mut buf).as_bytes();
-        if let Err(e) = self.apply_active_edit(EditOp::Replace {
+        // Q#AP9: capture the request's context before the edit (see
+        // the twin comment in [`Self::insert_char`]).
+        let (buffer_id, window_id) = (self.active_buffer_id(), self.active_window_id());
+        let edit = match self.apply_active_edit(EditOp::Replace {
             range: Range { start: lo, end: hi },
             bytes,
         }) {
-            self.status = format!("replace failed: {e}");
-            return;
-        }
+            Ok(edit) => edit,
+            Err(e) => {
+                self.status = format!("replace failed: {e}");
+                return;
+            }
+        };
         let aw = self.active_window_mut();
         aw.cursor = lo + bytes.len() as u64;
         aw.selection = None;
+        self.typed_edit_complete(
+            ch,
+            (buffer_id, window_id),
+            Range::new(lo, hi),
+            bytes.len() as u64,
+            &edit,
+        );
     }
 
     /// Delete the codepoint immediately before the cursor.
@@ -2095,9 +2208,12 @@ impl EditorCore {
         let Some((lo, hi)) = self.active_region() else {
             return Ok(self.active_buffer_len());
         };
-        let new_len = self.apply_active_edit(EditOp::Delete {
-            range: Range { start: lo, end: hi },
-        })?;
+        let new_len = self
+            .apply_active_edit(EditOp::Delete {
+                range: Range { start: lo, end: hi },
+            })?
+            .new_rope
+            .len();
         let aw = self.active_window_mut();
         aw.cursor = lo;
         aw.selection = None;
@@ -2187,6 +2303,130 @@ impl EditorCore {
             .get(&self.active_frontend)?
             .this
             .as_deref()
+    }
+
+    // ---- typed-edit provenance (auto-pairing, Q#AP9) ---------------------
+
+    /// Declare that `fid`'s dispatch is about to invoke
+    /// `buffer.self-insert` for `codepoint`: the next insert primitive
+    /// whose character matches completes the [`TypedEditRecord`].
+    /// Called by the dispatch fallback only — programmatic
+    /// `pmacs.command.invoke("buffer.self-insert")` deliberately never
+    /// arms, so a hook run after it observes no record.
+    pub fn typed_edit_arm(&mut self, fid: FrontendId, codepoint: char) {
+        self.typed_edit_pending = Some(TypedEditPending {
+            fid,
+            codepoint,
+            record: None,
+        });
+    }
+
+    /// Complete the pending typed-edit record from the effective edit,
+    /// if one is armed for this character and hasn't completed yet.
+    /// First match wins: a command body that somehow self-inserts the
+    /// same character twice records the first landing (the one the
+    /// dispatcher's keystroke produced). `context` is the caller's
+    /// pre-edit `(buffer, window)` — the buffer the edit landed in
+    /// even when an intercept switched the active context mid-edit.
+    fn typed_edit_complete(
+        &mut self,
+        ch: char,
+        context: (BufferId, WindowId),
+        requested: Range,
+        requested_len: u64,
+        edit: &Edit,
+    ) {
+        let matches = self.typed_edit_pending.as_ref().is_some_and(|p| {
+            p.record.is_none() && p.codepoint == ch && p.fid == self.active_frontend
+        });
+        if !matches {
+            return;
+        }
+        // The revision postcondition anchor: if the buffer vanished
+        // (killed mid-command), no record — absence fails closed.
+        let Some(revision) = self
+            .registry
+            .borrow()
+            .get(context.0)
+            .ok()
+            .map(Buffer::revision)
+        else {
+            return;
+        };
+        let clean = edit.range == requested && edit.inserted_len == requested_len;
+        let record = TypedEditRecord {
+            buffer: context.0,
+            window: context.1,
+            codepoint: ch,
+            requested_start: requested.start,
+            requested_end: requested.end,
+            effective_start: edit.range.start,
+            effective_end: edit.range.end,
+            inserted_len: edit.inserted_len,
+            post_cursor: self.active_window().cursor,
+            clean,
+            revision,
+        };
+        if let Some(p) = self.typed_edit_pending.as_mut() {
+            p.record = Some(record);
+        }
+    }
+
+    /// Take back the pending arm at the end of `fid`'s dispatch,
+    /// yielding the completed record (or `None` if the self-insert
+    /// never landed — rejected edit, command error). Always clears the
+    /// pending state: an arm never survives its dispatch cycle.
+    ///
+    /// Postcondition (PR #110 round 1, finding 1): the record is
+    /// yielded only if the edited buffer's revision still equals the
+    /// one captured at completion. A command body that edited again
+    /// after the self-insert — replacing or removing the typed
+    /// character while leaving the cursor in place — produced state
+    /// the record no longer describes; the record dies here, before
+    /// it can be armed for the hook.
+    pub fn typed_edit_finish(&mut self, fid: FrontendId) -> Option<TypedEditRecord> {
+        let pending = self.typed_edit_pending.take()?;
+        if pending.fid != fid {
+            return None;
+        }
+        let record = pending.record?;
+        let current = self
+            .registry
+            .borrow()
+            .get(record.buffer)
+            .ok()
+            .map(Buffer::revision);
+        if current != Some(record.revision) {
+            return None;
+        }
+        Some(record)
+    }
+
+    /// Arm `record` for consumption during the `buffer.after-edit`
+    /// fan-out the caller is about to run. The caller MUST clear the
+    /// slot when the fan-out returns ([`Self::typed_edit_clear_armed`]),
+    /// error paths included — the record must never outlive its hook.
+    pub fn typed_edit_set_armed(&mut self, fid: FrontendId, record: TypedEditRecord) {
+        self.typed_edit_armed = Some((fid, record));
+    }
+
+    /// Drop any untaken armed record. Producers call this immediately
+    /// after their `buffer.after-edit` fan-out returns.
+    pub fn typed_edit_clear_armed(&mut self) {
+        self.typed_edit_armed = None;
+    }
+
+    /// One-shot consume of the armed typed-edit record, per frontend:
+    /// yields the record iff one is armed for the *active* frontend,
+    /// clearing the slot. Second and later takes — including from a
+    /// nested manual `pmacs.hook.run("buffer.after-edit")` — observe
+    /// `None`, as does any context where no producer armed a record
+    /// (paste, programmatic mutation, standalone manual hook runs).
+    pub fn take_typed_edit(&mut self) -> Option<TypedEditRecord> {
+        if self.typed_edit_armed.as_ref()?.0 != self.active_frontend {
+            return None;
+        }
+        self.typed_edit_armed.take().map(|(_, rec)| rec)
     }
 
     /// Copy the active region into the clipboard slot and queue an

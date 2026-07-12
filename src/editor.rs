@@ -283,6 +283,21 @@ impl EditorState {
                 include_str!("../builtin/runtime/listview.lua"),
             )
             .expect("load listview builtin chunk");
+        // Auto-pairing (Arc 2, Q#AP7) — ORDERING CONTRACT: pair.lua
+        // must load BEFORE lsp.lua. Hook callbacks run in registration
+        // order, and lsp.lua's `buffer.after-edit` callback flushes
+        // didChange synchronously on the signature-trigger path — the
+        // pairing closer must already be in the buffer when that
+        // callback runs, or the server receives opener-only text and
+        // the closer stays unsynchronized until the next edit (hook
+        // edits don't re-fire the hook). pair.lua's `pmacs.lsp.*`
+        // lookups are lazy and nil-guarded for the same reason.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/pair.lua"),
+                include_str!("../builtin/runtime/pair.lua"),
+            )
+            .expect("load pair builtin chunk");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/lsp.lua"),
@@ -753,6 +768,14 @@ impl EditorState {
                     self.core
                         .borrow_mut()
                         .rotate_command(frontend_id, "buffer.self-insert");
+                    // Auto-pairing Q#AP9: this dispatch is the typed
+                    // self-insert producer — arm the exact typed-edit
+                    // record so the after-edit fan-out below can
+                    // expose it. The insert primitive completes the
+                    // record with the effective (post-intercept) edit;
+                    // `typed_edit_finish` takes it back on every path
+                    // out of this dispatch.
+                    self.core.borrow_mut().typed_edit_arm(frontend_id, ch);
                     let mut args = mlua::MultiValue::new();
                     args.push_back(mlua::Value::Integer(ch as i64));
                     if let Err(e) = self.lua_host.invoke_command("buffer.self-insert", args) {
@@ -769,10 +792,25 @@ impl EditorState {
             }
         }
 
+        // Auto-pairing Q#AP9: take back the typed-edit arm on every
+        // path out of this dispatch — command error, rejected insert,
+        // and the no-revision-change case all land here with either a
+        // completed record or nothing. The record is armed for Lua
+        // only across the one after-edit fan-out below and cleared
+        // the moment it returns, so paste, later dispatches, and
+        // manual hook runs can never observe a stale record.
+        let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
+
         let post_revision = self.active_buffer_revision();
         if pre_revision != post_revision {
+            if let Some(record) = typed_edit {
+                self.core
+                    .borrow_mut()
+                    .typed_edit_set_armed(frontend_id, record);
+            }
             self.lua_host
                 .run_hook("buffer.after-edit", mlua::MultiValue::new());
+            self.core.borrow_mut().typed_edit_clear_armed();
         }
 
         // Q#C3 post-dispatch validation, deliberately AFTER the

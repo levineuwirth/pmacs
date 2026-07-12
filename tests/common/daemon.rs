@@ -48,12 +48,33 @@ impl TestDaemon {
     /// T M10.8 Day 4 — spawn with extra env-var overrides for
     /// instance-capability tests.
     pub fn spawn_with_env(env_vars: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env_and_config(env_vars, None)
+    }
+
+    /// Spawn with a user `init.lua` pre-written into the daemon's
+    /// isolated config home (the tempdir doubles as `HOME` /
+    /// `XDG_CONFIG_HOME`, so the chunk lands at
+    /// `<tempdir>/pmacs/init.lua` and loads through the real
+    /// `load_user_config` path). First consumer: the auto-pairing
+    /// CRDT suite, which extends `pmacs.pair.sets` from config to
+    /// exercise the optimistic (non-built-in) pair-char route.
+    #[allow(dead_code)] // consumed per-suite; not every test crate uses it
+    pub fn spawn_with_config(init_lua: &str) -> Self {
+        Self::spawn_with_env_and_config(&[], Some(init_lua))
+    }
+
+    fn spawn_with_env_and_config(env_vars: &[(&str, &str)], init_lua: Option<&str>) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         // tempfile::TempDir creates 0755-mode directories; the daemon
         // requires a 0700-or-stricter parent for the socket. Tighten
         // the tempdir before spawning.
         fs::set_permissions(tempdir.path(), fs::Permissions::from_mode(0o700))
             .expect("chmod tempdir 0700");
+        if let Some(chunk) = init_lua {
+            let config_dir = tempdir.path().join("pmacs");
+            fs::create_dir_all(&config_dir).expect("create pmacs config dir");
+            fs::write(config_dir.join("init.lua"), chunk).expect("write init.lua");
+        }
         let socket_path = tempdir.path().join("pmacs.sock");
         let mut process = spawn_daemon_process_with_env(&socket_path, env_vars);
         wait_for_socket_or_exit(&socket_path, &mut process, Duration::from_secs(10))
