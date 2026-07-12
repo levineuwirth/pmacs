@@ -1,0 +1,60 @@
+#!/bin/sh
+# scripts/bite --- prove a fix's tests BITE: run them against an older
+# version of ONE file and succeed only if they FAIL there.
+#
+#   scripts/bite <ref> <path> [cargo-test-args...]
+#
+# Example (the PR #111 round-1 shape):
+#   scripts/bite HEAD~1 builtin/runtime/editops.lua \
+#       --test editops_acceptance -- capitalize trim_on_save_unexpected
+#
+# Exit status: 0 when the named tests fail against <ref>'s version of
+# <path> (the fix bites), 1 when they still pass (vacuous), 2 on
+# usage/setup errors. The working-tree file is restored on every exit
+# path, including interrupts.
+#
+# Caveat: a COMPILE error of the old tree also counts as "fails" —
+# correct, but weaker evidence than a clean assertion failure; eyeball
+# the output when the swapped file is Rust rather than Lua.
+#
+# Why this exists: bite-verification is step 4 of the working method,
+# and the obvious shortcut — git stash — is a trap here. The stash
+# namespace is REPO-GLOBAL: shared across every worktree and with
+# humans, so a scripted push/pop can collide with (or pop!) someone
+# else's stashed work. This helper never touches git state beyond a
+# read-only `git show`.
+
+set -eu
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: scripts/bite <ref> <path> [cargo-test-args...]" >&2
+    exit 2
+fi
+
+ref=$1
+path=$2
+shift 2
+
+if [ ! -f "$path" ]; then
+    echo "bite: no such file: $path" >&2
+    exit 2
+fi
+
+saved=$(mktemp "${TMPDIR:-/tmp}/bite.XXXXXX")
+cp -- "$path" "$saved"
+restore() {
+    cp -- "$saved" "$path"
+    rm -f -- "$saved"
+}
+trap restore EXIT INT TERM
+
+# The `./` prefix makes the pathspec cwd-relative for git-show, so the
+# script works from any directory inside the repo.
+git show "$ref:./$path" > "$path"
+
+if cargo test "$@"; then
+    echo "bite: VACUOUS --- tests still pass against $ref:$path" >&2
+    exit 1
+fi
+
+echo "bite: OK --- tests fail against $ref:$path (the fix bites)"
