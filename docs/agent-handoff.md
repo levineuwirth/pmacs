@@ -1,6 +1,6 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-10, on the laptop, by the auto-indent
+**Last updated: 2026-07-12, on the laptop, by the editops
 session.** This file is the bridge between development machines. If you
 are an agent reading this on a fresh clone: this document plus the
 `docs/*-framing.md` files ARE your memory. Read this fully before
@@ -22,6 +22,19 @@ next machine reads it the way you just did.
   in the daemon's optimistic CRDT source arm for both frontends. The
   TUI's missing nonempty-selection optimistic type-over gate and
   generated-buffer search invalidation remain named deferrals.
+- **Editing-conveniences pack (editops) in flight on branch
+  `editops`** — a Lua parallel lane beside the auto-pairing
+  close-out. Framing `docs/editing-conveniences-framing.md` at
+  revision 5 (three review rounds + one adopted post-approval
+  hardening; approved to branch 2026-07-12). goto-line, case ops,
+  transpose, zap-to-char (kill-chain member with an origin guard
+  and killring's new pending-prompt marker), line
+  move/duplicate/join, region sort/reverse/dedupe,
+  delete-trailing-whitespace + opt-in trim-on-save. killring.lua
+  gains `kill_range` / `break_chain([fid])` / the marker lifecycle.
+  On the laptop this branch lives in a git worktree at
+  `../pmacs-editops` (the main checkout was mid-flight on
+  auto-pair); fold the worktree back after merge.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
@@ -168,7 +181,11 @@ Editing: word kills (`M-d`/`M-BS` — need bytes-returning deleters +
 prepend-on-backward append), `C-SPC` set-mark, `C-u C-y` / `C-M-w`,
 kill-ring browser + persistence, clipboard watching, block comments +
 mid-line comment spans, comment-dwim append-at-EOL, per-language
-comment padding.
+comment padding. Editops deferrals (full list in its framing):
+recenter (blocked on viewport facts — the GPU never consumes daemon
+`view_top`), Unicode case/word classes, region-spanning
+move/duplicate, locale collation for sort-lines, zap chain semantics
+through boundary-disturbing input, ensure-final-newline on save.
 Substrate: buffer-aware edit epoch (after-edit currently compares the
 ACTIVE buffer only), wire provenance for CRDT self-insert
 classification, Lua intercept probe, completion.lua still on the old
