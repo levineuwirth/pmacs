@@ -314,6 +314,19 @@ impl EditorState {
                 include_str!("../builtin/runtime/completion.lua"),
             )
             .expect("load completion builtin chunk");
+        // Editing-conveniences pack (Q#EC9 ordering contract): MUST
+        // load before saveplace.lua — editops registers its (gated,
+        // default-off) trim-on-save callback at load time, and hook
+        // callbacks run in registration order, so saveplace's
+        // before-save cursor-record must observe post-trim text. Its
+        // pmacs.killring.* references resolve at invoke time, so
+        // loading before killring.lua is fine.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/editops.lua"),
+                include_str!("../builtin/runtime/editops.lua"),
+            )
+            .expect("load editops builtin chunk");
         // Arc 3: persistence builtins (saveplace + recentf). Load after
         // the LSP/completion runtimes; they subscribe to buffer hooks
         // and drive `pmacs.state` (inert until the state dir is

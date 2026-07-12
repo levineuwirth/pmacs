@@ -1,18 +1,32 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-12, on the laptop, by the auto-pairing
-session (post-merge sync).** This file is the bridge between
-development machines. If you are an agent reading this on a fresh
-clone: this document plus the `docs/*-framing.md` files ARE your
-memory. Read this fully before taking on work, seed your persistent
-memory from it, and **update this file (and commit it) whenever
-project state changes materially** — the next machine reads it the
-way you just did.
+**Last updated: 2026-07-12, on the laptop, by the editops session
+(merging the auto-pairing #110 post-merge sync).** This file is the
+bridge between development machines. If you are an agent reading
+this on a fresh clone: this document plus the `docs/*-framing.md`
+files ARE your memory. Read this fully before taking on work, seed
+your persistent memory from it, and **update this file (and commit
+it) whenever project state changes materially** — the next machine
+reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-12)
 
 - `main` @ `4174f3e` (auto-pairing #110 merged), protocol **v15**
   (`SUPPORTED=[6..15]`).
+- **Editing-conveniences pack (editops) in flight: PR #111** — the
+  Lua parallel lane, branch `editops`. Framing
+  `docs/editing-conveniences-framing.md` at revision 6 (three
+  pre-branch rounds, one adopted post-approval hardening, and PR
+  round 1: full UTF-8 scalar validation, per-word capitalize with
+  the `_`-constituent deviation named, trim-on-save dual-channel
+  error reporting). goto-line, case ops, transpose, zap-to-char
+  (kill-chain member with an origin guard and killring's new
+  pending-prompt marker), line move/duplicate/join, region
+  sort/reverse/dedupe, delete-trailing-whitespace + opt-in
+  trim-on-save. killring.lua gains `kill_range` /
+  `break_chain([fid])` / the marker lifecycle. On the laptop this
+  branch lives in a git worktree at `../pmacs-editops`; fold it
+  back after merge.
 - **Auto-pairing (#110) landed — Arc 2 is COMPLETE.** Framing
   `docs/auto-pairing-framing.md` at revision 6 (two pre-branch rounds
   + three PR rounds). Shape that shipped: the nine built-in pair
@@ -179,7 +193,11 @@ comment padding. Pairing (framing "Deferred"): wrap-region on opener,
 pair-aware backspace, RET-inside-pair closer-on-own-line,
 in-string/in-comment inhibit (needs node-at-byte `pmacs.parse`),
 undo amalgamation (pair = one step), balance-aware quotes,
-per-buffer toggle (config-registry-blocked).
+per-buffer toggle (config-registry-blocked). Editops deferrals (full
+list in its framing): recenter (blocked on viewport facts — the GPU
+never consumes daemon `view_top`), Unicode case/word classes,
+region-spanning move/duplicate, locale collation for sort-lines,
+ensure-final-newline on save.
 Substrate: buffer-aware edit epoch (after-edit currently compares the
 ACTIVE buffer only), wire provenance for CRDT self-insert
 classification, Lua intercept probe, completion.lua still on the old
