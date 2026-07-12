@@ -1167,6 +1167,20 @@ fn add_query_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
         with_registry(lua, |r| Ok(resolve(r, this.0)?.name().to_owned()))
     });
 
+    // Backing file path, or nil for pathless buffers (scratch,
+    // generated). The per-buffer twin of `pmacs.editor.file_path()`:
+    // consumers that hold a buffer handle from earlier in a hook
+    // fan-out (auto-pairing's typed-edit record) must resolve
+    // language/URIs against THAT buffer, not whatever is active by
+    // the time their callback runs.
+    methods.add_method("path", |lua, this, ()| {
+        with_registry(lua, |r| {
+            Ok(resolve(r, this.0)?
+                .file_path()
+                .map(|p| p.display().to_string()))
+        })
+    });
+
     methods.add_method("is_modified", |lua, this, ()| {
         with_registry(lua, |r| Ok(resolve(r, this.0)?.is_modified()))
     });
@@ -11009,6 +11023,44 @@ fn install_session(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result
         editor.set(
             "this_command",
             lua.create_function(move |_, ()| Ok(cc.borrow().this_command().map(str::to_owned)))?,
+        )?;
+    }
+    {
+        // take_typed_edit(): auto-pairing Q#AP9 — the one-shot exact
+        // provenance record of the self-insert that produced the
+        // current `buffer.after-edit` fan-out, or nil. Where
+        // `this_command()` names only the input class, this record
+        // carries the typed codepoint and the requested vs effective
+        // (post-intercept) edit, so a consumer can fail closed on a
+        // transformed, relocated, or context-switched source edit.
+        // Consuming clears the slot: later callbacks and nested manual
+        // hook runs see nil, and the producer clears any untaken
+        // record when the fan-out returns. Per-frontend — one
+        // frontend can never take another's record. `char` is the
+        // codepoint as a UTF-8 string (LuaJIT has no `utf8` library
+        // to convert `codepoint` Lua-side).
+        let cc = core.clone();
+        editor.set(
+            "take_typed_edit",
+            lua.create_function(move |lua, ()| {
+                let Some(rec) = cc.borrow_mut().take_typed_edit() else {
+                    return Ok(mlua::Value::Nil);
+                };
+                let cvt = |v: u64| i64::try_from(v).map_err(mlua::Error::external);
+                let t = lua.create_table()?;
+                t.set("buffer", BufferIdLua(rec.buffer))?;
+                t.set("window", cvt(rec.window.raw())?)?;
+                t.set("codepoint", i64::from(u32::from(rec.codepoint)))?;
+                t.set("char", rec.codepoint.to_string())?;
+                t.set("requested_start", cvt(rec.requested_start)?)?;
+                t.set("requested_end", cvt(rec.requested_end)?)?;
+                t.set("effective_start", cvt(rec.effective_start)?)?;
+                t.set("effective_end", cvt(rec.effective_end)?)?;
+                t.set("inserted_len", cvt(rec.inserted_len)?)?;
+                t.set("post_cursor", cvt(rec.post_cursor)?)?;
+                t.set("clean", rec.clean)?;
+                Ok(mlua::Value::Table(t))
+            })?,
         )?;
     }
     {

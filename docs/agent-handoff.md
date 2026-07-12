@@ -1,54 +1,62 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-12, on the laptop, by the editops
-session.** This file is the bridge between development machines. If you
-are an agent reading this on a fresh clone: this document plus the
-`docs/*-framing.md` files ARE your memory. Read this fully before
-taking on work, seed your persistent memory from it, and **update this
-file (and commit it) whenever project state changes materially** — the
-next machine reads it the way you just did.
+**Last updated: 2026-07-12, on the laptop, by the editops session
+(merging the auto-pairing #110 post-merge sync).** This file is the
+bridge between development machines. If you are an agent reading
+this on a fresh clone: this document plus the `docs/*-framing.md`
+files ARE your memory. Read this fully before taking on work, seed
+your persistent memory from it, and **update this file (and commit
+it) whenever project state changes materially** — the next machine
+reads it the way you just did.
 
-## 1. Where the project stands (2026-07-10)
+## 1. Where the project stands (2026-07-12)
 
-- `main` @ `efa41cb`, protocol **v15** (`SUPPORTED=[6..15]`).
-- **Auto-indent on newline (Arc 2) in flight on this branch** —
-  framing `docs/auto-indent-framing.md` is at revision 6 (five
-  pre-branch review rounds plus PR #109 round 1). RET now binds
-  `edit.newline-and-indent`; plain Enter is no longer GPU-optimistic
-  (round-trips like the TUI). Rode along: Q#AI8 search invalidation is
-  shared by dispatch, direct notification, undo, and redo (stale
-  step/summary fail closed; live origins translate through edits), and
-  Q#AI9 clears empty selections only after successful core inserts and
-  in the daemon's optimistic CRDT source arm for both frontends. The
-  TUI's missing nonempty-selection optimistic type-over gate and
-  generated-buffer search invalidation remain named deferrals.
-- **Editing-conveniences pack (editops) in flight on branch
-  `editops`** — a Lua parallel lane beside the auto-pairing
-  close-out. Framing `docs/editing-conveniences-framing.md` at
-  revision 5 (three review rounds + one adopted post-approval
-  hardening; approved to branch 2026-07-12). goto-line, case ops,
-  transpose, zap-to-char (kill-chain member with an origin guard
-  and killring's new pending-prompt marker), line
-  move/duplicate/join, region sort/reverse/dedupe,
-  delete-trailing-whitespace + opt-in trim-on-save. killring.lua
-  gains `kill_range` / `break_chain([fid])` / the marker lifecycle.
-  On the laptop this branch lives in a git worktree at
-  `../pmacs-editops` (the main checkout was mid-flight on
-  auto-pair); fold the worktree back after merge.
+- `main` @ `4174f3e` (auto-pairing #110 merged), protocol **v15**
+  (`SUPPORTED=[6..15]`).
+- **Editing-conveniences pack (editops) in flight: PR #111** — the
+  Lua parallel lane, branch `editops`. Framing
+  `docs/editing-conveniences-framing.md` at revision 6 (three
+  pre-branch rounds, one adopted post-approval hardening, and PR
+  round 1: full UTF-8 scalar validation, per-word capitalize with
+  the `_`-constituent deviation named, trim-on-save dual-channel
+  error reporting). goto-line, case ops, transpose, zap-to-char
+  (kill-chain member with an origin guard and killring's new
+  pending-prompt marker), line move/duplicate/join, region
+  sort/reverse/dedupe, delete-trailing-whitespace + opt-in
+  trim-on-save. killring.lua gains `kill_range` /
+  `break_chain([fid])` / the marker lifecycle. On the laptop this
+  branch lives in a git worktree at `../pmacs-editops`; fold it
+  back after merge.
+- **Auto-pairing (#110) landed — Arc 2 is COMPLETE.** Framing
+  `docs/auto-pairing-framing.md` at revision 6 (two pre-branch rounds
+  + three PR rounds). Shape that shipped: the nine built-in pair
+  chars leave both frontends' optimistic classifiers
+  (`BUILTIN_PAIR_CHARS` in pmacs-protocol; dispatch-routed →
+  adjacent daemon-peer undo units); reaction hook
+  `builtin/runtime/pair.lua` loads BEFORE lsp.lua (first-didChange
+  ordering contract); exact one-shot typed-edit provenance via
+  `pmacs.editor.take_typed_edit()` with a buffer-revision
+  postcondition (Q#AP9). New substrate other code can use:
+  `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
+  `PMACS_FAKE_LSP_CHANGE_SINK` (fake-LSP doc-sync replay),
+  `TestDaemon::spawn_with_config` (init.lua-carrying daemon fixture).
+- **NEXT: the user wants a decision discussion — compile-mode (Arc 5
+  stage 1) vs themes (Arc 4). Do not pick unilaterally; frame the
+  tradeoff and ask.**
+- Auto-indent (#109) landed earlier: RET binds
+  `edit.newline-and-indent`; plain Enter round-trips on both
+  frontends; shared search invalidation (Q#AI8), empty-selection
+  clearing (Q#AI9).
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
     hardening follow-ups (#102, #105, #106).
-  - **Arc 2 (editing table stakes)** — query-replace (#97), kill ring
-    + `M-y` (#103/#105/#106), comment-toggle (#107), auto-indent (this
-    branch). **Remaining after this merges: auto-pairing**, as its own
-    small framing + PR.
+  - **Arc 2 (editing table stakes) COMPLETE** — query-replace (#97),
+    kill ring + `M-y` (#103/#105/#106), comment-toggle (#107),
+    auto-indent (#109), auto-pairing (#110).
   - **Arc 3 (persistence) COMPLETE** — saveplace/recentf (#98),
     desktop-save (#99), autosave/crash-recovery (#100), save-clobber
     fix (#101).
-  - **After Arc 2 closes**: the user wants a decision discussion —
-    compile-mode (Arc 5 stage 1) vs themes (Arc 4). Do not pick
-    unilaterally; frame the tradeoff and ask.
 
 ## 2. How we work (the part that must not drift)
 
@@ -181,15 +189,24 @@ Editing: word kills (`M-d`/`M-BS` — need bytes-returning deleters +
 prepend-on-backward append), `C-SPC` set-mark, `C-u C-y` / `C-M-w`,
 kill-ring browser + persistence, clipboard watching, block comments +
 mid-line comment spans, comment-dwim append-at-EOL, per-language
-comment padding. Editops deferrals (full list in its framing):
-recenter (blocked on viewport facts — the GPU never consumes daemon
-`view_top`), Unicode case/word classes, region-spanning
-move/duplicate, locale collation for sort-lines, zap chain semantics
-through boundary-disturbing input, ensure-final-newline on save.
+comment padding. Pairing (framing "Deferred"): wrap-region on opener,
+pair-aware backspace, RET-inside-pair closer-on-own-line,
+in-string/in-comment inhibit (needs node-at-byte `pmacs.parse`),
+undo amalgamation (pair = one step), balance-aware quotes,
+per-buffer toggle (config-registry-blocked). Editops deferrals (full
+list in its framing): recenter (blocked on viewport facts — the GPU
+never consumes daemon `view_top`), Unicode case/word classes,
+region-spanning move/duplicate, locale collation for sort-lines,
+ensure-final-newline on save.
 Substrate: buffer-aware edit epoch (after-edit currently compares the
 ACTIVE buffer only), wire provenance for CRDT self-insert
 classification, Lua intercept probe, completion.lua still on the old
-cursor-delta heuristic (migrate to `this_command`).
+cursor-delta heuristic (migrate to `this_command`), the TUI's
+nonempty-selection optimistic type-over gate, generated-buffer search
+invalidation, cross-peer chronological undo arbitration (mixed
+source/daemon history; pinned by auto-pairing acceptance),
+origin-pinned `buffer.after-edit` fan-out (a context-switching
+intercept changes what later callbacks — LSP, completion — observe).
 LSP/persistence: hidden-buffer LSP attach, daemon desktop-restore, the
 *warning* half of external-change detection (verify-visited-file-
 modtime), config registry (no unified config surface yet).

@@ -89,6 +89,22 @@ pub enum Key {
     Unknown(u32),
 }
 
+/// The nine built-in auto-pair characters (docs/auto-pairing-framing.md
+/// Q#AP1). Both frontends' optimistic classifiers exclude these so they
+/// always round-trip through daemon dispatch: the typed opener and the
+/// pairing hook's closer then land as adjacent daemon-peer undo units,
+/// dispatch-path CUA type-over applies, and skip-over-close never
+/// paints a transient duplicate. Shared here — not duplicated per
+/// frontend — because a frontend that drifts from this set silently
+/// re-degrades pair undo to the cross-peer mixed-history case.
+pub const BUILTIN_PAIR_CHARS: [char; 9] = ['(', ')', '[', ']', '{', '}', '"', '\'', '`'];
+
+/// True when `c` is one of [`BUILTIN_PAIR_CHARS`].
+#[must_use]
+pub fn is_builtin_pair_char(c: char) -> bool {
+    BUILTIN_PAIR_CHARS.contains(&c)
+}
+
 /// Modifier-key set. Bit-flag encoding for compact wire shape.
 ///
 /// `META` corresponds to the "logo" / "super" key on most keyboards.

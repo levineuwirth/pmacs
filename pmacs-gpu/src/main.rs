@@ -39,6 +39,7 @@ use pmacs_protocol::{
     InstanceSignal, Key as ProtocolKey, LineNumberMode, MenuPromptRow, Modifiers, PointerKind,
     SelectionSnapshot, StyleSegment, StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
+    is_builtin_pair_char,
 };
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
@@ -1527,7 +1528,16 @@ fn optimistic_insert_text(key: ProtocolKey, mods: Modifiers, chbuf: &mut [u8; 4]
         return None;
     }
     match key {
-        ProtocolKey::Char(ch) if !ch.is_control() => Some(ch.encode_utf8(chbuf)),
+        // Auto-pairing Q#AP1: the built-in pair charset always
+        // round-trips so the typed opener and the pairing hook's
+        // closer land as adjacent daemon-peer undo units, and
+        // dispatch-path CUA type-over / skip-over-close apply. An
+        // optimistic pair char would put the opener on this
+        // frontend's peer with the closer on the daemon's — uncleanly
+        // undoable from either side.
+        ProtocolKey::Char(ch) if !ch.is_control() && !is_builtin_pair_char(ch) => {
+            Some(ch.encode_utf8(chbuf))
+        }
         ProtocolKey::Tab if mods.is_empty() => Some("\t"),
         _ => None,
     }
@@ -7110,6 +7120,30 @@ mod tests {
             optimistic_insert_text(ProtocolKey::Left, none, &mut buf),
             None
         );
+    }
+
+    #[test]
+    fn optimistic_insert_text_round_trips_builtin_pair_chars() {
+        // Auto-pairing Q#AP1: the nine built-in pair chars must reach
+        // daemon dispatch so the opener and the pairing hook's closer
+        // are adjacent daemon-peer undo units. Both modifier shapes
+        // real keyboards produce are pinned: `[`/`]`/`'`/`` ` ``
+        // arrive unshifted, `(`/`)`/`{`/`}`/`"` arrive with SHIFT — a
+        // gate that only caught `Modifiers::NONE` would leak every
+        // shifted pair char back onto the optimistic path.
+        let mut buf = [0u8; 4];
+        for c in pmacs_protocol::BUILTIN_PAIR_CHARS {
+            assert_eq!(
+                optimistic_insert_text(ProtocolKey::Char(c), Modifiers::NONE, &mut buf),
+                None,
+                "unshifted {c:?} must round-trip"
+            );
+            assert_eq!(
+                optimistic_insert_text(ProtocolKey::Char(c), Modifiers::SHIFT, &mut buf),
+                None,
+                "shifted {c:?} must round-trip"
+            );
+        }
     }
 
     /// Q#R1 parity invariant: the per-line surgery's chunk source

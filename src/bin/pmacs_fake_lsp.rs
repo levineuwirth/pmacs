@@ -49,6 +49,11 @@
 //!   advertises `signatureHelpProvider` with `(` / `,` triggers, so a
 //!   test can drive the Arc 1d auto-trigger. Every other mode omits the
 //!   capability and therefore never auto-triggers.
+//! * If `PMACS_FAKE_LSP_CHANGE_SINK` names a file (any mode): appends
+//!   one `{"method", "text"}` JSON line per received didOpen /
+//!   didChange, so a test can replay the exact document-sync sequence
+//!   the server saw — the auto-pairing Q#AP7 ordering observable
+//!   ("the first didChange after `(` carries `()`").
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -415,22 +420,38 @@ fn main() {
                     .and_then(|t| t.get("uri"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                if let Some(uri_s) = uri.as_str() {
-                    let text = if method == "textDocument/didOpen" {
-                        params
-                            .get("textDocument")
-                            .and_then(|t| t.get("text"))
-                            .and_then(serde_json::Value::as_str)
-                    } else {
-                        params
-                            .get("contentChanges")
-                            .and_then(serde_json::Value::as_array)
-                            .and_then(|a| a.first())
-                            .and_then(|c| c.get("text"))
-                            .and_then(serde_json::Value::as_str)
-                    };
-                    if let Some(text) = text {
-                        open_docs.insert(uri_s.to_owned(), text.to_owned());
+                let text = if method == "textDocument/didOpen" {
+                    params
+                        .get("textDocument")
+                        .and_then(|t| t.get("text"))
+                        .and_then(serde_json::Value::as_str)
+                } else {
+                    params
+                        .get("contentChanges")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|a| a.first())
+                        .and_then(|c| c.get("text"))
+                        .and_then(serde_json::Value::as_str)
+                };
+                if let (Some(uri_s), Some(text)) = (uri.as_str(), text) {
+                    open_docs.insert(uri_s.to_owned(), text.to_owned());
+                }
+                // Auto-pairing Q#AP7: the ordering observable is "the
+                // FIRST didChange after `(` carries `()`" — provable
+                // only from what the server actually received, in
+                // order. Mirror of `PMACS_FAKE_LSP_ROOT_SINK`: append
+                // one JSON line per didOpen/didChange to the sink
+                // file so a test can replay the exact sequence.
+                if let (Ok(sink), Some(text)) = (std::env::var("PMACS_FAKE_LSP_CHANGE_SINK"), text)
+                {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&sink)
+                    {
+                        let line = serde_json::json!({ "method": method, "text": text });
+                        let _ = writeln!(f, "{line}");
                     }
                 }
                 let echo = serde_json::json!({
