@@ -2723,18 +2723,30 @@ mod tests {
         nix::sys::signal::kill(Pid::from_raw(pid), None).is_ok()
     }
 
-    /// Process group of `pid` per /proc/<pid>/stat field 5 (Linux;
-    /// avoids widening the nix feature set with `process`). The comm
-    /// field may contain spaces, so parse after the closing paren.
+    /// Process group of `pid` via `ps` (portable across Linux and
+    /// macOS CI — the previous /proc/<pid>/stat read has no macOS
+    /// equivalent; `ps -o pgid=` avoids widening the nix feature set
+    /// with `process` for `getpgid`).
     fn pgid_of(pid: u32) -> i32 {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("read stat");
-        let after_comm = &stat[stat.rfind(')').expect("comm paren") + 2..];
-        after_comm
-            .split_whitespace()
-            .nth(2) // state ppid pgrp → index 2
-            .expect("pgrp field")
+        let out = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
             .parse()
-            .expect("pgrp parses")
+            .expect("pgid parses")
+    }
+
+    /// True when `name` resolves on PATH. Fixture-dependency gate:
+    /// the setsid escape-hatch test needs util-linux's setsid(1),
+    /// absent on macOS — skip per-test rather than fail (the
+    /// `m6_5_repl_acceptance` selective-skip precedent).
+    fn binary_available(name: &str) -> bool {
+        std::process::Command::new("which")
+            .arg(name)
+            .output()
+            .is_ok_and(|o| o.status.success())
     }
 
     /// Poll `path` until it holds a parseable pid. Fixture scripts
@@ -3034,6 +3046,14 @@ mod tests {
         // joins must complete, and the per-runtime active-reader
         // count must return to zero — across repeated cycles, so
         // nothing accumulates.
+        if !binary_available("setsid") {
+            // util-linux's setsid(1) is absent on macOS CI; the
+            // escape hatch is a Linux-production behavior. Skip
+            // rather than fail — the other group-lifecycle tests
+            // still run everywhere.
+            eprintln!("skipping: setsid(1) not on PATH");
+            return;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         let mut escapees = Vec::new();
         for round in 0..3 {

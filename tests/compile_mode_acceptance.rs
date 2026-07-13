@@ -184,7 +184,14 @@ fn wait_pidfile(s: &mut EditorState, path: &Path) -> i32 {
 }
 
 fn pid_alive(pid: i32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    // `kill -0` probe via /bin/kill: portable across Linux and macOS
+    // (a /proc existence check has no macOS equivalent and would
+    // make every "descendant is dead" assertion vacuously true
+    // there).
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Errors getter marshalled to a comparable Rust shape (encoded as
