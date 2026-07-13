@@ -2069,7 +2069,7 @@ fn r3f3_spec_fields_are_raw_reads_metatables_not_honored() {
         &s,
         r#"
         local spec = setmetatable(
-            { label = "mt2", command = "/bin/true" },
+            { label = "mt2", command = "/bin/sh", args = { "-c", "exit 0" } },
             { __index = function() error("hostile spec metatable") end })
         local ok = pcall(pmacs.process.spawn, spec)
         return ok
