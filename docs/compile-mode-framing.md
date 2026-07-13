@@ -1,7 +1,25 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 7 — 2026-07-13. Status: implemented on branch
-`compile-mode` (PR #113); revision 7 folds in PR round 1.**
+**Revision 8 — 2026-07-13. Status: implemented on branch
+`compile-mode` (PR #113); revisions 7–8 fold in PR rounds 1–2.**
+
+Revision 8 (PR #113 round 2, findings 1–5): rule validation is a
+stable, total snapshot — validated scalar fields are copied into
+per-run plain tables via raw reads (rawget; metatable-provided
+fields are deliberately not honored), and the container traversal is
+itself protected, so neither post-run mutation of the user's rule
+objects nor a hostile `__index` can alter an in-flight run or raise
+through the pump mid-batch (traversal-raise semantics are
+Lua-flavor-dependent: 5.2+ `ipairs` consults `__index`, LuaJIT reads
+raw — both pinned); capture indexes must also be FINITE
+(`math.floor(math.huge) == math.huge`); shell-command never touches
+the rule table (no spurious warnings, no rule-container failure can
+block a run that parses nothing); `parser:finish()` now RESETS the
+parser — in-flight CSI/OSC/escape state and alt-screen suppression
+included — so a post-finish feed parses a fresh stream (direct unit
+tests plus a Lua-driven twin); three stale comments corrected.
+Bites: four acceptance tests against pre-fix compile.lua, one
+against pre-fix ansi.rs.
 
 Revision 7 (PR #113 round 1, findings 1–10): stored coordinates must
 be finite integers and both cursor walks are movement-bounded
@@ -397,13 +415,17 @@ No protocol change, no frontend change.
    same-length replaces, so undoing one changes content without
    changing length. Revision increments on every edit, undo, and
    redo.
-5. **`AnsiParser::finish()` + `parser:finish()` (Revision 7)** —
+5. **`AnsiParser::finish()` + `parser:finish()` (Revisions 7–8)** —
    stream-end finalization: the feed-boundary contract deliberately
    buffers an incomplete UTF-8 sequence for the next feed, but at
    process EOF there is no next feed — `finish()` emits U+FFFD for
    the pending prefix (the same posture an interrupting control byte
-   gets) and flushes the text run. Compile-mode calls it once at the
-   terminal event, before finalizing the pending line.
+   gets) and flushes the text run, **then fully resets the parser
+   (in-flight CSI/OSC/escape state and alt-screen suppression
+   included): a feed after finish parses a NEW stream** rather than
+   continuing a pre-EOF escape or staying suppressed. Compile-mode
+   calls it once at the terminal event, before finalizing the
+   pending line.
 
 ## Decisions
 
@@ -608,9 +630,17 @@ invoke time, so commands/runtime load order stays irrelevant for it.
   mutations live after the degradation); malformed entries are
   skipped, invalid Lua patterns are caught (and counted) at
   validation time via a probe match, and match-time pattern calls
-  stay pcall'd as belt-and-braces. One status note per run counts
-  the skipped entries; a later valid rule still matches; the
-  per-frame pump never raises.
+  stay pcall'd as belt-and-braces. **Validation is a stable, total
+  snapshot (Revision 8):** validated scalar fields are copied into
+  per-run plain tables via raw reads — mutating the user's rule
+  objects after `compile.run()` cannot alter the in-flight run, a
+  hostile `__index` is a counted skip rather than an error through
+  the pump, and the container traversal itself is protected
+  (5.2+ `ipairs` consults `__index`; LuaJIT reads raw — both
+  degrade cleanly). Capture indexes must be positive, FINITE
+  integers. One status note per run counts the skipped entries; a
+  later valid rule still matches; the per-frame pump never raises.
+  Shell-command slots never touch the rule table at all.
 - Each match appends `{ file, line, col, severity,
   line_start_byte }` to the run's ordered error list (reset per
   run). Relative paths resolve against the run's cwd.

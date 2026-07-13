@@ -399,8 +399,14 @@ impl AnsiParser {
     /// next feed, so the pending prefix can never complete. Emit
     /// U+FFFD for it (the same posture `flush_text_run` takes when a
     /// control byte interrupts a sequence) and flush the resulting
-    /// text run. Idempotent once drained. First consumer:
-    /// compile-mode's terminal-event path (Q#CM4).
+    /// text run.
+    ///
+    /// The parser is then fully reset — in-flight CSI/OSC/escape
+    /// state AND alt-screen suppression included — so a `feed` after
+    /// `finish` parses a NEW stream from a clean slate rather than
+    /// continuing a pre-EOF escape sequence or staying suppressed
+    /// (PR #113 round-2 finding 4). Idempotent once drained. First
+    /// consumer: compile-mode's terminal-event path (Q#CM4).
     pub fn finish(&mut self) -> Vec<AnsiEvent> {
         let mut events = Vec::new();
         self.flush_pending_utf8_as_replacement();
@@ -410,6 +416,11 @@ impl AnsiParser {
         } else {
             self.text_run.clear();
         }
+        self.reset();
+        // `reset` deliberately preserves alt-screen suppression (a
+        // mid-stream reset must not unhide alt-screen contents); a
+        // stream END does end the suppression.
+        self.alt_screen_active = false;
         events
     }
 
@@ -1779,5 +1790,55 @@ mod tests {
         // Subsequent text uses the unchanged style.
         let evs_text = p.feed(b"hi");
         assert_eq!(collect_text(&evs_text), "hi");
+    }
+
+    // -----------------------------------------------------------------
+    // Stream-end finish() (compile-mode Q#CM4; PR #113 rounds 1–2)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn finish_flushes_truncated_utf8_as_replacement() {
+        let mut p = AnsiParser::new();
+        // 0xC3 opens a two-byte sequence that never completes.
+        let evs = p.feed(b"abc\xC3");
+        assert_eq!(collect_text(&evs), "abc", "prefix buffered across feeds");
+        let evs = p.finish();
+        assert_eq!(
+            collect_text(&evs),
+            "\u{FFFD}",
+            "stream end must surface the pending prefix as U+FFFD"
+        );
+        // Idempotent once drained.
+        assert!(p.finish().is_empty(), "second finish drains nothing");
+    }
+
+    #[test]
+    fn feed_after_finish_starts_a_fresh_stream() {
+        // Mid-CSI at stream end: without the finish-time reset, a
+        // subsequent feed would keep consuming bytes as CSI
+        // parameters instead of parsing a new stream (PR #113
+        // round-2 finding 4).
+        let mut p = AnsiParser::new();
+        let _ = p.feed(b"\x1b[3"); // incomplete CSI
+        let _ = p.finish();
+        let evs = p.feed(b"plain");
+        assert_eq!(
+            collect_text(&evs),
+            "plain",
+            "post-finish feeds must not continue a pre-EOF escape"
+        );
+    }
+
+    #[test]
+    fn finish_ends_alt_screen_suppression() {
+        let mut p = AnsiParser::new();
+        let _ = p.feed(b"\x1b[?1049hhidden"); // enter alt screen
+        let _ = p.finish();
+        let evs = p.feed(b"visible");
+        assert_eq!(
+            collect_text(&evs),
+            "visible",
+            "a stream END ends suppression; a new stream starts unsuppressed"
+        );
     }
 }

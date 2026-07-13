@@ -91,46 +91,59 @@ pmacs.compile.rules = {
   { pattern = "([^%s:][^:]*):(%d+):", file = 1, line = 2 },
 }
 
--- A capture index must be a positive INTEGER (a fractional index
--- silently reads a neighbouring capture via Lua table coercion —
--- round-1 finding 4).
+-- A capture index must be a positive, FINITE integer. Fractional
+-- indexes read a distinct (absent) table key, not a capture;
+-- math.floor(math.huge) == math.huge, so integrality alone does not
+-- imply finiteness (round-1 finding 4; round-2 finding 2).
 local function is_capture_index(v)
-  return type(v) == "number" and v >= 1 and v == math.floor(v)
+  return type(v) == "number" and v >= 1 and v < math.huge and v == math.floor(v)
 end
 
-local function rule_is_valid(rule)
-  if type(rule) ~= "table" then return false end
-  if type(rule.pattern) ~= "string" then return false end
+-- Validate one rule via RAW reads (rawget): a metatable-backed entry
+-- whose __index raises must be a skipped malformed entry, not an
+-- error thrown through the per-frame pump mid-batch (round-2
+-- finding 1). Fail-closed posture: metatable-provided fields are
+-- deliberately not honored. Returns a plain-table copy of the
+-- validated scalar fields, or nil — the copy is the run's snapshot,
+-- immune to post-validation mutation of the user's rule object.
+local function validated_rule_copy(rule)
+  if type(rule) ~= "table" then return nil end
+  local pattern = rawget(rule, "pattern")
+  if type(pattern) ~= "string" then return nil end
   -- Probe the pattern against the empty string so a malformed Lua
   -- pattern is caught (and counted in the status note) here at
   -- validation time, not silently at match time.
-  if not pcall(string.match, "", rule.pattern) then return false end
-  if not is_capture_index(rule.file) then return false end
-  if not is_capture_index(rule.line) then return false end
-  if rule.col ~= nil and not is_capture_index(rule.col) then return false end
-  if rule.severity ~= nil and rule.severity ~= "error" and rule.severity ~= "warning" then
-    return false
+  if not pcall(string.match, "", pattern) then return nil end
+  local file = rawget(rule, "file")
+  local line = rawget(rule, "line")
+  local col = rawget(rule, "col")
+  local severity = rawget(rule, "severity")
+  if not is_capture_index(file) then return nil end
+  if not is_capture_index(line) then return nil end
+  if col ~= nil and not is_capture_index(col) then return nil end
+  if severity ~= nil and severity ~= "error" and severity ~= "warning" then
+    return nil
   end
-  return true
+  return { pattern = pattern, file = file, line = line, col = col, severity = severity }
 end
 
--- Validate the (user-mutable) rule table once per run, fail-closed
--- per entry (Q#CM4): a non-table container degrades to the built-in
--- defaults; malformed entries are skipped; one status note per run
--- counts the skips. Never raises — this feeds the per-frame pump.
---
 -- The defaults are a private deep copy taken at load time: an alias
 -- of the public table would keep in-place user mutations live after
 -- the "using built-in defaults" degradation (round-1 finding 10).
 local BUILTIN_RULES = {}
 for i, rule in ipairs(pmacs.compile.rules) do
-  local copy = {}
-  for k, v in pairs(rule) do
-    copy[k] = v
-  end
-  BUILTIN_RULES[i] = copy
+  BUILTIN_RULES[i] = validated_rule_copy(rule)
 end
 
+-- Validate the (user-mutable) rule table once per run, fail-closed
+-- per entry (Q#CM4): a non-table container degrades to the built-in
+-- defaults; malformed entries are skipped; one status note per run
+-- counts the skips. Never raises — this feeds the per-frame pump —
+-- so the container traversal itself is protected too (a hostile
+-- __index on the OUTER table can raise from inside ipairs; round-2
+-- finding 1). The returned list holds per-run plain-table copies:
+-- validation is a stable, total snapshot, and mutating the user's
+-- rule objects after compile.run() cannot alter an in-flight run.
 local function validated_rules()
   local rules = pmacs.compile.rules
   if type(rules) ~= "table" then
@@ -138,12 +151,20 @@ local function validated_rules()
     return BUILTIN_RULES, 0
   end
   local valid, skipped = {}, 0
-  for _, rule in ipairs(rules) do
-    if rule_is_valid(rule) then
-      valid[#valid + 1] = rule
-    else
-      skipped = skipped + 1
+  local ok = pcall(function()
+    for _, rule in ipairs(rules) do
+      local copy = validated_rule_copy(rule)
+      if copy then
+        valid[#valid + 1] = copy
+      else
+        skipped = skipped + 1
+      end
     end
+  end)
+  if not ok then
+    pmacs.editor.set_status(
+      "compile: pmacs.compile.rules raised during traversal; using built-in defaults")
+    return BUILTIN_RULES, 0
   end
   return valid, skipped
 end
@@ -638,8 +659,15 @@ local function start_run(slot, cmdline, opts)
     pmacs.editor.set_status(slot.label .. ": superseded previous run")
   end
 
-  -- Fresh run state.
-  slot.rules, slot.skipped_rules = validated_rules()
+  -- Fresh run state. Only error-parsing slots touch the rule table
+  -- at all: shell-command performs no parsing, so it must neither
+  -- surface compile-rule warnings nor fail on a hostile rule
+  -- container (round-2 finding 3).
+  if slot.parse then
+    slot.rules, slot.skipped_rules = validated_rules()
+  else
+    slot.rules, slot.skipped_rules = {}, 0
+  end
   slot.parse_errors = slot.parse
   slot.errors = {}
   slot.err_index = 0

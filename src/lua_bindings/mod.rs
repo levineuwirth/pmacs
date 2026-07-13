@@ -2984,9 +2984,11 @@ fn attach_style_overlay_to_visible_windows(
 
 /// Lua-facing wrapper around [`crate::ansi::AnsiParser`].
 ///
-/// Constructed via `pmacs.ansi.parser()`; methods `feed(bytes)` and
-/// `reset()` mirror the Rust API. `feed` returns an array of event
-/// tables --- see [`event_to_lua_table`] for the schema. The wrapper
+/// Constructed via `pmacs.ansi.parser()`; methods `feed(bytes)`,
+/// `reset()`, and `finish()` mirror the Rust API. `feed` and
+/// `finish` return an array of event tables --- see
+/// [`event_to_lua_table`] for the schema; `finish` drains stream-end
+/// state and resets the parser for a fresh stream. The wrapper
 /// is `RefCell`-internal so multiple Lua-side methods can borrow
 /// safely; the Lua VM is single-threaded so the borrow can never
 /// race.
@@ -7001,11 +7003,13 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
     // Compile-mode process shape (Q#CM3). Both options are
     // pipe-mode-only; the supervisor rejects them at spawn under PTY
     // so misconfiguration surfaces as a spawn error, not silence.
-    // Type errors are HARD errors, not silent defaults: `stdin =
-    // true` quietly becoming a piped stdin (hang) or `group =
-    // "true"` quietly becoming false (descendant leak) would undo
-    // exactly the guarantees these fields exist to carry (PR #113
-    // round-1 finding 6).
+    // Type errors are HARD errors, not silent coercions: `stdin =
+    // true` would quietly keep a piped stdin (hang), and a mistyped
+    // `group` would coerce through Lua truthiness to whichever
+    // boolean its truthiness happens to be — either way the caller's
+    // intent is unverifiable, and these fields carry process-hygiene
+    // guarantees (PR #113 round-1 finding 6; wording corrected in
+    // round 2 finding 5).
     let stdin_raw: Option<String> = table.get("stdin").map_err(|_| {
         mlua::Error::external("stdin must be the string \"piped\" or \"null\"".to_owned())
     })?;

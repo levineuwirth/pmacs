@@ -1702,6 +1702,208 @@ fn r1f9_truncated_utf8_at_eof_becomes_the_replacement_character() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// PR #113 round 2 — bite tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r2f1_rule_validation_is_a_stable_snapshot() {
+    // Mutating the user's rule object AFTER compile.run() must not
+    // alter the in-flight run: validation copies scalar fields into
+    // per-run plain tables.
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(dir.path(), "slow.sh", "sleep 0.5\nprintf 'm.c:3: e\\n'\n");
+    let mut s = editor();
+    exec(
+        &s,
+        r#"pmacs.compile.rules = { { pattern = "(m%.c):(%d+):", file = 1, line = 2 } }"#,
+    );
+    compile_run(&s, &format!("sh {script}"), dir.path());
+    // The output hasn't arrived yet; sabotage the live rule object.
+    exec(&s, "pmacs.compile.rules[1].pattern = 'nevermatch'");
+    assert!(pump_until(&mut s, 10_000, |s| compilation_text(s)
+        .contains("[compile exited")));
+    assert_eq!(
+        compile_errors(&s),
+        vec![("m.c".to_owned(), 2, 0, None)],
+        "the run must parse with its validated snapshot, not the \
+         mutated object"
+    );
+}
+
+#[test]
+fn r2f1_metatable_backed_rules_cannot_raise_through_the_pump() {
+    // A rule whose field reads raise (hostile __index) and a
+    // container whose traversal raises: both must degrade cleanly —
+    // no error thrown through the per-frame pump, terminal cleanup
+    // intact.
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    exec(
+        &s,
+        r#"
+        local hostile = setmetatable({}, { __index = function() error("boom") end })
+        pmacs.compile.rules = { hostile,
+            { pattern = "(k%.c):(%d+):", file = 1, line = 2 } }
+        "#,
+    );
+    compile_run(&s, "printf 'k.c:4: e\\n'", dir.path());
+    assert!(
+        status(&s).contains("skipped 1 malformed"),
+        "the hostile entry is a counted skip; got: {}",
+        status(&s)
+    );
+    assert!(pump_until(&mut s, 10_000, |s| compilation_text(s)
+        .contains("[compile exited with code 0]")));
+    assert_eq!(
+        compile_errors(&s),
+        vec![("k.c".to_owned(), 3, 0, None)],
+        "the valid entry still parses"
+    );
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "nothing raised through the pump: {}",
+        errors_buffer(&s)
+    );
+    assert!(
+        pump_until(&mut s, 3_000, |s| process_count(s) == 0),
+        "terminal cleanup ran"
+    );
+
+    // Hostile CONTAINER whose traversal raises. Flavor-dependent by
+    // Lua semantics: 5.2+ `ipairs` consults __index (the raise fires
+    // and the pcall degrades to defaults with a note); LuaJIT/5.1
+    // reads raw (the container is simply empty — no rules, no note).
+    // Both flavors must complete cleanly with nothing thrown
+    // through the pump.
+    let mut s = editor();
+    exec(
+        &s,
+        r#"
+        pmacs.compile.rules = setmetatable({}, {
+            __index = function() error("container boom") end,
+        })
+        "#,
+    );
+    compile_run(&s, "printf 'a.c:1:1: error: e\\n'", dir.path());
+    let is_lua54: bool = eval(&s, "return _VERSION ~= 'Lua 5.1'");
+    if is_lua54 {
+        assert!(
+            status(&s).contains("raised during traversal"),
+            "degradation note under 5.2+ ipairs semantics; got: {}",
+            status(&s)
+        );
+    }
+    assert!(pump_until(&mut s, 10_000, |s| compilation_text(s)
+        .contains("[compile exited")));
+    if is_lua54 {
+        assert_eq!(
+            compile_errors(&s).len(),
+            1,
+            "built-in defaults still parse after container degradation"
+        );
+    } else {
+        assert!(
+            compile_errors(&s).is_empty(),
+            "under raw-ipairs flavors the hostile container reads as \
+             an (empty) rule table"
+        );
+    }
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no spam: {}",
+        errors_buffer(&s)
+    );
+}
+
+#[test]
+fn r2f2_infinite_capture_index_is_counted_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    exec(
+        &s,
+        r#"
+        pmacs.compile.rules = {
+            { pattern = "(z%.c):(%d+):", file = 1, line = 2, col = math.huge },
+        }
+        "#,
+    );
+    compile_run(&s, "printf 'z.c:2: e\\n'", dir.path());
+    assert!(
+        status(&s).contains("skipped 1 malformed"),
+        "math.huge is not a capture index (floor(huge) == huge, so \
+         integrality alone passes it); got: {}",
+        status(&s)
+    );
+    assert!(pump_until(&mut s, 10_000, |s| compilation_text(s)
+        .contains("[compile exited")));
+}
+
+#[test]
+fn r2f3_shell_command_ignores_the_compile_rule_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    // Both degradation shapes at once: a non-table container would
+    // warn, a raising container would abort — shell-command performs
+    // no parsing and must see neither.
+    exec(&s, "pmacs.compile.rules = 42");
+    exec(
+        &s,
+        &format!(
+            "pmacs.shell.command('echo shellok', {{ cwd = {:?} }})",
+            dir.path().display().to_string()
+        ),
+    );
+    assert!(
+        !status(&s).contains("not a table"),
+        "no compile-rule warning on a shell run; got: {}",
+        status(&s)
+    );
+    assert!(
+        pump_until(&mut s, 10_000, |s| named_text(s, "*shell-command*")
+            .contains("[shell exited with code 0]")),
+        "shell-command runs regardless of rule-table state"
+    );
+}
+
+#[test]
+fn r2f4_parser_finish_resets_for_a_fresh_stream() {
+    // Lua-driven twin of the ansi.rs units (which live inside the
+    // file a scripts/bite swap replaces): after finish(), a feed
+    // must parse a NEW stream — not continue a pre-EOF escape, not
+    // stay alt-screen-suppressed.
+    let s = editor();
+    let (after_csi, after_alt): (String, String) = eval(
+        &s,
+        r#"
+        local function text_of(evs)
+            local out = {}
+            for _, ev in ipairs(evs) do
+                if ev.kind == "text" then out[#out + 1] = ev.text end
+            end
+            return table.concat(out)
+        end
+        local p = pmacs.ansi.parser()
+        p:feed("\27[3")   -- incomplete CSI at stream end
+        p:finish()
+        local a = text_of(p:feed("plain"))
+        local q = pmacs.ansi.parser()
+        q:feed("\27[?1049hhidden")  -- alt screen active at stream end
+        q:finish()
+        local b = text_of(q:feed("visible"))
+        return a, b
+        "#,
+    );
+    assert_eq!(
+        after_csi, "plain",
+        "post-finish feed must not continue the pre-EOF CSI"
+    );
+    assert_eq!(
+        after_alt, "visible",
+        "stream end must end alt-screen suppression"
+    );
+}
+
 #[test]
 fn r1f10_builtin_default_rules_survive_in_place_mutation() {
     let dir = tempfile::tempdir().unwrap();
