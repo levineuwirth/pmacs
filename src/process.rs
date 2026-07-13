@@ -160,6 +160,22 @@ impl ProcessMode {
     }
 }
 
+/// Stdin disposition for a pipe-mode child.
+///
+/// Compile-mode (Q#CM3) runs noninteractive commands that may probe
+/// or read stdin (`cat`, tools that block on a tty check); `Null`
+/// gives them immediate EOF from `/dev/null` with no writer thread
+/// and no close-after-spawn race. PTY children have no separable
+/// stdin, so `Null` is rejected at spawn under PTY mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StdinMode {
+    /// Piped writer thread (the default; see [`StdinWriter`]).
+    Piped,
+    /// `/dev/null`: immediate EOF; `write_stdin` errors with the
+    /// stdin-not-piped message.
+    Null,
+}
+
 /// What to do when a managed process terminates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RestartPolicy {
@@ -200,6 +216,19 @@ pub struct ProcessSpec {
     /// instead of raw stdout bytes. Opt-in so LSP and other byte-stream
     /// consumers keep their existing stdout/stderr contract.
     pub ansi_events: bool,
+    /// Stdin disposition (pipe-mode only; rejected under PTY).
+    pub stdin: StdinMode,
+    /// Compile-mode group lifecycle (Q#CM3; pipe-mode only, rejected
+    /// under PTY — PTY children already lead their own session).
+    /// When set: the child is spawned as the leader of a fresh
+    /// process group (`process_group(0)`), fatal signals are
+    /// group-directed (negative pid, mirroring the PTY branch of
+    /// [`signal_target`]), the group receives SIGTERM and enters the
+    /// liveness-probed reap ledger on the leader's terminal event,
+    /// and the generation's readers are poll-based and cancellable
+    /// so teardown is bounded even when an escaped descendant holds
+    /// the output pipe.
+    pub group: bool,
 }
 
 impl ProcessSpec {
@@ -216,6 +245,8 @@ impl ProcessSpec {
             mode: ProcessMode::Pipes,
             restart: RestartPolicy::Never,
             ansi_events: false,
+            stdin: StdinMode::Piped,
+            group: false,
         }
     }
 }
@@ -391,6 +422,16 @@ const READER_SEND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// before the runtime handles are dropped.
 const EXIT_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// TERM→KILL escalation window for `group = true` process groups
+/// (Q#CM3). Armed into the reap ledger when the group receives
+/// SIGTERM — on explicit kill/supersede and on the leader's terminal
+/// event —
+/// and enforced both by the per-tick ledger probe and from inside
+/// the group-aware final drain loop. Deliberately short: this is
+/// child-tree cleanup, not polite application shutdown (the polite
+/// TERM already went out when the window starts).
+pub const GROUP_TERM_GRACE: Duration = Duration::from_millis(500);
+
 // ---------------------------------------------------------------------------
 // Supervisor
 // ---------------------------------------------------------------------------
@@ -409,8 +450,31 @@ pub struct ProcessSupervisor {
     /// exponential).
     restart_backoff: Duration,
     /// True once `shutdown()` has run; subsequent `spawn` calls
-    /// fail.
+    /// fail and `maybe_restart` is inert (a `restart = always`
+    /// process must not respawn mid-teardown).
     shut_down: bool,
+    /// Liveness-probed TERM→KILL reap ledger for `group = true`
+    /// process groups (Q#CM3). Keyed by pgid; independent of the
+    /// managed-process records so it survives `forget` and leader
+    /// exit. Armed insert-if-absent (earliest deadline wins — a
+    /// repeated TERM must not push the SIGKILL bound out). Probed
+    /// every tick with `kill(-pgid, 0)`: ESRCH drops the entry;
+    /// alive past the deadline SIGKILLs the group. `shutdown()`
+    /// force-kills outstanding entries and probes them to ESRCH
+    /// inside its bounded reap loop.
+    reap_ledger: HashMap<i32, GroupReap>,
+    /// TERM→KILL window used when arming the ledger. Constant
+    /// [`GROUP_TERM_GRACE`] in production; overridable in tests.
+    group_term_grace: Duration,
+}
+
+/// One armed group in the reap ledger.
+struct GroupReap {
+    /// When to SIGKILL the group if it still probes alive.
+    deadline: Instant,
+    /// SIGKILL already sent — keep probing to ESRCH but don't
+    /// re-kill every tick.
+    killed: bool,
 }
 
 struct ManagedProcess {
@@ -442,6 +506,18 @@ struct RuntimeHandles {
     /// reader stuck in `send` (consumer fell behind) wakes promptly
     /// instead of leaking until the kernel ends the producer.
     cancel: Arc<AtomicBool>,
+    /// Live reader-thread count for this generation, maintained by
+    /// [`spawn_group_reader`] via a drop guard. Unit tests hold a
+    /// clone across teardown as the deterministic proof that the
+    /// joined threads ended and their owned read FDs dropped
+    /// (join-return alone cannot distinguish "never started", and a
+    /// process-global thread/FD count is racy under the parallel
+    /// test runner). Always present — one Arc and two atomics per
+    /// reader lifetime — because cfg-gating the field would spread
+    /// cfg attributes through every construction site; only the
+    /// probe accessor is test-gated, hence the not(test) allow.
+    #[cfg_attr(not(test), allow(dead_code))]
+    active_readers: Arc<AtomicUsize>,
 }
 
 /// Byte budget for stdin data queued but not yet written, per
@@ -614,6 +690,14 @@ fn signal_target(proc: &ManagedProcess, pid: u32) -> Result<Pid, String> {
     {
         return Ok(Pid::from_raw(-pgrp));
     }
+    // `group = true` pipe children lead a fresh process group
+    // (`process_group(0)` at spawn ⇒ pgid == pid), so fatal signals
+    // reach the whole `sh -c` tree — mirroring the PTY branch above
+    // (Q#CM3).
+    if proc.spec.group {
+        let pgid = i32::try_from(pid).map_err(|e| e.to_string())?;
+        return Ok(Pid::from_raw(-pgid));
+    }
     Ok(Pid::from_raw(
         i32::try_from(pid).map_err(|e| e.to_string())?,
     ))
@@ -710,12 +794,19 @@ impl ProcessSupervisor {
             grace_period: Duration::from_secs(2),
             restart_backoff: Duration::from_millis(250),
             shut_down: false,
+            reap_ledger: HashMap::new(),
+            group_term_grace: GROUP_TERM_GRACE,
         }
     }
 
     /// Override the SIGTERM-to-SIGKILL grace window. Test helper.
     pub fn set_grace_period(&mut self, d: Duration) {
         self.grace_period = d;
+    }
+
+    /// Override the group TERM→KILL escalation window. Test helper.
+    pub fn set_group_term_grace(&mut self, d: Duration) {
+        self.group_term_grace = d;
     }
 
     /// Override the restart back-off. Test helper.
@@ -808,6 +899,18 @@ impl ProcessSupervisor {
                 pid,
                 signaled_at: Instant::now(),
             };
+            // Arm the group reap ledger on the first fatal signal
+            // (Q#CM3). Insert-if-absent: a repeated `terminate` must
+            // not push the SIGKILL bound out.
+            if proc.spec.group
+                && let Ok(pgid) = i32::try_from(pid)
+            {
+                let deadline = Instant::now() + self.group_term_grace;
+                self.reap_ledger.entry(pgid).or_insert(GroupReap {
+                    deadline,
+                    killed: false,
+                });
+            }
         }
         Ok(())
     }
@@ -921,6 +1024,35 @@ impl ProcessSupervisor {
             self.poll_one(id);
             self.maybe_restart(id);
         }
+        // Probe the group reap ledger last so groups TERMed by this
+        // tick's poll_one get their liveness checked from the very
+        // next tick onward (Q#CM3).
+        self.tick_reap_ledger();
+    }
+
+    /// Probe every armed group: ESRCH → group gone, drop the entry;
+    /// alive past its deadline → SIGKILL the group (once), then keep
+    /// probing to ESRCH. Independent of managed-process records by
+    /// design — this is what catches a TERM-ignoring descendant that
+    /// survived its leader's clean exit with its output redirected
+    /// (round-3 finding 1: neither leader state nor reader state can
+    /// see that survivor; only group liveness can).
+    fn tick_reap_ledger(&mut self) {
+        let now = Instant::now();
+        self.reap_ledger.retain(|pgid, entry| {
+            // ESRCH: no such group — done. Any other probe error is
+            // also treated as "nothing left we can reach" (EPERM
+            // cannot happen for our own children) so the ledger
+            // cannot grow without bound.
+            if nix::sys::signal::kill(Pid::from_raw(-*pgid), None).is_err() {
+                return false;
+            }
+            if now >= entry.deadline && !entry.killed {
+                let _ = nix::sys::signal::kill(Pid::from_raw(-*pgid), Some(Signal::SIGKILL));
+                entry.killed = true;
+            }
+            true
+        });
     }
 
     /// Drain the per-generation byte channel for `id` and emit at
@@ -963,61 +1095,81 @@ impl ProcessSupervisor {
         let Some(runtime) = proc.runtime.as_mut() else {
             return;
         };
-        match runtime.child.try_wait() {
-            Ok(None) => {}
-            Ok(Some(TermStatus::Exited(code))) => {
-                let now = Instant::now();
-                let final_output = final_drain_runtime(runtime);
-                proc.state = ProcessState::Terminated(Termination::Exited {
+        let status = runtime.child.try_wait();
+        if matches!(status, Ok(None)) {
+            return;
+        }
+        // Terminal from here on. Group leader-exit reap (Q#CM3):
+        // TERM the remaining group and arm the reap ledger BEFORE
+        // the final drain — a leader that exits leaving `sleep 60 &`
+        // holding the merged pipe would otherwise burn the full
+        // drain timeout and then block the reader join. Arming is
+        // insert-if-absent, so a deadline already armed by an
+        // explicit kill is not extended.
+        let group_ctx = if proc.spec.group {
+            i32::try_from(runtime.pid).ok().map(|pgid| {
+                let _ = nix::sys::signal::kill(Pid::from_raw(-pgid), Some(Signal::SIGTERM));
+                let deadline = Instant::now() + self.group_term_grace;
+                let entry = self.reap_ledger.entry(pgid).or_insert(GroupReap {
+                    deadline,
+                    killed: false,
+                });
+                GroupDrainCtx {
+                    pgid,
+                    deadline: entry.deadline,
+                }
+            })
+        } else {
+            None
+        };
+        let now = Instant::now();
+        let final_output = final_drain_runtime(runtime, group_ctx);
+        let (termination, event) = match status {
+            Ok(Some(TermStatus::Exited(code))) => (
+                Termination::Exited {
                     code,
                     started,
                     ended: now,
-                });
-                proc.runtime = None;
-                append_process_events(&mut self.pending, id, final_output, now);
-                self.pending.entry(id).or_default().push(ProcessEvent {
-                    id,
-                    kind: ProcessEventKind::Exited { code },
-                    at: now,
-                });
-            }
-            Ok(Some(TermStatus::Signaled(signal))) => {
-                let now = Instant::now();
-                let final_output = final_drain_runtime(runtime);
-                proc.state = ProcessState::Terminated(Termination::Signaled {
+                },
+                ProcessEventKind::Exited { code },
+            ),
+            Ok(Some(TermStatus::Signaled(signal))) => (
+                Termination::Signaled {
                     signal: signal.clone(),
                     started,
                     ended: now,
-                });
-                proc.runtime = None;
-                append_process_events(&mut self.pending, id, final_output, now);
-                self.pending.entry(id).or_default().push(ProcessEvent {
-                    id,
-                    kind: ProcessEventKind::Signaled { signal },
-                    at: now,
-                });
-            }
-            Err(e) => {
-                let now = Instant::now();
-                let final_output = final_drain_runtime(runtime);
-                proc.state = ProcessState::Terminated(Termination::Crashed {
+                },
+                ProcessEventKind::Signaled { signal },
+            ),
+            Err(e) => (
+                Termination::Crashed {
                     error: e.clone(),
                     ended: now,
-                });
-                proc.runtime = None;
-                append_process_events(&mut self.pending, id, final_output, now);
-                self.pending.entry(id).or_default().push(ProcessEvent {
-                    id,
-                    kind: ProcessEventKind::Crashed { error: e },
-                    at: now,
-                });
-            }
-        }
+                },
+                ProcessEventKind::Crashed { error: e },
+            ),
+            // Guarded above; kept explicit so the match stays total.
+            Ok(None) => return,
+        };
+        proc.state = ProcessState::Terminated(termination);
+        proc.runtime = None;
+        append_process_events(&mut self.pending, id, final_output, now);
+        self.pending.entry(id).or_default().push(ProcessEvent {
+            id,
+            kind: event,
+            at: now,
+        });
     }
 
     /// Apply restart policy after `poll_one` may have transitioned
     /// the process to `Terminated`.
     fn maybe_restart(&mut self, id: ProcessId) {
+        // Inert during and after shutdown: shutdown's own tick()
+        // calls must not respawn a `restart = always` process
+        // mid-teardown (round-4 finding 1).
+        if self.shut_down {
+            return;
+        }
         let now = Instant::now();
         let restart_now = {
             let Some(proc) = self.processes.get(&id) else {
@@ -1155,12 +1307,25 @@ impl ProcessSupervisor {
                 let _ = self.signal(*id, Signal::SIGKILL);
             }
         }
+        // Editor exit owes group survivors no grace: force-kill every
+        // outstanding reap-ledger entry now, then probe it to ESRCH in
+        // the bounded loop below. Without this, a pre-deadline ledger
+        // (leader exited promptly, TERM-ignoring group member alive)
+        // would be silently discarded at Drop and leak the member
+        // (Q#CM3, round-4 finding 1).
+        for (pgid, entry) in &mut self.reap_ledger {
+            let _ = nix::sys::signal::kill(Pid::from_raw(-*pgid), Some(Signal::SIGKILL));
+            entry.killed = true;
+        }
         // Final reap loop. SIGKILL is delivered immediately by the
         // kernel; the child becomes a zombie until we reap. Bound
         // the wait so a pathological case can't hang the editor
-        // exit forever.
+        // exit forever. The tick also probes the reap ledger, so the
+        // loop holds until force-killed groups observe ESRCH.
         let final_deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < final_deadline && self.any_running() {
+        while Instant::now() < final_deadline
+            && (self.any_running() || !self.reap_ledger.is_empty())
+        {
             self.tick();
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -1175,6 +1340,23 @@ impl ProcessSupervisor {
                     | ProcessState::Exiting { .. }
             )
         })
+    }
+
+    /// Clone of a live generation's active-reader counter (see
+    /// [`RuntimeHandles::active_readers`]). Unit tests grab it while
+    /// the generation runs and assert zero after teardown.
+    #[cfg(test)]
+    fn active_reader_probe(&self, id: ProcessId) -> Option<Arc<AtomicUsize>> {
+        Some(Arc::clone(
+            &self.processes.get(&id)?.runtime.as_ref()?.active_readers,
+        ))
+    }
+
+    /// Number of armed reap-ledger entries. Test observability for
+    /// the shutdown/drop-twin pins.
+    #[cfg(test)]
+    fn reap_ledger_len(&self) -> usize {
+        self.reap_ledger.len()
     }
 }
 
@@ -1201,6 +1383,17 @@ fn build_runtime(spec: &ProcessSpec, id: ProcessId) -> Result<RuntimeHandles, St
     if spec.ansi_events && matches!(spec.mode, ProcessMode::Pipes) {
         return Err("process spawn: ansi=true requires pty mode; pipe-mode consumers receive raw stdout/stderr bytes".to_owned());
     }
+    if matches!(spec.mode, ProcessMode::Pty { .. }) {
+        if matches!(spec.stdin, StdinMode::Null) {
+            return Err(
+                "process spawn: stdin=\"null\" requires pipe mode; a PTY has no separable stdin"
+                    .to_owned(),
+            );
+        }
+        if spec.group {
+            return Err("process spawn: group=true requires pipe mode; PTY children already lead their own session and are signaled group-wide".to_owned());
+        }
+    }
     match spec.mode {
         ProcessMode::Pipes => build_pipes_runtime(spec, id),
         ProcessMode::Pty { rows, cols, mode } => build_pty_runtime(spec, id, rows, cols, mode),
@@ -1212,9 +1405,20 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
 
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args)
-        .stdin(Stdio::piped())
+        .stdin(match spec.stdin {
+            StdinMode::Piped => Stdio::piped(),
+            // Immediate EOF, no writer thread, zero close-after-spawn
+            // race (Q#CM3).
+            StdinMode::Null => Stdio::null(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if spec.group {
+        // Fresh process group with the child as leader (pgid == pid).
+        // Safe std API — no `unsafe`, no trampoline (stable 1.64).
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     if let Some(ref cwd) = spec.cwd {
         cmd.current_dir(cwd);
     }
@@ -1231,22 +1435,33 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
     let stderr = child.stderr.take();
     let (byte_tx, byte_rx) = channel::bounded::<ByteChunk>(BYTE_CHUNK_CHANNEL_CAP);
     let cancel = Arc::new(AtomicBool::new(false));
+    let active_readers = Arc::new(AtomicUsize::new(0));
     let mut readers = Vec::new();
     if let Some(out) = stdout {
-        readers.push(spawn_reader(
-            byte_tx.clone(),
-            Arc::clone(&cancel),
-            out,
-            ReaderKind::Stdout,
-        ));
+        readers.push(if spec.group {
+            spawn_group_reader(
+                byte_tx.clone(),
+                Arc::clone(&cancel),
+                out,
+                ReaderKind::Stdout,
+                Arc::clone(&active_readers),
+            )
+        } else {
+            spawn_reader(byte_tx.clone(), Arc::clone(&cancel), out, ReaderKind::Stdout)
+        });
     }
     if let Some(err) = stderr {
-        readers.push(spawn_reader(
-            byte_tx,
-            Arc::clone(&cancel),
-            err,
-            ReaderKind::Stderr,
-        ));
+        readers.push(if spec.group {
+            spawn_group_reader(
+                byte_tx,
+                Arc::clone(&cancel),
+                err,
+                ReaderKind::Stderr,
+                Arc::clone(&active_readers),
+            )
+        } else {
+            spawn_reader(byte_tx, Arc::clone(&cancel), err, ReaderKind::Stderr)
+        });
     }
     Ok(RuntimeHandles {
         child: ChildHandle::Pipes(child),
@@ -1255,6 +1470,7 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
         readers,
         output_rx: RuntimeOutputRx::Bytes(byte_rx),
         cancel,
+        active_readers,
     })
 }
 
@@ -1341,6 +1557,9 @@ fn build_pty_runtime(
         readers,
         output_rx,
         cancel,
+        // PTY readers are the blocking kind; the counter is only
+        // maintained by group readers and stays zero here.
+        active_readers: Arc::new(AtomicUsize::new(0)),
     })
 }
 
@@ -1498,6 +1717,112 @@ fn spawn_reader<R: Read + Send + 'static>(
     })
 }
 
+/// RAII live-count for group reader threads: increments on
+/// construction, decrements on every exit path (panic included), so
+/// [`RuntimeHandles::active_readers`] reaching zero is a
+/// deterministic "thread ended, its read FD dropped" signal.
+struct ActiveReaderGuard(Arc<AtomicUsize>);
+
+impl ActiveReaderGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for ActiveReaderGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Poll-based cancellable reader for `group = true` generations
+/// (Q#CM3). Unlike [`spawn_reader`], the fd is set nonblocking and
+/// every wait — for readability or for channel space — re-checks
+/// `cancel` each [`READER_SEND_POLL_INTERVAL`], with an extra check
+/// between poll and read/send, so `RuntimeHandles::Drop`'s retained
+/// join completes within one interval regardless of who still holds
+/// the pipe's write end (a setsid'd descendant, notably). Non-group
+/// consumers (REPL, LSP) keep the blocking [`spawn_reader`] they
+/// were tuned on — the M6.6 ingest gate; unifying is a named
+/// deferral in the compile-mode framing.
+fn spawn_group_reader<R>(
+    byte_tx: Sender<ByteChunk>,
+    cancel: Arc<AtomicBool>,
+    read: R,
+    kind: ReaderKind,
+    active: Arc<AtomicUsize>,
+) -> JoinHandle<()>
+where
+    R: Read + std::os::fd::AsFd + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let _guard = ActiveReaderGuard::new(active);
+        let mut read = read;
+        // nix 0.29's fcntl still takes a RawFd (poll takes BorrowedFd).
+        let raw_fd = std::os::fd::AsRawFd::as_raw_fd(&read.as_fd());
+        if nix::fcntl::fcntl(
+            raw_fd,
+            nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .is_err()
+        {
+            // Cannot go nonblocking (does not happen for pipe fds in
+            // practice): exit rather than risk an uncancellable
+            // blocking read.
+            return;
+        }
+        let poll_timeout = nix::poll::PollTimeout::try_from(READER_SEND_POLL_INTERVAL)
+            .unwrap_or(nix::poll::PollTimeout::MAX);
+        let mut buf = [0u8; BYTE_CHUNK_SIZE];
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let ready = {
+                let mut fds = [nix::poll::PollFd::new(
+                    read.as_fd(),
+                    nix::poll::PollFlags::POLLIN,
+                )];
+                nix::poll::poll(&mut fds, poll_timeout)
+            };
+            match ready {
+                // Timeout or interrupt: loop around and re-check the
+                // cancel flag.
+                Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+                Ok(_) => {}
+                Err(_) => return,
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            match read.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => {
+                    let mut payload: ByteChunk = (kind, buf[..n].to_vec());
+                    loop {
+                        match byte_tx.send_timeout(payload, READER_SEND_POLL_INTERVAL) {
+                            Ok(()) => break,
+                            Err(crossbeam::channel::SendTimeoutError::Timeout(rejected)) => {
+                                if cancel.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                payload = rejected;
+                            }
+                            Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => {
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    })
+}
+
 fn drain_raw_output(byte_rx: &Receiver<ByteChunk>) -> Vec<ProcessEventKind> {
     let mut stdout_buf: Vec<u8> = Vec::new();
     let mut stderr_buf: Vec<u8> = Vec::new();
@@ -1536,15 +1861,63 @@ fn drain_runtime_output(rt: &RuntimeHandles) -> Vec<ProcessEventKind> {
     }
 }
 
-fn final_drain_runtime(rt: &RuntimeHandles) -> Vec<ProcessEventKind> {
+/// Context for a group-aware final drain (Q#CM3). Carries the reap
+/// ledger's deadline for this group: the drain enforces it from
+/// inside its loop because no other tick runs while the drain
+/// blocks the frame.
+#[derive(Clone, Copy)]
+struct GroupDrainCtx {
+    pgid: i32,
+    deadline: Instant,
+}
+
+fn final_drain_runtime(
+    rt: &RuntimeHandles,
+    group: Option<GroupDrainCtx>,
+) -> Vec<ProcessEventKind> {
     let deadline = Instant::now() + EXIT_OUTPUT_DRAIN_TIMEOUT;
     let mut out = Vec::new();
+    // Group drains get tighter bounds than the plain byte-flush
+    // timeout (Q#CM3, round-4 finding 2 / round-5 revision):
+    //  - the ledger deadline is enforced in-loop — SIGKILL the group
+    //    at the grace bound;
+    //  - once the group probes ESRCH, readers get one quiescent
+    //    READER_SEND_POLL_INTERVAL to flush already-read and
+    //    kernel-buffered bytes; new data resets the window;
+    //  - independently, no group drain may pass the absolute cancel
+    //    deadline of ledger deadline + one poll interval — reaching
+    //    it cancels the readers even when an escaped (setsid'd)
+    //    writer still holds the pipe past its group's death. Honest
+    //    trailing output gets a bounded flush; escaped output may be
+    //    truncated. The retained join in RuntimeHandles::Drop then
+    //    completes within one further poll interval because group
+    //    readers are poll-based and observe the cancel flag.
+    let mut group_killed = false;
+    let mut last_data = Instant::now();
     loop {
         let drained = drain_runtime_output(rt);
         let drained_any = !drained.is_empty();
         out.extend(drained);
+        if drained_any {
+            last_data = Instant::now();
+        }
         if rt.readers.iter().all(std::thread::JoinHandle::is_finished) && !drained_any {
             return out;
+        }
+        if let Some(ctx) = &group {
+            let now = Instant::now();
+            let group_alive = nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), None).is_ok();
+            if group_alive && now >= ctx.deadline && !group_killed {
+                let _ = nix::sys::signal::kill(Pid::from_raw(-ctx.pgid), Some(Signal::SIGKILL));
+                group_killed = true;
+            }
+            let quiesced =
+                !group_alive && now.duration_since(last_data) >= READER_SEND_POLL_INTERVAL;
+            if quiesced || now >= ctx.deadline + READER_SEND_POLL_INTERVAL {
+                rt.cancel.store(true, Ordering::Relaxed);
+                out.extend(drain_runtime_output(rt));
+                return out;
+            }
         }
         if Instant::now() >= deadline {
             return out;
@@ -2313,5 +2686,402 @@ mod tests {
                  send (per-generation cancel flag is required)",
         );
         handle.join().expect("test thread should exit cleanly");
+    }
+
+    // -----------------------------------------------------------------
+    // Compile-mode group lifecycle (Q#CM3; framing acceptance 34)
+    // -----------------------------------------------------------------
+
+    fn sh_group_spec(label: &str, script: &str) -> ProcessSpec {
+        let mut spec = ProcessSpec::new(label, "/bin/sh");
+        spec.args = vec!["-c".into(), script.to_owned()];
+        spec.stdin = StdinMode::Null;
+        spec.group = true;
+        spec
+    }
+
+    fn started_pid(events: &[ProcessEvent]) -> Option<u32> {
+        events.iter().find_map(|e| match e.kind {
+            ProcessEventKind::Started { pid } => Some(pid),
+            _ => None,
+        })
+    }
+
+    fn stdout_contains(events: &[ProcessEvent], needle: &[u8]) -> bool {
+        let mut all = Vec::new();
+        for e in events {
+            if let ProcessEventKind::Stdout(b) = &e.kind {
+                all.extend_from_slice(b);
+            }
+        }
+        all.windows(needle.len()).any(|w| w == needle)
+    }
+
+    fn pid_alive(pid: i32) -> bool {
+        nix::sys::signal::kill(Pid::from_raw(pid), None).is_ok()
+    }
+
+    /// Process group of `pid` per /proc/<pid>/stat field 5 (Linux;
+    /// avoids widening the nix feature set with `process`). The comm
+    /// field may contain spaces, so parse after the closing paren.
+    fn pgid_of(pid: u32) -> i32 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("read stat");
+        let after_comm = &stat[stat.rfind(')').expect("comm paren") + 2..];
+        after_comm
+            .split_whitespace()
+            .nth(2) // state ppid pgrp → index 2
+            .expect("pgrp field")
+            .parse()
+            .expect("pgrp parses")
+    }
+
+    /// Poll `path` until it holds a parseable pid. Fixture scripts
+    /// write descendant pids there.
+    fn wait_pidfile(path: &std::path::Path) -> i32 {
+        let stop = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < stop {
+            if let Ok(s) = std::fs::read_to_string(path)
+                && let Ok(pid) = s.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("pidfile {} never appeared", path.display());
+    }
+
+    #[test]
+    fn stdin_null_yields_immediate_eof() {
+        let mut sup = ProcessSupervisor::new();
+        // `cat` exits only at stdin EOF; under piped stdin this test
+        // would hang until the drain deadline killed it. (Framing
+        // acceptance 34 / round-1 finding 3.)
+        let spec = sh_group_spec("eof-test", "cat; echo done");
+        let id = sup.spawn(spec).expect("spawn");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Exited { code: 0 })),
+            "cat must see EOF and exit 0; events: {events:?}"
+        );
+        assert!(
+            stdout_contains(&events, b"done"),
+            "post-cat echo must run; events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn group_true_spawns_distinct_process_group() {
+        let mut sup = ProcessSupervisor::new();
+        let id = sup
+            .spawn(sh_group_spec("group-test", "sleep 30"))
+            .expect("spawn");
+        let events = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
+            started_pid(evs).is_some()
+        });
+        let pid = started_pid(&events).expect("Started event");
+        assert_eq!(
+            pgid_of(pid),
+            i32::try_from(pid).unwrap(),
+            "group child must lead its own process group (pgid == pid)"
+        );
+        // Control: a non-group child inherits the test process's
+        // group instead of leading its own.
+        let mut plain = ProcessSpec::new("plain", "/bin/sh");
+        plain.args = vec!["-c".into(), "sleep 30".into()];
+        let plain_id = sup.spawn(plain).expect("spawn plain");
+        let plain_events = drain_until(&mut sup, plain_id, Duration::from_secs(2), |evs| {
+            started_pid(evs).is_some()
+        });
+        let plain_pid = started_pid(&plain_events).expect("Started event");
+        assert_ne!(
+            pgid_of(plain_pid),
+            i32::try_from(plain_pid).unwrap(),
+            "non-group child must not lead its own group"
+        );
+        sup.terminate(id).ok();
+        sup.terminate(plain_id).ok();
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let _ = drain_until(&mut sup, plain_id, Duration::from_secs(5), has_exited);
+    }
+
+    #[test]
+    fn terminate_group_escalates_to_sigkill_on_term_trapping_child() {
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_millis(200));
+        // Readiness echo: terminating before the trap is installed
+        // would let plain SIGTERM win and vacuously pass.
+        let id = sup
+            .spawn(sh_group_spec("trap-test", "trap '' TERM; echo ready; sleep 30"))
+            .expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
+            stdout_contains(evs, b"ready")
+        });
+        let t0 = Instant::now();
+        sup.terminate(id).expect("terminate");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let elapsed = t0.elapsed();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.kind,
+                ProcessEventKind::Signaled { signal } if signal == "SIGKILL"
+            )),
+            "TERM-trapping child must fall to the ledger's SIGKILL; events: {events:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "escalation must land near the 200ms grace, not the 2s drain timeout; took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn liveness_probe_reaps_term_ignoring_survivor_after_leader_exit() {
+        // Unit twin of framing acceptance 8: the survivor ignores
+        // TERM *and* sheds its stdout/stderr, so the leader's
+        // terminal event arrives and the readers finish — only the
+        // ledger's kill(-pgid, 0) probe can catch it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("pid");
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_millis(200));
+        let script = format!(
+            "( trap '' TERM; exec >/dev/null 2>&1; sleep 30 ) & echo $! > {}",
+            pidfile.display()
+        );
+        let id = sup.spawn(sh_group_spec("survivor", &script)).expect("spawn");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Exited { code: 0 })),
+            "leader must exit cleanly; events: {events:?}"
+        );
+        let survivor = wait_pidfile(&pidfile);
+        // The ledger fires on subsequent ticks — keep ticking.
+        let stop = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < stop && pid_alive(survivor) {
+            sup.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !pid_alive(survivor),
+            "TERM-ignoring redirected survivor must be SIGKILLed by the ledger probe"
+        );
+        // Ledger converges to empty once the group probes ESRCH.
+        let stop = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < stop && sup.reap_ledger_len() > 0 {
+            sup.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(sup.reap_ledger_len(), 0, "ledger must drain to empty");
+    }
+
+    #[test]
+    fn repeated_terminate_does_not_extend_ledger_deadline() {
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_millis(500));
+        let id = sup
+            .spawn(sh_group_spec("re-term", "trap '' TERM; echo ready; sleep 30"))
+            .expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
+            stdout_contains(evs, b"ready")
+        });
+        let t0 = Instant::now();
+        sup.terminate(id).expect("terminate");
+        // Re-terminate at half the grace window: with plain
+        // HashMap::insert arming, this would reset the 500ms clock
+        // and push SIGKILL past 800ms.
+        std::thread::sleep(Duration::from_millis(300));
+        sup.tick();
+        sup.terminate(id).expect("re-terminate");
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let elapsed = t0.elapsed();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.kind,
+                ProcessEventKind::Signaled { signal } if signal == "SIGKILL"
+            )),
+            "must escalate; events: {events:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "earliest deadline must win: SIGKILL by ~500ms, not 800ms; took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn shutdown_force_kills_outstanding_ledger_groups() {
+        // Drop-twin of framing acceptance 8 (round-4 finding 1): the
+        // grace is long enough that the ledger cannot fire on its
+        // own — only shutdown's force-kill can reap the survivor.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("pid");
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_secs(30));
+        let script = format!(
+            "( trap '' TERM; exec >/dev/null 2>&1; sleep 30 ) & echo $! > {}",
+            pidfile.display()
+        );
+        let id = sup.spawn(sh_group_spec("survivor", &script)).expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let survivor = wait_pidfile(&pidfile);
+        assert!(pid_alive(survivor), "survivor alive pre-shutdown");
+        assert!(sup.reap_ledger_len() > 0, "ledger armed pre-shutdown");
+        sup.shutdown();
+        assert!(
+            !pid_alive(survivor),
+            "shutdown must force-kill outstanding ledger groups"
+        );
+        assert_eq!(
+            sup.reap_ledger_len(),
+            0,
+            "shutdown must probe forced kills to ESRCH"
+        );
+    }
+
+    #[test]
+    fn maybe_restart_inert_once_shut_down() {
+        let mut sup = ProcessSupervisor::new();
+        sup.set_restart_backoff(Duration::from_millis(30));
+        let mut spec = ProcessSpec::new("restarter", "/bin/sh");
+        spec.args = vec!["-c".into(), "echo x".into()];
+        spec.restart = RestartPolicy::Always;
+        let id = sup.spawn(spec).expect("spawn");
+        // Prove the policy is live: observe at least one restart.
+        let events = drain_until(&mut sup, id, Duration::from_secs(5), |evs| {
+            evs.iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Restarting { .. }))
+        });
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Restarting { .. })),
+            "restart=always must restart pre-shutdown; events: {events:?}"
+        );
+        sup.shutdown();
+        let _ = sup.take_events(id);
+        // Give a reset restart-backoff window plenty of room, then
+        // confirm no respawn happened during or after teardown.
+        for _ in 0..8 {
+            sup.tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let after = sup.take_events(id);
+        assert!(
+            !after.iter().any(|e| matches!(
+                e.kind,
+                ProcessEventKind::Restarting { .. } | ProcessEventKind::Started { .. }
+            )),
+            "restart accounting must be inert once shut down; events: {after:?}"
+        );
+    }
+
+    #[test]
+    fn leader_exit_reap_bounds_drain_with_pipe_holding_descendant() {
+        // Unit twin of framing acceptance 9: the descendant ignores
+        // TERM and KEEPS fd1, so the readers stay alive and the old
+        // drain would block ~2s per EXIT_OUTPUT_DRAIN_TIMEOUT (and
+        // then the join would hang). In-drain ledger enforcement
+        // SIGKILLs at the grace bound instead.
+        let mut sup = ProcessSupervisor::new();
+        sup.set_group_term_grace(Duration::from_millis(300));
+        let id = sup
+            .spawn(sh_group_spec(
+                "holder",
+                "( trap '' TERM; sleep 30 ) & echo started",
+            ))
+            .expect("spawn");
+        let stop = Instant::now() + Duration::from_secs(5);
+        let mut max_tick = Duration::ZERO;
+        let mut events = Vec::new();
+        while Instant::now() < stop && !has_exited(&events) {
+            let t = Instant::now();
+            sup.tick();
+            max_tick = max_tick.max(t.elapsed());
+            events.append(&mut sup.take_events(id));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            has_exited(&events),
+            "leader exit must be observed; events: {events:?}"
+        );
+        assert!(
+            max_tick < Duration::from_millis(1200),
+            "the blocking tick must be bounded by ~grace + 2 poll intervals, \
+             not the 2s drain timeout; max tick {max_tick:?}"
+        );
+    }
+
+    #[test]
+    fn setsid_escapee_is_not_reaped_and_teardown_reclaims_readers() {
+        // The setsid'd descendant leaves the group (the deliberate
+        // daemonization escape hatch) while inheriting fd1, so it
+        // holds the pipe after its old group is ESRCH. The
+        // quiescence/cancel cap must bound the drain, the retained
+        // joins must complete, and the per-runtime active-reader
+        // count must return to zero — across repeated cycles, so
+        // nothing accumulates.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut escapees = Vec::new();
+        for round in 0..3 {
+            let pidfile = dir.path().join(format!("pid{round}"));
+            let mut sup = ProcessSupervisor::new();
+            sup.set_group_term_grace(Duration::from_millis(300));
+            let script = format!(
+                "setsid /bin/sh -c 'echo $$ > {}; exec sleep 30' & echo started",
+                pidfile.display()
+            );
+            let id = sup.spawn(sh_group_spec("escapee", &script)).expect("spawn");
+            let ready = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
+                started_pid(evs).is_some()
+            });
+            assert!(started_pid(&ready).is_some(), "Started must arrive");
+            let probe = sup.active_reader_probe(id).expect("live runtime probe");
+            let t0 = Instant::now();
+            let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+            let elapsed = t0.elapsed();
+            assert!(
+                has_exited(&events),
+                "leader exit must be observed; events: {events:?}"
+            );
+            assert!(
+                elapsed < Duration::from_millis(1500),
+                "escaped-writer drain must be cancelled at the cap, \
+                 not ride the 2s timeout; took {elapsed:?}"
+            );
+            assert_eq!(
+                probe.load(Ordering::Relaxed),
+                0,
+                "reader threads must have ended and dropped their FDs"
+            );
+            let escapee = wait_pidfile(&pidfile);
+            assert!(
+                pid_alive(escapee),
+                "setsid escapee must NOT be reaped (deliberate escape hatch)"
+            );
+            escapees.push(escapee);
+        }
+        // Fixture owns the escapees the supervisor deliberately
+        // does not: kill them explicitly.
+        for pid in escapees {
+            let _ = nix::sys::signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL));
+        }
+    }
+
+    #[test]
+    fn group_and_null_stdin_rejected_under_pty() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("pty-null", "/bin/sh");
+        spec.mode = ProcessMode::default_pty();
+        spec.stdin = StdinMode::Null;
+        let err = sup.spawn(spec).expect_err("stdin=null must be rejected under pty");
+        assert!(err.contains("pipe mode"), "error points at pipe mode: {err}");
+
+        let mut spec = ProcessSpec::new("pty-group", "/bin/sh");
+        spec.mode = ProcessMode::default_pty();
+        spec.group = true;
+        let err = sup.spawn(spec).expect_err("group=true must be rejected under pty");
+        assert!(err.contains("pipe mode"), "error points at pipe mode: {err}");
     }
 }

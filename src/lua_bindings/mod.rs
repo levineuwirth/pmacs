@@ -1181,6 +1181,17 @@ fn add_query_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
         })
     });
 
+    // Edit revision: bumped by every edit, undo, and redo. The
+    // compile-mode external-edit guard (Q#CM2) records this after
+    // each of its own writes and resyncs on mismatch — byte length
+    // is not an edit-integrity token (a same-length replace changes
+    // content while preserving length).
+    methods.add_method("revision", |lua, this, ()| {
+        with_registry(lua, |r| {
+            i64::try_from(resolve(r, this.0)?.revision()).map_err(mlua::Error::external)
+        })
+    });
+
     methods.add_method("is_modified", |lua, this, ()| {
         with_registry(lua, |r| Ok(resolve(r, this.0)?.is_modified()))
     });
@@ -6974,6 +6985,28 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         .ok()
         .flatten()
         .unwrap_or(false);
+    // Compile-mode process shape (Q#CM3). Both options are
+    // pipe-mode-only; the supervisor rejects them at spawn under PTY
+    // so misconfiguration surfaces as a spawn error, not silence.
+    let stdin = match table
+        .get::<Option<String>>("stdin")
+        .ok()
+        .flatten()
+        .as_deref()
+    {
+        None | Some("piped") => crate::process::StdinMode::Piped,
+        Some("null") => crate::process::StdinMode::Null,
+        Some(other) => {
+            return Err(mlua::Error::external(format!(
+                "stdin must be \"piped\" or \"null\"; got {other:?}"
+            )));
+        }
+    };
+    let group = table
+        .get::<Option<bool>>("group")
+        .ok()
+        .flatten()
+        .unwrap_or(false);
     Ok(ProcessSpec {
         label,
         command,
@@ -6983,6 +7016,8 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         mode,
         restart,
         ansi_events,
+        stdin,
+        group,
     })
 }
 
@@ -10796,7 +10831,25 @@ fn install_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<
         let cc = core.clone();
         editor.set(
             "jump_back",
-            lua.create_function(move |_, ()| Ok(cc.borrow_mut().jump_back()))?,
+            lua.create_function(move |lua, ()| {
+                let (jumped, buffer_changed) = {
+                    let mut core = cc.borrow_mut();
+                    let before = core.active_buffer_id();
+                    let jumped = core.jump_back();
+                    (jumped, core.active_buffer_id() != before)
+                };
+                // Parity with `pmacs.window.switch_buffer` (compile-mode
+                // additions #3): a jump that lands in another buffer
+                // clears the destination window's overlays exactly like
+                // any other switch, so overlay subscribers need the same
+                // re-attach signal. Without this, RET → M-, permanently
+                // stripped a generated buffer's styling. Same-buffer
+                // jumps stay hook-silent.
+                if buffer_changed {
+                    run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
+                }
+                Ok(jumped)
+            })?,
         )?;
     }
     Ok(())
@@ -12582,6 +12635,34 @@ mod tests {
             .eval()
             .unwrap();
         assert!(called);
+    }
+
+    #[test]
+    fn buffer_revision_bumps_on_edit_undo_and_redo() {
+        // Compile-mode's external-edit guard (Q#CM2) leans on all
+        // three bump sources: a same-length replace changes content
+        // without changing length, and undo/redo are exactly the
+        // mutations the guard exists to catch.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let ok: bool = lua
+            .load(
+                r#"
+                local b = pmacs.buffer.from_bytes("rev", "abcd")
+                local r0 = b:revision()
+                b:insert(4, "e")
+                local r1 = b:revision()
+                b:replace(0, 1, "X") -- same-length replace still bumps
+                local r2 = b:revision()
+                assert(b:undo(), "undo applies")
+                local r3 = b:revision()
+                assert(b:redo(), "redo applies")
+                local r4 = b:revision()
+                return r1 > r0 and r2 > r1 and r3 > r2 and r4 > r3
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(ok, "revision must be strictly monotonic across edit/undo/redo");
     }
 
     #[test]
