@@ -318,6 +318,8 @@ local function resync(slot)
   local len = buf:len()
   buf:insert(len, DESYNC_MARKER, { bypass_intercept = true })
   slot.out_pos = buf:len()
+  -- The marker ends with \n, so the fresh epoch starts a new line.
+  slot.line_start = slot.out_pos
   slot.parse_line_start = slot.out_pos
   slot.next_row = count_newlines(buf:slice(0, slot.parse_line_start))
   slot.expected_rev = buf:revision()
@@ -383,6 +385,28 @@ local function codepoint_prefix_bytes(s, n)
   return i
 end
 
+-- Track the current line's start as bytes land (round-5 finding 3):
+-- `slot.line_start` is the byte offset where the line containing
+-- `out_pos` begins. CR, backspace, and erase-line rewinds read it in
+-- O(1); the old per-event scan materialized and walked the ENTIRE
+-- preceding buffer (buf:slice(0, pos)) on every CR — quadratic for a
+-- progress-heavy command behind megabytes of output. The value
+-- advances wherever a \n lands (this helper for appended text; the
+-- mid-line newline branch inline) and resets on the recovery paths
+-- (run start, resync, raw marker appends). Rewinds never cross it,
+-- so it is always ≤ out_pos and always a line start.
+local function note_appended(slot, base, text)
+  local last = nil
+  local search = 1
+  while true do
+    local idx = text:find("\n", search, true)
+    if not idx then break end
+    last = idx
+    search = idx + 1
+  end
+  if last then slot.line_start = base + last end
+end
+
 -- Append `text` at the tracked output position with overwrite
 -- semantics (CR progress bars rewrite the current line in place).
 --
@@ -418,6 +442,7 @@ local function emit_text(slot, text)
       local rest = text:sub(idx)
       buf:insert(len, rest, { bypass_intercept = true })
       slot.out_pos = len + #rest
+      note_appended(slot, len, rest)
       add_style_span(slot, len, len + #rest)
       return
     end
@@ -428,6 +453,7 @@ local function emit_text(slot, text)
       -- over it.
       buf:insert(len, "\n", { bypass_intercept = true })
       slot.out_pos = len + 1
+      slot.line_start = len + 1
       idx = idx + 1
     else
       local seg = text:sub(idx, (nl or #text + 1) - 1)
@@ -444,27 +470,11 @@ local function emit_text(slot, text)
   end
 end
 
--- Byte offset where the line containing `out_pos` starts. Scanned
--- from the buffer (the REPL's `_current_line_start` discipline) —
--- NOT `parse_line_start`, which only advances once per batch: a CR
+-- The current unterminated line runs from the tracked
+-- `slot.line_start` (per-slot, updated at every \n — NOT
+-- `parse_line_start`, which only advances once per batch: a CR
 -- arriving in the same batch as earlier completed lines must rewind
--- to the start of the CURRENT line, not to the batch's first line
--- (using the stale value let a progress line overwrite everything
--- emitted earlier in the batch).
-local function current_line_start(slot)
-  local pos = math.min(slot.out_pos, slot.buf:len())
-  local prefix = slot.buf:slice(0, pos)
-  local start = 0
-  local search = 1
-  while true do
-    local idx = prefix:find("\n", search, true)
-    if not idx then return start end
-    start = idx
-    search = idx + 1
-  end
-end
-
--- The current unterminated line runs from its scanned start to
+-- to the start of the CURRENT line, not the batch's first line) to
 -- buf:len() — no newline ever exists past out_pos (output is
 -- append-only except CR/BS rewinds within the current line).
 local function apply_events(slot, events)
@@ -476,12 +486,12 @@ local function apply_events(slot, events)
     elseif kind == "set_style" then
       slot.cur_style = ev.style
     elseif kind == "carriage_return" then
-      slot.out_pos = current_line_start(slot)
+      slot.out_pos = slot.line_start
     elseif kind == "backspace" then
       -- Step back over one whole CODEPOINT, not one byte — a
       -- mid-codepoint out_pos would make the next overwrite split
       -- the character (round-3 finding 1).
-      local ls = current_line_start(slot)
+      local ls = slot.line_start
       if slot.out_pos > ls then
         local prefix = slot.buf:slice(ls, slot.out_pos)
         local i = #prefix
@@ -496,7 +506,7 @@ local function apply_events(slot, events)
         buf:delete(slot.out_pos, len, { bypass_intercept = true })
       end
     elseif kind == "erase_line" then
-      local ls = current_line_start(slot)
+      local ls = slot.line_start
       local len = buf:len()
       if ls < len then
         buf:delete(ls, len, { bypass_intercept = true })
@@ -628,8 +638,10 @@ end
 -- pump cleanup/forget ran (round-1 finding 5).
 local function emit_text_raw(slot, text)
   local buf = slot.buf
-  buf:insert(buf:len(), text, { bypass_intercept = true })
+  local base = buf:len()
+  buf:insert(base, text, { bypass_intercept = true })
   slot.out_pos = buf:len()
+  note_appended(slot, base, text)
   if slot.parse_line_start > slot.out_pos then
     slot.parse_line_start = slot.out_pos
   end
@@ -764,6 +776,8 @@ local function start_run(slot, cmdline, opts)
   local header = string.format("$ %s\nDirectory: %s\n\n", cmdline, cwd or "(unknown)")
   buf:insert(0, header, { bypass_intercept = true })
   slot.out_pos = buf:len()
+  -- The header ends with \n, so output starts on a fresh line.
+  slot.line_start = slot.out_pos
   slot.parse_line_start = slot.out_pos
   slot.next_row = count_newlines(header)
   slot.expected_rev = buf:revision()
@@ -786,8 +800,12 @@ local function start_run(slot, cmdline, opts)
   }
   if cwd then spec.cwd = cwd end
   local ok, proc = pcall(pmacs.process.spawn, spec)
+  -- switch_buffer synchronously fires buffer.after-switch, whose
+  -- subscription above attaches the overlay — a second explicit
+  -- attach here stacked a duplicate render view per run (round-5
+  -- finding 1; translation itself is buffer-level and unaffected by
+  -- attachment count).
   pmacs.window.switch_buffer(slot.buf)
-  pcall(pmacs.buffer.attach_style_overlay, slot.buf, slot.overlay)
   if not ok then
     emit_text_raw(slot, string.format("[%s spawn failed: %s]\n", slot.label, tostring(proc)))
     slot.expected_rev = buf:revision()

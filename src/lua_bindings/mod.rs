@@ -2916,6 +2916,7 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
+        let reg = registry.clone();
         buffer.set(
             "add_style_overlay",
             lua.create_function(
@@ -2924,6 +2925,21 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     let handle = StyleOverlayHandleLua {
                         spans: Arc::clone(&spans),
                     };
+                    // Coordinate translation lives on the BUFFER
+                    // (PR #113 round-5 finding 1): buffer-attached
+                    // views see every edit exactly once — Lua bypass
+                    // writes, undo/redo, remote CRDT ops — whether or
+                    // not any window shows the buffer. The window
+                    // attachments below are render-only; per-window
+                    // translation ran once per split and zero times
+                    // hidden.
+                    {
+                        let mut r = reg.borrow_mut();
+                        let buf = resolve_mut(&mut r, id.0)?;
+                        buf.attach_view(Box::new(crate::overlay::BufferStyleSpanTranslator::new(
+                            Arc::clone(&spans),
+                        )));
+                    }
                     attach_style_overlay_to_visible_windows(lua, id.0, &spans);
                     Ok(handle)
                 },

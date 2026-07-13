@@ -1,7 +1,31 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 10 — 2026-07-13. Status: implemented on branch
-`compile-mode` (PR #113); revisions 7–10 fold in PR rounds 1–4.**
+**Revision 11 — 2026-07-13. Status: implemented on branch
+`compile-mode` (PR #113); revisions 7–11 fold in PR rounds 1–5.**
+
+Revision 11 (PR #113 round 5, findings 1–3): style-span coordinate
+translation belongs to the BUFFER, not to views — a new
+`BufferStyleSpanTranslator` is attached to the buffer by
+`pmacs.buffer.add_style_overlay`, sees every edit exactly once
+(bypass writes, undo/redo, remote CRDT ops) regardless of window
+count or visibility, and the window-attached `BufferStyleOverlay`
+copies are render-only. Pre-fix each attached view translated the
+shared store from its own `on_edit`: the duplicate attachment in
+`start_run` (switch_buffer's after-switch hook already attaches)
+made byte-delta rewrites shift later spans TWICE on the normal path,
+splits multiplied further, and a hidden buffer shifted ZERO times.
+Translation also preserves the untouched fragments of a partially
+overlapped span (finding 2): left of the replaced range keeps its
+styling, right of it shifts by the length delta, and only the bytes
+actually rewritten lose theirs — `red abc, reset, CR, X` renders a
+default X followed by red `bc`, where the old translation dropped
+any overlapping span whole. Per-cell rendered assertions
+(glyph, fg) pin both — `any_styled_cell` cannot see a wrong color on
+the right cell. And the per-event whole-prefix line-start scan is
+gone (finding 3): `slot.line_start` is tracked — advanced at every
+\n, reset on recovery paths — making CR/BS/erase-line O(1); measured
+2.52s → 0.67s on 2 MB + 3000 CRs (the pin is behavioral, not timed —
+timing bounds flake on slow CI).
 
 Revision 10 (PR #113 round 4, findings 1–2): CR rewrites are
 COLUMN-counted and newline-segmented, not byte-counted — each
@@ -211,10 +235,13 @@ Everything below was verified by reading the code, not the roadmap.
   teardown point calling `pmacs.process.forget` only after the
   terminal event (`:782-822`, the M6.9 no-leak discipline).
 - **Style overlay window semantics** (`src/lua_bindings/mod.rs:
-  2907-2933`, `:1756-1799`): `add_style_overlay` attaches only to
-  windows *currently showing* the buffer; buffer switches clear
-  window overlays; `attach_style_overlay(buf, handle)` re-attaches.
-  The handle has `add`, `clear`, `clear_before`, `spans`.
+  2907-2933`, `:1756-1799`): `add_style_overlay` attaches a
+  buffer-level `BufferStyleSpanTranslator` (coordinate translation,
+  exactly once per edit — Revision 11) plus render-only window
+  overlays on windows *currently showing* the buffer; buffer
+  switches clear window overlays; `attach_style_overlay(buf,
+  handle)` re-attaches the render view. The handle has `add`,
+  `clear`, `clear_before`, `spans`.
 - **Buffer-switch hooks**: `buffer.after-switch` exists and fires on
   the ordinary switch paths (recentf subscribes,
   `builtin/runtime/recentf.lua:54`). **`pmacs.editor.jump_back` does
@@ -604,14 +631,17 @@ invoke time, so commands/runtime load order stays irrelevant for it.
      raises.
 - **Style overlay discipline:** one overlay handle per generated
   buffer, created once and retained; `overlay:clear()` on each run
-  reset; `pmacs.buffer.attach_style_overlay(buf, handle)` after
-  every switch the module performs into the buffer, **and (Revision
-  3) from a `buffer.after-switch` subscription that re-attaches
-  whenever any switch path lands on one of its buffers** — combined
-  with the jump-back parity fix (additions #3), this covers `C-x b`
-  returns and the primary RET → `M-,` workflow. The former
-  "user-initiated switch loses styling" deferral is withdrawn as
-  covered.
+  reset; render re-attach rides **one** `buffer.after-switch`
+  subscription that fires whenever any switch path lands on one of
+  its buffers (Revision 3) — `start_run`'s own switch included, so
+  the former explicit attach after it stacked a duplicate render
+  view per run and is removed (Revision 11) — combined with the
+  jump-back parity fix (additions #3), this covers `C-x b` returns
+  and the primary RET → `M-,` workflow. The former "user-initiated
+  switch loses styling" deferral is withdrawn as covered.
+  Coordinate translation never depends on any of this: it lives on
+  the buffer (Revision 11), exactly once per edit, hidden or split
+  or not attached at all.
 - No marks needed: one append point, tracked as plain integers, with
   the revision guard above as the honesty check.
 

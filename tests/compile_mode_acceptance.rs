@@ -269,6 +269,35 @@ fn any_styled_cell(cells: &[pmacs::cell::Cell]) -> bool {
         .any(|c| c.style != pmacs::cell::Style::default())
 }
 
+/// `(glyph, fg)` for the first `n` cells of the grid row whose glyphs
+/// spell `prefix`; panics if no row matches. Round-5 tests pin exact
+/// per-cell colors — `any_styled_cell` cannot see a wrong color on
+/// the right glyph.
+fn styled_row(
+    cells: &[pmacs::cell::Cell],
+    rows: u32,
+    cols: u32,
+    prefix: &str,
+    n: usize,
+) -> Vec<(char, pmacs::cell::Color)> {
+    let glyph_at = |r: u32, c: u32| match cells[(r * cols + c) as usize].glyph {
+        pmacs::cell::Glyph::Char(ch) => ch,
+        _ => ' ',
+    };
+    for r in 0..rows {
+        let line: String = (0..cols).map(|c| glyph_at(r, c)).collect();
+        if line.starts_with(prefix) {
+            return (0..n)
+                .map(|i| {
+                    let cell = &cells[(r * cols) as usize + i];
+                    (glyph_at(r, i as u32), cell.style.fg)
+                })
+                .collect();
+        }
+    }
+    panic!("no rendered row starts with {prefix:?}");
+}
+
 const DESYNC: &str = "[output desynced by external edit]";
 
 // ---------------------------------------------------------------------------
@@ -2210,5 +2239,156 @@ fn r4f2_alt_screen_style_desync_resynced_on_exit_and_finish() {
         finish_resynced,
         "finish must emit the default SetStyle the CONSUMER needs even \
          though the internal style is already default"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PR #113 round 5 — bite tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r5f1_span_translation_is_exactly_once_for_the_active_buffer() {
+    use pmacs::cell::Color;
+    // Red 'a', blue 'bc', then CR and a red 2-byte é overwriting the
+    // 'a' (length delta +1): the blue span must shift exactly ONCE
+    // (round-5 finding 1). Pre-fix every attached view translated
+    // the shared store — the duplicate attachment made it twice on
+    // the normal path, splits multiplied it further — leaving 'b'
+    // unstyled and the span end past the buffer.
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "spans.sh",
+        "printf '\\033[31ma\\033[34mbc\\r\\033[31m\\303\\251\\n'\n",
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    let cells = render_active_window_to_grid(&mut s, 12, 60);
+    let row = styled_row(&cells, 12, 60, "\u{e9}bc", 3);
+    assert_eq!(
+        row,
+        vec![
+            ('\u{e9}', Color::Indexed(1)),
+            ('b', Color::Indexed(4)),
+            ('c', Color::Indexed(4)),
+        ],
+        "the blue span shifts exactly once past the 1-to-2-byte rewrite"
+    );
+}
+
+#[test]
+fn r5f1_hidden_buffer_spans_still_translate() {
+    use pmacs::cell::Color;
+    // The compile buffer sits in NO window while the rewrite
+    // arrives: pre-fix, no view received on_edit and the spans were
+    // never adjusted at all. Translation is buffer-level now,
+    // independent of visibility.
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "hidden.sh",
+        concat!(
+            "printf '\\033[31ma\\033[34mbc'\n",
+            "sleep 0.5\n",
+            "printf '\\r\\033[31m\\303\\251\\n'\n",
+        ),
+    );
+    let mut s = editor();
+    compile_run(&s, &format!("sh {script}"), dir.path());
+    assert!(
+        pump_until(&mut s, 5_000, |s| compilation_text(s).contains("abc")),
+        "styled prefix lands first"
+    );
+    exec(
+        &s,
+        r#"pmacs.window.switch_buffer(pmacs.buffer.create("*elsewhere*"))"#,
+    );
+    assert!(
+        pump_until(&mut s, 10_000, |s| named_text(s, "*compilation*")
+            .contains("[compile ")),
+        "run finishes while hidden"
+    );
+    // Switch back; the after-switch hook re-attaches the render view.
+    exec(
+        &s,
+        r#"
+        for _, id in ipairs(pmacs.buffer.list()) do
+            if pmacs.describe.buffer(id).name == "*compilation*" then
+                pmacs.window.switch_buffer(id)
+            end
+        end
+        "#,
+    );
+    let cells = render_active_window_to_grid(&mut s, 12, 60);
+    let row = styled_row(&cells, 12, 60, "\u{e9}bc", 3);
+    assert_eq!(
+        row,
+        vec![
+            ('\u{e9}', Color::Indexed(1)),
+            ('b', Color::Indexed(4)),
+            ('c', Color::Indexed(4)),
+        ],
+        "spans shifted while hidden; the re-shown buffer renders true colors"
+    );
+}
+
+#[test]
+fn r5f2_partial_rewrite_preserves_untouched_styling() {
+    use pmacs::cell::Color;
+    // SGR red; abc; SGR reset; CR; X — the default-styled X
+    // overwrites only 'a'; 'bc' keeps its red (round-5 finding 2).
+    // Pre-fix any overlap dropped the WHOLE span (bc lost its
+    // color); with no translation at all the stale span painted the
+    // default X red instead. Exact per-cell colors on both sides.
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "frag.sh",
+        "printf '\\033[31mabc\\033[0m\\rX\\n'\n",
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    let cells = render_active_window_to_grid(&mut s, 12, 60);
+    let row = styled_row(&cells, 12, 60, "Xbc", 3);
+    assert_eq!(
+        row,
+        vec![
+            ('X', Color::Default),
+            ('b', Color::Indexed(1)),
+            ('c', Color::Indexed(1)),
+        ],
+        "the rewritten cell is default-styled; the untouched suffix keeps red"
+    );
+}
+
+#[test]
+fn r5f3_tracked_line_start_matches_the_scan_across_transitions() {
+    // Round-5 finding 3 is a performance fix — the per-CR/BS/erase
+    // whole-prefix scan became a tracked byte. These are the
+    // correctness pins for that tracked value across every
+    // transition: a multi-line append, CR after a batch boundary,
+    // repeated CR on one line, erase-line, and a fresh line after
+    // each. Behavior must be identical to the old scan (this test
+    // passes on both by design — the perf win is measured, not
+    // asserted; a timing bound here would flake on slow CI).
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "track.sh",
+        concat!(
+            "printf 'l1\\nl2 partial'\n",
+            "sleep 0.3\n",
+            "printf '\\rL2 done!!!\\n'\n",
+            "printf 'p 1\\rp 2\\rp 22\\n'\n",
+            "printf 'erase me\\033[2K'\n",
+            "printf 'clean\\n'\n",
+        ),
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    let text = compilation_text(&s);
+    assert!(
+        text.contains("\nl1\nL2 done!!!\np 22\nclean\n"),
+        "every rewind lands at the tracked line start; buffer:\n{text:?}"
     );
 }

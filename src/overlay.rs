@@ -186,6 +186,14 @@ pub type SharedBufferStyleSpans = Arc<Mutex<Vec<BufferStyleSpan>>>;
 /// than viewport cell ranges. That is the right shape for stream
 /// consumers such as the REPL: ANSI SGR applies to bytes as they land
 /// in the rope, and render maps the surviving ranges into visible cells.
+///
+/// RENDER-ONLY (PR #113 round-5 finding 1): this view deliberately
+/// does not implement `on_edit`. Every window showing the buffer
+/// holds its own copy over the SAME shared store, so a per-view
+/// translation runs once per attached window — twice under a split,
+/// zero times while the buffer is hidden. Coordinate translation
+/// belongs to [`BufferStyleSpanTranslator`], attached to the buffer
+/// itself.
 #[derive(Clone, Debug)]
 pub struct BufferStyleOverlay {
     spans: SharedBufferStyleSpans,
@@ -199,7 +207,35 @@ impl BufferStyleOverlay {
     }
 }
 
-impl View for BufferStyleOverlay {
+/// Buffer-attached edit translator for a shared span store.
+///
+/// Keeps the byte coordinates in a [`SharedBufferStyleSpans`] store
+/// in sync with buffer edits, EXACTLY ONCE per edit, independent of
+/// how many windows currently render the buffer (PR #113 round-5
+/// finding 1). Buffer-attached views receive `on_edit` on every
+/// mutation path — intercept-skipping Lua writes, undo/redo, and
+/// remote CRDT ops — whether or not the buffer is displayed
+/// anywhere; window-attached [`BufferStyleOverlay`] copies are
+/// render-only.
+///
+/// Translation preserves the untouched fragments of a span that
+/// partially overlaps the edit (round-5 finding 2): bytes before the
+/// replaced range keep their styling, bytes at/after it keep theirs
+/// shifted by the edit's length delta, and only the bytes actually
+/// replaced lose styling — the writer styles what it writes.
+pub struct BufferStyleSpanTranslator {
+    spans: SharedBufferStyleSpans,
+}
+
+impl BufferStyleSpanTranslator {
+    /// Construct a translator over `spans`.
+    #[must_use]
+    pub fn new(spans: SharedBufferStyleSpans) -> Self {
+        Self { spans }
+    }
+}
+
+impl View for BufferStyleSpanTranslator {
     fn on_edit(&mut self, _buf: &Buffer, edit: &Edit) -> Result<(), crate::buffer::BufferError> {
         let old_start = edit.range.start;
         let old_end = edit.range.end;
@@ -207,22 +243,39 @@ impl View for BufferStyleOverlay {
         let new_len = edit.inserted_len;
         let mut spans = self.spans.lock().expect("style spans mutex poisoned");
         let mut adjusted = Vec::with_capacity(spans.len());
-        for mut span in spans.drain(..) {
-            if span.end <= old_start {
-                adjusted.push(span);
-            } else if span.start >= old_end {
-                span.start = shift_pos(span.start, old_end, old_len, new_len);
-                span.end = shift_pos(span.end, old_end, old_len, new_len);
-                adjusted.push(span);
+        for span in spans.drain(..) {
+            // Left fragment: bytes strictly before the replaced
+            // range are untouched by the edit.
+            if span.start < old_start {
+                adjusted.push(BufferStyleSpan {
+                    start: span.start,
+                    end: span.end.min(old_start),
+                    style: span.style,
+                });
             }
-            // Overlapping spans are dropped. REPL style spans are append-only
-            // and scrollback truncation deletes whole old blocks, so a
-            // conservative drop is simpler and avoids half-styled fragments.
+            // Right fragment: bytes at/after the replaced range
+            // survive, shifted by the length delta. (`pos >= old_end
+            // >= old_len`, so the subtraction cannot underflow.)
+            if span.end > old_end {
+                adjusted.push(BufferStyleSpan {
+                    start: span.start.max(old_end) - old_len + new_len,
+                    end: span.end - old_len + new_len,
+                    style: span.style,
+                });
+            }
+            // A span entirely inside the replaced range produces
+            // neither fragment and is dropped.
         }
         *spans = adjusted;
         Ok(())
     }
 
+    fn kind(&self) -> &'static str {
+        "buffer_style_span_translator"
+    }
+}
+
+impl View for BufferStyleOverlay {
     fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
         let spans = self
             .spans
@@ -240,15 +293,6 @@ impl View for BufferStyleOverlay {
         for span in spans {
             render_buffer_style_span(buf, &line_offsets, start_line, viewport, cells, span);
         }
-    }
-}
-
-fn shift_pos(pos: u64, old_end: u64, old_len: u64, new_len: u64) -> u64 {
-    if new_len >= old_len {
-        pos + (new_len - old_len)
-    } else {
-        pos.saturating_sub(old_end)
-            .saturating_add(old_end - (old_len - new_len))
     }
 }
 
@@ -680,5 +724,130 @@ mod tests {
             cell: Cell::default(),
         });
         virt.render(&buf, viewport(1, 5), &mut grid);
+    }
+
+    fn red() -> Style {
+        Style {
+            fg: crate::cell::Color::Indexed(1),
+            ..Default::default()
+        }
+    }
+
+    fn spans_of(store: &SharedBufferStyleSpans) -> Vec<(u64, u64)> {
+        store
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| (s.start, s.end))
+            .collect()
+    }
+
+    #[test]
+    fn translator_shifts_spans_exactly_once_regardless_of_render_views() {
+        // PR #113 round-5 finding 1: N windows over the same store
+        // must not translate N times, and zero windows must not mean
+        // zero translations. The render-only overlays contribute
+        // nothing to on_edit; the single buffer-attached translator
+        // does it all.
+        use crate::buffer::EditOp;
+        use crate::rope::Range;
+        let mut buf = Buffer::from_bytes(BufferId::next(), "t", b"abc");
+        let store: SharedBufferStyleSpans = Arc::new(Mutex::new(vec![BufferStyleSpan {
+            start: 1,
+            end: 3,
+            style: red(),
+        }]));
+        buf.attach_view(Box::new(BufferStyleSpanTranslator::new(Arc::clone(&store))));
+        // Two render copies attached to the same buffer — the
+        // split-window shape. Their on_edit is the default no-op.
+        buf.attach_view(Box::new(BufferStyleOverlay::new(Arc::clone(&store))));
+        buf.attach_view(Box::new(BufferStyleOverlay::new(Arc::clone(&store))));
+        // Replace byte 0 with two bytes: delta +1, span after the
+        // edit shifts by exactly one.
+        buf.apply_edit(EditOp::Replace {
+            range: Range::new(0, 1),
+            bytes: b"XY",
+        })
+        .expect("edit applies");
+        assert_eq!(
+            spans_of(&store),
+            vec![(2, 4)],
+            "one translator, one shift — attachment count is irrelevant"
+        );
+    }
+
+    #[test]
+    fn translator_preserves_untouched_span_fragments() {
+        // PR #113 round-5 finding 2: a partial overwrite must keep
+        // styling on the bytes it never wrote. Replacing byte 0 of a
+        // red [0,3) span (same length) leaves [1,3) red; the written
+        // byte's styling is the writer's business.
+        use crate::buffer::EditOp;
+        use crate::rope::Range;
+        let mut buf = Buffer::from_bytes(BufferId::next(), "t", b"abc");
+        let store: SharedBufferStyleSpans = Arc::new(Mutex::new(vec![BufferStyleSpan {
+            start: 0,
+            end: 3,
+            style: red(),
+        }]));
+        buf.attach_view(Box::new(BufferStyleSpanTranslator::new(Arc::clone(&store))));
+        buf.apply_edit(EditOp::Replace {
+            range: Range::new(0, 1),
+            bytes: b"X",
+        })
+        .expect("edit applies");
+        assert_eq!(
+            spans_of(&store),
+            vec![(1, 3)],
+            "the untouched right fragment survives a same-length rewrite"
+        );
+    }
+
+    #[test]
+    fn translator_splits_a_span_around_an_interior_edit() {
+        // Both fragments survive an interior replacement; the
+        // replaced middle loses styling. Also pins the insertion
+        // case: bytes inserted INSIDE a span do not inherit style.
+        use crate::buffer::EditOp;
+        use crate::rope::Range;
+        let mut buf = Buffer::from_bytes(BufferId::next(), "t", b"abcdef");
+        let store: SharedBufferStyleSpans = Arc::new(Mutex::new(vec![BufferStyleSpan {
+            start: 0,
+            end: 6,
+            style: red(),
+        }]));
+        buf.attach_view(Box::new(BufferStyleSpanTranslator::new(Arc::clone(&store))));
+        // Replace "cd" with "Z": left [0,2) intact, right [4,6)
+        // shifts to [3,5).
+        buf.apply_edit(EditOp::Replace {
+            range: Range::new(2, 4),
+            bytes: b"Z",
+        })
+        .expect("edit applies");
+        assert_eq!(
+            spans_of(&store),
+            vec![(0, 2), (3, 5)],
+            "left kept, right shifted by the length delta"
+        );
+        // A span wholly inside a replaced range is dropped.
+        {
+            let mut spans = store.lock().unwrap();
+            spans.clear();
+            spans.push(BufferStyleSpan {
+                start: 1,
+                end: 2,
+                style: red(),
+            });
+        }
+        buf.apply_edit(EditOp::Replace {
+            range: Range::new(0, 4),
+            bytes: b"....",
+        })
+        .expect("edit applies");
+        assert_eq!(
+            spans_of(&store),
+            Vec::<(u64, u64)>::new(),
+            "a fully-overwritten span produces no fragments"
+        );
     }
 }
