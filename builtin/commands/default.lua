@@ -644,7 +644,8 @@ cmd { name = "editor.execute-command",
         }
       end }
 
--- Workers and project search (T M3.6, T M3.7) -------------------------------
+-- Workers and project search (T M3.6, T M3.7; grep-mode upgrade per
+-- docs/compile-mode-framing.md Q#CM7) ---------------------------------------
 --
 -- `pmacs.workers.grep` is the runtime API; the user-facing entry
 -- point is `M-x project.search`, which prompts for a query and
@@ -653,19 +654,176 @@ cmd { name = "editor.execute-command",
 -- `supersede = "search"` key (M3.6 acceptance: cancel within 50 ms).
 -- `pmacs.project.search(query, opts)` is the same logic without
 -- the prompt --- callable from Lua scripts and tests.
+--
+-- The panel is a first-class locations buffer: read-only intercept
+-- with bypass writes, RET visits, n/p walk match lines, q restores,
+-- undo chords are no-ops, and each run claims the unified
+-- next-error source so M-g n walks matches. The worker's matches
+-- are already structured — no regex parsing. Every producer write
+-- runs the revision check BEFORE mutating so a no-hook external
+-- edit cannot be masked by the next batch advancing the expected
+-- revision.
 
 pmacs.project = pmacs.project or {}
 
 local SEARCH_RESULTS_NAME = "*search-results*"
+local GREP_DESYNC_MARKER = "\n[output desynced by external edit]\n"
 local active_search_id = nil
+local active_search_stream = nil
+-- Panel state: buffer incarnation, the root this search ran with
+-- (retained across interactive supersedes issued from inside the
+-- pathless panel), match locations, and the revision guard.
+local search_panel = nil
 
-local function search_results_buffer()
+local function grep_count_newlines(s)
+  local n = 0
+  local i = 0
+  while true do
+    i = s:find("\n", i + 1, true)
+    if not i then return n end
+    n = n + 1
+  end
+end
+
+local function search_panel_alive()
+  return search_panel ~= nil
+    and search_panel.buf ~= nil
+    and search_panel.buf:is_valid()
+end
+
+-- Resync after an external edit (the Q#CM2 discipline, grep shape):
+-- drop row anchors (a revision carries no edit range), append the
+-- marker, and recompute the row epoch. The match-location list
+-- survives for M-g n.
+local function search_panel_resync()
+  local p = search_panel
+  for _, m in ipairs(p.matches) do
+    m.row = nil
+  end
+  local buf = p.buf
+  buf:insert(buf:len(), GREP_DESYNC_MARKER, { bypass_intercept = true })
+  p.next_row = grep_count_newlines(buf:slice(0, buf:len()))
+  p.expected_rev = buf:revision()
+end
+
+local function search_panel_check_rev()
+  if not search_panel_alive() then return false end
+  local p = search_panel
+  if p.expected_rev ~= nil and p.buf:revision() ~= p.expected_rev then
+    search_panel_resync()
+  end
+  return true
+end
+
+-- Revision-checked producer append: check BEFORE the write (so a
+-- mismatch is marked rather than masked), record after. Returns the
+-- row the text landed on, or nil when the panel is gone.
+local function search_panel_append(text)
+  if not search_panel_check_rev() then return nil end
+  local p = search_panel
+  local row = p.next_row
+  local buf = p.buf
+  buf:insert(buf:len(), text, { bypass_intercept = true })
+  p.expected_rev = buf:revision()
+  p.next_row = row + grep_count_newlines(text)
+  return row
+end
+
+local SEARCH_UNDO_CHORDS = { "C-/", "C-_", "C-4", "C-x u", "C-?", "C-S-_", "C-x r" }
+
+local function ensure_search_panel()
+  if search_panel_alive() then return search_panel end
+  local p = search_panel or { matches = {}, match_index = 0 }
+  search_panel = p
+  local buf
   for _, id in ipairs(pmacs.buffer.list()) do
     if pmacs.describe.buffer(id).name == SEARCH_RESULTS_NAME then
-      return id
+      buf = id
+      break
     end
   end
-  return pmacs.buffer.create(SEARCH_RESULTS_NAME)
+  p.buf = buf or pmacs.buffer.create(SEARCH_RESULTS_NAME)
+  pmacs.buffer.add_intercept(p.buf, function()
+    error(SEARCH_RESULTS_NAME .. " is read-only")
+  end)
+  pmacs.buffer.set_round_trip_input(p.buf, true)
+  -- Kill-mid-search safety (Q#CM7): cancel the stream and
+  -- invalidate the id so late callbacks drop instead of writing
+  -- through a stale handle; the next search recreates the buffer.
+  pcall(pmacs.buffer.on_removed, p.buf, function()
+    if active_search_stream then
+      pcall(function() active_search_stream:cancel() end)
+    end
+    active_search_id = nil
+    active_search_stream = nil
+    p.buf = nil
+  end)
+  local function bind(seq, command)
+    pmacs.keymap.bind {
+      scope = "buffer", buffer = p.buf, sequence = seq, command = command,
+    }
+  end
+  bind("RET", "project-search.visit")
+  bind("n", "project-search.next-line")
+  bind("p", "project-search.previous-line")
+  bind("q", "project-search.quit")
+  for _, seq in ipairs(SEARCH_UNDO_CHORDS) do
+    bind(seq, "compile.undo-noop")
+  end
+  return p
+end
+
+-- Cursor walk via primitives (the lsp.lua visit idiom; 0-based).
+local function search_move_cursor_to(line, col)
+  pmacs.editor.move_line_start()
+  while pmacs.editor.cursor_line() > 0 do
+    pmacs.editor.move_up()
+  end
+  for _ = 1, line do pmacs.editor.move_down() end
+  for _ = 1, col do pmacs.editor.move_right() end
+end
+
+local function visit_match(idx)
+  local p = search_panel
+  local m = p and p.matches[idx]
+  if not m then return end
+  -- Worker match paths are relative to the search root, not the
+  -- cwd — resolve against the root this search ran with.
+  local path = m.file
+  if path:sub(1, 1) ~= "/" then
+    local root = p.root or "."
+    if root:sub(-1) ~= "/" then root = root .. "/" end
+    path = root .. path
+  end
+  pmacs.editor.push_jump()
+  local ok, err = pcall(pmacs.buffer.find_or_open, path)
+  if not ok then
+    pmacs.editor.jump_back()
+    pmacs.editor.set_status("search: failed to open " .. path .. ": " .. tostring(err))
+    return
+  end
+  search_move_cursor_to(m.line, m.col)
+  p.match_index = idx
+end
+
+-- Root resolution (Q#CM7): explicit opt > the panel's stored root
+-- when searching from inside the pathless panel (the natural
+-- supersede path would otherwise silently degrade to ".") > the
+-- active file's project root > ".".
+local function resolve_search_root(opts)
+  if opts.root then return opts.root end
+  local cur = pmacs.window.buffer()
+  if cur and search_panel_alive() and cur == search_panel.buf and search_panel.root then
+    return search_panel.root
+  end
+  if cur then
+    local okp, path = pcall(function() return cur:path() end)
+    if okp and path then
+      local okd, proj = pcall(pmacs.project.detect, path)
+      if okd and proj and proj.root then return proj.root end
+    end
+  end
+  return "."
 end
 
 function pmacs.project.search(query, opts)
@@ -673,18 +831,61 @@ function pmacs.project.search(query, opts)
     return nil
   end
   opts = opts or {}
-  local root = opts.root or "."
-  local buf = search_results_buffer()
+  local root = resolve_search_root(opts)
+  local p = ensure_search_panel()
+  -- q-target discipline: never capture a generated buffer.
+  local cur = pmacs.window.buffer()
+  if cur
+    and not (pmacs.compile
+      and pmacs.compile.is_generated_buffer
+      and pmacs.compile.is_generated_buffer(cur))
+  then
+    p.prev = cur
+  end
+  p.root = root
+  p.matches = {}
+  p.match_index = 0
   -- Replace any prior contents in one shot, then append a header.
   -- The buffer is reused across searches; clearing here is what
   -- gives the user a fresh page per query.
-  if buf:len() > 0 then buf:delete(0, buf:len()) end
-  buf:insert(0, "Searching for: " .. query .. "\n\n")
+  local buf = p.buf
+  if buf:len() > 0 then buf:delete(0, buf:len(), { bypass_intercept = true }) end
+  local header = "Searching for: " .. query .. "\n\n"
+  buf:insert(0, header, { bypass_intercept = true })
+  p.next_row = grep_count_newlines(header)
+  p.expected_rev = buf:revision()
   pmacs.window.switch_buffer(buf)
   local stream = pmacs.workers.grep(
     { root = root, pattern = query },
     { supersede = "search" })
   active_search_id = stream:id()
+  active_search_stream = stream
+  -- Claim the unified next-error source (Q#CM5): M-g n walks the
+  -- match list, which survives desync epochs. Guarded: this chunk
+  -- loads before the runtime chunks, and a minimal harness may
+  -- invoke search without compile.lua installed.
+  local claim = pmacs.errors and pmacs.errors.claim or function() end
+  claim {
+    name = "grep",
+    next = function()
+      if not p.matches or #p.matches == 0 then
+        pmacs.editor.set_status("search: no matches")
+        return
+      end
+      if p.match_index >= #p.matches then
+        pmacs.editor.set_status("no more errors")
+        return
+      end
+      visit_match(p.match_index + 1)
+    end,
+    previous = function()
+      if p.match_index <= 1 then
+        pmacs.editor.set_status("no more errors")
+        return
+      end
+      visit_match(p.match_index - 1)
+    end,
+  }
   -- Capture the id at registration time so callbacks for a
   -- superseded predecessor (whose worker hasn't yet observed
   -- cancel) drop their late batches instead of polluting the
@@ -692,17 +893,111 @@ function pmacs.project.search(query, opts)
   local my_id = active_search_id
   stream:on_batch(function(items)
     if my_id ~= active_search_id then return end
+    if not search_panel_alive() then return end
     for _, m in ipairs(items) do
-      buf:insert(buf:len(), string.format("%s:%d:%d: %s\n",
+      local row = search_panel_append(string.format("%s:%d:%d: %s\n",
         m.file, m.line, m.match_start, m.text))
+      if row then
+        -- Grep normalization (Q#CM7): line is 1-based → minus one;
+        -- match_start is already a 0-based byte offset in the line.
+        p.matches[#p.matches + 1] = {
+          file = m.file,
+          line = m.line - 1,
+          col = m.match_start,
+          row = row,
+        }
+      end
     end
   end)
   stream:on_close(function(status, _value)
     if my_id ~= active_search_id then return end
-    buf:insert(buf:len(), string.format("\n-- search %s --\n", status))
+    if not search_panel_alive() then return end
+    search_panel_append(string.format("\n-- search %s --\n", status))
   end)
   return stream
 end
+
+local function match_on_row(row)
+  local p = search_panel
+  if not p then return nil end
+  for i, m in ipairs(p.matches) do
+    if m.row == row then return i end
+  end
+  return nil
+end
+
+local function active_is_search_panel()
+  local cur = pmacs.window.buffer()
+  return cur ~= nil and search_panel_alive() and cur == search_panel.buf
+end
+
+cmd { name = "project-search.visit",
+      description = "Visit the match on the current line of *search-results*.",
+      fn = function()
+        if not active_is_search_panel() then return end
+        if not search_panel_check_rev() then return end
+        local idx = match_on_row(pmacs.editor.cursor_line())
+        if not idx then
+          pmacs.editor.set_status("no match on this line")
+          return
+        end
+        visit_match(idx)
+      end }
+
+local function search_step_line(direction)
+  if not active_is_search_panel() then return end
+  if not search_panel_check_rev() then return end
+  local from = pmacs.editor.cursor_line()
+  local best = nil
+  for _, m in ipairs(search_panel.matches) do
+    if m.row then
+      if direction > 0 and m.row > from and (not best or m.row < best) then
+        best = m.row
+      elseif direction < 0 and m.row < from and (not best or m.row > best) then
+        best = m.row
+      end
+    end
+  end
+  if not best then
+    pmacs.editor.set_status("no more errors")
+    return
+  end
+  local cur = from
+  while cur < best do
+    pmacs.editor.move_down()
+    cur = cur + 1
+  end
+  while cur > best do
+    pmacs.editor.move_up()
+    cur = cur - 1
+  end
+  pmacs.editor.move_line_start()
+end
+
+cmd { name = "project-search.next-line",
+      description = "Move to the next match line within *search-results*.",
+      fn = function() search_step_line(1) end }
+
+cmd { name = "project-search.previous-line",
+      description = "Move to the previous match line within *search-results*.",
+      fn = function() search_step_line(-1) end }
+
+cmd { name = "project-search.quit",
+      description = "Leave *search-results*, restoring the previous buffer.",
+      fn = function()
+        if not active_is_search_panel() then return end
+        local target = search_panel.prev
+        if not (target and target:is_valid()) then
+          for _, id in ipairs(pmacs.buffer.list()) do
+            if pmacs.describe.buffer(id).name == "*scratch*" then
+              target = id
+              break
+            end
+          end
+          target = target or pmacs.buffer.create("*scratch*")
+        end
+        pmacs.window.switch_buffer(target)
+      end }
 
 cmd { name = "project.search",
       description = "Parallel grep across the project; new queries cancel the predecessor.",

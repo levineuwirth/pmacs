@@ -373,6 +373,19 @@ impl EditorState {
                 include_str!("../builtin/runtime/indent.lua"),
             )
             .expect("load indent builtin chunk");
+        // Compile-mode (Arc 5 stage 1, Q#CM1) — ORDERING CONTRACT:
+        // compile.lua must load AFTER lsp.lua. It takes over
+        // `M-g n` / `M-g p` for the unified error dispatchers, and
+        // duplicate bindings are rejected, so the takeover is
+        // unbind-then-bind against lsp.lua's diag bindings — they
+        // must exist first. (Loaded last in the runtime sequence;
+        // its after-tick pump is ordering-independent.)
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/compile.lua"),
+                include_str!("../builtin/runtime/compile.lua"),
+            )
+            .expect("load compile builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
