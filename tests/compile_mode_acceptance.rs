@@ -1948,3 +1948,140 @@ fn r1f10_builtin_default_rules_survive_in_place_mutation() {
          stored column 0)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PR #113 round 3 — bite tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r3f1_cr_and_backspace_are_utf8_safe() {
+    // Overwrites must consume whole existing codepoints in one
+    // atomic replace, and backspace must step to the previous UTF-8
+    // boundary. Pre-fix, é\rX left "X\xA9" (malformed) and é\bX left
+    // "\xC3X"; under CRDT the mid-codepoint edit rejects and aborts
+    // the pump (see the CRDT twin).
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "uni.sh",
+        concat!(
+            "printf '\\303\\251\\rX\\n'\n", // é\rX  → X
+            "printf 'X\\r\\303\\251\\n'\n", // X\ré  → é
+            "printf '\\303\\251\\bX\\n'\n", // é\bX  → X
+        ),
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    let text = compilation_text(&s);
+    assert!(
+        text.contains("\nX\n\u{e9}\nX\n"),
+        "each overwrite must yield exactly the replacing character, \
+         valid UTF-8, no residue; buffer:\n{text:?}"
+    );
+    assert!(
+        text.contains("[compile exited with code 0]"),
+        "terminal event must survive the unicode batch:\n{text}"
+    );
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no pump aborts: {}",
+        errors_buffer(&s)
+    );
+    assert!(
+        pump_until(&mut s, 3_000, |s| process_count(s) == 0),
+        "process record forgotten (cleanup ran)"
+    );
+}
+
+#[test]
+fn r3f2_parser_finish_emits_balancing_state_events() {
+    // Consumers mirror parser state from the event stream alone: an
+    // unclosed alt-screen enter must be balanced by an exit, and a
+    // non-default running style by a default SetStyle — applied to
+    // consumer state, not just observed as later text.
+    let s = editor();
+    let (alt_balanced, style_reset): (bool, bool) = eval(
+        &s,
+        r#"
+        local p = pmacs.ansi.parser()
+        p:feed("\27[31mred")
+        p:feed("\27[?1049h")  -- enter alt screen, never exited
+        local alt = true      -- consumer mirror of the enter
+        local style = { fg = 1 }
+        for _, ev in ipairs(p:finish()) do
+            if ev.kind == "alt_screen_exit" then alt = false end
+            if ev.kind == "set_style" then style = ev.style end
+        end
+        local style_is_default = style.fg == "default"
+            and style.bg == "default" and not style.bold
+        return alt == false, style_is_default
+        "#,
+    );
+    assert!(
+        alt_balanced,
+        "finish must emit alt_screen_exit for an unclosed enter"
+    );
+    assert!(
+        style_reset,
+        "finish must emit a default set_style when the running style \
+         was non-default"
+    );
+}
+
+#[test]
+fn r3f3_spec_fields_are_raw_reads_metatables_not_honored() {
+    let s = editor();
+    // A metatable that provides group = true: honoring it would be
+    // silent spec-by-metatable; raw reads ignore it (the compile.lua
+    // rawget posture), so the child must NOT lead its own group.
+    let pid: i64 = eval(
+        &s,
+        r#"
+        local spec = setmetatable(
+            { label = "mt", command = "/bin/sh", args = { "-c", "sleep 30" } },
+            { __index = function(_, k)
+                if k == "group" then return true end
+                return nil
+            end })
+        local id = pmacs.process.spawn(spec)
+        for _, row in ipairs(pmacs.process.list()) do
+            if row.state and row.state.pid then return row.state.pid end
+        end
+        return -1
+        "#,
+    );
+    assert!(pid > 0, "metatable-backed spec must spawn");
+    let out = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    let pgid: i64 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("pgid");
+    assert_ne!(
+        pgid, pid,
+        "metatable-provided group=true must not be honored (raw reads)"
+    );
+    // A RAISING __index must not be silently absorbed either — with
+    // raw reads it simply never fires; the spawn succeeds cleanly.
+    let ok: bool = eval(
+        &s,
+        r#"
+        local spec = setmetatable(
+            { label = "mt2", command = "/bin/true" },
+            { __index = function() error("hostile spec metatable") end })
+        local ok = pcall(pmacs.process.spawn, spec)
+        return ok
+        "#,
+    );
+    assert!(ok, "raw reads must not trip a raising __index");
+    exec(
+        &s,
+        r"
+        for _, row in ipairs(pmacs.process.list()) do
+            pcall(pmacs.process.terminate, row.id)
+        end
+        ",
+    );
+}

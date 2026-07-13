@@ -7009,8 +7009,12 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
     // boolean its truthiness happens to be — either way the caller's
     // intent is unverifiable, and these fields carry process-hygiene
     // guarantees (PR #113 round-1 finding 6; wording corrected in
-    // round 2 finding 5).
-    let stdin_raw: Option<String> = table.get("stdin").map_err(|_| {
+    // round 2 finding 5). RAW reads (round-3 finding 3): a spec
+    // table is plain data — metatable-provided fields are
+    // deliberately not honored (the compile.lua rawget posture), and
+    // a raising __index must not be silently absorbed into "false"
+    // and quietly disable process-group isolation.
+    let stdin_raw: Option<String> = table.raw_get("stdin").map_err(|_| {
         mlua::Error::external("stdin must be the string \"piped\" or \"null\"".to_owned())
     })?;
     let stdin = match stdin_raw.as_deref() {
@@ -7024,9 +7028,10 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
     };
     // Read as a raw Value: mlua's `bool` conversion applies Lua
     // truthiness, so `group = "true"` would silently coerce instead
-    // of erroring.
-    let group = match table.get::<mlua::Value>("group") {
-        Ok(mlua::Value::Nil) | Err(_) => false,
+    // of erroring. A raw Value read cannot raise; any residual error
+    // is still a hard error, never a silent default.
+    let group = match table.raw_get::<mlua::Value>("group") {
+        Ok(mlua::Value::Nil) => false,
         Ok(mlua::Value::Boolean(b)) => b,
         Ok(other) => {
             return Err(mlua::Error::external(format!(
@@ -7034,6 +7039,7 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
                 other.type_name()
             )));
         }
+        Err(e) => return Err(e),
     };
     Ok(ProcessSpec {
         label,

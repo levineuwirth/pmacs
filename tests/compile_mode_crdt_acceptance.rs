@@ -253,3 +253,52 @@ fn compile_run_converges_and_replica_edit_triggers_recovery() {
         "post-recovery convergence across the reorder seam"
     );
 }
+
+#[test]
+fn r3f1_unicode_cr_backspace_survive_crdt_replication() {
+    // PR #113 round-3 finding 1, CRDT twin: pre-fix the byte-counted
+    // overwrite split a 2-byte é mid-codepoint; the byte-native
+    // UTF-8 CRDT edit REJECTS that range, the pump callback aborts
+    // after events_take, the run never reaches its exit marker, and
+    // the process record leaks. Post-fix the whole-codepoint atomic
+    // replace applies cleanly and both replicas converge.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("uni.sh");
+    std::fs::write(
+        &script,
+        "printf '\\303\\251\\rX\\n'\nprintf 'X\\r\\303\\251\\n'\nprintf '\\303\\251\\bX\\n'\n",
+    )
+    .unwrap();
+    let init = format!(
+        r#"
+        pmacs.command.define {{
+            name = "test.compile-unicode",
+            description = "round-3 unicode fixture trigger",
+            fn = function()
+                pmacs.compile.run("sh {script}", {{ cwd = "{dir}" }})
+            end,
+        }}
+        pmacs.keymap.bind {{ scope = "global", sequence = "C-c 8", command = "test.compile-unicode" }}
+        "#,
+        script = script.display(),
+        dir = dir.path().display(),
+    );
+    let daemon = TestDaemon::spawn_with_config(&init);
+    let mut source = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
+
+    send_key(&mut source, Key::Char('c'), Modifiers::CTRL);
+    send_key(&mut source, Key::Char('8'), Modifiers::NONE);
+
+    adopt_next_buffer(&mut source, "source");
+    adopt_next_buffer(&mut observer, "observer");
+
+    let done = |t: &str| t.contains("[compile exited with code 0]");
+    let src_text = pump_until_text(&mut source, Duration::from_secs(15), "source run", done);
+    let obs_text = pump_until_text(&mut observer, Duration::from_secs(15), "observer run", done);
+    assert_eq!(src_text, obs_text, "byte-identical convergence");
+    assert!(
+        src_text.contains("\nX\n\u{e9}\nX\n"),
+        "whole-codepoint overwrites replicate as valid UTF-8; got:\n{src_text:?}"
+    );
+}

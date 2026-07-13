@@ -1,7 +1,24 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 8 — 2026-07-13. Status: implemented on branch
-`compile-mode` (PR #113); revisions 7–8 fold in PR rounds 1–2.**
+**Revision 9 — 2026-07-13. Status: implemented on branch
+`compile-mode` (PR #113); revisions 7–9 fold in PR rounds 1–3.**
+
+Revision 9 (PR #113 round 3, findings 1–3): the CR/backspace
+renderer is UTF-8-safe — overwrites consume WHOLE existing
+codepoints (range end aligned forward past continuation bytes) in
+ONE atomic replace of the complete text event, and backspace steps
+to the previous codepoint boundary; pre-fix, byte-counted splits
+left malformed bytes on the plain rope and made the byte-native CRDT
+edit reject mid-codepoint ranges, aborting the pump after its events
+were consumed (default + CRDT bites: é\rX, X\ré, é\bX).
+`parser:finish()`'s reset is now OBSERVABLE: balancing events —
+`AlternateScreenExit` for an unclosed enter, a default `SetStyle`
+for a non-default running style — let consumers unwind mirrored
+state from the event stream alone (unit applies events to consumer
+state; Lua twin). The spawn-spec `stdin`/`group` fields are RAW
+reads: metatable-provided fields are deliberately not honored (the
+compile.lua posture) and a raising `__index` can no longer be
+silently absorbed as `group = false`, disabling isolation.
 
 Revision 8 (PR #113 round 2, findings 1–5): rule validation is a
 stable, total snapshot — validated scalar fields are copied into
@@ -294,7 +311,11 @@ No protocol change, no frontend change.
    as HARD errors (Revision 7) — a silently-defaulted `stdin = true`
    or `group = "true"` would undo exactly the guarantees the fields
    carry; `group` is matched as a raw Value because mlua's bool
-   conversion applies Lua truthiness.
+   conversion applies Lua truthiness. Both fields are RAW reads
+   (Revision 9): a spec table is plain data, metatable-provided
+   fields are deliberately not honored (the compile.lua rawget
+   posture), and a raising `__index` cannot be silently absorbed
+   into `group = false`, quietly disabling isolation.
 2. **`group = true`** (`ProcessSpec`, pipes-only) — a full lifecycle
    policy, not just a spawn flag:
    - **Spawn**: `process_group(0)` — the child leads a fresh group.
@@ -421,11 +442,15 @@ No protocol change, no frontend change.
    process EOF there is no next feed — `finish()` emits U+FFFD for
    the pending prefix (the same posture an interrupting control byte
    gets) and flushes the text run, **then fully resets the parser
-   (in-flight CSI/OSC/escape state and alt-screen suppression
-   included): a feed after finish parses a NEW stream** rather than
-   continuing a pre-EOF escape or staying suppressed. Compile-mode
-   calls it once at the terminal event, before finalizing the
-   pending line.
+   (in-flight CSI/OSC/escape state, alt-screen suppression, and the
+   running SGR style): a feed after finish parses a NEW stream**
+   rather than continuing a pre-EOF escape, staying suppressed, or
+   inheriting stale color. The reset is OBSERVABLE (Revision 9):
+   balancing events — `AlternateScreenExit` for an unclosed enter, a
+   default `SetStyle` for a non-default running style — let
+   consumers that mirror parser state unwind from the event stream
+   alone. Compile-mode calls it once at the terminal event, before
+   finalizing the pending line.
 
 ## Decisions
 
@@ -468,7 +493,15 @@ invoke time, so commands/runtime load order stays irrelevant for it.
   intra-line treatment so progress bars collapse. Alt-screen
   suppression comes free. One parser, one running style, one output
   position — coherent because the child delivers **one merged
-  stream** (Q#CM3).
+  stream** (Q#CM3). **UTF-8 safety (Revision 9):** overwrite ranges
+  are byte-counted but consume whole existing codepoints (the range
+  end aligns forward past continuation bytes) and each text event is
+  applied as ONE atomic replace, never split; backspace steps to the
+  previous codepoint boundary. `out_pos` stays on codepoint
+  boundaries by induction. A split on either side previously left
+  malformed bytes on the plain rope, and under CRDT made the
+  byte-native edit reject — aborting the pump after events_take had
+  already consumed the batch.
 - **External-edit resilience (Revision 4–6).** Generated-buffer keys
   round-trip, so honest frontend optimistic undo is not an escape from
   the local bindings; accepted replica ops also fire

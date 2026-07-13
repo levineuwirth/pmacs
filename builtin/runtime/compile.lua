@@ -353,20 +353,40 @@ local function add_style_span(slot, from, to)
   slot.overlay:add(from, to, slot.cur_style)
 end
 
+-- True when byte `b` is a UTF-8 continuation byte (0x80–0xBF).
+local function is_utf8_continuation(b)
+  return b >= 0x80 and b < 0xC0
+end
+
 -- Append `text` at the tracked output position with overwrite
 -- semantics (CR progress bars rewrite the current line in place).
+--
+-- UTF-8 safety (PR #113 round-3 finding 1): overwrite ranges are
+-- byte-counted but must consume WHOLE existing codepoints — the
+-- range end is aligned forward past continuation bytes — and the
+-- incoming text event is applied as ONE atomic replace, never split
+-- (parser text events carry only complete scalars). Splitting either
+-- side left malformed bytes on the plain rope and made the
+-- byte-native CRDT edit reject the range, aborting the pump
+-- mid-batch after its events were already consumed. `out_pos` stays
+-- on codepoint boundaries by induction: it moves to end-of-write,
+-- line starts (after \n), or a boundary-aligned backspace target.
 local function emit_text(slot, text)
   if #text == 0 then return end
   local buf = slot.buf
   local len = buf:len()
   local pos = math.min(slot.out_pos, len)
-  local overwrite = math.min(#text, len - pos)
-  if overwrite > 0 then
-    buf:replace(pos, pos + overwrite, text:sub(1, overwrite), { bypass_intercept = true })
+  -- The current line's remainder — the only bytes an overwrite may
+  -- touch (no \n exists past out_pos).
+  local tail = buf:slice(pos, len)
+  local overwrite = math.min(#text, #tail)
+  -- Align the overwrite end forward to a codepoint boundary of the
+  -- EXISTING content: replacing 1 byte of a 2-byte é must consume
+  -- both of its bytes (é and X both occupy one terminal column).
+  while overwrite < #tail and is_utf8_continuation(tail:byte(overwrite + 1)) do
+    overwrite = overwrite + 1
   end
-  if #text > overwrite then
-    buf:insert(pos + overwrite, text:sub(overwrite + 1), { bypass_intercept = true })
-  end
+  buf:replace(pos, pos + overwrite, text, { bypass_intercept = true })
   slot.out_pos = pos + #text
   add_style_span(slot, pos, pos + #text)
 end
@@ -405,8 +425,17 @@ local function apply_events(slot, events)
     elseif kind == "carriage_return" then
       slot.out_pos = current_line_start(slot)
     elseif kind == "backspace" then
-      if slot.out_pos > current_line_start(slot) then
-        slot.out_pos = slot.out_pos - 1
+      -- Step back over one whole CODEPOINT, not one byte — a
+      -- mid-codepoint out_pos would make the next overwrite split
+      -- the character (round-3 finding 1).
+      local ls = current_line_start(slot)
+      if slot.out_pos > ls then
+        local prefix = slot.buf:slice(ls, slot.out_pos)
+        local i = #prefix
+        while i > 1 and is_utf8_continuation(prefix:byte(i)) do
+          i = i - 1
+        end
+        slot.out_pos = ls + i - 1
       end
     elseif kind == "erase_to_eol" then
       local len = buf:len()

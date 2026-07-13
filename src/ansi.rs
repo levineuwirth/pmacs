@@ -402,11 +402,17 @@ impl AnsiParser {
     /// text run.
     ///
     /// The parser is then fully reset — in-flight CSI/OSC/escape
-    /// state AND alt-screen suppression included — so a `feed` after
-    /// `finish` parses a NEW stream from a clean slate rather than
-    /// continuing a pre-EOF escape sequence or staying suppressed
-    /// (PR #113 round-2 finding 4). Idempotent once drained. First
-    /// consumer: compile-mode's terminal-event path (Q#CM4).
+    /// state, alt-screen suppression, AND the running SGR style — so
+    /// a `feed` after `finish` parses a NEW stream from a clean
+    /// slate rather than continuing a pre-EOF escape sequence,
+    /// staying suppressed, or inheriting stale color (PR #113
+    /// round-2 finding 4; round-3 finding 2). The reset is
+    /// OBSERVABLE: consumers that mirror parser state from the event
+    /// stream receive balancing events — an `AlternateScreenExit`
+    /// for an unclosed enter, a default `SetStyle` when the running
+    /// style was non-default — so they unwind without out-of-band
+    /// knowledge. Idempotent once drained. First consumer:
+    /// compile-mode's terminal-event path (Q#CM4).
     pub fn finish(&mut self) -> Vec<AnsiEvent> {
         let mut events = Vec::new();
         self.flush_pending_utf8_as_replacement();
@@ -416,11 +422,19 @@ impl AnsiParser {
         } else {
             self.text_run.clear();
         }
-        self.reset();
-        // `reset` deliberately preserves alt-screen suppression (a
+        // Balancing state events, in unwind order. `reset` alone
+        // deliberately preserves alt-screen suppression (a
         // mid-stream reset must not unhide alt-screen contents); a
-        // stream END does end the suppression.
-        self.alt_screen_active = false;
+        // stream END does end it, observably.
+        if self.alt_screen_active {
+            self.alt_screen_active = false;
+            events.push(AnsiEvent::AlternateScreenExit);
+        }
+        if self.current_style != Style::default() {
+            self.current_style = Style::default();
+            events.push(AnsiEvent::SetStyle(Style::default()));
+        }
+        self.reset();
         events
     }
 
@@ -1839,6 +1853,42 @@ mod tests {
             collect_text(&evs),
             "visible",
             "a stream END ends suppression; a new stream starts unsuppressed"
+        );
+    }
+
+    #[test]
+    fn finish_emits_balancing_events_for_consumer_state() {
+        // A consumer mirrors parser state from the event stream
+        // alone (PR #113 round-3 finding 2): apply every event to a
+        // consumer-side mirror and require finish() to unwind it —
+        // not merely make subsequent text visible.
+        let mut p = AnsiParser::new();
+        let mut consumer_alt = false;
+        let mut consumer_style = Style::default();
+        let apply = |evs: &[AnsiEvent], alt: &mut bool, style: &mut Style| {
+            for ev in evs {
+                match ev {
+                    AnsiEvent::AlternateScreenEnter => *alt = true,
+                    AnsiEvent::AlternateScreenExit => *alt = false,
+                    AnsiEvent::SetStyle(s) => *style = *s,
+                    _ => {}
+                }
+            }
+        };
+        let evs = p.feed(b"\x1b[31mred\x1b[?1049h");
+        apply(&evs, &mut consumer_alt, &mut consumer_style);
+        assert!(consumer_alt, "enter observed");
+        assert_ne!(consumer_style, Style::default(), "red observed");
+        let evs = p.finish();
+        apply(&evs, &mut consumer_alt, &mut consumer_style);
+        assert!(
+            !consumer_alt,
+            "finish must balance the unclosed AlternateScreenEnter"
+        );
+        assert_eq!(
+            consumer_style,
+            Style::default(),
+            "finish must reset the running style observably"
         );
     }
 }
