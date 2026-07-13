@@ -302,3 +302,55 @@ fn r3f1_unicode_cr_backspace_survive_crdt_replication() {
         "whole-codepoint overwrites replicate as valid UTF-8; got:\n{src_text:?}"
     );
 }
+
+#[test]
+fn r4f1_column_rewrites_replicate_and_converge() {
+    // PR #113 round-4 finding 1, CRDT twin: the column-based
+    // renderer makes SEVERAL byte-native edits per text event
+    // (segment overwrites plus appended newlines instead of one
+    // atomic replace); every edit must land on codepoint boundaries
+    // and the full run — including the shorter rewrite whose stale
+    // remainder survives in place and the multibyte-over-ASCII
+    // overwrite — must converge byte-identically. Pre-fix the
+    // byte-counted overwrite replicates the corrupted structure
+    // (ghost line, eaten column) to both replicas.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("cols.sh");
+    std::fs::write(
+        &script,
+        "printf 'abcdef\\rX\\n'\nprintf 'abc\\r\\303\\251\\n'\n",
+    )
+    .unwrap();
+    let init = format!(
+        r#"
+        pmacs.command.define {{
+            name = "test.compile-columns",
+            description = "round-4 column-rewrite fixture trigger",
+            fn = function()
+                pmacs.compile.run("sh {script}", {{ cwd = "{dir}" }})
+            end,
+        }}
+        pmacs.keymap.bind {{ scope = "global", sequence = "C-c 7", command = "test.compile-columns" }}
+        "#,
+        script = script.display(),
+        dir = dir.path().display(),
+    );
+    let daemon = TestDaemon::spawn_with_config(&init);
+    let mut source = attach_replica(&daemon);
+    let mut observer = attach_replica(&daemon);
+
+    send_key(&mut source, Key::Char('c'), Modifiers::CTRL);
+    send_key(&mut source, Key::Char('7'), Modifiers::NONE);
+
+    adopt_next_buffer(&mut source, "source");
+    adopt_next_buffer(&mut observer, "observer");
+
+    let done = |t: &str| t.contains("[compile exited with code 0]");
+    let src_text = pump_until_text(&mut source, Duration::from_secs(15), "source run", done);
+    let obs_text = pump_until_text(&mut observer, Duration::from_secs(15), "observer run", done);
+    assert_eq!(src_text, obs_text, "byte-identical convergence");
+    assert!(
+        src_text.contains("\nXbcdef\n\u{e9}bc\n"),
+        "column-based rewrites replicate intact; got:\n{src_text:?}"
+    );
+}

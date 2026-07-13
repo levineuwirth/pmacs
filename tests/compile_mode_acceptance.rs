@@ -2085,3 +2085,130 @@ fn r3f3_spec_fields_are_raw_reads_metatables_not_honored() {
         ",
     );
 }
+
+// ---------------------------------------------------------------------------
+// PR #113 round 4 — bite tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r4f1_cr_rewrites_are_column_based_not_byte_based() {
+    // PR #113 round-4 finding 1: the round-3 renderer preserved
+    // UTF-8 validity but still counted the overwrite in BYTES.
+    // `abcdef\rX\n` wrote "X\n" over "ab", splitting the line and
+    // leaving "cdef" as a ghost line the parser saw again at EOF;
+    // `abc\ré` overwrote TWO ASCII characters because é is two
+    // bytes. Overwrites are column-counted (codepoints), and LF is
+    // not an overwrite column: the newline drops to a fresh line and
+    // the stale remainder survives in place (terminal semantics).
+    // CRLF (a CR event followed by a text event starting "\n") is
+    // the same rule and used to corrupt the same way.
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "cols.sh",
+        concat!(
+            "printf 'abcdef\\rX\\n'\n",       // → Xbcdef
+            "printf 'abc\\r\\303\\251\\n'\n", // → ébc
+            "printf 'one\\r\\ntwo\\r\\n'\n",  // CRLF → one / two
+        ),
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    let text = compilation_text(&s);
+    assert!(
+        text.contains("\nXbcdef\n\u{e9}bc\none\ntwo\n"),
+        "shorter rewrites keep the line whole (no ghost line), a \
+         multibyte overwrite consumes one COLUMN, and CRLF is a \
+         plain line break; buffer:\n{text:?}"
+    );
+    assert!(
+        text.contains("[compile exited with code 0]"),
+        "run completes: {text}"
+    );
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no error spam: {}",
+        errors_buffer(&s)
+    );
+}
+
+#[test]
+fn r4f1_split_feed_rewrites_and_split_codepoints() {
+    // The same rewrites with the CR, the overwrite text, and even
+    // the é's two bytes arriving in SEPARATE pump batches: the
+    // buffer-scanned line start and the parser's cross-feed UTF-8
+    // buffer must compose with the column-based overwrite.
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "split.sh",
+        concat!(
+            "printf 'abcdef'\n",
+            "sleep 0.3\n",
+            "printf '\\rX\\n'\n",
+            "printf 'abc\\r\\303'\n", // é's lead byte ends the batch
+            "sleep 0.3\n",
+            "printf '\\251\\n'\n",
+        ),
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    let text = compilation_text(&s);
+    assert!(
+        text.contains("\nXbcdef\n\u{e9}bc\n"),
+        "cross-batch rewrites must match the single-batch results; \
+         buffer:\n{text:?}"
+    );
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no error spam: {}",
+        errors_buffer(&s)
+    );
+}
+
+#[test]
+fn r4f2_alt_screen_style_desync_resynced_on_exit_and_finish() {
+    // Round-4 finding 2, Lua twin (the in-crate Rust units vanish
+    // with an ansi.rs swap; this one bites): a consumer mirroring
+    // style from the event stream must be resynchronized when SGR
+    // changes were suppressed inside the alternate screen — on
+    // ordinary exit AND at finish(). The finish() half is the
+    // internal-comparison trap: the suppressed reset makes the
+    // PARSER's style default, so only the emitted-style comparison
+    // sees anything to balance.
+    let s = editor();
+    let (exit_resynced, finish_resynced): (bool, bool) = eval(
+        &s,
+        r#"
+        local function last_style(evs, style)
+            for _, ev in ipairs(evs) do
+                if ev.kind == "set_style" then style = ev.style end
+            end
+            return style
+        end
+        local function is_default(style)
+            return style.fg == "default" and style.bg == "default"
+                and not style.bold
+        end
+        -- Ordinary exit: red before enter, SGR reset inside
+        -- (suppressed), explicit CSI ?1049l.
+        local p = pmacs.ansi.parser()
+        local evs = p:feed("\27[31mred\27[?1049h\27[0m\27[?1049l")
+        local a = is_default(last_style(evs, {}))
+        -- finish(): the same drift, closed by stream end instead.
+        local q = pmacs.ansi.parser()
+        local style = last_style(q:feed("\27[31mred\27[?1049h\27[0m"), {})
+        local b = is_default(last_style(q:finish(), style))
+        return a, b
+        "#,
+    );
+    assert!(
+        exit_resynced,
+        "ordinary alt-screen exit must resync the suppressed SGR reset"
+    );
+    assert!(
+        finish_resynced,
+        "finish must emit the default SetStyle the CONSUMER needs even \
+         though the internal style is already default"
+    );
+}

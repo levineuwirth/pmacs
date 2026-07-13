@@ -287,6 +287,15 @@ pub struct AnsiParser {
     /// Current SGR state. Mutated by SGR parameters; emitted as
     /// [`AnsiEvent::SetStyle`] when it changes.
     current_style: Style,
+    /// The style the CONSUMER last received via an emitted
+    /// `SetStyle` event. Outside alternate-screen this always equals
+    /// `current_style` (every SGR emits immediately); inside, SGR
+    /// events are suppressed while `current_style` keeps advancing,
+    /// so the two drift apart — and alternate-screen exit (ordinary
+    /// or via [`Self::finish`]) must resynchronize the consumer from
+    /// this field, not from an internal comparison against default
+    /// (PR #113 round-4 finding 2).
+    emitted_style: Style,
     /// Byte count consumed in the current Ignore state. Reset to
     /// zero on every entry to an Ignore state: this is a per-state
     /// budget, not a global counter, so each malformed sequence
@@ -339,6 +348,7 @@ impl AnsiParser {
         Self {
             state: State::Ground,
             current_style: Style::default(),
+            emitted_style: Style::default(),
             ignore_byte_count: 0,
             text_run: String::new(),
             utf8_buf: Vec::new(),
@@ -352,7 +362,9 @@ impl AnsiParser {
 
     /// Reset the parser to ground state. The running style is *not*
     /// reset --- callers that want a clean style should pair this
-    /// with their own `SetStyle(Style::default())`.
+    /// with their own `SetStyle(Style::default())`. Neither is
+    /// `emitted_style`: a mid-stream reset changes nothing about
+    /// what the consumer has already been shown.
     pub fn reset(&mut self) {
         self.state = State::Ground;
         self.ignore_byte_count = 0;
@@ -409,9 +421,12 @@ impl AnsiParser {
     /// round-2 finding 4; round-3 finding 2). The reset is
     /// OBSERVABLE: consumers that mirror parser state from the event
     /// stream receive balancing events — an `AlternateScreenExit`
-    /// for an unclosed enter, a default `SetStyle` when the running
-    /// style was non-default — so they unwind without out-of-band
-    /// knowledge. Idempotent once drained. First consumer:
+    /// for an unclosed enter, a default `SetStyle` whenever the
+    /// style the consumer LAST RECEIVED was non-default. The
+    /// comparison is against `emitted_style`, not `current_style`:
+    /// an SGR reset inside the alternate screen leaves the internal
+    /// style default while the consumer still shows pre-enter color
+    /// (round-4 finding 2). Idempotent once drained. First consumer:
     /// compile-mode's terminal-event path (Q#CM4).
     pub fn finish(&mut self) -> Vec<AnsiEvent> {
         let mut events = Vec::new();
@@ -430,10 +445,11 @@ impl AnsiParser {
             self.alt_screen_active = false;
             events.push(AnsiEvent::AlternateScreenExit);
         }
-        if self.current_style != Style::default() {
-            self.current_style = Style::default();
+        if self.emitted_style != Style::default() {
             events.push(AnsiEvent::SetStyle(Style::default()));
         }
+        self.current_style = Style::default();
+        self.emitted_style = Style::default();
         self.reset();
         events
     }
@@ -523,6 +539,7 @@ impl AnsiParser {
         if self.alt_screen_active {
             return;
         }
+        self.emitted_style = self.current_style;
         events.push(AnsiEvent::SetStyle(self.current_style));
     }
 
@@ -875,6 +892,15 @@ impl AnsiParser {
                         } else if !set && self.alt_screen_active {
                             self.alt_screen_active = false;
                             events.push(AnsiEvent::AlternateScreenExit);
+                            // SGR changes inside the alternate
+                            // screen advanced `current_style` while
+                            // their events were suppressed; the
+                            // consumer still holds the pre-enter
+                            // style. Resynchronize the effective
+                            // style on exit (round-4 finding 2).
+                            if self.current_style != self.emitted_style {
+                                self.emit_set_style(events);
+                            }
                         }
                     }
                 }
@@ -1889,6 +1915,84 @@ mod tests {
             consumer_style,
             Style::default(),
             "finish must reset the running style observably"
+        );
+    }
+
+    /// Consumer mirror for the round-4 alt-screen style-desync
+    /// tests: alt flag + last received style, driven purely by
+    /// emitted events.
+    fn mirror(evs: &[AnsiEvent], alt: &mut bool, style: &mut Style) {
+        for ev in evs {
+            match ev {
+                AnsiEvent::AlternateScreenEnter => *alt = true,
+                AnsiEvent::AlternateScreenExit => *alt = false,
+                AnsiEvent::SetStyle(s) => *style = *s,
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn alt_screen_exit_resyncs_suppressed_style_changes() {
+        // SGR events are suppressed inside the alternate screen
+        // while `current_style` keeps advancing; an ordinary exit
+        // must resynchronize the consumer's effective style (PR #113
+        // round-4 finding 2). Both drift directions: a reset the
+        // consumer never saw, and a color it never saw.
+        let mut p = AnsiParser::new();
+        let mut alt = false;
+        let mut style = Style::default();
+        let evs = p.feed(b"\x1b[31mred\x1b[?1049h\x1b[0m\x1b[?1049l");
+        mirror(&evs, &mut alt, &mut style);
+        assert!(!alt, "exit observed");
+        assert_eq!(
+            style,
+            Style::default(),
+            "the suppressed SGR reset must reach the consumer on exit"
+        );
+
+        let mut p = AnsiParser::new();
+        let mut alt = false;
+        let mut style = Style::default();
+        let evs = p.feed(b"\x1b[?1049h\x1b[31m\x1b[?1049lafter");
+        mirror(&evs, &mut alt, &mut style);
+        assert_ne!(
+            style,
+            Style::default(),
+            "a color set inside the alt screen styles post-exit text"
+        );
+        // No drift → no spurious resync event.
+        let mut p = AnsiParser::new();
+        let evs = p.feed(b"\x1b[?1049h\x1b[?1049l");
+        assert!(
+            !evs.iter().any(|e| matches!(e, AnsiEvent::SetStyle(_))),
+            "style untouched inside alt screen emits no resync"
+        );
+    }
+
+    #[test]
+    fn finish_emits_default_style_when_reset_was_suppressed() {
+        // The round-4 finding-2 finish() scenario: consumer shows
+        // red from before the alt-screen enter; an SGR reset inside
+        // makes the INTERNAL style default, so a current_style
+        // comparison sees nothing to balance — but the consumer is
+        // still red. finish() must compare against what was last
+        // EMITTED.
+        let mut p = AnsiParser::new();
+        let mut alt = false;
+        let mut style = Style::default();
+        let evs = p.feed(b"\x1b[31mred\x1b[?1049h\x1b[0m");
+        mirror(&evs, &mut alt, &mut style);
+        assert!(alt, "enter observed");
+        assert_ne!(style, Style::default(), "consumer is red pre-finish");
+        let evs = p.finish();
+        mirror(&evs, &mut alt, &mut style);
+        assert!(!alt, "finish balances the enter");
+        assert_eq!(
+            style,
+            Style::default(),
+            "finish must emit the default SetStyle the consumer needs \
+             even though the internal style is already default"
         );
     }
 }

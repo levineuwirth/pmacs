@@ -1,7 +1,29 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 9 — 2026-07-13. Status: implemented on branch
-`compile-mode` (PR #113); revisions 7–9 fold in PR rounds 1–3.**
+**Revision 10 — 2026-07-13. Status: implemented on branch
+`compile-mode` (PR #113); revisions 7–10 fold in PR rounds 1–4.**
+
+Revision 10 (PR #113 round 4, findings 1–2): CR rewrites are
+COLUMN-counted and newline-segmented, not byte-counted — each
+newline-free segment of a text event consumes one existing codepoint
+per incoming codepoint (codepoints approximate columns; double-width
+and combining characters count as one, the documented stance), and
+LF is not an overwrite column: a newline arriving mid-line drops the
+cursor to a fresh line and the stale remainder of the current line
+survives in place (terminal semantics). Pre-fix, `abcdef\rX\n` wrote
+`X\n` over `ab` — splitting the line and leaving `cdef` as a ghost
+line the parser saw again at EOF — and `abc\ré` ate two ASCII
+columns because é is two bytes (bites: single-batch, split-feed with
+a split codepoint, and a CRDT twin — the segmented renderer makes
+several byte-native edits per event, each on codepoint boundaries).
+The ANSI parser now tracks the style the consumer LAST RECEIVED
+(`emitted_style`): SGR changes inside the alternate screen advance
+the internal style while their events are suppressed, so an ordinary
+`?1049l` exit resynchronizes the effective style, and `finish()`
+balances against the emitted style rather than the internal one — a
+suppressed SGR reset inside the alt screen no longer strands the
+consumer on stale pre-enter color (consumer-mirror units + a Lua
+twin that bites).
 
 Revision 9 (PR #113 round 3, findings 1–3): the CR/backspace
 renderer is UTF-8-safe — overwrites consume WHOLE existing
@@ -447,9 +469,16 @@ No protocol change, no frontend change.
    rather than continuing a pre-EOF escape, staying suppressed, or
    inheriting stale color. The reset is OBSERVABLE (Revision 9):
    balancing events — `AlternateScreenExit` for an unclosed enter, a
-   default `SetStyle` for a non-default running style — let
-   consumers that mirror parser state unwind from the event stream
-   alone. Compile-mode calls it once at the terminal event, before
+   default `SetStyle` — let consumers that mirror parser state
+   unwind from the event stream alone. The balance point is the
+   style the consumer LAST RECEIVED, not the internal style
+   (Revision 10, `emitted_style`): SGR changes inside the alternate
+   screen advance `current_style` while their events are suppressed,
+   so a suppressed reset would otherwise strand the consumer on
+   pre-enter color with nothing to compare unequal. The same field
+   drives an ordinary `?1049l` exit, which resynchronizes the
+   effective style whenever suppressed SGR changes drifted it.
+   Compile-mode calls `finish()` once at the terminal event, before
    finalizing the pending line.
 
 ## Decisions
@@ -493,15 +522,25 @@ invoke time, so commands/runtime load order stays irrelevant for it.
   intra-line treatment so progress bars collapse. Alt-screen
   suppression comes free. One parser, one running style, one output
   position — coherent because the child delivers **one merged
-  stream** (Q#CM3). **UTF-8 safety (Revision 9):** overwrite ranges
-  are byte-counted but consume whole existing codepoints (the range
-  end aligns forward past continuation bytes) and each text event is
-  applied as ONE atomic replace, never split; backspace steps to the
-  previous codepoint boundary. `out_pos` stays on codepoint
-  boundaries by induction. A split on either side previously left
-  malformed bytes on the plain rope, and under CRDT made the
-  byte-native edit reject — aborting the pump after events_take had
-  already consumed the batch.
+  stream** (Q#CM3). **Overwrite semantics (Revision 9→10):**
+  overwrites are COLUMN-counted and newline-segmented — each
+  newline-free segment of a text event consumes one existing
+  codepoint per incoming codepoint (codepoints approximate columns;
+  double-width and combining characters count as one, the documented
+  stance), LF is never an overwrite column (a mid-line newline
+  appends past the surviving stale remainder — terminal semantics —
+  instead of being written INTO the line, which split it and left
+  the remainder as a ghost line), and backspace steps to the
+  previous codepoint boundary. Every buffer edit keeps both range
+  ends on codepoint boundaries — Revision 9's UTF-8 invariant, held
+  per-segment now rather than by one atomic replace: segments carry
+  complete scalars, so the rope is valid UTF-8 after every step and
+  the byte-native CRDT edit never rejects a range. `out_pos` stays
+  on codepoint boundaries by induction. History: pre-Revision-9
+  splits left malformed bytes and aborted the CRDT pump after
+  events_take had already consumed the batch; pre-Revision-10 the
+  byte count split lines (`abcdef\rX\n` → ghost `cdef` line) and ate
+  columns under multibyte overwrites (`abc\ré` → `éc`).
 - **External-edit resilience (Revision 4–6).** Generated-buffer keys
   round-trip, so honest frontend optimistic undo is not an escape from
   the local bindings; accepted replica ops also fire

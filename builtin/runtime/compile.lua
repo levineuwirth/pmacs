@@ -358,37 +358,90 @@ local function is_utf8_continuation(b)
   return b >= 0x80 and b < 0xC0
 end
 
+-- Codepoint count of `s` (lead bytes only; `s` always holds complete
+-- scalars — parser text events never carry a partial sequence).
+local function count_codepoints(s)
+  local n = 0
+  for i = 1, #s do
+    if not is_utf8_continuation(s:byte(i)) then n = n + 1 end
+  end
+  return n
+end
+
+-- Byte length of the first `n` codepoints of `s`, clamped to #s.
+local function codepoint_prefix_bytes(s, n)
+  local len = #s
+  local i = 0
+  local seen = 0
+  while i < len and seen < n do
+    i = i + 1
+    while i < len and is_utf8_continuation(s:byte(i + 1)) do
+      i = i + 1
+    end
+    seen = seen + 1
+  end
+  return i
+end
+
 -- Append `text` at the tracked output position with overwrite
 -- semantics (CR progress bars rewrite the current line in place).
 --
--- UTF-8 safety (PR #113 round-3 finding 1): overwrite ranges are
--- byte-counted but must consume WHOLE existing codepoints — the
--- range end is aligned forward past continuation bytes — and the
--- incoming text event is applied as ONE atomic replace, never split
--- (parser text events carry only complete scalars). Splitting either
--- side left malformed bytes on the plain rope and made the
--- byte-native CRDT edit reject the range, aborting the pump
--- mid-batch after its events were already consumed. `out_pos` stays
--- on codepoint boundaries by induction: it moves to end-of-write,
--- line starts (after \n), or a boundary-aligned backspace target.
+-- Overwrites are COLUMN-counted and newline-segmented (PR #113
+-- round-4 finding 1; codepoints approximate columns — double-width
+-- and combining characters count as one, the framing's documented
+-- stance). Each newline-free segment consumes one existing codepoint
+-- per incoming codepoint — `abc\ré` yields `ébc`, never the
+-- byte-counted `éc` — and LF is NOT an overwrite column: a newline
+-- arriving mid-line drops the cursor to a fresh line and the stale
+-- remainder of the current line survives in place (terminal
+-- semantics), where the byte-counted overwrite wrote `X\n` INTO the
+-- line, splitting it and leaving the remainder as a ghost line the
+-- parser saw again at EOF.
+--
+-- UTF-8 safety (round-3 finding 1) is per-edit: every segment holds
+-- complete scalars (the parser never splits one, and \n is ASCII)
+-- and every consumed range covers whole existing codepoints, so the
+-- rope is valid UTF-8 after each step and the byte-native CRDT edit
+-- never rejects a range. `out_pos` stays on codepoint boundaries by
+-- induction: it moves to end-of-segment, line starts (after \n), or
+-- a boundary-aligned backspace target.
 local function emit_text(slot, text)
   if #text == 0 then return end
   local buf = slot.buf
-  local len = buf:len()
-  local pos = math.min(slot.out_pos, len)
-  -- The current line's remainder — the only bytes an overwrite may
-  -- touch (no \n exists past out_pos).
-  local tail = buf:slice(pos, len)
-  local overwrite = math.min(#text, #tail)
-  -- Align the overwrite end forward to a codepoint boundary of the
-  -- EXISTING content: replacing 1 byte of a 2-byte é must consume
-  -- both of its bytes (é and X both occupy one terminal column).
-  while overwrite < #tail and is_utf8_continuation(tail:byte(overwrite + 1)) do
-    overwrite = overwrite + 1
+  local idx = 1
+  while idx <= #text do
+    local len = buf:len()
+    local pos = math.min(slot.out_pos, len)
+    if pos >= len then
+      -- Append fast path: nothing ahead to overwrite, so the whole
+      -- remainder (newlines included) lands as one edit.
+      local rest = text:sub(idx)
+      buf:insert(len, rest, { bypass_intercept = true })
+      slot.out_pos = len + #rest
+      add_style_span(slot, len, len + #rest)
+      return
+    end
+    local nl = text:find("\n", idx, true)
+    if nl == idx then
+      -- Newline while mid-line: cursor to a fresh line; the stale
+      -- remainder stays. The \n is appended past it, never written
+      -- over it.
+      buf:insert(len, "\n", { bypass_intercept = true })
+      slot.out_pos = len + 1
+      idx = idx + 1
+    else
+      local seg = text:sub(idx, (nl or #text + 1) - 1)
+      -- The current line's remainder — the only bytes an overwrite
+      -- may touch. No \n exists at or past out_pos: rewinds stay
+      -- within the final line and \n is only ever appended.
+      local tail = buf:slice(pos, len)
+      local ow = codepoint_prefix_bytes(tail, count_codepoints(seg))
+      buf:replace(pos, pos + ow, seg, { bypass_intercept = true })
+      slot.out_pos = pos + #seg
+      add_style_span(slot, pos, pos + #seg)
+      idx = idx + #seg
+    end
   end
-  buf:replace(pos, pos + overwrite, text, { bypass_intercept = true })
-  slot.out_pos = pos + #text
-  add_style_span(slot, pos, pos + #text)
 end
 
 -- Byte offset where the line containing `out_pos` starts. Scanned
