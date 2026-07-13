@@ -453,22 +453,38 @@ fn acc07_term_trapping_child_falls_to_sigkill() {
     );
 }
 
+/// Fixture: background a TERM-ignoring survivor; the leader exits
+/// only after the survivor's trap is INSTALLED (readiness file).
+/// Without the gate, a slow scheduler (macOS CI, observed) delivers
+/// the leader-exit group-TERM before the subshell's `trap` runs and
+/// kills the "survivor" — making these assertions vacuous. Mirrors
+/// the process.rs unit fixture.
+fn survivor_cmdline(dir: &Path, redirect: bool) -> (String, std::path::PathBuf) {
+    let pidfile = dir.join("pid");
+    let ready = dir.join("ready");
+    let redirect_part = if redirect {
+        "exec >/dev/null 2>&1; "
+    } else {
+        ""
+    };
+    let cmdline = format!(
+        "( trap '' TERM; : > {ready}; {redirect_part}sleep 30 ) & echo $! > {pid}; \
+         while [ ! -e {ready} ]; do sleep 0.01; done",
+        ready = ready.display(),
+        pid = pidfile.display(),
+    );
+    (cmdline, pidfile)
+}
+
 #[test]
 fn acc08_ledger_reaps_term_ignoring_redirected_survivor() {
     // The bite: the survivor ignores TERM and sheds its output, so
     // the terminal event arrives AND the readers finish — only the
     // liveness probe can catch it.
     let dir = tempfile::tempdir().unwrap();
-    let pidfile = dir.path().join("pid");
     let mut s = editor();
-    compile_run(
-        &s,
-        &format!(
-            "( trap '' TERM; exec >/dev/null 2>&1; sleep 30 ) & echo $! > {}",
-            pidfile.display()
-        ),
-        dir.path(),
-    );
+    let (cmdline, pidfile) = survivor_cmdline(dir.path(), true);
+    compile_run(&s, &cmdline, dir.path());
     assert!(
         pump_until(&mut s, 5_000, |s| compilation_text(s)
             .contains("exited with code 0")),
@@ -489,7 +505,8 @@ fn acc09_pipe_holding_survivor_bounded_tick_latency() {
     // at the grace bound instead of blocking ~2s.
     let dir = tempfile::tempdir().unwrap();
     let mut s = editor();
-    compile_run(&s, "( trap '' TERM; sleep 30 ) & echo started", dir.path());
+    let (cmdline, _pidfile) = survivor_cmdline(dir.path(), false);
+    compile_run(&s, &cmdline, dir.path());
     let stop = Instant::now() + Duration::from_secs(6);
     let mut max_tick = Duration::ZERO;
     let mut done = false;

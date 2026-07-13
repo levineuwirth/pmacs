@@ -2749,6 +2749,33 @@ mod tests {
             .is_ok_and(|o| o.status.success())
     }
 
+    /// Fixture: background a TERM-ignoring survivor and let the
+    /// leader exit only after the survivor's trap is INSTALLED
+    /// (readiness file). Without the gate, a slow scheduler (macOS
+    /// CI, observed) can deliver the leader-exit group-TERM before
+    /// the subshell's `trap` runs — killing the "survivor": flaky
+    /// red for tests that need it alive, vacuous green for tests
+    /// that assert its death. `redirect` sheds the survivor's
+    /// stdout/stderr (the acceptance-8 shape); without it the
+    /// survivor keeps fd1 (the acceptance-9 shape). Returns
+    /// (script, pidfile).
+    fn survivor_script(dir: &std::path::Path, redirect: bool) -> (String, std::path::PathBuf) {
+        let pidfile = dir.join("pid");
+        let ready = dir.join("ready");
+        let redirect_part = if redirect {
+            "exec >/dev/null 2>&1; "
+        } else {
+            ""
+        };
+        let script = format!(
+            "( trap '' TERM; : > {ready}; {redirect_part}sleep 30 ) & echo $! > {pid}; \
+             while [ ! -e {ready} ]; do sleep 0.01; done",
+            ready = ready.display(),
+            pid = pidfile.display(),
+        );
+        (script, pidfile)
+    }
+
     /// Poll `path` until it holds a parseable pid. Fixture scripts
     /// write descendant pids there.
     fn wait_pidfile(path: &std::path::Path) -> i32 {
@@ -2859,13 +2886,9 @@ mod tests {
         // terminal event arrives and the readers finish — only the
         // ledger's kill(-pgid, 0) probe can catch it.
         let dir = tempfile::tempdir().expect("tempdir");
-        let pidfile = dir.path().join("pid");
         let mut sup = ProcessSupervisor::new();
         sup.set_group_term_grace(Duration::from_millis(200));
-        let script = format!(
-            "( trap '' TERM; exec >/dev/null 2>&1; sleep 30 ) & echo $! > {}",
-            pidfile.display()
-        );
+        let (script, pidfile) = survivor_script(dir.path(), true);
         let id = sup
             .spawn(sh_group_spec("survivor", &script))
             .expect("spawn");
@@ -2938,13 +2961,9 @@ mod tests {
         // grace is long enough that the ledger cannot fire on its
         // own — only shutdown's force-kill can reap the survivor.
         let dir = tempfile::tempdir().expect("tempdir");
-        let pidfile = dir.path().join("pid");
         let mut sup = ProcessSupervisor::new();
         sup.set_group_term_grace(Duration::from_secs(30));
-        let script = format!(
-            "( trap '' TERM; exec >/dev/null 2>&1; sleep 30 ) & echo $! > {}",
-            pidfile.display()
-        );
+        let (script, pidfile) = survivor_script(dir.path(), true);
         let id = sup
             .spawn(sh_group_spec("survivor", &script))
             .expect("spawn");
@@ -3007,15 +3026,14 @@ mod tests {
         // TERM and KEEPS fd1, so the readers stay alive and the old
         // drain would block ~2s per EXIT_OUTPUT_DRAIN_TIMEOUT (and
         // then the join would hang). In-drain ledger enforcement
-        // SIGKILLs at the grace bound instead.
+        // SIGKILLs at the grace bound instead. Readiness-gated so an
+        // early leader-exit TERM can't reap the holder and let the
+        // bound hold vacuously.
+        let dir = tempfile::tempdir().expect("tempdir");
         let mut sup = ProcessSupervisor::new();
         sup.set_group_term_grace(Duration::from_millis(300));
-        let id = sup
-            .spawn(sh_group_spec(
-                "holder",
-                "( trap '' TERM; sleep 30 ) & echo started",
-            ))
-            .expect("spawn");
+        let (script, _pidfile) = survivor_script(dir.path(), false);
+        let id = sup.spawn(sh_group_spec("holder", &script)).expect("spawn");
         let stop = Instant::now() + Duration::from_secs(5);
         let mut max_tick = Duration::ZERO;
         let mut events = Vec::new();
