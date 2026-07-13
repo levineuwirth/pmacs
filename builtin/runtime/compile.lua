@@ -92,6 +92,10 @@ pmacs.compile.rules = {
 local function rule_is_valid(rule)
   if type(rule) ~= "table" then return false end
   if type(rule.pattern) ~= "string" then return false end
+  -- Probe the pattern against the empty string so a malformed Lua
+  -- pattern is caught (and counted in the status note) here at
+  -- validation time, not silently at match time.
+  if not pcall(string.match, "", rule.pattern) then return false end
   if type(rule.file) ~= "number" or rule.file < 1 then return false end
   if type(rule.line) ~= "number" or rule.line < 1 then return false end
   if rule.col ~= nil and (type(rule.col) ~= "number" or rule.col < 1) then return false end
@@ -321,9 +325,29 @@ local function emit_text(slot, text)
   add_style_span(slot, pos, pos + #text)
 end
 
--- The current unterminated line spans [parse_line_start, buf:len());
--- CR/BS/erase are confined to it by construction (lines are parsed
--- and left behind the moment their newline lands).
+-- Byte offset where the line containing `out_pos` starts. Scanned
+-- from the buffer (the REPL's `_current_line_start` discipline) —
+-- NOT `parse_line_start`, which only advances once per batch: a CR
+-- arriving in the same batch as earlier completed lines must rewind
+-- to the start of the CURRENT line, not to the batch's first line
+-- (using the stale value let a progress line overwrite everything
+-- emitted earlier in the batch).
+local function current_line_start(slot)
+  local pos = math.min(slot.out_pos, slot.buf:len())
+  local prefix = slot.buf:slice(0, pos)
+  local start = 0
+  local search = 1
+  while true do
+    local idx = prefix:find("\n", search, true)
+    if not idx then return start end
+    start = idx
+    search = idx + 1
+  end
+end
+
+-- The current unterminated line runs from its scanned start to
+-- buf:len() — no newline ever exists past out_pos (output is
+-- append-only except CR/BS rewinds within the current line).
 local function apply_events(slot, events)
   local buf = slot.buf
   for _, ev in ipairs(events) do
@@ -333,9 +357,9 @@ local function apply_events(slot, events)
     elseif kind == "set_style" then
       slot.cur_style = ev.style
     elseif kind == "carriage_return" then
-      slot.out_pos = slot.parse_line_start
+      slot.out_pos = current_line_start(slot)
     elseif kind == "backspace" then
-      if slot.out_pos > slot.parse_line_start then
+      if slot.out_pos > current_line_start(slot) then
         slot.out_pos = slot.out_pos - 1
       end
     elseif kind == "erase_to_eol" then
@@ -344,11 +368,12 @@ local function apply_events(slot, events)
         buf:delete(slot.out_pos, len, { bypass_intercept = true })
       end
     elseif kind == "erase_line" then
+      local ls = current_line_start(slot)
       local len = buf:len()
-      if slot.parse_line_start < len then
-        buf:delete(slot.parse_line_start, len, { bypass_intercept = true })
+      if ls < len then
+        buf:delete(ls, len, { bypass_intercept = true })
       end
-      slot.out_pos = slot.parse_line_start
+      slot.out_pos = ls
     end
     -- alt-screen suppression happens inside the parser; titles and
     -- shell-integration markers are irrelevant to a compile buffer.
