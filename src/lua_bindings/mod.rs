@@ -12662,7 +12662,10 @@ mod tests {
             )
             .eval()
             .unwrap();
-        assert!(ok, "revision must be strictly monotonic across edit/undo/redo");
+        assert!(
+            ok,
+            "revision must be strictly monotonic across edit/undo/redo"
+        );
     }
 
     #[test]

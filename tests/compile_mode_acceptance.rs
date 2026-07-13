@@ -1,7 +1,7 @@
 //! Compile-mode acceptance (Arc 5 stage 1,
 //! docs/compile-mode-framing.md, items 1–33; item 34 lives as unit
 //! tests in src/process.rs, item 35 in
-//! tests/compile_mode_crdt_acceptance.rs).
+//! `tests/compile_mode_crdt_acceptance.rs`).
 //!
 //! Dispatch-driven: every keybinding claim is exercised through
 //! `dispatch_key` (never `pmacs.command.invoke`), per the standing
@@ -188,7 +188,7 @@ fn pid_alive(pid: i32) -> bool {
 }
 
 /// Errors getter marshalled to a comparable Rust shape (encoded as
-/// one line per entry — mlua tuples don't implement FromLua).
+/// one line per entry — mlua tuples don't implement `FromLua`).
 fn compile_errors(s: &EditorState) -> Vec<(String, i64, i64, Option<String>)> {
     let encoded: String = eval(
         s,
@@ -218,7 +218,7 @@ fn compile_errors(s: &EditorState) -> Vec<(String, i64, i64, Option<String>)> {
 }
 
 /// Rendered cells of the active window (copied from the
-/// m4_acceptance grid helper — cross-crate test code can't import).
+/// `m4_acceptance` grid helper — cross-crate test code can't import).
 fn render_active_window_to_grid(
     state: &mut EditorState,
     rows: u32,
@@ -617,7 +617,11 @@ fn acc14_malformed_rule_containers_fail_closed() {
         1,
         "built-in defaults still parse under a non-table container"
     );
-    assert!(errors_buffer(&s).is_empty(), "no error spam: {}", errors_buffer(&s));
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no error spam: {}",
+        errors_buffer(&s)
+    );
 
     // (b) an invalid-pattern entry is skipped; a later valid entry
     // still matches; one status note counts the skip.
@@ -644,7 +648,11 @@ fn acc14_malformed_rule_containers_fail_closed() {
         vec![("b.c".to_owned(), 3, 0, Some("error".to_owned()))],
         "the valid entry still matches after the malformed one"
     );
-    assert!(errors_buffer(&s).is_empty(), "no error spam: {}", errors_buffer(&s));
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no error spam: {}",
+        errors_buffer(&s)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +746,10 @@ fn acc17_chords_walk_compile_errors_across_files() {
     // C-x ` is the classic chord for the same dispatcher.
     ctrl(&mut s, 'x');
     press(&mut s, KeyCode::Char('`'));
-    assert!(active_buffer_name(&s).ends_with("two.c"), "C-x ` = error.next");
+    assert!(
+        active_buffer_name(&s).ends_with("two.c"),
+        "C-x ` = error.next"
+    );
 }
 
 #[test]
@@ -773,25 +784,24 @@ fn acc19_g_recompiles_and_clears_overlay_spans() {
         ),
         dir.path(),
     );
-    assert!(any_styled_cell(&render_active_window_to_grid(&mut s, 8, 60)));
+    assert!(any_styled_cell(&render_active_window_to_grid(
+        &mut s, 8, 60
+    )));
     assert_eq!(
         std::fs::read_to_string(&counter).unwrap().lines().count(),
         1
     );
-    // g re-runs the stored command. The rerun's output has no
-    // diagnostics, so any styling would be a stale span.
+    // g re-runs the stored command.
     press(&mut s, KeyCode::Char('g'));
     assert!(
         pump_until(&mut s, 10_000, |_| {
-            std::fs::read_to_string(&counter)
-                .map(|c| c.lines().count() == 2)
-                .unwrap_or(false)
+            std::fs::read_to_string(&counter).is_ok_and(|c| c.lines().count() == 2)
         }),
         "recompile must actually re-execute the command"
     );
-    // Wait, then override the fixture: the rerun emits the same
-    // diagnostic (stored command), so instead assert spans were
-    // cleared by checking the fresh run reached its own marker with
+    // The rerun executes the SAME stored command, so its output
+    // carries the same diagnostic; per-run reset is pinned by
+    // checking the fresh run reached its own marker with
     // exactly one diagnostic parsed (not accumulated).
     assert!(pump_until(&mut s, 10_000, |s| compilation_text(s)
         .contains("[compile exited")));
@@ -924,8 +934,11 @@ fn acc24_command_path_undo_after_completed_run_recovers_immediately() {
             dir.path().display().to_string()
         ),
     );
-    assert!(pump_until(&mut s, 10_000, |s| named_text(s, "*shell-command*")
-        .contains("[shell exited with code 0]")));
+    assert!(pump_until(&mut s, 10_000, |s| named_text(
+        s,
+        "*shell-command*"
+    )
+    .contains("[shell exited with code 0]")));
     // M-x buffer.undo: the command path rebinding cannot reach. No
     // pump event will ever arrive — recovery must come from the
     // buffer.after-edit subscription, synchronously.
@@ -938,7 +951,11 @@ fn acc24_command_path_undo_after_completed_run_recovers_immediately() {
         "desync marker must appear immediately (bite: fails when \
          recovery only runs at pump/anchor time); buffer:\n{text}"
     );
-    assert!(errors_buffer(&s).is_empty(), "clean *errors*: {}", errors_buffer(&s));
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "clean *errors*: {}",
+        errors_buffer(&s)
+    );
 }
 
 #[test]
@@ -986,7 +1003,11 @@ fn acc25a_no_hook_shrink_mid_stream_recovers_and_reanchors() {
         text.find(DESYNC).unwrap() < text.find("two").unwrap(),
         "streaming continued after the marker:\n{text}"
     );
-    assert!(errors_buffer(&s).is_empty(), "no spam: {}", errors_buffer(&s));
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no spam: {}",
+        errors_buffer(&s)
+    );
     // Pre-marker anchor dropped: RET on the old row reports.
     exec(&s, "pmacs.editor.goto_byte(0)");
     let target = first_row;
@@ -1101,8 +1122,7 @@ fn acc27_killed_buffer_terminates_run_and_recreates() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = editor();
     compile_run(&s, "echo alive; sleep 30", dir.path());
-    assert!(pump_until(&mut s, 5_000, |s| compilation_text(s)
-        .contains("\nalive\n")));
+    assert!(pump_until(&mut s, 5_000, |s| compilation_text(s).contains("\nalive\n")));
     exec(
         &s,
         r#"
@@ -1117,7 +1137,11 @@ fn acc27_killed_buffer_terminates_run_and_recreates() {
         pump_until(&mut s, 5_000, |s| process_count(s) == 0),
         "run terminated and forgotten after buffer death"
     );
-    assert!(errors_buffer(&s).is_empty(), "no spam: {}", errors_buffer(&s));
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no spam: {}",
+        errors_buffer(&s)
+    );
     // The next run recreates the buffer and completes.
     compile_and_finish(&mut s, "echo reborn", dir.path());
     assert!(compilation_text(&s).contains("reborn"));
@@ -1159,7 +1183,10 @@ fn acc28_grep_panel_is_a_locations_buffer() {
     assert!(pump_until(&mut s, 10_000, search_done), "search completes");
     assert_eq!(active_buffer_name(&s), "*search-results*");
     let text = named_text(&s, "*search-results*");
-    assert!(text.contains("f.txt:2:0:"), "structured match line:\n{text}");
+    assert!(
+        text.contains("f.txt:2:0:"),
+        "structured match line:\n{text}"
+    );
     // Read-only under dispatch.
     type_str(&mut s, "x");
     assert_eq!(named_text(&s, "*search-results*"), text, "read-only");
@@ -1236,14 +1263,21 @@ fn acc29_grep_kill_mid_search_is_safe_and_masking_is_prevented() {
          appending (not mask it); tail:\n…{}",
         &text[text.len().saturating_sub(400)..]
     );
-    assert!(errors_buffer(&s).is_empty(), "no spam: {}", errors_buffer(&s));
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no spam: {}",
+        errors_buffer(&s)
+    );
 
     // (b) killing the panel mid-search: no stale-handle writes, and
     // the next search recreates the buffer.
     let mut s = editor();
     search(&s, "zqxvbn_needle_77", dir.path());
-    assert!(pump_until(&mut s, 10_000, |s| named_text(s, "*search-results*")
-        .contains(":1:0:")));
+    assert!(pump_until(&mut s, 10_000, |s| named_text(
+        s,
+        "*search-results*"
+    )
+    .contains(":1:0:")));
     exec(
         &s,
         r#"
@@ -1256,7 +1290,11 @@ fn acc29_grep_kill_mid_search_is_safe_and_masking_is_prevented() {
     );
     // Drain whatever the worker still delivers.
     let _ = pump_until(&mut s, 1_000, |_| false);
-    assert!(errors_buffer(&s).is_empty(), "no spam: {}", errors_buffer(&s));
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no spam: {}",
+        errors_buffer(&s)
+    );
     search(&s, "zqxvbn_needle_77", dir.path());
     assert!(
         pump_until(&mut s, 15_000, |s| named_text(s, "*search-results*")
@@ -1280,8 +1318,11 @@ fn acc30_grep_root_retained_across_interactive_supersede() {
         ),
     );
     exec(&s, "pmacs.project.search('zqxvbn_needle_77')");
-    assert!(pump_until(&mut s, 10_000, |s| named_text(s, "*search-results*")
-        .contains("f.txt:2:0:")));
+    assert!(pump_until(&mut s, 10_000, |s| named_text(
+        s,
+        "*search-results*"
+    )
+    .contains("f.txt:2:0:")));
     // Second search issued from inside the pathless panel, no
     // opts.root: the panel's stored root must be reused (the "."
     // fallback would search the test process's cwd and find
@@ -1349,7 +1390,10 @@ fn acc32_q_restores_previous_buffer_from_all_three() {
     // *compilation*
     compile_and_finish(&mut s, "echo x", dir.path());
     press(&mut s, KeyCode::Char('q'));
-    assert!(active_buffer_name(&s).ends_with("home.txt"), "q from compile");
+    assert!(
+        active_buffer_name(&s).ends_with("home.txt"),
+        "q from compile"
+    );
     // *shell-command*
     exec(
         &s,
@@ -1358,15 +1402,21 @@ fn acc32_q_restores_previous_buffer_from_all_three() {
             dir.path().display().to_string()
         ),
     );
-    assert!(pump_until(&mut s, 10_000, |s| named_text(s, "*shell-command*")
-        .contains("[shell exited")));
+    assert!(pump_until(&mut s, 10_000, |s| named_text(
+        s,
+        "*shell-command*"
+    )
+    .contains("[shell exited")));
     press(&mut s, KeyCode::Char('q'));
     assert!(active_buffer_name(&s).ends_with("home.txt"), "q from shell");
     // *search-results*
     search(&s, "zqxvbn_needle_77", dir.path());
     assert!(pump_until(&mut s, 10_000, search_done));
     press(&mut s, KeyCode::Char('q'));
-    assert!(active_buffer_name(&s).ends_with("home.txt"), "q from search");
+    assert!(
+        active_buffer_name(&s).ends_with("home.txt"),
+        "q from search"
+    );
 }
 
 #[test]
@@ -1387,7 +1437,13 @@ fn acc33_round_trip_input_is_set_on_generated_buffers() {
             dir.path().display().to_string()
         ),
     );
-    assert!(s.core.borrow().active_buffer_round_trips(), "*shell-command*");
+    assert!(
+        s.core.borrow().active_buffer_round_trips(),
+        "*shell-command*"
+    );
     search(&s, "zqxvbn_needle_77", dir.path());
-    assert!(s.core.borrow().active_buffer_round_trips(), "*search-results*");
+    assert!(
+        s.core.borrow().active_buffer_round_trips(),
+        "*search-results*"
+    );
 }

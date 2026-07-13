@@ -220,7 +220,10 @@ fn compile_run_converges_and_replica_edit_triggers_recovery() {
     let src_text = pump_until_text(&mut source, Duration::from_secs(15), "source run", done);
     let obs_text = pump_until_text(&mut observer, Duration::from_secs(15), "observer run", done);
     assert_eq!(src_text, obs_text, "byte-identical convergence");
-    assert!(src_text.contains("x.c:1:1: error: boom"), "output replicated");
+    assert!(
+        src_text.contains("x.c:1:1: error: boom"),
+        "output replicated"
+    );
     assert!(src_text.starts_with("$ sh "), "header replicated");
 
     // Synthetic accepted replica edit to the generated buffer: the

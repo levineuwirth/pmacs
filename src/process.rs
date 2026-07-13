@@ -1447,7 +1447,12 @@ fn build_pipes_runtime(spec: &ProcessSpec, _id: ProcessId) -> Result<RuntimeHand
                 Arc::clone(&active_readers),
             )
         } else {
-            spawn_reader(byte_tx.clone(), Arc::clone(&cancel), out, ReaderKind::Stdout)
+            spawn_reader(
+                byte_tx.clone(),
+                Arc::clone(&cancel),
+                out,
+                ReaderKind::Stdout,
+            )
         });
     }
     if let Some(err) = stderr {
@@ -1871,10 +1876,7 @@ struct GroupDrainCtx {
     deadline: Instant,
 }
 
-fn final_drain_runtime(
-    rt: &RuntimeHandles,
-    group: Option<GroupDrainCtx>,
-) -> Vec<ProcessEventKind> {
+fn final_drain_runtime(rt: &RuntimeHandles, group: Option<GroupDrainCtx>) -> Vec<ProcessEventKind> {
     let deadline = Instant::now() + EXIT_OUTPUT_DRAIN_TIMEOUT;
     let mut out = Vec::new();
     // Group drains get tighter bounds than the plain byte-flush
@@ -2813,7 +2815,10 @@ mod tests {
         // Readiness echo: terminating before the trap is installed
         // would let plain SIGTERM win and vacuously pass.
         let id = sup
-            .spawn(sh_group_spec("trap-test", "trap '' TERM; echo ready; sleep 30"))
+            .spawn(sh_group_spec(
+                "trap-test",
+                "trap '' TERM; echo ready; sleep 30",
+            ))
             .expect("spawn");
         let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
             stdout_contains(evs, b"ready")
@@ -2849,7 +2854,9 @@ mod tests {
             "( trap '' TERM; exec >/dev/null 2>&1; sleep 30 ) & echo $! > {}",
             pidfile.display()
         );
-        let id = sup.spawn(sh_group_spec("survivor", &script)).expect("spawn");
+        let id = sup
+            .spawn(sh_group_spec("survivor", &script))
+            .expect("spawn");
         let events = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
         assert!(
             events
@@ -2882,7 +2889,10 @@ mod tests {
         let mut sup = ProcessSupervisor::new();
         sup.set_group_term_grace(Duration::from_millis(500));
         let id = sup
-            .spawn(sh_group_spec("re-term", "trap '' TERM; echo ready; sleep 30"))
+            .spawn(sh_group_spec(
+                "re-term",
+                "trap '' TERM; echo ready; sleep 30",
+            ))
             .expect("spawn");
         let _ = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {
             stdout_contains(evs, b"ready")
@@ -2923,7 +2933,9 @@ mod tests {
             "( trap '' TERM; exec >/dev/null 2>&1; sleep 30 ) & echo $! > {}",
             pidfile.display()
         );
-        let id = sup.spawn(sh_group_spec("survivor", &script)).expect("spawn");
+        let id = sup
+            .spawn(sh_group_spec("survivor", &script))
+            .expect("spawn");
         let _ = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
         let survivor = wait_pidfile(&pidfile);
         assert!(pid_alive(survivor), "survivor alive pre-shutdown");
@@ -3075,13 +3087,23 @@ mod tests {
         let mut spec = ProcessSpec::new("pty-null", "/bin/sh");
         spec.mode = ProcessMode::default_pty();
         spec.stdin = StdinMode::Null;
-        let err = sup.spawn(spec).expect_err("stdin=null must be rejected under pty");
-        assert!(err.contains("pipe mode"), "error points at pipe mode: {err}");
+        let err = sup
+            .spawn(spec)
+            .expect_err("stdin=null must be rejected under pty");
+        assert!(
+            err.contains("pipe mode"),
+            "error points at pipe mode: {err}"
+        );
 
         let mut spec = ProcessSpec::new("pty-group", "/bin/sh");
         spec.mode = ProcessMode::default_pty();
         spec.group = true;
-        let err = sup.spawn(spec).expect_err("group=true must be rejected under pty");
-        assert!(err.contains("pipe mode"), "error points at pipe mode: {err}");
+        let err = sup
+            .spawn(spec)
+            .expect_err("group=true must be rejected under pty");
+        assert!(
+            err.contains("pipe mode"),
+            "error points at pipe mode: {err}"
+        );
     }
 }
