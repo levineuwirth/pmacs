@@ -393,6 +393,26 @@ impl AnsiParser {
         events
     }
 
+    /// Stream-end finalization. The feed-boundary contract keeps an
+    /// incomplete UTF-8 sequence buffered because its trailing bytes
+    /// are expected in the next feed — but at process EOF there IS no
+    /// next feed, so the pending prefix can never complete. Emit
+    /// U+FFFD for it (the same posture `flush_text_run` takes when a
+    /// control byte interrupts a sequence) and flush the resulting
+    /// text run. Idempotent once drained. First consumer:
+    /// compile-mode's terminal-event path (Q#CM4).
+    pub fn finish(&mut self) -> Vec<AnsiEvent> {
+        let mut events = Vec::new();
+        self.flush_pending_utf8_as_replacement();
+        if !self.text_run.is_empty() && !self.alt_screen_active {
+            let run = std::mem::take(&mut self.text_run);
+            events.push(AnsiEvent::Text(run));
+        } else {
+            self.text_run.clear();
+        }
+        events
+    }
+
     fn feed_byte(&mut self, b: u8, events: &mut Vec<AnsiEvent>) {
         // ESC-anywhere rule: ECMA-48 §10.2 ("Cancel"). Aborts any
         // in-progress sequence and starts a fresh Escape state. The

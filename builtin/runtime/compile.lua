@@ -79,8 +79,10 @@ pmacs.command.define {
 -- `severity` is an override; nil falls back to keyword sniffing on
 -- the matched line. User-extensible from init.lua.
 pmacs.compile.rules = {
-  -- rustc/cargo arrow lines: "  --> src/foo.rs:12:4"
-  { pattern = "%-%->%s+([^:%s]+):(%d+):(%d+)", file = 1, line = 2, col = 3 },
+  -- rustc/cargo arrow lines: "  --> src/foo.rs:12:4". `[^:]+` (the
+  -- framing's spelling), NOT `[^:%s]+` — paths may contain spaces
+  -- (PR #113 round-1 finding 3).
+  { pattern = "%-%->%s+([^:]+):(%d+):(%d+)", file = 1, line = 2, col = 3 },
   -- gcc/clang/grep-format: "file:line:col:" (also matches most Unix tools)
   { pattern = "([^%s:][^:]*):(%d+):(%d+):", file = 1, line = 2, col = 3 },
   -- Python tracebacks: 'File "foo.py", line 12'
@@ -89,6 +91,13 @@ pmacs.compile.rules = {
   { pattern = "([^%s:][^:]*):(%d+):", file = 1, line = 2 },
 }
 
+-- A capture index must be a positive INTEGER (a fractional index
+-- silently reads a neighbouring capture via Lua table coercion —
+-- round-1 finding 4).
+local function is_capture_index(v)
+  return type(v) == "number" and v >= 1 and v == math.floor(v)
+end
+
 local function rule_is_valid(rule)
   if type(rule) ~= "table" then return false end
   if type(rule.pattern) ~= "string" then return false end
@@ -96,9 +105,9 @@ local function rule_is_valid(rule)
   -- pattern is caught (and counted in the status note) here at
   -- validation time, not silently at match time.
   if not pcall(string.match, "", rule.pattern) then return false end
-  if type(rule.file) ~= "number" or rule.file < 1 then return false end
-  if type(rule.line) ~= "number" or rule.line < 1 then return false end
-  if rule.col ~= nil and (type(rule.col) ~= "number" or rule.col < 1) then return false end
+  if not is_capture_index(rule.file) then return false end
+  if not is_capture_index(rule.line) then return false end
+  if rule.col ~= nil and not is_capture_index(rule.col) then return false end
   if rule.severity ~= nil and rule.severity ~= "error" and rule.severity ~= "warning" then
     return false
   end
@@ -109,7 +118,19 @@ end
 -- per entry (Q#CM4): a non-table container degrades to the built-in
 -- defaults; malformed entries are skipped; one status note per run
 -- counts the skips. Never raises — this feeds the per-frame pump.
-local BUILTIN_RULES = pmacs.compile.rules
+--
+-- The defaults are a private deep copy taken at load time: an alias
+-- of the public table would keep in-place user mutations live after
+-- the "using built-in defaults" degradation (round-1 finding 10).
+local BUILTIN_RULES = {}
+for i, rule in ipairs(pmacs.compile.rules) do
+  local copy = {}
+  for k, v in pairs(rule) do
+    copy[k] = v
+  end
+  BUILTIN_RULES[i] = copy
+end
+
 local function validated_rules()
   local rules = pmacs.compile.rules
   if type(rules) ~= "table" then
@@ -267,7 +288,11 @@ end
 local function resync(slot)
   local buf = slot.buf
   for _, e in ipairs(slot.errors) do
+    -- Both in-buffer anchors: the display row AND the public byte
+    -- anchor — pre-marker byte offsets are exactly as untrustworthy
+    -- as rows after an unknown edit (round-1 finding 7).
     e.row = nil
+    e.line_start_byte = nil
   end
   local len = buf:len()
   buf:insert(len, DESYNC_MARKER, { bypass_intercept = true })
@@ -389,18 +414,33 @@ local SEVERITY_STYLE = {
   warning = { fg = 3 }, -- indexed yellow
 }
 
+-- A stored coordinate must be a finite integer ≥ 1: `%d+` happily
+-- captures digit runs whose tonumber is astronomically large or
+-- math.huge, and an unbounded value would drive the cursor walk
+-- loops effectively forever (round-1 finding 1). The cursor walk
+-- also clamps independently — belt and braces.
+local function valid_coordinate(n)
+  return n ~= nil and n >= 1 and n < math.huge and n == math.floor(n)
+end
+
 local function parse_line(slot, line, abs_start)
   if not slot.parse_errors then return end
   for _, rule in ipairs(slot.rules) do
-    local ok, c1, c2, c3 = pcall(string.match, line, rule.pattern)
-    if ok and c1 then
-      local caps = { c1, c2, c3 }
+    -- Capture EVERYTHING the pattern produced: validation accepts
+    -- any positive integer index, so truncating at three silently
+    -- misread four-capture rules (round-1 finding 4).
+    local caps = { pcall(string.match, line, rule.pattern) }
+    local ok = table.remove(caps, 1)
+    if ok and caps[1] then
       local file = caps[rule.file]
       local lnum = tonumber(caps[rule.line])
       local cnum = rule.col and tonumber(caps[rule.col]) or nil
-      -- 1-based contract; below-1 captures fail closed (a raw -1
-      -- would walk the cursor loops to a silent (0,0) landing).
-      if type(file) == "string" and lnum and lnum >= 1 and (cnum == nil or cnum >= 1) then
+      -- 1-based contract; below-1, non-integral, and non-finite
+      -- captures fail closed. A rule that NAMES a column capture the
+      -- match didn't produce also fails closed (silently storing
+      -- column 0 would misreport the location).
+      local col_ok = (rule.col == nil and cnum == nil) or valid_coordinate(cnum)
+      if type(file) == "string" and valid_coordinate(lnum) and col_ok then
         local severity = rule.severity or sniff_severity(line)
         slot.errors[#slot.errors + 1] = {
           file = file,
@@ -454,6 +494,19 @@ local function project_root_of_active()
   return nil
 end
 
+-- The daemon's actual working directory: the last-resort cwd when
+-- there is no explicit opt and no detectable project. Resolving it
+-- (rather than leaving nil and printing "(inherited)") gives the
+-- header a real path and relative error files an explicit base
+-- (round-1 finding 8).
+local function daemon_working_directory()
+  local ok, id = pcall(pmacs.instance.identity)
+  if ok and type(id) == "table" and type(id.working_directory) == "string" then
+    return id.working_directory
+  end
+  return nil
+end
+
 local function format_exit_marker(label, ev)
   if ev.kind == "exited" then
     return string.format("\n[%s exited with code %d]\n", label, ev.code or 0)
@@ -465,12 +518,32 @@ local function format_exit_marker(label, ev)
   return string.format("\n[%s exited]\n", label)
 end
 
--- Terminal event: finalize the pending unterminated line (a final
+-- Plain append at end, no overwrite/style tracking — markers and
+-- headers. LOCAL by design: a global here would let user config
+-- shadow a helper the terminal-event path depends on, and an error
+-- thrown from that shadow would consume the terminal event before
+-- pump cleanup/forget ran (round-1 finding 5).
+local function emit_text_raw(slot, text)
+  local buf = slot.buf
+  buf:insert(buf:len(), text, { bypass_intercept = true })
+  slot.out_pos = buf:len()
+  if slot.parse_line_start > slot.out_pos then
+    slot.parse_line_start = slot.out_pos
+  end
+end
+
+-- Terminal event: drain the parser's cross-feed state (an
+-- incomplete UTF-8 sequence at process EOF can never complete — the
+-- parser's finish() emits its replacement character, round-1
+-- finding 9), finalize the pending unterminated line (a final
 -- diagnostic emitted without a trailing newline is complete at EOF
 -- and must not be dropped — Q#CM4), then the exit marker.
 local function finish_run(slot, ev)
   if not check_rev(slot) then return end
   local buf = slot.buf
+  if slot.parser then
+    apply_events(slot, slot.parser:finish())
+  end
   local len = buf:len()
   if slot.parse_errors and slot.parse_line_start < len then
     parse_line(slot, buf:slice(slot.parse_line_start, len), slot.parse_line_start)
@@ -486,17 +559,6 @@ local function finish_run(slot, ev)
     pmacs.editor.set_status(string.format("%s: exited abnormally with code %d", slot.label, ev.code))
   else
     pmacs.editor.set_status(slot.label .. ": " .. ev.kind)
-  end
-end
-
--- Plain append at end, no overwrite/style tracking — markers and
--- headers.
-function emit_text_raw(slot, text)
-  local buf = slot.buf
-  buf:insert(buf:len(), text, { bypass_intercept = true })
-  slot.out_pos = buf:len()
-  if slot.parse_line_start > slot.out_pos then
-    slot.parse_line_start = slot.out_pos
   end
 end
 
@@ -564,7 +626,7 @@ local function start_run(slot, cmdline, opts)
   if cur and not pmacs.compile.is_generated_buffer(cur) then
     slot.prev = cur
   end
-  local cwd = opts.cwd or project_root_of_active()
+  local cwd = opts.cwd or project_root_of_active() or daemon_working_directory()
 
   -- Supersede (Q#CM9): terminate the old group and tombstone its
   -- pump entry; its terminal event still drives forget.
@@ -587,7 +649,9 @@ local function start_run(slot, cmdline, opts)
   local buf = slot.buf
   local len = buf:len()
   if len > 0 then buf:delete(0, len, { bypass_intercept = true }) end
-  local header = string.format("$ %s\nDirectory: %s\n\n", cmdline, cwd or "(inherited)")
+  -- The identity fallback should always resolve; "(unknown)" only
+  -- survives if the instance API itself failed.
+  local header = string.format("$ %s\nDirectory: %s\n\n", cmdline, cwd or "(unknown)")
   buf:insert(0, header, { bypass_intercept = true })
   slot.out_pos = buf:len()
   slot.parse_line_start = slot.out_pos
@@ -631,14 +695,32 @@ end
 
 -- Cursor walk via primitives so overlay observers see the motion
 -- (the lsp.lua visit idiom; 0-based line/col; the col walk shares
--- lsp.lua's inherited per-codepoint residual).
+-- lsp.lua's inherited per-codepoint residual). Both walks stop when
+-- movement stops moving — a diagnostic pointing past EOF/EOL clamps
+-- there instead of looping to its nominal coordinate (round-1
+-- finding 1; parse-time validation bounds the values, the clamp
+-- bounds the walk regardless).
 local function move_active_cursor_to(line, col)
   pmacs.editor.move_line_start()
   while pmacs.editor.cursor_line() > 0 do
     pmacs.editor.move_up()
   end
-  for _ = 1, line do pmacs.editor.move_down() end
-  for _ = 1, col do pmacs.editor.move_right() end
+  for _ = 1, line do
+    local before = pmacs.editor.cursor_line()
+    pmacs.editor.move_down()
+    if pmacs.editor.cursor_line() == before then break end -- EOF
+  end
+  local row = pmacs.editor.cursor_line()
+  for _ = 1, col do
+    local before = pmacs.editor.cursor()
+    pmacs.editor.move_right()
+    if pmacs.editor.cursor() == before then break end -- buffer end
+    if pmacs.editor.cursor_line() ~= row then
+      -- Ran off the line's end onto the next row: step back to EOL.
+      pmacs.editor.move_left()
+      break
+    end
+  end
 end
 
 local function resolve_error_path(slot, file)

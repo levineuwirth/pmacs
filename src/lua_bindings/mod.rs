@@ -3009,6 +3009,19 @@ impl UserData for AnsiParserLua {
             Ok(())
         });
 
+        // Stream-end finalization: flushes cross-feed state (an
+        // incomplete UTF-8 sequence becomes the replacement
+        // character). Compile-mode calls this once at the process's
+        // terminal event (Q#CM4; PR #113 round-1 finding 9).
+        methods.add_method("finish", |lua, this, ()| {
+            let events = this.0.borrow_mut().finish();
+            let out = lua.create_table_with_capacity(events.len(), 0)?;
+            for (i, ev) in events.iter().enumerate() {
+                out.set(i + 1, event_to_lua_table(lua, ev)?)?;
+            }
+            Ok(out)
+        });
+
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, _this, ()| {
             Ok("AnsiParser".to_string())
         });
@@ -6988,12 +7001,15 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
     // Compile-mode process shape (Q#CM3). Both options are
     // pipe-mode-only; the supervisor rejects them at spawn under PTY
     // so misconfiguration surfaces as a spawn error, not silence.
-    let stdin = match table
-        .get::<Option<String>>("stdin")
-        .ok()
-        .flatten()
-        .as_deref()
-    {
+    // Type errors are HARD errors, not silent defaults: `stdin =
+    // true` quietly becoming a piped stdin (hang) or `group =
+    // "true"` quietly becoming false (descendant leak) would undo
+    // exactly the guarantees these fields exist to carry (PR #113
+    // round-1 finding 6).
+    let stdin_raw: Option<String> = table.get("stdin").map_err(|_| {
+        mlua::Error::external("stdin must be the string \"piped\" or \"null\"".to_owned())
+    })?;
+    let stdin = match stdin_raw.as_deref() {
         None | Some("piped") => crate::process::StdinMode::Piped,
         Some("null") => crate::process::StdinMode::Null,
         Some(other) => {
@@ -7002,11 +7018,19 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
             )));
         }
     };
-    let group = table
-        .get::<Option<bool>>("group")
-        .ok()
-        .flatten()
-        .unwrap_or(false);
+    // Read as a raw Value: mlua's `bool` conversion applies Lua
+    // truthiness, so `group = "true"` would silently coerce instead
+    // of erroring.
+    let group = match table.get::<mlua::Value>("group") {
+        Ok(mlua::Value::Nil) | Err(_) => false,
+        Ok(mlua::Value::Boolean(b)) => b,
+        Ok(other) => {
+            return Err(mlua::Error::external(format!(
+                "group must be a boolean; got {}",
+                other.type_name()
+            )));
+        }
+    };
     Ok(ProcessSpec {
         label,
         command,

@@ -1447,3 +1447,278 @@ fn acc33_round_trip_input_is_set_on_generated_buffers() {
         "*search-results*"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PR #113 round 1 — bite tests (one per finding; each observed
+// failing against the pre-fix tree via scripts/bite)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r1f1_non_finite_coordinates_fail_closed() {
+    // A 400-digit line capture tonumbers to math.huge; pre-fix it
+    // was stored and any visit walked forever.
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    let digits = "9".repeat(400);
+    compile_and_finish(
+        &mut s,
+        &format!("printf 'h.c:{digits}:1: error: e\\n'"),
+        dir.path(),
+    );
+    assert!(
+        compile_errors(&s).is_empty(),
+        "a non-finite line coordinate must be discarded; got {:?}",
+        compile_errors(&s)
+    );
+}
+
+#[test]
+fn r1f1_beyond_eol_column_clamps_to_the_target_row() {
+    // Column past EOL: pre-fix the walk marched move_right across
+    // newlines and landed rows away from the diagnostic's line (and
+    // an astronomical value walked effectively forever).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("w.c"), "ab\ncd\nef\n").unwrap();
+    let mut s = editor();
+    compile_and_finish(&mut s, "printf 'w.c:1:500: error: e\\n'", dir.path());
+    press(&mut s, KeyCode::Char('n'));
+    press(&mut s, KeyCode::Enter);
+    assert!(active_buffer_name(&s).ends_with("w.c"));
+    let line: i64 = eval(&s, "return pmacs.editor.cursor_line()");
+    assert_eq!(
+        line, 0,
+        "the column walk must clamp at the target row's EOL, not run \
+         onto later rows"
+    );
+}
+
+#[test]
+fn r1f2_grep_command_path_undo_after_completed_search_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    grep_fixture(dir.path());
+    let mut s = editor();
+    search(&s, "zqxvbn_needle_77", dir.path());
+    assert!(pump_until(&mut s, 10_000, search_done), "search completes");
+    // M-x buffer.undo in the completed panel: no producer write or
+    // navigation may ever come — recovery must be immediate via the
+    // buffer.after-edit subscription.
+    alt(&mut s, 'x');
+    type_str(&mut s, "buffer.undo");
+    press(&mut s, KeyCode::Enter);
+    let text = named_text(&s, "*search-results*");
+    assert!(
+        text.contains(DESYNC),
+        "desync marker must appear immediately in the grep panel; \
+         buffer:\n{text}"
+    );
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "clean *errors*: {}",
+        errors_buffer(&s)
+    );
+}
+
+#[test]
+fn r1f3_rustc_arrow_paths_with_spaces_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "space.sh",
+        "printf '  --> /tmp/my dir/foo.rs:12:4\\n'\n",
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    assert_eq!(
+        compile_errors(&s),
+        vec![("/tmp/my dir/foo.rs".to_owned(), 11, 3, None)],
+        "the rustc rule must capture space-containing paths whole \
+         (pre-fix the two-part fallback recorded arrow junk at col 0)"
+    );
+}
+
+#[test]
+fn r1f4_capture_indexes_above_three_and_absent_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    // (a) a valid four-capture rule with col = 4 must store the
+    // fourth capture, not silently column 0.
+    let mut s = editor();
+    exec(
+        &s,
+        r#"
+        pmacs.compile.rules = {
+            { pattern = "(q%.c):(%d+):(x):(%d+)", file = 1, line = 2, col = 4 },
+        }
+        "#,
+    );
+    compile_and_finish(&mut s, "printf 'q.c:7:x:9 error\\n'", dir.path());
+    assert_eq!(
+        compile_errors(&s),
+        vec![("q.c".to_owned(), 6, 8, Some("error".to_owned()))],
+        "capture index 4 must be honored"
+    );
+
+    // (b) fractional indexes are malformed; (c) a rule that names a
+    // column its match didn't produce rejects the match.
+    let mut s = editor();
+    exec(
+        &s,
+        r#"
+        pmacs.compile.rules = {
+            { pattern = "(a%.c):(%d+):", file = 1, line = 2, col = 1.5 },
+            { pattern = "(r%.c):(%d+):?(%d*)", file = 1, line = 2, col = 3 },
+        }
+        "#,
+    );
+    compile_run(&s, "printf 'a.c:3: e\\nr.c:5: e\\n'", dir.path());
+    assert!(
+        status(&s).contains("skipped 1 malformed"),
+        "the fractional index is rejected at validation; got: {}",
+        status(&s)
+    );
+    assert!(pump_until(&mut s, 10_000, |s| compilation_text(s)
+        .contains("[compile exited")));
+    assert!(
+        compile_errors(&s).is_empty(),
+        "an empty column capture under a col-naming rule must reject \
+         the match, not store column 0; got {:?}",
+        compile_errors(&s)
+    );
+}
+
+#[test]
+fn r1f5_user_global_cannot_shadow_the_marker_helper() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    // A hostile (or merely colliding) user global with the helper's
+    // old name: pre-fix this replaced the module's function and its
+    // error consumed the terminal event before forget ran.
+    exec(&s, "_G.emit_text_raw = function() error('shadowed') end");
+    compile_and_finish(&mut s, "echo fine", dir.path());
+    assert!(
+        compilation_text(&s).contains("[compile exited with code 0]"),
+        "the exit marker must come from the module's local helper"
+    );
+    assert!(
+        errors_buffer(&s).is_empty(),
+        "no error spam: {}",
+        errors_buffer(&s)
+    );
+    assert!(
+        pump_until(&mut s, 3_000, |s| process_count(s) == 0),
+        "terminal-event cleanup (forget) must have run"
+    );
+}
+
+#[test]
+fn r1f6_wrong_spec_types_error_instead_of_defaulting() {
+    let s = editor();
+    let (ok, err): (bool, String) = eval(
+        &s,
+        r#"
+        local ok, err = pcall(pmacs.process.spawn,
+            { label = "t", command = "/bin/true", stdin = true })
+        return ok, tostring(err)
+        "#,
+    );
+    assert!(!ok, "stdin = true (boolean) must be a hard error");
+    assert!(err.contains("stdin must be"), "pointed message; got: {err}");
+    let (ok, err): (bool, String) = eval(
+        &s,
+        r#"
+        local ok, err = pcall(pmacs.process.spawn,
+            { label = "t", command = "/bin/true", group = "true" })
+        return ok, tostring(err)
+        "#,
+    );
+    assert!(!ok, "group = \"true\" (string) must be a hard error");
+    assert!(
+        err.contains("group must be a boolean"),
+        "pointed message; got: {err}"
+    );
+}
+
+#[test]
+fn r1f7_resync_invalidates_the_public_byte_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    compile_and_finish(&mut s, "printf 'a.c:1:1: error: e\\n'", dir.path());
+    let has_anchor: bool = eval(
+        &s,
+        "return pmacs.compile.errors()[1].line_start_byte ~= nil",
+    );
+    assert!(has_anchor, "pre-desync entries carry the byte anchor");
+    // Trigger the guard through the command path.
+    alt(&mut s, 'x');
+    type_str(&mut s, "buffer.undo");
+    press(&mut s, KeyCode::Enter);
+    assert!(compilation_text(&s).contains(DESYNC), "marker appended");
+    let has_anchor: bool = eval(
+        &s,
+        "return pmacs.compile.errors()[1].line_start_byte ~= nil",
+    );
+    assert!(
+        !has_anchor,
+        "total pre-marker anchor invalidation includes the public \
+         line_start_byte, not just the display row"
+    );
+}
+
+#[test]
+fn r1f8_inherited_cwd_resolves_to_the_daemon_working_directory() {
+    // Pathless scratch buffer, no opts.cwd, no project: the header
+    // must print the real working directory, and relative error
+    // paths must resolve against it explicitly.
+    let mut s = editor();
+    exec(&s, "pmacs.compile.run('echo hi')");
+    assert!(pump_until(&mut s, 10_000, |s| compilation_text(s)
+        .contains("[compile exited")));
+    let cwd = std::env::current_dir().unwrap().display().to_string();
+    let text = compilation_text(&s);
+    assert!(
+        text.contains(&format!("Directory: {cwd}")),
+        "the header must name the daemon's actual working directory; \
+         got:\n{text}"
+    );
+    assert!(
+        !text.contains("(inherited)") && !text.contains("(unknown)"),
+        "no placeholder when the identity API is available:\n{text}"
+    );
+}
+
+#[test]
+fn r1f9_truncated_utf8_at_eof_becomes_the_replacement_character() {
+    let dir = tempfile::tempdir().unwrap();
+    // \303 (0xC3) opens a two-byte sequence that never completes:
+    // the parser's cross-feed buffer holds it, and only the new
+    // stream-end finish() can flush it as U+FFFD.
+    let script = write_script(dir.path(), "trunc.sh", "printf 'abc\\303'\n");
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    let text = compilation_text(&s);
+    assert!(
+        text.contains("abc\u{FFFD}"),
+        "the truncated sequence must surface as U+FFFD, not vanish; \
+         buffer:\n{text}"
+    );
+}
+
+#[test]
+fn r1f10_builtin_default_rules_survive_in_place_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = editor();
+    // Corrupt an entry IN PLACE, then degrade the container: the
+    // "built-in defaults" fallback must be a true copy, not an alias
+    // of the mutated table.
+    exec(
+        &s,
+        "pmacs.compile.rules[2] = 'junk'; pmacs.compile.rules = 42",
+    );
+    compile_and_finish(&mut s, "printf 'foo.c:7:2: warning: w\\n'", dir.path());
+    assert_eq!(
+        compile_errors(&s),
+        vec![("foo.c".to_owned(), 6, 1, Some("warning".to_owned()))],
+        "the gcc three-part rule from the TRUE defaults must match \
+         (the aliased pre-fix table lost it and the two-part fallback \
+         stored column 0)"
+    );
+}

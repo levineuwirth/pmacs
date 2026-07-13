@@ -773,14 +773,44 @@ local function ensure_search_panel()
   return p
 end
 
+-- Immediate command-path recovery for the panel (the Q#CM2 trigger
+-- the compile slots already have): M-x/menu edits fire
+-- buffer.after-edit, and after a COMPLETED search no producer write
+-- or navigation may ever come — without this, an M-x buffer.undo
+-- left corrupted output unmarked indefinitely (PR #113 round-1
+-- finding 2). Hook edits don't re-fire the hook, so the resync
+-- marker can be appended from here safely.
+pmacs.hook.add("buffer.after-edit", function()
+  local cur = pmacs.window.buffer()
+  if cur and search_panel_alive() and cur == search_panel.buf then
+    search_panel_check_rev()
+  end
+end)
+
 -- Cursor walk via primitives (the lsp.lua visit idiom; 0-based).
+-- Movement-bounded like compile.lua's walk: a match pointing past
+-- EOF/EOL clamps instead of looping (the file may have changed on
+-- disk since the worker scanned it).
 local function search_move_cursor_to(line, col)
   pmacs.editor.move_line_start()
   while pmacs.editor.cursor_line() > 0 do
     pmacs.editor.move_up()
   end
-  for _ = 1, line do pmacs.editor.move_down() end
-  for _ = 1, col do pmacs.editor.move_right() end
+  for _ = 1, line do
+    local before = pmacs.editor.cursor_line()
+    pmacs.editor.move_down()
+    if pmacs.editor.cursor_line() == before then break end
+  end
+  local row = pmacs.editor.cursor_line()
+  for _ = 1, col do
+    local before = pmacs.editor.cursor()
+    pmacs.editor.move_right()
+    if pmacs.editor.cursor() == before then break end
+    if pmacs.editor.cursor_line() ~= row then
+      pmacs.editor.move_left()
+      break
+    end
+  end
 end
 
 local function visit_match(idx)

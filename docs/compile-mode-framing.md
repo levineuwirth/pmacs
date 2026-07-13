@@ -1,7 +1,30 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 6 — 2026-07-13. Status: awaiting approval; no branch, no
-implementation.**
+**Revision 7 — 2026-07-13. Status: implemented on branch
+`compile-mode` (PR #113); revision 7 folds in PR round 1.**
+
+Revision 7 (PR #113 round 1, findings 1–10): stored coordinates must
+be finite integers and both cursor walks are movement-bounded
+(clamping at EOF/EOL) — an astronomical `%d+` capture can no longer
+hang the editor; the grep panel gains the same immediate
+`buffer.after-edit` recovery trigger as the compile slots; the rustc
+rule uses the framing's `([^:]+)` spelling (paths with spaces);
+rule capture indexes must be positive integers, all pattern captures
+are honored (not just the first three), and a rule that names a
+column its match didn't produce rejects the match; the marker/header
+append helper is module-local (a user global could shadow it and its
+error consumed the terminal event before forget); `stdin`/`group`
+spec fields reject wrong Lua types instead of silently defaulting
+(strict boolean check — mlua truthiness would coerce `"true"`);
+resync also nils the public `line_start_byte` (total pre-marker
+anchor invalidation includes the byte anchor); the inherited cwd
+resolves through `pmacs.instance.identity().working_directory` so
+the header always names a real path; a new `parser:finish()`
+(additions #5) flushes a truncated UTF-8 sequence at process EOF as
+U+FFFD before the exit marker; the built-in default rules are a
+private deep copy, immune to in-place mutation of the public table.
+Eleven bite tests, each verified failing against the pre-fix tree
+via `scripts/bite`.
 
 Revision 6 (responding to review round 5, findings 1–4, plus the
 follow-up blocker audit): group-aware final drain now has an absolute
@@ -249,6 +272,11 @@ No protocol change, no frontend change.
    immediately (zero-race; strictly better here than exposing
    `close_stdin` post-spawn). `write_stdin` on such a process errors
    with the existing stdin-not-piped message. Rejected under PTY.
+   The Lua spec parsing for `stdin` and `group` treats wrong types
+   as HARD errors (Revision 7) — a silently-defaulted `stdin = true`
+   or `group = "true"` would undo exactly the guarantees the fields
+   carry; `group` is matched as a raw Value because mlua's bool
+   conversion applies Lua truthiness.
 2. **`group = true`** (`ProcessSpec`, pipes-only) — a full lifecycle
    policy, not just a spawn flag:
    - **Spawn**: `process_group(0)` — the child leads a fresh group.
@@ -369,6 +397,13 @@ No protocol change, no frontend change.
    same-length replaces, so undoing one changes content without
    changing length. Revision increments on every edit, undo, and
    redo.
+5. **`AnsiParser::finish()` + `parser:finish()` (Revision 7)** —
+   stream-end finalization: the feed-boundary contract deliberately
+   buffers an incomplete UTF-8 sequence for the next feed, but at
+   process EOF there is no next feed — `finish()` emits U+FFFD for
+   the pending prefix (the same posture an interrupting control byte
+   gets) and flushes the text run. Compile-mode calls it once at the
+   terminal event, before finalizing the pending line.
 
 ## Decisions
 
@@ -457,10 +492,12 @@ invoke time, so commands/runtime load order stays irrelevant for it.
      length: the CR-overwrite path emits same-length replaces, so an
      undone overwrite changes content while preserving length — a
      length guard provably misses it (round-3 finding 3). **Anchor
-     invalidation is total (Revision 5):** a revision mismatch
+     invalidation is total (Revisions 5/7):** a revision mismatch
      carries no edit range, and a same-length replace can remove or
      move newlines while every anchor stays in bounds — so ALL
-     **pre-marker** in-buffer anchors are dropped on any mismatch.
+     **pre-marker** in-buffer anchors are dropped on any mismatch,
+     the public `line_start_byte` included (a pre-marker byte offset
+     is exactly as untrustworthy as a row).
      Immediately after recovery, `n`/`p` report "no more errors" and
      RET reports "no error on this line" for the damaged pre-marker
      content. The marker establishes a fresh anchor epoch: diagnostic
@@ -511,8 +548,10 @@ invoke time, so commands/runtime load order stays irrelevant for it.
   `GROUP_TERM_GRACE + 2 * READER_SEND_POLL_INTERVAL`; eliminating it
   requires the deferred tick-driven drain.
 - `cwd`: explicit opt > `pmacs.project.detect(active buffer
-  path).root` > the daemon process cwd. The header line prints the
-  resolved cwd.
+  path).root` > `pmacs.instance.identity().working_directory`
+  (Revision 7 — actually *resolved*, so the header always names a
+  real path and relative error files get an explicit base rather
+  than an implicit pass-through).
 
 ### Q#CM4 — Error parsing: ordered Lua-pattern rules, parsed at newline time
 
@@ -539,26 +578,39 @@ invoke time, so commands/runtime load order stays irrelevant for it.
   a named deferral.
 - **Coordinate normalization:** rule captures follow compiler
   convention — **1-based line and column**; that is the public rule
-  contract. Captured values **below 1 fail closed** (Revision 4):
-  the match is discarded — `%d+` accepts `0`, and an unvalidated
-  `0 - 1 = -1` would walk the cursor loops to a silent (0,0)
-  landing. Valid stored entries are **0-based** (what
-  `move_active_cursor_to` consumes): `line - 1`; `col - 1` when
-  captured, else `0`. The Python rule has no column: `line - 1`,
-  col `0`. (Grep normalization is in Q#CM7.)
+  contract. Captured values **below 1, non-integral, or non-finite
+  fail closed** (Revisions 4/7): the match is discarded — `%d+`
+  accepts `0` (an unvalidated `0 - 1 = -1` would walk the cursor
+  loops to a silent (0,0) landing) and also accepts digit runs whose
+  `tonumber` is `math.huge` (an unbounded loop bound). The cursor
+  walks are independently **movement-bounded** (Revision 7): they
+  stop when motion stops moving, clamping at EOF, and the column
+  walk clamps at the target row's EOL instead of marching onto later
+  rows. Rule capture **indexes** must be positive integers; all
+  pattern captures are collected (an index above three reads the
+  real capture, not nil-as-column-0); a rule that names a column
+  capture its match didn't produce rejects the match. Valid stored
+  entries are **0-based** (what `move_active_cursor_to` consumes):
+  `line - 1`; `col - 1` when captured, else `0`. The Python rule has
+  no column: `line - 1`, col `0`. (Grep normalization is in Q#CM7.)
 - **Parse each line exactly once, when its `\n` lands** — CR/erase
   rewrites happen within the current *unterminated* line, so the
   content parsed at newline time is the line's final form. **At the
-  terminal event, the pending unterminated line (if any) is
-  finalized and parsed once before the exit marker is appended.**
+  terminal event: first `parser:finish()` drains the cross-feed
+  state (a truncated multibyte sequence at process EOF surfaces as
+  U+FFFD instead of vanishing — Revision 7, additions #5), then the
+  pending unterminated line (if any) is finalized and parsed once
+  before the exit marker is appended.**
 - **Rule-table robustness (fail-closed per entry):** on each run's
   first use the table is validated — non-table `pmacs.compile.rules`
-  degrades to the built-in defaults with one status note (the
-  pair.lua non-table-sets precedent); malformed entries are skipped
-  and pattern matching is pcall'd so an invalid Lua pattern skips
-  that entry too. One status note per run counts the skipped
-  entries; a later valid rule still matches; the per-frame pump
-  never raises.
+  degrades to **a private deep copy of the built-in defaults**
+  (Revision 7: an alias of the public table would keep in-place user
+  mutations live after the degradation); malformed entries are
+  skipped, invalid Lua patterns are caught (and counted) at
+  validation time via a probe match, and match-time pattern calls
+  stay pcall'd as belt-and-braces. One status note per run counts
+  the skipped entries; a later valid rule still matches; the
+  per-frame pump never raises.
 - Each match appends `{ file, line, col, severity,
   line_start_byte }` to the run's ordered error list (reset per
   run). Relative paths resolve against the run's cwd.
@@ -630,6 +682,11 @@ user puts it (an auto-scroll option is deferred).
   Checking only process-pump appends is insufficient: a no-hook edit to
   `*search-results*` followed by a worker batch would otherwise advance
   the expected revision and permanently mask the external edit.
+- **The panel has the same immediate `buffer.after-edit` recovery
+  trigger as the compile slots (Revision 7):** after a COMPLETED
+  search no producer write or navigation may ever come, so an `M-x
+  buffer.undo` in the panel must be marked synchronously, not on the
+  next guarded operation.
 - **Root retention across interactive supersedes (Revision 3):** the
   panel stores the root each search ran with. Resolution order:
   explicit `opts.root` > *if the active buffer is the results panel,
