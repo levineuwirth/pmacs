@@ -168,15 +168,17 @@ pmacs.lsp.config.dockerfile = pmacs.lsp.config.dockerfile or {
 }
 
 -- CMake via cmake-language-server (the Python server). It speaks LSP over
--- stdio with no transport flag and pulls configuration via
--- `workspace/configuration` under the `cmake` section (empty ⇒ defaults,
--- present not null — same rationale as gopls). It reads
--- `build/compile_commands.json` for the project model. Users populate
--- `settings.cmake` (buildDirectory, …) from init.lua.
+-- stdio with no transport flag. Unlike gopls/taplo it does NOT pull a
+-- `workspace/configuration` section: it reads `buildDirectory` from the
+-- `initialize` request's `initializationOptions`, and drives its project
+-- model off CMake's File API under `<buildDirectory>/.cmake/api/` (not
+-- `compile_commands.json`). So the config is an `init_options`, defaulting
+-- to the conventional out-of-source `build/`; users override
+-- `init_options.buildDirectory` from init.lua.
 pmacs.lsp.config.cmake = pmacs.lsp.config.cmake or {
   command = "cmake-language-server",
   args = {},
-  settings = { cmake = {} },
+  init_options = { buildDirectory = "build" },
 }
 
 -- TOML via taplo. `taplo lsp stdio` serves LSP over stdio. taplo

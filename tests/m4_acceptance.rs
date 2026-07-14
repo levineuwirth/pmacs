@@ -6154,6 +6154,11 @@ fn m4_filename_map_resolves_special_files() {
             out.plain_is_nil = f('notes.txt') == nil
             out.cfg_docker = pmacs.lsp.config.dockerfile and pmacs.lsp.config.dockerfile.command
             out.cfg_cmake = pmacs.lsp.config.cmake and pmacs.lsp.config.cmake.command
+            -- cmake-language-server reads buildDirectory from
+            -- initializationOptions, not workspace/configuration.
+            out.cmake_builddir = pmacs.lsp.config.cmake
+                and pmacs.lsp.config.cmake.init_options
+                and pmacs.lsp.config.cmake.init_options.buildDirectory
             out.has_make_cfg = pmacs.lsp.config.make ~= nil
             return out
             ",
@@ -6180,6 +6185,11 @@ fn m4_filename_map_resolves_special_files() {
     assert_eq!(
         probe.get::<String>("cfg_cmake").unwrap(),
         "cmake-language-server"
+    );
+    assert_eq!(
+        probe.get::<String>("cmake_builddir").unwrap(),
+        "build",
+        "cmake config passes buildDirectory via init_options (not a workspace/configuration section)"
     );
     assert!(
         !probe.get::<bool>("has_make_cfg").unwrap(),
