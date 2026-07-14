@@ -307,6 +307,9 @@ surface, chrome bold/italic/underline re-shaping).
 Housekeeping: F-016 `lua_bindings/mod.rs` split paused mid-way
 (tranches 0–2 landed, ~5–8 PRs left; see
 `docs/lua-bindings-split-framing.md`).
+Full cross-cutting index of the non-themes backlog (this list + every
+framing doc's Deferred section + a code sweep, themes excluded, with a
+prioritization north star): `docs/side-quest-backlog.md`.
 
 ## 7. Machine-local facts (desktop) that do NOT travel
 
