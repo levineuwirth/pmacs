@@ -1754,11 +1754,19 @@ pub struct InterceptHandleLua {
 pub struct StyleOverlayHandleLua {
     /// Shared style spans rendered by every attached overlay view.
     spans: crate::overlay::SharedBufferStyleSpans,
-    /// Buffer the translator was attached to.
+    /// Buffer the translator was attached to. Attachment is
+    /// validated against this (round-7 finding 1): a render view on
+    /// any OTHER buffer would show coordinates translated only by
+    /// edits to this one.
     buffer: BufferId,
     /// The buffer-attached translator's view id — retained so
     /// `dispose()` can detach it.
     translator: crate::buffer::ViewId,
+    /// Shared across handle clones (`FromLua` clones): set by
+    /// `dispose()`, checked by attachment — re-attaching a disposed
+    /// handle would resurrect rendering without its translator
+    /// (round-7 finding 1).
+    disposed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FromLua for StyleOverlayHandleLua {
@@ -1843,13 +1851,23 @@ impl UserData for StyleOverlayHandleLua {
         // repeated creation on a long-lived buffer. Safe to call
         // twice; safe after the buffer is gone.
         methods.add_method("dispose", |lua, this, ()| {
+            this.disposed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             let id = crate::overlay::style_store_identity(&this.spans);
+            // Window cleanup needs the editor core, which is
+            // optional app data...
             if let Some(core) = lua.app_data_ref::<SharedCore>() {
                 let mut core = core.borrow_mut();
                 for win in core.windows.values_mut() {
                     win.overlays.retain(|v| v.overlay_identity() != Some(id));
                 }
-                let registry = core.registry.clone();
+            }
+            // ...but the translator detach must not go through it:
+            // an install-only/headless host registers the registry
+            // WITHOUT a core, and returning success while the
+            // translator stays attached would leak per-edit work for
+            // the buffer's lifetime (round-7 finding 2).
+            if let Some(registry) = lua.app_data_ref::<SharedRegistry>() {
                 let mut r = registry.borrow_mut();
                 if let Ok(buf) = r.get_mut(this.buffer) {
                     buf.detach_view(this.translator);
@@ -2977,6 +2995,7 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                         spans: Arc::clone(&spans),
                         buffer: id.0,
                         translator,
+                        disposed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     };
                     attach_style_overlay_to_visible_windows(lua, id.0, &spans);
                     Ok(handle)
@@ -2990,6 +3009,26 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
             "attach_style_overlay",
             lua.create_function(
                 move |lua, (id, handle): (BufferIdLua, StyleOverlayHandleLua)| {
+                    // Round-7 finding 1: a disposed handle's
+                    // translator is gone — re-attaching would
+                    // resurrect rendering with frozen coordinates —
+                    // and a handle's translator follows edits to ITS
+                    // buffer only, so attaching to any other buffer
+                    // shows unmaintained spans.
+                    if handle.disposed.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(mlua::Error::external(
+                            "this style overlay handle was disposed; create a fresh \
+                             one with pmacs.buffer.add_style_overlay",
+                        ));
+                    }
+                    if id.0 != handle.buffer {
+                        return Err(mlua::Error::external(format!(
+                            "this style overlay handle belongs to buffer {:?}; its \
+                             spans are not translated by edits to {:?} — create an \
+                             overlay for that buffer with pmacs.buffer.add_style_overlay",
+                            handle.buffer, id.0
+                        )));
+                    }
                     attach_style_overlay_to_visible_windows(lua, id.0, &handle.spans);
                     Ok(())
                 },
@@ -14847,5 +14886,43 @@ mod tests {
             "expected uptime >= 10000 after rewinding `started`; got {}",
             id.uptime_secs
         );
+    }
+
+    #[test]
+    fn style_overlay_dispose_detaches_translator_without_a_core() {
+        // PR #113 round-7 finding 2: `fresh()` is the install-only /
+        // headless host shape — the registry is registered as app
+        // data, SharedCore is NOT. dispose() must detach the
+        // buffer-attached translator through the registry alone;
+        // pre-fix it returned success having done nothing, leaving
+        // the translator attached (and paying per edit) for the
+        // buffer's lifetime.
+        let (lua, reg, _cmds, _kms, _hks) = fresh();
+        lua.load(r#"_G.hbuf = pmacs.buffer.create("headless")"#)
+            .exec()
+            .unwrap();
+        let id = reg
+            .borrow()
+            .find_by_name("headless")
+            .expect("buffer exists");
+        let baseline = reg.borrow().get(id).unwrap().view_count();
+        lua.load(r"_G.hov = pmacs.buffer.add_style_overlay(_G.hbuf)")
+            .exec()
+            .unwrap();
+        assert_eq!(
+            reg.borrow().get(id).unwrap().view_count(),
+            baseline + 1,
+            "add_style_overlay attaches the translator"
+        );
+        lua.load("_G.hov:dispose()").exec().unwrap();
+        assert_eq!(
+            reg.borrow().get(id).unwrap().view_count(),
+            baseline,
+            "dispose must detach the translator with no core registered"
+        );
+        // Idempotent: a second dispose neither errors nor
+        // over-detaches.
+        lua.load("_G.hov:dispose()").exec().unwrap();
+        assert_eq!(reg.borrow().get(id).unwrap().view_count(), baseline);
     }
 }

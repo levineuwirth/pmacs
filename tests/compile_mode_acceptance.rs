@@ -2513,6 +2513,87 @@ fn r6f3_handle_dispose_detaches_translator_and_render_views() {
     assert_eq!(render_views, 0, "dispose removes the window render views");
 }
 
+// ---------------------------------------------------------------------------
+// PR #113 round 7 — bite tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r7f1_attach_validates_buffer_identity_and_disposed_state() {
+    // Round-7 finding 1: a handle's translator follows edits to ITS
+    // buffer only, so attaching the handle to another buffer showed
+    // spans nobody maintains; attaching after dispose() resurrected
+    // rendering without the translator. Both now fail clearly, with
+    // the message pointing at add_style_overlay.
+    let s = editor();
+    let (ok_cross, err_cross, ok_same, ok_after, err_after): (bool, String, bool, bool, String) =
+        eval(
+            &s,
+            r#"
+            local a = pmacs.buffer.create("*ov-a*")
+            local b = pmacs.buffer.create("*ov-b*")
+            local ov = pmacs.buffer.add_style_overlay(a)
+            local ok_cross, err_cross = pcall(pmacs.buffer.attach_style_overlay, b, ov)
+            local ok_same = pcall(pmacs.buffer.attach_style_overlay, a, ov)
+            ov:dispose()
+            local ok_after, err_after = pcall(pmacs.buffer.attach_style_overlay, a, ov)
+            return ok_cross, tostring(err_cross), ok_same, ok_after, tostring(err_after)
+            "#,
+        );
+    assert!(!ok_cross, "cross-buffer attachment must be rejected");
+    assert!(
+        err_cross.contains("belongs to buffer") && err_cross.contains("add_style_overlay"),
+        "pointed message naming the fix; got: {err_cross}"
+    );
+    assert!(ok_same, "same-buffer attachment stays valid");
+    assert!(!ok_after, "attachment after dispose must be rejected");
+    assert!(
+        err_after.contains("disposed") && err_after.contains("add_style_overlay"),
+        "pointed message naming the fix; got: {err_after}"
+    );
+}
+
+#[test]
+fn r7f2_dispose_detaches_translator_in_a_headless_host() {
+    // Round-7 finding 2, acceptance twin (the in-crate unit vanishes
+    // with a mod.rs swap; this one bites): an install-only host
+    // registers the buffer registry as app data but NO editor core.
+    // Pre-fix, dispose() did all cleanup inside the optional
+    // SharedCore branch — returning success while the translator
+    // stayed attached for the buffer's lifetime.
+    use pmacs::lua_bindings::{
+        SharedCommandRegistry, SharedHookRegistry, SharedKeymapStack, SharedMenuRegistry,
+        SharedRegistry, install,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let lua = mlua::Lua::new();
+    let reg: SharedRegistry = Rc::new(RefCell::new(pmacs::buffer_registry::BufferRegistry::new()));
+    let cmds: SharedCommandRegistry = Rc::new(RefCell::new(pmacs::command::CommandRegistry::new()));
+    let kms: SharedKeymapStack = Rc::new(RefCell::new(pmacs::keymap_stack::KeymapStack::new()));
+    let mns: SharedMenuRegistry = Rc::new(RefCell::new(pmacs::menu::MenuRegistry::new()));
+    let hks: SharedHookRegistry = Rc::new(RefCell::new(pmacs::hook::HookRegistry::new()));
+    install(&lua, &reg, &cmds, &kms, &mns, &hks).expect("install-only host");
+    lua.load(
+        r#"
+        _G.hbuf = pmacs.buffer.create("headless")
+        _G.hov = pmacs.buffer.add_style_overlay(_G.hbuf)
+        "#,
+    )
+    .exec()
+    .expect("create + overlay");
+    let id = reg
+        .borrow()
+        .find_by_name("headless")
+        .expect("buffer exists");
+    let with_translator = reg.borrow().get(id).unwrap().view_count();
+    lua.load("_G.hov:dispose()").exec().expect("dispose");
+    assert_eq!(
+        reg.borrow().get(id).unwrap().view_count(),
+        with_translator - 1,
+        "dispose must detach the translator without a core registered"
+    );
+}
+
 #[test]
 fn r5f3_tracked_line_start_matches_the_scan_across_transitions() {
     // Round-5 finding 3 is a performance fix — the per-CR/BS/erase

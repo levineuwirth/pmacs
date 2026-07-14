@@ -1,7 +1,24 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 12 — 2026-07-14. Status: implemented on branch
-`compile-mode` (PR #113); revisions 7–12 fold in PR rounds 1–6.**
+**Revision 13 — 2026-07-14. Status: implemented on branch
+`compile-mode` (PR #113); revisions 7–13 fold in PR rounds 1–7.**
+
+Revision 13 (PR #113 round 7, findings 1–2): overlay handle
+attachment is validated — `attach_style_overlay` rejects a handle
+whose recorded buffer differs from the target (its translator
+follows edits to ITS buffer only; a cross-buffer render view showed
+spans nobody maintains) and rejects a disposed handle (re-attachment
+resurrected rendering without the translator); the disposed state is
+shared across handle clones and both error messages point at
+`add_style_overlay` as the fix. And `dispose()` no longer performs
+the translator detach inside the optional `SharedCore` branch: the
+window cleanup uses the core when present, while the detach goes
+through the always-registered `SharedRegistry` — an
+install-only/headless host previously got success with the
+translator left attached (and paying per edit) for the buffer's
+lifetime. Bites: cross-buffer + dispose-then-attach acceptance, and
+a headless-host twin in the acceptance crate (the in-crate
+registry-only unit vanishes under a mod.rs swap; the twin bites).
 
 Revision 12 (PR #113 round 6, findings 1–3): render-view attachment
 is idempotent and split-complete. Overlays expose an
@@ -268,10 +285,14 @@ Everything below was verified by reading the code, not the roadmap.
   switches clear window overlays; `attach_style_overlay(buf,
   handle)` re-attaches the render view, idempotently per window via
   the store identity, and same-buffer splits copy the render view to
-  the new pane (Revision 12). The handle has `add`, `clear`,
-  `clear_before`, `spans`, and idempotent `dispose` (teardown of the
-  translator + every window render view; one handle per buffer
-  incarnation needs no disposal).
+  the new pane (Revision 12). Attachment validates the handle:
+  wrong-buffer and disposed handles are rejected with messages
+  pointing at `add_style_overlay` (Revision 13). The handle has
+  `add`, `clear`, `clear_before`, `spans`, and idempotent `dispose`
+  (teardown of the translator + every window render view; the
+  translator detach rides the always-registered registry, not the
+  optional editor core; one handle per buffer incarnation needs no
+  disposal).
 - **Buffer-switch hooks**: `buffer.after-switch` exists and fires on
   the ordinary switch paths (recentf subscribes,
   `builtin/runtime/recentf.lua:54`). **`pmacs.editor.jump_back` does
