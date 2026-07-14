@@ -1743,9 +1743,22 @@ pub struct InterceptHandleLua {
 
 #[derive(Clone)]
 /// Lua handle for a shared buffer-byte style overlay.
+///
+/// Lifetime contract (PR #113 round-6 finding 3): the buffer-attached
+/// translator lives until the buffer dies OR `dispose()` is called.
+/// One handle per buffer incarnation (the compile-mode and REPL
+/// discipline) needs no disposal — the buffer's death frees it;
+/// repeated `add_style_overlay` calls on a LONG-LIVED buffer must
+/// `dispose()` retired handles, or every edit keeps paying for every
+/// abandoned translator.
 pub struct StyleOverlayHandleLua {
     /// Shared style spans rendered by every attached overlay view.
     spans: crate::overlay::SharedBufferStyleSpans,
+    /// Buffer the translator was attached to.
+    buffer: BufferId,
+    /// The buffer-attached translator's view id — retained so
+    /// `dispose()` can detach it.
+    translator: crate::buffer::ViewId,
 }
 
 impl FromLua for StyleOverlayHandleLua {
@@ -1820,6 +1833,29 @@ impl UserData for StyleOverlayHandleLua {
                 out.set(i + 1, row)?;
             }
             Ok(out)
+        });
+
+        // Idempotent teardown (round-6 finding 3): detaches the
+        // buffer-attached translator (so later edits stop paying for
+        // it) and removes every window render view over this store.
+        // Without this, a retired handle's translator lived until
+        // the buffer died — permanent per-edit cost growth for
+        // repeated creation on a long-lived buffer. Safe to call
+        // twice; safe after the buffer is gone.
+        methods.add_method("dispose", |lua, this, ()| {
+            let id = crate::overlay::style_store_identity(&this.spans);
+            if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                let mut core = core.borrow_mut();
+                for win in core.windows.values_mut() {
+                    win.overlays.retain(|v| v.overlay_identity() != Some(id));
+                }
+                let registry = core.registry.clone();
+                let mut r = registry.borrow_mut();
+                if let Ok(buf) = r.get_mut(this.buffer) {
+                    buf.detach_view(this.translator);
+                }
+            }
+            Ok(())
         });
     }
 }
@@ -2922,9 +2958,6 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
             lua.create_function(
                 move |lua, id: BufferIdLua| -> mlua::Result<StyleOverlayHandleLua> {
                     let spans = Arc::new(Mutex::new(Vec::new()));
-                    let handle = StyleOverlayHandleLua {
-                        spans: Arc::clone(&spans),
-                    };
                     // Coordinate translation lives on the BUFFER
                     // (PR #113 round-5 finding 1): buffer-attached
                     // views see every edit exactly once — Lua bypass
@@ -2933,13 +2966,18 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                     // attachments below are render-only; per-window
                     // translation ran once per split and zero times
                     // hidden.
-                    {
+                    let translator = {
                         let mut r = reg.borrow_mut();
                         let buf = resolve_mut(&mut r, id.0)?;
                         buf.attach_view(Box::new(crate::overlay::BufferStyleSpanTranslator::new(
                             Arc::clone(&spans),
-                        )));
-                    }
+                        )))
+                    };
+                    let handle = StyleOverlayHandleLua {
+                        spans: Arc::clone(&spans),
+                        buffer: id.0,
+                        translator,
+                    };
                     attach_style_overlay_to_visible_windows(lua, id.0, &spans);
                     Ok(handle)
                 },
@@ -2987,7 +3025,12 @@ fn attach_style_overlay_to_visible_windows(
     let mut core = core.borrow_mut();
     for win in core.windows.values_mut() {
         if win.buffer_id == buffer_id {
-            win.push_overlay(Box::new(crate::overlay::BufferStyleOverlay::new(
+            // ensure_overlay: idempotent per window via the store's
+            // identity (round-6 finding 1) — repeated switches into
+            // the buffer stacked duplicate render views on passive
+            // panes, each cloning every span and rescanning the
+            // buffer per frame.
+            win.ensure_overlay(Box::new(crate::overlay::BufferStyleOverlay::new(
                 Arc::clone(spans),
             )));
         }

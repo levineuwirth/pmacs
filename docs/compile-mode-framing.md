@@ -1,7 +1,33 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 11 — 2026-07-13. Status: implemented on branch
-`compile-mode` (PR #113); revisions 7–11 fold in PR rounds 1–5.**
+**Revision 12 — 2026-07-14. Status: implemented on branch
+`compile-mode` (PR #113); revisions 7–12 fold in PR rounds 1–6.**
+
+Revision 12 (PR #113 round 6, findings 1–3): render-view attachment
+is idempotent and split-complete. Overlays expose an
+`overlay_identity` (the span store's allocation address);
+`Window::ensure_overlay` attaches a store-backed render view AT MOST
+once per window — pre-fix every switch into the buffer blindly
+pushed another copy onto EVERY matching window, so passive panes
+accumulated duplicates, each cloning all spans and rescanning the
+buffer per frame. A same-buffer split copies clonable overlays to
+the new pane via `clone_for_split` (splits fire no switch hook and
+started with an empty overlay list — the new compilation pane
+rendered unstyled). The translator ignores pure no-op edits
+(buffers deliberately broadcast them): pre-fix each interior no-op
+split the containing span into adjacent fragments — unbounded list
+growth, and a no-op at a UTF-8 continuation byte minted a
+mid-codepoint span boundary. And the overlay handle has a teardown
+path: `handle:dispose()` idempotently detaches the buffer-attached
+translator and removes every window render view over its store —
+the documented lifetime contract is one handle per buffer
+incarnation (compile/REPL need no disposal; repeated creation on a
+long-lived buffer must dispose retired handles or every edit keeps
+paying for abandoned translators). Bites: split+bounce per-cell
+acceptance (immediate post-split assert, before any switch could
+heal the pane), no-op fragmentation Lua twin, dispose Lua twin;
+units for genuine insertion, no-op ignore, split copy, and
+ensure-once.
 
 Revision 11 (PR #113 round 5, findings 1–3): style-span coordinate
 translation belongs to the BUFFER, not to views — a new
@@ -240,8 +266,12 @@ Everything below was verified by reading the code, not the roadmap.
   exactly once per edit — Revision 11) plus render-only window
   overlays on windows *currently showing* the buffer; buffer
   switches clear window overlays; `attach_style_overlay(buf,
-  handle)` re-attaches the render view. The handle has `add`,
-  `clear`, `clear_before`, `spans`.
+  handle)` re-attaches the render view, idempotently per window via
+  the store identity, and same-buffer splits copy the render view to
+  the new pane (Revision 12). The handle has `add`, `clear`,
+  `clear_before`, `spans`, and idempotent `dispose` (teardown of the
+  translator + every window render view; one handle per buffer
+  incarnation needs no disposal).
 - **Buffer-switch hooks**: `buffer.after-switch` exists and fires on
   the ordinary switch paths (recentf subscribes,
   `builtin/runtime/recentf.lua:54`). **`pmacs.editor.jump_back` does

@@ -2361,6 +2361,158 @@ fn r5f2_partial_rewrite_preserves_untouched_styling() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// PR #113 round 6 — bite tests
+// ---------------------------------------------------------------------------
+
+/// Count of `buffer_style_overlay` render views on the ACTIVE window.
+fn active_style_overlay_count(s: &EditorState) -> i64 {
+    eval(
+        s,
+        r#"
+        local n = 0
+        for _, k in ipairs(pmacs.window._overlay_kinds()) do
+            if k == "buffer_style_overlay" then n = n + 1 end
+        end
+        return n
+        "#,
+    )
+}
+
+#[test]
+fn r6f1_split_panes_stay_styled_with_one_attachment_each() {
+    use pmacs::cell::Color;
+    // A styled compilation split into two panes: the split copies
+    // the render view (splits fire no switch hook and pre-fix left
+    // the new pane unstyled), and repeated switches of one pane must
+    // not stack duplicates on the passive pane (pre-fix every
+    // re-attach blindly pushed to EVERY matching window — unbounded
+    // render cost). Round-6 finding 1.
+    let dir = tempfile::tempdir().unwrap();
+    let script = write_script(
+        dir.path(),
+        "red.sh",
+        "printf '\\033[31mhello\\033[0m world\\n'\n",
+    );
+    let mut s = editor();
+    compile_and_finish(&mut s, &format!("sh {script}"), dir.path());
+    exec(&s, "pmacs.window.split_horizontal()");
+    // IMMEDIATELY after the split — before any switch could heal it
+    // through the attach-to-all-matching-windows path — both panes
+    // must be styled with one attachment each. This is the split
+    // half of the finding: pre-fix the new pane had NO render view.
+    for pane in 0..2 {
+        assert_eq!(
+            active_style_overlay_count(&s),
+            1,
+            "pane {pane} post-split: exactly one render attachment"
+        );
+        let cells = render_active_window_to_grid(&mut s, 12, 60);
+        let row = styled_row(&cells, 12, 60, "hello world", 5);
+        assert!(
+            row.iter().all(|(_, fg)| *fg == Color::Indexed(1)),
+            "pane {pane} post-split: 'hello' renders red; got {row:?}"
+        );
+        exec(&s, "pmacs.window.focus_next()");
+    }
+    // Bounce the ACTIVE pane away and back three times; the passive
+    // pane keeps showing *compilation* through every re-attach. This
+    // is the accumulation half: pre-fix every re-attach blindly
+    // pushed another render view onto the passive pane.
+    exec(&s, r#"bounce_buf = pmacs.buffer.create("*bounce*")"#);
+    for _ in 0..3 {
+        exec(&s, "pmacs.window.switch_buffer(bounce_buf)");
+        exec(
+            &s,
+            r#"
+            for _, id in ipairs(pmacs.buffer.list()) do
+                if pmacs.describe.buffer(id).name == "*compilation*" then
+                    pmacs.window.switch_buffer(id)
+                end
+            end
+            "#,
+        );
+    }
+    for pane in 0..2 {
+        assert_eq!(
+            active_style_overlay_count(&s),
+            1,
+            "pane {pane} post-bounce: exactly one render attachment"
+        );
+        let cells = render_active_window_to_grid(&mut s, 12, 60);
+        let row = styled_row(&cells, 12, 60, "hello world", 5);
+        assert!(
+            row.iter().all(|(_, fg)| *fg == Color::Indexed(1)),
+            "pane {pane} post-bounce: 'hello' renders red; got {row:?}"
+        );
+        exec(&s, "pmacs.window.focus_next()");
+    }
+}
+
+#[test]
+fn r6f2_noop_edits_do_not_fragment_spans() {
+    // Buffers deliberately broadcast no-op edits; the translator
+    // must ignore them (round-6 finding 2). Pre-fix each interior
+    // no-op split the containing span into two adjacent fragments —
+    // unbounded growth, and position 3 (the é's continuation byte)
+    // minted a mid-codepoint span boundary.
+    let s = editor();
+    let (count, start, end): (i64, i64, i64) = eval(
+        &s,
+        r#"
+        local buf = pmacs.buffer.create("*noop-spans*")
+        local ov = pmacs.buffer.add_style_overlay(buf)
+        buf:insert(0, "ab\195\169def")
+        ov:add(0, 7, { fg = 1 })
+        for _, pos in ipairs({ 1, 2, 3, 4, 5 }) do
+            buf:insert(pos, "")
+            buf:delete(pos, pos)
+        end
+        local spans = ov:spans()
+        return #spans, spans[1].start, spans[1]["end"]
+        "#,
+    );
+    assert_eq!(
+        (count, start, end),
+        (1, 0, 7),
+        "no-op edits must neither fragment nor move spans"
+    );
+}
+
+#[test]
+fn r6f3_handle_dispose_detaches_translator_and_render_views() {
+    // Teardown path (round-6 finding 3): dispose() detaches the
+    // buffer-attached translator (later edits stop translating) and
+    // removes every window render view over the handle's store;
+    // calling it twice is safe. Pre-fix a dropped handle's
+    // translator lived until the buffer died.
+    let s = editor();
+    let (live, stale, render_views): (i64, i64, i64) = eval(
+        &s,
+        r#"
+        local buf = pmacs.buffer.create("*disposable*")
+        pmacs.window.switch_buffer(buf)
+        local ov = pmacs.buffer.add_style_overlay(buf)
+        buf:insert(0, "abcdef")
+        ov:add(0, 6, { fg = 1 })
+        buf:insert(0, "xx")          -- live translator: span shifts
+        local live = ov:spans()[1].start
+        ov:dispose()
+        buf:insert(0, "yy")          -- detached: span must NOT move
+        local stale = ov:spans()[1].start
+        ov:dispose()                 -- idempotent
+        local n = 0
+        for _, k in ipairs(pmacs.window._overlay_kinds()) do
+            if k == "buffer_style_overlay" then n = n + 1 end
+        end
+        return live, stale, n
+        "#,
+    );
+    assert_eq!(live, 2, "pre-dispose edits translate the span");
+    assert_eq!(stale, 2, "post-dispose edits must not reach the store");
+    assert_eq!(render_views, 0, "dispose removes the window render views");
+}
+
 #[test]
 fn r5f3_tracked_line_start_matches_the_scan_across_transitions() {
     // Round-5 finding 3 is a performance fix — the per-CR/BS/erase

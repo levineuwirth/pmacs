@@ -180,6 +180,16 @@ pub struct BufferStyleSpan {
 /// Shared span store used by Lua handles and render overlays.
 pub type SharedBufferStyleSpans = Arc<Mutex<Vec<BufferStyleSpan>>>;
 
+/// Identity of a span store: the allocation address, stable for the
+/// `Arc`'s lifetime. Every overlay/translator over the same store
+/// reports this via [`View::overlay_identity`], which is what makes
+/// per-window attachment idempotent and disposal able to find every
+/// window copy (PR #113 round-6 findings 1 and 3).
+#[must_use]
+pub fn style_store_identity(spans: &SharedBufferStyleSpans) -> usize {
+    Arc::as_ptr(spans) as usize
+}
+
 /// View that renders buffer-byte style annotations.
 ///
 /// Unlike [`StyleSpanOverlay`], this overlay stores byte ranges rather
@@ -241,6 +251,17 @@ impl View for BufferStyleSpanTranslator {
         let old_end = edit.range.end;
         let old_len = old_end - old_start;
         let new_len = edit.inserted_len;
+        // Buffers deliberately broadcast no-op edits (empty insert /
+        // empty-range delete — buffer.rs's "callers that count the
+        // call" contract). Nothing moved, so there is nothing to
+        // translate; falling through would split any span containing
+        // the position into two adjacent fragments per call —
+        // unbounded growth for repeated no-ops, and a fragment
+        // boundary mid-codepoint for a no-op at a continuation byte
+        // (round-6 finding 2).
+        if old_len == 0 && new_len == 0 {
+            return Ok(());
+        }
         let mut spans = self.spans.lock().expect("style spans mutex poisoned");
         let mut adjusted = Vec::with_capacity(spans.len());
         for span in spans.drain(..) {
@@ -273,9 +294,25 @@ impl View for BufferStyleSpanTranslator {
     fn kind(&self) -> &'static str {
         "buffer_style_span_translator"
     }
+
+    fn overlay_identity(&self) -> Option<usize> {
+        Some(style_store_identity(&self.spans))
+    }
 }
 
 impl View for BufferStyleOverlay {
+    fn kind(&self) -> &'static str {
+        "buffer_style_overlay"
+    }
+
+    fn overlay_identity(&self) -> Option<usize> {
+        Some(style_store_identity(&self.spans))
+    }
+
+    fn clone_for_split(&self) -> Option<Box<dyn View>> {
+        Some(Box::new(self.clone()))
+    }
+
     fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
         let spans = self
             .spans
@@ -848,6 +885,65 @@ mod tests {
             spans_of(&store),
             Vec::<(u64, u64)>::new(),
             "a fully-overwritten span produces no fragments"
+        );
+    }
+
+    #[test]
+    fn translator_splits_a_span_around_a_genuine_insertion() {
+        // A real EditOp::Insert (not a replacement) inside a span:
+        // the left fragment stays, the right fragment shifts by the
+        // inserted length, and the inserted bytes inherit nothing.
+        use crate::buffer::EditOp;
+        let mut buf = Buffer::from_bytes(BufferId::next(), "t", b"abcdef");
+        let store: SharedBufferStyleSpans = Arc::new(Mutex::new(vec![BufferStyleSpan {
+            start: 0,
+            end: 6,
+            style: red(),
+        }]));
+        buf.attach_view(Box::new(BufferStyleSpanTranslator::new(Arc::clone(&store))));
+        buf.apply_edit(EditOp::Insert {
+            pos: 3,
+            bytes: b"XY",
+        })
+        .expect("insert applies");
+        assert_eq!(
+            spans_of(&store),
+            vec![(0, 3), (5, 8)],
+            "insertion splits the span; inserted bytes are unstyled"
+        );
+    }
+
+    #[test]
+    fn translator_ignores_pure_noop_edits() {
+        // Buffers deliberately broadcast no-op edits (empty insert /
+        // empty-range delete). PR #113 round-6 finding 2: falling
+        // through split a containing span into two adjacent
+        // fragments per call — unbounded growth for repeated no-ops
+        // at distinct positions, and a fragment boundary
+        // mid-codepoint for a no-op at a UTF-8 continuation byte.
+        use crate::buffer::EditOp;
+        use crate::rope::Range;
+        let mut buf = Buffer::from_bytes(BufferId::next(), "t", "ab\u{e9}def".as_bytes());
+        let store: SharedBufferStyleSpans = Arc::new(Mutex::new(vec![BufferStyleSpan {
+            start: 0,
+            end: 7,
+            style: red(),
+        }]));
+        buf.attach_view(Box::new(BufferStyleSpanTranslator::new(Arc::clone(&store))));
+        // Distinct interior positions, including 3 — the é's
+        // continuation byte.
+        for pos in [1, 2, 3, 4, 5] {
+            buf.apply_edit(EditOp::Insert { pos, bytes: b"" })
+                .expect("no-op insert applies");
+            buf.apply_edit(EditOp::Delete {
+                range: Range::new(pos, pos),
+            })
+            .expect("no-op delete applies");
+        }
+        assert_eq!(
+            spans_of(&store),
+            vec![(0, 7)],
+            "no-op edits must not fragment or move spans"
         );
     }
 }
