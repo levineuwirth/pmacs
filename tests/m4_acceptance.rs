@@ -5760,7 +5760,15 @@ fn m4_12_default_bundle_wires_cuda() {
         .load(
             r"
             local out = {}
-            out.cfg_cmd = pmacs.lsp.config.cuda and pmacs.lsp.config.cuda.command
+            local cfg = pmacs.lsp.config.cuda
+            out.cfg_cmd = cfg and cfg.command
+            -- `.cuh` (and bare `.cu`) headers are not recognized as CUDA
+            -- by clangd's extension-based language selection, so the
+            -- server must pass `-x cuda` via fallbackFlags for files with
+            -- no compile command.
+            out.fallback = cfg and cfg.init_options
+                and cfg.init_options.fallbackFlags
+                and cfg.init_options.fallbackFlags[1]
             out.ft_cu = pmacs.lsp.filetypes.cu
             out.ft_cuh = pmacs.lsp.filetypes.cuh
             -- Grammar-backed detection (bundled CUDA grammar) wins first.
@@ -5775,6 +5783,11 @@ fn m4_12_default_bundle_wires_cuda() {
         probe.get::<String>("cfg_cmd").unwrap(),
         "clangd",
         "config.cuda targets clangd"
+    );
+    assert_eq!(
+        probe.get::<String>("fallback").unwrap(),
+        "-xcuda",
+        "config.cuda forces `-x cuda` so standalone `.cuh`/`.cu` headers get an AST"
     );
     assert_eq!(probe.get::<String>("ft_cu").unwrap(), "cuda");
     assert_eq!(probe.get::<String>("ft_cuh").unwrap(), "cuda");
