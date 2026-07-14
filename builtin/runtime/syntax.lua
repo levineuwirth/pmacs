@@ -147,20 +147,55 @@ function pmacs.parse.language_from_shebang(buf)
   return pmacs.parse.shebangs[base]
 end
 
+-- Filename → language detection --------------------------------------------
+--
+-- Some files are identified by their whole BASENAME, not an extension:
+-- `Dockerfile`, `Makefile`, `CMakeLists.txt`, and rc dotfiles like
+-- `.bashrc`/`PKGBUILD` (highlighted by the already-bundled bash grammar).
+-- Consulted after extension detection (a recognized extension still wins)
+-- and before the shebang — a `Makefile` never carries a shebang, and the
+-- basename is the more reliable signal. User-extensible from init.lua,
+-- e.g. `pmacs.parse.filenames["Vagrantfile"] = "ruby"`.
+pmacs.parse.filenames = pmacs.parse.filenames or {
+  ["Dockerfile"] = "dockerfile",
+  ["Containerfile"] = "dockerfile",
+  ["Makefile"] = "make",
+  ["makefile"] = "make",
+  ["GNUmakefile"] = "make",
+  ["BSDmakefile"] = "make",
+  ["CMakeLists.txt"] = "cmake",
+  -- Shell rc / config files → the bundled bash grammar.
+  [".bashrc"] = "bash",
+  [".bash_profile"] = "bash",
+  [".bash_logout"] = "bash",
+  [".profile"] = "bash",
+  [".zshrc"] = "bash",
+  [".zprofile"] = "bash",
+  [".zshenv"] = "bash",
+  ["PKGBUILD"] = "bash",
+}
+
+-- Language for a path's basename, or nil. `name` may be a full path.
+function pmacs.parse.language_from_filename(name)
+  if not name then return nil end
+  local base = name:match("([^/]+)$") or name
+  return pmacs.parse.filenames[base]
+end
+
 -- Set of buffer ids that already have a highlight overlay
 -- attached, keyed by raw id (number). A buffer that opens, gets
 -- highlights, gets killed, and is reopened needs a fresh overlay
 -- attach; the kill path clears the entry below if/when it lands.
 local highlighted_buffers = {}
 
--- Filetype-aware language resolution for the active buffer, in
--- precedence order: grammar extension → LSP filetype map → shebang. The
--- shebang is consulted ONLY when the extension is unrecognized (a known
--- non-grammar extension like `.py` must not fall through to a stray
--- `#!/bin/sh` and be misparsed as bash). Keyed on `buf:name()` for the
--- extension parts (matching the historical behavior — path-less buffers
--- that resolve a grammar by name keep working); the shebang reads buffer
--- content directly.
+-- Filetype-aware language resolution for the active buffer, in precedence
+-- order: grammar extension → LSP filetype map → filename → shebang. A
+-- recognized extension is authoritative (a `.py` must not fall through to
+-- a stray `#!/bin/sh` and be misparsed as bash); the basename map handles
+-- extensionless `Dockerfile`/`Makefile`/rc-dotfiles, and only then does
+-- the shebang (buffer content) get a look. Keyed on `buf:name()` for the
+-- path parts (matching the historical behavior — path-less buffers that
+-- resolve a grammar by name keep working).
 local function resolve_active_language(buf)
   local name = buf:name()
   if name then
@@ -168,9 +203,9 @@ local function resolve_active_language(buf)
     if grammar then return grammar end
     local ext = name:match("%.([%w_]+)$")
     local by_ext = ext and pmacs.lsp and pmacs.lsp.filetypes and pmacs.lsp.filetypes[ext]
-    -- A recognized (even non-grammar) extension is authoritative; do not
-    -- consult the shebang for it.
     if by_ext then return by_ext end
+    local by_name = pmacs.parse.language_from_filename(name)
+    if by_name then return by_name end
   end
   return pmacs.parse.language_from_shebang(buf)
 end

@@ -167,6 +167,20 @@ tree-sitter-cuda = "0.21"
 # bash-language-server (shellcheck refuses zsh, so `.zsh` diagnostics
 # may be sparse; highlighting is unaffected).
 tree-sitter-bash = "0.25"
+# Filename-identified languages (no useful extension): Dockerfile, Make,
+# CMake. Highlighting for files detected by BASENAME (`Dockerfile`,
+# `Makefile`, `CMakeLists.txt`) via the new filename map, plus their
+# extensions (`.dockerfile`/`.mk`/`.cmake`). All three ride
+# `tree-sitter-language 0.1` with `tree-sitter` dev-only (no second core
+# in the graph) and export `LANGUAGE`/`HIGHLIGHTS_QUERY`.
+#   * Dockerfile: `tree-sitter-containerfile` — the maintained,
+#     ABI-current grammar (the older `tree-sitter-dockerfile` is pinned to
+#     `tree-sitter ^0.20` and would fork the graph). Covers Containerfile.
+#   * Make / CMake serve `dockerfile`/`cmake` LSP servers too (see lsp.lua);
+#     Make has no language server.
+tree-sitter-containerfile = "0.9"
+tree-sitter-make = "1.1"
+tree-sitter-cmake = "0.7"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.

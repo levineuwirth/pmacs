@@ -451,15 +451,41 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
     // `.ash` are close-enough dialects and `.bats` is bash. None collide
     // with an entry above. Because the language name is `bash` — matching
     // the `pmacs.lsp.config.bash` key — opening any of these also
-    // auto-attaches bash-language-server. Extensionless shebang scripts
-    // (`#!/bin/sh`) and rc dotfiles (`.bashrc`) are NOT covered: detection
-    // is extension-keyed, and shebang/filename sniffing is a separate
-    // (deferred) feature.
+    // auto-attaches bash-language-server. Extensionless shell scripts are
+    // resolved by shebang, and rc dotfiles (`.bashrc`, `PKGBUILD`) by the
+    // filename map — both in `builtin/runtime/syntax.lua`.
     LanguageEntry {
         name: "bash",
         extensions: &["sh", "bash", "zsh", "ksh", "ash", "bats"],
         loader: || tree_sitter_bash::LANGUAGE.into(),
         highlights_query: &[tree_sitter_bash::HIGHLIGHT_QUERY],
+    },
+    // Filename-identified languages. These files usually have no useful
+    // extension (`Dockerfile`, `Makefile`, `CMakeLists.txt`), so the bulk
+    // of detection is the filename map in `syntax.lua`; the extensions
+    // here catch the `.dockerfile`/`.mk`/`.cmake` variants. All three ship
+    // self-contained highlights (no `; inherits:`), so single fragments.
+    //
+    // Dockerfile uses the `tree-sitter-containerfile` crate (the
+    // ABI-current grammar; also covers Containerfile); its root node is
+    // `source_file`. Make roots at `makefile`, CMake at `source_file`.
+    LanguageEntry {
+        name: "dockerfile",
+        extensions: &["dockerfile", "containerfile"],
+        loader: || tree_sitter_containerfile::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_containerfile::HIGHLIGHTS_QUERY],
+    },
+    LanguageEntry {
+        name: "make",
+        extensions: &["mk", "make"],
+        loader: || tree_sitter_make::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_make::HIGHLIGHTS_QUERY],
+    },
+    LanguageEntry {
+        name: "cmake",
+        extensions: &["cmake"],
+        loader: || tree_sitter_cmake::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_cmake::HIGHLIGHTS_QUERY],
     },
 ];
 
@@ -1056,6 +1082,91 @@ mod tests {
                 reg.language_name_for_path(path).as_deref(),
                 Some("bash"),
                 "{path} resolves to bash"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_languages_include_dockerfile_make_cmake() {
+        for (name, exts) in [
+            ("dockerfile", &["dockerfile", "containerfile"][..]),
+            ("make", &["mk", "make"][..]),
+            ("cmake", &["cmake"][..]),
+        ] {
+            let entry = BUILTIN_LANGUAGES
+                .iter()
+                .find(|l| l.name == name)
+                .unwrap_or_else(|| panic!("`{name}` language entry must be present"));
+            for ext in exts {
+                assert!(entry.extensions.contains(ext), "`{name}` claims `.{ext}`");
+            }
+            assert!(
+                entry.highlights_query.iter().any(|q| !q.is_empty()),
+                "`{name}` ships a highlights query"
+            );
+        }
+    }
+
+    #[test]
+    fn filename_grammars_load_and_parse() {
+        // ABI acceptance: each 0.x/1.x grammar must be accepted by our
+        // tree-sitter 0.26 core (set_language succeeds at runtime) and
+        // parse a representative snippet without error, at its own root.
+        let reg = SyntaxRegistry::new();
+        let cases: &[(&str, &str, &[u8])] = &[
+            (
+                "dockerfile",
+                "source_file",
+                b"FROM alpine:3\nRUN apk add curl\nCMD [\"sh\"]\n",
+            ),
+            (
+                "make",
+                "makefile",
+                b"all: build\n\tcc -o app main.c\n.PHONY: all\n",
+            ),
+            (
+                "cmake",
+                "source_file",
+                b"cmake_minimum_required(VERSION 3.10)\nproject(demo)\n",
+            ),
+        ];
+        for (lang, root_kind, src) in cases {
+            let language = reg
+                .language(lang)
+                .unwrap_or_else(|| panic!("`{lang}` loads from BUILTIN_LANGUAGES"));
+            let mut buf = fresh_buffer(&format!("probe.{lang}"));
+            buf.apply_edit(EditOp::Insert { pos: 0, bytes: src })
+                .unwrap();
+            let view = ParseView::new(&buf, language, (*lang).to_owned());
+            let handle = view.handle();
+            let _vid = buf.attach_view(Box::new(view));
+            let bundle = parse_synchronously(&handle);
+            assert_eq!(
+                bundle.tree.root_node().kind(),
+                *root_kind,
+                "`{lang}` roots at `{root_kind}`"
+            );
+            assert!(
+                !bundle.tree.root_node().has_error(),
+                "`{lang}` parses its snippet without error"
+            );
+        }
+    }
+
+    #[test]
+    fn language_for_path_resolves_dockerfile_make_cmake_extensions() {
+        let reg = SyntaxRegistry::new();
+        for (path, lang) in [
+            ("app.dockerfile", "dockerfile"),
+            ("svc.containerfile", "dockerfile"),
+            ("rules.mk", "make"),
+            ("common.make", "make"),
+            ("toolchain.cmake", "cmake"),
+        ] {
+            assert_eq!(
+                reg.language_name_for_path(path).as_deref(),
+                Some(lang),
+                "{path} resolves to {lang}"
             );
         }
     }

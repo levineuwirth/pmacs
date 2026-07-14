@@ -156,6 +156,31 @@ pmacs.lsp.config.bash = pmacs.lsp.config.bash or {
   args = { "start" },
 }
 
+-- Dockerfile via docker-langserver (dockerfile-language-server-nodejs).
+-- `--stdio` is the LSP transport. No project config. The `dockerfile`
+-- language id is set from the bundled grammar / filename map, so a file
+-- named `Dockerfile` (no extension) attaches. Users override from
+-- init.lua before a Dockerfile opens. Make has no language server, so
+-- there is deliberately no `config.make`.
+pmacs.lsp.config.dockerfile = pmacs.lsp.config.dockerfile or {
+  command = "docker-langserver",
+  args = { "--stdio" },
+}
+
+-- CMake via cmake-language-server (the Python server). It speaks LSP over
+-- stdio with no transport flag. Unlike gopls/taplo it does NOT pull a
+-- `workspace/configuration` section: it reads `buildDirectory` from the
+-- `initialize` request's `initializationOptions`, and drives its project
+-- model off CMake's File API under `<buildDirectory>/.cmake/api/` (not
+-- `compile_commands.json`). So the config is an `init_options`, defaulting
+-- to the conventional out-of-source `build/`; users override
+-- `init_options.buildDirectory` from init.lua.
+pmacs.lsp.config.cmake = pmacs.lsp.config.cmake or {
+  command = "cmake-language-server",
+  args = {},
+  init_options = { buildDirectory = "build" },
+}
+
 -- TOML via taplo. `taplo lsp stdio` serves LSP over stdio. taplo
 -- pulls configuration via `workspace/configuration` under the
 -- `taplo` section (empty ⇒ defaults, present not null); a project
@@ -223,6 +248,17 @@ pmacs.lsp.filetypes.lua = pmacs.lsp.filetypes.lua or "lua"
 -- declines zsh, so `.zsh` diagnostics may be sparse.
 for _, ext in ipairs({ "sh", "bash", "zsh", "ksh", "ash", "bats" }) do
   pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "bash"
+end
+-- Dockerfile / Make / CMake. Bundled grammars resolve these via
+-- `language_for_path` (and filename map for extensionless files); these
+-- extension entries are the LSP-only fallback that keeps the id stable if
+-- a grammar is dropped. `.mk`/`.make` map to `make`, which has no server
+-- (grammar highlight only); `.dockerfile`/`.cmake` attach their servers.
+pmacs.lsp.filetypes.dockerfile = pmacs.lsp.filetypes.dockerfile or "dockerfile"
+pmacs.lsp.filetypes.containerfile = pmacs.lsp.filetypes.containerfile or "dockerfile"
+pmacs.lsp.filetypes.cmake = pmacs.lsp.filetypes.cmake or "cmake"
+for _, ext in ipairs({ "mk", "make" }) do
+  pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "make"
 end
 -- TOML (taplo).
 pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
@@ -373,15 +409,18 @@ local function buffer_language(buf)
   local ok, path = pcall(function() return buf and buf:path() end)
   if not ok or not path then return nil end
   -- Grammar-backed detection first (keeps rust/.rs etc. exactly as
-  -- before); fall back to the LSP-only filetype map so languages
-  -- with a server but no tree-sitter grammar (Python) still attach;
-  -- finally, for an extensionless file, sniff a `#!interp` shebang so
-  -- e.g. an extensionless `#!/bin/sh` script still attaches its server.
+  -- before); fall back to the LSP-only filetype map so languages with a
+  -- server but no tree-sitter grammar (Python) still attach; then the
+  -- basename map for filename-identified files (`Dockerfile`,
+  -- `CMakeLists.txt`); finally, for an extensionless file, sniff a
+  -- `#!interp` shebang so e.g. `#!/bin/sh` still attaches its server.
   local lang = pmacs.parse.language_for_path(path)
   if lang then return lang end
   local ext = path:match("%.([%w_]+)$")
   local by_ext = ext and pmacs.lsp.filetypes[ext]
   if by_ext then return by_ext end
+  local by_name = pmacs.parse.language_from_filename(path)
+  if by_name then return by_name end
   return pmacs.parse.language_from_shebang(buf)
 end
 -- Public: the per-buffer language chain. Auto-pairing resolves
