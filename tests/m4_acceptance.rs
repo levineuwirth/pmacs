@@ -6127,6 +6127,106 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
     assert_eq!(errs, 0, "reparse with the pinned grammar reports no error");
 }
 
+/// Filename detection: `pmacs.parse.language_from_filename` maps a
+/// basename (Dockerfile / Makefile / CMakeLists.txt / rc dotfiles) to a
+/// language, resolving a full path too, and returns nil for a plain file.
+/// The default bundle also wires the dockerfile and cmake LSP configs;
+/// Make has no server, so `config.make` is absent.
+#[test]
+fn m4_filename_map_resolves_special_files() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let probe: mlua::Table = s
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local f = pmacs.parse.language_from_filename
+            local out = {}
+            out.dockerfile = f('Dockerfile')
+            out.containerfile = f('Containerfile')
+            out.make = f('Makefile')
+            out.gnumake = f('GNUmakefile')
+            out.cmake = f('CMakeLists.txt')
+            out.bashrc = f('.bashrc')
+            out.pkgbuild = f('PKGBUILD')
+            out.pathform = f('/home/x/proj/Dockerfile')
+            out.plain_is_nil = f('notes.txt') == nil
+            out.cfg_docker = pmacs.lsp.config.dockerfile and pmacs.lsp.config.dockerfile.command
+            out.cfg_cmake = pmacs.lsp.config.cmake and pmacs.lsp.config.cmake.command
+            out.has_make_cfg = pmacs.lsp.config.make ~= nil
+            return out
+            ",
+        )
+        .eval()
+        .expect("probe filename map");
+    assert_eq!(probe.get::<String>("dockerfile").unwrap(), "dockerfile");
+    assert_eq!(probe.get::<String>("containerfile").unwrap(), "dockerfile");
+    assert_eq!(probe.get::<String>("make").unwrap(), "make");
+    assert_eq!(probe.get::<String>("gnumake").unwrap(), "make");
+    assert_eq!(probe.get::<String>("cmake").unwrap(), "cmake");
+    assert_eq!(probe.get::<String>("bashrc").unwrap(), "bash");
+    assert_eq!(probe.get::<String>("pkgbuild").unwrap(), "bash");
+    assert_eq!(
+        probe.get::<String>("pathform").unwrap(),
+        "dockerfile",
+        "basename is extracted from a full path"
+    );
+    assert!(probe.get::<bool>("plain_is_nil").unwrap());
+    assert_eq!(
+        probe.get::<String>("cfg_docker").unwrap(),
+        "docker-langserver"
+    );
+    assert_eq!(
+        probe.get::<String>("cfg_cmake").unwrap(),
+        "cmake-language-server"
+    );
+    assert!(
+        !probe.get::<bool>("has_make_cfg").unwrap(),
+        "Make has no language server, so no config.make"
+    );
+}
+
+/// End-to-end: opening an extensionless `Dockerfile` attaches the
+/// dockerfile grammar (a settled parse tree) and resolves `dockerfile`
+/// for LSP — reachable only via the filename map, since the file has no
+/// extension and no shebang. `pmacs.lsp.config` is emptied first so
+/// docker-langserver is not spawned; grammar detection is independent.
+#[test]
+fn m4_filename_extensionless_dockerfile_highlights() {
+    use pmacs::editor::EditorState;
+    let mut s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("Dockerfile"); // no extension
+    std::fs::write(&f, b"FROM alpine:3\nRUN apk add curl\n").expect("write");
+    let f_disp = f.display();
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             pmacs.buffer.find_or_open('{f_disp}')"
+        ))
+        .exec()
+        .expect("open Dockerfile");
+    let lsp_lang: Option<String> = s
+        .lua_host
+        .lua()
+        .load("return pmacs.lsp.active_buffer_language()")
+        .eval()
+        .expect("lsp language");
+    assert_eq!(
+        lsp_lang.as_deref(),
+        Some("dockerfile"),
+        "extensionless Dockerfile resolves to dockerfile for LSP"
+    );
+    pump_async(&mut s, |st| current_tree_language(st).is_some());
+    assert_eq!(
+        current_tree_language(&s).as_deref(),
+        Some("dockerfile"),
+        "extensionless Dockerfile gets a dockerfile parse tree"
+    );
+}
+
 /// Typing-perf: the default bundle coalesces full-document
 /// `didChange` notifications instead of sending one per keystroke
 /// (each send copies the whole buffer several times and writes
