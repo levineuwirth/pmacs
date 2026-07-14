@@ -154,6 +154,19 @@ tree-sitter-cpp = "0.23"
 # it shares the ABI crate with the other grammars — no second
 # `tree-sitter` in the graph (its own `tree-sitter` dep is dev-only).
 tree-sitter-cuda = "0.21"
+# Shell / bash. Lexical highlighting for `.sh`/`.bash` and the wider
+# shell family (`.zsh`/`.ksh`/`.ash`/`.bats`) — the LSP half
+# (bash-language-server + shellcheck/shfmt) was already wired in
+# `builtin/runtime/lsp.lua`; this fills in the missing grammar. bash
+# does not inherit another grammar, so `HIGHLIGHT_QUERY` (singular, the
+# c/cpp/md idiom) is self-contained — no base-query composition like
+# `cuda`. Exports `LANGUAGE` over `tree-sitter-language 0.1` (shared ABI
+# crate, no second `tree-sitter` in the graph). Note: because the
+# grammar's language name (`bash`) matches the `pmacs.lsp.config.bash`
+# key, every extension claimed here also auto-attaches
+# bash-language-server (shellcheck refuses zsh, so `.zsh` diagnostics
+# may be sparse; highlighting is unaffected).
+tree-sitter-bash = "0.25"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.
