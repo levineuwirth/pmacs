@@ -443,6 +443,24 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_cuda::HIGHLIGHTS_QUERY,
         ],
     },
+    // Shell / bash. Lexical highlighting for the shell family; the LSP
+    // half (bash-language-server) was already wired in `lsp.lua`. Unlike
+    // `cuda`, bash's `highlights.scm` is self-contained (no `; inherits:`
+    // delta), so a single fragment suffices. The extension set is wider
+    // than the `.sh`/`.bash` the LSP filetype map covered: `.zsh`/`.ksh`/
+    // `.ash` are close-enough dialects and `.bats` is bash. None collide
+    // with an entry above. Because the language name is `bash` — matching
+    // the `pmacs.lsp.config.bash` key — opening any of these also
+    // auto-attaches bash-language-server. Extensionless shebang scripts
+    // (`#!/bin/sh`) and rc dotfiles (`.bashrc`) are NOT covered: detection
+    // is extension-keyed, and shebang/filename sniffing is a separate
+    // (deferred) feature.
+    LanguageEntry {
+        name: "bash",
+        extensions: &["sh", "bash", "zsh", "ksh", "ash", "bats"],
+        loader: || tree_sitter_bash::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_bash::HIGHLIGHT_QUERY],
+    },
 ];
 
 /// Registry that the Lua surface ([`crate::lua_bindings::install_parse`])
@@ -951,6 +969,95 @@ mod tests {
             reg.language_name_for_path("device.cuh").as_deref(),
             Some("cuda")
         );
+    }
+
+    #[test]
+    fn builtin_languages_include_bash() {
+        // Regression guard: the bash entry claims the wider shell family
+        // and ships a highlights query, so shell scripts get lexical color
+        // (they had LSP via bash-language-server but no grammar before).
+        let bash = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "bash")
+            .expect("`bash` language entry must be present");
+        for ext in ["sh", "bash", "zsh", "ksh", "ash", "bats"] {
+            assert!(bash.extensions.contains(&ext), "`bash` claims `.{ext}`");
+        }
+        assert!(
+            !bash.highlights_query.is_empty(),
+            "`bash` ships a highlights query"
+        );
+    }
+
+    #[test]
+    fn bash_grammar_loads_and_parses_script() {
+        // ABI acceptance: the `tree-sitter-bash` 0.25 grammar must be
+        // accepted by our `tree-sitter` 0.26 core — `set_language`
+        // succeeds and a tree is produced. A representative script
+        // (shebang, `set`, parameter expansion, function, `if`) parses
+        // without error, so the entry wired a working grammar.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("bash")
+            .expect("`bash` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("deploy.sh");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"#!/usr/bin/env bash\nset -euo pipefail\nname=${1:-world}\n\
+                     greet() { echo \"hello, $name\"; }\nif [ -n \"$name\" ]; then greet; fi\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "bash".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.tree.root_node().kind(),
+            "program",
+            "bash grammar roots at `program`"
+        );
+        assert!(
+            !bundle.tree.root_node().has_error(),
+            "bash grammar parses a representative script without error"
+        );
+    }
+
+    #[test]
+    fn bash_highlights_compile_with_captures() {
+        // The self-contained bash `highlights.scm` must compile against
+        // the grammar and yield real capture classes (a crate bump that
+        // drifted query and grammar apart would surface here).
+        let reg = SyntaxRegistry::new();
+        let query = reg
+            .highlights_query("bash")
+            .expect("bash highlights compile");
+        assert!(
+            query.capture_names().len() >= 5,
+            "bash highlights resolve several capture classes; got {}",
+            query.capture_names().len()
+        );
+    }
+
+    #[test]
+    fn language_for_path_resolves_bash_extensions() {
+        // The whole shell family resolves to the `bash` grammar via
+        // extension detection; `.zsh`/`.ksh`/`.ash`/`.bats` are new here
+        // (only `.sh`/`.bash` were covered by the LSP filetype map before).
+        let reg = SyntaxRegistry::new();
+        for path in [
+            "deploy.sh",
+            "lib.bash",
+            "prompt.zsh",
+            "script.ksh",
+            "init.ash",
+            "test_cli.bats",
+        ] {
+            assert_eq!(
+                reg.language_name_for_path(path).as_deref(),
+                Some("bash"),
+                "{path} resolves to bash"
+            );
+        }
     }
 
     #[test]

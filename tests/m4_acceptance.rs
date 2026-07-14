@@ -5804,6 +5804,51 @@ fn m4_12_default_bundle_wires_cuda() {
     assert_eq!(probe.get::<String>("grammar_cuh").unwrap(), "cuda");
 }
 
+/// The default bundle wires the shell family: `pmacs.lsp.config.bash`
+/// targets bash-language-server (pre-existing), the bundled bash grammar
+/// resolves the wider extension set (`.sh`/`.zsh`/`.bats`) to `bash`
+/// through `pmacs.parse.language_for_path`, and the LSP filetype fallback
+/// maps the new extensions too (belt-and-suspenders if the grammar is
+/// dropped).
+#[test]
+fn m4_12_default_bundle_wires_bash() {
+    use pmacs::editor::EditorState;
+
+    let s = EditorState::new();
+    let probe: mlua::Table = s
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local out = {}
+            out.cfg_cmd = pmacs.lsp.config.bash and pmacs.lsp.config.bash.command
+            out.ft_zsh = pmacs.lsp.filetypes.zsh
+            out.ft_bats = pmacs.lsp.filetypes.bats
+            -- Grammar-backed detection resolves the wider set directly.
+            out.grammar_sh = pmacs.parse.language_for_path('deploy.sh')
+            out.grammar_zsh = pmacs.parse.language_for_path('prompt.zsh')
+            out.grammar_bats = pmacs.parse.language_for_path('test_cli.bats')
+            return out
+            ",
+        )
+        .eval()
+        .expect("probe bash wiring");
+    assert_eq!(
+        probe.get::<String>("cfg_cmd").unwrap(),
+        "bash-language-server",
+        "config.bash targets bash-language-server"
+    );
+    assert_eq!(probe.get::<String>("ft_zsh").unwrap(), "bash");
+    assert_eq!(probe.get::<String>("ft_bats").unwrap(), "bash");
+    assert_eq!(
+        probe.get::<String>("grammar_sh").unwrap(),
+        "bash",
+        "bundled grammar resolves `.sh` to bash"
+    );
+    assert_eq!(probe.get::<String>("grammar_zsh").unwrap(), "bash");
+    assert_eq!(probe.get::<String>("grammar_bats").unwrap(), "bash");
+}
+
 /// Typing-perf: the default bundle coalesces full-document
 /// `didChange` notifications instead of sending one per keystroke
 /// (each send copies the whole buffer several times and writes

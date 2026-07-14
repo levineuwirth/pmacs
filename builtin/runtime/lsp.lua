@@ -215,9 +215,15 @@ pmacs.lsp.filetypes.jsx = pmacs.lsp.filetypes.jsx or "javascriptreact"
 -- `language_for_path` resolves `.lua` first; this entry is the LSP
 -- fallback and keeps the language id stable if that ever changes.
 pmacs.lsp.filetypes.lua = pmacs.lsp.filetypes.lua or "lua"
--- Bash / shell (bash-language-server).
-pmacs.lsp.filetypes.sh = pmacs.lsp.filetypes.sh or "bash"
-pmacs.lsp.filetypes.bash = pmacs.lsp.filetypes.bash or "bash"
+-- Bash / shell (bash-language-server). pmacs bundles a bash grammar, so
+-- `language_for_path` already resolves these to `bash`; this map is the
+-- LSP-only fallback that keeps the language id stable if that grammar is
+-- ever dropped (same role as the `lua`/`cuda` entries). The wider shell
+-- family (`.zsh`/`.ksh`/`.ash`/`.bats`) rides the same server; shellcheck
+-- declines zsh, so `.zsh` diagnostics may be sparse.
+for _, ext in ipairs({ "sh", "bash", "zsh", "ksh", "ash", "bats" }) do
+  pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "bash"
+end
 -- TOML (taplo).
 pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
 -- Zig (zls). `.zon` is Zig Object Notation, handled by the same server.
