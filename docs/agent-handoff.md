@@ -1,7 +1,7 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-14, on the laptop, by the compile-mode
-session (post-merge snapshot).** This file is the
+**Last updated: 2026-07-14, by the syntax-highlight / language-detection
+side-quest session (post-merge snapshot).** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -11,68 +11,73 @@ reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-14)
 
-- `main` @ `98323df` (compile-mode #113 merged), protocol **v15**
-  (`SUPPORTED=[6..15]`; no bump in #113).
-- **Compile-mode (Arc 5 stage 1, #113) LANDED** — merged 2026-07-14
-  after seven PR review rounds (framing
-  `docs/compile-mode-framing.md` at revision 13, revisions 7–13 =
-  the rounds; final commit was the user's atomic-teardown
-  hardening). Shape: `compile.run` streams
-  `/bin/sh -c "exec 2>&1; <cmd>"` (pipes, `stdin="null"`,
-  `group=true`, TERM=dumb) into an intercept-read-only
-  `*compilation*` buffer via a Lua-side ANSI parser (column-counted
-  newline-segmented CR/BS rewrites, tracked O(1) line start);
-  once-per-newline error rules (raw-read validated per-run
-  snapshots); unified `error.next`/`error.previous` dispatcher
-  (M-g n/p taken over from diag with fallback; `` C-x ` ``; M-!
-  shell-command); buffer-revision external-edit guard with desync
-  marker + anchor epochs; grep-mode upgrade of `project.search`.
-  New substrate other code can use: `ProcessSpec.stdin/group`
-  (group lifecycle: reap ledger, in-drain enforcement, cancellable
-  poll readers), `buf:revision()`, jump_back fires
-  `buffer.after-switch`, `pmacs.errors.claim`,
-  `parser:finish()`/`AnsiParser::finish()` (observable reset;
-  `emitted_style` alt-screen resync), and the style-overlay stack:
-  buffer-attached `BufferStyleSpanTranslator` (translation exactly
-  once per edit, fragment-preserving, no-op-edit immune),
-  render-only window overlays with identity-deduped attachment
-  (`Window::ensure_overlay`), split copy (`clone_for_split`),
-  validated `attach_style_overlay`, idempotent atomic
-  `handle:dispose()` (registry detach works headless).
-- **Editing-conveniences pack (editops, #111) landed** — the Lua
-  parallel lane. Framing `docs/editing-conveniences-framing.md` at
-  revision 6 (three pre-branch rounds, one adopted post-approval
-  hardening, one PR round: full UTF-8 scalar validation, per-word
-  capitalize with the `_`-constituent deviation named, trim-on-save
-  dual-channel error reporting). Ships goto-line, case ops,
-  transpose, zap-to-char (kill-chain member with an origin guard
-  and killring's pending-prompt marker), line move/duplicate/join,
-  region sort/reverse/dedupe, delete-trailing-whitespace + opt-in
-  `pmacs.editops.trim_on_save`. New substrate other code can use:
-  `pmacs.killring.kill_range` / `break_chain([fid])` /
-  `arm_kill_prompt`+`commit_kill_prompt` (the marker lifecycle),
-  and the origin-guard pattern for chain-sensitive minibuffer
-  commands. The development worktree at `../pmacs-editops` has been
-  folded back.
-- **Auto-pairing (#110) landed — Arc 2 is COMPLETE.** Framing
-  `docs/auto-pairing-framing.md` at revision 6 (two pre-branch rounds
-  + three PR rounds). Shape that shipped: the nine built-in pair
-  chars leave both frontends' optimistic classifiers
-  (`BUILTIN_PAIR_CHARS` in pmacs-protocol; dispatch-routed →
-  adjacent daemon-peer undo units); reaction hook
+- `main` @ `7d1b6d6` (filename-grammars #117 merged), protocol **v15**
+  (`SUPPORTED=[6..15]`; no bump since #113 — the highlight side-quest is
+  grammar + Lua only).
+- **Syntax-highlight / language-detection side-quest (#114–#118)
+  LANDED** — a one-shot arc built in sibling worktrees off main while
+  the user's themes lane (`theme-faces`) ran concurrently in the shared
+  checkout. #114–#117 merged; #118 (`grammar-gap`) approved, merge
+  pending. What shipped:
+  - **Grammars** (`crate::syntax::BUILTIN_LANGUAGES`): every
+    LSP-configured language now has one — cuda, bash, dockerfile (via
+    the ABI-current `tree-sitter-containerfile`, NOT the dead
+    `tree-sitter-dockerfile` which pins `tree-sitter ^0.20`), make,
+    cmake, python, go, javascript (+jsx), typescript (+tsx), toml, zig.
+  - **Detection chain** (`resolve_active_language` in syntax.lua /
+    `buffer_language` in lsp.lua): extension → LSP filetype map →
+    filename → shebang. New user-extensible Lua surfaces
+    `pmacs.parse.shebangs` / `.filenames` and
+    `pmacs.parse.language_from_shebang` / `language_from_filename`.
+    Grammar name MUST equal the `pmacs.lsp.config.<name>` key (grammar
+    detection wins over the filetype map, so it fixes the LSP id too).
+    A buffer keeps its first-attached grammar across edits/switches (no
+    re-sniff of a since-edited shebang).
+  - **LSP configs added**: dockerfile (`docker-langserver --stdio`),
+    cmake (`cmake-language-server`, config via
+    `init_options.buildDirectory="build"` — it does NOT pull
+    `workspace/configuration`). Make has no server.
+  - **Substrate**: `LanguageEntry.highlights_query` is now
+    `&[&'static str]` — fragments joined base-first, for grammars whose
+    bundled highlights are a `; inherits:` delta (cuda over c/cpp; ts
+    over js/jsx). `compute_highlight_spans` FAILS CLOSED on the
+    `#is?`/`#is-not? local` property predicate (no locals processing) —
+    drops those captures so shadowed builtins aren't mis-styled.
+- **Compile-mode (Arc 5 stage 1, #113) LANDED** (2026-07-14, 7 rounds;
+  framing `docs/compile-mode-framing.md` rev 13). `compile.run` streams
+  `/bin/sh -c "exec 2>&1; <cmd>"` into an intercept-read-only
+  `*compilation*` buffer via a Lua ANSI parser; once-per-newline error
+  rules; unified `error.next`/`error.previous` (M-g n/p, `` C-x ` ``,
+  M-!). Substrate other code can use: `ProcessSpec.stdin/group` (group
+  lifecycle: reap ledger, in-drain enforcement, cancellable poll
+  readers), `buf:revision()`, jump_back fires `buffer.after-switch`,
+  `pmacs.errors.claim`, `AnsiParser::finish()` (observable reset), and
+  the style-overlay stack: buffer-attached `BufferStyleSpanTranslator`
+  (once-per-edit, fragment-preserving), render-only window overlays with
+  identity-deduped `Window::ensure_overlay` + `clone_for_split`,
+  idempotent atomic `handle:dispose()`.
+- **Editing-conveniences pack (editops, #111) landed** (framing
+  `docs/editing-conveniences-framing.md` rev 6). goto-line, case ops,
+  transpose, zap-to-char, line move/duplicate/join, region
+  sort/reverse/dedupe, delete-trailing-whitespace + opt-in
+  `pmacs.editops.trim_on_save`. Substrate: `pmacs.killring.kill_range` /
+  `break_chain([fid])` / `arm_kill_prompt`+`commit_kill_prompt` (marker
+  lifecycle), and the origin-guard pattern for chain-sensitive
+  minibuffer commands.
+- **Auto-pairing (#110) landed — Arc 2 COMPLETE** (framing
+  `docs/auto-pairing-framing.md` rev 6). `BUILTIN_PAIR_CHARS` in
+  pmacs-protocol leave both frontends' optimistic classifiers;
   `builtin/runtime/pair.lua` loads BEFORE lsp.lua (first-didChange
-  ordering contract); exact one-shot typed-edit provenance via
-  `pmacs.editor.take_typed_edit()` with a buffer-revision
-  postcondition (Q#AP9). New substrate other code can use:
-  `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
-  `PMACS_FAKE_LSP_CHANGE_SINK` (fake-LSP doc-sync replay),
-  `TestDaemon::spawn_with_config` (init.lua-carrying daemon fixture).
-- **NEXT: themes (Arc 4) is the standing runner-up from the
-  decision discussion** — scout fresh before framing (protocol bump
-  v15→16 for a ThemeFacts channel, the LineNumbers/Q#UX1
-  control-plane template, glyphon font reload is the hard part).
-  PR #114 (`cuda-lsp`: clangd + bundled CUDA grammar) is the USER'S
-  own lane — hands off; scout main freshly before branching.
+  ordering contract); one-shot typed-edit provenance via
+  `pmacs.editor.take_typed_edit()` (buffer-revision postcondition,
+  Q#AP9). Substrate: `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
+  `PMACS_FAKE_LSP_CHANGE_SINK`, `TestDaemon::spawn_with_config`.
+- **NEXT: themes (Arc 4) — IN PROGRESS by the user on `theme-faces`**
+  (the main course; the highlight side-quest above ran parallel to it).
+  Hard parts from the decision discussion: protocol bump v15→16 for a
+  ThemeFacts channel, the LineNumbers/Q#UX1 control-plane template,
+  glyphon font reload. Leave `theme-faces` alone; scout main freshly
+  before any parallel branch.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
@@ -132,8 +137,17 @@ before trusting them:
   passes in 0.18s), so the skip is droppable on the laptop.
 - **GPU on the laptop**: AMD Radeon 780M (RADV) — native Vulkan,
   `PMACS_REQUIRE_GPU=1` works without lavapipe.
-- **m8 daemon tests are FLAKY** (timing). A lone m8 failure → rerun
-  before investigating.
+- **Flaky-under-load tests — rerun isolated before treating a sweep
+  failure as a regression.** The m8 daemon tests and the m6 process/PTY
+  tests (`m6_1_pty_mode_lifecycle_started_then_exited`,
+  `m6_8_supervisor_reaps_all_children_across_cycles`) are timing-based;
+  `editor::composition_overhead_under_ten_percent` is a render-ratio
+  microbenchmark that fails ~1/3 even isolated single-threaded (already
+  `cfg!(macos)`-disabled). A lone failure of one of these → rerun that
+  test alone (`-- --test-threads=1`) before investigating. Also: run the
+  workspace sweep as ONE `cargo test` invocation piped to a full log — a
+  double invocation + `grep -c "test result: ok"` can mask real
+  failures with a misleading `0`.
 - **GPU tests** need a Vulkan device. `PMACS_REQUIRE_GPU=1` makes
   absence a hard failure instead of a silent skip. Headless option:
   lavapipe (see `docs/repository-audit-2026-07-03.md` for the CI
@@ -247,6 +261,17 @@ intercept changes what later callbacks — LSP, completion — observe).
 LSP/persistence: hidden-buffer LSP attach, daemon desktop-restore, the
 *warning* half of external-change detection (verify-visited-file-
 modtime), config registry (no unified config surface yet).
+Highlight/detection (from the #114–#118 side-quest): locals-query
+processing (run each grammar's LOCALS_QUERY so `#is?`/`#is-not? local`
+is honored instead of the current fail-closed drop — restores `.builtin`
+styling for non-shadowed console/require etc.); multi-language
+injections (one-grammar-per-buffer today — blocks per-cell notebook
+highlighting, markdown fenced code blocks, HTML-in-JS); modeline
+detection as a 5th layer (`-*- mode: … -*-` / `# vim: ft=…`); JSON/YAML
+grammars+LSP; byte-accurate multibyte cursor placement in `move_active
+_cursor_to` (still steps one codepoint per LSP byte column). A full
+Jupyter `.ipynb` setup (reader → editable → kernel execution) is a real
+arc gated on JSON + injections, NOT a one-shot.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
 Housekeeping: F-016 `lua_bindings/mod.rs` split paused mid-way
