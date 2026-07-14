@@ -181,6 +181,21 @@ tree-sitter-bash = "0.25"
 tree-sitter-containerfile = "0.9"
 tree-sitter-make = "1.1"
 tree-sitter-cmake = "0.7"
+# Grammar-gap languages: these already have LSP configs (basedpyright /
+# gopls / tsserver / taplo / zls) but shipped no tree-sitter grammar, so
+# they rendered with no lexical color. Fill the gap. All ride
+# `tree-sitter-language 0.1` (tree-sitter dev-only) and export
+# `LANGUAGE`/`HIGHLIGHTS_QUERY`. TypeScript is special: one crate ships
+# TWO grammars (`LANGUAGE_TYPESCRIPT`/`LANGUAGE_TSX`) and its highlights
+# inherit JavaScript, so the `typescript*` entries compose the JS query
+# ahead of the TS one (see `crate::syntax::BUILTIN_LANGUAGES`). JavaScript
+# parses both `.js` and `.jsx`.
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-zig = "1.1"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.
