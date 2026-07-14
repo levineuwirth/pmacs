@@ -98,13 +98,21 @@ function pmacs.parse.language_from_shebang(buf)
     base = nil
     local seen_env = false
     local skip_next = false
+    local tokens = {}
     for tok in rest:gmatch("%S+") do
-      -- `-S`/`--split-string` introduces a string whose FIRST word is the
-      -- interpreter. GNU env accepts that value ATTACHED — `-Spython3`,
-      -- `-vSpython3` (after no-operand short flags i/v/0), or
-      -- `--split-string=python3` — where the interpreter rides inside the
-      -- option token. Extract it; the separated forms (`-S python3`) are
-      -- handled by simply walking on to the next token.
+      tokens[#tokens + 1] = tok
+    end
+    local i = 1
+    while i <= #tokens do
+      local tok = tokens[i]
+      i = i + 1
+      -- `-S`/`--split-string` introduces a complete env argument list,
+      -- not necessarily an interpreter first: it may begin with more env
+      -- options or `VAR=value` assignments. GNU env accepts that value
+      -- ATTACHED — `-Spython3`, `-vSpython3` (after no-operand short flags
+      -- i/v/0), or `--split-string=python3`. Put an attached payload back
+      -- into this token stream so it goes through the same option/operand/
+      -- assignment state machine as a separated payload.
       local split_attached =
         tok:match("^%-[iv0]*S(.+)$") or tok:match("^%-%-split%-string=(.+)$")
       if not seen_env then
@@ -112,12 +120,10 @@ function pmacs.parse.language_from_shebang(buf)
       elseif skip_next then
         skip_next = false -- the operand consumed by the previous option
       elseif split_attached then
-        local word = split_attached:match("^(%S+)")
-        base = word and (word:match("([^/]+)$") or word)
-        break
+        table.insert(tokens, i, split_attached)
       elseif tok == "-S" or tok == "--split-string" then
         -- Separated split-string: the next token starts the string, i.e.
-        -- the interpreter — keep walking.
+        -- another env argument — keep walking.
       elseif tok:find("=", 1, true) then
         -- `VAR=value` env assignment, or another `--long=value` option:
         -- self-contained, skip.

@@ -5883,6 +5883,11 @@ fn m4_shebang_resolver_maps_interpreters() {
         ("#!/usr/bin/env -Spython3 -u\n", "python"),
         ("#!/usr/bin/env --split-string=python3 -u\n", "python"),
         ("#!/usr/bin/env -vSpython3 -u\n", "python"),
+        // The attached split string is a complete env argument list, so
+        // options and assignments may precede the interpreter within it.
+        ("#!/usr/bin/env -S-i python3 -u\n", "python"),
+        ("#!/usr/bin/env -SFOO=bar python3 -u\n", "python"),
+        ("#!/usr/bin/env --split-string=-u FOO python3\n", "python"),
         // GNU-env options that consume an operand must not have the
         // operand mistaken for the interpreter.
         ("#!/usr/bin/env -u FOO python3\n", "python"),
