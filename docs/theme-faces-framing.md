@@ -1,7 +1,35 @@
 # Theme faces — framing (Arc 4 stage 1, themes)
 
-**Revision 4 — 2026-07-14. Status: awaiting approval; folds framing
-rounds 1–3.**
+**Revision 5 — 2026-07-14. Status: implemented on branch
+`theme-faces` (PR #120); revision 5 folds PR round 1.**
+
+Revision 5 (PR #120 round 1, findings 1–4): accepting a
+`FileStyleSummary` on the GPU now drops the cached minimap vertices —
+theme recolors and diagnostic republishes arrive at an UNCHANGED
+generation, and the cache keys only on (generation, dims, scroll), so
+the stale strokes survived until an edit/resize/scroll; the daemon's
+payload-equality suppression makes the invalidation precise
+(finding 1). `lua_to_style` propagates every `Table::get` error: the
+lookups run `__index`, so a raising metatable previously parsed as an
+all-default style and the merge SUCCEEDED, committing its valid
+siblings against the Q#TH6 all-or-nothing contract; boolean fields
+deliberately keep Lua truthiness (mlua's `bool`), so only lookups
+that RAISE fail the transaction (finding 2). The producer is
+peer-version-aware: `SemanticRenderState::for_peer` records whether
+the peer negotiated >= 16, and below that no `ThemeFacts` is produced
+at all AND no `ui.diag.*` face is folded into the `FileStyleSummary`
+marks — that summary is an ungated pre-v16 channel, and a v15 peer
+must not get face-derived minimap colors while its squiggles, signs,
+and counters stay unthemed; the summary's cache key zeroes its
+face-epoch component for such peers so face edits don't trigger
+pointless whole-file recomputes (finding 3). And the "canonical
+severity color" claim is weakened to what is true: the
+daemon-RESOLVED color is canonical (TUI squiggle/marker/minimap and,
+when a face is set, all GPU surfaces), but the GPU's BUILT-IN
+defaults — bright RGB constants for squiggles/signs/counters vs the
+minimap's converted `Indexed(1/3/6/8)` — are a pre-existing
+divergence this arc keeps, because unset faces must render
+byte-identically to before (finding 4).
 
 Revision 4 (framing round 3, findings 1–7):
 `ui.minibuffer.candidate` now has a real GPU site: its `fg` colors the
@@ -410,6 +438,14 @@ counterpart. The unified rule:
   built-in error color on every surface (squiggle, sign, minimap, band
   counter). It is not absent: an exact empty child stops Q#TH4's walk,
   so it overrides an inherited `ui.diag` color with the built-in.
+  Scope of "built-in" (round 1 finding 4): a SET face with a concrete
+  color unifies all surfaces on both frontends, but the per-surface
+  built-in DEFAULTS keep their pre-existing values — the TUI and the
+  wire summary use `Indexed(1/3/6/8)`, while the GPU's squiggle,
+  sign, and counter constants are historical bright RGBs that differ
+  from the minimap's converted `Indexed` marks. That divergence
+  predates this arc and stays, because unset faces must render
+  byte-identically to before.
 
 Residual divergence, accepted and tested: `Indexed` colors mean the
 user's terminal palette on the TUI and the `indexed_to_glyphon`
@@ -427,7 +463,11 @@ the four Lua bindings — the only mid-session mutation paths:
    `mlua::Result<Vec<(String, Style)>>`, and only after `Ok(Vec)`
    acquires the theme mutex and commits in the requested mode. The Lua
    table iterator maps each raw `(name, style_table)` entry through
-   `lua_to_style` into that result stream. `default` parses its one
+   `lua_to_style` into that result stream — whose own lookups
+   PROPAGATE errors (round 1 finding 2): `Table::get` runs `__index`,
+   so a raising metatable fails the transaction rather than silently
+   parsing as an all-default style; boolean fields keep Lua
+   truthiness by design. `default` parses its one
    `Style` before locking; `clear` has no input to parse. `set`
    already parses into a scratch value pre-lock; `merge` today
    inserts while iterating under the lock (`mod.rs:6925-6931`), so a
@@ -497,6 +537,16 @@ pub struct ThemeFace {
   logic. The daemon owns face semantics; frontends own pixels
   (Q#UX1). No epoch on the wire — the payload is self-contained and
   the house facts style carries no counters.
+- **The producer is peer-version-aware** (round 1 finding 3):
+  daemon sessions construct via `SemanticRenderState::for_peer`, and
+  below v16 no `ThemeFacts` is produced at all — more importantly,
+  no `ui.diag.*` face is folded into the `FileStyleSummary` marks,
+  because that summary is an ungated pre-v16 channel and a v15 peer
+  must not receive face-derived minimap colors while its squiggles,
+  signs, and counters stay unthemed. The write-loop gate remains as
+  the belt-and-braces filter. The summary cache key zeroes its
+  face-epoch component for such peers (no whole-file recompute per
+  face edit that could never change their marks).
 - **Producer**: `theme_facts_msg` on `SemanticRenderState`, called
   from the `render_frame` emission list. Per-tick cheapness comes
   from a `last_face_epoch: Option<u64>` gate **seeded `None`** —
@@ -551,6 +601,14 @@ baked into glyphon rich-text attributes at compose time
 are unchanged (`main.rs:3502-3546`) — without clearing those cached
 comparison strings, a diag-face change with constant counts keeps
 stale counter colors indefinitely.
+
+A newly accepted `FileStyleSummary` drops the cached minimap
+vertices (round 1 finding 1): theme recolors and diagnostic
+republishes ship a new summary at an UNCHANGED generation, and the
+minimap cache keys only on (generation, dims, scroll) — without the
+explicit invalidation the stale strokes survive until an edit,
+resize, or scroll. The daemon payload-suppresses identical
+summaries, so every accepted one is genuinely new.
 
 Each themed site resolves per draw with the Q#TH5 rule: face absent
 → today's site constant; face present → the face's **in-mask**
@@ -816,3 +874,15 @@ Keybinding-driven tests dispatch keys, never `pmacs.command.invoke`.
 24. **Lua surface unchanged**: `pmacs.theme.current()` lists both bare
     `ui` and `ui.*` entries alongside captures; `get("ui.modeline")`
     returns the set style (existing lookup semantics).
+25. **Raising `__index` is transactional** (PR round 1 finding 2): a
+    merge whose style value carries a raising `__index` metatable
+    errors with the metatable's own message, commits nothing —
+    including its valid sibling — and emits nothing.
+26. **v15 peers get no face-derived summary marks** (PR round 1
+    finding 3): with a diag face set, a `for_peer(…, 15)` producer
+    ships summary marks at the built-in severity color and produces
+    no `ThemeFacts`; the `for_peer(…, 16)` twin resolves the face.
+27. **Same-generation summary updates repaint the GPU minimap**
+    (PR round 1 finding 1, `PMACS_REQUIRE_GPU=1`): two summaries at
+    one generation with different mark colors render different
+    frames — fails without the cache invalidation on accept.

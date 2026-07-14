@@ -4095,6 +4095,15 @@ impl State {
         }
         self.current_line_shapes = minimap_line_shapes(&self.current_text);
         self.current_summary = Some(FileStyleSummaryState { generation, lines });
+        // PR #120 round 1 finding 1: a newly accepted summary can
+        // arrive at an UNCHANGED generation (theme recolor,
+        // diagnostic republish) and the minimap cache keys only on
+        // (generation, dims, scroll) — without an explicit drop the
+        // stale vertices survive until an edit, resize, or scroll.
+        // The daemon payload-suppresses identical summaries, so every
+        // summary accepted here is genuinely new and the invalidation
+        // is precise.
+        self.minimap_cache = None;
         self.request_redraw();
     }
 
@@ -8656,6 +8665,48 @@ mod tests {
             base,
             state.render_offscreen(),
             "ui.diag.error = {{}} must render as the built-in severity color"
+        );
+    }
+
+    #[test]
+    fn headless_same_generation_summary_update_repaints_the_minimap() {
+        // PR #120 round 1 finding 1: theme recolors and diagnostic
+        // republishes ship a NEW summary at the SAME CRDT generation,
+        // and the minimap cache keys only on (generation, dims,
+        // scroll) — accepting a summary must drop the cached vertices
+        // or the stale strokes survive until an edit/resize/scroll.
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let (w, h) = (400u32, 300u32);
+        let Some(mut state) = headless_or_skip(w, h, text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.view_range = (0, text.len() as u64);
+        let summary = |color: CellColor| -> Vec<CellStyle> {
+            (0..4)
+                .map(|_| CellStyle {
+                    fg: color,
+                    ..CellStyle::default()
+                })
+                .collect()
+        };
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 7,
+            lines: summary(CellColor::Rgb(200, 40, 40)),
+        });
+        let first = state.render_offscreen();
+        // Same generation, different colors — a theme-recolor twin.
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 7,
+            lines: summary(CellColor::Rgb(40, 200, 40)),
+        });
+        let second = state.render_offscreen();
+        assert_ne!(
+            first, second,
+            "a same-generation summary recolor must repaint the minimap"
         );
     }
 

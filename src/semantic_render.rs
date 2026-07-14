@@ -222,6 +222,15 @@ pub struct SemanticRenderState {
     /// viewport declaration. A frontend retaining face state across
     /// attachments is therefore corrected even by an unthemed daemon.
     last_theme_faces: Option<Vec<crate::protocol::ThemeFace>>,
+    /// Whether the peer negotiated protocol >= 16 (PR #120 round 1
+    /// finding 3). Faces reach a semantic frontend through TWO
+    /// channels: `ThemeFacts` (daemon write-loop gated) and the
+    /// `ui.diag.*` colors folded into `FileStyleSummary` — an OLDER
+    /// channel the version gate does not filter. A v15 peer must not
+    /// receive face-derived minimap marks while its squiggles, signs,
+    /// and counters stay unthemed, so this producer resolves faces
+    /// only when the peer can apply the whole face table.
+    peer_knows_theme_facts: bool,
     /// Cached byte↔line table for the diagnostics projection, keyed
     /// by buffer revision. Building it costs an O(buffer) rope copy
     /// plus a full scan; before this cache, that ran on *every tick*
@@ -313,8 +322,22 @@ impl StyleGate {
 }
 
 impl SemanticRenderState {
+    /// Fresh session state for a peer that negotiated
+    /// `negotiated_protocol_version` — the real daemon construction
+    /// path (PR #120 round 1 finding 3): a `< 16` peer gets no
+    /// `ThemeFacts` produced at all and, crucially, no face-derived
+    /// colors folded into its `FileStyleSummary` marks.
+    #[must_use]
+    pub fn for_peer(frontend_id: FrontendId, negotiated_protocol_version: u32) -> Self {
+        let mut s = Self::new(frontend_id);
+        s.peer_knows_theme_facts = negotiated_protocol_version >= 16;
+        s
+    }
+
     /// Fresh session state for frontend `frontend_id`: no viewport
-    /// declared, nothing sent.
+    /// declared, nothing sent. Assumes a current-build peer (>= 16);
+    /// daemon sessions with a real negotiated version use
+    /// [`Self::for_peer`].
     #[must_use]
     pub fn new(frontend_id: FrontendId) -> Self {
         Self {
@@ -341,6 +364,7 @@ impl SemanticRenderState {
             // an epoch-0 daemon before that send.
             last_face_epoch: None,
             last_theme_faces: None,
+            peer_knows_theme_facts: true,
             diag_line_cache: HashMap::new(),
         }
     }
@@ -990,7 +1014,16 @@ impl SemanticRenderState {
         // `ui.diag.*` feeds the marks.
         let diag_epoch = diagnostics_epoch(state, buffer_id);
         let (syntax_epoch, face_epoch) = theme_epochs(state);
-        let key = (generation, diag_epoch, syntax_epoch, face_epoch);
+        // A v15 peer's marks never resolve faces (finding 3), so a
+        // face mutation cannot change its summary either — zero the
+        // key component rather than recompute a whole-file pass per
+        // face edit just to payload-suppress it.
+        let face_key = if self.peer_knows_theme_facts {
+            face_epoch
+        } else {
+            0
+        };
+        let key = (generation, diag_epoch, syntax_epoch, face_key);
         if self
             .last_summary
             .get(&buffer_id)
@@ -998,7 +1031,7 @@ impl SemanticRenderState {
         {
             return None;
         }
-        let lines = scoped_file_summary(state, buffer_id);
+        let lines = scoped_file_summary(state, buffer_id, self.peer_knows_theme_facts);
         // Payload-equality suppression (Q#TH6): a face edit that
         // leaves the summary unchanged (e.g. `ui.modeline`) emits
         // nothing — but the key still advances, on computation rather
@@ -1036,6 +1069,12 @@ impl SemanticRenderState {
     /// `None`, so every attachment ships exactly one authoritative
     /// table — the empty table included — on its first frame.
     fn theme_facts_msg(&mut self, state: &EditorState) -> Option<InstanceMessage> {
+        // PR #120 round 1 finding 3: never even produced for a peer
+        // below v16 (the daemon write-loop gate remains as the
+        // belt-and-braces filter).
+        if !self.peer_knows_theme_facts {
+            return None;
+        }
         let theme = state.syntax_registry.theme();
         let (faces, face_epoch) = {
             let th = theme.lock().expect("theme mutex poisoned");
@@ -1815,7 +1854,11 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
 /// `O(spans × lines)` in the worst case; the caller short-circuits on
 /// unchanged CRDT generation so this only runs on first sight of a
 /// buffer or after an edit, not per frame.
-fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
+fn scoped_file_summary(
+    state: &EditorState,
+    buffer_id: BufferId,
+    resolve_faces: bool,
+) -> Vec<Style> {
     let source = {
         let core = state.core.borrow();
         let registry = core.registry.clone();
@@ -1846,7 +1889,7 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
     if spans.is_empty() {
         // No styled runs — but diagnostic marks are independent of
         // syntax styling (a plain-text buffer can still have lints).
-        overlay_diagnostic_marks(state, buffer_id, &mut out);
+        overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
         return out;
     }
 
@@ -1879,7 +1922,7 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
             *line_dominant = winner.0;
         }
     }
-    overlay_diagnostic_marks(state, buffer_id, &mut out);
+    overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
     out
 }
 
@@ -1891,7 +1934,12 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
 /// describe pre-edit text, same discipline as the decorations
 /// producer (the marks return on republish, which bumps the diag
 /// epoch and recomputes this summary).
-fn overlay_diagnostic_marks(state: &EditorState, buffer_id: BufferId, lines: &mut [Style]) {
+fn overlay_diagnostic_marks(
+    state: &EditorState,
+    buffer_id: BufferId,
+    lines: &mut [Style],
+    resolve_faces: bool,
+) {
     let uri = {
         let core = state.core.borrow();
         let Some(uri) = buffer_file_uri(&core, buffer_id) else {
@@ -1919,14 +1967,18 @@ fn overlay_diagnostic_marks(state: &EditorState, buffer_id: BufferId, lines: &mu
     // `ui.diag.*` faces reach the minimap through this summary. The
     // diag `Default`-fg policy guarantees a diagnosed line never
     // writes `Default` here, which the GPU reads as "no mark".
-    let theme = {
+    // `resolve_faces` is false for a peer below v16 (PR #120 round 1
+    // finding 3): this summary is an ungated pre-v16 channel, and a
+    // v15 frontend must not get face-derived marks on one surface
+    // while every other severity surface stays unthemed.
+    let theme = resolve_faces.then(|| {
         let handle = state.syntax_registry.theme();
         let t = handle.lock().expect("theme mutex poisoned");
         t.clone()
-    };
+    });
     for (line, severity) in lines.iter_mut().zip(best) {
         if let Some(s) = severity {
-            line.underline_color = crate::diag::severity_color(Some(&theme), s);
+            line.underline_color = crate::diag::severity_color(theme.as_ref(), s);
         }
     }
 }

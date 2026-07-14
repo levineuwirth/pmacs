@@ -6862,18 +6862,26 @@ fn underline_to_lua(style: UnderlineStyle) -> &'static str {
 /// default to the same values as `Style::default()` --- a Lua table
 /// with `{ bold = true }` produces a style that is otherwise
 /// terminal-default.
+///
+/// Every lookup PROPAGATES its error (PR #120 round 1 finding 2):
+/// `Table::get` runs `__index`, so a raising metatable must fail the
+/// enclosing transactional mutation (Q#TH6 all-or-nothing), not
+/// silently parse as an all-default style and let sibling entries
+/// commit. Color/underline fields validate strictly through their
+/// converters; the boolean fields follow Lua truthiness (mlua's
+/// `bool` conversion), so `reverse = 1` reads as `true` by design.
 fn lua_to_style(t: &Table) -> mlua::Result<Style> {
-    let fg: mlua::Value = t.get("fg").unwrap_or(mlua::Value::Nil);
-    let bg: mlua::Value = t.get("bg").unwrap_or(mlua::Value::Nil);
-    let underline: mlua::Value = t.get("underline").unwrap_or(mlua::Value::Nil);
-    let underline_color: mlua::Value = t.get("underline_color").unwrap_or(mlua::Value::Nil);
+    let fg: mlua::Value = t.get("fg")?;
+    let bg: mlua::Value = t.get("bg")?;
+    let underline: mlua::Value = t.get("underline")?;
+    let underline_color: mlua::Value = t.get("underline_color")?;
     Ok(Style {
         fg: lua_to_color(&fg)?,
         bg: lua_to_color(&bg)?,
-        bold: t.get("bold").unwrap_or(false),
-        italic: t.get("italic").unwrap_or(false),
+        bold: t.get::<Option<bool>>("bold")?.unwrap_or(false),
+        italic: t.get::<Option<bool>>("italic")?.unwrap_or(false),
         underline: lua_to_underline(&underline)?,
-        reverse: t.get("reverse").unwrap_or(false),
+        reverse: t.get::<Option<bool>>("reverse")?.unwrap_or(false),
         underline_color: lua_to_color(&underline_color)?,
     })
 }

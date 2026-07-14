@@ -735,6 +735,98 @@ fn malformed_merge_is_atomic_from_lua() {
     );
 }
 
+#[test]
+fn raising_index_metamethods_fail_the_merge_transactionally() {
+    // PR #120 round 1 finding 2: `Table::get` runs __index, so a
+    // raising metatable must error the whole merge. Pre-fix, the
+    // trapped lookup silently parsed as an all-default style and the
+    // merge SUCCEEDED, committing the valid sibling — against the
+    // Q#TH6 all-or-nothing contract.
+    let mut state = editor();
+    type_str(&mut state, "hello");
+    let mut sem = semantic(&state);
+    let _ = sem.render_frame(&state);
+
+    let err = exec_err(
+        &state,
+        r#"
+        local trap = setmetatable({}, { __index = function() error("trapdoor") end })
+        pmacs.theme.merge { ["ui.gutter"] = trap, zebra = { fg = 42 } }
+        "#,
+    );
+    assert!(
+        format!("{err}").contains("trapdoor"),
+        "the metatable's own error surfaces: {err}"
+    );
+    // `zebra` is not in default_dark, so its presence would prove the
+    // valid sibling leaked through the failed merge.
+    let (zebra, gutter): (bool, bool) = eval(
+        &state,
+        r#"
+        local t = pmacs.theme.current()
+        return t["zebra"] ~= nil, t["ui.gutter"] ~= nil
+        "#,
+    );
+    assert!(
+        !zebra && !gutter,
+        "nothing from the failed merge landed (zebra={zebra}, gutter={gutter})"
+    );
+    let frame = sem.render_frame(&state);
+    assert!(
+        theme_facts_of(&frame).is_none() && !has_style_spans(&frame),
+        "a failed merge bumps nothing and emits nothing"
+    );
+    // (Boolean fields deliberately follow Lua truthiness — mlua's
+    // bool conversion — so `reverse = "yes"` is Some(true), not an
+    // error; the transactional contract is about lookups that RAISE.)
+}
+
+#[test]
+fn v15_peers_get_no_face_derived_summary_marks() {
+    // PR #120 round 1 finding 3: ui.diag.* colors reach the minimap
+    // through FileStyleSummary — an ungated pre-v16 channel. A v15
+    // semantic peer must keep built-in marks (its squiggles, signs,
+    // and counters are unthemed too); a v16 peer gets the face.
+    use pmacs::diag::DiagnosticSeverity;
+
+    let mut state = editor();
+    type_str(&mut state, "boom\nfine\n");
+    attach_diags(&state, vec![diag(DiagnosticSeverity::Error)]);
+    exec(
+        &state,
+        r#"pmacs.theme.merge { ["ui.diag.error"] = { fg = 45 } }"#,
+    );
+    let buffer_id = active_buffer(&state);
+    let viewport = ByteRange {
+        start: 0,
+        end: 1 << 20,
+    };
+
+    let mut v15 = SemanticRenderState::for_peer(FrontendId::LOCAL, 15);
+    v15.set_viewport(buffer_id, viewport, 0);
+    let frame = v15.render_frame(&state);
+    let lines = summary_of(&frame).expect("v15 still receives the summary");
+    assert_eq!(
+        lines[0].underline_color,
+        Color::Indexed(1),
+        "a v15 peer's marks keep the built-in severity color"
+    );
+    assert!(
+        theme_facts_of(&frame).is_none(),
+        "and no ThemeFacts is produced for it at all"
+    );
+
+    let mut v16 = SemanticRenderState::for_peer(FrontendId::LOCAL, 16);
+    v16.set_viewport(buffer_id, viewport, 0);
+    let frame = v16.render_frame(&state);
+    assert_eq!(
+        summary_of(&frame).expect("summary ships")[0].underline_color,
+        Color::Indexed(45),
+        "a v16 peer's marks resolve the face"
+    );
+    assert!(theme_facts_of(&frame).is_some());
+}
+
 // ---------------------------------------------------------------------------
 // 12 + 16 + 19 — ThemeFacts emission discipline; late join; set wipes
 // ---------------------------------------------------------------------------

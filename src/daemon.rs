@@ -1375,6 +1375,9 @@ fn handle_session_established(
     // fires: the semantic frontend holds the rope locally and the
     // semantic frame ships no text.
     let semantic_render = session_state.negotiated_capabilities.semantic_render;
+    // Captured before `register_session` consumes the state: the
+    // semantic producer needs the peer's version (finding 3 below).
+    let negotiated_protocol_version = session_state.negotiated_protocol_version;
     if crdt_replica {
         send_buffer_snapshots(editor, &mut write_stream);
     }
@@ -1386,7 +1389,14 @@ fn handle_session_established(
     if semantic_render {
         semantic_states.insert(
             frontend_id,
-            crate::semantic_render::SemanticRenderState::new(frontend_id),
+            // for_peer, not new (PR #120 round 1 finding 3): a v15
+            // peer's producer must not resolve faces into the
+            // FileStyleSummary marks — that channel predates the v16
+            // gate.
+            crate::semantic_render::SemanticRenderState::for_peer(
+                frontend_id,
+                negotiated_protocol_version,
+            ),
         );
     } else {
         let mut render_state = RenderState::new(initial_size);
