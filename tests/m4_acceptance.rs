@@ -5878,6 +5878,11 @@ fn m4_shebang_resolver_maps_interpreters() {
         ("#!/usr/bin/env bash\n", "bash"),
         ("#!/usr/bin/env python3\n", "python"),
         ("#!/usr/bin/env -S python3 -u\n", "python"),
+        // Attached split-string forms carry the interpreter inside the
+        // option token.
+        ("#!/usr/bin/env -Spython3 -u\n", "python"),
+        ("#!/usr/bin/env --split-string=python3 -u\n", "python"),
+        ("#!/usr/bin/env -vSpython3 -u\n", "python"),
         // GNU-env options that consume an operand must not have the
         // operand mistaken for the interpreter.
         ("#!/usr/bin/env -u FOO python3\n", "python"),
@@ -6080,6 +6085,33 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         current_tree_language(&s).as_deref(),
         Some("bash"),
         "editing the shebang must not re-switch the pinned grammar"
+    );
+
+    // Switch away to another buffer and back: the after-switch reattach
+    // must reuse the pinned bash grammar rather than re-sniff the (now
+    // lua) shebang — otherwise grammar and LSP diverge, since the LSP side
+    // keeps its bash attachment across the switch. `switch_buffer` fires
+    // `buffer.after-switch` synchronously.
+    let other = dir.path().join("other.txt");
+    std::fs::write(&other, b"plain text\n").expect("write other");
+    let other_disp = other.display();
+    s.lua_host
+        .lua()
+        .load(format!(
+            "local pinned = pmacs.window.buffer()
+             pmacs.buffer.find_or_open('{other_disp}')
+             pmacs.window.switch_buffer(pinned)"
+        ))
+        .exec()
+        .expect("switch away and back");
+    for _ in 0..64 {
+        s.tick_async();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        current_tree_language(&s).as_deref(),
+        Some("bash"),
+        "switch-away/back must reuse the pinned grammar, not re-sniff the edited shebang"
     );
     let errs: i64 = s
         .lua_host

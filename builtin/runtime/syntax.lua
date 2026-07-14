@@ -99,21 +99,34 @@ function pmacs.parse.language_from_shebang(buf)
     local seen_env = false
     local skip_next = false
     for tok in rest:gmatch("%S+") do
+      -- `-S`/`--split-string` introduces a string whose FIRST word is the
+      -- interpreter. GNU env accepts that value ATTACHED — `-Spython3`,
+      -- `-vSpython3` (after no-operand short flags i/v/0), or
+      -- `--split-string=python3` — where the interpreter rides inside the
+      -- option token. Extract it; the separated forms (`-S python3`) are
+      -- handled by simply walking on to the next token.
+      local split_attached =
+        tok:match("^%-[iv0]*S(.+)$") or tok:match("^%-%-split%-string=(.+)$")
       if not seen_env then
         seen_env = true -- the `env` path token itself
       elseif skip_next then
         skip_next = false -- the operand consumed by the previous option
+      elseif split_attached then
+        local word = split_attached:match("^(%S+)")
+        base = word and (word:match("([^/]+)$") or word)
+        break
+      elseif tok == "-S" or tok == "--split-string" then
+        -- Separated split-string: the next token starts the string, i.e.
+        -- the interpreter — keep walking.
       elseif tok:find("=", 1, true) then
-        -- `VAR=value` env assignment, or a `--long=value` option: both
+        -- `VAR=value` env assignment, or another `--long=value` option:
         -- self-contained, skip.
       elseif tok:sub(1, 1) == "-" then
         -- An option. A few GNU-env short options and their long forms
         -- consume the *next* token as an operand (`-u NAME`, `-C DIR`,
         -- `-a NAME`); skip that operand too, or its value is mistaken for
-        -- the interpreter. `-S`/`--split-string` is deliberately absent:
-        -- the string it introduces contains the interpreter, which the
-        -- walk then picks up. An option with an attached operand
-        -- (`-uNAME`) is one self-contained token and needs no skip.
+        -- the interpreter. An option with an attached operand (`-uNAME`)
+        -- is one self-contained token and needs no skip.
         if tok == "-u" or tok == "-C" or tok == "-a"
             or tok == "--unset" or tok == "--chdir" or tok == "--argv0" then
           skip_next = true
@@ -159,11 +172,18 @@ end
 local function attach_for_active_buffer()
   local buf = pmacs.window.buffer()
   if not buf then return end
-  -- Gate dispatch on `_has_language`: the chain above also resolves
-  -- languages with no grammar (python, javascript), and dispatching one
-  -- would raise "unknown language" (caught, but noise) — and an
-  -- extensionless script must never get a wrong-grammar parse tree.
-  local lang = resolve_active_language(buf)
+  local key = tostring(buf)
+  -- Reuse the language pinned at first attach if this buffer already has
+  -- a parse view. A switch-away/back re-runs this hook (via after-switch);
+  -- re-resolving there would re-sniff a shebang the user has since edited
+  -- and silently swap the grammar — and diverge from the LSP side, which
+  -- keeps its existing attachment across the switch. A first-seen buffer
+  -- (no view yet) resolves normally. Gate dispatch on `_has_language`: the
+  -- resolution chain also yields languages with no grammar (python,
+  -- javascript), and dispatching one would raise "unknown language"
+  -- (caught, but noise) and never gives a wrong-grammar tree.
+  local lang = pmacs.parse._has_view(buf) and parse_lang_by_buffer[key]
+    or resolve_active_language(buf)
   if not lang or not pmacs.parse._has_language(lang) then return end
   pmacs.parse._dispatch(buf, lang)
   -- T M4.3: install the syntax-highlight overlay for this buffer.
@@ -174,8 +194,8 @@ local function attach_for_active_buffer()
   -- table so we only push once per (buffer, after-load) cycle).
   -- `tostring(buf)` is stable per BufferId (the metamethod
   -- formats the wrapped id), so it's a safe table-key
-  -- replacement for a `:id()` method we don't have to expose.
-  local key = tostring(buf)
+  -- replacement for a `:id()` method we don't have to expose (`key` is
+  -- computed once at the top of this function).
   if not highlighted_buffers[key] then
     local ok = pmacs.parse._attach_highlight(buf, lang)
     if ok then highlighted_buffers[key] = true end
