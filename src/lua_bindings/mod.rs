@@ -12267,14 +12267,19 @@ mod tests {
         // committed and face_epoch iff any face key did — bare `ui`
         // classifies as a face (Q#TH2, round 2 finding 3).
         let theme = seeded_theme();
+        // One lock per observation: two `lock()` calls inside one
+        // tuple expression self-deadlock (the first guard outlives
+        // the second call).
+        let epochs = |theme: &crate::highlight::ThemeHandle| {
+            let th = theme.lock().expect("lock");
+            (th.syntax_epoch, th.face_epoch)
+        };
+
         let face_only: Vec<mlua::Result<(String, Style)>> =
             vec![Ok(("ui.modeline".to_owned(), Style::default()))];
         commit_theme_entries(&theme, ThemeCommit::Merge, face_only.into_iter()).expect("commit");
         assert_eq!(
-            (
-                theme.lock().expect("lock").syntax_epoch,
-                theme.lock().expect("lock").face_epoch
-            ),
+            epochs(&theme),
             (3, 6),
             "face-only merge bumps face_epoch only"
         );
@@ -12282,36 +12287,19 @@ mod tests {
         let bare_ui: Vec<mlua::Result<(String, Style)>> =
             vec![Ok(("ui".to_owned(), Style::default()))];
         commit_theme_entries(&theme, ThemeCommit::Merge, bare_ui.into_iter()).expect("commit");
-        assert_eq!(
-            (
-                theme.lock().expect("lock").syntax_epoch,
-                theme.lock().expect("lock").face_epoch
-            ),
-            (3, 7),
-            "bare ui is a face key"
-        );
+        assert_eq!(epochs(&theme), (3, 7), "bare ui is a face key");
 
         let mixed: Vec<mlua::Result<(String, Style)>> = vec![
             Ok(("comment".to_owned(), Style::default())),
             Ok(("ui.gutter".to_owned(), Style::default())),
         ];
         commit_theme_entries(&theme, ThemeCommit::Merge, mixed.into_iter()).expect("commit");
-        assert_eq!(
-            (
-                theme.lock().expect("lock").syntax_epoch,
-                theme.lock().expect("lock").face_epoch
-            ),
-            (4, 8),
-            "mixed merge bumps both"
-        );
+        assert_eq!(epochs(&theme), (4, 8), "mixed merge bumps both");
 
         let empty: Vec<mlua::Result<(String, Style)>> = Vec::new();
         commit_theme_entries(&theme, ThemeCommit::Merge, empty.into_iter()).expect("commit");
         assert_eq!(
-            (
-                theme.lock().expect("lock").syntax_epoch,
-                theme.lock().expect("lock").face_epoch
-            ),
+            epochs(&theme),
             (4, 8),
             "an empty merge commits nothing and bumps nothing"
         );
