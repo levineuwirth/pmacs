@@ -205,6 +205,26 @@ ResourceOffer {
     mime: String,
     body: ResourceBody, // Inline(Vec<u8>) | Uri(String)
 },
+
+/// Themes arc Q#TH7 (protocol v16): the daemon-resolved UI face
+/// table. Bufferless — the theme is one global instance. Complete
+/// replacement each send: a face absent from `faces` is unset and
+/// the frontend uses its own default for that surface. Every
+/// attachment receives exactly one authoritative table (the empty
+/// table included) with its first emission after viewport
+/// declaration; cached-compare suppressed thereafter, so an
+/// unthemed session pays one small message and nothing more.
+/// Resolution (the `ui.*` dotted-prefix inheritance walk) happens
+/// daemon-side over the stage-1 face inventory — frontends do
+/// exact-name lookup only, and apply each face within its
+/// stage-1 component mask (docs/theme-faces-framing.md Q#TH3/Q#TH5:
+/// a set face owns its surface; `Default` components mean the
+/// frontend's plain rendering; out-of-mask components are never
+/// read). Daemon-gated `>= 16`; appended as the FINAL variant —
+/// postcard discriminants are ordinal.
+ThemeFacts {
+    faces: Vec<ThemeFace>, // { name: String, style: Style }, sorted by name
+},
 ```
 
 Each family member diffs against the previous frame the same way

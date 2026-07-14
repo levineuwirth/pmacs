@@ -43,7 +43,11 @@ fn diagnostic_to_lua(lua: &Lua, d: &Diagnostic) -> mlua::Result<Table> {
     clippy::too_many_lines,
     reason = "linear list of raw bindings; splitting fragments a coherent surface"
 )]
-pub fn install_diag(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
+pub fn install_diag(
+    lua: &Lua,
+    manager: &SharedLspManager,
+    theme: &crate::highlight::ThemeHandle,
+) -> mlua::Result<()> {
     let pmacs: Table = lua.globals().get("pmacs")?;
     let diag_mod = lua.create_table()?;
 
@@ -202,6 +206,7 @@ pub fn install_diag(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
     // per buffer; double-attach stacks duplicate overlays.
     {
         let m = manager.clone();
+        let th = theme.clone();
         diag_mod.set(
             "_attach_view",
             lua.create_function(move |lua, (id, uri): (BufferIdLua, String)| {
@@ -217,7 +222,10 @@ pub fn install_diag(lua: &Lua, manager: &SharedLspManager) -> mlua::Result<()> {
                         id.0
                     )));
                 }
-                let overlay = crate::diag::DiagnosticView::new(uri, store_handle);
+                // Themes Q#TH9: the Lua attachment path threads the
+                // shared theme so ui.diag.* faces reach the squiggles
+                // and gutter signs.
+                let overlay = crate::diag::DiagnosticView::new(uri, store_handle, Some(th.clone()));
                 win.push_overlay(Box::new(overlay));
                 Ok(true)
             })?,

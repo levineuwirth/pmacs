@@ -385,6 +385,10 @@ fn active_match_style() -> Style {
 /// maps to one row.
 pub struct SearchView {
     store: SharedSearchStore,
+    /// Shared theme for the `ui.search.match(.active)` wash faces
+    /// (themes arc Q#TH9). `None` — a bare core with no injected
+    /// theme — paints the built-in yellow literals.
+    theme: Option<crate::highlight::ThemeHandle>,
 }
 
 impl SearchView {
@@ -393,10 +397,11 @@ impl SearchView {
     /// ([`Buffer::id`]) rather than a fixed id, so a single attached
     /// instance keeps highlighting correctly even if the window
     /// switches buffers (the store is per-buffer; a buffer with no
-    /// search entry simply paints nothing).
+    /// search entry simply paints nothing). Wash faces resolve
+    /// through `theme` when given.
     #[must_use]
-    pub fn new(store: SharedSearchStore) -> Self {
-        Self { store }
+    pub fn new(store: SharedSearchStore, theme: Option<crate::highlight::ThemeHandle>) -> Self {
+        Self { store, theme }
     }
 }
 
@@ -437,11 +442,36 @@ impl View for SearchView {
         let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
 
+        // Themes Q#TH5: a set wash face replaces the default overlay
+        // wholesale within its {bg} mask — the face's bg is the wash,
+        // everything else plain (so `ui.search.match = {}` disables
+        // the wash; out-of-mask fg/reverse are never read). Unset
+        // keeps today's literals. One theme clone per render (Q#TH9).
+        let (match_overlay, active_overlay) = {
+            let theme = self
+                .theme
+                .as_ref()
+                .map(|t| t.lock().expect("theme mutex poisoned").clone());
+            let resolve = |name: &str, fallback: fn() -> Style| -> Style {
+                theme
+                    .as_ref()
+                    .and_then(|t| t.face(name))
+                    .map_or_else(fallback, |f| Style {
+                        bg: f.bg,
+                        ..Style::default()
+                    })
+            };
+            (
+                resolve("ui.search.match", match_style),
+                resolve("ui.search.match.active", active_match_style),
+            )
+        };
+
         for m in &matches {
             let style = if Some(*m) == active {
-                active_match_style()
+                active_overlay
             } else {
-                match_style()
+                match_overlay
             };
             // A regex match may span multiple lines (Q#RX4); wash each
             // row's clipped slice, mirroring the selection renderer.
@@ -707,7 +737,7 @@ mod tests {
             .unwrap()
             .set(bid, "lo", find_all(b"lo lo lo\n", "lo"));
 
-        let mut view = SearchView::new(store.clone());
+        let mut view = SearchView::new(store.clone(), None);
         let mut backing = vec![Cell::default(); 10];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -783,7 +813,7 @@ mod tests {
             stride: cols,
             size: CellSize::new(rows, cols),
         };
-        SearchView::new(store.clone()).render(
+        SearchView::new(store.clone(), None).render(
             &buf,
             Viewport {
                 buffer_start: 0,

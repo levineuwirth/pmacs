@@ -363,51 +363,48 @@ pub fn make_shared_store() -> SharedDiagStore {
 /// [`crate::text_view`] and [`crate::highlight`].
 const TAB_WIDTH: u32 = 8;
 
-/// Style applied to bytes covered by an `Error` diagnostic. Wavy
-/// underline colored via `underline_color` (not `fg`) so the
-/// squiggle reads red while the syntax view's text color survives
-/// underneath (T M4.6, protocol v6).
-fn error_style() -> Style {
-    Style {
-        underline: UnderlineStyle::Curly,
-        underline_color: DiagnosticSeverity::Error.underline_color(),
-        ..Style::default()
+/// The RESOLVED severity color (themes arc Q#TH5): the `ui.diag.*`
+/// face's `fg` when a face is set with a concrete color, else the
+/// built-in [`DiagnosticSeverity::underline_color`]. The diag family
+/// carries a special `Default` policy — `Default` fg means the
+/// built-in severity color, never "plain" — because the color doubles
+/// as the *presence* encoding in the minimap summary
+/// (`FileStyleSummary.underline_color`, where `Default` reads as "no
+/// mark"), so a plain severity color is unrepresentable and
+/// `ui.diag.error = {}` degrades to the built-in on every surface.
+#[must_use]
+pub fn severity_color(
+    theme: Option<&crate::highlight::Theme>,
+    severity: DiagnosticSeverity,
+) -> Color {
+    let name = match severity {
+        DiagnosticSeverity::Error => "ui.diag.error",
+        DiagnosticSeverity::Warning => "ui.diag.warning",
+        DiagnosticSeverity::Information => "ui.diag.info",
+        DiagnosticSeverity::Hint => "ui.diag.hint",
+    };
+    match theme.and_then(|t| t.face(name)) {
+        Some(f) if f.fg != Color::Default => f.fg,
+        _ => severity.underline_color(),
     }
 }
 
-/// Style applied to bytes covered by a `Warning` diagnostic.
-fn warning_style() -> Style {
+/// Style applied to bytes covered by a diagnostic: severity-shaped
+/// underline (wavy for error/warning, single for info, dotted for
+/// hint) colored via `underline_color` (not `fg`) so the squiggle
+/// reads its severity color while the syntax view's text color
+/// survives underneath (T M4.6, protocol v6). `color` is the
+/// resolved severity color ([`severity_color`]).
+fn style_for(severity: DiagnosticSeverity, color: Color) -> Style {
+    let underline = match severity {
+        DiagnosticSeverity::Error | DiagnosticSeverity::Warning => UnderlineStyle::Curly,
+        DiagnosticSeverity::Information => UnderlineStyle::Single,
+        DiagnosticSeverity::Hint => UnderlineStyle::Dotted,
+    };
     Style {
-        underline: UnderlineStyle::Curly,
-        underline_color: DiagnosticSeverity::Warning.underline_color(),
+        underline,
+        underline_color: color,
         ..Style::default()
-    }
-}
-
-/// Style applied to bytes covered by an `Information` diagnostic.
-fn info_style() -> Style {
-    Style {
-        underline: UnderlineStyle::Single,
-        underline_color: DiagnosticSeverity::Information.underline_color(),
-        ..Style::default()
-    }
-}
-
-/// Style applied to bytes covered by a `Hint` diagnostic.
-fn hint_style() -> Style {
-    Style {
-        underline: UnderlineStyle::Dotted,
-        underline_color: DiagnosticSeverity::Hint.underline_color(),
-        ..Style::default()
-    }
-}
-
-fn style_for(severity: DiagnosticSeverity) -> Style {
-    match severity {
-        DiagnosticSeverity::Error => error_style(),
-        DiagnosticSeverity::Warning => warning_style(),
-        DiagnosticSeverity::Information => info_style(),
-        DiagnosticSeverity::Hint => hint_style(),
     }
 }
 
@@ -416,10 +413,11 @@ fn style_for(severity: DiagnosticSeverity) -> Style {
 /// severity-colored *background* on the line's first cell: the
 /// glyph and its syntax color survive (the view contract is
 /// style-only), and zero-width diagnostics — invisible to the
-/// underline pass — still get a visible artifact.
-fn marker_style_for(severity: DiagnosticSeverity) -> Style {
+/// underline pass — still get a visible artifact. `color` is the
+/// resolved severity color ([`severity_color`]).
+fn marker_style_for(color: Color) -> Style {
     Style {
-        bg: severity.underline_color(),
+        bg: color,
         ..Style::default()
     }
 }
@@ -436,15 +434,25 @@ pub struct DiagnosticView {
     /// Shared store; mutated by the LSP manager, read by this view
     /// on every render.
     store: SharedDiagStore,
+    /// Shared theme for the `ui.diag.*` face resolution (themes arc
+    /// Q#TH9; the `SyntaxHighlightView` precedent). `None` — a bare
+    /// test construction — paints the built-in severity colors.
+    theme: Option<crate::highlight::ThemeHandle>,
 }
 
 impl DiagnosticView {
-    /// Construct a diagnostic view for `uri` against `store`.
+    /// Construct a diagnostic view for `uri` against `store`,
+    /// resolving severity colors through `theme` when given.
     #[must_use]
-    pub fn new(uri: impl Into<String>, store: SharedDiagStore) -> Self {
+    pub fn new(
+        uri: impl Into<String>,
+        store: SharedDiagStore,
+        theme: Option<crate::highlight::ThemeHandle>,
+    ) -> Self {
         Self {
             uri: uri.into(),
             store,
+            theme,
         }
     }
 
@@ -502,8 +510,15 @@ impl View for DiagnosticView {
         let mut line_markers: std::collections::HashMap<u32, DiagnosticSeverity> =
             std::collections::HashMap::new();
 
+        // One theme clone per render (themes arc Q#TH9, the
+        // SyntaxHighlightView discipline) for the ui.diag.* faces.
+        let theme = self
+            .theme
+            .as_ref()
+            .map(|t| t.lock().expect("theme mutex poisoned").clone());
+
         for diag in &diags {
-            let style = style_for(diag.severity);
+            let style = style_for(diag.severity, severity_color(theme.as_ref(), diag.severity));
             // Apply to each line the diagnostic touches. LSP ranges
             // are half-open at the end position; if end_col == 0
             // the diagnostic stops at the start of `end_line` so
@@ -580,6 +595,7 @@ impl View for DiagnosticView {
             viewport.gutter_w,
             max_cols,
             &line_markers,
+            theme.as_ref(),
         );
     }
 }
@@ -597,9 +613,11 @@ fn paint_line_markers(
     gutter_w: u32,
     max_cols: u32,
     line_markers: &std::collections::HashMap<u32, DiagnosticSeverity>,
+    theme: Option<&crate::highlight::Theme>,
 ) {
     for (&row_offset, &severity) in line_markers {
         let row = cell_origin.row + row_offset;
+        let color = severity_color(theme, severity);
         if gutter_w > 0 {
             let cell = cells.at(CellCoord::new(
                 row,
@@ -607,12 +625,12 @@ fn paint_line_markers(
             ));
             cell.glyph = Glyph::Char(severity.gutter_glyph());
             cell.style = Style {
-                fg: severity.underline_color(),
+                fg: color,
                 ..Style::default()
             };
         } else if max_cols > 0 {
             let cell = cells.at(CellCoord::new(row, cell_origin.col));
-            cell.style = merge_styles(cell.style, marker_style_for(severity));
+            cell.style = merge_styles(cell.style, marker_style_for(color));
         }
     }
 }
@@ -921,7 +939,7 @@ mod tests {
             DiagnosticSeverity::Information,
             DiagnosticSeverity::Hint,
         ] {
-            let style = style_for(s);
+            let style = style_for(s, severity_color(None, s));
             assert_eq!(style.fg, Color::Default, "{s:?} must not set fg");
             assert_ne!(
                 style.underline_color,
@@ -959,7 +977,7 @@ mod tests {
         // `pmacs.window._overlay_kinds()` introspection (task #23 wire-up,
         // mirroring "syntax-highlight" / LspStyleView) relies on this.
         let store = make_shared_store();
-        let view = DiagnosticView::new("file:///a", store);
+        let view = DiagnosticView::new("file:///a", store, None);
         assert_eq!(view.kind(), "diagnostic");
     }
 
@@ -984,7 +1002,7 @@ mod tests {
         })
         .expect("seed buffer");
 
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 10];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1046,7 +1064,7 @@ mod tests {
         })
         .expect("seed buffer");
 
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 30];
         // Pre-paint glyphs at column 0 to pin the style-only contract.
         backing[0].glyph = Glyph::Char('h');
@@ -1123,7 +1141,7 @@ mod tests {
 
         // A 2-cell gutter: text is shifted to column 2, signs land at
         // window column 0 (`cell_origin.col - gutter_w`).
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 30];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1191,7 +1209,7 @@ mod tests {
         })
         .expect("seed buffer");
 
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,

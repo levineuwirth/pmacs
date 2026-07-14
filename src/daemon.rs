@@ -1125,6 +1125,11 @@ fn dispatcher_loop(
                 let peer_knows_completion_popup = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 15);
+                // Themes Q#TH7 — ThemeFacts gated at v16; a v15 peer's
+                // chrome simply stays on its frontend defaults.
+                let peer_knows_theme_facts = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 16);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1157,6 +1162,10 @@ fn dispatcher_loop(
                     }
                     if !peer_knows_completion_popup
                         && matches!(msg, InstanceMessage::CompletionPopup { .. })
+                    {
+                        continue;
+                    }
+                    if !peer_knows_theme_facts && matches!(msg, InstanceMessage::ThemeFacts { .. })
                     {
                         continue;
                     }

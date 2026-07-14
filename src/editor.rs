@@ -206,6 +206,11 @@ impl EditorState {
             lua_host.registry(),
         )
         .expect("install pmacs.parse");
+        // Themes Q#TH9: inject the shared theme into the core right
+        // after SyntaxRegistry construction — the core owns no syntax
+        // state, but its search overlay resolves wash faces through
+        // this handle.
+        core.borrow_mut().theme = Some(syntax_registry.theme());
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/syntax.lua"),
@@ -2093,6 +2098,14 @@ pub fn paint_frame(
     }
     let text_rows = term_size.rows - 1;
 
+    // Themes Q#TH9: one theme clone per frame for the chrome faces —
+    // the same single-lock discipline as `SyntaxHighlightView::render`.
+    let theme = {
+        let handle = state.syntax_registry.theme();
+        let t = handle.lock().expect("theme mutex poisoned");
+        t.clone()
+    };
+
     let mut core_ref = state.core.borrow_mut();
     let core: &mut EditorCore = &mut core_ref;
 
@@ -2175,12 +2188,12 @@ pub fn paint_frame(
         // overlay in attach order. See [`crate::view::View`].
         window.text_view.render(buf, viewport, grid);
         if gutter_w > 0 {
-            paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w);
+            paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, &theme);
         }
         for overlay in &mut window.overlays {
             overlay.render(buf, viewport, grid);
         }
-        paint_local_selection(grid, buf, window, &rect, inner_rows, gutter_w);
+        paint_local_selection(grid, buf, window, &rect, inner_rows, gutter_w, &theme);
         // Mode line for this window. Painted last so the line
         // itself is always visible regardless of overlay activity.
         let coord = window
@@ -2212,21 +2225,29 @@ pub fn paint_frame(
             coord.col,
             &scroll,
             &diags,
+            mode_line_style(&theme),
         );
     }
     drop(reg);
 
-    paint_status_line(grid, core, &state.lua_host, &state.dispatcher, term_size);
+    paint_status_line(
+        grid,
+        core,
+        &state.lua_host,
+        &state.dispatcher,
+        term_size,
+        &theme,
+    );
 
     // An active isearch owns the bottom row (its prompt + match
     // readout), but the terminal cursor stays in the buffer at the
     // active match so the eye follows the search — so paint the prompt
     // and fall through to the buffer-cursor placement below.
     let mb_cursor_col = if core.search_active() {
-        paint_search_prompt(grid, core, term_size);
+        paint_search_prompt(grid, core, term_size, &theme);
         None
     } else if core.minibuffer.is_active() {
-        Some(paint_minibuffer(grid, core, term_size))
+        Some(paint_minibuffer(grid, core, term_size, &theme))
     } else {
         None
     };
@@ -2257,33 +2278,59 @@ pub fn paint_frame(
     Some(CellCoord::new(grid_row, grid_col))
 }
 
+/// The mode-line row style (themes arc Q#TH5): a set `ui.modeline`
+/// face owns the surface within its {fg, bg, reverse} mask — the row
+/// resets to plain plus the face's in-mask components — else today's
+/// reverse video.
+fn mode_line_style(theme: &crate::highlight::Theme) -> crate::cell::Style {
+    theme.face("ui.modeline").map_or(
+        crate::cell::Style {
+            reverse: true,
+            ..Default::default()
+        },
+        |f| crate::cell::Style {
+            fg: f.fg,
+            bg: f.bg,
+            reverse: f.reverse,
+            ..Default::default()
+        },
+    )
+}
+
 fn paint_status_line(
     grid: &mut crate::cell::CellGrid<'_>,
     core: &EditorCore,
     lua_host: &LuaHost,
     dispatcher: &KeyDispatcher,
     term_size: crate::cell::CellSize,
+    theme: &crate::highlight::Theme,
 ) {
     let status = build_status_line(core, lua_host, dispatcher, term_size.cols);
     let row = term_size.rows - 1;
+    // Themes Q#TH5: a set `ui.statusline` face owns the row within its
+    // {fg} mask (surface resets to plain); unset keeps reverse video.
+    let style = theme.face("ui.statusline").map_or(
+        crate::cell::Style {
+            reverse: true,
+            ..Default::default()
+        },
+        |f| crate::cell::Style {
+            fg: f.fg,
+            ..Default::default()
+        },
+    );
     for (col, ch) in status.chars().enumerate() {
         if col >= term_size.cols as usize {
             break;
         }
         let cell = grid.at(CellCoord::new(row, col as u32));
         cell.glyph = crate::cell::Glyph::Char(ch);
-        cell.style = crate::cell::Style {
-            reverse: true,
-            ..Default::default()
-        };
+        cell.style = style;
     }
     for col in (status.chars().count() as u32)..term_size.cols {
         let cell = grid.at(CellCoord::new(row, col));
         cell.glyph = crate::cell::Glyph::Char(' ');
-        cell.style = crate::cell::Style {
-            reverse: true,
-            ..Default::default()
-        };
+        cell.style = style;
     }
 }
 
@@ -2323,16 +2370,25 @@ fn paint_line_number_gutter(
     rect: &crate::window::Rect,
     inner_rows: u32,
     gutter_w: u32,
+    theme: &crate::highlight::Theme,
 ) {
     let line_count = window.text_view.line_count();
     // Relative/Hybrid measure distance from the cursor's buffer line;
     // Absolute ignores it. Computed once per frame (the gutter repaints on
     // cursor motion, so this stays current).
     let cursor_line = window.text_view.line_at_offset(window.cursor);
-    let style = crate::cell::Style {
-        fg: crate::cell::Color::Indexed(8),
-        ..crate::cell::Style::default()
-    };
+    // Themes Q#TH5: a set `ui.gutter` face owns the strip within its
+    // {fg} mask; unset keeps the dim Indexed(8).
+    let style = theme.face("ui.gutter").map_or(
+        crate::cell::Style {
+            fg: crate::cell::Color::Indexed(8),
+            ..crate::cell::Style::default()
+        },
+        |f| crate::cell::Style {
+            fg: f.fg,
+            ..crate::cell::Style::default()
+        },
+    );
     // The number's rightmost digit sits at `field - 1`; the last gutter
     // cell (`gutter_w - 1`) is a trailing pad separating it from the code.
     let field = gutter_w.saturating_sub(1);
@@ -2382,10 +2438,25 @@ fn paint_local_selection(
     // text-relative display column shifted right by this (Q#UX2). 0 when
     // the gutter is off, so this is a no-op then.
     gutter_w: u32,
+    theme: &crate::highlight::Theme,
 ) {
     let Some((sel_start, sel_end)) = window.region() else {
         return;
     };
+    // Themes Q#TH5: the selection is a wash — a set `ui.selection`
+    // face replaces the default overlay wholesale within its {bg}
+    // mask (an all-default face disables the wash; out-of-mask
+    // fg/reverse are never read); unset keeps today's reverse video.
+    let overlay = theme.face("ui.selection").map_or(
+        crate::cell::Style {
+            reverse: true,
+            ..crate::cell::Style::default()
+        },
+        |f| crate::cell::Style {
+            bg: f.bg,
+            ..crate::cell::Style::default()
+        },
+    );
     if inner_rows == 0 || rect.size.cols == 0 || sel_start >= sel_end {
         return;
     }
@@ -2428,7 +2499,7 @@ fn paint_local_selection(
                 rect.origin.row + row_offset,
                 rect.origin.col + gutter_w + col,
             ));
-            cell.style.reverse = true;
+            cell.style = crate::overlay::merge_styles(cell.style, overlay);
         }
     }
 }
@@ -2481,6 +2552,10 @@ fn paint_mode_line(
     cursor_col: u32,
     scroll: &str,
     diags: &str,
+    // The resolved row style ([`mode_line_style`]) — this fn is a
+    // pure formatter, so the `ui.modeline` face resolution stays with
+    // the caller (themes arc Q#TH9).
+    mode_style: crate::cell::Style,
 ) {
     if rect.size.rows == 0 || rect.size.cols == 0 {
         return;
@@ -2495,11 +2570,7 @@ fn paint_mode_line(
         format!(" {diags} L{}:C{} {scroll} ", cursor_row + 1, cursor_col + 1)
     };
 
-    // Fill the row with reverse-video spaces.
-    let mode_style = crate::cell::Style {
-        reverse: true,
-        ..Default::default()
-    };
+    // Fill the row with the mode-line style.
     for c in 0..rect.size.cols {
         let cell = grid.at(CellCoord::new(row, rect.origin.col + c));
         cell.glyph = crate::cell::Glyph::Char(' ');
@@ -2538,10 +2609,23 @@ fn paint_mode_line(
 /// Paint the minibuffer line on the bottom row, replacing the status
 /// line. Returns the screen column the terminal cursor should sit
 /// at (so the user can see what they're typing).
+/// The minibuffer base style (themes arc Q#TH5): a set `ui.minibuffer`
+/// face owns the prompt/input/fill (and the search prompt row) within
+/// its {fg} mask; unset keeps the terminal default.
+fn minibuffer_style(theme: &crate::highlight::Theme) -> crate::cell::Style {
+    theme
+        .face("ui.minibuffer")
+        .map_or(crate::cell::Style::default(), |f| crate::cell::Style {
+            fg: f.fg,
+            ..crate::cell::Style::default()
+        })
+}
+
 fn paint_minibuffer(
     grid: &mut crate::cell::CellGrid<'_>,
     core: &EditorCore,
     term_size: crate::cell::CellSize,
+    theme: &crate::highlight::Theme,
 ) -> u32 {
     let session = core
         .minibuffer
@@ -2562,13 +2646,27 @@ fn paint_minibuffer(
     let max = term_size.cols;
     let cursor_byte = core.minibuffer.cursor;
 
+    let base = minibuffer_style(theme);
+    // Themes Q#TH5: the inline candidate suffix has its own face,
+    // `ui.minibuffer.candidate` ({fg} mask); unset keeps reverse.
+    let candidate = theme.face("ui.minibuffer.candidate").map_or(
+        crate::cell::Style {
+            reverse: true,
+            ..Default::default()
+        },
+        |f| crate::cell::Style {
+            fg: f.fg,
+            ..crate::cell::Style::default()
+        },
+    );
+
     for ch in prompt.chars() {
         if col >= max {
             break;
         }
         let cell = grid.at(CellCoord::new(row, col));
         cell.glyph = crate::cell::Glyph::Char(ch);
-        cell.style = crate::cell::Style::default();
+        cell.style = base;
         col += 1;
         written += 1;
     }
@@ -2585,7 +2683,7 @@ fn paint_minibuffer(
         }
         let cell = grid.at(CellCoord::new(row, col));
         cell.glyph = crate::cell::Glyph::Char(ch);
-        cell.style = crate::cell::Style::default();
+        cell.style = base;
         col += 1;
         written += 1;
         byte_pos += ch.len_utf8() as u64;
@@ -2602,10 +2700,7 @@ fn paint_minibuffer(
         }
         let cell = grid.at(CellCoord::new(row, col));
         cell.glyph = crate::cell::Glyph::Char(ch);
-        cell.style = crate::cell::Style {
-            reverse: true,
-            ..Default::default()
-        };
+        cell.style = candidate;
         col += 1;
         written += 1;
     }
@@ -2613,7 +2708,7 @@ fn paint_minibuffer(
     for col in written..max {
         let cell = grid.at(CellCoord::new(row, col));
         cell.glyph = crate::cell::Glyph::Char(' ');
-        cell.style = crate::cell::Style::default();
+        cell.style = base;
     }
 
     cursor_col.min(max.saturating_sub(1))
@@ -2630,7 +2725,11 @@ fn paint_search_prompt(
     grid: &mut crate::cell::CellGrid<'_>,
     core: &EditorCore,
     term_size: crate::cell::CellSize,
+    theme: &crate::highlight::Theme,
 ) {
+    // Themes Q#TH5: the search prompt is the echo-area input line, so
+    // it follows `ui.minibuffer` (the framing's applicability table).
+    let base = minibuffer_style(theme);
     let prompt = match (core.search_is_regex(), core.search_forward()) {
         (false, true) => "I-search: ",
         (false, false) => "I-search backward: ",
@@ -2656,7 +2755,7 @@ fn paint_search_prompt(
         if *col < max {
             let cell = grid.at(CellCoord::new(row, *col));
             cell.glyph = crate::cell::Glyph::Char(ch);
-            cell.style = crate::cell::Style::default();
+            cell.style = base;
             *col += 1;
         }
     };
@@ -2670,11 +2769,11 @@ fn paint_search_prompt(
         put(grid, &mut col, ch);
     }
     // Clear the remainder of the row (the status line underneath used
-    // reverse video; blank it with the default style).
+    // reverse video; blank it with the prompt's base style).
     for c in col..max {
         let cell = grid.at(CellCoord::new(row, c));
         cell.glyph = crate::cell::Glyph::Char(' ');
-        cell.style = crate::cell::Style::default();
+        cell.style = base;
     }
 }
 
@@ -2852,7 +2951,14 @@ mod tests {
             size: CellSize::new(rows, cols),
         };
         let rect = Rect::new(0, 0, rows, cols);
-        paint_line_number_gutter(&mut grid, &window, &rect, rows, 4);
+        paint_line_number_gutter(
+            &mut grid,
+            &window,
+            &rect,
+            rows,
+            4,
+            &crate::highlight::Theme::empty(),
+        );
 
         let glyph = |r: u32, c: u32| storage[(r * cols + c) as usize].glyph.clone();
         // Row 0 = line 1: "  1 " (digit right-aligned at col 2, col 3 = pad).
@@ -6894,7 +7000,7 @@ mod tests {
         {
             let mut core = s.core.borrow_mut();
             core.active_window_mut()
-                .push_overlay(Box::new(crate::diag::DiagnosticView::new(uri, store)));
+                .push_overlay(Box::new(crate::diag::DiagnosticView::new(uri, store, None)));
         }
         let (cells, stride, _) = render_to_grid(&s, 24, 80);
         // Both surfaces of the same store: the overlay's underline

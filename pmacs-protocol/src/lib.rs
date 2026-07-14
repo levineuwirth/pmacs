@@ -52,7 +52,7 @@ pub use message::{
     InstanceCapabilities, InstanceIdentity, InstanceMessage, InstanceSignal, Key, KeyEvent,
     LineNumberMode, MenuPromptRow, Modifiers, MouseButton, MouseEvent, MouseKind,
     NegotiatedCapabilities, PROTOCOL_VERSION, PointerKind, ResourceBody,
-    SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, StyleSegment, StyleSpan, is_builtin_pair_char,
-    is_supported_protocol_version, negotiate_capabilities,
+    SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, StyleSegment, StyleSpan, ThemeFace,
+    is_builtin_pair_char, is_supported_protocol_version, negotiate_capabilities,
 };
 pub use transport::{MAX_FRAME_BYTES, TransportError, read_message, write_message};

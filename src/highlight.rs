@@ -58,12 +58,39 @@ use crate::view::{View, Viewport};
 /// the same hierarchy in both cases.
 #[derive(Clone, Debug, Default)]
 pub struct Theme {
-    /// Direct map from capture name → style. T M4.3.
+    /// Direct map from capture name → style. T M4.3. Names matching
+    /// [`is_face_name`] (`ui` / `ui.*`) are UI faces (themes arc
+    /// Q#TH2), reserved by convention — no tree-sitter capture or LSP
+    /// token type uses them.
     pub by_capture: HashMap<String, Style>,
     /// Fallback style when no capture matches. Defaults to the
     /// terminal default colors (no override) so unhighlighted text
     /// looks identical to plain rendering.
     pub default_style: Style,
+    /// Monotonic syntax-mutation counter (themes arc Q#TH6). Bumped
+    /// by every successful Lua mutation that commits a non-face key
+    /// (or touches `default_style`); keys the `StyleGate` and the
+    /// minimap summary so a mid-session recolor re-ships spans.
+    /// INVARIANT: only ever incremented — a wholesale `set` must
+    /// replace `by_capture`, never the whole `Theme`, or consecutive
+    /// mutations share an epoch and become invisible to every gate.
+    pub syntax_epoch: u64,
+    /// Monotonic face-mutation counter (themes arc Q#TH6). Bumped by
+    /// every successful Lua mutation that commits a face key
+    /// ([`is_face_name`]); keys the `ThemeFacts` producer and the
+    /// minimap summary (`ui.diag.*` feeds its marks). Same
+    /// increment-only invariant as `syntax_epoch`.
+    pub face_epoch: u64,
+}
+
+/// Themes arc Q#TH2: the face predicate. A theme key names a UI face
+/// iff it is exactly `ui` (the deliberate inheritance catch-all —
+/// [`Theme::face`]'s walk terminal) or starts with `ui.`. Shared by
+/// the namespace reservation, the mutation-counter classification,
+/// and the `ThemeFacts` producer's key filter.
+#[must_use]
+pub fn is_face_name(name: &str) -> bool {
+    name == "ui" || name.starts_with("ui.")
 }
 
 impl Theme {
@@ -151,6 +178,8 @@ impl Theme {
         Self {
             by_capture,
             default_style: Style::default(),
+            syntax_epoch: 0,
+            face_epoch: 0,
         }
     }
 
@@ -167,6 +196,32 @@ impl Theme {
             match name.rfind('.') {
                 Some(idx) => name = &name[..idx],
                 None => return self.default_style,
+            }
+        }
+    }
+
+    /// Resolve a UI face name to its style, or `None` when unset
+    /// (themes arc Q#TH4). Same dotted-prefix walk as [`Self::lookup`]
+    /// — so `ui.search.match.active` falls back to `ui.search.match`,
+    /// the `ui.diag.*` children to `ui.diag`, and everything to the
+    /// bare-`ui` catch-all — but the walk returns `None` instead of
+    /// falling back to `default_style`: an unset face must leave the
+    /// paint site's hardcoded default untouched, and a user's
+    /// `pmacs.theme.default` (a *syntax* fallback) must never bleed
+    /// into chrome. An exact entry stops the walk, so an explicitly
+    /// empty child (e.g. `ui.diag.error = {}`) blocks inheritance
+    /// from a themed parent. Callers pass full face names only.
+    #[must_use]
+    pub fn face(&self, name: &str) -> Option<Style> {
+        debug_assert!(is_face_name(name), "face() takes ui/ui.* names");
+        let mut name = name;
+        loop {
+            if let Some(s) = self.by_capture.get(name) {
+                return Some(*s);
+            }
+            match name.rfind('.') {
+                Some(idx) => name = &name[..idx],
+                None => return None,
             }
         }
     }
@@ -683,6 +738,83 @@ mod tests {
         let s = t.lookup("function.method");
         assert!(s.italic);
         assert!(!s.bold);
+    }
+
+    #[test]
+    fn face_returns_none_when_unset_never_default_style() {
+        // Q#TH4: an unset face leaves the paint site's hardcoded
+        // default untouched — even a loud user default_style (a
+        // SYNTAX fallback) must not bleed into chrome.
+        let mut t = Theme::empty();
+        t.default_style = Style {
+            bold: true,
+            ..Style::default()
+        };
+        assert_eq!(t.face("ui.modeline"), None);
+        assert_eq!(t.face("ui"), None);
+        // lookup, by contrast, resolves through to default_style.
+        assert!(t.lookup("ui.modeline").bold);
+    }
+
+    #[test]
+    fn face_walks_dotted_prefixes_to_the_ui_catch_all() {
+        let mut t = Theme::empty();
+        t.insert(
+            "ui",
+            Style {
+                italic: true,
+                ..Style::default()
+            },
+        );
+        t.insert(
+            "ui.search.match",
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+        );
+        // Exact match.
+        assert!(t.face("ui.search.match").expect("set").bold);
+        // One-segment fallback: active inherits from ui.search.match.
+        assert!(t.face("ui.search.match.active").expect("inherit").bold);
+        // Everything else falls to the bare-ui catch-all.
+        assert!(t.face("ui.modeline").expect("catch-all").italic);
+        assert!(t.face("ui.diag.error").expect("catch-all").italic);
+    }
+
+    #[test]
+    fn face_exact_empty_child_blocks_parent_inheritance() {
+        // Q#TH5 (round 3 finding 4): with a themed ui.diag parent, an
+        // explicitly empty ui.diag.error child stops the walk at the
+        // exact entry — errors reset to the built-in (the Default fg
+        // policy applies at the consumer) while siblings inherit.
+        let mut t = Theme::empty();
+        t.insert(
+            "ui.diag",
+            Style {
+                fg: Color::Indexed(93),
+                ..Style::default()
+            },
+        );
+        t.insert("ui.diag.error", Style::default());
+        assert_eq!(t.face("ui.diag.error"), Some(Style::default()));
+        assert_eq!(
+            t.face("ui.diag.warning").expect("inherits").fg,
+            Color::Indexed(93)
+        );
+    }
+
+    #[test]
+    fn face_predicate_accepts_ui_root_and_prefix_only() {
+        // Q#TH2: exactly `ui` or `ui.`-prefixed — nothing else. A
+        // name like `uix` must classify as syntax, not face.
+        assert!(is_face_name("ui"));
+        assert!(is_face_name("ui.modeline"));
+        assert!(is_face_name("ui.search.match.active"));
+        assert!(!is_face_name("uix"));
+        assert!(!is_face_name("u"));
+        assert!(!is_face_name("keyword"));
+        assert!(!is_face_name("gui.modeline"));
     }
 
     #[test]
