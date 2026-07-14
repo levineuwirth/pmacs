@@ -1384,6 +1384,22 @@ mod tests {
             builtin.is_empty(),
             "a locally-shadowed `console` must not get a *.builtin capture; got {builtin:?}"
         );
+        // ...and dropping the builtin pattern must not strip *all* styling:
+        // each `console` occurrence still keeps its ordinary `@variable`
+        // capture (the fallback), so the loss is only the `.builtin` refine.
+        let src = "const console = 5;\nconsole;\n";
+        for (pos, _) in src.match_indices("console") {
+            let (start, end) = (pos as u32, (pos + "console".len()) as u32);
+            let caps: Vec<&str> = spans
+                .iter()
+                .filter(|s| s.start_byte == start && s.end_byte == end)
+                .map(|s| names[s.capture_index as usize])
+                .collect();
+            assert!(
+                caps.iter().any(|n| n.starts_with("variable")),
+                "`console` at byte {pos} keeps a variable capture; got {caps:?}"
+            );
+        }
     }
 
     #[test]
