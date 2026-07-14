@@ -886,6 +886,24 @@ pub fn compute_highlight_spans_in_range(
     let root = bundle.tree.root_node();
     let mut iter = cursor.captures(query, root, source);
     while let Some((qmatch, capture_idx)) = iter.next() {
+        // Fail-closed on the locals property predicate. The capture
+        // iterator already applies text predicates (`#eq?`/`#match?`/
+        // `#any-of?`), but `#is? local` / `#is-not? local` are *property*
+        // predicates (`Query::property_predicates`) that need a scope map
+        // built from the grammar's LOCALS_QUERY, which pmacs does not run.
+        // Applying such a capture regardless mis-styles shadowed locals —
+        // e.g. a local `console`/`require` in JS/TS would still capture as
+        // `@variable.builtin`/`@function.builtin`. Until locals processing
+        // exists, drop captures whose pattern carries one; the identifier
+        // falls back to its non-builtin capture. `#set!` (property
+        // *settings*) is a different API and is not consulted here.
+        if query
+            .property_predicates(qmatch.pattern_index)
+            .iter()
+            .any(|(prop, _)| &*prop.key == "local")
+        {
+            continue;
+        }
         let cap = qmatch.captures[*capture_idx];
         spans.push(HighlightSpan {
             start_byte: cap.node.start_byte() as u32,
@@ -1329,6 +1347,43 @@ mod tests {
                 query.capture_names().len()
             );
         }
+    }
+
+    #[test]
+    fn javascript_shadowed_builtin_is_not_mislabeled() {
+        // `#is-not? local` (JS/TS use it for console/require/etc.) needs a
+        // scope map from the LOCALS_QUERY we don't run, so
+        // `compute_highlight_spans` drops captures guarded by it. Here
+        // `console` is a LOCAL declaration — it must not surface as a
+        // `*.builtin` capture (which is what a naive run of the shared JS
+        // query would produce).
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("javascript").expect("javascript loads");
+        let query = reg
+            .highlights_query("javascript")
+            .expect("javascript highlights compile");
+        let mut buf = fresh_buffer("shadow.js");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"const console = 5;\nconsole;\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "javascript".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        let spans = compute_highlight_spans(&query, &bundle);
+        assert!(!spans.is_empty(), "the JS query produced highlight spans");
+        let names = query.capture_names();
+        let builtin: Vec<&str> = spans
+            .iter()
+            .map(|s| names[s.capture_index as usize])
+            .filter(|n| n.contains("builtin"))
+            .collect();
+        assert!(
+            builtin.is_empty(),
+            "a locally-shadowed `console` must not get a *.builtin capture; got {builtin:?}"
+        );
     }
 
     #[test]

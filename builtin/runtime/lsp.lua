@@ -201,11 +201,13 @@ pmacs.lsp.config.zig = pmacs.lsp.config.zig or {
 }
 
 -- LSP-side extension → language map, deliberately independent of the
--- tree-sitter detection in `pmacs.parse` (which is grammar-gated:
--- Python has an LSP server but no bundled grammar). Consulted only
--- when `pmacs.parse.language_for_path` finds nothing, so grammar-
--- backed languages keep their existing detection. Extensible from
--- init.lua: `pmacs.lsp.filetypes.foo = "bar"`.
+-- tree-sitter detection in `pmacs.parse`. Consulted only when
+-- `pmacs.parse.language_for_path` finds nothing (an extension with a
+-- server but no bundled grammar), so grammar-backed languages keep their
+-- existing detection. Every language with an LSP config now also ships a
+-- grammar, so this is mainly the LSP-only fallback that keeps a language
+-- id stable if a grammar is ever dropped, plus the seam for user-added
+-- mappings. Extensible from init.lua: `pmacs.lsp.filetypes.foo = "bar"`.
 pmacs.lsp.filetypes = pmacs.lsp.filetypes or {}
 pmacs.lsp.filetypes.py = pmacs.lsp.filetypes.py or "python"
 pmacs.lsp.filetypes.pyi = pmacs.lsp.filetypes.pyi or "python"

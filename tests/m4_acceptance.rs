@@ -5994,11 +5994,13 @@ fn m4_shebang_does_not_override_extension() {
     );
 }
 
-/// Finding-1 gate: an extensionless `#!/usr/bin/env python3` script
-/// resolves to python for LSP, but python has no grammar — syntax must
+/// Finding-1 gate: an extensionless `#!/usr/bin/env ruby` script resolves
+/// to `ruby` via the shebang map, but ruby has no grammar — syntax must
 /// skip it *silently*. Without the `_has_language` gate, `_dispatch`
-/// raises "unknown language: python" (caught by the after-load pcall and
+/// raises "unknown language: ruby" (caught by the after-load pcall and
 /// reported through `pmacs.error`), which we assert does NOT happen.
+/// (python/js/lua/bash all ship grammars now, so the gate needs a
+/// genuinely grammarless example.)
 #[test]
 fn m4_shebang_extensionless_grammarless_language_is_silent() {
     use pmacs::editor::EditorState;
