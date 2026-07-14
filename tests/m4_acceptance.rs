@@ -5849,6 +5849,284 @@ fn m4_12_default_bundle_wires_bash() {
     assert_eq!(probe.get::<String>("grammar_bats").unwrap(), "bash");
 }
 
+/// Shebang detection: `pmacs.parse.language_from_shebang` maps the
+/// interpreter basename (resolving the `#!/usr/bin/env` indirection) to a
+/// language, and returns nil for non-shebangs and unmapped interpreters.
+/// This is the fallback that lets extensionless scripts (`scripts/deploy`,
+/// git hooks, `configure`) resolve a language at all — extension
+/// detection misses them.
+#[test]
+fn m4_shebang_resolver_maps_interpreters() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let resolve = |first_line: &str| -> Option<String> {
+        s.lua_host
+            .lua()
+            .load(format!(
+                "local b = pmacs.window.buffer()
+                 if b:len() > 0 then b:delete(0, b:len()) end
+                 b:insert(0, {first_line:?})
+                 return pmacs.parse.language_from_shebang(b)"
+            ))
+            .eval()
+            .expect("resolve shebang")
+    };
+    for (line, want) in [
+        ("#!/bin/sh\n", "bash"),
+        ("#!/bin/bash -e\n", "bash"),
+        ("#! /bin/zsh\n", "bash"),
+        ("#!/usr/bin/env bash\n", "bash"),
+        ("#!/usr/bin/env python3\n", "python"),
+        ("#!/usr/bin/env -S python3 -u\n", "python"),
+        // Attached split-string forms carry the interpreter inside the
+        // option token.
+        ("#!/usr/bin/env -Spython3 -u\n", "python"),
+        ("#!/usr/bin/env --split-string=python3 -u\n", "python"),
+        ("#!/usr/bin/env -vSpython3 -u\n", "python"),
+        // The attached split string is a complete env argument list, so
+        // options and assignments may precede the interpreter within it.
+        ("#!/usr/bin/env -S-i python3 -u\n", "python"),
+        ("#!/usr/bin/env -SFOO=bar python3 -u\n", "python"),
+        ("#!/usr/bin/env --split-string=-u FOO python3\n", "python"),
+        // GNU-env options that consume an operand must not have the
+        // operand mistaken for the interpreter.
+        ("#!/usr/bin/env -u FOO python3\n", "python"),
+        ("#!/usr/bin/env -C /tmp python3\n", "python"),
+        ("#!/usr/bin/env -u FOO -C /tmp node\n", "javascript"),
+        ("#!/usr/bin/node\n", "javascript"),
+        ("#!/usr/bin/env lua\n", "lua"),
+    ] {
+        assert_eq!(resolve(line).as_deref(), Some(want), "{line:?}");
+    }
+    for line in [
+        "echo hi\n",
+        "# just a comment\n",
+        "#!/usr/bin/env ruby\n", // interpreter not in the seeded map
+        "\n",
+        "",
+    ] {
+        assert_eq!(resolve(line), None, "{line:?}");
+    }
+}
+
+/// End-to-end: opening an extensionless `#!/bin/sh` script resolves to
+/// `bash` on both paths — `lsp.lua`'s `buffer_language` chain (so the
+/// server would attach) and `syntax.lua`'s grammar attach (so a bash
+/// parse tree is produced). `pmacs.lsp.config` is emptied first so the
+/// real bash-language-server isn't spawned; grammar detection is
+/// independent of the LSP config.
+#[test]
+fn m4_shebang_extensionless_script_resolves_bash() {
+    use pmacs::editor::EditorState;
+    let mut s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hook = dir.path().join("pre-commit"); // no extension
+    std::fs::write(&hook, b"#!/bin/sh\nset -e\necho building\n").expect("write");
+    let hook_disp = hook.display();
+
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             pmacs.buffer.find_or_open('{hook_disp}')"
+        ))
+        .exec()
+        .expect("open extensionless shebang script");
+
+    let lsp_lang: Option<String> = s
+        .lua_host
+        .lua()
+        .load("return pmacs.lsp.active_buffer_language()")
+        .eval()
+        .expect("lsp language");
+    assert_eq!(
+        lsp_lang.as_deref(),
+        Some("bash"),
+        "extensionless #!/bin/sh resolves to bash for LSP"
+    );
+
+    pump_async(&mut s, |st| current_tree_language(st).is_some());
+    assert_eq!(
+        current_tree_language(&s).as_deref(),
+        Some("bash"),
+        "extensionless #!/bin/sh gets a bash parse tree"
+    );
+}
+
+/// Precedence: a recognized extension always wins over file content, so a
+/// `.py` file that happens to open with `#!/bin/sh` still resolves to
+/// python — the shebang is consulted only when extension detection misses.
+#[test]
+fn m4_shebang_does_not_override_extension() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("tool.py");
+    std::fs::write(&f, b"#!/bin/sh\nprint('hi')\n").expect("write");
+    let f_disp = f.display();
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             pmacs.buffer.find_or_open('{f_disp}')"
+        ))
+        .exec()
+        .expect("open .py with a shell shebang");
+    // Both the LSP language *and* the grammar decision must respect the
+    // extension: python for LSP, and NO grammar parse view (python has no
+    // grammar) — not a bash tree installed from the `#!/bin/sh` line.
+    // `_has_view` is set synchronously by `_dispatch`, so no pump is
+    // needed; without the precedence fix the shebang would have dispatched
+    // bash and this would be true.
+    let (lang, has_view): (Option<String>, bool) = s
+        .lua_host
+        .lua()
+        .load(
+            "return pmacs.lsp.active_buffer_language(),
+                    pmacs.parse._has_view(pmacs.window.buffer())",
+        )
+        .eval()
+        .expect("language + view");
+    assert_eq!(
+        lang.as_deref(),
+        Some("python"),
+        ".py extension wins over a #!/bin/sh shebang (LSP)"
+    );
+    assert!(
+        !has_view,
+        ".py file must not get a grammar parse view from a #!/bin/sh line"
+    );
+}
+
+/// Finding-1 gate: an extensionless `#!/usr/bin/env python3` script
+/// resolves to python for LSP, but python has no grammar — syntax must
+/// skip it *silently*. Without the `_has_language` gate, `_dispatch`
+/// raises "unknown language: python" (caught by the after-load pcall and
+/// reported through `pmacs.error`), which we assert does NOT happen.
+#[test]
+fn m4_shebang_extensionless_grammarless_language_is_silent() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("generate"); // no extension
+    std::fs::write(&f, b"#!/usr/bin/env python3\nprint('hi')\n").expect("write");
+    let f_disp = f.display();
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             _G.__errs = {{}}
+             local real = pmacs.error
+             pmacs.error = function(m) table.insert(_G.__errs, m) end
+             pmacs.buffer.find_or_open('{f_disp}')"
+        ))
+        .exec()
+        .expect("open extensionless python script");
+    let (lang, has_view, errs): (Option<String>, bool, i64) = s
+        .lua_host
+        .lua()
+        .load(
+            "return pmacs.lsp.active_buffer_language(),
+                    pmacs.parse._has_view(pmacs.window.buffer()),
+                    #_G.__errs",
+        )
+        .eval()
+        .expect("probe");
+    assert_eq!(lang.as_deref(), Some("python"), "python resolves for LSP");
+    assert!(
+        !has_view,
+        "no grammar parse view for a grammarless language"
+    );
+    assert_eq!(errs, 0, "no 'unknown language' error reported");
+}
+
+/// Finding-2 pin: editing an open extensionless script's shebang must not
+/// re-switch the parse grammar. A `#!/bin/sh` script attaches the bash
+/// grammar; rewriting its shebang to lua and firing after-edit must keep
+/// the bash tree (the pinned grammar) rather than swap in lua under the
+/// stale highlight overlay — and must not error.
+#[test]
+fn m4_shebang_edit_keeps_pinned_grammar() {
+    use pmacs::editor::EditorState;
+    let mut s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hook = dir.path().join("deploy"); // no extension
+    std::fs::write(&hook, b"#!/bin/sh\necho one\n").expect("write");
+    let hook_disp = hook.display();
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             _G.__errs = {{}}
+             local real = pmacs.error
+             pmacs.error = function(m) table.insert(_G.__errs, m) end
+             pmacs.buffer.find_or_open('{hook_disp}')"
+        ))
+        .exec()
+        .expect("open extensionless shell script");
+    pump_async(&mut s, |st| {
+        current_tree_language(st).as_deref() == Some("bash")
+    });
+
+    // Rewrite the first line to a lua shebang, then fire after-edit.
+    s.lua_host
+        .lua()
+        .load(
+            "local b = pmacs.window.buffer()
+             local text = b:slice(0, b:len())
+             local first_len = (text:find('\\n', 1, true) or 1) - 1
+             b:replace(0, first_len, '#!/usr/bin/env lua')
+             pmacs.hook.run('buffer.after-edit')",
+        )
+        .exec()
+        .expect("rewrite shebang to lua");
+    // Let the reparse settle (manual ticks: the tree stays bash with the
+    // pin, so a `pump_async` for a language *change* would time out).
+    for _ in 0..64 {
+        s.tick_async();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        current_tree_language(&s).as_deref(),
+        Some("bash"),
+        "editing the shebang must not re-switch the pinned grammar"
+    );
+
+    // Switch away to another buffer and back: the after-switch reattach
+    // must reuse the pinned bash grammar rather than re-sniff the (now
+    // lua) shebang — otherwise grammar and LSP diverge, since the LSP side
+    // keeps its bash attachment across the switch. `switch_buffer` fires
+    // `buffer.after-switch` synchronously.
+    let other = dir.path().join("other.txt");
+    std::fs::write(&other, b"plain text\n").expect("write other");
+    let other_disp = other.display();
+    s.lua_host
+        .lua()
+        .load(format!(
+            "local pinned = pmacs.window.buffer()
+             pmacs.buffer.find_or_open('{other_disp}')
+             pmacs.window.switch_buffer(pinned)"
+        ))
+        .exec()
+        .expect("switch away and back");
+    for _ in 0..64 {
+        s.tick_async();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        current_tree_language(&s).as_deref(),
+        Some("bash"),
+        "switch-away/back must reuse the pinned grammar, not re-sniff the edited shebang"
+    );
+    let errs: i64 = s
+        .lua_host
+        .lua()
+        .load("return #_G.__errs")
+        .eval()
+        .expect("errs");
+    assert_eq!(errs, 0, "reparse with the pinned grammar reports no error");
+}
+
 /// Typing-perf: the default bundle coalesces full-document
 /// `didChange` notifications instead of sending one per keystroke
 /// (each send copies the whole buffer several times and writes
