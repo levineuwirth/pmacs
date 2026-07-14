@@ -118,17 +118,17 @@ API. This framing covers **stage 1 only — named UI faces plus the
 statusline segments are stages 2 and 3, each with its own framing
 (Q#TH1). One branch (`theme-faces`), one PR.
 
-## Ground truth (as of `3cbb9de`)
+## Ground truth (as of `13dbadd`)
 
 ### The theme substrate today
 
 - `Theme { by_capture: HashMap<String, Style>, default_style: Style }`
   — `src/highlight.rs:59-67`. One global instance behind
   `ThemeHandle = Arc<Mutex<Theme>>` (`highlight.rs:190`), owned by the
-  `SyntaxRegistry` (`src/syntax.rs:478`, seeded `Theme::default_dark()`
-  at `:500`, exposed via `.theme()` at `:509`; line refs re-verified
-  after PR #114's syntax.rs changes, whose bundled CUDA grammar also
-  introduces no `ui`-named capture).
+  `SyntaxRegistry` (`src/syntax.rs:496`, seeded `Theme::default_dark()`
+  at `:518`, exposed via `.theme()` at `:527`; line refs re-verified
+  after the #114/#115/#116 highlight-stack merges, whose bundled CUDA
+  and shell grammars introduce no `ui`-named capture).
 - `Theme::lookup` (`highlight.rs:161-172`) tries the full dotted name,
   strips one `.`-segment at a time, and **falls back to
   `default_style`** — correct for syntax captures, wrong for faces
