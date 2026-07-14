@@ -1,7 +1,7 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-13, on the laptop, by the compile-mode
-session (on-branch snapshot).** This file is the
+**Last updated: 2026-07-14, on the laptop, by the compile-mode
+session (post-merge snapshot).** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -9,26 +9,36 @@ your persistent memory from it, and **update this file (and commit
 it) whenever project state changes materially** — the next machine
 reads it the way you just did.
 
-## 1. Where the project stands (2026-07-13)
+## 1. Where the project stands (2026-07-14)
 
-- `main` @ `0efb5cd` (scripts/bite #112 merged), protocol **v15**
-  (`SUPPORTED=[6..15]`).
-- **IN FLIGHT: compile-mode (Arc 5 stage 1) on branch
-  `compile-mode`** — the user chose it over themes (Arc 4) in the
-  decision discussion. Framing `docs/compile-mode-framing.md` at
-  revision 6 (five pre-branch review rounds; approved for build).
-  Shape: `compile.run` streams `/bin/sh -c "exec 2>&1; <cmd>"`
-  (pipes, `stdin="null"`, `group=true`, TERM=dumb) into an
-  intercept-read-only `*compilation*` buffer via a Lua-side ANSI
-  parser; once-per-newline error rules; unified `error.next`/
-  `error.previous` dispatcher (M-g n/p taken over from diag with a
-  behavior-preserving fallback; `` C-x ` ``; M-! shell-command);
-  buffer-revision external-edit guard with desync marker + anchor
-  epochs; grep-mode upgrade of `project.search`. New substrate other
-  code can use: `ProcessSpec.stdin/group` (group lifecycle: reap
-  ledger, in-drain enforcement, cancellable poll readers),
-  `buf:revision()`, jump_back now fires `buffer.after-switch`,
-  `pmacs.errors.claim`. All gates green; PR next.
+- `main` @ `98323df` (compile-mode #113 merged), protocol **v15**
+  (`SUPPORTED=[6..15]`; no bump in #113).
+- **Compile-mode (Arc 5 stage 1, #113) LANDED** — merged 2026-07-14
+  after seven PR review rounds (framing
+  `docs/compile-mode-framing.md` at revision 13, revisions 7–13 =
+  the rounds; final commit was the user's atomic-teardown
+  hardening). Shape: `compile.run` streams
+  `/bin/sh -c "exec 2>&1; <cmd>"` (pipes, `stdin="null"`,
+  `group=true`, TERM=dumb) into an intercept-read-only
+  `*compilation*` buffer via a Lua-side ANSI parser (column-counted
+  newline-segmented CR/BS rewrites, tracked O(1) line start);
+  once-per-newline error rules (raw-read validated per-run
+  snapshots); unified `error.next`/`error.previous` dispatcher
+  (M-g n/p taken over from diag with fallback; `` C-x ` ``; M-!
+  shell-command); buffer-revision external-edit guard with desync
+  marker + anchor epochs; grep-mode upgrade of `project.search`.
+  New substrate other code can use: `ProcessSpec.stdin/group`
+  (group lifecycle: reap ledger, in-drain enforcement, cancellable
+  poll readers), `buf:revision()`, jump_back fires
+  `buffer.after-switch`, `pmacs.errors.claim`,
+  `parser:finish()`/`AnsiParser::finish()` (observable reset;
+  `emitted_style` alt-screen resync), and the style-overlay stack:
+  buffer-attached `BufferStyleSpanTranslator` (translation exactly
+  once per edit, fragment-preserving, no-op-edit immune),
+  render-only window overlays with identity-deduped attachment
+  (`Window::ensure_overlay`), split copy (`clone_for_split`),
+  validated `attach_style_overlay`, idempotent atomic
+  `handle:dispose()` (registry detach works headless).
 - **Editing-conveniences pack (editops, #111) landed** — the Lua
   parallel lane. Framing `docs/editing-conveniences-framing.md` at
   revision 6 (three pre-branch rounds, one adopted post-approval
@@ -57,15 +67,12 @@ reads it the way you just did.
   `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
   `PMACS_FAKE_LSP_CHANGE_SINK` (fake-LSP doc-sync replay),
   `TestDaemon::spawn_with_config` (init.lua-carrying daemon fixture).
-- **NEXT after compile-mode merges: themes (Arc 4) is the standing
-  runner-up from the decision discussion** — scout fresh before
-  framing (protocol bump v15→16 for a ThemeFacts channel, the
-  LineNumbers/Q#UX1 control-plane template, glyphon font reload is
-  the hard part).
-- Auto-indent (#109) landed earlier: RET binds
-  `edit.newline-and-indent`; plain Enter round-trips on both
-  frontends; shared search invalidation (Q#AI8), empty-selection
-  clearing (Q#AI9).
+- **NEXT: themes (Arc 4) is the standing runner-up from the
+  decision discussion** — scout fresh before framing (protocol bump
+  v15→16 for a ThemeFacts channel, the LineNumbers/Q#UX1
+  control-plane template, glyphon font reload is the hard part).
+  PR #114 (`cuda-lsp`: clangd + bundled CUDA grammar) is the USER'S
+  own lane — hands off; scout main freshly before branching.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
