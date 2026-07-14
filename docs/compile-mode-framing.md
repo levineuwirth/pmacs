@@ -1,7 +1,18 @@
 # Compile-mode — framing (Arc 5 stage 1, terminal)
 
-**Revision 13 — 2026-07-14. Status: implemented on branch
-`compile-mode` (PR #113); revisions 7–13 fold in PR rounds 1–7.**
+**Revision 14 — 2026-07-14. Status: implemented on branch
+`compile-mode` (PR #113); revisions 7–14 fold in PR rounds 1–8.**
+
+Revision 14 (PR #113 round 8, direct review fixes): overlay disposal
+now preflights both the optional editor-core borrow and the required
+registry borrow before changing the shared disposed flag or removing
+either view. A re-entrant callback therefore receives a pointed,
+retryable error instead of a `RefCell` panic or partial teardown; the
+acceptance bite holds each borrow in turn, proves the handle remains
+fully live, and retries successfully. `attach_style_overlay` also
+resolves the recorded owner in the registry after its identity checks,
+so a handle whose buffer (and translator) has died is rejected as
+stale rather than reporting a successful no-op.
 
 Revision 13 (PR #113 round 7, findings 1–2): overlay handle
 attachment is validated — `attach_style_overlay` rejects a handle
@@ -287,12 +298,14 @@ Everything below was verified by reading the code, not the roadmap.
   the store identity, and same-buffer splits copy the render view to
   the new pane (Revision 12). Attachment validates the handle:
   wrong-buffer and disposed handles are rejected with messages
-  pointing at `add_style_overlay` (Revision 13). The handle has
+  pointing at `add_style_overlay`; a handle whose recorded owner has
+  died is rejected as stale (Revisions 13–14). The handle has
   `add`, `clear`, `clear_before`, `spans`, and idempotent `dispose`
   (teardown of the translator + every window render view; the
   translator detach rides the always-registered registry, not the
-  optional editor core; one handle per buffer incarnation needs no
-  disposal).
+  optional editor core; teardown preflights both borrows so re-entrant
+  calls fail atomically and can be retried; one handle per buffer
+  incarnation needs no disposal).
 - **Buffer-switch hooks**: `buffer.after-switch` exists and fires on
   the ordinary switch paths (recentf subscribes,
   `builtin/runtime/recentf.lua:54`). **`pmacs.editor.jump_back` does

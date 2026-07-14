@@ -1101,6 +1101,16 @@ pub enum BindingError {
          after the edit completes"
     )]
     Reentrant,
+
+    /// Style-overlay teardown was requested from a callback that is
+    /// still running under an editor-core or buffer-registry borrow.
+    /// Disposal touches both stores, so it must acquire both before
+    /// changing the shared disposed flag or removing either view.
+    #[error(
+        "style overlay disposal cannot run while editor state is borrowed; defer dispose() until \
+         after the current callback completes"
+    )]
+    StyleOverlayDisposeReentrant,
 }
 
 // ---------------------------------------------------------------------------
@@ -1851,13 +1861,32 @@ impl UserData for StyleOverlayHandleLua {
         // repeated creation on a long-lived buffer. Safe to call
         // twice; safe after the buffer is gone.
         methods.add_method("dispose", |lua, this, ()| {
+            // Preflight every borrow before changing shared state.
+            // A callback may run while the editor core or registry is
+            // already borrowed; panicking (or removing the window
+            // views before discovering a registry conflict) would
+            // leave a partially disposed handle. Returning a pointed
+            // error keeps the operation retryable after the callback.
+            let core_handle = lua.app_data_ref::<SharedCore>();
+            let mut core = match core_handle.as_deref() {
+                Some(core) => Some(core.try_borrow_mut().map_err(|_| {
+                    mlua::Error::external(BindingError::StyleOverlayDisposeReentrant)
+                })?),
+                None => None,
+            };
+            let registry_handle = lua
+                .app_data_ref::<SharedRegistry>()
+                .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
+            let mut registry = registry_handle
+                .try_borrow_mut()
+                .map_err(|_| mlua::Error::external(BindingError::StyleOverlayDisposeReentrant))?;
+
             this.disposed
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             let id = crate::overlay::style_store_identity(&this.spans);
             // Window cleanup needs the editor core, which is
             // optional app data...
-            if let Some(core) = lua.app_data_ref::<SharedCore>() {
-                let mut core = core.borrow_mut();
+            if let Some(core) = core.as_mut() {
                 for win in core.windows.values_mut() {
                     win.overlays.retain(|v| v.overlay_identity() != Some(id));
                 }
@@ -1867,11 +1896,8 @@ impl UserData for StyleOverlayHandleLua {
             // WITHOUT a core, and returning success while the
             // translator stays attached would leak per-edit work for
             // the buffer's lifetime (round-7 finding 2).
-            if let Some(registry) = lua.app_data_ref::<SharedRegistry>() {
-                let mut r = registry.borrow_mut();
-                if let Ok(buf) = r.get_mut(this.buffer) {
-                    buf.detach_view(this.translator);
-                }
+            if let Ok(buf) = registry.get_mut(this.buffer) {
+                buf.detach_view(this.translator);
             }
             Ok(())
         });
@@ -3029,6 +3055,16 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
                             handle.buffer, id.0
                         )));
                     }
+                    // The recorded owner may have been removed since
+                    // the handle was created. Buffer IDs are
+                    // generational, so resolving it is the only way
+                    // to distinguish a live owner from a stale handle;
+                    // silently scanning the windows would otherwise
+                    // report a successful no-op.
+                    with_registry(lua, |r| {
+                        resolve(r, id.0)?;
+                        Ok(())
+                    })?;
                     attach_style_overlay_to_visible_windows(lua, id.0, &handle.spans);
                     Ok(())
                 },

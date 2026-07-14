@@ -2594,6 +2594,130 @@ fn r7f2_dispose_detaches_translator_in_a_headless_host() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// PR #113 round 8 — direct review fixes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r8f1_dispose_is_atomic_and_retryable_under_reentrant_borrows() {
+    // dispose() is callable from Lua callbacks that may still be
+    // running under an EditorCore or BufferRegistry RefCell borrow.
+    // It must return a pointed error before changing the shared
+    // disposed state or removing either view, then succeed when
+    // retried after that callback completes.
+    let s = editor();
+    exec(
+        &s,
+        r#"
+        _G.r8_buf = pmacs.buffer.create("*r8-dispose*")
+        pmacs.window.switch_buffer(_G.r8_buf)
+        _G.r8_ov = pmacs.buffer.add_style_overlay(_G.r8_buf)
+        "#,
+    );
+
+    let (ok_core, err_core): (bool, String) = {
+        let _core_borrow = s.core.borrow_mut();
+        eval(
+            &s,
+            "local ok, err = pcall(_G.r8_ov.dispose, _G.r8_ov); \
+             return ok, tostring(err)",
+        )
+    };
+    assert!(!ok_core, "dispose under a core borrow must fail cleanly");
+    assert!(
+        err_core.contains("defer dispose()"),
+        "core-borrow error must name the recovery; got: {err_core}"
+    );
+    let (still_attached, can_attach): (i64, bool) = eval(
+        &s,
+        r#"
+        local n = 0
+        for _, kind in ipairs(pmacs.window._overlay_kinds()) do
+            if kind == "buffer_style_overlay" then n = n + 1 end
+        end
+        return n, pcall(pmacs.buffer.attach_style_overlay, _G.r8_buf, _G.r8_ov)
+        "#,
+    );
+    assert_eq!(
+        still_attached, 1,
+        "failed disposal must not remove render views"
+    );
+    assert!(
+        can_attach,
+        "failed disposal must not mark the handle disposed"
+    );
+
+    let registry = s.core.borrow().registry.clone();
+    let (ok_registry, err_registry): (bool, String) = {
+        let _registry_borrow = registry.borrow_mut();
+        eval(
+            &s,
+            "local ok, err = pcall(_G.r8_ov.dispose, _G.r8_ov); \
+             return ok, tostring(err)",
+        )
+    };
+    assert!(
+        !ok_registry,
+        "dispose under a registry borrow must fail cleanly"
+    );
+    assert!(
+        err_registry.contains("defer dispose()"),
+        "registry-borrow error must name the recovery; got: {err_registry}"
+    );
+    let (still_attached, can_attach): (i64, bool) = eval(
+        &s,
+        r#"
+        local n = 0
+        for _, kind in ipairs(pmacs.window._overlay_kinds()) do
+            if kind == "buffer_style_overlay" then n = n + 1 end
+        end
+        return n, pcall(pmacs.buffer.attach_style_overlay, _G.r8_buf, _G.r8_ov)
+        "#,
+    );
+    assert_eq!(
+        still_attached, 1,
+        "registry conflict must not partially dispose"
+    );
+    assert!(can_attach, "registry conflict must leave the handle live");
+
+    let (ok_final, remaining): (bool, i64) = eval(
+        &s,
+        r#"
+        local ok = pcall(_G.r8_ov.dispose, _G.r8_ov)
+        local n = 0
+        for _, kind in ipairs(pmacs.window._overlay_kinds()) do
+            if kind == "buffer_style_overlay" then n = n + 1 end
+        end
+        return ok, n
+        "#,
+    );
+    assert!(ok_final, "dispose must be retryable after the borrow ends");
+    assert_eq!(remaining, 0, "successful retry removes the render view");
+}
+
+#[test]
+fn r8f2_attach_rejects_a_handle_whose_owner_buffer_was_removed() {
+    // BufferId equality alone does not prove that the recorded owner
+    // is still live. Without a registry resolution this returned
+    // success after the buffer (and its translator) had been removed.
+    let s = editor();
+    let (ok, err): (bool, String) = eval(
+        &s,
+        r#"
+        local buf = pmacs.buffer.create("*stale-overlay-owner*")
+        local ov = pmacs.buffer.add_style_overlay(buf)
+        pmacs.buffer.remove(buf)
+        local ok, err = pcall(pmacs.buffer.attach_style_overlay, buf, ov)
+        return ok, tostring(err)
+        "#,
+    );
+    assert!(!ok, "attachment for a removed owner must be rejected");
+    assert!(
+        err.contains("stale buffer handle"),
+        "stale-owner error must identify the invalid handle; got: {err}"
+    );
+}
+
 #[test]
 fn r5f3_tracked_line_start_matches_the_scan_across_transitions() {
     // Round-5 finding 3 is a performance fix — the per-CR/BS/erase
