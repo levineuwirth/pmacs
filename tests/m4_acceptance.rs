@@ -5959,7 +5959,7 @@ fn m4_shebang_extensionless_script_resolves_bash() {
 #[test]
 fn m4_shebang_does_not_override_extension() {
     use pmacs::editor::EditorState;
-    let s = EditorState::new();
+    let mut s = EditorState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("tool.py");
     std::fs::write(&f, b"#!/bin/sh\nprint('hi')\n").expect("write");
@@ -5972,56 +5972,58 @@ fn m4_shebang_does_not_override_extension() {
         ))
         .exec()
         .expect("open .py with a shell shebang");
-    // Both the LSP language *and* the grammar decision must respect the
-    // extension: python for LSP, and NO grammar parse view (python has no
-    // grammar) — not a bash tree installed from the `#!/bin/sh` line.
-    // `_has_view` is set synchronously by `_dispatch`, so no pump is
-    // needed; without the precedence fix the shebang would have dispatched
-    // bash and this would be true.
-    let (lang, has_view): (Option<String>, bool) = s
+    // Both the LSP language *and* the grammar must respect the extension:
+    // python, not bash from the `#!/bin/sh` line. (Python now has a
+    // grammar, so the check is "the tree is python", not "no tree at all".)
+    let lang: Option<String> = s
         .lua_host
         .lua()
-        .load(
-            "return pmacs.lsp.active_buffer_language(),
-                    pmacs.parse._has_view(pmacs.window.buffer())",
-        )
+        .load("return pmacs.lsp.active_buffer_language()")
         .eval()
-        .expect("language + view");
+        .expect("language");
     assert_eq!(
         lang.as_deref(),
         Some("python"),
         ".py extension wins over a #!/bin/sh shebang (LSP)"
     );
-    assert!(
-        !has_view,
-        ".py file must not get a grammar parse view from a #!/bin/sh line"
+    pump_async(&mut s, |st| current_tree_language(st).is_some());
+    assert_eq!(
+        current_tree_language(&s).as_deref(),
+        Some("python"),
+        ".py gets a python grammar tree, not bash from the shebang"
     );
 }
 
-/// Finding-1 gate: an extensionless `#!/usr/bin/env python3` script
-/// resolves to python for LSP, but python has no grammar — syntax must
+/// Finding-1 gate: an extensionless `#!/usr/bin/env ruby` script resolves
+/// to `ruby` via the shebang map, but ruby has no grammar — syntax must
 /// skip it *silently*. Without the `_has_language` gate, `_dispatch`
-/// raises "unknown language: python" (caught by the after-load pcall and
+/// raises "unknown language: ruby" (caught by the after-load pcall and
 /// reported through `pmacs.error`), which we assert does NOT happen.
+/// (python/js/lua/bash all ship grammars now, so the gate needs a
+/// genuinely grammarless example.)
 #[test]
 fn m4_shebang_extensionless_grammarless_language_is_silent() {
     use pmacs::editor::EditorState;
     let s = EditorState::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let f = dir.path().join("generate"); // no extension
-    std::fs::write(&f, b"#!/usr/bin/env python3\nprint('hi')\n").expect("write");
+    // `ruby` is deliberately grammarless (and serverless) — a language the
+    // shebang resolves but pmacs cannot parse. (python/js/lua/bash all have
+    // grammars now, so the gate needs a genuinely grammarless example.)
+    std::fs::write(&f, b"#!/usr/bin/env ruby\nputs 'hi'\n").expect("write");
     let f_disp = f.display();
     s.lua_host
         .lua()
         .load(format!(
             "pmacs.lsp.config = {{}}
+             pmacs.parse.shebangs.ruby = 'ruby'
              _G.__errs = {{}}
              local real = pmacs.error
              pmacs.error = function(m) table.insert(_G.__errs, m) end
              pmacs.buffer.find_or_open('{f_disp}')"
         ))
         .exec()
-        .expect("open extensionless python script");
+        .expect("open extensionless ruby script");
     let (lang, has_view, errs): (Option<String>, bool, i64) = s
         .lua_host
         .lua()
@@ -6032,7 +6034,11 @@ fn m4_shebang_extensionless_grammarless_language_is_silent() {
         )
         .eval()
         .expect("probe");
-    assert_eq!(lang.as_deref(), Some("python"), "python resolves for LSP");
+    assert_eq!(
+        lang.as_deref(),
+        Some("ruby"),
+        "ruby resolves via the shebang"
+    );
     assert!(
         !has_view,
         "no grammar parse view for a grammarless language"
@@ -6235,6 +6241,46 @@ fn m4_filename_extensionless_dockerfile_highlights() {
         Some("dockerfile"),
         "extensionless Dockerfile gets a dockerfile parse tree"
     );
+}
+
+/// Grammar-gap languages: each bundled grammar's name matches the
+/// existing `pmacs.lsp.config.<name>` key, so grammar detection (which
+/// wins over the filetype map) resolves the id the server keys off — the
+/// file now gets BOTH highlighting and the right server. Verified through
+/// the loaded runtime.
+#[test]
+fn m4_gap_grammars_align_with_lsp_configs() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    for (path, id) in [
+        ("app.py", "python"),
+        ("srv.go", "go"),
+        ("m.js", "javascript"),
+        ("v.jsx", "javascriptreact"),
+        ("i.ts", "typescript"),
+        ("A.tsx", "typescriptreact"),
+        ("Cargo.toml", "toml"),
+        ("build.zig", "zig"),
+    ] {
+        let (grammar, has_cfg): (Option<String>, bool) = s
+            .lua_host
+            .lua()
+            .load(format!(
+                "return pmacs.parse.language_for_path('{path}'),
+                        pmacs.lsp.config['{id}'] ~= nil"
+            ))
+            .eval()
+            .unwrap_or_else(|e| panic!("probe {path}: {e}"));
+        assert_eq!(
+            grammar.as_deref(),
+            Some(id),
+            "{path} grammar detection resolves to {id}"
+        );
+        assert!(
+            has_cfg,
+            "{id} has an LSP config the grammar name aligns with"
+        );
+    }
 }
 
 /// Typing-perf: the default bundle coalesces full-document

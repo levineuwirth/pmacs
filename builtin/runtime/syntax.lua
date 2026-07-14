@@ -220,9 +220,11 @@ local function attach_for_active_buffer()
   -- and silently swap the grammar — and diverge from the LSP side, which
   -- keeps its existing attachment across the switch. A first-seen buffer
   -- (no view yet) resolves normally. Gate dispatch on `_has_language`: the
-  -- resolution chain also yields languages with no grammar (python,
-  -- javascript), and dispatching one would raise "unknown language"
-  -- (caught, but noise) and never gives a wrong-grammar tree.
+  -- resolution chain can still yield a language with no grammar — a
+  -- shebang or filetype mapping to a server-only or unsupported language
+  -- (e.g. an init.lua `pmacs.parse.shebangs.ruby = "ruby"`) — and
+  -- dispatching one would raise "unknown language" (caught, but noise) and
+  -- never gives a wrong-grammar tree.
   local lang = pmacs.parse._has_view(buf) and parse_lang_by_buffer[key]
     or resolve_active_language(buf)
   if not lang or not pmacs.parse._has_language(lang) then return end

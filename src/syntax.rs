@@ -487,6 +487,78 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         loader: || tree_sitter_cmake::LANGUAGE.into(),
         highlights_query: &[tree_sitter_cmake::HIGHLIGHTS_QUERY],
     },
+    // Grammar-gap languages — these already had LSP configs but no
+    // grammar, so they rendered without lexical color. Each language name
+    // matches its existing `pmacs.lsp.config.<name>` key, so grammar
+    // detection (which wins over the filetype map) resolves the same id
+    // the server keys off. Root kinds: python `module`, go/zig
+    // `source_file`, js/ts family `program`, toml `document`.
+    LanguageEntry {
+        name: "python",
+        extensions: &["py", "pyi"],
+        loader: || tree_sitter_python::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_python::HIGHLIGHTS_QUERY],
+    },
+    LanguageEntry {
+        name: "go",
+        extensions: &["go"],
+        loader: || tree_sitter_go::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_go::HIGHLIGHTS_QUERY],
+    },
+    // JavaScript / TypeScript. One `tree-sitter-javascript` grammar parses
+    // both `.js` and `.jsx`; `tree-sitter-typescript` ships two grammars
+    // (`LANGUAGE_TYPESCRIPT`, `LANGUAGE_TSX`). Highlights inherit: the TS
+    // query is a ~5-capture delta over JavaScript, and JSX is a further
+    // `JSX_HIGHLIGHT_QUERY` delta — so the `*react` and `typescript*`
+    // entries compose base-first (js → jsx → ts), the same pattern as
+    // `cuda` over C/C++. The four names mirror the LSP filetype map
+    // (typescriptreact/javascriptreact) so tsserver enables the JSX parser.
+    LanguageEntry {
+        name: "javascript",
+        extensions: &["js", "mjs", "cjs"],
+        loader: || tree_sitter_javascript::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_javascript::HIGHLIGHT_QUERY],
+    },
+    LanguageEntry {
+        name: "javascriptreact",
+        extensions: &["jsx"],
+        loader: || tree_sitter_javascript::LANGUAGE.into(),
+        highlights_query: &[
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+        ],
+    },
+    LanguageEntry {
+        name: "typescript",
+        extensions: &["ts", "mts", "cts"],
+        loader: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        highlights_query: &[
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        ],
+    },
+    LanguageEntry {
+        name: "typescriptreact",
+        extensions: &["tsx"],
+        loader: || tree_sitter_typescript::LANGUAGE_TSX.into(),
+        highlights_query: &[
+            tree_sitter_javascript::HIGHLIGHT_QUERY,
+            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+            tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        ],
+    },
+    LanguageEntry {
+        name: "toml",
+        extensions: &["toml"],
+        loader: || tree_sitter_toml_ng::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_toml_ng::HIGHLIGHTS_QUERY],
+    },
+    LanguageEntry {
+        name: "zig",
+        extensions: &["zig", "zon"],
+        loader: || tree_sitter_zig::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_zig::HIGHLIGHTS_QUERY],
+    },
 ];
 
 /// Registry that the Lua surface ([`crate::lua_bindings::install_parse`])
@@ -814,6 +886,24 @@ pub fn compute_highlight_spans_in_range(
     let root = bundle.tree.root_node();
     let mut iter = cursor.captures(query, root, source);
     while let Some((qmatch, capture_idx)) = iter.next() {
+        // Fail-closed on the locals property predicate. The capture
+        // iterator already applies text predicates (`#eq?`/`#match?`/
+        // `#any-of?`), but `#is? local` / `#is-not? local` are *property*
+        // predicates (`Query::property_predicates`) that need a scope map
+        // built from the grammar's LOCALS_QUERY, which pmacs does not run.
+        // Applying such a capture regardless mis-styles shadowed locals —
+        // e.g. a local `console`/`require` in JS/TS would still capture as
+        // `@variable.builtin`/`@function.builtin`. Until locals processing
+        // exists, drop captures whose pattern carries one; the identifier
+        // falls back to its non-builtin capture. `#set!` (property
+        // *settings*) is a different API and is not consulted here.
+        if query
+            .property_predicates(qmatch.pattern_index)
+            .iter()
+            .any(|(prop, _)| &*prop.key == "local")
+        {
+            continue;
+        }
         let cap = qmatch.captures[*capture_idx];
         spans.push(HighlightSpan {
             start_byte: cap.node.start_byte() as u32,
@@ -1162,6 +1252,172 @@ mod tests {
             ("rules.mk", "make"),
             ("common.make", "make"),
             ("toolchain.cmake", "cmake"),
+        ] {
+            assert_eq!(
+                reg.language_name_for_path(path).as_deref(),
+                Some(lang),
+                "{path} resolves to {lang}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_languages_include_gap_grammars() {
+        for (name, exts) in [
+            ("python", &["py", "pyi"][..]),
+            ("go", &["go"][..]),
+            ("javascript", &["js", "mjs", "cjs"][..]),
+            ("javascriptreact", &["jsx"][..]),
+            ("typescript", &["ts", "mts", "cts"][..]),
+            ("typescriptreact", &["tsx"][..]),
+            ("toml", &["toml"][..]),
+            ("zig", &["zig", "zon"][..]),
+        ] {
+            let entry = BUILTIN_LANGUAGES
+                .iter()
+                .find(|l| l.name == name)
+                .unwrap_or_else(|| panic!("`{name}` language entry must be present"));
+            for ext in exts {
+                assert!(entry.extensions.contains(ext), "`{name}` claims `.{ext}`");
+            }
+            assert!(
+                entry.highlights_query.iter().any(|q| !q.is_empty()),
+                "`{name}` ships a highlights query"
+            );
+        }
+    }
+
+    #[test]
+    fn gap_grammars_load_and_parse() {
+        // ABI acceptance for each new grammar (set_language succeeds at
+        // runtime) + a snippet that parses without error at the expected
+        // root. Covers both `tree-sitter-typescript` grammars.
+        let reg = SyntaxRegistry::new();
+        let cases: &[(&str, &str, &[u8])] = &[
+            ("python", "module", b"def f(x):\n    return x + 1\n"),
+            ("go", "source_file", b"package main\nfunc main() {}\n"),
+            ("javascript", "program", b"const x = 1;\nlet y = [x];\n"),
+            (
+                "javascriptreact",
+                "program",
+                b"const e = <div id=\"a\"/>;\n",
+            ),
+            ("typescript", "program", b"const x: number = 1;\n"),
+            ("typescriptreact", "program", b"const e = <div/>;\n"),
+            ("toml", "document", b"[pkg]\nname = \"x\"\n"),
+            ("zig", "source_file", b"const std = @import(\"std\");\n"),
+        ];
+        for (lang, root_kind, src) in cases {
+            let language = reg
+                .language(lang)
+                .unwrap_or_else(|| panic!("`{lang}` loads from BUILTIN_LANGUAGES"));
+            let mut buf = fresh_buffer(&format!("probe_{lang}"));
+            buf.apply_edit(EditOp::Insert { pos: 0, bytes: src })
+                .unwrap();
+            let view = ParseView::new(&buf, language, (*lang).to_owned());
+            let handle = view.handle();
+            let _vid = buf.attach_view(Box::new(view));
+            let bundle = parse_synchronously(&handle);
+            assert_eq!(
+                bundle.tree.root_node().kind(),
+                *root_kind,
+                "`{lang}` roots at `{root_kind}`"
+            );
+            assert!(
+                !bundle.tree.root_node().has_error(),
+                "`{lang}` parses its snippet without error"
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_highlights_compose_the_javascript_base() {
+        // The bundled TypeScript highlights are a ~5-capture delta over
+        // JavaScript; the entries prepend the JS query (and JSX for tsx).
+        // Assert the COMPILED query resolves far more than the delta — the
+        // JS base is really there, not just the ts-specific captures.
+        let reg = SyntaxRegistry::new();
+        for lang in ["typescript", "typescriptreact"] {
+            let query = reg
+                .highlights_query(lang)
+                .unwrap_or_else(|| panic!("`{lang}` highlights compile"));
+            assert!(
+                query.capture_names().len() >= 15,
+                "`{lang}` composes the JavaScript base (got {} captures, delta alone is ~5)",
+                query.capture_names().len()
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_shadowed_builtin_is_not_mislabeled() {
+        // `#is-not? local` (JS/TS use it for console/require/etc.) needs a
+        // scope map from the LOCALS_QUERY we don't run, so
+        // `compute_highlight_spans` drops captures guarded by it. Here
+        // `console` is a LOCAL declaration — it must not surface as a
+        // `*.builtin` capture (which is what a naive run of the shared JS
+        // query would produce).
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("javascript").expect("javascript loads");
+        let query = reg
+            .highlights_query("javascript")
+            .expect("javascript highlights compile");
+        let mut buf = fresh_buffer("shadow.js");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"const console = 5;\nconsole;\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "javascript".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        let spans = compute_highlight_spans(&query, &bundle);
+        assert!(!spans.is_empty(), "the JS query produced highlight spans");
+        let names = query.capture_names();
+        let builtin: Vec<&str> = spans
+            .iter()
+            .map(|s| names[s.capture_index as usize])
+            .filter(|n| n.contains("builtin"))
+            .collect();
+        assert!(
+            builtin.is_empty(),
+            "a locally-shadowed `console` must not get a *.builtin capture; got {builtin:?}"
+        );
+        // ...and dropping the builtin pattern must not strip *all* styling:
+        // each `console` occurrence still keeps its ordinary `@variable`
+        // capture (the fallback), so the loss is only the `.builtin` refine.
+        let src = "const console = 5;\nconsole;\n";
+        for (pos, _) in src.match_indices("console") {
+            let (start, end) = (pos as u32, (pos + "console".len()) as u32);
+            let caps: Vec<&str> = spans
+                .iter()
+                .filter(|s| s.start_byte == start && s.end_byte == end)
+                .map(|s| names[s.capture_index as usize])
+                .collect();
+            assert!(
+                caps.iter().any(|n| n.starts_with("variable")),
+                "`console` at byte {pos} keeps a variable capture; got {caps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gap_grammar_extensions_resolve() {
+        let reg = SyntaxRegistry::new();
+        for (path, lang) in [
+            ("main.py", "python"),
+            ("stub.pyi", "python"),
+            ("server.go", "go"),
+            ("app.js", "javascript"),
+            ("mod.mjs", "javascript"),
+            ("view.jsx", "javascriptreact"),
+            ("index.ts", "typescript"),
+            ("types.mts", "typescript"),
+            ("App.tsx", "typescriptreact"),
+            ("Cargo.toml", "toml"),
+            ("build.zig", "zig"),
+            ("config.zon", "zig"),
         ] {
             assert_eq!(
                 reg.language_name_for_path(path).as_deref(),
