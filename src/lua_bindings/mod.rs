@@ -1101,6 +1101,16 @@ pub enum BindingError {
          after the edit completes"
     )]
     Reentrant,
+
+    /// Style-overlay teardown was requested from a callback that is
+    /// still running under an editor-core or buffer-registry borrow.
+    /// Disposal touches both stores, so it must acquire both before
+    /// changing the shared disposed flag or removing either view.
+    #[error(
+        "style overlay disposal cannot run while editor state is borrowed; defer dispose() until \
+         after the current callback completes"
+    )]
+    StyleOverlayDisposeReentrant,
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,6 +1188,17 @@ fn add_query_methods<M: UserDataMethods<BufferIdLua>>(methods: &mut M) {
             Ok(resolve(r, this.0)?
                 .file_path()
                 .map(|p| p.display().to_string()))
+        })
+    });
+
+    // Edit revision: bumped by every edit, undo, and redo. The
+    // compile-mode external-edit guard (Q#CM2) records this after
+    // each of its own writes and resyncs on mismatch — byte length
+    // is not an edit-integrity token (a same-length replace changes
+    // content while preserving length).
+    methods.add_method("revision", |lua, this, ()| {
+        with_registry(lua, |r| {
+            i64::try_from(resolve(r, this.0)?.revision()).map_err(mlua::Error::external)
         })
     });
 
@@ -1732,9 +1753,30 @@ pub struct InterceptHandleLua {
 
 #[derive(Clone)]
 /// Lua handle for a shared buffer-byte style overlay.
+///
+/// Lifetime contract (PR #113 round-6 finding 3): the buffer-attached
+/// translator lives until the buffer dies OR `dispose()` is called.
+/// One handle per buffer incarnation (the compile-mode and REPL
+/// discipline) needs no disposal — the buffer's death frees it;
+/// repeated `add_style_overlay` calls on a LONG-LIVED buffer must
+/// `dispose()` retired handles, or every edit keeps paying for every
+/// abandoned translator.
 pub struct StyleOverlayHandleLua {
     /// Shared style spans rendered by every attached overlay view.
     spans: crate::overlay::SharedBufferStyleSpans,
+    /// Buffer the translator was attached to. Attachment is
+    /// validated against this (round-7 finding 1): a render view on
+    /// any OTHER buffer would show coordinates translated only by
+    /// edits to this one.
+    buffer: BufferId,
+    /// The buffer-attached translator's view id — retained so
+    /// `dispose()` can detach it.
+    translator: crate::buffer::ViewId,
+    /// Shared across handle clones (`FromLua` clones): set by
+    /// `dispose()`, checked by attachment — re-attaching a disposed
+    /// handle would resurrect rendering without its translator
+    /// (round-7 finding 1).
+    disposed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FromLua for StyleOverlayHandleLua {
@@ -1809,6 +1851,55 @@ impl UserData for StyleOverlayHandleLua {
                 out.set(i + 1, row)?;
             }
             Ok(out)
+        });
+
+        // Idempotent teardown (round-6 finding 3): detaches the
+        // buffer-attached translator (so later edits stop paying for
+        // it) and removes every window render view over this store.
+        // Without this, a retired handle's translator lived until
+        // the buffer died — permanent per-edit cost growth for
+        // repeated creation on a long-lived buffer. Safe to call
+        // twice; safe after the buffer is gone.
+        methods.add_method("dispose", |lua, this, ()| {
+            // Preflight every borrow before changing shared state.
+            // A callback may run while the editor core or registry is
+            // already borrowed; panicking (or removing the window
+            // views before discovering a registry conflict) would
+            // leave a partially disposed handle. Returning a pointed
+            // error keeps the operation retryable after the callback.
+            let core_handle = lua.app_data_ref::<SharedCore>();
+            let mut core = match core_handle.as_deref() {
+                Some(core) => Some(core.try_borrow_mut().map_err(|_| {
+                    mlua::Error::external(BindingError::StyleOverlayDisposeReentrant)
+                })?),
+                None => None,
+            };
+            let registry_handle = lua
+                .app_data_ref::<SharedRegistry>()
+                .ok_or_else(|| mlua::Error::external(BindingError::NoRegistry))?;
+            let mut registry = registry_handle
+                .try_borrow_mut()
+                .map_err(|_| mlua::Error::external(BindingError::StyleOverlayDisposeReentrant))?;
+
+            this.disposed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let id = crate::overlay::style_store_identity(&this.spans);
+            // Window cleanup needs the editor core, which is
+            // optional app data...
+            if let Some(core) = core.as_mut() {
+                for win in core.windows.values_mut() {
+                    win.overlays.retain(|v| v.overlay_identity() != Some(id));
+                }
+            }
+            // ...but the translator detach must not go through it:
+            // an install-only/headless host registers the registry
+            // WITHOUT a core, and returning success while the
+            // translator stays attached would leak per-edit work for
+            // the buffer's lifetime (round-7 finding 2).
+            if let Ok(buf) = registry.get_mut(this.buffer) {
+                buf.detach_view(this.translator);
+            }
+            Ok(())
         });
     }
 }
@@ -2905,13 +2996,32 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     }
 
     {
+        let reg = registry.clone();
         buffer.set(
             "add_style_overlay",
             lua.create_function(
                 move |lua, id: BufferIdLua| -> mlua::Result<StyleOverlayHandleLua> {
                     let spans = Arc::new(Mutex::new(Vec::new()));
+                    // Coordinate translation lives on the BUFFER
+                    // (PR #113 round-5 finding 1): buffer-attached
+                    // views see every edit exactly once — Lua bypass
+                    // writes, undo/redo, remote CRDT ops — whether or
+                    // not any window shows the buffer. The window
+                    // attachments below are render-only; per-window
+                    // translation ran once per split and zero times
+                    // hidden.
+                    let translator = {
+                        let mut r = reg.borrow_mut();
+                        let buf = resolve_mut(&mut r, id.0)?;
+                        buf.attach_view(Box::new(crate::overlay::BufferStyleSpanTranslator::new(
+                            Arc::clone(&spans),
+                        )))
+                    };
                     let handle = StyleOverlayHandleLua {
                         spans: Arc::clone(&spans),
+                        buffer: id.0,
+                        translator,
+                        disposed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     };
                     attach_style_overlay_to_visible_windows(lua, id.0, &spans);
                     Ok(handle)
@@ -2925,6 +3035,36 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
             "attach_style_overlay",
             lua.create_function(
                 move |lua, (id, handle): (BufferIdLua, StyleOverlayHandleLua)| {
+                    // Round-7 finding 1: a disposed handle's
+                    // translator is gone — re-attaching would
+                    // resurrect rendering with frozen coordinates —
+                    // and a handle's translator follows edits to ITS
+                    // buffer only, so attaching to any other buffer
+                    // shows unmaintained spans.
+                    if handle.disposed.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(mlua::Error::external(
+                            "this style overlay handle was disposed; create a fresh \
+                             one with pmacs.buffer.add_style_overlay",
+                        ));
+                    }
+                    if id.0 != handle.buffer {
+                        return Err(mlua::Error::external(format!(
+                            "this style overlay handle belongs to buffer {:?}; its \
+                             spans are not translated by edits to {:?} — create an \
+                             overlay for that buffer with pmacs.buffer.add_style_overlay",
+                            handle.buffer, id.0
+                        )));
+                    }
+                    // The recorded owner may have been removed since
+                    // the handle was created. Buffer IDs are
+                    // generational, so resolving it is the only way
+                    // to distinguish a live owner from a stale handle;
+                    // silently scanning the windows would otherwise
+                    // report a successful no-op.
+                    with_registry(lua, |r| {
+                        resolve(r, id.0)?;
+                        Ok(())
+                    })?;
                     attach_style_overlay_to_visible_windows(lua, id.0, &handle.spans);
                     Ok(())
                 },
@@ -2960,7 +3100,12 @@ fn attach_style_overlay_to_visible_windows(
     let mut core = core.borrow_mut();
     for win in core.windows.values_mut() {
         if win.buffer_id == buffer_id {
-            win.push_overlay(Box::new(crate::overlay::BufferStyleOverlay::new(
+            // ensure_overlay: idempotent per window via the store's
+            // identity (round-6 finding 1) — repeated switches into
+            // the buffer stacked duplicate render views on passive
+            // panes, each cloning every span and rescanning the
+            // buffer per frame.
+            win.ensure_overlay(Box::new(crate::overlay::BufferStyleOverlay::new(
                 Arc::clone(spans),
             )));
         }
@@ -2973,9 +3118,11 @@ fn attach_style_overlay_to_visible_windows(
 
 /// Lua-facing wrapper around [`crate::ansi::AnsiParser`].
 ///
-/// Constructed via `pmacs.ansi.parser()`; methods `feed(bytes)` and
-/// `reset()` mirror the Rust API. `feed` returns an array of event
-/// tables --- see [`event_to_lua_table`] for the schema. The wrapper
+/// Constructed via `pmacs.ansi.parser()`; methods `feed(bytes)`,
+/// `reset()`, and `finish()` mirror the Rust API. `feed` and
+/// `finish` return an array of event tables --- see
+/// [`event_to_lua_table`] for the schema; `finish` drains stream-end
+/// state and resets the parser for a fresh stream. The wrapper
 /// is `RefCell`-internal so multiple Lua-side methods can borrow
 /// safely; the Lua VM is single-threaded so the borrow can never
 /// race.
@@ -2996,6 +3143,19 @@ impl UserData for AnsiParserLua {
         methods.add_method("reset", |_, this, ()| {
             this.0.borrow_mut().reset();
             Ok(())
+        });
+
+        // Stream-end finalization: flushes cross-feed state (an
+        // incomplete UTF-8 sequence becomes the replacement
+        // character). Compile-mode calls this once at the process's
+        // terminal event (Q#CM4; PR #113 round-1 finding 9).
+        methods.add_method("finish", |lua, this, ()| {
+            let events = this.0.borrow_mut().finish();
+            let out = lua.create_table_with_capacity(events.len(), 0)?;
+            for (i, ev) in events.iter().enumerate() {
+                out.set(i + 1, event_to_lua_table(lua, ev)?)?;
+            }
+            Ok(out)
         });
 
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, _this, ()| {
@@ -6974,6 +7134,47 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         .ok()
         .flatten()
         .unwrap_or(false);
+    // Compile-mode process shape (Q#CM3). Both options are
+    // pipe-mode-only; the supervisor rejects them at spawn under PTY
+    // so misconfiguration surfaces as a spawn error, not silence.
+    // Type errors are HARD errors, not silent coercions: `stdin =
+    // true` would quietly keep a piped stdin (hang), and a mistyped
+    // `group` would coerce through Lua truthiness to whichever
+    // boolean its truthiness happens to be — either way the caller's
+    // intent is unverifiable, and these fields carry process-hygiene
+    // guarantees (PR #113 round-1 finding 6; wording corrected in
+    // round 2 finding 5). RAW reads (round-3 finding 3): a spec
+    // table is plain data — metatable-provided fields are
+    // deliberately not honored (the compile.lua rawget posture), and
+    // a raising __index must not be silently absorbed into "false"
+    // and quietly disable process-group isolation.
+    let stdin_raw: Option<String> = table.raw_get("stdin").map_err(|_| {
+        mlua::Error::external("stdin must be the string \"piped\" or \"null\"".to_owned())
+    })?;
+    let stdin = match stdin_raw.as_deref() {
+        None | Some("piped") => crate::process::StdinMode::Piped,
+        Some("null") => crate::process::StdinMode::Null,
+        Some(other) => {
+            return Err(mlua::Error::external(format!(
+                "stdin must be \"piped\" or \"null\"; got {other:?}"
+            )));
+        }
+    };
+    // Read as a raw Value: mlua's `bool` conversion applies Lua
+    // truthiness, so `group = "true"` would silently coerce instead
+    // of erroring. A raw Value read cannot raise; any residual error
+    // is still a hard error, never a silent default.
+    let group = match table.raw_get::<mlua::Value>("group") {
+        Ok(mlua::Value::Nil) => false,
+        Ok(mlua::Value::Boolean(b)) => b,
+        Ok(other) => {
+            return Err(mlua::Error::external(format!(
+                "group must be a boolean; got {}",
+                other.type_name()
+            )));
+        }
+        Err(e) => return Err(e),
+    };
     Ok(ProcessSpec {
         label,
         command,
@@ -6983,6 +7184,8 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         mode,
         restart,
         ansi_events,
+        stdin,
+        group,
     })
 }
 
@@ -10796,7 +10999,25 @@ fn install_motion(editor: &Table, lua: &Lua, core: &SharedCore) -> mlua::Result<
         let cc = core.clone();
         editor.set(
             "jump_back",
-            lua.create_function(move |_, ()| Ok(cc.borrow_mut().jump_back()))?,
+            lua.create_function(move |lua, ()| {
+                let (jumped, buffer_changed) = {
+                    let mut core = cc.borrow_mut();
+                    let before = core.active_buffer_id();
+                    let jumped = core.jump_back();
+                    (jumped, core.active_buffer_id() != before)
+                };
+                // Parity with `pmacs.window.switch_buffer` (compile-mode
+                // additions #3): a jump that lands in another buffer
+                // clears the destination window's overlays exactly like
+                // any other switch, so overlay subscribers need the same
+                // re-attach signal. Without this, RET → M-, permanently
+                // stripped a generated buffer's styling. Same-buffer
+                // jumps stay hook-silent.
+                if buffer_changed {
+                    run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
+                }
+                Ok(jumped)
+            })?,
         )?;
     }
     Ok(())
@@ -12582,6 +12803,37 @@ mod tests {
             .eval()
             .unwrap();
         assert!(called);
+    }
+
+    #[test]
+    fn buffer_revision_bumps_on_edit_undo_and_redo() {
+        // Compile-mode's external-edit guard (Q#CM2) leans on all
+        // three bump sources: a same-length replace changes content
+        // without changing length, and undo/redo are exactly the
+        // mutations the guard exists to catch.
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let ok: bool = lua
+            .load(
+                r#"
+                local b = pmacs.buffer.from_bytes("rev", "abcd")
+                local r0 = b:revision()
+                b:insert(4, "e")
+                local r1 = b:revision()
+                b:replace(0, 1, "X") -- same-length replace still bumps
+                local r2 = b:revision()
+                assert(b:undo(), "undo applies")
+                local r3 = b:revision()
+                assert(b:redo(), "redo applies")
+                local r4 = b:revision()
+                return r1 > r0 and r2 > r1 and r3 > r2 and r4 > r3
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(
+            ok,
+            "revision must be strictly monotonic across edit/undo/redo"
+        );
     }
 
     #[test]
@@ -14670,5 +14922,43 @@ mod tests {
             "expected uptime >= 10000 after rewinding `started`; got {}",
             id.uptime_secs
         );
+    }
+
+    #[test]
+    fn style_overlay_dispose_detaches_translator_without_a_core() {
+        // PR #113 round-7 finding 2: `fresh()` is the install-only /
+        // headless host shape — the registry is registered as app
+        // data, SharedCore is NOT. dispose() must detach the
+        // buffer-attached translator through the registry alone;
+        // pre-fix it returned success having done nothing, leaving
+        // the translator attached (and paying per edit) for the
+        // buffer's lifetime.
+        let (lua, reg, _cmds, _kms, _hks) = fresh();
+        lua.load(r#"_G.hbuf = pmacs.buffer.create("headless")"#)
+            .exec()
+            .unwrap();
+        let id = reg
+            .borrow()
+            .find_by_name("headless")
+            .expect("buffer exists");
+        let baseline = reg.borrow().get(id).unwrap().view_count();
+        lua.load(r"_G.hov = pmacs.buffer.add_style_overlay(_G.hbuf)")
+            .exec()
+            .unwrap();
+        assert_eq!(
+            reg.borrow().get(id).unwrap().view_count(),
+            baseline + 1,
+            "add_style_overlay attaches the translator"
+        );
+        lua.load("_G.hov:dispose()").exec().unwrap();
+        assert_eq!(
+            reg.borrow().get(id).unwrap().view_count(),
+            baseline,
+            "dispose must detach the translator with no core registered"
+        );
+        // Idempotent: a second dispose neither errors nor
+        // over-detaches.
+        lua.load("_G.hov:dispose()").exec().unwrap();
+        assert_eq!(reg.borrow().get(id).unwrap().view_count(), baseline);
     }
 }

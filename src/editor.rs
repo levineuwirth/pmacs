@@ -373,6 +373,19 @@ impl EditorState {
                 include_str!("../builtin/runtime/indent.lua"),
             )
             .expect("load indent builtin chunk");
+        // Compile-mode (Arc 5 stage 1, Q#CM1) — ORDERING CONTRACT:
+        // compile.lua must load AFTER lsp.lua. It takes over
+        // `M-g n` / `M-g p` for the unified error dispatchers, and
+        // duplicate bindings are rejected, so the takeover is
+        // unbind-then-bind against lsp.lua's diag bindings — they
+        // must exist first. (Loaded last in the runtime sequence;
+        // its after-tick pump is ordering-independent.)
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/compile.lua"),
+                include_str!("../builtin/runtime/compile.lua"),
+            )
+            .expect("load compile builtin chunk");
         // T M7.11 bundled-package bootstrap. Through M7.10 the REPL
         // was loaded directly via `eval(include_str!(...))`; the
         // M7.11 deliverable migrates it to the package system so it
@@ -5762,6 +5775,68 @@ mod tests {
             count.load(Ordering::Relaxed),
             1,
             "overlay did not see on_edit"
+        );
+    }
+
+    /// PR #113 round-6 finding 1: a same-buffer split copies
+    /// store-backed render overlays to the new pane (splits fire no
+    /// switch hook and started from an empty overlay list), and
+    /// per-window attachment is idempotent via the store identity.
+    #[test]
+    fn same_buffer_split_copies_style_overlays_and_attach_is_idempotent() {
+        use crate::overlay::{BufferStyleOverlay, SharedBufferStyleSpans};
+        use crate::window::Orientation;
+        use std::sync::{Arc, Mutex};
+
+        let s = fresh_with(b"hello\n");
+        let store: SharedBufferStyleSpans = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut core = s.core.borrow_mut();
+            let win = core.active_window_mut();
+            win.ensure_overlay(Box::new(BufferStyleOverlay::new(Arc::clone(&store))));
+            // Second ensure over the SAME store: no duplicate.
+            win.ensure_overlay(Box::new(BufferStyleOverlay::new(Arc::clone(&store))));
+            assert_eq!(
+                win.overlay_kinds()
+                    .iter()
+                    .filter(|k| **k == "buffer_style_overlay")
+                    .count(),
+                1,
+                "ensure_overlay must be idempotent per store"
+            );
+        }
+        // Same-buffer split: the new pane carries a copy.
+        let new_id = s
+            .core
+            .borrow_mut()
+            .split_active(Orientation::Horizontal, true);
+        {
+            let core = s.core.borrow();
+            let win = core.windows.get(&new_id).expect("split window");
+            assert_eq!(
+                win.overlay_kinds()
+                    .iter()
+                    .filter(|k| **k == "buffer_style_overlay")
+                    .count(),
+                1,
+                "a same-buffer split must copy the render overlay"
+            );
+        }
+        // Fresh-buffer split: no copy (different buffer, different
+        // styling).
+        let scratch_id = s
+            .core
+            .borrow_mut()
+            .split_active(Orientation::Horizontal, false);
+        let core = s.core.borrow();
+        let win = core.windows.get(&scratch_id).expect("scratch window");
+        assert_eq!(
+            win.overlay_kinds()
+                .iter()
+                .filter(|k| **k == "buffer_style_overlay")
+                .count(),
+            0,
+            "a fresh-buffer split carries nothing"
         );
     }
 

@@ -2109,9 +2109,21 @@ impl EditorCore {
             (new_id, TextView::new(buf))
         };
         let new_id = WindowId::next();
-        let new_window = Window::new(new_id, buffer_id, text_view);
-        self.windows.insert(new_id, new_window);
+        let mut new_window = Window::new(new_id, buffer_id, text_view);
         let active = self.active_window_id();
+        // A same-buffer split starts from an empty overlay list and
+        // fires no switch hook, so store-backed render overlays
+        // (ANSI styling on a compile buffer) would silently vanish
+        // from the new pane (PR #113 round-6 finding 1). Views that
+        // carry across splits say so via `clone_for_split`.
+        if same_buffer && let Some(src) = self.windows.get(&active) {
+            for overlay in &src.overlays {
+                if let Some(copy) = overlay.clone_for_split() {
+                    new_window.overlays.push(copy);
+                }
+            }
+        }
+        self.windows.insert(new_id, new_window);
         self.active_layout_mut()
             .split_window(active, orientation, new_id);
         new_id

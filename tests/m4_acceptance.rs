@@ -1892,13 +1892,18 @@ fn m4_6_diag_navigate_commands_and_bindings_are_registered() {
         )
         .eval()
         .expect("keymap.list");
+    // Compile-mode (Q#CM5, docs/compile-mode-framing.md) took the
+    // M-g chords over for the unified dispatchers; the diag commands
+    // stay registered and remain the dispatchers' fallback when no
+    // compile/grep run has claimed the error source, so the
+    // no-LSP-attachment behavior asserted below is unchanged.
     assert!(
-        bindings.iter().any(|b| b == "M-g n=>diag.next"),
-        "M-g n must bind to diag.next; got: {bindings:?}"
+        bindings.iter().any(|b| b == "M-g n=>error.next"),
+        "M-g n must bind to error.next; got: {bindings:?}"
     );
     assert!(
-        bindings.iter().any(|b| b == "M-g p=>diag.previous"),
-        "M-g p must bind to diag.previous; got: {bindings:?}"
+        bindings.iter().any(|b| b == "M-g p=>error.previous"),
+        "M-g p must bind to error.previous; got: {bindings:?}"
     );
 
     // Without an LSP attachment, the command should surface a status

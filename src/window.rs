@@ -232,6 +232,25 @@ impl Window {
         self.overlays.push(view);
     }
 
+    /// Push `view` unless an overlay with the same
+    /// [`View::overlay_identity`] is already attached — attachment
+    /// of store-backed overlays must be idempotent per window
+    /// (PR #113 round-6 finding 1: repeated switches into a buffer
+    /// stacked duplicate render views on passive panes, each cloning
+    /// every span and rescanning the buffer per frame). Views
+    /// without an identity always push.
+    pub fn ensure_overlay(&mut self, view: Box<dyn View>) {
+        if let Some(id) = view.overlay_identity()
+            && self
+                .overlays
+                .iter()
+                .any(|v| v.overlay_identity() == Some(id))
+        {
+            return;
+        }
+        self.overlays.push(view);
+    }
+
     /// Stable kind identifiers of every overlay on this window, in
     /// push order. Test seam used by `pmacs.window._overlay_kinds()`
     /// to verify that a specific overlay type actually attached

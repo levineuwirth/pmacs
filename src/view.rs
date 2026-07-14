@@ -236,6 +236,27 @@ pub trait View {
     fn kind(&self) -> &'static str {
         "unknown"
     }
+
+    /// Identity of the shared resource this overlay renders, if any
+    /// (PR #113 round-6 findings 1 and 3). Two overlay instances
+    /// backed by the same store report the same value, which lets a
+    /// window attach a resource-backed overlay AT MOST once
+    /// ([`crate::window::Window::ensure_overlay`]) and lets disposal
+    /// remove every window copy. The default `None` opts out: such
+    /// views are never deduplicated or bulk-removed.
+    fn overlay_identity(&self) -> Option<usize> {
+        None
+    }
+
+    /// A copy of this overlay for a freshly split window showing the
+    /// same buffer (round-6 finding 1: a same-buffer split starts
+    /// with an empty overlay list and fires no switch hook, so
+    /// without this the new pane rendered unstyled). `None` (the
+    /// default) means the view does not carry across splits;
+    /// store-backed render overlays return a clone.
+    fn clone_for_split(&self) -> Option<Box<dyn View>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

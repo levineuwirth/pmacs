@@ -154,9 +154,9 @@ tree-sitter-cpp = "0.23"
 # maintenance status — pick the upstream one.
 tree-sitter-md = "0.5"
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
-# the feature surface tight to keep build time low (no syscalls
-# beyond `kill(2)` for v0.1).
-nix = { version = "0.29", default-features = false, features = ["signal", "user", "fs", "term", "socket"] }
+# the feature surface tight to keep build time low. `poll` feeds the
+# compile-mode group readers (cancellable poll-based reads, Q#CM3).
+nix = { version = "0.29", default-features = false, features = ["signal", "user", "fs", "term", "socket", "poll"] }
 # T M4.4 PTY mode: portable abstraction over openpty / fork+exec
 # with controlling-tty wiring. The crate uses internal `unsafe`
 # but exposes a fully safe API; pmacs's own `unsafe_code = "forbid"`
