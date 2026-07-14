@@ -82,6 +82,29 @@ pmacs.lsp.config.cpp = pmacs.lsp.config.cpp or {
   args = { "--background-index" },
 }
 
+-- CUDA (`.cu`/`.cuh`) via clangd — the same binary serves it; `config.cuda`
+-- is a separate entry so the `language_id` sent in `didOpen` is `cuda`.
+-- clangd, however, picks the compiler *language* from the file extension,
+-- NOT that `language_id`: it recognizes `.cu` (→ `-x cuda`) but not `.cuh`,
+-- so a standalone header with no compile command otherwise fails to build
+-- an AST (`fe_expected_compiler_job`). `initializationOptions.fallbackFlags
+-- = { "-xcuda" }` supplies `-x cuda` for any file this server opens that
+-- lacks a `compile_commands.json` entry, which fixes `.cuh` (and bare `.cu`)
+-- headers; a real compile command still wins where present. This server
+-- only ever serves `.cu`/`.cuh`, so the fallback can't mis-flag C/C++.
+-- Like C/C++, clangd takes the project model from `compile_commands.json`
+-- / `compile_flags.txt`, so no `settings` here. For real analysis clangd
+-- must also locate a CUDA toolkit: it probes common install roots (e.g.
+-- `/usr/local/cuda`), and a project can pin `--cuda-path=` / the GPU arch
+-- through its compile flags; absent those, navigation and hover still work
+-- but diagnostics may be noisy. Users override from init.lua before a CUDA
+-- file opens.
+pmacs.lsp.config.cuda = pmacs.lsp.config.cuda or {
+  command = "clangd",
+  args = { "--background-index" },
+  init_options = { fallbackFlags = { "-xcuda" } },
+}
+
 -- Go via gopls. `gopls` with no args serves LSP over stdio. gopls
 -- pulls its configuration via `workspace/configuration` (now
 -- answered, #13) under the `gopls` section; an empty section means
@@ -169,6 +192,13 @@ pmacs.lsp.filetypes.h = pmacs.lsp.filetypes.h or "c"
 for _, ext in ipairs({ "cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "inl", "cppm" }) do
   pmacs.lsp.filetypes[ext] = pmacs.lsp.filetypes[ext] or "cpp"
 end
+-- CUDA. pmacs bundles a CUDA grammar, so `language_for_path` already
+-- resolves `.cu`/`.cuh` to `cuda` and this map is never consulted for
+-- them in practice; the entries are the LSP-only fallback that keeps
+-- the language id stable if that grammar is ever dropped (same role as
+-- the `lua` entry below).
+pmacs.lsp.filetypes.cu = pmacs.lsp.filetypes.cu or "cuda"
+pmacs.lsp.filetypes.cuh = pmacs.lsp.filetypes.cuh or "cuda"
 -- Go.
 pmacs.lsp.filetypes.go = pmacs.lsp.filetypes.go or "go"
 -- Tier 1 single-binary servers. TypeScript / JavaScript distinguish

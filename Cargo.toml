@@ -144,6 +144,16 @@ tree-sitter-lua = "0.5"
 # matching the LSP filetype map in `builtin/runtime/lsp.lua`.
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
+# CUDA (`.cu`/`.cuh`). CUDA is C++ with device extensions, but its own
+# grammar recognizes `__global__`/`__device__` kernels, `<<<...>>>`
+# launch syntax, and CUDA builtins that the C++ grammar would misparse.
+# Loading is lazy like the others; `LspStyleView` layers clangd's CUDA
+# semantic tokens on top (clangd serves `.cu`/`.cuh` off the same
+# binary as C/C++). The crate exports `LANGUAGE`/`HIGHLIGHTS_QUERY`
+# (plural, the rust/lua idiom) and rides `tree-sitter-language 0.1`, so
+# it shares the ABI crate with the other grammars — no second
+# `tree-sitter` in the graph (its own `tree-sitter` dep is dev-only).
+tree-sitter-cuda = "0.21"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.

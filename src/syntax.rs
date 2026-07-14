@@ -312,9 +312,9 @@ impl ParseViewHandle {
 /// [`tree_sitter::Language`] so the C-side grammar object isn't
 /// touched until the first buffer of that language is opened ---
 /// "load grammar lazily" per the M4.2 acceptance criterion. The
-/// [`Self::highlights_query`] string is `include_str!`'d at compile
-/// time so it ships in the binary; T M4.3 compiles it into a
-/// [`tree_sitter::Query`] on first highlight attach.
+/// [`Self::highlights_query`] fragments ship as `&'static str`
+/// constants in the binary; T M4.3 concatenates and compiles them
+/// into a [`tree_sitter::Query`] on first highlight attach.
 pub struct LanguageEntry {
     /// Canonical language name. Used by [`SyntaxRegistry::language`]
     /// lookups, surfaced through Lua as the grammar label.
@@ -328,10 +328,17 @@ pub struct LanguageEntry {
     /// once per registry lifetime --- the result is cached under
     /// `name` after the first invocation.
     pub loader: fn() -> tree_sitter::Language,
-    /// Source of the bundled `highlights.scm` query (T M4.3). Empty
-    /// string means the grammar has no highlight query (rare; in
-    /// that case the highlight view runs but emits nothing).
-    pub highlights_query: &'static str,
+    /// Bundled `highlights.scm` query fragments (T M4.3), concatenated
+    /// in order (base grammar first) to form the effective query. Most
+    /// grammars ship one self-contained fragment. A grammar whose
+    /// bundled query is a tree-sitter `; inherits: <lang>` delta lists
+    /// the inherited base queries ahead of its own, because pmacs does
+    /// not resolve `inherits:` directives — CUDA, for instance, ships a
+    /// two-capture delta over C++ and must carry the C and C++ queries
+    /// explicitly or ordinary C/C++ syntax goes unhighlighted. An empty
+    /// slice (or all-empty fragments) means no highlights: the view
+    /// runs but emits nothing.
+    pub highlights_query: &'static [&'static str],
 }
 
 /// Bundled grammars (T M4.2 + M4.3). The order is significant only
@@ -340,8 +347,10 @@ pub struct LanguageEntry {
 ///
 /// Adding a grammar:
 /// 1. Add `tree-sitter-foo = "X.Y"` to `Cargo.toml`.
-/// 2. Add one [`LanguageEntry`] here, including
-///    `tree_sitter_foo::HIGHLIGHTS_QUERY`.
+/// 2. Add one [`LanguageEntry`] here, with
+///    `highlights_query: &[tree_sitter_foo::HIGHLIGHTS_QUERY]` (or the
+///    inherited base queries ahead of it, if `foo`'s bundled query is
+///    a `; inherits:` delta — see the `cuda` entry).
 /// 3. (Done.) The Lua side picks up the new grammar through the
 ///    `buffer.after-load` hook automatically and the highlight
 ///    overlay attaches in the same step.
@@ -350,13 +359,13 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         name: "rust",
         extensions: &["rs"],
         loader: || tree_sitter_rust::LANGUAGE.into(),
-        highlights_query: tree_sitter_rust::HIGHLIGHTS_QUERY,
+        highlights_query: &[tree_sitter_rust::HIGHLIGHTS_QUERY],
     },
     LanguageEntry {
         name: "lua",
         extensions: &["lua"],
         loader: || tree_sitter_lua::LANGUAGE.into(),
-        highlights_query: tree_sitter_lua::HIGHLIGHTS_QUERY,
+        highlights_query: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
     },
     // T M9.7: markdown grammar for prompt-result buffers with
     // `_meta.format = "markdown"`. Uses only the block grammar
@@ -375,7 +384,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         name: "markdown",
         extensions: &["md", "markdown"],
         loader: || tree_sitter_md::LANGUAGE.into(),
-        highlights_query: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+        highlights_query: &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
     },
     // T M_B3 — C / C++. Lexical highlighting (keywords / strings /
     // operators) so the grid TUI shows code-shaped C++ on first open.
@@ -396,13 +405,43 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         name: "c",
         extensions: &["c", "h"],
         loader: || tree_sitter_c::LANGUAGE.into(),
-        highlights_query: tree_sitter_c::HIGHLIGHT_QUERY,
+        highlights_query: &[tree_sitter_c::HIGHLIGHT_QUERY],
     },
     LanguageEntry {
         name: "cpp",
         extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "inl", "cppm"],
         loader: || tree_sitter_cpp::LANGUAGE.into(),
-        highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
+        highlights_query: &[tree_sitter_cpp::HIGHLIGHT_QUERY],
+    },
+    // CUDA (`.cu` source, `.cuh` header). A dedicated grammar rather
+    // than reusing `cpp`: CUDA extends C++ with `__global__`/`__device__`
+    // qualifiers, `<<<grid, block>>>` kernel-launch syntax, and builtin
+    // types the C++ grammar misparses. Neither extension collides with
+    // an entry above, so ordering is irrelevant here. `LspStyleView`
+    // layers clangd's CUDA semantic tokens on top, exactly as for C/C++.
+    //
+    // Note the const name: `tree-sitter-cuda` exposes `HIGHLIGHTS_QUERY`
+    // (plural, the `tree-sitter-rust`/`tree-sitter-lua` idiom), NOT the
+    // singular `HIGHLIGHT_QUERY` that `tree-sitter-c`/`-cpp`/`-md` use.
+    //
+    // The CUDA `highlights.scm` opens with `; inherits: cpp` and defines
+    // only the CUDA-specific captures (`<<<...>>>` launch brackets, the
+    // `__global__`/`__device__` modifiers) — two capture classes on its
+    // own. pmacs does not resolve `inherits:`, so the C and C++ base
+    // queries are prepended explicitly; the three compile together into
+    // ~16 capture classes against the CUDA grammar (which is a superset
+    // of C++). Order is base-first (C, then C++, then CUDA) so later
+    // fragments refine earlier ones. Without this, ordinary C/C++ syntax
+    // in a `.cu` file would go almost entirely unhighlighted.
+    LanguageEntry {
+        name: "cuda",
+        extensions: &["cu", "cuh"],
+        loader: || tree_sitter_cuda::LANGUAGE.into(),
+        highlights_query: &[
+            tree_sitter_c::HIGHLIGHT_QUERY,
+            tree_sitter_cpp::HIGHLIGHT_QUERY,
+            tree_sitter_cuda::HIGHLIGHTS_QUERY,
+        ],
     },
 ];
 
@@ -601,14 +640,19 @@ impl SyntaxRegistry {
         }
         let language = self.language(lang_name)?;
         let entry = BUILTIN_LANGUAGES.iter().find(|e| e.name == lang_name);
-        let source = entry.map_or("", |e| e.highlights_query);
-        if source.is_empty() {
+        // Fragments are joined with a newline, never bare-concatenated: a
+        // fragment can end mid-`; comment` or without a trailing newline,
+        // and abutting it against the next fragment's first token would
+        // corrupt the query (e.g. `@variable; Functions` swallows the
+        // next line into a comment).
+        let source = entry.map_or_else(String::new, |e| e.highlights_query.join("\n"));
+        if source.trim().is_empty() {
             self.queries
                 .borrow_mut()
                 .insert(lang_name.to_owned(), Err("no highlights query".to_owned()));
             return None;
         }
-        let compiled = tree_sitter::Query::new(&language, source)
+        let compiled = tree_sitter::Query::new(&language, &source)
             .map(Arc::new)
             .map_err(|e| format!("compile {lang_name} highlights: {e:?}"));
         let result = compiled.as_ref().ok().cloned();
@@ -796,6 +840,116 @@ mod tests {
         assert!(
             !cpp.highlights_query.is_empty(),
             "`cpp` ships a non-empty highlights query"
+        );
+    }
+
+    #[test]
+    fn builtin_languages_include_cuda() {
+        // Regression guard mirroring `builtin_languages_include_c_and_cpp`:
+        // the CUDA entry must keep claiming its canonical extensions and,
+        // because its bundled query is a `; inherits: cpp` delta, prepend
+        // the C and C++ base queries explicitly (see the entry comment and
+        // `cuda_highlights_resolve_c_and_cpp_captures`).
+        let cuda = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "cuda")
+            .expect("`cuda` language entry must be present");
+        assert!(cuda.extensions.contains(&"cu"), "`cuda` claims `.cu`");
+        assert!(cuda.extensions.contains(&"cuh"), "`cuda` claims `.cuh`");
+        assert!(
+            cuda.highlights_query
+                .contains(&tree_sitter_c::HIGHLIGHT_QUERY),
+            "`cuda` prepends the C base highlights (it does not resolve `inherits:`)"
+        );
+        assert!(
+            cuda.highlights_query
+                .contains(&tree_sitter_cpp::HIGHLIGHT_QUERY),
+            "`cuda` prepends the C++ base highlights"
+        );
+        assert!(
+            cuda.highlights_query
+                .contains(&tree_sitter_cuda::HIGHLIGHTS_QUERY),
+            "`cuda` carries its own CUDA-specific highlights delta"
+        );
+    }
+
+    #[test]
+    fn cuda_highlights_resolve_c_and_cpp_captures() {
+        // Finding-2 regression: the bundled CUDA `highlights.scm` is only
+        // a two-capture `; inherits: cpp` delta (launch brackets + CUDA
+        // modifiers). pmacs does not resolve `inherits:`, so the entry
+        // prepends the C and C++ base queries; assert the COMPILED query
+        // actually carries ordinary C/C++ captures (the C base's
+        // `@variable`) and far more than the delta's two capture classes —
+        // not merely that some query is non-empty.
+        let reg = SyntaxRegistry::new();
+        let query = reg
+            .highlights_query("cuda")
+            .expect("cuda highlights compile");
+        let names = query.capture_names();
+        assert!(
+            names.contains(&"variable"),
+            "combined query carries the C base `@variable` capture; got {names:?}"
+        );
+        assert!(
+            names.len() >= 8,
+            "combined C+C+++CUDA query resolves many capture classes, not the \
+             CUDA delta's two; got {} ({names:?})",
+            names.len()
+        );
+    }
+
+    #[test]
+    fn cuda_grammar_loads_and_parses_kernel_launch() {
+        // ABI acceptance: a `tree-sitter-cuda` 0.21 grammar must be
+        // accepted by our `tree-sitter` 0.26 core — `set_language`
+        // succeeds and a tree is produced. This is the runtime check the
+        // compile step cannot give us (a too-old grammar ABI fails only
+        // here, at parse time). Grammar identity: `<<<grid, block>>>`
+        // kernel-launch syntax is CUDA-specific; the C++ grammar parses
+        // it as chained comparison/shift operators and flags an error, so
+        // an error-free parse proves the entry wired the CUDA grammar,
+        // not a C++ fallback.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("cuda")
+            .expect("`cuda` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("kernel.cu");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"__global__ void add(int *c) { c[threadIdx.x] = 1; }\n\
+                     int main() { add<<<1, 256>>>(0); return 0; }\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "cuda".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.tree.root_node().kind(),
+            "translation_unit",
+            "CUDA grammar (C-derived) roots at translation_unit"
+        );
+        assert!(
+            !bundle.tree.root_node().has_error(),
+            "CUDA grammar parses the `<<<...>>>` kernel launch without error"
+        );
+    }
+
+    #[test]
+    fn language_for_path_resolves_cuda_extensions() {
+        // `.cu`/`.cuh` resolve to the CUDA grammar through the same
+        // extension-detection path as every other bundled language, so
+        // the LSP filetype fallback in `lsp.lua` is never consulted for
+        // them in practice.
+        let reg = SyntaxRegistry::new();
+        assert_eq!(
+            reg.language_name_for_path("kernel.cu").as_deref(),
+            Some("cuda")
+        );
+        assert_eq!(
+            reg.language_name_for_path("device.cuh").as_deref(),
+            Some("cuda")
         );
     }
 
