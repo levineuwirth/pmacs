@@ -5849,6 +5849,127 @@ fn m4_12_default_bundle_wires_bash() {
     assert_eq!(probe.get::<String>("grammar_bats").unwrap(), "bash");
 }
 
+/// Shebang detection: `pmacs.parse.language_from_shebang` maps the
+/// interpreter basename (resolving the `#!/usr/bin/env` indirection) to a
+/// language, and returns nil for non-shebangs and unmapped interpreters.
+/// This is the fallback that lets extensionless scripts (`scripts/deploy`,
+/// git hooks, `configure`) resolve a language at all — extension
+/// detection misses them.
+#[test]
+fn m4_shebang_resolver_maps_interpreters() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let resolve = |first_line: &str| -> Option<String> {
+        s.lua_host
+            .lua()
+            .load(format!(
+                "local b = pmacs.window.buffer()
+                 if b:len() > 0 then b:delete(0, b:len()) end
+                 b:insert(0, {first_line:?})
+                 return pmacs.parse.language_from_shebang(b)"
+            ))
+            .eval()
+            .expect("resolve shebang")
+    };
+    for (line, want) in [
+        ("#!/bin/sh\n", "bash"),
+        ("#!/bin/bash -e\n", "bash"),
+        ("#! /bin/zsh\n", "bash"),
+        ("#!/usr/bin/env bash\n", "bash"),
+        ("#!/usr/bin/env python3\n", "python"),
+        ("#!/usr/bin/env -S python3 -u\n", "python"),
+        ("#!/usr/bin/node\n", "javascript"),
+        ("#!/usr/bin/env lua\n", "lua"),
+    ] {
+        assert_eq!(resolve(line).as_deref(), Some(want), "{line:?}");
+    }
+    for line in [
+        "echo hi\n",
+        "# just a comment\n",
+        "#!/usr/bin/env ruby\n", // interpreter not in the seeded map
+        "\n",
+        "",
+    ] {
+        assert_eq!(resolve(line), None, "{line:?}");
+    }
+}
+
+/// End-to-end: opening an extensionless `#!/bin/sh` script resolves to
+/// `bash` on both paths — `lsp.lua`'s `buffer_language` chain (so the
+/// server would attach) and `syntax.lua`'s grammar attach (so a bash
+/// parse tree is produced). `pmacs.lsp.config` is emptied first so the
+/// real bash-language-server isn't spawned; grammar detection is
+/// independent of the LSP config.
+#[test]
+fn m4_shebang_extensionless_script_resolves_bash() {
+    use pmacs::editor::EditorState;
+    let mut s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hook = dir.path().join("pre-commit"); // no extension
+    std::fs::write(&hook, b"#!/bin/sh\nset -e\necho building\n").expect("write");
+    let hook_disp = hook.display();
+
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             pmacs.buffer.find_or_open('{hook_disp}')"
+        ))
+        .exec()
+        .expect("open extensionless shebang script");
+
+    let lsp_lang: Option<String> = s
+        .lua_host
+        .lua()
+        .load("return pmacs.lsp.active_buffer_language()")
+        .eval()
+        .expect("lsp language");
+    assert_eq!(
+        lsp_lang.as_deref(),
+        Some("bash"),
+        "extensionless #!/bin/sh resolves to bash for LSP"
+    );
+
+    pump_async(&mut s, |st| current_tree_language(st).is_some());
+    assert_eq!(
+        current_tree_language(&s).as_deref(),
+        Some("bash"),
+        "extensionless #!/bin/sh gets a bash parse tree"
+    );
+}
+
+/// Precedence: a recognized extension always wins over file content, so a
+/// `.py` file that happens to open with `#!/bin/sh` still resolves to
+/// python — the shebang is consulted only when extension detection misses.
+#[test]
+fn m4_shebang_does_not_override_extension() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let f = dir.path().join("tool.py");
+    std::fs::write(&f, b"#!/bin/sh\nprint('hi')\n").expect("write");
+    let f_disp = f.display();
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             pmacs.buffer.find_or_open('{f_disp}')"
+        ))
+        .exec()
+        .expect("open .py with a shell shebang");
+    let lang: Option<String> = s
+        .lua_host
+        .lua()
+        .load("return pmacs.lsp.active_buffer_language()")
+        .eval()
+        .expect("language");
+    assert_eq!(
+        lang.as_deref(),
+        Some("python"),
+        ".py extension wins over a #!/bin/sh shebang"
+    );
+}
+
 /// Typing-perf: the default bundle coalesces full-document
 /// `didChange` notifications instead of sending one per keystroke
 /// (each send copies the whole buffer several times and writes

@@ -374,11 +374,15 @@ local function buffer_language(buf)
   if not ok or not path then return nil end
   -- Grammar-backed detection first (keeps rust/.rs etc. exactly as
   -- before); fall back to the LSP-only filetype map so languages
-  -- with a server but no tree-sitter grammar (Python) still attach.
+  -- with a server but no tree-sitter grammar (Python) still attach;
+  -- finally, for an extensionless file, sniff a `#!interp` shebang so
+  -- e.g. an extensionless `#!/bin/sh` script still attaches its server.
   local lang = pmacs.parse.language_for_path(path)
   if lang then return lang end
   local ext = path:match("%.([%w_]+)$")
-  return ext and pmacs.lsp.filetypes[ext] or nil
+  local by_ext = ext and pmacs.lsp.filetypes[ext]
+  if by_ext then return by_ext end
+  return pmacs.parse.language_from_shebang(buf)
 end
 -- Public: the per-buffer language chain. Auto-pairing resolves
 -- relevance against the buffer its typed-edit record names — which a
