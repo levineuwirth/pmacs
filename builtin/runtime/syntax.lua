@@ -96,11 +96,29 @@ function pmacs.parse.language_from_shebang(buf)
   local base = first:match("([^/]+)$") or first
   if base == "env" then
     base = nil
+    local seen_env = false
+    local skip_next = false
     for tok in rest:gmatch("%S+") do
-      -- Skip the `env` path itself, its flags (`-S`, `--split-string`),
-      -- and inline `VAR=value` assignments; the first bare word left is
-      -- the real interpreter.
-      if tok ~= first and tok:sub(1, 1) ~= "-" and not tok:find("=", 1, true) then
+      if not seen_env then
+        seen_env = true -- the `env` path token itself
+      elseif skip_next then
+        skip_next = false -- the operand consumed by the previous option
+      elseif tok:find("=", 1, true) then
+        -- `VAR=value` env assignment, or a `--long=value` option: both
+        -- self-contained, skip.
+      elseif tok:sub(1, 1) == "-" then
+        -- An option. A few GNU-env short options and their long forms
+        -- consume the *next* token as an operand (`-u NAME`, `-C DIR`,
+        -- `-a NAME`); skip that operand too, or its value is mistaken for
+        -- the interpreter. `-S`/`--split-string` is deliberately absent:
+        -- the string it introduces contains the interpreter, which the
+        -- walk then picks up. An option with an attached operand
+        -- (`-uNAME`) is one self-contained token and needs no skip.
+        if tok == "-u" or tok == "-C" or tok == "-a"
+            or tok == "--unset" or tok == "--chdir" or tok == "--argv0" then
+          skip_next = true
+        end
+      else
         base = tok:match("([^/]+)$") or tok
         break
       end
@@ -116,14 +134,37 @@ end
 -- attach; the kill path clears the entry below if/when it lands.
 local highlighted_buffers = {}
 
+-- Filetype-aware language resolution for the active buffer, in
+-- precedence order: grammar extension → LSP filetype map → shebang. The
+-- shebang is consulted ONLY when the extension is unrecognized (a known
+-- non-grammar extension like `.py` must not fall through to a stray
+-- `#!/bin/sh` and be misparsed as bash). Keyed on `buf:name()` for the
+-- extension parts (matching the historical behavior — path-less buffers
+-- that resolve a grammar by name keep working); the shebang reads buffer
+-- content directly.
+local function resolve_active_language(buf)
+  local name = buf:name()
+  if name then
+    local grammar = pmacs.parse.language_for_path(name)
+    if grammar then return grammar end
+    local ext = name:match("%.([%w_]+)$")
+    local by_ext = ext and pmacs.lsp and pmacs.lsp.filetypes and pmacs.lsp.filetypes[ext]
+    -- A recognized (even non-grammar) extension is authoritative; do not
+    -- consult the shebang for it.
+    if by_ext then return by_ext end
+  end
+  return pmacs.parse.language_from_shebang(buf)
+end
+
 local function attach_for_active_buffer()
   local buf = pmacs.window.buffer()
   if not buf then return end
-  local path = buf:name()
-  if not path then return end
-  local lang = pmacs.parse.language_for_path(path)
-    or pmacs.parse.language_from_shebang(buf)
-  if not lang then return end
+  -- Gate dispatch on `_has_language`: the chain above also resolves
+  -- languages with no grammar (python, javascript), and dispatching one
+  -- would raise "unknown language" (caught, but noise) — and an
+  -- extensionless script must never get a wrong-grammar parse tree.
+  local lang = resolve_active_language(buf)
+  if not lang or not pmacs.parse._has_language(lang) then return end
   pmacs.parse._dispatch(buf, lang)
   -- T M4.3: install the syntax-highlight overlay for this buffer.
   -- Idempotent --- repeated calls for the same buffer are a no-op
@@ -175,10 +216,14 @@ local function reparse_active_buffer_after_edit()
   if not pmacs.parse._has_view(buf) then return end
   local pending = pmacs.parse._pending_edits(buf)
   if not pending or pending == 0 then return end
-  local path = buf:name()
-  if not path then return end
-  local lang = pmacs.parse.language_for_path(path)
-    or pmacs.parse.language_from_shebang(buf)
+  -- Reparse with the language pinned when the view was first attached ---
+  -- never re-resolve from the path or (mutable) shebang. The Rust side is
+  -- "first language wins"; re-sniffing a shebang the user just edited
+  -- would either raise "unknown language" (sh → python) or swap the parse
+  -- tree to a new grammar while the highlight overlay still holds the
+  -- original grammar's query (sh → lua). Language changes need a
+  -- close/reopen, exactly as they do for a renamed extension.
+  local lang = parse_lang_by_buffer[tostring(buf)]
   if not lang then return end
   pmacs.parse._dispatch(buf, lang)
 end
