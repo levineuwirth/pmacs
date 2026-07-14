@@ -11,14 +11,13 @@ reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-14)
 
-- `main` @ `7d1b6d6` (filename-grammars #117 merged), protocol **v15**
+- `main` @ `6364064` (grammar-gap #118 merged), protocol **v15**
   (`SUPPORTED=[6..15]`; no bump since #113 — the highlight side-quest is
   grammar + Lua only).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
-  checkout. #114–#117 merged; #118 (`grammar-gap`) approved, merge
-  pending. What shipped:
+  checkout. All merged. What shipped:
   - **Grammars** (`crate::syntax::BUILTIN_LANGUAGES`): every
     LSP-configured language now has one — cuda, bash, dockerfile (via
     the ABI-current `tree-sitter-containerfile`, NOT the dead
