@@ -404,6 +404,22 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         loader: || tree_sitter_cpp::LANGUAGE.into(),
         highlights_query: tree_sitter_cpp::HIGHLIGHT_QUERY,
     },
+    // CUDA (`.cu` source, `.cuh` header). A dedicated grammar rather
+    // than reusing `cpp`: CUDA extends C++ with `__global__`/`__device__`
+    // qualifiers, `<<<grid, block>>>` kernel-launch syntax, and builtin
+    // types the C++ grammar misparses. Neither extension collides with
+    // an entry above, so ordering is irrelevant here. `LspStyleView`
+    // layers clangd's CUDA semantic tokens on top, exactly as for C/C++.
+    //
+    // Note the const name: `tree-sitter-cuda` exposes `HIGHLIGHTS_QUERY`
+    // (plural, the `tree-sitter-rust`/`tree-sitter-lua` idiom), NOT the
+    // singular `HIGHLIGHT_QUERY` that `tree-sitter-c`/`-cpp`/`-md` use.
+    LanguageEntry {
+        name: "cuda",
+        extensions: &["cu", "cuh"],
+        loader: || tree_sitter_cuda::LANGUAGE.into(),
+        highlights_query: tree_sitter_cuda::HIGHLIGHTS_QUERY,
+    },
 ];
 
 /// Registry that the Lua surface ([`crate::lua_bindings::install_parse`])
@@ -796,6 +812,79 @@ mod tests {
         assert!(
             !cpp.highlights_query.is_empty(),
             "`cpp` ships a non-empty highlights query"
+        );
+    }
+
+    #[test]
+    fn builtin_languages_include_cuda() {
+        // Regression guard mirroring `builtin_languages_include_c_and_cpp`:
+        // the CUDA entry must keep claiming its canonical extensions and
+        // shipping a highlights query, so `.cu`/`.cuh` get lexical
+        // styling (with clangd's semantic tokens layered on top) instead
+        // of falling back to no grammar at all.
+        let cuda = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "cuda")
+            .expect("`cuda` language entry must be present");
+        assert!(cuda.extensions.contains(&"cu"), "`cuda` claims `.cu`");
+        assert!(cuda.extensions.contains(&"cuh"), "`cuda` claims `.cuh`");
+        assert!(
+            !cuda.highlights_query.is_empty(),
+            "`cuda` ships a non-empty highlights query"
+        );
+    }
+
+    #[test]
+    fn cuda_grammar_loads_and_parses_kernel_launch() {
+        // ABI acceptance: a `tree-sitter-cuda` 0.21 grammar must be
+        // accepted by our `tree-sitter` 0.26 core — `set_language`
+        // succeeds and a tree is produced. This is the runtime check the
+        // compile step cannot give us (a too-old grammar ABI fails only
+        // here, at parse time). Grammar identity: `<<<grid, block>>>`
+        // kernel-launch syntax is CUDA-specific; the C++ grammar parses
+        // it as chained comparison/shift operators and flags an error, so
+        // an error-free parse proves the entry wired the CUDA grammar,
+        // not a C++ fallback.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("cuda")
+            .expect("`cuda` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("kernel.cu");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"__global__ void add(int *c) { c[threadIdx.x] = 1; }\n\
+                     int main() { add<<<1, 256>>>(0); return 0; }\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "cuda".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.tree.root_node().kind(),
+            "translation_unit",
+            "CUDA grammar (C-derived) roots at translation_unit"
+        );
+        assert!(
+            !bundle.tree.root_node().has_error(),
+            "CUDA grammar parses the `<<<...>>>` kernel launch without error"
+        );
+    }
+
+    #[test]
+    fn language_for_path_resolves_cuda_extensions() {
+        // `.cu`/`.cuh` resolve to the CUDA grammar through the same
+        // extension-detection path as every other bundled language, so
+        // the LSP filetype fallback in `lsp.lua` is never consulted for
+        // them in practice.
+        let reg = SyntaxRegistry::new();
+        assert_eq!(
+            reg.language_name_for_path("kernel.cu").as_deref(),
+            Some("cuda")
+        );
+        assert_eq!(
+            reg.language_name_for_path("device.cuh").as_deref(),
+            Some("cuda")
         );
     }
 
