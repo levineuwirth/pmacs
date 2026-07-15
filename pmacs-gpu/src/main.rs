@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, fontdb,
 };
 use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
@@ -52,6 +52,106 @@ use crate::attach::{AttachClient, AttachEvent};
 
 /// Bundled font (SIL Open Font License 1.1 — see `fonts/OFL.txt`).
 const JETBRAINS_MONO: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+
+/// The default font family — the query `family: None` (and every
+/// rejected requested family) resolves through (framing Q#F6). The
+/// bundle guarantees the query is never empty; a monospaced
+/// system-installed face of the same family may legitimately win by
+/// insertion order (availability, not face identity).
+const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
+
+/// What sanitized assembly retained (framing Q#F6): the default
+/// family name and the bundled face's ID, both asserted present and
+/// monospaced at assembly time. The rejected-family fallback and the
+/// `family: None` default both resolve through
+/// `Family::Name(&default_family)` against the sanitized db, so the
+/// fallback is total and cannot recurse into a proportional
+/// collision.
+struct FontDefaults {
+    default_family: String,
+    bundled_id: fontdb::ID,
+}
+
+/// Remove every NON-monospace face that advertises `default_family`
+/// (framing Q#F6, round 3 finding 4): fontdb returns the first
+/// surviving equally-good candidate in insertion order, so a
+/// closer-weight proportional system face could otherwise win
+/// bold/italic queries even when the normal query selected a valid
+/// monospaced face. Parameterized by family + bundled ID so tests
+/// run the PRODUCTION path with an unreserved fixture family. The
+/// bundled face is monospaced and survives by construction.
+fn sanitize_font_database(db: &mut fontdb::Database, default_family: &str, bundled_id: fontdb::ID) {
+    let doomed: Vec<fontdb::ID> = db
+        .faces()
+        .filter(|f| {
+            !f.monospaced
+                && f.id != bundled_id
+                && f.families.iter().any(|(name, _)| name == default_family)
+        })
+        .map(|f| f.id)
+        .collect();
+    for id in doomed {
+        db.remove_face(id);
+    }
+}
+
+/// Sanitized, current-order font database + `FontSystem` (framing
+/// Q#F6): system fonts FIRST (what `FontSystem::new()` does today),
+/// the bundled bytes second — retaining the bundled `fontdb::ID` —
+/// then the collision filter, then cosmic-text's current
+/// generic-family defaults, and only then the `FontSystem`
+/// construction, so its internal monospace-ID set includes every
+/// surviving monospaced face (the bundle included). The locale is
+/// resolved exactly as cosmic-text does (`sys_locale`, `"en-US"`
+/// fallback).
+fn build_font_system() -> (FontSystem, FontDefaults) {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    let bundled_ids =
+        db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(JETBRAINS_MONO)));
+    let bundled_id = *bundled_ids
+        .first()
+        .expect("bundled JetBrains Mono contains one face");
+    sanitize_font_database(&mut db, DEFAULT_FONT_FAMILY, bundled_id);
+    db.set_monospace_family("Noto Sans Mono");
+    db.set_sans_serif_family("Open Sans");
+    db.set_serif_family("DejaVu Serif");
+    let locale = sys_locale::get_locale().unwrap_or_else(|| String::from("en-US"));
+    let font_system = FontSystem::new_with_locale_and_db(locale, db);
+    let defaults = FontDefaults {
+        default_family: DEFAULT_FONT_FAMILY.to_owned(),
+        bundled_id,
+    };
+    // Assembly-time assertions (framing Q#F6): the default query and
+    // the bundled face are present and monospaced — the total
+    // fallback depends on both.
+    debug_assert!(
+        font_system
+            .db()
+            .face(defaults.bundled_id)
+            .is_some_and(|f| f.monospaced),
+        "the bundled face must survive sanitization and be monospaced"
+    );
+    debug_assert!(
+        query_normal_face(font_system.db(), &defaults.default_family)
+            .and_then(|id| font_system.db().face(id))
+            .is_some_and(|f| f.monospaced),
+        "the default family query must resolve to a monospaced face"
+    );
+    (font_system, defaults)
+}
+
+/// The normal-style query for `family` — the same `fontdb::Query`
+/// implied by the base `Attrs` installed on all seven buffers
+/// (normal weight, normal style, normal stretch).
+fn query_normal_face(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> {
+    db.query(&fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        weight: fontdb::Weight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    })
+}
 
 /// Initial window size in logical pixels.
 const INITIAL_WIDTH: u32 = 800;
@@ -385,6 +485,11 @@ struct State {
     surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     font_system: FontSystem,
+    /// What sanitized assembly retained (Q#F6): the default family
+    /// and the bundled face ID — the total-fallback anchors for
+    /// every font resolution.
+    #[allow(dead_code)] // consumed by apply_font_facts (next commit)
+    font_defaults: FontDefaults,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -1842,8 +1947,11 @@ impl State {
         // Pipelines, atlas, and any offscreen texture must all share the
         // render-target format; `config.format` is the single source.
         let format = config.format;
-        let mut font_system = FontSystem::new();
-        font_system.db_mut().load_font_data(JETBRAINS_MONO.to_vec());
+        // Q#F6: sanitized current-order assembly — system fonts, the
+        // bundled face (ID retained), the same-family collision
+        // filter, generic defaults, THEN FontSystem construction so
+        // its monospace-ID set sees the final database.
+        let (mut font_system, font_defaults) = build_font_system();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let mut viewport = Viewport::new(&device, &cache);
@@ -1957,6 +2065,7 @@ impl State {
             surface,
             config,
             font_system,
+            font_defaults,
             swash_cache,
             viewport,
             atlas,
