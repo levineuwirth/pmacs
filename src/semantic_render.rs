@@ -1766,7 +1766,7 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     // (framing Q#IJ6). Fully-default styles are dropped (they fold as
     // identity anyway).
     let mut styled: Vec<StyledLayerSpan> = Vec::new();
-    for layer in &bundle.layers {
+    for (layer_idx, layer) in bundle.layers.iter().enumerate() {
         let Some(query) = layer.highlight_query.as_ref() else {
             continue;
         };
@@ -1794,7 +1794,7 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
                 start: s,
                 end: e,
                 style,
-                priority: (layer.depth, order as u32),
+                priority: (layer_idx as u32, order as u32),
             });
         }
     }
@@ -1802,14 +1802,18 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
 }
 
 /// One styled span from a single injection layer, tagged with a priority
-/// used to resolve overlaps: `(depth, order)`, higher wins. `order` is the
-/// index in the layer's wider-first list, so a narrower capture (later)
-/// overrides a wider one within the same layer.
+/// used to resolve overlaps: `(layer_index, capture_order)`, higher wins.
+/// `layer_index` is the position in `bundle.layers` — depth-ascending, so a
+/// deeper layer AND a later same-depth sibling both sort after (and thus
+/// override) an earlier one, exactly matching the grid's shallow-to-deep,
+/// layer-by-layer paint order. `capture_order` is the index in the layer's
+/// wider-first list, so within a layer a narrower capture overrides a wider
+/// one. The pair is unique per span, so the fold order is total (no ties).
 struct StyledLayerSpan {
     start: u64,
     end: u64,
     style: Style,
-    priority: (u16, u32),
+    priority: (u32, u32),
 }
 
 /// Flatten possibly-overlapping per-layer styled spans into **disjoint**
@@ -3489,11 +3493,14 @@ mod tests {
     }
 
     #[test]
-    fn full_buffer_summary_scales_on_large_grammar_file() {
-        // Perf gate (round-2 finding 1): the file-style summary runs the
-        // flattener over the WHOLE buffer, not the viewport. The ordered
-        // active-set sweep must keep that roughly linear — the pre-sweep
-        // O(spans^2) flatten stalled a large grammar-backed file here.
+    fn full_buffer_summary_flatten_scales_on_large_grammar_file() {
+        // Perf gate (round-1 finding 1): the file-style summary runs the
+        // FLATTENER over the WHOLE buffer, not the viewport. The ordered
+        // active-set sweep keeps the flatten O(n·log n + Σ active); the
+        // pre-sweep O(spans^2) flatten stalled a large grammar-backed file
+        // here. (This guards the *flattener* regression specifically — the
+        // summary's separate per-line dominant-style tally is a pre-existing
+        // O(lines × spans) loop, not addressed or claimed linear here.)
         use std::fmt::Write as _;
         let state = empty_state();
         let bid = active_buffer(&state);
@@ -3513,8 +3520,64 @@ mod tests {
         assert!(!summary.is_empty(), "summary produced for a styled buffer");
         assert!(
             elapsed < std::time::Duration::from_secs(1),
-            "full-buffer summary took {elapsed:?}; the sweep must stay ~linear \
-             (a quadratic flatten regresses here)"
+            "full-buffer flatten took {elapsed:?}; the event sweep must stay \
+             ~linear (a quadratic flatten regresses here)"
+        );
+    }
+
+    #[test]
+    fn flatten_same_depth_sibling_later_layer_wins() {
+        // Round-2 finding: two overlapping spans from different sibling
+        // layers must resolve to the LATER layer (higher layer_index),
+        // matching the grid's layer-by-layer paint order. The old
+        // `(depth, order)` priority tied same-depth siblings, and the
+        // active-set insert then reversed them — making the earlier sibling
+        // win, the opposite of the grid. Layer index in the priority fixes
+        // it.
+        use crate::cell::Color;
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
+        let green = Style {
+            fg: Color::Indexed(2),
+            ..Style::default()
+        };
+        // Layer 0 span [0,10) red; layer 1 span [3,6) green (overlapping).
+        let styled = vec![
+            StyledLayerSpan {
+                start: 0,
+                end: 10,
+                style: red,
+                priority: (0, 0),
+            },
+            StyledLayerSpan {
+                start: 3,
+                end: 6,
+                style: green,
+                priority: (1, 0),
+            },
+        ];
+        let out = flatten_layer_spans(&styled);
+        // Byte 4 (covered by both) folds to the later layer (green).
+        let covering = out
+            .iter()
+            .find(|s| s.range.start <= 4 && 4 < s.range.end)
+            .expect("byte 4 covered");
+        assert_eq!(
+            covering.style.fg,
+            Color::Indexed(2),
+            "the later sibling layer wins at the overlap"
+        );
+        // Byte 1 (layer 0 only) keeps the base layer's color.
+        let c1 = out
+            .iter()
+            .find(|s| s.range.start <= 1 && 1 < s.range.end)
+            .expect("byte 1 covered");
+        assert_eq!(
+            c1.style.fg,
+            Color::Indexed(1),
+            "a non-overlapping byte keeps the base layer color"
         );
     }
 

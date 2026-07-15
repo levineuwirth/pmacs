@@ -9,11 +9,13 @@
 //! `docs/multi-language-injections-framing.md`.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pmacs::buffer::{Buffer, BufferId, EditOp};
 use pmacs::editor::EditorState;
 use pmacs::lua_bindings::BufferIdLua;
+use pmacs::rope::Range;
 use pmacs::syntax::{self, ParseView, SyntaxRegistry};
 
 /// Drive `tick_async` until `predicate` holds or a deadline passes.
@@ -124,6 +126,109 @@ fn sync_parse_now_resolves_alias() {
     assert!(
         bundle.layers.iter().any(|l| l.language_name == "python"),
         "the `py` fence resolved to python on the synchronous `_parse_now` path"
+    );
+}
+
+/// Round-2 finding: the injection layer cap must be *observably* surfaced,
+/// not merely flagged. Drives the real Lua settle path (`syntax.lua`'s tick
+/// → `_injection_capped` → `pmacs.error`) and asserts the three behaviors:
+/// surfaced once, suppressed on an unchanged re-parse, and re-armed after
+/// the file drops below the cap and exceeds it again.
+#[test]
+fn injection_cap_surfaced_once_and_rearms_via_lua() {
+    let mut state = EditorState::new();
+    // Capture pmacs.error messages into a Lua global.
+    state
+        .lua_host
+        .lua()
+        .load("_CAP = {}\npmacs.error = function(msg) _CAP[#_CAP + 1] = tostring(msg) end")
+        .exec()
+        .expect("install error capture");
+
+    let capping: String = "```rust\nx\n```\n\n".repeat(4096 + 8);
+    let buf_id = state
+        .lua_host
+        .registry()
+        .borrow_mut()
+        .create_from_bytes("big.md".to_owned(), capping.as_bytes());
+    state
+        .lua_host
+        .lua()
+        .globals()
+        .set("BUF", BufferIdLua(buf_id))
+        .expect("bind BUF");
+
+    let dispatch = |state: &EditorState| {
+        state
+            .lua_host
+            .lua()
+            .load("pmacs.parse._dispatch(BUF, 'markdown')")
+            .exec()
+            .expect("dispatch");
+    };
+    let cap_count = |state: &EditorState| -> usize {
+        state.lua_host.lua().load("return #_CAP").eval().unwrap()
+    };
+    let current =
+        |state: &EditorState| state.syntax_registry.view(buf_id).and_then(|h| h.current());
+    let replace_all = |state: &EditorState, bytes: &[u8]| {
+        let core = state.core.borrow();
+        let mut reg = core.registry.borrow_mut();
+        let buf = reg.get_mut(buf_id).expect("buffer");
+        let len = buf.len();
+        buf.apply_edit(EditOp::Replace {
+            range: Range::new(0, len),
+            bytes,
+        })
+        .expect("replace");
+    };
+
+    // 1) First settle → surfaced exactly once, message names the cap.
+    dispatch(&state);
+    pump_async(&mut state, |s| current(s).is_some());
+    assert_eq!(cap_count(&state), 1, "cap surfaced once on first settle");
+    let msg: String = state.lua_host.lua().load("return _CAP[1]").eval().unwrap();
+    assert!(
+        msg.contains("injection layer cap"),
+        "message names the cap: {msg}"
+    );
+
+    // 2) Re-dispatch with no change → suppressed (still once).
+    let b1 = current(&state).unwrap();
+    dispatch(&state);
+    pump_async(&mut state, |s| {
+        current(s).is_some_and(|b| !Arc::ptr_eq(&b1, &b))
+    });
+    assert_eq!(
+        cap_count(&state),
+        1,
+        "once-per-buffer: no re-warn without change"
+    );
+
+    // 3) Shrink below the cap → warned flag clears, no new error.
+    replace_all(&state, b"# small\n\n```rust\nx\n```\n");
+    let b2 = current(&state).unwrap();
+    dispatch(&state);
+    pump_async(&mut state, |s| {
+        current(s).is_some_and(|b| !Arc::ptr_eq(&b2, &b))
+    });
+    assert_eq!(
+        cap_count(&state),
+        1,
+        "dropping below the cap surfaces no new error"
+    );
+
+    // 4) Grow back above the cap → re-armed, warns once more.
+    replace_all(&state, capping.as_bytes());
+    let b3 = current(&state).unwrap();
+    dispatch(&state);
+    pump_async(&mut state, |s| {
+        current(s).is_some_and(|b| !Arc::ptr_eq(&b3, &b))
+    });
+    assert_eq!(
+        cap_count(&state),
+        2,
+        "re-armed: exceeding the cap again warns once more"
     );
 }
 

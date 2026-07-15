@@ -215,17 +215,20 @@ Because the wire re-sorts by start (`main.rs:4117`/`4130`), producer
 order cannot carry overlap precedence. So overlaps are resolved **in the
 producer, before the wire**:
 
-- **`scoped_style_spans` flattens** all layers over the viewport into
-  **disjoint effective spans** — a sweep-line that, at each byte, takes
-  the deepest layer covering it, and within a layer the existing
-  wider-first "narrower overrides" rule. Output is disjoint runs of a
-  single folded style. The viewport already bounds the sweep, so this is
-  O(boundaries) in the visible range. Positional re-sorting downstream is
-  then a no-op on precedence, and the disjoint output aligns with the
-  model's existing style-tile disjointness invariant. (Per-byte effective
-  style is unchanged from today for single-layer buffers; only the *shape*
-  goes overlapping→disjoint, so existing `StyleSpans` shape assertions are
-  updated to match.)
+- **`scoped_style_spans` flattens** all layers into **disjoint effective
+  spans** — an ordered active-set **event sweep**: activate a span at its
+  start boundary, expire it at its end, and at each interval fold the
+  active set (deeper layer / later same-depth sibling / narrower capture
+  wins, keyed by `(layer_index, capture_order)`). Cost is
+  **O(n·log n + Σ active)** in the span count — linear in practice, since
+  the active set is bounded by overlap depth, not the total span count.
+  This bound matters because the file-style summary runs the flattener
+  over the **whole buffer**, not just the viewport. Positional re-sorting
+  downstream is then a no-op on precedence, and the disjoint output aligns
+  with the model's existing style-tile disjointness invariant. (Per-byte
+  effective style is unchanged from today for single-layer buffers; only
+  the *shape* goes overlapping→disjoint, so existing `StyleSpans` shape
+  assertions are updated to match.)
 - **The GPU `source_color_at` fold fix is kept** (fold all covering spans
   in order, matching `effective_style_at`) — defense-in-depth and a
   contract alignment, correct even for any residual same-start overlap.
@@ -233,9 +236,12 @@ producer, before the wire**:
   it paints layer-by-layer in depth order (later overrides via the cell
   merge), which is already correct.
 
-Acceptance test #9 drives the **full message-application path**
-(`replace_style_spans` → render → `source_color_at`) with an overlapping
-parent-red / child-green case, not a direct `source_color_at` call.
+Acceptance test #9 drives the real full-frame message transform
+(`spans_from_segments`, extracted from `replace_style_spans`) then
+`source_color_at`, with an overlapping parent-red / child-green case —
+exercising the start-sort + fold, not a hand-rolled sort. (A live-`State`
+render pass needs a GPU device and is out of unit-test scope; the extracted
+transform is the code that matters here.)
 
 ### Q#IJ7 — Both producers walk layers; Policy A unchanged at buffer scope
 
@@ -329,15 +335,20 @@ half-styled frame. `grammar_style_parse_not_ready` unchanged.
    falsify multi-range.)
 7. `recursion_bounds_terminate` — rust macro self-injection terminates
    within the depth bound; `injection_layer_cap_surfaces_and_preserves_root`
-   drives >4096 fences and asserts the surfaced `injection_capped` flag,
-   the bounded count, and an intact root; a failing child drops only itself
-   (Q#IJ3).
+   drives >4096 fences (bundle-flag level), and
+   `injection_cap_surfaced_once_and_rearms_via_lua` (round 2) drives the
+   **observable** Lua settle path: `pmacs.error` once, suppressed on an
+   unchanged re-parse, and re-armed after dropping below the cap and
+   exceeding it again. A failing child drops only itself (Q#IJ3).
 8. `wire_producer_emits_disjoint_child_spans_in_fence` — `scoped_style_spans`
    over a ` ```rust ` fence emits disjoint `StyleSpan`s covering a rust
    keyword **inside** the fence. **Bite-verified** vs the single-layer
-   producer. Plus `full_buffer_summary_scales_on_large_grammar_file`
-   (round 1): the whole-buffer summary path stays ~linear under the event
-   sweep (a quadratic flatten regresses it).
+   producer. `flatten_same_depth_sibling_later_layer_wins` (round 2): a
+   later same-depth sibling layer wins the fold, matching grid paint order.
+   `full_buffer_summary_flatten_scales_on_large_grammar_file` (round 1):
+   the whole-buffer **flatten** stays ~linear under the event sweep (a
+   quadratic flatten regresses it; the summary's per-line tally is a
+   separate pre-existing loop).
 9. `source_color_folds_overlapping_child_over_parent` — parent-red /
    child-green overlap driven through the real `spans_from_segments`
    (`replace_style_spans` body): the child (green) wins the fold.
