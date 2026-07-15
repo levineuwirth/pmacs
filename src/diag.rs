@@ -196,6 +196,10 @@ impl Diagnostic {
 #[derive(Default)]
 pub struct DiagnosticStore {
     by_uri: HashMap<String, Vec<Diagnostic>>,
+    /// Per-URI severity totals, maintained alongside `by_uri` so
+    /// frame-time consumers do not rescan every diagnostic at render
+    /// cadence. Entries exist exactly when `by_uri` entries do.
+    severity_counts: HashMap<String, (u32, u32, u32, u32)>,
     /// URIs whose stored diagnostics are known to be out of date
     /// because a `textDocument/didChange` was issued after the last
     /// `publishDiagnostics` was absorbed. `Self::set` clears entries
@@ -208,6 +212,20 @@ pub struct DiagnosticStore {
     /// producer's) additionally key on this to know a republish
     /// happened (T M4.6 GPU parity).
     epochs: HashMap<String, u64>,
+}
+
+fn count_severities(diags: &[Diagnostic]) -> (u32, u32, u32, u32) {
+    let mut counts = (0u32, 0u32, 0u32, 0u32);
+    for diagnostic in diags {
+        let slot = match diagnostic.severity {
+            DiagnosticSeverity::Error => &mut counts.0,
+            DiagnosticSeverity::Warning => &mut counts.1,
+            DiagnosticSeverity::Information => &mut counts.2,
+            DiagnosticSeverity::Hint => &mut counts.3,
+        };
+        *slot = slot.saturating_add(1);
+    }
+    counts
 }
 
 impl DiagnosticStore {
@@ -227,11 +245,14 @@ impl DiagnosticStore {
     pub fn set(&mut self, uri: impl Into<String>, mut diags: Vec<Diagnostic>) {
         diags.sort_by(Diagnostic::compare_by_position);
         let uri = uri.into();
+        let counts = count_severities(&diags);
         self.stale_uris.remove(&uri);
         *self.epochs.entry(uri.clone()).or_insert(0) += 1;
         if diags.is_empty() {
             self.by_uri.remove(&uri);
+            self.severity_counts.remove(&uri);
         } else {
+            self.severity_counts.insert(uri.clone(), counts);
             self.by_uri.insert(uri, diags);
         }
     }
@@ -240,6 +261,7 @@ impl DiagnosticStore {
     /// no entry to be stale about.
     pub fn clear(&mut self, uri: &str) {
         self.by_uri.remove(uri);
+        self.severity_counts.remove(uri);
         self.stale_uris.remove(uri);
         *self.epochs.entry(uri.to_owned()).or_insert(0) += 1;
     }
@@ -285,17 +307,24 @@ impl DiagnosticStore {
         let mut w = 0;
         let mut i = 0;
         let mut h = 0;
-        for diags in self.by_uri.values() {
-            for d in diags {
-                match d.severity {
-                    DiagnosticSeverity::Error => e += 1,
-                    DiagnosticSeverity::Warning => w += 1,
-                    DiagnosticSeverity::Information => i += 1,
-                    DiagnosticSeverity::Hint => h += 1,
-                }
-            }
+        for &(errors, warnings, information, hints) in self.severity_counts.values() {
+            e += errors as usize;
+            w += warnings as usize;
+            i += information as usize;
+            h += hints as usize;
         }
         (e, w, i, h)
+    }
+
+    /// Per-URI totals `(error, warning, information, hint)`.
+    ///
+    /// The tuple is computed once by [`Self::set`] and deliberately
+    /// survives [`Self::mark_stale`]: staleness invalidates byte
+    /// positions, while the last published counts remain valid as a
+    /// frozen status summary until the next publication.
+    #[must_use]
+    pub fn severity_counts_for(&self, uri: &str) -> (u32, u32, u32, u32) {
+        self.severity_counts.get(uri).copied().unwrap_or_default()
     }
 
     /// Per-URI count.
@@ -861,11 +890,46 @@ mod tests {
     }
 
     #[test]
+    fn cached_severity_counts_replace_clear_and_survive_staleness() {
+        let mut store = DiagnosticStore::new();
+        assert_eq!(store.severity_counts_for("file:///a"), (0, 0, 0, 0));
+
+        store.set(
+            "file:///a",
+            vec![
+                diag(0, DiagnosticSeverity::Error, "1"),
+                diag(1, DiagnosticSeverity::Error, "2"),
+                diag(2, DiagnosticSeverity::Warning, "3"),
+                diag(3, DiagnosticSeverity::Information, "4"),
+                diag(4, DiagnosticSeverity::Hint, "5"),
+            ],
+        );
+        assert_eq!(store.severity_counts_for("file:///a"), (2, 1, 1, 1));
+
+        store.mark_stale("file:///a");
+        assert_eq!(
+            store.severity_counts_for("file:///a"),
+            (2, 1, 1, 1),
+            "staleness freezes the last published counts"
+        );
+
+        store.set(
+            "file:///a",
+            vec![diag(0, DiagnosticSeverity::Warning, "replacement")],
+        );
+        assert_eq!(store.severity_counts_for("file:///a"), (0, 1, 0, 0));
+
+        store.clear("file:///a");
+        assert_eq!(store.severity_counts_for("file:///a"), (0, 0, 0, 0));
+    }
+
+    #[test]
     fn empty_set_clears_uri() {
         let mut s = DiagnosticStore::new();
         s.set("a", vec![diag(0, DiagnosticSeverity::Error, "x")]);
         s.set("a", Vec::new());
         assert!(s.for_uri("a").is_empty());
+        assert_eq!(s.severity_counts_for("a"), (0, 0, 0, 0));
         assert_eq!(s.uris().count(), 0);
     }
 

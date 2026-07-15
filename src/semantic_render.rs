@@ -889,12 +889,12 @@ impl SemanticRenderState {
     /// last published value while the diag store is stale — mid-edit
     /// positions are wrong but *counts* merely lag, and flickering
     /// to zero on every keystroke would be worse. The freeze IS the
-    /// store's retained vector (rounds 3–4): `mark_stale` keeps the
-    /// last published diagnostics, so counting them while stale
-    /// yields the frozen value with no session state to lose — not
-    /// to a snapshot reset, and not by attaching mid-edit. The
-    /// daemon's write loop keeps the variant off wires negotiated
-    /// `< 8`.
+    /// store's retained state (rounds 3–5): `mark_stale` keeps the
+    /// last published diagnostics and their cached severity totals,
+    /// so reading the totals while stale yields the frozen value in
+    /// O(1) with no session state to lose — not to a snapshot reset,
+    /// and not by attaching mid-edit. The daemon's write loop keeps
+    /// the variant off wires negotiated `< 8`.
     fn status_facts_msg(
         &mut self,
         state: &EditorState,
@@ -917,25 +917,22 @@ impl SemanticRenderState {
             buffer_file_uri(&core, buffer_id).map_or((0, 0), |uri| {
                 let store = state.lsp_manager.borrow().diag_store();
                 let guard = store.lock().expect("diag store mutex poisoned");
-                // Counted even while the store is STALE (round 4):
-                // `mark_stale` keeps the last published vector (T
-                // M11.8) — positions are invalid mid-edit, but counts
-                // merely lag, so the retained entries ARE the frozen
-                // value. Sourcing the freeze from the store rather
-                // than any per-session cache means a session first
-                // rendering during staleness — a late joiner, or a
-                // buffer first visited mid-edit — reports the
+                // Read even while the store is STALE (round 4):
+                // `mark_stale` keeps the last published diagnostics
+                // (T M11.8) — positions are invalid mid-edit, but
+                // counts merely lag, so the retained totals ARE the
+                // frozen value. Sourcing the freeze from the store
+                // rather than any per-session cache means a session
+                // first rendering during staleness — a late joiner,
+                // or a buffer first visited mid-edit — reports the
                 // preserved counts instead of zeros, and the snapshot
                 // reset has nothing count-related to preserve.
-                let mut errors = 0u32;
-                let mut warnings = 0u32;
-                for d in guard.for_uri(&uri) {
-                    match d.severity {
-                        crate::diag::DiagnosticSeverity::Error => errors += 1,
-                        crate::diag::DiagnosticSeverity::Warning => warnings += 1,
-                        _ => {}
-                    }
-                }
+                // `DiagnosticStore::set` computes this tuple once
+                // (round 5). StatusFacts runs at frame cadence for
+                // every semantic session, so rescanning the retained
+                // vector here would make stale intervals
+                // O(frames * diagnostics).
+                let (errors, warnings, _, _) = guard.severity_counts_for(&uri);
                 (errors, warnings)
             })
         };

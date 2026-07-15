@@ -132,7 +132,9 @@ instance's stale-store diagnostic-count freeze is store knowledge,
 not session state — the re-sent `StatusFacts` after a snapshot
 carries the frozen counts, never zeros, including for a session
 whose first frame lands during staleness (a late joiner attaching
-mid-edit).
+mid-edit). The store maintains those per-URI severity totals with
+the retained vector, so frame-time producers read them in O(1)
+rather than rescanning diagnostics for every attached session.
 
 ## Capability and version mechanics
 

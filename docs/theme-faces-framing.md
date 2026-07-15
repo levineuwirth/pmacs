@@ -1,7 +1,18 @@
 # Theme faces — framing (Arc 4 stage 1, themes)
 
-**Revision 8 — 2026-07-15. Status: implemented on branch
-`theme-faces` (PR #120); revision 8 folds PR round 4.**
+**Revision 9 — 2026-07-15. Status: implemented on branch
+`theme-faces` (PR #120); revision 9 folds PR round 5.**
+
+Revision 9 (PR #120 round 5, one finding): the store-sourced freeze
+no longer rescans the retained diagnostic vector at frame cadence.
+`DiagnosticStore` maintains per-URI severity totals alongside
+`by_uri`, replacing or removing both in `set` / `clear` while
+`mark_stale` deliberately preserves both. `status_facts_msg` reads
+that tuple in O(1), so the round-4 late-join correctness does not
+turn a long stale interval into O(frames x diagnostics x semantic
+sessions) work under the shared store mutex. Acceptance item 34 is
+the store unit pin: all four totals replace correctly, survive
+staleness, and clear with the diagnostic vector.
 
 Revision 8 (PR #120 round 4, one finding): the diagnostic-count
 freeze is sourced from the diag store itself, superseding round 3's
@@ -671,10 +682,13 @@ pub struct ThemeFace {
   other buffers' baselines (each buffer's own snapshot precedes its
   revisit). The diagnostic-count freeze needs no protection here
   (rounds 3–4): it is sourced from the diag store's retained vector
-  — `mark_stale` keeps the last published diagnostics, whose counts
-  merely lag — never from session state, so the reset cannot zero
-  mid-edit counts and the freeze holds even for a session attaching
-  during staleness. Resetting on a failed write is harmless — the
+  and its cached per-URI severity tuple — `mark_stale` keeps the last
+  published diagnostics and counts, which merely lag — never from
+  session state, so the reset cannot zero mid-edit counts and the
+  freeze holds even for a session attaching during staleness. The
+  producer reads the tuple in O(1), rather than scanning the retained
+  vector for every semantic session at frame cadence (round 5).
+  Resetting on a failed write is harmless — the
   failure mode is one redundant re-send, never staleness. The GPU's `BufferSnapshot` arm mirrors the contract
   (round 3 finding 1): it clears its buffer-scoped facts —
   search/menu popups (which gate key and pointer interception) and
@@ -1016,3 +1030,9 @@ Keybinding-driven tests dispatch keys, never `pmacs.command.invoke`.
     `SemanticRenderState` — the session's first frame reports the
     store's preserved counts, because the freeze is the retained
     diagnostic vector itself, not a per-session cache.
+34. **Frozen counts stay O(1) at frame cadence** (PR round 5, Rust
+    unit): `DiagnosticStore` caches all four per-URI severity totals;
+    replacement updates them, `mark_stale` preserves them, and
+    `clear` / an empty replacement remove them with the diagnostic
+    vector. `StatusFacts` reads this tuple rather than rescanning
+    `for_uri` for every semantic session on every frame.
