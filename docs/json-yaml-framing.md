@@ -1,0 +1,177 @@
+# JSON + YAML grammars — framing (side quest, highlight family)
+
+**Intent.** Add `tree-sitter-json` and `tree-sitter-yaml` grammars (plus
+their language servers) to the bundle. Two config formats that pmacs
+currently renders as plain text, and — the reason this is the natural
+next side quest — the **honest gate on the Jupyter `.ipynb` path** (JSON)
+and an **immediate payoff from the injection engine just shipped (#122)**:
+the markdown block grammar's `injections.scm` already sets
+`injection.language "yaml"` for `---` frontmatter and `"toml"` for `+++`
+frontmatter, so registering YAML lights up YAML frontmatter highlighting
+with zero extra wiring (TOML frontmatter already works — `toml` landed in
+#118 and injections in #122). This is a mostly-additive grammar-gap-style
+change, following the #118 pattern, with the frontmatter/fence synergy as
+the demonstrable headline.
+
+---
+
+## Ground truth (as of `main` @ `56eb67e`, #121)
+
+- **Adding a grammar** is a one-line `LanguageEntry` in
+  `crate::syntax::BUILTIN_LANGUAGES` (`name`, `extensions`, `loader`,
+  `highlights_query`, `injections_query`) + a `tree-sitter-foo` dep. The
+  Lua `buffer.after-load` path picks it up automatically; detection is
+  extension → LSP filetype → filename → shebang
+  (`resolve_active_language`).
+- **Grammar name MUST equal the `pmacs.lsp.config.<name>` key** — grammar
+  detection wins over the filetype map, so the name it resolves is the id
+  the LSP client keys off (the #118 invariant; there's an acceptance test
+  that pins every grammar-gap language to its config key).
+- **LSP configs** are `pmacs.lsp.config.<name> = … or { command, args,
+  [settings|init_options] }` (`builtin/runtime/lsp.lua`); no json/yaml
+  config today. `pmacs.lsp.filetypes` is the LSP-only extension fallback
+  (consulted only when `language_for_path` misses).
+- **Injection synergy (#122).** The bundled `tree_sitter_md::
+  INJECTION_QUERY_BLOCK` contains:
+  - `((minus_metadata) @injection.content (#set! injection.language
+    "yaml"))` — `---`-fenced frontmatter,
+  - `((plus_metadata) @injection.content (#set! injection.language
+    "toml"))` — `+++`-fenced frontmatter,
+  - fenced code blocks via the dynamic info-string.
+  So a registered `yaml` grammar is injected into markdown frontmatter
+  automatically, and ` ```json `/` ```yaml `/` ```yml ` fences resolve
+  (`yml`→yaml is already in `default_injection_aliases`; `json` is the
+  bundled name).
+
+**Confirmed crate facts** (probed against the registry + a build under
+tree-sitter 0.26):
+
+1. `tree-sitter-json` **0.24.8** — `pub const LANGUAGE: LanguageFn` (via
+   `tree-sitter-language`, the modern shared ABI) + `HIGHLIGHTS_QUERY`.
+   Compiles and links under our tree-sitter 0.26. No `INJECTIONS_QUERY`
+   (JSON embeds nothing).
+2. `tree-sitter-yaml` **0.7.2** — same shape (`LANGUAGE: LanguageFn`,
+   `HIGHLIGHTS_QUERY`, `tree-sitter-language` dep). Compiles under 0.26.
+   No `INJECTIONS_QUERY`.
+3. Both are the ABI-current crates — **not** a `tree-sitter ^0.20` fork
+   (the dockerfile trap from #118). A single build confirmed link +
+   compile; runtime `set_language` is pinned by the ABI acceptance test.
+
+---
+
+## Decisions
+
+### Q#JY1 — Two `LanguageEntry`s, self-contained highlights, no injections
+
+Add `json` and `yaml` to `BUILTIN_LANGUAGES`, each
+`highlights_query: &[…::HIGHLIGHTS_QUERY]` (self-contained, no
+`; inherits:` delta), `injections_query: &[]`. Extensions:
+
+- **json:** `.json`. (`.jsonc`/`.json5` — comment/trailing-comma variants
+  the plain JSON grammar rejects — are **deferred**; a `.jsonc` grammar
+  or a lenient mode is a separate call.)
+- **yaml:** `.yaml`, `.yml`.
+
+Root kinds (pinned by the ABI test): json `document`, yaml `stream`.
+
+### Q#JY2 — LSP configs: `vscode-json-language-server` + `yaml-language-server`
+
+- **json:** `vscode-json-language-server --stdio` from the **maintained
+  `vscode-langservers-extracted` bundle** — NOT the stale standalone
+  `vscode-json-languageserver` npm package. Schema-driven
+  diagnostics/completion; auto-associates well-known files
+  (`package.json`, `tsconfig.json`) via its schema store. The underlying
+  Microsoft JSON server is **MIT-licensed with no telemetry path**; its
+  only relevant outbound behavior is fetching remote `$schema` content.
+  **Remote schema retrieval stays enabled by default** — setting
+  `handledSchemaProtocols = {"file"}` would disable server-side HTTP but
+  then remote schemas fail unless pmacs implements the `vscode/content`
+  request (out of scope), so we leave it on and document the behavior.
+- **yaml:** `yaml-language-server --stdio` (Red Hat).
+
+Both servers stay **external** (installed by the user), adding **no
+licensing payload** to pmacs; if either is ever bundled, retain its MIT +
+dependency notices. Both **pull `workspace/configuration`** (the
+mechanism that bit CMake in #117), so the config ships **non-nil empty
+settings** matching the taplo/cmake precedent. **Implementation verifies
+the exact `workspace/configuration` sections each real server requests
+and pins those sections in the config + tests** — not merely that a
+non-null settings table exists (if a server is not installed on the
+build machine, the sections are derived from its source/docs and the
+gap is noted, per the basedpyright machine-caveat precedent). Servers
+activate only if installed; the grammar is the always-on value.
+
+### Q#JY3 — Filetype fallback + alias entries
+
+Add `pmacs.lsp.filetypes` entries (`json`→json, `yaml`/`yml`→yaml) as the
+stable-id fallback (grammar detection wins in practice, same role as the
+`cuda`/`lua` entries). `default_injection_aliases` already has `yml`→yaml;
+`json`/`yaml` are bundled names needing no alias. Special *filenames*
+(`.prettierrc`, `docker-compose.yml` is already `.yml`, extensionless
+CI/config yaml) are **deferred** to the filename map as a follow-up.
+
+### Q#JY4 — Frontmatter/fence highlighting is the headline, and it's free
+
+No new injection wiring: registering `yaml` makes the existing markdown
+`minus_metadata`→yaml injection resolve, and ` ```json `/` ```yaml `
+fences resolve through the #122 engine. Acceptance proves both end to end
+(this is the demonstrable payoff and the tie-back to injections).
+
+---
+
+## Bets
+
+1. The two crates are ABI-current and drop in like the #118 grammar-gap
+   languages — verified by a build; the ABI test is the runtime pin.
+2. The frontmatter/fence synergy needs zero engine changes — it falls out
+   of #122 + the markdown injection query.
+3. The LSP `workspace/configuration` shape is the only real unknown;
+   empty-but-present settings + implementation-time verification against
+   the real servers is the mitigation (the #117 CMake lesson).
+
+## Deferred (named)
+
+- `.jsonc` / `.json5` (comments / trailing commas) — needs a lenient
+  grammar or variant entry.
+- Special-filename detection for extensionless config files (`.prettierrc`,
+  CI yaml) via the filename map.
+- JSON **schema** wiring (custom `json.schemas` / `yaml.schemas` settings)
+  beyond the servers' built-in schema stores.
+- The Jupyter `.ipynb` arc itself (JSON is its prerequisite, not its
+  delivery).
+
+## Acceptance
+
+1. `builtin_languages_include_json_and_yaml` — entries present, claim
+   their extensions, ship non-empty highlights.
+2. `json_grammar_loads_and_parses` — ABI: `set_language` + parse a JSON
+   object; root `document`, no error (the runtime ABI pin).
+3. `yaml_grammar_loads_and_parses` — ABI: parse a YAML mapping; root
+   `stream`, no error.
+4. `json_yaml_highlights_compile` — both highlights queries compile and
+   resolve several capture classes.
+5. `language_for_path_resolves_json_yaml` — `.json`→json, `.yaml`/`.yml`→
+   yaml.
+6. `json_yaml_align_with_lsp_configs` — grammar name == the
+   `pmacs.lsp.config.<name>` key (the #118 invariant).
+7. **`yaml_frontmatter_injects_in_markdown`** — a markdown doc with a
+   `---\nkey: val\n---` frontmatter yields a `yaml` child layer that
+   highlights; **the headline synergy with #122**.
+8. `json_fence_injects_in_markdown` — a ` ```json ` fence yields a `json`
+   child layer.
+9. LSP config tests (m4-style): `pmacs.lsp.config.json`/`.yaml` present
+   with the expected command/args (json uses
+   `vscode-json-language-server`), and the settings table carries
+   **exactly the `workspace/configuration` sections each server
+   requests** — pinned, not merely asserted non-nil.
+
+## Risks / interactions
+
+- **LSP `workspace/configuration`** (Q#JY2) — the real risk; verified
+  against the servers at implementation time, empty-present settings as
+  the safe default.
+- **Themes / injections** — untouched. This is pure grammar+detection
+  addition; it consumes the #122 engine, doesn't change it. No protocol
+  bump.
+- **`.yml` vs `.yaml`** — both map to `yaml`; no collision with any
+  existing entry.
