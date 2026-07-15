@@ -285,6 +285,13 @@ pub struct EditorCore {
     /// ([`crate::semantic_render`]) and the TUI search overlay.
     /// Cheaply cloneable (`Arc<Mutex>`); shared with both readers.
     pub search_store: crate::search::SharedSearchStore,
+    /// Shared theme handle (themes arc Q#TH9), injected once at editor
+    /// bring-up right after `SyntaxRegistry` construction — the core
+    /// owns no syntax state, but `ensure_search_overlay` constructs
+    /// `SearchView`s that resolve wash faces through it. A bare core
+    /// (unit-test construction) carries `None` and paints today's
+    /// literals.
+    pub theme: Option<crate::highlight::ThemeHandle>,
     /// Live incremental-search session (Q#SR5), or `None` when no
     /// search is running. Frontend-agnostic: the TUI run loop and the
     /// daemon's `FrontendEvent::Key` path both drive it through the
@@ -385,6 +392,7 @@ impl EditorCore {
             pending_crdt_ops: Vec::new(),
             jump_ring: Vec::new(),
             search_store: crate::search::make_shared_store(),
+            theme: None,
             search: None,
             clipboard_slot: Vec::new(),
             pending_clipboard: None,
@@ -857,9 +865,12 @@ impl EditorCore {
     /// rendered buffer, so one instance suffices per window.
     fn ensure_search_overlay(&mut self) {
         let store = self.search_store.clone();
+        // Themes Q#TH9: pass the injected theme through unconditionally
+        // — a bare core (None) constructs a working unthemed view.
+        let theme = self.theme.clone();
         let win = self.active_window_mut();
         if !win.overlay_kinds().contains(&"search") {
-            win.push_overlay(Box::new(crate::search::SearchView::new(store)));
+            win.push_overlay(Box::new(crate::search::SearchView::new(store, theme)));
         }
     }
 

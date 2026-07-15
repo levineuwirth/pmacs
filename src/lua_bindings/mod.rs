@@ -55,7 +55,7 @@ use crate::buffer_registry::BufferRegistry;
 use crate::cell::{Color, Style, UnderlineStyle};
 use crate::command::{Command, CommandError, CommandRegistry, SourceLocation};
 use crate::editor_core::EditorCore;
-use crate::highlight::{SyntaxHighlightView, Theme};
+use crate::highlight::SyntaxHighlightView;
 use crate::hook::{Hook, HookRegistry};
 use crate::key::{display_sequence, parse_sequence};
 use crate::keymap_stack::KeymapStack;
@@ -6862,18 +6862,26 @@ fn underline_to_lua(style: UnderlineStyle) -> &'static str {
 /// default to the same values as `Style::default()` --- a Lua table
 /// with `{ bold = true }` produces a style that is otherwise
 /// terminal-default.
+///
+/// Every lookup PROPAGATES its error (PR #120 round 1 finding 2):
+/// `Table::get` runs `__index`, so a raising metatable must fail the
+/// enclosing transactional mutation (Q#TH6 all-or-nothing), not
+/// silently parse as an all-default style and let sibling entries
+/// commit. Color/underline fields validate strictly through their
+/// converters; the boolean fields follow Lua truthiness (mlua's
+/// `bool` conversion), so `reverse = 1` reads as `true` by design.
 fn lua_to_style(t: &Table) -> mlua::Result<Style> {
-    let fg: mlua::Value = t.get("fg").unwrap_or(mlua::Value::Nil);
-    let bg: mlua::Value = t.get("bg").unwrap_or(mlua::Value::Nil);
-    let underline: mlua::Value = t.get("underline").unwrap_or(mlua::Value::Nil);
-    let underline_color: mlua::Value = t.get("underline_color").unwrap_or(mlua::Value::Nil);
+    let fg: mlua::Value = t.get("fg")?;
+    let bg: mlua::Value = t.get("bg")?;
+    let underline: mlua::Value = t.get("underline")?;
+    let underline_color: mlua::Value = t.get("underline_color")?;
     Ok(Style {
         fg: lua_to_color(&fg)?,
         bg: lua_to_color(&bg)?,
-        bold: t.get("bold").unwrap_or(false),
-        italic: t.get("italic").unwrap_or(false),
+        bold: t.get::<Option<bool>>("bold")?.unwrap_or(false),
+        italic: t.get::<Option<bool>>("italic")?.unwrap_or(false),
         underline: lua_to_underline(&underline)?,
-        reverse: t.get("reverse").unwrap_or(false),
+        reverse: t.get::<Option<bool>>("reverse")?.unwrap_or(false),
         underline_color: lua_to_color(&underline_color)?,
     })
 }
@@ -6895,6 +6903,83 @@ fn style_to_lua(lua: &Lua, style: Style) -> mlua::Result<Table> {
 /// attached [`SyntaxHighlightView`] sees the change on its next
 /// render. T M4.3 acceptance: "theming via Lua-defined color
 /// schemes."
+/// Themes arc Q#TH6: how [`commit_theme_entries`] applies a parsed
+/// entry set to the theme's capture map.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ThemeCommit {
+    /// `pmacs.theme.set`: the parsed entries become the whole map
+    /// (faces wiped with captures, Q#TH10); `default_style` is
+    /// untouched.
+    Replace,
+    /// `pmacs.theme.merge`: insert/overwrite the parsed entries.
+    Merge,
+}
+
+/// Themes arc Q#TH6: the transactional mutation helper behind
+/// `pmacs.theme.set` / `pmacs.theme.merge`. Collects the WHOLE entry
+/// stream before touching the theme lock, so a malformed entry
+/// anywhere in the input returns its error with the theme untouched
+/// and the mutation counters unbumped — the pre-fix `merge` inserted
+/// while iterating, letting early entries land before a later one
+/// failed. After a successful commit the counters bump from their
+/// prior values (never reset — [`crate::highlight::Theme`]'s
+/// increment-only invariant): `Replace` touches both namespaces
+/// wholesale so it bumps both; `Merge` classifies every committed
+/// key through [`crate::highlight::is_face_name`] (bare `ui`
+/// included) and bumps `syntax_epoch` iff any non-face key
+/// committed, `face_epoch` iff any face key did.
+fn commit_theme_entries(
+    theme: &crate::highlight::ThemeHandle,
+    mode: ThemeCommit,
+    entries: impl Iterator<Item = mlua::Result<(String, Style)>>,
+) -> mlua::Result<()> {
+    let entries: Vec<(String, Style)> = entries.collect::<mlua::Result<_>>()?;
+    let mut th = theme.lock().expect("theme mutex poisoned");
+    match mode {
+        ThemeCommit::Replace => {
+            // Replace the FIELD, never the `Theme` value: a fresh
+            // Theme's zeroed counters would let consecutive `set`
+            // calls share an epoch and stay invisible to every gate.
+            th.by_capture = entries.into_iter().collect();
+            th.syntax_epoch += 1;
+            th.face_epoch += 1;
+        }
+        ThemeCommit::Merge => {
+            let any_face = entries
+                .iter()
+                .any(|(n, _)| crate::highlight::is_face_name(n));
+            let any_syntax = entries
+                .iter()
+                .any(|(n, _)| !crate::highlight::is_face_name(n));
+            for (name, style) in entries {
+                th.by_capture.insert(name, style);
+            }
+            if any_syntax {
+                th.syntax_epoch += 1;
+            }
+            if any_face {
+                th.face_epoch += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Adapt a Lua theme table to [`commit_theme_entries`]'s ordered
+/// result stream: each raw `(name, style_table)` pair maps through
+/// [`lua_to_style`], and any iteration or conversion error rides the
+/// stream so the helper can fail before locking.
+fn lua_theme_entries(table: &Table) -> impl Iterator<Item = mlua::Result<(String, Style)>> + use<> {
+    table
+        .pairs::<String, Table>()
+        .map(|pair| {
+            let (name, style) = pair?;
+            Ok((name, lua_to_style(&style)?))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
 fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table> {
     let theme_mod = lua.create_table()?;
 
@@ -6903,17 +6988,7 @@ fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table
         theme_mod.set(
             "set",
             lua.create_function(move |_, table: Table| {
-                let mut new_theme = Theme::empty();
-                table.for_each(|name: String, style: Table| {
-                    new_theme.insert(name, lua_to_style(&style)?);
-                    Ok(())
-                })?;
-                let theme = s.theme();
-                let mut th = theme.lock().expect("theme mutex poisoned");
-                let prev_default = th.default_style;
-                *th = new_theme;
-                th.default_style = prev_default;
-                Ok(())
+                commit_theme_entries(&s.theme(), ThemeCommit::Replace, lua_theme_entries(&table))
             })?,
         )?;
     }
@@ -6923,13 +6998,7 @@ fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table
         theme_mod.set(
             "merge",
             lua.create_function(move |_, table: Table| {
-                let theme = s.theme();
-                let mut th = theme.lock().expect("theme mutex poisoned");
-                table.for_each(|name: String, style: Table| {
-                    th.insert(name, lua_to_style(&style)?);
-                    Ok(())
-                })?;
-                Ok(())
+                commit_theme_entries(&s.theme(), ThemeCommit::Merge, lua_theme_entries(&table))
             })?,
         )?;
     }
@@ -6952,7 +7021,11 @@ fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table
             "clear",
             lua.create_function(move |_, ()| {
                 let theme = s.theme();
-                theme.lock().expect("theme mutex poisoned").clear();
+                let mut th = theme.lock().expect("theme mutex poisoned");
+                th.clear();
+                // Q#TH6: clear empties both namespaces — bump both.
+                th.syntax_epoch += 1;
+                th.face_epoch += 1;
                 Ok(())
             })?,
         )?;
@@ -6963,8 +7036,13 @@ fn install_theme(lua: &Lua, syntax: &SharedSyntaxRegistry) -> mlua::Result<Table
         theme_mod.set(
             "default",
             lua.create_function(move |_, style: Table| {
+                // Q#TH6: parse before locking; default_style is a
+                // syntax-namespace fallback, so bump syntax only.
+                let parsed = lua_to_style(&style)?;
                 let theme = s.theme();
-                theme.lock().expect("theme mutex poisoned").default_style = lua_to_style(&style)?;
+                let mut th = theme.lock().expect("theme mutex poisoned");
+                th.default_style = parsed;
+                th.syntax_epoch += 1;
                 Ok(())
             })?,
         )?;
@@ -8623,7 +8701,7 @@ pub fn make_lsp_manager(
 ) -> mlua::Result<SharedLspManager> {
     let manager = Rc::new(RefCell::new(LspManager::new(supervisor, runtime)));
     install_lsp(lua, &manager, syntax)?;
-    diag::install_diag(lua, &manager)?;
+    diag::install_diag(lua, &manager, &syntax.theme())?;
     install_completion(lua, &manager)?;
     install_hover(lua, &manager)?;
     install_signature(lua, &manager)?;
@@ -12116,6 +12194,123 @@ mod tests {
         let hks: SharedHookRegistry = Rc::new(RefCell::new(HookRegistry::new()));
         install(&lua, &reg, &cmds, &kms, &mns, &hks).expect("install");
         (lua, reg, cmds, kms, hks)
+    }
+
+    /// A theme handle with one syntax entry and nonzero counters, for
+    /// pinning that failed commits change nothing and successful ones
+    /// bump from the PRIOR values (themes arc Q#TH6).
+    fn seeded_theme() -> crate::highlight::ThemeHandle {
+        let mut th = crate::highlight::Theme::empty();
+        th.insert(
+            "keyword",
+            Style {
+                bold: true,
+                ..Style::default()
+            },
+        );
+        th.syntax_epoch = 3;
+        th.face_epoch = 5;
+        std::sync::Arc::new(std::sync::Mutex::new(th))
+    }
+
+    #[test]
+    fn theme_commit_is_all_or_nothing_with_untouched_counters() {
+        // Q#TH6 / acceptance 11 (the deterministic bite): an ordered
+        // entry stream whose TAIL is malformed must error with zero
+        // theme mutation — the helper collects the whole stream
+        // before taking the lock. The pre-fix merge inserted while
+        // iterating, so the leading Ok entry landed before the Err.
+        let theme = seeded_theme();
+        let entries: Vec<mlua::Result<(String, Style)>> = vec![
+            Ok((
+                "string".to_owned(),
+                Style {
+                    italic: true,
+                    ..Style::default()
+                },
+            )),
+            Err(mlua::Error::RuntimeError("malformed style".into())),
+        ];
+        let res = commit_theme_entries(&theme, ThemeCommit::Merge, entries.into_iter());
+        assert!(res.is_err(), "a malformed tail entry must error");
+        let th = theme.lock().expect("lock");
+        assert!(
+            !th.by_capture.contains_key("string"),
+            "the leading Ok entry must NOT have landed"
+        );
+        assert!(
+            th.by_capture.contains_key("keyword"),
+            "pre-existing entries survive"
+        );
+        assert_eq!(th.syntax_epoch, 3, "failed commit bumps nothing");
+        assert_eq!(th.face_epoch, 5, "failed commit bumps nothing");
+    }
+
+    #[test]
+    fn theme_commit_replace_advances_counters_from_prior_values() {
+        // Q#TH6 / acceptance 10: consecutive wholesale replacements
+        // must each advance the counters — replacing the FIELD, not
+        // the Theme value, or two `set`s share an epoch. Replace also
+        // leaves default_style alone (the historical `set` contract).
+        let theme = seeded_theme();
+        theme.lock().expect("lock").default_style = Style {
+            reverse: true,
+            ..Style::default()
+        };
+        for expected in [(4, 6), (5, 7)] {
+            let entries: Vec<mlua::Result<(String, Style)>> =
+                vec![Ok(("type".to_owned(), Style::default()))];
+            commit_theme_entries(&theme, ThemeCommit::Replace, entries.into_iter())
+                .expect("commit");
+            let th = theme.lock().expect("lock");
+            assert_eq!((th.syntax_epoch, th.face_epoch), expected);
+            assert!(!th.by_capture.contains_key("keyword"), "replaced wholesale");
+            assert!(th.default_style.reverse, "default_style preserved");
+        }
+    }
+
+    #[test]
+    fn theme_commit_merge_classifies_face_and_syntax_keys() {
+        // Q#TH6: merge bumps syntax_epoch iff any non-face key
+        // committed and face_epoch iff any face key did — bare `ui`
+        // classifies as a face (Q#TH2, round 2 finding 3).
+        let theme = seeded_theme();
+        // One lock per observation: two `lock()` calls inside one
+        // tuple expression self-deadlock (the first guard outlives
+        // the second call).
+        let epochs = |theme: &crate::highlight::ThemeHandle| {
+            let th = theme.lock().expect("lock");
+            (th.syntax_epoch, th.face_epoch)
+        };
+
+        let face_only: Vec<mlua::Result<(String, Style)>> =
+            vec![Ok(("ui.modeline".to_owned(), Style::default()))];
+        commit_theme_entries(&theme, ThemeCommit::Merge, face_only.into_iter()).expect("commit");
+        assert_eq!(
+            epochs(&theme),
+            (3, 6),
+            "face-only merge bumps face_epoch only"
+        );
+
+        let bare_ui: Vec<mlua::Result<(String, Style)>> =
+            vec![Ok(("ui".to_owned(), Style::default()))];
+        commit_theme_entries(&theme, ThemeCommit::Merge, bare_ui.into_iter()).expect("commit");
+        assert_eq!(epochs(&theme), (3, 7), "bare ui is a face key");
+
+        let mixed: Vec<mlua::Result<(String, Style)>> = vec![
+            Ok(("comment".to_owned(), Style::default())),
+            Ok(("ui.gutter".to_owned(), Style::default())),
+        ];
+        commit_theme_entries(&theme, ThemeCommit::Merge, mixed.into_iter()).expect("commit");
+        assert_eq!(epochs(&theme), (4, 8), "mixed merge bumps both");
+
+        let empty: Vec<mlua::Result<(String, Style)>> = Vec::new();
+        commit_theme_entries(&theme, ThemeCommit::Merge, empty.into_iter()).expect("commit");
+        assert_eq!(
+            epochs(&theme),
+            (4, 8),
+            "an empty merge commits nothing and bumps nothing"
+        );
     }
 
     #[test]

@@ -974,6 +974,40 @@ pub enum InstanceMessage {
         /// Total candidate count (the window is a slice of this).
         total: u32,
     },
+    /// Themes arc (Q#TH7, protocol v16). The daemon-resolved UI faces.
+    /// The theme is one global instance, so this is bufferless (the
+    /// [`Self::MinibufferPrompt`] shape). Complete replacement each
+    /// send: a face absent from `faces` is unset, and the frontend
+    /// uses its own default for that surface. Every attachment
+    /// receives exactly one authoritative table — the empty table
+    /// included — with its first emission after viewport declaration;
+    /// cached-compare suppressed thereafter. Daemon-gated `>= 16`.
+    ///
+    /// Appended as the FINAL variant deliberately: postcard
+    /// discriminants are ordinal, so inserting earlier would shift
+    /// every later variant's tag and corrupt v15 peers on ungated
+    /// channels. The `CompletionPopup` byte pin in `src/protocol.rs`
+    /// guards this placement.
+    ThemeFacts {
+        /// Every stage-1 face that resolves to a style (the Q#TH4
+        /// dotted-prefix walk, resolved daemon-side — frontends do
+        /// exact-name lookup, no walk), full names, sorted by name
+        /// for deterministic comparison.
+        faces: Vec<ThemeFace>,
+    },
+}
+
+/// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
+/// face name (e.g. `"ui.modeline"`) and the style the daemon resolved
+/// for it. The face's component *mask* (which components a frontend
+/// may read) is a stage-1 contract documented per face in the themes
+/// framing; out-of-mask components are never read by either frontend.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ThemeFace {
+    /// Full face name (`ui` or `ui.`-prefixed).
+    pub name: String,
+    /// The daemon-resolved style for this face.
+    pub style: crate::cell::Style,
 }
 
 /// Line-number gutter mode for a window (UX gutter arc). Shared across the
@@ -1330,7 +1364,16 @@ pub enum ResourceBody {
 /// (encoding change to that variant; its gate moved `>= 8` → `>= 15`,
 /// so a v14 peer's status band goes dark rather than mis-decoding —
 /// the v10 `SearchPrompt` / v14 `LineNumbers` shape).
-pub const PROTOCOL_VERSION: u32 = 15;
+///
+/// Theme faces (Q#TH7): bumped 15 → 16 for
+/// [`InstanceMessage::ThemeFacts`] — a new additive variant carrying
+/// the daemon-resolved UI face table. Daemon-gated `< 16`; a v15 peer
+/// negotiates v15 and simply receives no `ThemeFacts` (its chrome
+/// stays on the frontend defaults), like every prior additive bump.
+/// The variant is appended after `CompletionPopup` — the final v15
+/// variant — because postcard discriminants are ordinal and an
+/// earlier insertion would shift existing tags under v15 peers.
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1390,7 +1433,10 @@ pub const PROTOCOL_VERSION: u32 = 15;
 ///
 /// Q#C5: extended to `[6, ..., 15]`. `InstanceMessage::CompletionPopup`
 /// is additive and daemon-gated per session.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+///
+/// Q#TH7: extended to `[6, ..., 16]`. `InstanceMessage::ThemeFacts`
+/// is additive and daemon-gated per session, so the ladder resumes.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

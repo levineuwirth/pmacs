@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_fifteen_for_completion_popup() {
+    fn protocol_version_is_sixteen_for_theme_facts() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1706,8 +1706,10 @@ mod tests {
         // gutter modes bumped 13→14 (`LineNumbers` swapped `enabled: bool`
         // for a `LineNumberMode` enum — encoding change, still daemon-gated).
         // Arc 1a Q#C5 bumped 14→15 (`InstanceMessage::CompletionPopup`,
-        // additive + daemon-gated).
-        assert_eq!(PROTOCOL_VERSION, 15);
+        // additive + daemon-gated). Themes Q#TH7 bumped 15→16
+        // (`InstanceMessage::ThemeFacts`, additive + daemon-gated,
+        // appended as the final variant — see the placement pin).
+        assert_eq!(PROTOCOL_VERSION, 16);
     }
 
     #[test]
@@ -1781,19 +1783,82 @@ mod tests {
         // (`TripleDown`), v8 (`StatusFacts`), v9 + v10 (`SearchPrompt` +
         // regex/invalid), v11 (the context menu), v12 (the GUI
         // minibuffer), v13 (`LineNumbers`), v14 (`LineNumberMode`), v15
-        // (`CompletionPopup`) all interoperate, so v6 through v15 talk.
-        for accepted in 6..=15 {
+        // (`CompletionPopup`), v16 (`ThemeFacts`) all interoperate, so
+        // v6 through v16 talk.
+        for accepted in 6..=16 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 16, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 17, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v15 binary"
+                "v{rejected} must be rejected by a v16 binary"
             );
         }
+    }
+
+    #[test]
+    fn theme_facts_round_trips_through_postcard() {
+        // Themes Q#TH7 (v16): the daemon-resolved UI face table. Pin
+        // the empty (authoritative-unthemed) and populated shapes.
+        for msg in [
+            InstanceMessage::ThemeFacts { faces: Vec::new() },
+            InstanceMessage::ThemeFacts {
+                faces: vec![
+                    pmacs_protocol::ThemeFace {
+                        name: "ui.gutter".into(),
+                        style: crate::cell::Style {
+                            fg: crate::cell::Color::Indexed(245),
+                            ..crate::cell::Style::default()
+                        },
+                    },
+                    pmacs_protocol::ThemeFace {
+                        name: "ui.modeline".into(),
+                        style: crate::cell::Style {
+                            fg: crate::cell::Color::Rgb(200, 200, 210),
+                            bg: crate::cell::Color::Rgb(30, 30, 46),
+                            ..crate::cell::Style::default()
+                        },
+                    },
+                ],
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn completion_popup_encoding_is_unchanged_by_the_v16_build() {
+        // Themes Q#TH7 placement pin: postcard discriminants are
+        // ordinal, so a variant inserted anywhere before the end of
+        // `InstanceMessage` would shift every later variant's tag and
+        // silently corrupt v15 peers on channels that are NOT
+        // version-gated. `ThemeFacts` must therefore be APPENDED after
+        // `CompletionPopup` — the final v15 variant, whose ordinal
+        // moves if anything is inserted before any v15 variant. These
+        // are the exact bytes a v15 binary produced for this value
+        // (discriminant 22 as a postcard varint, then the fields);
+        // the new variant's own round-trip cannot detect a shift.
+        let msg = InstanceMessage::CompletionPopup {
+            buffer_id: pmacs_protocol::BufferId::from_raw(3),
+            anchor: Some(5),
+            prefix_len: 2,
+            rows: Vec::new(),
+            selected: None,
+            total: 9,
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        assert_eq!(
+            bytes,
+            [22, 3, 1, 5, 2, 0, 0, 9],
+            "CompletionPopup's v15 wire bytes changed — a variant was \
+             inserted before it; append new InstanceMessage variants \
+             at the end"
+        );
     }
 
     #[test]

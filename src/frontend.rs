@@ -413,6 +413,11 @@ impl Frontend {
             // completion dropdown; the TUI paints the popup via its
             // CompletionView cell overlay, so it drops this silently.
             | InstanceMessage::CompletionPopup { .. }
+            // Themes Q#TH7 — ThemeFacts is the semantic-frontend face
+            // table; the cell-grid TUI receives its chrome pre-painted
+            // (the daemon resolves faces at paint time), so it drops
+            // this silently like the other semantic families.
+            | InstanceMessage::ThemeFacts { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path
@@ -758,6 +763,32 @@ mod tests {
             style: Style::default(),
             attachment: None,
         }
+    }
+
+    #[test]
+    fn theme_facts_drops_silently_on_the_grid_frontend() {
+        // Themes Q#TH7 / acceptance 18: the cell-grid TUI receives its
+        // chrome pre-painted (the daemon resolves faces at paint
+        // time), so a `ThemeFacts` reaching this client — which never
+        // negotiates it — must fall into the semantic-family silent
+        // drop, not error. Constructed directly (no terminal
+        // takeover); the drop arm writes nothing.
+        let mut fe = Frontend {
+            out: BufWriter::new(io::stdout()),
+            size: CellSize::new(24, 80),
+            raw_mode: false,
+            alt_screen: false,
+            bracketed_paste: false,
+            mouse: false,
+            keyboard_enhancement: false,
+        };
+        fe.apply_message(&InstanceMessage::ThemeFacts {
+            faces: vec![pmacs_protocol::ThemeFace {
+                name: "ui.modeline".into(),
+                style: Style::default(),
+            }],
+        })
+        .expect("the grid frontend must drop ThemeFacts silently");
     }
 
     #[test]

@@ -116,6 +116,26 @@ layout-local frontend consumes). Peer cursors reuse the existing
 is: one capability bit, ~five instance→frontend interpretation
 variants, and one frontend→instance `Viewport` variant.
 
+**`BufferSnapshot` resets buffer-scoped interpretation state.** A
+frontend receiving a snapshot drops everything it holds for the
+named buffer — spans, decorations, adornments, minimap summary,
+completion popup, search and menu prompts (which also gate the
+frontend's key/pointer interception), and status facts — and
+rebuilds from the frames that follow; the instance mirrors this by
+invalidating its per-buffer emission baselines whenever it writes a
+snapshot, so the frontend's post-snapshot viewport declaration
+receives authoritative re-sends even when nothing changed
+daemon-side (the unchanged-generation A → B → A revisit). Bufferless
+facts (`ThemeFacts`, the minibuffer prompt) and per-frontend state
+(the gutter mode) survive snapshots on both sides, and the
+instance's stale-store diagnostic-count freeze is store knowledge,
+not session state — the re-sent `StatusFacts` after a snapshot
+carries the frozen counts, never zeros, including for a session
+whose first frame lands during staleness (a late joiner attaching
+mid-edit). The store maintains those per-URI severity totals with
+the retained vector, so frame-time producers read them in O(1)
+rather than rescanning diagnostics for every attached session.
+
 ## Capability and version mechanics
 
 Identical pattern to `crdt_replica`:
@@ -204,6 +224,26 @@ ResourceOffer {
     handle: u64,
     mime: String,
     body: ResourceBody, // Inline(Vec<u8>) | Uri(String)
+},
+
+/// Themes arc Q#TH7 (protocol v16): the daemon-resolved UI face
+/// table. Bufferless — the theme is one global instance. Complete
+/// replacement each send: a face absent from `faces` is unset and
+/// the frontend uses its own default for that surface. Every
+/// attachment receives exactly one authoritative table (the empty
+/// table included) with its first emission after viewport
+/// declaration; cached-compare suppressed thereafter, so an
+/// unthemed session pays one small message and nothing more.
+/// Resolution (the `ui.*` dotted-prefix inheritance walk) happens
+/// daemon-side over the stage-1 face inventory — frontends do
+/// exact-name lookup only, and apply each face within its
+/// stage-1 component mask (docs/theme-faces-framing.md Q#TH3/Q#TH5:
+/// a set face owns its surface; `Default` components mean the
+/// frontend's plain rendering; out-of-mask components are never
+/// read). Daemon-gated `>= 16`; appended as the FINAL variant —
+/// postcard discriminants are ordinal.
+ThemeFacts {
+    faces: Vec<ThemeFace>, // { name: String, style: Style }, sorted by name
 },
 ```
 

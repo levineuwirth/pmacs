@@ -160,14 +160,27 @@ pub struct SemanticRenderState {
     /// buffer at the same generation re-uses what the frontend
     /// already has and emits nothing. First emission happens on the
     /// first frame for a buffer; further emissions only after edits.
-    /// `(crdt_generation, diag_epoch)` the last emitted summary was
-    /// computed against. Diagnostics arrive without a generation
-    /// bump, so the epoch half catches republishes (minimap marks,
-    /// T M4.6 GPU parity).
-    last_summary: HashMap<BufferId, (u64, u64)>,
+    /// `(crdt_generation, diag_epoch, syntax_epoch, face_epoch)` the
+    /// last summary was computed against, plus that computed payload.
+    /// Diagnostics arrive without a generation bump, so the diag
+    /// epoch catches republishes (minimap marks, T M4.6 GPU parity);
+    /// the theme epochs (Q#TH6) catch mid-session recolors —
+    /// `face_epoch` belongs in the key because `ui.diag.*` feeds the
+    /// marks. The payload copy backs the Q#TH6 payload-equality
+    /// suppression: a face edit that leaves the summary unchanged
+    /// (e.g. `ui.modeline`) recomputes once per mutation and emits
+    /// nothing. The key advances on COMPUTATION, not emission — a
+    /// suppressed send still inserts, or the whole-file recompute
+    /// repeats every tick.
+    last_summary: HashMap<BufferId, SummaryCache>,
     /// `(name, modified, diag_errors, diag_warnings, message)` last
     /// emitted as `StatusFacts` (Q#S1; `message` since v15) —
-    /// cached-compare suppression.
+    /// cached-compare suppression. A peer emission baseline ONLY:
+    /// the diagnostic-count freeze deliberately holds no session
+    /// state (rounds 3–4) — it is sourced from the diag store's
+    /// retained vector, so it needs nothing here to survive the
+    /// `on_buffer_snapshot_sent` reset and it holds for sessions
+    /// with no history (a late joiner attaching mid-edit).
     last_status: HashMap<BufferId, (String, bool, u32, u32, Option<String>)>,
     /// Last-emitted line-number gutter mode (UX gutter arc, protocol v14) —
     /// cached-compare suppression. Seeded to `Some(Off)` (the frontend's
@@ -193,11 +206,36 @@ pub struct SemanticRenderState {
     /// viewport* (which the GPU frontend sets to the entire buffer)
     /// and clones the theme — too expensive to repeat on every tick.
     /// The styling depends only on the parse bundle, the CRDT
-    /// generation, and the viewport — never the cursor — so a gate
-    /// built from those lets cursor-only ticks skip the query entirely.
-    /// Only the grammar (tree-sitter) path is gated; the LSP-token path
-    /// has no comparably cheap handle and recomputes as before.
+    /// generation, the viewport, and the theme's syntax epoch
+    /// (Q#TH6) — never the cursor — so a gate built from those lets
+    /// cursor-only ticks skip the query entirely while a mid-session
+    /// `pmacs.theme.set` still re-ships recolored spans without an
+    /// edit. Only the grammar (tree-sitter) path is gated; the
+    /// LSP-token path has no comparably cheap handle and recomputes
+    /// as before.
     last_style_gate: HashMap<BufferId, StyleGate>,
+    /// The theme `face_epoch` the `ThemeFacts` producer last
+    /// INSPECTED (Q#TH7) — `Option`, not a bare zero, because an
+    /// unthemed daemon sits at `face_epoch == 0` and a `0 == 0`
+    /// short-circuit would starve the first authoritative send.
+    /// Advances on computation, not emission: an identical rebuild
+    /// records the epoch it inspected even though nothing ships.
+    last_face_epoch: Option<u64>,
+    /// The face table the frontend believes (Q#TH7), seeded `None` so
+    /// every attachment receives exactly one authoritative table —
+    /// the empty table included — with its first emission after
+    /// viewport declaration. A frontend retaining face state across
+    /// attachments is therefore corrected even by an unthemed daemon.
+    last_theme_faces: Option<Vec<crate::protocol::ThemeFace>>,
+    /// Whether the peer negotiated protocol >= 16 (PR #120 round 1
+    /// finding 3). Faces reach a semantic frontend through TWO
+    /// channels: `ThemeFacts` (daemon write-loop gated) and the
+    /// `ui.diag.*` colors folded into `FileStyleSummary` — an OLDER
+    /// channel the version gate does not filter. A v15 peer must not
+    /// receive face-derived minimap marks while its squiggles, signs,
+    /// and counters stay unthemed, so this producer resolves faces
+    /// only when the peer can apply the whole face table.
+    peer_knows_theme_facts: bool,
     /// Cached byte↔line table for the diagnostics projection, keyed
     /// by buffer revision. Building it costs an O(buffer) rope copy
     /// plus a full scan; before this cache, that ran on *every tick*
@@ -215,6 +253,43 @@ struct DiagLineCache {
     source_len: u64,
 }
 
+/// One [`SemanticRenderState::last_summary`] entry: the inputs the
+/// summary was computed against and the computed per-line payload.
+struct SummaryCache {
+    /// `(crdt_generation, diag_epoch, syntax_epoch, face_epoch)`.
+    key: (u64, u64, u64, u64),
+    /// The computed summary — compared before emitting (Q#TH6
+    /// payload-equality suppression).
+    lines: Vec<Style>,
+}
+
+/// The stage-1 UI face inventory (themes arc Q#TH3): the names the
+/// `ThemeFacts` producer resolves through [`crate::highlight::Theme::face`]
+/// and ships. Resolution is daemon-side — frontends do exact-name
+/// lookup on the shipped table, no walk (Q#TH7). Kept sorted; the
+/// wire table's deterministic ordering rides on it.
+const UI_FACES: &[&str] = &[
+    "ui.diag.error",
+    "ui.diag.hint",
+    "ui.diag.info",
+    "ui.diag.warning",
+    "ui.gutter",
+    "ui.minibuffer",
+    "ui.minibuffer.candidate",
+    "ui.modeline",
+    "ui.search.match",
+    "ui.search.match.active",
+    "ui.selection",
+    "ui.statusline",
+];
+
+/// Read both theme mutation counters under one lock (Q#TH6).
+fn theme_epochs(state: &EditorState) -> (u64, u64) {
+    let theme = state.syntax_registry.theme();
+    let th = theme.lock().expect("theme mutex poisoned");
+    (th.syntax_epoch, th.face_epoch)
+}
+
 /// Recompute gate for [`scoped_style_spans`] on a grammar-backed
 /// buffer. Holds the current parse bundle `Arc` so its address stays
 /// stable while cached — comparing by `Arc::ptr_eq` then can't be
@@ -230,6 +305,11 @@ struct StyleGate {
     generation: u64,
     /// Declared viewport.
     visible: ByteRange,
+    /// The theme's syntax mutation counter (Q#TH6): spans are a pure
+    /// function of the theme too, and before this half the gate a
+    /// mid-session `pmacs.theme.set` shipped nothing until the next
+    /// buffer edit — the GPU kept stale colors.
+    syntax_epoch: u64,
 }
 
 impl StyleGate {
@@ -237,6 +317,7 @@ impl StyleGate {
     fn matches(&self, other: &Self) -> bool {
         self.generation == other.generation
             && self.visible == other.visible
+            && self.syntax_epoch == other.syntax_epoch
             && match (&self.bundle, &other.bundle) {
                 (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -246,8 +327,22 @@ impl StyleGate {
 }
 
 impl SemanticRenderState {
+    /// Fresh session state for a peer that negotiated
+    /// `negotiated_protocol_version` — the real daemon construction
+    /// path (PR #120 round 1 finding 3): a `< 16` peer gets no
+    /// `ThemeFacts` produced at all and, crucially, no face-derived
+    /// colors folded into its `FileStyleSummary` marks.
+    #[must_use]
+    pub fn for_peer(frontend_id: FrontendId, negotiated_protocol_version: u32) -> Self {
+        let mut s = Self::new(frontend_id);
+        s.peer_knows_theme_facts = negotiated_protocol_version >= 16;
+        s
+    }
+
     /// Fresh session state for frontend `frontend_id`: no viewport
-    /// declared, nothing sent.
+    /// declared, nothing sent. Assumes a current-build peer (>= 16);
+    /// daemon sessions with a real negotiated version use
+    /// [`Self::for_peer`].
     #[must_use]
     pub fn new(frontend_id: FrontendId) -> Self {
         Self {
@@ -268,6 +363,13 @@ impl SemanticRenderState {
             // toggle-on (or later toggle-off) ships a message.
             last_line_numbers: Some(crate::window::LineNumberMode::Off),
             last_style_gate: HashMap::new(),
+            // Q#TH7: both seeded None — the first frame after viewport
+            // declaration always ships an authoritative face table
+            // (empty included), and the epoch gate cannot short-circuit
+            // an epoch-0 daemon before that send.
+            last_face_epoch: None,
+            last_theme_faces: None,
+            peer_knows_theme_facts: true,
             diag_line_cache: HashMap::new(),
         }
     }
@@ -282,6 +384,48 @@ impl SemanticRenderState {
             visible,
             frontend_generation: generation,
         });
+    }
+
+    /// Snapshot/baseline reset contract (PR #120 round 2 finding 1).
+    ///
+    /// A `BufferSnapshot` resets the receiving frontend's
+    /// buffer-scoped render state wholesale — spans, decorations,
+    /// adornments, minimap summary, completion popup (see the GPU's
+    /// `BufferSnapshot` arm) — so every buffer-scoped emission
+    /// baseline this producer holds for that buffer must die with the
+    /// send. Otherwise an unchanged-key revisit (the A → B → A round
+    /// trip at one CRDT generation) suppresses every re-send and the
+    /// frontend never regains the state until an edit, diagnostic
+    /// republish, or theme mutation happens to move the key.
+    ///
+    /// Called by the daemon wherever it writes a `BufferSnapshot` to
+    /// this session's stream. Resetting when the write later fails is
+    /// harmless — the failure mode is one redundant re-send, never
+    /// staleness.
+    ///
+    /// Deliberately NOT reset: `last_face_epoch` / `last_theme_faces`
+    /// (`ThemeFacts` is bufferless — the frontend keeps its face
+    /// table across snapshots), `last_minibuffer` (one global core
+    /// instance, not buffer-scoped), `last_line_numbers`
+    /// (per-frontend gutter mode, kept by the frontend across the
+    /// switch), and `diag_line_cache` (a revision-keyed compute
+    /// cache, not a peer-state baseline). The diagnostic-count
+    /// freeze survives by construction (rounds 3–4): it is sourced
+    /// from the diag store's retained vector, never from session
+    /// state, so this reset cannot zero mid-edit counts. Baselines
+    /// for OTHER buffers also survive — the snapshot names one
+    /// buffer, and any buffer the frontend navigates to receives its
+    /// own snapshot first.
+    pub fn on_buffer_snapshot_sent(&mut self, buffer_id: BufferId) {
+        self.last_sent.remove(&buffer_id);
+        self.last_style_gate.remove(&buffer_id);
+        self.last_decorations.remove(&buffer_id);
+        self.last_adornments.remove(&buffer_id);
+        self.last_summary.remove(&buffer_id);
+        self.last_status.remove(&buffer_id);
+        self.last_search_prompt.remove(&buffer_id);
+        self.last_menu_prompt.remove(&buffer_id);
+        self.last_completion_popup.remove(&buffer_id);
     }
 
     /// Project one frame.
@@ -475,6 +619,8 @@ impl SemanticRenderState {
         out.extend(self.minibuffer_prompt_msg(state, vp.buffer_id));
         // --- CompletionPopup (Arc 1a Q#C5, protocol v15) ---
         out.extend(self.completion_popup_msg(state, vp.buffer_id));
+        // --- ThemeFacts (UI faces; themes arc Q#TH7, protocol v16) ---
+        out.extend(self.theme_facts_msg(state));
         out
     }
 
@@ -740,9 +886,14 @@ impl SemanticRenderState {
     /// nothing changed. Carries the facts a semantic frontend cannot
     /// derive locally: buffer name, modified flag, whole-file
     /// diagnostic counts (errors / warnings). Counts freeze at their
-    /// last value while the diag store is stale — mid-edit positions
-    /// are wrong but *counts* merely lag, and flickering to zero on
-    /// every keystroke would be worse. The daemon's write loop keeps
+    /// last published value while the diag store is stale — mid-edit
+    /// positions are wrong but *counts* merely lag, and flickering
+    /// to zero on every keystroke would be worse. The freeze IS the
+    /// store's retained state (rounds 3–5): `mark_stale` keeps the
+    /// last published diagnostics and their cached severity totals,
+    /// so reading the totals while stale yields the frozen value in
+    /// O(1) with no session state to lose — not to a snapshot reset,
+    /// and not by attaching mid-edit. The daemon's write loop keeps
     /// the variant off wires negotiated `< 8`.
     fn status_facts_msg(
         &mut self,
@@ -761,32 +912,32 @@ impl SemanticRenderState {
             let buf = reg.get(buffer_id).ok()?;
             (buf.name().to_owned(), buf.is_modified(), message)
         };
-        let counts = {
+        let (diag_errors, diag_warnings) = {
             let core = state.core.borrow();
-            buffer_file_uri(&core, buffer_id).and_then(|uri| {
+            buffer_file_uri(&core, buffer_id).map_or((0, 0), |uri| {
                 let store = state.lsp_manager.borrow().diag_store();
                 let guard = store.lock().expect("diag store mutex poisoned");
-                if guard.is_stale(&uri) {
-                    None // keep the cached counts
-                } else {
-                    let mut errors = 0u32;
-                    let mut warnings = 0u32;
-                    for d in guard.for_uri(&uri) {
-                        match d.severity {
-                            crate::diag::DiagnosticSeverity::Error => errors += 1,
-                            crate::diag::DiagnosticSeverity::Warning => warnings += 1,
-                            _ => {}
-                        }
-                    }
-                    Some((errors, warnings))
-                }
+                // Read even while the store is STALE (round 4):
+                // `mark_stale` keeps the last published diagnostics
+                // (T M11.8) — positions are invalid mid-edit, but
+                // counts merely lag, so the retained totals ARE the
+                // frozen value. Sourcing the freeze from the store
+                // rather than any per-session cache means a session
+                // first rendering during staleness — a late joiner,
+                // or a buffer first visited mid-edit — reports the
+                // preserved counts instead of zeros, and the snapshot
+                // reset has nothing count-related to preserve.
+                // `DiagnosticStore::set` computes this tuple once
+                // (round 5). StatusFacts runs at frame cadence for
+                // every semantic session, so rescanning the retained
+                // vector here would make stale intervals
+                // O(frames * diagnostics).
+                let (errors, warnings, _, _) = guard.severity_counts_for(&uri);
+                (errors, warnings)
             })
         };
-        let cached = self.last_status.get(&buffer_id);
-        let (diag_errors, diag_warnings) =
-            counts.unwrap_or_else(|| cached.map_or((0, 0), |c| (c.2, c.3)));
         let facts = (name, modified, diag_errors, diag_warnings, message);
-        if cached == Some(&facts) {
+        if self.last_status.get(&buffer_id) == Some(&facts) {
             return None;
         }
         let msg = InstanceMessage::StatusFacts {
@@ -910,18 +1061,96 @@ impl SemanticRenderState {
         // publish without a generation bump — key the cache on the
         // diag store's per-URI epoch as well, so a republish
         // refreshes the marks and anything else stays suppressed.
+        // The theme epochs (Q#TH6) join the key so a mid-session
+        // recolor refreshes the strokes — face_epoch included, since
+        // `ui.diag.*` feeds the marks.
         let diag_epoch = diagnostics_epoch(state, buffer_id);
-        if self.last_summary.get(&buffer_id).copied() == Some((generation, diag_epoch)) {
+        let (syntax_epoch, face_epoch) = theme_epochs(state);
+        // A v15 peer's marks never resolve faces (finding 3), so a
+        // face mutation cannot change its summary either — zero the
+        // key component rather than recompute a whole-file pass per
+        // face edit just to payload-suppress it.
+        let face_key = if self.peer_knows_theme_facts {
+            face_epoch
+        } else {
+            0
+        };
+        let key = (generation, diag_epoch, syntax_epoch, face_key);
+        if self
+            .last_summary
+            .get(&buffer_id)
+            .is_some_and(|c| c.key == key)
+        {
             return None;
         }
-        let lines = scoped_file_summary(state, buffer_id);
-        self.last_summary
-            .insert(buffer_id, (generation, diag_epoch));
+        let lines = scoped_file_summary(state, buffer_id, self.peer_knows_theme_facts);
+        // Payload-equality suppression (Q#TH6): a face edit that
+        // leaves the summary unchanged (e.g. `ui.modeline`) emits
+        // nothing — but the key still advances, on computation rather
+        // than emission, or this whole-file pass would repeat every
+        // tick.
+        let unchanged = self
+            .last_summary
+            .get(&buffer_id)
+            .is_some_and(|c| c.lines == lines);
+        self.last_summary.insert(
+            buffer_id,
+            SummaryCache {
+                key,
+                lines: lines.clone(),
+            },
+        );
+        if unchanged {
+            return None;
+        }
         Some(InstanceMessage::FileStyleSummary {
             buffer_id,
             generation,
             lines,
         })
+    }
+
+    /// The `ThemeFacts` message for this frame, or `None` when the
+    /// face table is unchanged (themes arc Q#TH7, protocol v16).
+    /// Resolves the [`UI_FACES`] inventory through
+    /// [`crate::highlight::Theme::face`] under one lock — resolution
+    /// is daemon-side; frontends do exact-name lookup, no walk. The
+    /// `last_face_epoch` gate keeps unchanged ticks to one u64
+    /// compare; `last_theme_faces` (the frontend's believed table)
+    /// decides emission. Both advance on computation, and both seed
+    /// `None`, so every attachment ships exactly one authoritative
+    /// table — the empty table included — on its first frame.
+    fn theme_facts_msg(&mut self, state: &EditorState) -> Option<InstanceMessage> {
+        // PR #120 round 1 finding 3: never even produced for a peer
+        // below v16 (the daemon write-loop gate remains as the
+        // belt-and-braces filter).
+        if !self.peer_knows_theme_facts {
+            return None;
+        }
+        let theme = state.syntax_registry.theme();
+        let (faces, face_epoch) = {
+            let th = theme.lock().expect("theme mutex poisoned");
+            if self.last_face_epoch == Some(th.face_epoch) {
+                return None;
+            }
+            let faces: Vec<crate::protocol::ThemeFace> = UI_FACES
+                .iter()
+                .filter_map(|name| {
+                    th.face(name).map(|style| crate::protocol::ThemeFace {
+                        name: (*name).to_owned(),
+                        style,
+                    })
+                })
+                .collect();
+            (faces, th.face_epoch)
+        };
+        self.last_face_epoch = Some(face_epoch);
+        let unchanged = self.last_theme_faces.as_ref() == Some(&faces);
+        self.last_theme_faces = Some(faces.clone());
+        if unchanged {
+            return None;
+        }
+        Some(InstanceMessage::ThemeFacts { faces })
     }
 
     /// Project the [`Decoration`] set intersecting the declared
@@ -1481,6 +1710,7 @@ fn grammar_style_key(
         bundle: handle.current(),
         generation,
         visible: vp.visible,
+        syntax_epoch: theme_epochs(state).0,
     })
 }
 
@@ -1676,7 +1906,11 @@ fn lsp_scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<Sty
 /// `O(spans × lines)` in the worst case; the caller short-circuits on
 /// unchanged CRDT generation so this only runs on first sight of a
 /// buffer or after an edit, not per frame.
-fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
+fn scoped_file_summary(
+    state: &EditorState,
+    buffer_id: BufferId,
+    resolve_faces: bool,
+) -> Vec<Style> {
     let source = {
         let core = state.core.borrow();
         let registry = core.registry.clone();
@@ -1707,7 +1941,7 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
     if spans.is_empty() {
         // No styled runs — but diagnostic marks are independent of
         // syntax styling (a plain-text buffer can still have lints).
-        overlay_diagnostic_marks(state, buffer_id, &mut out);
+        overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
         return out;
     }
 
@@ -1740,7 +1974,7 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
             *line_dominant = winner.0;
         }
     }
-    overlay_diagnostic_marks(state, buffer_id, &mut out);
+    overlay_diagnostic_marks(state, buffer_id, &mut out, resolve_faces);
     out
 }
 
@@ -1752,7 +1986,12 @@ fn scoped_file_summary(state: &EditorState, buffer_id: BufferId) -> Vec<Style> {
 /// describe pre-edit text, same discipline as the decorations
 /// producer (the marks return on republish, which bumps the diag
 /// epoch and recomputes this summary).
-fn overlay_diagnostic_marks(state: &EditorState, buffer_id: BufferId, lines: &mut [Style]) {
+fn overlay_diagnostic_marks(
+    state: &EditorState,
+    buffer_id: BufferId,
+    lines: &mut [Style],
+    resolve_faces: bool,
+) {
     let uri = {
         let core = state.core.borrow();
         let Some(uri) = buffer_file_uri(&core, buffer_id) else {
@@ -1776,9 +2015,22 @@ fn overlay_diagnostic_marks(state: &EditorState, buffer_id: BufferId, lines: &mu
             *slot = Some(slot.map_or(d.severity, |s| s.min(d.severity)));
         }
     }
+    // Themes Q#TH5: the mark color is the RESOLVED severity color —
+    // `ui.diag.*` faces reach the minimap through this summary. The
+    // diag `Default`-fg policy guarantees a diagnosed line never
+    // writes `Default` here, which the GPU reads as "no mark".
+    // `resolve_faces` is false for a peer below v16 (PR #120 round 1
+    // finding 3): this summary is an ungated pre-v16 channel, and a
+    // v15 frontend must not get face-derived marks on one surface
+    // while every other severity surface stays unthemed.
+    let theme = resolve_faces.then(|| {
+        let handle = state.syntax_registry.theme();
+        let t = handle.lock().expect("theme mutex poisoned");
+        t.clone()
+    });
     for (line, severity) in lines.iter_mut().zip(best) {
         if let Some(s) = severity {
-            line.underline_color = s.underline_color();
+            line.underline_color = crate::diag::severity_color(theme.as_ref(), s);
         }
     }
 }
@@ -1877,10 +2129,256 @@ mod tests {
         );
     }
 
+    /// Pull the `ThemeFacts` table out of a frame, if any.
+    fn theme_facts_of(msgs: &[InstanceMessage]) -> Option<Vec<crate::protocol::ThemeFace>> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::ThemeFacts { faces } => Some(faces.clone()),
+            _ => None,
+        })
+    }
+
+    /// Simulate a committed face mutation: what `pmacs.theme.merge`
+    /// does after its transactional parse (insert + face-epoch bump).
+    fn merge_face(state: &EditorState, name: &str, style: Style) {
+        let theme = state.syntax_registry.theme();
+        let mut th = theme.lock().expect("theme mutex poisoned");
+        th.insert(name, style);
+        th.face_epoch += 1;
+    }
+
+    #[test]
+    fn theme_facts_authoritative_empty_then_silent_then_face_change_emits() {
+        // Q#TH7: the first frame after viewport declaration ships the
+        // authoritative table — EMPTY for an unthemed daemon, which
+        // the Option epoch gate must not short-circuit at 0 == 0 —
+        // then unchanged ticks say nothing; a face commit re-emits
+        // the resolved table.
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+
+        let first = s.render_frame(&state);
+        assert_eq!(
+            theme_facts_of(&first),
+            Some(Vec::new()),
+            "an unthemed attachment still receives one authoritative empty table"
+        );
+        assert_eq!(
+            theme_facts_of(&s.render_frame(&state)),
+            None,
+            "unchanged ticks emit nothing"
+        );
+
+        merge_face(
+            &state,
+            "ui.gutter",
+            Style {
+                fg: crate::cell::Color::Indexed(99),
+                ..Style::default()
+            },
+        );
+        let facts = theme_facts_of(&s.render_frame(&state)).expect("face change emits");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].name, "ui.gutter");
+        assert_eq!(facts[0].style.fg, crate::cell::Color::Indexed(99));
+        assert_eq!(
+            theme_facts_of(&s.render_frame(&state)),
+            None,
+            "and suppresses again once shipped"
+        );
+    }
+
+    #[test]
+    fn theme_facts_resolution_is_daemon_side() {
+        // Q#TH7 / acceptance 15: with only `ui.diag` set, the shipped
+        // table carries the four concrete `ui.diag.*` children — the
+        // walk happens here, never in a frontend.
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state);
+
+        merge_face(
+            &state,
+            "ui.diag",
+            Style {
+                fg: crate::cell::Color::Indexed(93),
+                ..Style::default()
+            },
+        );
+        let facts = theme_facts_of(&s.render_frame(&state)).expect("emits");
+        let names: Vec<&str> = facts.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "ui.diag.error",
+                "ui.diag.hint",
+                "ui.diag.info",
+                "ui.diag.warning"
+            ],
+            "only the concrete stage-1 children ship, sorted"
+        );
+        assert!(
+            facts
+                .iter()
+                .all(|f| f.style.fg == crate::cell::Color::Indexed(93)),
+            "each child resolved through the parent"
+        );
+    }
+
+    #[test]
+    fn theme_facts_identical_rebuild_advances_epoch_without_emitting() {
+        // Q#TH7 / acceptance 14: an epoch bump with an unchanged
+        // table (an identical re-merge) emits nothing but still
+        // records the inspected epoch — the cache advances on
+        // computation, or every subsequent tick would rebuild.
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state);
+
+        let bumped = {
+            let theme = state.syntax_registry.theme();
+            let mut th = theme.lock().expect("lock");
+            th.face_epoch += 1; // identical re-merge: no table change
+            th.face_epoch
+        };
+        assert_eq!(
+            theme_facts_of(&s.render_frame(&state)),
+            None,
+            "identical rebuild is suppressed"
+        );
+        assert_eq!(
+            s.last_face_epoch,
+            Some(bumped),
+            "the inspected epoch advanced despite the suppressed send"
+        );
+    }
+
+    #[test]
+    fn summary_cache_key_advances_on_suppressed_emission() {
+        // Q#TH6 / acceptance 14: a face mutation that leaves the
+        // summary unchanged (ui.modeline touches no minimap stroke)
+        // recomputes once, emits nothing, and STILL advances the
+        // cache key — otherwise the whole-file pass repeats per tick.
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let first = s.render_frame(&state);
+        assert!(
+            first
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::FileStyleSummary { .. })),
+            "first frame ships the summary"
+        );
+
+        merge_face(&state, "ui.modeline", Style::default());
+        let (_, _, _, face_epoch) = {
+            let theme = state.syntax_registry.theme();
+            let th = theme.lock().expect("lock");
+            (0, 0, th.syntax_epoch, th.face_epoch)
+        };
+        let next = s.render_frame(&state);
+        assert!(
+            !next
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::FileStyleSummary { .. })),
+            "an unchanged summary is suppressed"
+        );
+        assert_eq!(
+            s.last_summary
+                .get(&buffer_id)
+                .expect("cache entry exists")
+                .key
+                .3,
+            face_epoch,
+            "the cache key advanced despite the suppressed send"
+        );
+    }
+
+    #[test]
+    fn snapshot_reset_drops_one_buffers_baselines_and_keeps_the_rest() {
+        // PR #120 round 2 finding 1 — the reset contract's scope: a
+        // `BufferSnapshot` for buffer A kills A's buffer-scoped
+        // emission baselines (here: summary and status, the two the
+        // A → B → A round trip visibly strands) while OTHER buffers'
+        // baselines and the bufferless ThemeFacts pair survive.
+        let state = empty_state();
+        let mut s = local();
+        let a = active_buffer(&state);
+        let b = {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.create("other")
+        };
+        s.set_viewport(a, ByteRange { start: 0, end: 64 }, 0);
+        let first = s.render_frame(&state);
+        assert!(
+            first
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::FileStyleSummary { .. })),
+            "first frame ships A's summary"
+        );
+        s.set_viewport(b, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state);
+        assert!(s.last_summary.contains_key(&a));
+        assert!(s.last_summary.contains_key(&b));
+        assert!(s.last_status.contains_key(&a));
+        let facts_baseline = s.last_theme_faces.clone();
+        assert!(facts_baseline.is_some(), "first frame shipped ThemeFacts");
+
+        s.on_buffer_snapshot_sent(a);
+
+        assert!(
+            !s.last_summary.contains_key(&a) && !s.last_status.contains_key(&a),
+            "A's baselines die with A's snapshot"
+        );
+        assert!(
+            s.last_summary.contains_key(&b),
+            "B's baselines survive A's snapshot"
+        );
+        assert_eq!(
+            s.last_theme_faces, facts_baseline,
+            "ThemeFacts is bufferless — the face table survives snapshots"
+        );
+
+        // And the behavioral consequence: revisiting A at the SAME
+        // generation re-ships the summary the frontend just dropped.
+        s.set_viewport(a, ByteRange { start: 0, end: 64 }, 0);
+        let back = s.render_frame(&state);
+        assert!(
+            back.iter()
+                .any(|m| matches!(m, InstanceMessage::FileStyleSummary { .. })),
+            "the unchanged-generation revisit re-ships A's summary"
+        );
+    }
+
+    #[test]
+    fn style_gate_differs_when_syntax_epoch_bumps() {
+        // Q#TH6: the gate is a pure function of the theme too — a
+        // syntax-epoch bump must force the span recompute (the
+        // pre-existing mid-session staleness bug).
+        let g1 = StyleGate {
+            bundle: None,
+            generation: 1,
+            visible: ByteRange { start: 0, end: 10 },
+            syntax_epoch: 0,
+        };
+        let mut g2 = g1.clone();
+        assert!(g1.matches(&g2), "identical gates match");
+        g2.syntax_epoch = 1;
+        assert!(!g1.matches(&g2), "a theme mutation breaks the match");
+    }
+
     /// All `InstanceMessage` variants the semantic projection may
     /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`,
-    /// `FileStyleSummary`, `StatusFacts` (Q#S1), or `SearchPrompt`
-    /// (Q#SR5) — never `CellDelta`, grid `Cursor`, or the still-unwired
+    /// `FileStyleSummary`, `StatusFacts` (Q#S1), `SearchPrompt`
+    /// (Q#SR5), `LineNumbers`, or `ThemeFacts` (Q#TH7) — never
+    /// `CellDelta`, grid `Cursor`, or the still-unwired
     /// `BlockAdornments` / `FoldState` families.
     fn assert_semantic_only(msgs: &[InstanceMessage]) {
         for m in msgs {
@@ -1894,6 +2392,7 @@ mod tests {
                         | InstanceMessage::StatusFacts { .. }
                         | InstanceMessage::SearchPrompt { .. }
                         | InstanceMessage::LineNumbers { .. }
+                        | InstanceMessage::ThemeFacts { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
@@ -2063,12 +2562,14 @@ mod tests {
         // (the frontend clears its viewport), carrying empty segments.
         // FileStyleSummary also emits on the first frame for this buffer
         // (post-M11 minimap producer, generation-keyed), as does
-        // StatusFacts (Q#S1, cached-compare).
+        // StatusFacts (Q#S1, cached-compare) and the authoritative
+        // ThemeFacts table (Q#TH7 — empty for an unthemed daemon).
         let first = s.render_frame(&state);
         assert_eq!(
             first.len(),
-            4,
-            "first frame ships StyleSpans + Decorations + FileStyleSummary + StatusFacts"
+            5,
+            "first frame ships StyleSpans + Decorations + FileStyleSummary \
+             + StatusFacts + ThemeFacts"
         );
         assert_semantic_only(&first);
         let (style_full, _) = style_segments(&first).expect("StyleSpans present");

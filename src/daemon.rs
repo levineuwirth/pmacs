@@ -984,6 +984,7 @@ fn dispatcher_loop(
                         upgraded,
                         &session_registry,
                         &mut streams,
+                        &mut semantic_states,
                     );
                     // The broadcast just delivered this buffer to this
                     // frontend too; record it so the follow check below
@@ -1022,6 +1023,14 @@ fn dispatcher_loop(
                         && last_active_buffer_sent.get(fid) != Some(&active_now)
                     {
                         send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
+                        // PR #120 round 2 — the snapshot just wiped
+                        // this frontend's buffer-scoped render state;
+                        // the emission baselines must die with it or
+                        // an unchanged-generation revisit (A → B → A)
+                        // suppresses every re-send.
+                        if let Some(sem) = semantic_states.get_mut(fid) {
+                            sem.on_buffer_snapshot_sent(active_now);
+                        }
                         last_active_buffer_sent.insert(*fid, active_now);
                     }
                 }
@@ -1125,6 +1134,11 @@ fn dispatcher_loop(
                 let peer_knows_completion_popup = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 15);
+                // Themes Q#TH7 — ThemeFacts gated at v16; a v15 peer's
+                // chrome simply stays on its frontend defaults.
+                let peer_knows_theme_facts = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 16);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1157,6 +1171,10 @@ fn dispatcher_loop(
                     }
                     if !peer_knows_completion_popup
                         && matches!(msg, InstanceMessage::CompletionPopup { .. })
+                    {
+                        continue;
+                    }
+                    if !peer_knows_theme_facts && matches!(msg, InstanceMessage::ThemeFacts { .. })
                     {
                         continue;
                     }
@@ -1366,6 +1384,9 @@ fn handle_session_established(
     // fires: the semantic frontend holds the rope locally and the
     // semantic frame ships no text.
     let semantic_render = session_state.negotiated_capabilities.semantic_render;
+    // Captured before `register_session` consumes the state: the
+    // semantic producer needs the peer's version (finding 3 below).
+    let negotiated_protocol_version = session_state.negotiated_protocol_version;
     if crdt_replica {
         send_buffer_snapshots(editor, &mut write_stream);
     }
@@ -1377,7 +1398,14 @@ fn handle_session_established(
     if semantic_render {
         semantic_states.insert(
             frontend_id,
-            crate::semantic_render::SemanticRenderState::new(frontend_id),
+            // for_peer, not new (PR #120 round 1 finding 3): a v15
+            // peer's producer must not resolve faces into the
+            // FileStyleSummary marks — that channel predates the v16
+            // gate.
+            crate::semantic_render::SemanticRenderState::for_peer(
+                frontend_id,
+                negotiated_protocol_version,
+            ),
         );
     } else {
         let mut render_state = RenderState::new(initial_size);
@@ -1844,6 +1872,7 @@ fn broadcast_buffer_snapshot_to_replicas(
     buffer_id: crate::buffer::BufferId,
     session_registry: &SessionRegistry,
     streams: &mut HashMap<FrontendId, UnixStream>,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
 ) {
     let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
         return;
@@ -1861,6 +1890,12 @@ fn broadcast_buffer_snapshot_to_replicas(
         }
         if let Err(e) = write_message(stream, &msg) {
             eprintln!("pmacs: F29 send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
+        }
+        // PR #120 round 2 — same reset contract as the follow path:
+        // the snapshot wiped this replica's buffer-scoped render
+        // state, so its emission baselines for the buffer die too.
+        if let Some(sem) = semantic_states.get_mut(fid) {
+            sem.on_buffer_snapshot_sent(buffer_id);
         }
     }
 }

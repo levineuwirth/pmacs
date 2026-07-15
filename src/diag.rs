@@ -196,6 +196,10 @@ impl Diagnostic {
 #[derive(Default)]
 pub struct DiagnosticStore {
     by_uri: HashMap<String, Vec<Diagnostic>>,
+    /// Per-URI severity totals, maintained alongside `by_uri` so
+    /// frame-time consumers do not rescan every diagnostic at render
+    /// cadence. Entries exist exactly when `by_uri` entries do.
+    severity_counts: HashMap<String, (u32, u32, u32, u32)>,
     /// URIs whose stored diagnostics are known to be out of date
     /// because a `textDocument/didChange` was issued after the last
     /// `publishDiagnostics` was absorbed. `Self::set` clears entries
@@ -208,6 +212,20 @@ pub struct DiagnosticStore {
     /// producer's) additionally key on this to know a republish
     /// happened (T M4.6 GPU parity).
     epochs: HashMap<String, u64>,
+}
+
+fn count_severities(diags: &[Diagnostic]) -> (u32, u32, u32, u32) {
+    let mut counts = (0u32, 0u32, 0u32, 0u32);
+    for diagnostic in diags {
+        let slot = match diagnostic.severity {
+            DiagnosticSeverity::Error => &mut counts.0,
+            DiagnosticSeverity::Warning => &mut counts.1,
+            DiagnosticSeverity::Information => &mut counts.2,
+            DiagnosticSeverity::Hint => &mut counts.3,
+        };
+        *slot = slot.saturating_add(1);
+    }
+    counts
 }
 
 impl DiagnosticStore {
@@ -227,11 +245,14 @@ impl DiagnosticStore {
     pub fn set(&mut self, uri: impl Into<String>, mut diags: Vec<Diagnostic>) {
         diags.sort_by(Diagnostic::compare_by_position);
         let uri = uri.into();
+        let counts = count_severities(&diags);
         self.stale_uris.remove(&uri);
         *self.epochs.entry(uri.clone()).or_insert(0) += 1;
         if diags.is_empty() {
             self.by_uri.remove(&uri);
+            self.severity_counts.remove(&uri);
         } else {
+            self.severity_counts.insert(uri.clone(), counts);
             self.by_uri.insert(uri, diags);
         }
     }
@@ -240,6 +261,7 @@ impl DiagnosticStore {
     /// no entry to be stale about.
     pub fn clear(&mut self, uri: &str) {
         self.by_uri.remove(uri);
+        self.severity_counts.remove(uri);
         self.stale_uris.remove(uri);
         *self.epochs.entry(uri.to_owned()).or_insert(0) += 1;
     }
@@ -285,17 +307,24 @@ impl DiagnosticStore {
         let mut w = 0;
         let mut i = 0;
         let mut h = 0;
-        for diags in self.by_uri.values() {
-            for d in diags {
-                match d.severity {
-                    DiagnosticSeverity::Error => e += 1,
-                    DiagnosticSeverity::Warning => w += 1,
-                    DiagnosticSeverity::Information => i += 1,
-                    DiagnosticSeverity::Hint => h += 1,
-                }
-            }
+        for &(errors, warnings, information, hints) in self.severity_counts.values() {
+            e += errors as usize;
+            w += warnings as usize;
+            i += information as usize;
+            h += hints as usize;
         }
         (e, w, i, h)
+    }
+
+    /// Per-URI totals `(error, warning, information, hint)`.
+    ///
+    /// The tuple is computed once by [`Self::set`] and deliberately
+    /// survives [`Self::mark_stale`]: staleness invalidates byte
+    /// positions, while the last published counts remain valid as a
+    /// frozen status summary until the next publication.
+    #[must_use]
+    pub fn severity_counts_for(&self, uri: &str) -> (u32, u32, u32, u32) {
+        self.severity_counts.get(uri).copied().unwrap_or_default()
     }
 
     /// Per-URI count.
@@ -363,51 +392,48 @@ pub fn make_shared_store() -> SharedDiagStore {
 /// [`crate::text_view`] and [`crate::highlight`].
 const TAB_WIDTH: u32 = 8;
 
-/// Style applied to bytes covered by an `Error` diagnostic. Wavy
-/// underline colored via `underline_color` (not `fg`) so the
-/// squiggle reads red while the syntax view's text color survives
-/// underneath (T M4.6, protocol v6).
-fn error_style() -> Style {
-    Style {
-        underline: UnderlineStyle::Curly,
-        underline_color: DiagnosticSeverity::Error.underline_color(),
-        ..Style::default()
+/// The RESOLVED severity color (themes arc Q#TH5): the `ui.diag.*`
+/// face's `fg` when a face is set with a concrete color, else the
+/// built-in [`DiagnosticSeverity::underline_color`]. The diag family
+/// carries a special `Default` policy — `Default` fg means the
+/// built-in severity color, never "plain" — because the color doubles
+/// as the *presence* encoding in the minimap summary
+/// (`FileStyleSummary.underline_color`, where `Default` reads as "no
+/// mark"), so a plain severity color is unrepresentable and
+/// `ui.diag.error = {}` degrades to the built-in on every surface.
+#[must_use]
+pub fn severity_color(
+    theme: Option<&crate::highlight::Theme>,
+    severity: DiagnosticSeverity,
+) -> Color {
+    let name = match severity {
+        DiagnosticSeverity::Error => "ui.diag.error",
+        DiagnosticSeverity::Warning => "ui.diag.warning",
+        DiagnosticSeverity::Information => "ui.diag.info",
+        DiagnosticSeverity::Hint => "ui.diag.hint",
+    };
+    match theme.and_then(|t| t.face(name)) {
+        Some(f) if f.fg != Color::Default => f.fg,
+        _ => severity.underline_color(),
     }
 }
 
-/// Style applied to bytes covered by a `Warning` diagnostic.
-fn warning_style() -> Style {
+/// Style applied to bytes covered by a diagnostic: severity-shaped
+/// underline (wavy for error/warning, single for info, dotted for
+/// hint) colored via `underline_color` (not `fg`) so the squiggle
+/// reads its severity color while the syntax view's text color
+/// survives underneath (T M4.6, protocol v6). `color` is the
+/// resolved severity color ([`severity_color`]).
+fn style_for(severity: DiagnosticSeverity, color: Color) -> Style {
+    let underline = match severity {
+        DiagnosticSeverity::Error | DiagnosticSeverity::Warning => UnderlineStyle::Curly,
+        DiagnosticSeverity::Information => UnderlineStyle::Single,
+        DiagnosticSeverity::Hint => UnderlineStyle::Dotted,
+    };
     Style {
-        underline: UnderlineStyle::Curly,
-        underline_color: DiagnosticSeverity::Warning.underline_color(),
+        underline,
+        underline_color: color,
         ..Style::default()
-    }
-}
-
-/// Style applied to bytes covered by an `Information` diagnostic.
-fn info_style() -> Style {
-    Style {
-        underline: UnderlineStyle::Single,
-        underline_color: DiagnosticSeverity::Information.underline_color(),
-        ..Style::default()
-    }
-}
-
-/// Style applied to bytes covered by a `Hint` diagnostic.
-fn hint_style() -> Style {
-    Style {
-        underline: UnderlineStyle::Dotted,
-        underline_color: DiagnosticSeverity::Hint.underline_color(),
-        ..Style::default()
-    }
-}
-
-fn style_for(severity: DiagnosticSeverity) -> Style {
-    match severity {
-        DiagnosticSeverity::Error => error_style(),
-        DiagnosticSeverity::Warning => warning_style(),
-        DiagnosticSeverity::Information => info_style(),
-        DiagnosticSeverity::Hint => hint_style(),
     }
 }
 
@@ -416,10 +442,11 @@ fn style_for(severity: DiagnosticSeverity) -> Style {
 /// severity-colored *background* on the line's first cell: the
 /// glyph and its syntax color survive (the view contract is
 /// style-only), and zero-width diagnostics — invisible to the
-/// underline pass — still get a visible artifact.
-fn marker_style_for(severity: DiagnosticSeverity) -> Style {
+/// underline pass — still get a visible artifact. `color` is the
+/// resolved severity color ([`severity_color`]).
+fn marker_style_for(color: Color) -> Style {
     Style {
-        bg: severity.underline_color(),
+        bg: color,
         ..Style::default()
     }
 }
@@ -436,15 +463,25 @@ pub struct DiagnosticView {
     /// Shared store; mutated by the LSP manager, read by this view
     /// on every render.
     store: SharedDiagStore,
+    /// Shared theme for the `ui.diag.*` face resolution (themes arc
+    /// Q#TH9; the `SyntaxHighlightView` precedent). `None` — a bare
+    /// test construction — paints the built-in severity colors.
+    theme: Option<crate::highlight::ThemeHandle>,
 }
 
 impl DiagnosticView {
-    /// Construct a diagnostic view for `uri` against `store`.
+    /// Construct a diagnostic view for `uri` against `store`,
+    /// resolving severity colors through `theme` when given.
     #[must_use]
-    pub fn new(uri: impl Into<String>, store: SharedDiagStore) -> Self {
+    pub fn new(
+        uri: impl Into<String>,
+        store: SharedDiagStore,
+        theme: Option<crate::highlight::ThemeHandle>,
+    ) -> Self {
         Self {
             uri: uri.into(),
             store,
+            theme,
         }
     }
 
@@ -502,8 +539,15 @@ impl View for DiagnosticView {
         let mut line_markers: std::collections::HashMap<u32, DiagnosticSeverity> =
             std::collections::HashMap::new();
 
+        // One theme clone per render (themes arc Q#TH9, the
+        // SyntaxHighlightView discipline) for the ui.diag.* faces.
+        let theme = self
+            .theme
+            .as_ref()
+            .map(|t| t.lock().expect("theme mutex poisoned").clone());
+
         for diag in &diags {
-            let style = style_for(diag.severity);
+            let style = style_for(diag.severity, severity_color(theme.as_ref(), diag.severity));
             // Apply to each line the diagnostic touches. LSP ranges
             // are half-open at the end position; if end_col == 0
             // the diagnostic stops at the start of `end_line` so
@@ -580,6 +624,7 @@ impl View for DiagnosticView {
             viewport.gutter_w,
             max_cols,
             &line_markers,
+            theme.as_ref(),
         );
     }
 }
@@ -597,9 +642,11 @@ fn paint_line_markers(
     gutter_w: u32,
     max_cols: u32,
     line_markers: &std::collections::HashMap<u32, DiagnosticSeverity>,
+    theme: Option<&crate::highlight::Theme>,
 ) {
     for (&row_offset, &severity) in line_markers {
         let row = cell_origin.row + row_offset;
+        let color = severity_color(theme, severity);
         if gutter_w > 0 {
             let cell = cells.at(CellCoord::new(
                 row,
@@ -607,12 +654,12 @@ fn paint_line_markers(
             ));
             cell.glyph = Glyph::Char(severity.gutter_glyph());
             cell.style = Style {
-                fg: severity.underline_color(),
+                fg: color,
                 ..Style::default()
             };
         } else if max_cols > 0 {
             let cell = cells.at(CellCoord::new(row, cell_origin.col));
-            cell.style = merge_styles(cell.style, marker_style_for(severity));
+            cell.style = merge_styles(cell.style, marker_style_for(color));
         }
     }
 }
@@ -843,11 +890,46 @@ mod tests {
     }
 
     #[test]
+    fn cached_severity_counts_replace_clear_and_survive_staleness() {
+        let mut store = DiagnosticStore::new();
+        assert_eq!(store.severity_counts_for("file:///a"), (0, 0, 0, 0));
+
+        store.set(
+            "file:///a",
+            vec![
+                diag(0, DiagnosticSeverity::Error, "1"),
+                diag(1, DiagnosticSeverity::Error, "2"),
+                diag(2, DiagnosticSeverity::Warning, "3"),
+                diag(3, DiagnosticSeverity::Information, "4"),
+                diag(4, DiagnosticSeverity::Hint, "5"),
+            ],
+        );
+        assert_eq!(store.severity_counts_for("file:///a"), (2, 1, 1, 1));
+
+        store.mark_stale("file:///a");
+        assert_eq!(
+            store.severity_counts_for("file:///a"),
+            (2, 1, 1, 1),
+            "staleness freezes the last published counts"
+        );
+
+        store.set(
+            "file:///a",
+            vec![diag(0, DiagnosticSeverity::Warning, "replacement")],
+        );
+        assert_eq!(store.severity_counts_for("file:///a"), (0, 1, 0, 0));
+
+        store.clear("file:///a");
+        assert_eq!(store.severity_counts_for("file:///a"), (0, 0, 0, 0));
+    }
+
+    #[test]
     fn empty_set_clears_uri() {
         let mut s = DiagnosticStore::new();
         s.set("a", vec![diag(0, DiagnosticSeverity::Error, "x")]);
         s.set("a", Vec::new());
         assert!(s.for_uri("a").is_empty());
+        assert_eq!(s.severity_counts_for("a"), (0, 0, 0, 0));
         assert_eq!(s.uris().count(), 0);
     }
 
@@ -921,7 +1003,7 @@ mod tests {
             DiagnosticSeverity::Information,
             DiagnosticSeverity::Hint,
         ] {
-            let style = style_for(s);
+            let style = style_for(s, severity_color(None, s));
             assert_eq!(style.fg, Color::Default, "{s:?} must not set fg");
             assert_ne!(
                 style.underline_color,
@@ -959,7 +1041,7 @@ mod tests {
         // `pmacs.window._overlay_kinds()` introspection (task #23 wire-up,
         // mirroring "syntax-highlight" / LspStyleView) relies on this.
         let store = make_shared_store();
-        let view = DiagnosticView::new("file:///a", store);
+        let view = DiagnosticView::new("file:///a", store, None);
         assert_eq!(view.kind(), "diagnostic");
     }
 
@@ -984,7 +1066,7 @@ mod tests {
         })
         .expect("seed buffer");
 
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 10];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1046,7 +1128,7 @@ mod tests {
         })
         .expect("seed buffer");
 
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 30];
         // Pre-paint glyphs at column 0 to pin the style-only contract.
         backing[0].glyph = Glyph::Char('h');
@@ -1123,7 +1205,7 @@ mod tests {
 
         // A 2-cell gutter: text is shifted to column 2, signs land at
         // window column 0 (`cell_origin.col - gutter_w`).
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 30];
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -1191,7 +1273,7 @@ mod tests {
         })
         .expect("seed buffer");
 
-        let mut view = DiagnosticView::new("file:///a", store);
+        let mut view = DiagnosticView::new("file:///a", store, None);
         let mut backing = vec![Cell::default(); 20];
         let mut grid = CellGrid {
             cells: &mut backing,

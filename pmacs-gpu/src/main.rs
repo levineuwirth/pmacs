@@ -678,6 +678,14 @@ struct State {
     gutter_buffer: Buffer,
     /// Dedicated renderer for the gutter number layer (like the menu / mb).
     gutter_text_renderer: TextRenderer,
+    /// The daemon-resolved UI face table (themes arc Q#TH7, protocol
+    /// v16). Exact-name lookup only — inheritance is resolved
+    /// daemon-side, so the frontend never walks. Complete replacement
+    /// per `ThemeFacts`; a face absent from the map means "use the
+    /// site's hardcoded default". Applied per draw through the
+    /// `face_fg_or` / `face_wash_or` / `modeline_face_colors` /
+    /// `diag_face_rgba` resolvers (Q#TH5 mask + `Default` mapping).
+    faces: HashMap<String, CellStyle>,
 }
 
 /// Kind-glyph column for a completion row: the LSP
@@ -2019,6 +2027,7 @@ impl State {
             completion_bg_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_cache: None,
             line_numbers: LineNumberMode::Off,
+            faces: HashMap::new(),
             gutter_buffer,
             gutter_text_renderer,
         }
@@ -2456,6 +2465,22 @@ impl State {
                 // keep hijacking Esc/RET/TAB. The daemon-side session
                 // was already invalidated by the switch.
                 self.completion = None;
+                // PR #120 round 3 finding 1 — the remaining
+                // buffer-scoped facts, same reasoning: search and menu
+                // popups anchor in the prior buffer AND gate key and
+                // pointer interception (`daemon_intercepts_keys`, the
+                // pointer arms), and the new buffer's first CLOSED
+                // state is suppressed daemon-side, so no close message
+                // ever comes — a retained popup would hijack input
+                // forever. The status band's name/counts describe the
+                // buffer we just left; the producer's reset contract
+                // re-ships the new buffer's facts on its first frame.
+                // The minibuffer deliberately survives: it is one
+                // global core instance, matching the producer's
+                // surviving `last_minibuffer` baseline.
+                self.search_prompt = None;
+                self.menu = None;
+                self.status_facts = None;
                 self.cursor_fresh = false;
                 self.optimistic_cursor_floor = None;
                 self.optimistic_floor_set_at = None;
@@ -2688,6 +2713,21 @@ impl State {
                     self.line_numbers = mode;
                     self.request_redraw();
                 }
+                None
+            }
+            // Themes Q#TH7 (protocol v16): the daemon-resolved UI face
+            // table — complete replacement each send. The status-band
+            // shaping cache MUST be invalidated here (Q#TH8): the
+            // E:/W: counter colors are baked into glyphon rich-text
+            // attributes at compose time and `refresh_status_line`
+            // skips re-shaping while the composed strings are
+            // unchanged, so a diag-face change with constant counts
+            // would keep stale colors indefinitely without this.
+            InstanceMessage::ThemeFacts { faces } => {
+                self.faces = faces.into_iter().map(|f| (f.name, f.style)).collect();
+                self.status_text.clear();
+                self.status_left_text.clear();
+                self.request_redraw();
                 None
             }
             // Q#SR5 / Q#RX6 — the live isearch prompt (protocol v10).
@@ -3382,6 +3422,134 @@ impl State {
         self.request_redraw();
     }
 
+    // -----------------------------------------------------------------
+    // Themes (Q#TH5/Q#TH7/Q#TH8): UI-face resolution. Faces arrive
+    // daemon-resolved over `ThemeFacts`; lookups are exact-name. A set
+    // face owns its surface within its stage-1 mask, and a `Default`
+    // component inside the mask maps to the frontend's PLAIN rendering
+    // — the buffer-text default fg / the window-background bg — never
+    // the old chrome constant. An UNSET face keeps the site constant.
+    // -----------------------------------------------------------------
+
+    /// fg resolution for an {fg}-mask site: face set → its fg
+    /// (`Default` ↦ the plain text color); unset → `fallback`
+    /// (today's site constant).
+    fn face_fg_or(&self, name: &str, fallback: Color) -> Color {
+        match self.faces.get(name) {
+            Some(f) => cell_color_to_glyphon(f.fg).unwrap_or_else(plain_text_color),
+            None => fallback,
+        }
+    }
+
+    /// Wash resolution for a {bg}-mask face: face set → its bg RGB
+    /// carrying the site's current alpha (`Default` bg ↦ no wash — a
+    /// fully transparent quad); unset → `fallback` (today's wash
+    /// constant, alpha included).
+    fn face_wash_or(&self, name: &str, fallback: [f32; 4]) -> [f32; 4] {
+        match self.faces.get(name) {
+            Some(f) => match cell_color_to_glyphon(f.bg) {
+                Some(c) => glyphon_to_rgba(c, fallback[3]),
+                None => [0.0, 0.0, 0.0, 0.0],
+            },
+            None => fallback,
+        }
+    }
+
+    /// `Some((band quad rgba, band text color))` when `ui.modeline`
+    /// is set — mask {fg, bg, reverse}: `Default` bg ↦ the window
+    /// background (an untinted band), `Default` fg ↦ the plain text
+    /// color, `reverse` swaps the two after mapping. `None` when
+    /// unset: each band site keeps its own constant.
+    fn modeline_face_colors(&self) -> Option<([f32; 4], Color)> {
+        let f = self.faces.get("ui.modeline")?;
+        let text = cell_color_to_glyphon(f.fg).unwrap_or_else(plain_text_color);
+        let quad = match cell_color_to_glyphon(f.bg) {
+            Some(c) => glyphon_to_rgba(c, 1.0),
+            None => WINDOW_BG_RGBA,
+        };
+        Some(if f.reverse {
+            (glyphon_to_rgba(text, 1.0), rgba_to_glyphon(quad))
+        } else {
+            (quad, text)
+        })
+    }
+
+    /// Diag-family TEXT color (Q#TH5 policy): the `ui.diag.*` face's
+    /// fg when set with a concrete color, else `fallback` (the
+    /// built-in severity constant). Unlike [`Self::face_fg_or`], a
+    /// set face's `Default` fg maps to the BUILT-IN color, never
+    /// plain — the severity color doubles as the minimap presence
+    /// encoding, so a plain severity is unrepresentable.
+    fn diag_face_fg_or(&self, name: &str, fallback: Color) -> Color {
+        self.faces
+            .get(name)
+            .and_then(|f| cell_color_to_glyphon(f.fg))
+            .unwrap_or(fallback)
+    }
+
+    /// Diag-family quad color — [`Self::diag_face_fg_or`]'s rgba
+    /// twin, keyed by decoration kind.
+    fn diag_face_rgba(&self, kind: DecorationKind, fallback: [f32; 4]) -> [f32; 4] {
+        let name = match kind {
+            DecorationKind::DiagnosticError => "ui.diag.error",
+            DecorationKind::DiagnosticWarning => "ui.diag.warning",
+            DecorationKind::DiagnosticInfo => "ui.diag.info",
+            DecorationKind::DiagnosticHint => "ui.diag.hint",
+            _ => return fallback,
+        };
+        match self
+            .faces
+            .get(name)
+            .and_then(|f| cell_color_to_glyphon(f.fg))
+        {
+            Some(c) => glyphon_to_rgba(c, 1.0),
+            None => fallback,
+        }
+    }
+
+    /// The OWN-window wash color for a background decoration kind:
+    /// the local selection and search washes resolve their faces;
+    /// peer rects (`collect_peer_rects`) deliberately keep the
+    /// constants — peer theming rides the deferred peer-cursor
+    /// palette arc (Q#TH5, round 2 finding 9).
+    fn own_wash_color(&self, kind: DecorationKind) -> Option<[f32; 4]> {
+        let fallback = decoration_kind_to_bg_color(kind)?;
+        let name = match kind {
+            DecorationKind::Selection => "ui.selection",
+            DecorationKind::SearchMatch => "ui.search.match",
+            DecorationKind::SearchMatchActive => "ui.search.match.active",
+            _ => return Some(fallback),
+        };
+        Some(self.face_wash_or(name, fallback))
+    }
+
+    /// The band's left-segment text color, mirroring
+    /// [`Self::compose_status_left`]'s priority: minibuffer/isearch
+    /// content follows `ui.minibuffer`, a transient message follows
+    /// `ui.statusline`, and the buffer name follows `ui.modeline`
+    /// (the framing's content-class applicability, Q#TH3).
+    fn status_left_color(&self) -> Color {
+        const LEFT_DEFAULT: (u8, u8, u8) = (200, 200, 210);
+        let fallback = Color::rgb(LEFT_DEFAULT.0, LEFT_DEFAULT.1, LEFT_DEFAULT.2);
+        if self.minibuffer.is_some()
+            || self
+                .search_prompt
+                .as_ref()
+                .is_some_and(|s| Some(s.buffer_id) == self.current_buffer_id)
+        {
+            return self.face_fg_or("ui.minibuffer", fallback);
+        }
+        let has_message = self
+            .status_facts
+            .as_ref()
+            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
+            .is_some_and(|f| f.message.is_some());
+        if has_message {
+            return self.face_fg_or("ui.statusline", fallback);
+        }
+        self.modeline_face_colors().map_or(fallback, |(_, t)| t)
+    }
+
     /// Compose the status-band readout (Q#S1): diagnostic counts
     /// (wire-authoritative, severity-colored, omitted when zero),
     /// then cursor L:C from the *optimistic* caret (so it tracks
@@ -3396,15 +3564,19 @@ impl State {
             .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
         {
             if facts.diag_errors > 0 {
+                // Themes Q#TH5: the counters follow the diag faces
+                // (fg mask; the shaping-cache invalidation in the
+                // ThemeFacts arm makes a recolor with constant counts
+                // actually re-shape, Q#TH8).
                 spans.push((
                     format!("E:{}", facts.diag_errors),
-                    Some(Color::rgb(241, 76, 76)),
+                    Some(self.diag_face_fg_or("ui.diag.error", Color::rgb(241, 76, 76))),
                 ));
             }
             if facts.diag_warnings > 0 {
                 spans.push((
                     format!("W:{}", facts.diag_warnings),
-                    Some(Color::rgb(245, 245, 67)),
+                    Some(self.diag_face_fg_or("ui.diag.warning", Color::rgb(245, 245, 67))),
                 ));
             }
         }
@@ -3548,12 +3720,16 @@ impl State {
     /// The status band's background quad (Q#S2): a full-width strip
     /// under the band text.
     fn status_band_vertex_bytes(&self) -> Vec<u8> {
+        // Themes Q#TH5: a set ui.modeline face owns the band surface.
+        let color = self
+            .modeline_face_colors()
+            .map_or(STATUS_BAND_BG, |(quad, _)| quad);
         let rect = MinimapRect {
             x: 0.0,
             y: text_area_bottom(self.config.height),
             w: self.config.width as f32,
             h: STATUS_BAND_HEIGHT,
-            color: STATUS_BAND_BG,
+            color,
         };
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
     }
@@ -3935,6 +4111,15 @@ impl State {
         }
         self.current_line_shapes = minimap_line_shapes(&self.current_text);
         self.current_summary = Some(FileStyleSummaryState { generation, lines });
+        // PR #120 round 1 finding 1: a newly accepted summary can
+        // arrive at an UNCHANGED generation (theme recolor,
+        // diagnostic republish) and the minimap cache keys only on
+        // (generation, dims, scroll) — without an explicit drop the
+        // stale vertices survive until an edit, resize, or scroll.
+        // The daemon payload-suppresses identical summaries, so every
+        // summary accepted here is genuinely new and the invalidation
+        // is precise.
+        self.minimap_cache = None;
         self.request_redraw();
     }
 
@@ -4457,6 +4642,14 @@ impl State {
         } else {
             0
         };
+        // Themes Q#TH5/Q#TH9: resolve the face-driven colors before
+        // the prepare call — its `&mut self.*` field borrows preclude
+        // method calls on `self` inside the argument list.
+        let readout_color = self
+            .modeline_face_colors()
+            .map_or(Color::rgb(168, 168, 180), |(_, text)| text);
+        let left_color = self.status_left_color();
+        let gutter_color = self.face_fg_or("ui.gutter", Color::rgb(120, 120, 135));
         self.text_renderer
             .prepare(
                 &self.device,
@@ -4493,7 +4686,10 @@ impl State {
                             right: self.config.width.cast_signed(),
                             bottom: self.config.height.cast_signed(),
                         },
-                        default_color: Color::rgb(168, 168, 180),
+                        // Themes Q#TH5: a set ui.modeline face colors
+                        // the readout too (its fg after the reverse
+                        // swap); unset keeps the dimmer gray.
+                        default_color: readout_color,
                         custom_glyphs: &[],
                     },
                     TextArea {
@@ -4508,7 +4704,11 @@ impl State {
                             right: (status_left - STATUS_TEXT_PAD).max(0.0).round() as i32,
                             bottom: self.config.height.cast_signed(),
                         },
-                        default_color: Color::rgb(200, 200, 210),
+                        // Themes Q#TH3: the left segment's face follows
+                        // its CONTENT class (minibuffer/isearch →
+                        // ui.minibuffer; message → ui.statusline; name
+                        // → ui.modeline).
+                        default_color: left_color,
                         custom_glyphs: &[],
                     },
                 ],
@@ -4531,7 +4731,8 @@ impl State {
                     right: gutter_clip_left,
                     bottom: text_area_bottom(self.config.height).round() as i32,
                 },
-                default_color: Color::rgb(120, 120, 135),
+                // Themes Q#TH5: ui.gutter's {fg} mask colors the digits.
+                default_color: gutter_color,
                 custom_glyphs: &[],
             }]
         } else {
@@ -4591,6 +4792,8 @@ impl State {
         // by `first` rows so line `first` lands at `top_y`, and the
         // existing `bounds.top`/`bottom` clip the rows scrolled out of the
         // visible window (no per-resize re-shape needed).
+        // Hoisted for the same borrow reason as the band colors above.
+        let candidate_color = self.face_fg_or("ui.minibuffer.candidate", Color::rgb(232, 232, 238));
         let mb_areas: Vec<TextArea> = self
             .mb_visible_window()
             .zip(self.mb_dropdown_rect())
@@ -4605,7 +4808,10 @@ impl State {
                     right: (x + width).round() as i32,
                     bottom: text_area_bottom(self.config.height).round() as i32,
                 },
-                default_color: Color::rgb(232, 232, 238),
+                // Themes Q#TH5 (round 3 finding 1): the candidate
+                // glyph layer is ui.minibuffer.candidate's GPU site;
+                // the popup bg/selection quads stay chrome constants.
+                default_color: candidate_color,
                 custom_glyphs: &[],
             })
             .into_iter()
@@ -4864,7 +5070,9 @@ impl State {
                 if best.is_none_or(|(r, _)| rank < r)
                     && let Some(color) = decoration_kind_to_underline_color(d.kind)
                 {
-                    best = Some((rank, color));
+                    // Themes Q#TH5: gutter signs share the resolved
+                    // severity color with the squiggles.
+                    best = Some((rank, self.diag_face_rgba(d.kind, color)));
                 }
             }
             if let Some((_, color)) = best {
@@ -4902,8 +5110,9 @@ impl State {
             };
             // Diagnostic underlines are squiggles now, drawn by their
             // own pipeline (`squiggle_vertex_bytes`); only the solid
-            // washes belong in this quad batch.
-            if let Some(color) = decoration_kind_to_bg_color(d.kind) {
+            // washes belong in this quad batch. Own washes resolve
+            // their theme faces (Q#TH5); peers keep the constants.
+            if let Some(color) = self.own_wash_color(d.kind) {
                 self.push_glyph_extent_rects(rects, line_offsets, lo, hi, color, None);
             }
         }
@@ -4929,6 +5138,9 @@ impl State {
             let Some(color) = decoration_kind_to_underline_color(d.kind) else {
                 continue;
             };
+            // Themes Q#TH5: squiggles follow the ui.diag.* faces
+            // (fg mask, Default ↦ the built-in severity constant).
+            let color = self.diag_face_rgba(d.kind, color);
             if let Some((lo, hi)) = clip_rebase_range(d.range.start, d.range.end, vstart, vend) {
                 self.push_glyph_extent_rects(
                     &mut rects,
@@ -5627,6 +5839,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::DispatchIdle { .. } => "DispatchIdle",
         InstanceMessage::LineNumbers { .. } => "LineNumbers",
         InstanceMessage::CompletionPopup { .. } => "CompletionPopup",
+        InstanceMessage::ThemeFacts { .. } => "ThemeFacts",
     }
 }
 
@@ -6543,6 +6756,45 @@ fn cell_color_to_glyphon(c: CellColor) -> Option<glyphon::Color> {
         CellColor::Rgb(r, g, b) => Some(glyphon::Color::rgb(r, g, b)),
         CellColor::Indexed(idx) => Some(indexed_to_glyphon(idx)),
     }
+}
+
+/// The GPU's "plain" text color — the buffer-text default at
+/// `main.rs`'s primary `TextArea`. The Q#TH5 mapping target for a
+/// set face's `Default` fg.
+fn plain_text_color() -> glyphon::Color {
+    glyphon::Color::rgb(230, 230, 235)
+}
+
+/// The window clear color as a quad rgba — the Q#TH5 mapping target
+/// for a set face's `Default` bg (an untinted surface). Must equal
+/// [`BG`].
+const WINDOW_BG_RGBA: [f32; 4] = [0.05, 0.05, 0.07, 1.0];
+
+/// glyphon (u8) → quad (f32) color, carrying `alpha`. Divides by 255
+/// — the same space every existing float constant uses (e.g. the
+/// error squiggle `[0.945, …]` is exactly `rgb(241, 76, 76) / 255`).
+fn glyphon_to_rgba(c: glyphon::Color, alpha: f32) -> [f32; 4] {
+    [
+        f32::from(c.r()) / 255.0,
+        f32::from(c.g()) / 255.0,
+        f32::from(c.b()) / 255.0,
+        alpha,
+    ]
+}
+
+/// quad (f32) → glyphon (u8) color (alpha dropped) — the `reverse`
+/// swap's other direction.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "inputs are 0.0..=1.0 quad colors by construction"
+)]
+fn rgba_to_glyphon(c: [f32; 4]) -> glyphon::Color {
+    glyphon::Color::rgb(
+        (c[0] * 255.0) as u8,
+        (c[1] * 255.0) as u8,
+        (c[2] * 255.0) as u8,
+    )
 }
 
 /// Standard xterm-style 256-color palette: 16 base colors + 6×6×6
@@ -8095,6 +8347,626 @@ mod tests {
         assert!(
             wide.gutter_width_px() > 0.0,
             "a wide window keeps the gutter"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Themes (Q#TH5/Q#TH7/Q#TH8): GPU face application.
+    // -----------------------------------------------------------------
+
+    fn theme_face(name: &str, style: CellStyle) -> pmacs_protocol::ThemeFace {
+        pmacs_protocol::ThemeFace {
+            name: name.into(),
+            style,
+        }
+    }
+
+    fn apply_faces(state: &mut State, faces: Vec<pmacs_protocol::ThemeFace>) {
+        let _ = state.apply_attach_message(InstanceMessage::ThemeFacts { faces });
+    }
+
+    fn px_at(px: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * width + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    }
+
+    #[test]
+    fn headless_theme_facts_empty_table_renders_identically() {
+        // Acceptance 20: the authoritative empty table (an unthemed
+        // daemon's first send) must change nothing.
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let base = state.render_offscreen();
+        apply_faces(&mut state, Vec::new());
+        let themed = state.render_offscreen();
+        assert_eq!(base, themed, "an empty face table must be a no-op");
+    }
+
+    #[test]
+    fn headless_modeline_face_owns_the_band_and_reverse_swaps() {
+        // Acceptance 20: ui.modeline bg retints the band quad, and
+        // reverse swaps quad/text after the Default mapping. Sampled
+        // at a band pixel left of the text pad — comparing two states
+        // whose (fg, bg, reverse) SHOULD produce the same quad avoids
+        // any dependence on the surface's exact color space.
+        let (w, h) = (400u32, 300u32);
+        let fg = CellColor::Rgb(200, 30, 30);
+        let bg = CellColor::Rgb(10, 60, 110);
+        let Some(mut plain) = headless_or_skip(w, h, "hello") else {
+            return;
+        };
+        let plain_sample = px_at(&plain.render_offscreen(), w, 2, h - 2);
+
+        apply_faces(
+            &mut plain,
+            vec![theme_face(
+                "ui.modeline",
+                CellStyle {
+                    fg,
+                    bg,
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let tinted_sample = px_at(&plain.render_offscreen(), w, 2, h - 2);
+        assert_ne!(
+            plain_sample, tinted_sample,
+            "a bg face must retint the band quad"
+        );
+
+        // Swapped face + reverse ⇒ the identical quad color…
+        apply_faces(
+            &mut plain,
+            vec![theme_face(
+                "ui.modeline",
+                CellStyle {
+                    fg: bg,
+                    bg: fg,
+                    reverse: true,
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let swapped_sample = px_at(&plain.render_offscreen(), w, 2, h - 2);
+        assert_eq!(
+            tinted_sample, swapped_sample,
+            "reverse must swap fg/bg after mapping (same quad both ways)"
+        );
+
+        // …while reverse on the ORIGINAL face tints the quad with fg.
+        apply_faces(
+            &mut plain,
+            vec![theme_face(
+                "ui.modeline",
+                CellStyle {
+                    fg,
+                    bg,
+                    reverse: true,
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let reversed_sample = px_at(&plain.render_offscreen(), w, 2, h - 2);
+        assert_ne!(
+            tinted_sample, reversed_sample,
+            "reverse must move the quad off the bg color"
+        );
+    }
+
+    #[test]
+    fn headless_gutter_face_recolors_only_the_gutter_region() {
+        // Acceptance 20: a ui.gutter fg change alters the gutter
+        // digits and nothing else — every differing pixel lies left
+        // of the text origin and above the band.
+        let (w, h) = (400u32, 300u32);
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let Some(mut state) = headless_or_skip(w, h, text) else {
+            return;
+        };
+        state.line_numbers = LineNumberMode::Absolute;
+        let text_left = state.text_left().ceil() as u32;
+        let band_top = text_area_bottom(h).floor() as u32;
+        let base = state.render_offscreen();
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.gutter",
+                CellStyle {
+                    fg: CellColor::Rgb(220, 120, 40),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let themed = state.render_offscreen();
+        let mut differing = 0usize;
+        for (i, (a, b)) in base.iter().zip(&themed).enumerate() {
+            if a != b {
+                differing += 1;
+                let pixel = (i / 4) as u32;
+                let (x, y) = (pixel % w, pixel / w);
+                assert!(
+                    x < text_left && y < band_top,
+                    "gutter face leaked outside the gutter region at ({x}, {y})"
+                );
+            }
+        }
+        assert!(differing > 20, "the digits must actually recolor");
+    }
+
+    #[test]
+    fn headless_band_text_faces_follow_content_class() {
+        // Acceptance 20: with the composed strings held constant,
+        // ui.statusline recolors a transient message, ui.minibuffer
+        // recolors a live minibuffer and an isearch band — and each
+        // face is a NO-OP on the content classes it doesn't own.
+        let (w, h) = (400u32, 300u32);
+        let Some(mut state) = headless_or_skip(w, h, "hello") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let statusline_face = vec![theme_face(
+            "ui.statusline",
+            CellStyle {
+                fg: CellColor::Rgb(240, 140, 40),
+                ..CellStyle::default()
+            },
+        )];
+        let minibuffer_face = vec![theme_face(
+            "ui.minibuffer",
+            CellStyle {
+                fg: CellColor::Rgb(40, 220, 140),
+                ..CellStyle::default()
+            },
+        )];
+
+        // (a) Buffer name showing: ui.statusline must not repaint it.
+        state.status_facts = Some(StatusFactsLocal {
+            buffer_id: bid,
+            name: "main.rs".into(),
+            modified: false,
+            diag_errors: 0,
+            diag_warnings: 0,
+            message: None,
+        });
+        let name_base = state.render_offscreen();
+        apply_faces(&mut state, statusline_face.clone());
+        assert_eq!(
+            name_base,
+            state.render_offscreen(),
+            "ui.statusline must not color the buffer-name class"
+        );
+        apply_faces(&mut state, Vec::new());
+
+        // (b) Transient message showing: ui.statusline recolors it.
+        state.status_facts = Some(StatusFactsLocal {
+            buffer_id: bid,
+            name: "main.rs".into(),
+            modified: false,
+            diag_errors: 0,
+            diag_warnings: 0,
+            message: Some("12 references".into()),
+        });
+        let msg_base = state.render_offscreen();
+        apply_faces(&mut state, statusline_face);
+        assert_ne!(
+            msg_base,
+            state.render_offscreen(),
+            "ui.statusline must recolor the transient message"
+        );
+        apply_faces(&mut state, Vec::new());
+
+        // (c) Live minibuffer: ui.minibuffer recolors the band text.
+        state.minibuffer = Some(MinibufferLocal {
+            prompt: "M-x ".into(),
+            input: "theme".into(),
+            cursor: 5,
+            candidates: Vec::new(),
+            selected: None,
+            total: 0,
+        });
+        let mb_base = state.render_offscreen();
+        apply_faces(&mut state, minibuffer_face.clone());
+        assert_ne!(
+            mb_base,
+            state.render_offscreen(),
+            "ui.minibuffer must recolor the live minibuffer"
+        );
+        apply_faces(&mut state, Vec::new());
+        state.minibuffer = None;
+
+        // (d) Isearch band: same face, same route.
+        state.search_prompt = Some(SearchPromptLocal {
+            buffer_id: bid,
+            query: "needle".into(),
+            active: Some(0),
+            total: 2,
+            regex: false,
+            invalid: false,
+        });
+        let isearch_base = state.render_offscreen();
+        apply_faces(&mut state, minibuffer_face);
+        assert_ne!(
+            isearch_base,
+            state.render_offscreen(),
+            "ui.minibuffer must recolor the isearch band"
+        );
+    }
+
+    #[test]
+    fn headless_candidate_face_recolors_the_dropdown_glyphs() {
+        // Acceptance 20 (round 3 finding 1): ui.minibuffer.candidate's
+        // GPU site is the dropdown's candidate glyph layer.
+        let (w, h) = (400u32, 300u32);
+        let Some(mut state) = headless_or_skip(w, h, "hello") else {
+            return;
+        };
+        state.minibuffer = Some(MinibufferLocal {
+            prompt: "M-x ".into(),
+            input: "the".into(),
+            cursor: 3,
+            candidates: vec!["theme-set".into(), "theme-clear".into()],
+            selected: Some(0),
+            total: 2,
+        });
+        let base = state.render_offscreen();
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.minibuffer.candidate",
+                CellStyle {
+                    fg: CellColor::Rgb(250, 80, 160),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        assert_ne!(
+            base,
+            state.render_offscreen(),
+            "the candidate glyphs must recolor"
+        );
+    }
+
+    #[test]
+    fn headless_diag_face_recolors_band_counter_despite_unchanged_text() {
+        // Acceptance 22 — the round-1 finding-3 bite. The E: counter
+        // color is baked into shaped rich text and the composed string
+        // is CONSTANT here, so this fails without the ThemeFacts arm's
+        // shaping-cache invalidation (Q#TH8). The empty diag child is
+        // the built-in reset (Q#TH5): identical to unthemed.
+        let (w, h) = (400u32, 300u32);
+        let Some(mut state) = headless_or_skip(w, h, "alpha\nbeta\n") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.view_range = (0, state.current_text.len() as u64);
+        state.status_facts = Some(StatusFactsLocal {
+            buffer_id: bid,
+            name: "main.rs".into(),
+            modified: false,
+            diag_errors: 2,
+            diag_warnings: 0,
+            message: None,
+        });
+        state.current_decorations.push(Decoration {
+            range: ByteRange { start: 0, end: 5 },
+            kind: DecorationKind::DiagnosticError,
+        });
+        let base = state.render_offscreen();
+
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.diag.error",
+                CellStyle {
+                    fg: CellColor::Rgb(40, 200, 255),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        assert_ne!(
+            base,
+            state.render_offscreen(),
+            "the counter (and squiggle) must recolor with counts constant"
+        );
+
+        // An all-default diag child resets to the built-in color.
+        apply_faces(
+            &mut state,
+            vec![theme_face("ui.diag.error", CellStyle::default())],
+        );
+        assert_eq!(
+            base,
+            state.render_offscreen(),
+            "ui.diag.error = {{}} must render as the built-in severity color"
+        );
+    }
+
+    #[test]
+    fn headless_same_generation_summary_update_repaints_the_minimap() {
+        // PR #120 round 1 finding 1: theme recolors and diagnostic
+        // republishes ship a NEW summary at the SAME CRDT generation,
+        // and the minimap cache keys only on (generation, dims,
+        // scroll) — accepting a summary must drop the cached vertices
+        // or the stale strokes survive until an edit/resize/scroll.
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let (w, h) = (400u32, 300u32);
+        let Some(mut state) = headless_or_skip(w, h, text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.view_range = (0, text.len() as u64);
+        let summary = |color: CellColor| -> Vec<CellStyle> {
+            (0..4)
+                .map(|_| CellStyle {
+                    fg: color,
+                    ..CellStyle::default()
+                })
+                .collect()
+        };
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 7,
+            lines: summary(CellColor::Rgb(200, 40, 40)),
+        });
+        let first = state.render_offscreen();
+        // Same generation, different colors — a theme-recolor twin.
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 7,
+            lines: summary(CellColor::Rgb(40, 200, 40)),
+        });
+        let second = state.render_offscreen();
+        assert_ne!(
+            first, second,
+            "a same-generation summary recolor must repaint the minimap"
+        );
+    }
+
+    #[test]
+    fn headless_snapshot_round_trip_summary_restores_the_minimap() {
+        // PR #120 round 2 finding 1 (frontend half): a `BufferSnapshot`
+        // drops `current_summary` with the rest of the buffer-scoped
+        // state, so after an A → B → A round trip no stale minimap
+        // may survive — and when the daemon's baseline reset re-ships
+        // the summary at the unchanged generation, the first visit's
+        // pixels must return exactly.
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let (w, h) = (400u32, 300u32);
+        let Some(mut state) = headless_or_skip(w, h, text) else {
+            return;
+        };
+        // Both buffers carry the same text so the frames differ by
+        // the minimap alone.
+        let snapshot = || -> Vec<u8> {
+            let doc = loro::LoroDoc::new();
+            doc.get_text(LORO_TEXT_CONTAINER)
+                .insert(0, text)
+                .expect("insert snapshot text");
+            doc.export(loro::ExportMode::Snapshot)
+                .expect("export snapshot")
+        };
+        let bid_a = BufferId::next();
+        let bid_b = BufferId::next();
+        let visit = |state: &mut State, bid: BufferId| {
+            let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+                buffer_id: bid,
+                crdt_snapshot: snapshot(),
+            });
+            state.view_range = (0, text.len() as u64);
+        };
+        let lines: Vec<CellStyle> = (0..4)
+            .map(|_| CellStyle {
+                fg: CellColor::Rgb(200, 40, 40),
+                ..CellStyle::default()
+            })
+            .collect();
+
+        visit(&mut state, bid_a);
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid_a,
+            generation: 7,
+            lines: lines.clone(),
+        });
+        let first_visit = state.render_offscreen();
+
+        visit(&mut state, bid_b);
+        visit(&mut state, bid_a);
+        assert_ne!(
+            first_visit,
+            state.render_offscreen(),
+            "the round trip dropped the summary — no stale minimap"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid_a,
+            generation: 7,
+            lines,
+        });
+        assert_eq!(
+            first_visit,
+            state.render_offscreen(),
+            "the re-shipped summary restores the first visit's minimap"
+        );
+    }
+
+    #[test]
+    fn headless_snapshot_clears_search_menu_status_and_the_intercept_gate() {
+        // PR #120 round 3 finding 1: search/menu popups anchor in the
+        // prior buffer AND gate key/pointer interception, and the new
+        // buffer's first CLOSED state is suppressed daemon-side, so
+        // no close message ever comes — a `BufferSnapshot` must clear
+        // them (and the stale status band) or the popup hijacks input
+        // forever. The minibuffer is global and deliberately exempt.
+        let text = "alpha\nbeta\n";
+        let Some(mut state) = headless_or_skip(400, 300, text) else {
+            return;
+        };
+        let bid_a = BufferId::next();
+        state.current_buffer_id = Some(bid_a);
+        let _ = state.apply_attach_message(InstanceMessage::DispatchIdle { idle: true });
+        assert!(
+            !state.daemon_intercepts_keys(),
+            "idle with nothing open: keys apply locally"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::SearchPrompt {
+            buffer_id: bid_a,
+            query: Some("al".into()),
+            active: Some(0),
+            total: 1,
+            regex: false,
+            invalid: false,
+        });
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: bid_a,
+            rows: vec![MenuPromptRow {
+                label: "Cut".into(),
+                separator: false,
+            }],
+            active: Some(0),
+        });
+        let _ = state.apply_attach_message(InstanceMessage::StatusFacts {
+            buffer_id: bid_a,
+            name: "old.rs".into(),
+            modified: false,
+            diag_errors: 3,
+            diag_warnings: 1,
+            message: None,
+        });
+        assert!(
+            state.daemon_intercepts_keys(),
+            "an open search/menu round-trips every key"
+        );
+        let with_popups = state.render_offscreen();
+
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+
+        assert!(
+            state.search_prompt.is_none() && state.menu.is_none() && state.status_facts.is_none(),
+            "buffer-scoped search/menu/status facts die with the snapshot"
+        );
+        assert!(
+            !state.daemon_intercepts_keys(),
+            "the intercept gate releases — keys apply locally again"
+        );
+        assert_ne!(
+            with_popups,
+            state.render_offscreen(),
+            "the popup pixels are gone"
+        );
+    }
+
+    #[test]
+    fn own_wash_faces_color_local_rects_peers_keep_the_constant() {
+        // Acceptance 21 + 23: decode the emitted decoration vertex
+        // colors — the LOCAL selection and both search washes resolve
+        // their faces (site alpha preserved), while simultaneous PEER
+        // selection/current-line rects keep the hardcoded constants.
+        fn decode_quad_colors(bytes: &[u8]) -> Vec<[f32; 4]> {
+            bytes
+                .chunks_exact(24)
+                .map(|v| {
+                    let f = |i: usize| {
+                        f32::from_ne_bytes(v[i * 4..i * 4 + 4].try_into().expect("4 bytes"))
+                    };
+                    [f(2), f(3), f(4), f(5)]
+                })
+                .collect()
+        }
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let Some(mut state) = headless_or_skip(400, 300, text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.view_range = (0, text.len() as u64);
+        state.current_decorations.extend([
+            Decoration {
+                range: ByteRange { start: 0, end: 5 }, // "alpha"
+                kind: DecorationKind::Selection,
+            },
+            Decoration {
+                range: ByteRange { start: 6, end: 10 }, // "beta"
+                kind: DecorationKind::SearchMatch,
+            },
+            Decoration {
+                range: ByteRange { start: 11, end: 16 }, // "gamma"
+                kind: DecorationKind::SearchMatchActive,
+            },
+        ]);
+        state.peer_presences.insert(
+            FrontendId(7),
+            PeerPresence {
+                buffer_id: bid,
+                cursor: 17,
+                selection: Some(SelectionSnapshot {
+                    anchor: 17,
+                    active: 22, // "delta"
+                }),
+            },
+        );
+        apply_faces(
+            &mut state,
+            vec![
+                theme_face(
+                    "ui.selection",
+                    CellStyle {
+                        bg: CellColor::Rgb(9, 99, 199),
+                        ..CellStyle::default()
+                    },
+                ),
+                theme_face(
+                    "ui.search.match",
+                    CellStyle {
+                        bg: CellColor::Rgb(10, 20, 30),
+                        ..CellStyle::default()
+                    },
+                ),
+                theme_face(
+                    "ui.search.match.active",
+                    CellStyle {
+                        bg: CellColor::Rgb(40, 50, 60),
+                        ..CellStyle::default()
+                    },
+                ),
+            ],
+        );
+        let colors = decode_quad_colors(&state.decoration_background_vertex_bytes());
+        // Exact float equality is deliberate: both sides derive from
+        // the same constants through the same arithmetic.
+        let has = |c: [f32; 4]| colors.contains(&c);
+        // Local rects: face RGB with each site's original alpha.
+        assert!(
+            has(glyphon_to_rgba(glyphon::Color::rgb(9, 99, 199), 0.30)),
+            "local selection must use ui.selection"
+        );
+        assert!(
+            has(glyphon_to_rgba(glyphon::Color::rgb(10, 20, 30), 0.30)),
+            "search match must use ui.search.match"
+        );
+        assert!(
+            has(glyphon_to_rgba(glyphon::Color::rgb(40, 50, 60), 0.48)),
+            "active match must use ui.search.match.active"
+        );
+        // Peer rects: the hardcoded constants, face table ignored.
+        assert!(
+            has([0.31, 0.42, 0.82, 0.30]),
+            "the peer selection must keep the Selection constant"
+        );
+        assert!(
+            has([0.55, 0.60, 0.75, 0.22]),
+            "the peer cursor line must keep the CurrentLine constant"
         );
     }
 }
