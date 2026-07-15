@@ -1,7 +1,25 @@
 # Theme faces — framing (Arc 4 stage 1, themes)
 
-**Revision 7 — 2026-07-15. Status: implemented on branch
-`theme-faces` (PR #120); revision 7 folds PR round 3.**
+**Revision 8 — 2026-07-15. Status: implemented on branch
+`theme-faces` (PR #120); revision 8 folds PR round 4.**
+
+Revision 8 (PR #120 round 4, one finding): the diagnostic-count
+freeze is sourced from the diag store itself, superseding round 3's
+per-session `frozen_diag_counts` cache. That cache only seeded from
+fresh computations, so a session FIRST rendering during staleness —
+a late joiner attaching mid-edit, or a buffer first visited between
+didChange and fresh diagnostics — had no entry and fell back to
+(0, 0), contradicting the documented "frozen counts, never zeros"
+contract. But `mark_stale` (T M11.8) keeps the last published
+diagnostic vector — only the positions are invalid — so
+`status_facts_msg` now counts the retained `for_uri` entries even
+while stale: the retained entries ARE the frozen value, with no
+session state to lose to a snapshot reset and no history needed at
+attach. The per-session cache is deleted; the round-3 reset-survival
+property holds by construction. Acceptance item 33 (a store marked
+stale BEFORE the session exists still reports the preserved counts
+on the first frame); item 32's round-trip claim is unchanged and
+still passes against the new mechanism.
 
 Revision 7 (PR #120 round 3, findings 1–2): the reset contract is
 now symmetric on the GPU. The round-2 producer reset covered
@@ -649,14 +667,15 @@ pub struct ThemeFace {
   needs no call. NOT reset: `last_face_epoch` / `last_theme_faces`
   (this channel is bufferless — the frontend keeps its face table
   across snapshots), the global minibuffer baseline, the
-  per-frontend gutter mode, the revision-keyed diag line cache,
-  `frozen_diag_counts` (round 3 finding 2: the stale-store freeze
-  source is daemon-side knowledge about the buffer, split from the
-  `last_status` peer baseline precisely so the reset cannot zero
-  mid-edit counts), and other buffers' baselines (each buffer's own
-  snapshot precedes its revisit). Resetting on a failed write is
-  harmless — the failure mode is one redundant re-send, never
-  staleness. The GPU's `BufferSnapshot` arm mirrors the contract
+  per-frontend gutter mode, the revision-keyed diag line cache, and
+  other buffers' baselines (each buffer's own snapshot precedes its
+  revisit). The diagnostic-count freeze needs no protection here
+  (rounds 3–4): it is sourced from the diag store's retained vector
+  — `mark_stale` keeps the last published diagnostics, whose counts
+  merely lag — never from session state, so the reset cannot zero
+  mid-edit counts and the freeze holds even for a session attaching
+  during staleness. Resetting on a failed write is harmless — the
+  failure mode is one redundant re-send, never staleness. The GPU's `BufferSnapshot` arm mirrors the contract
   (round 3 finding 1): it clears its buffer-scoped facts —
   search/menu popups (which gate key and pointer interception) and
   the status band — alongside spans, decorations, adornments,
@@ -992,3 +1011,8 @@ Keybinding-driven tests dispatch keys, never `pmacs.command.invoke`.
     finding 2): render nonzero counts, mark the store stale
     (didChange), apply the snapshot reset — the re-sent
     `StatusFacts` carries the frozen nonzero counts, never (0, 0).
+33. **The freeze holds without session history** (PR round 4): mark
+    a populated store stale BEFORE constructing the
+    `SemanticRenderState` — the session's first frame reports the
+    store's preserved counts, because the freeze is the retained
+    diagnostic vector itself, not a per-session cache.

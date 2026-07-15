@@ -128,9 +128,11 @@ receives authoritative re-sends even when nothing changed
 daemon-side (the unchanged-generation A → B → A revisit). Bufferless
 facts (`ThemeFacts`, the minibuffer prompt) and per-frontend state
 (the gutter mode) survive snapshots on both sides, and the
-instance's stale-store diagnostic-count freeze is daemon knowledge,
-not peer state — the re-sent `StatusFacts` after a snapshot carries
-the frozen counts, never zeros.
+instance's stale-store diagnostic-count freeze is store knowledge,
+not session state — the re-sent `StatusFacts` after a snapshot
+carries the frozen counts, never zeros, including for a session
+whose first frame lands during staleness (a late joiner attaching
+mid-edit).
 
 ## Capability and version mechanics
 

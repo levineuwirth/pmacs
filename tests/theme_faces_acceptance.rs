@@ -1,7 +1,7 @@
 // theme_faces_acceptance.rs --- Themes Arc 4 stage 1 acceptance
 // (docs/theme-faces-framing.md, acceptance items 1–19, 24–26, 28–29,
-// and 32; the GPU routes — 20–23, 27, and 30–31 — live in pmacs-gpu's
-// headless suite).
+// and 32–33; the GPU routes — 20–23, 27, and 30–31 — live in
+// pmacs-gpu's headless suite).
 
 //! Named UI faces (`ui` / `ui.*` theme entries) + the `ThemeFacts`
 //! wire channel (protocol v16).
@@ -1084,9 +1084,10 @@ fn snapshot_reset_keeps_frozen_diag_counts_while_the_store_is_stale() {
     // `last_status` was both the peer emission baseline AND the
     // stale-store freeze source, so the round-2 reset zeroed the
     // counts: a buffer switch between didChange and fresh
-    // diagnostics re-shipped StatusFacts with (0, 0). The freeze
-    // source now lives apart (`frozen_diag_counts`) and survives
-    // `on_buffer_snapshot_sent`.
+    // diagnostics re-shipped StatusFacts with (0, 0). The freeze is
+    // now the diag store's own retained vector (round 4 superseded
+    // round 3's per-session cache), so the reset has nothing
+    // count-related to lose.
     use pmacs::diag::DiagnosticSeverity;
 
     let mut state = editor();
@@ -1143,6 +1144,56 @@ fn snapshot_reset_keeps_frozen_diag_counts_while_the_store_is_stale() {
         status_counts(&sem.render_frame(&state)),
         Some((1, 1)),
         "the re-sent StatusFacts preserves the frozen counts"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 33 — the freeze holds without session history (PR #120 round 4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_session_first_rendering_during_staleness_reports_preserved_counts() {
+    // `mark_stale` keeps the last published diagnostic vector — only
+    // the positions are invalid — so the freeze must hold for a
+    // session with NO per-session history. Pre-fix, the producer
+    // skipped the retained entries while stale and a late joiner (or
+    // a buffer first visited mid-edit) fell back to (0, 0), against
+    // the documented "frozen counts, never zeros" contract.
+    use pmacs::diag::DiagnosticSeverity;
+
+    let mut state = editor();
+    type_str(&mut state, "boom\nfine\n");
+    let uri = attach_diags(
+        &state,
+        vec![
+            diag(DiagnosticSeverity::Error),
+            diag(DiagnosticSeverity::Warning),
+        ],
+    );
+
+    // didChange BEFORE any session exists for this buffer.
+    {
+        let store = state.lsp_manager.borrow().diag_store();
+        store
+            .lock()
+            .expect("diag store lock")
+            .mark_stale(uri.clone());
+    }
+
+    let mut sem = semantic(&state);
+    let first = sem.render_frame(&state);
+    let counts = first.iter().find_map(|m| match m {
+        InstanceMessage::StatusFacts {
+            diag_errors,
+            diag_warnings,
+            ..
+        } => Some((*diag_errors, *diag_warnings)),
+        _ => None,
+    });
+    assert_eq!(
+        counts,
+        Some((1, 1)),
+        "a late joiner's first frame reports the store's preserved counts"
     );
 }
 
