@@ -3078,9 +3078,15 @@ mod tests {
             let pidfile = dir.path().join(format!("pid{round}"));
             let mut sup = ProcessSupervisor::new();
             sup.set_group_term_grace(Duration::from_millis(300));
+            // Do not let the group leader exit until the background child has
+            // completed `setsid` and published its pid. Without this readiness
+            // gate, teardown can TERM the old process group before `setsid`
+            // runs; the child then dies before creating the pidfile (a race
+            // exposed consistently by the Ubuntu 20260714 runner image).
             let script = format!(
-                "setsid /bin/sh -c 'echo $$ > {}; exec sleep 30' & echo started",
-                pidfile.display()
+                "setsid /bin/sh -c 'echo $$ > {pid}; exec sleep 30' & \
+                 while [ ! -s {pid} ]; do sleep 0.01; done; echo started",
+                pid = pidfile.display()
             );
             let id = sup.spawn(sh_group_spec("escapee", &script)).expect("spawn");
             let ready = drain_until(&mut sup, id, Duration::from_secs(2), |evs| {

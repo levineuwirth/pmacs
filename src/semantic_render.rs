@@ -1761,10 +1761,10 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     // Collect the styled spans from every injection layer, scoping each
     // capture walk to the visible byte range so re-styling on each edit is
     // O(visible), not O(file) (framing Q#S6). Each span carries a priority
-    // `(depth, order)`: a deeper layer wins over a shallower one, and
-    // within a layer the wider-first order lets narrower captures override
-    // (framing Q#IJ6). Fully-default styles are dropped (they fold as
-    // identity anyway).
+    // `(layer_index, capture_order)`: a deeper layer wins over a shallower
+    // one, a later same-depth sibling wins over an earlier one, and within a
+    // layer the wider-first order lets narrower captures override (framing
+    // Q#IJ6). Fully-default styles are dropped (they fold as identity anyway).
     let mut styled: Vec<StyledLayerSpan> = Vec::new();
     for (layer_idx, layer) in bundle.layers.iter().enumerate() {
         let Some(query) = layer.highlight_query.as_ref() else {
@@ -1794,11 +1794,21 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
                 start: s,
                 end: e,
                 style,
-                priority: (layer_idx as u32, order as u32),
+                priority: layer_span_priority(layer_idx, layer.depth, order),
             });
         }
     }
     flatten_layer_spans(&styled)
+}
+
+type LayerSpanPriority = (u32, u32);
+
+/// Build the total ordering shared by the wire flattener and its sibling
+/// precedence regression test. Keeping the layer index and depth as separate
+/// inputs makes the former `(depth, capture_order)` bug directly falsifiable:
+/// two siblings tie on depth but must differ on layer index.
+fn layer_span_priority(layer_index: usize, _depth: u16, capture_order: usize) -> LayerSpanPriority {
+    (layer_index as u32, capture_order as u32)
 }
 
 /// One styled span from a single injection layer, tagged with a priority
@@ -1813,7 +1823,7 @@ struct StyledLayerSpan {
     start: u64,
     end: u64,
     style: Style,
-    priority: (u32, u32),
+    priority: LayerSpanPriority,
 }
 
 /// Flatten possibly-overlapping per-layer styled spans into **disjoint**
@@ -3543,19 +3553,27 @@ mod tests {
             fg: Color::Indexed(2),
             ..Style::default()
         };
-        // Layer 0 span [0,10) red; layer 1 span [3,6) green (overlapping).
+        // Both spans are depth-1 siblings. Layer index 2 follows layer index
+        // 1, so green must win even though their depth/capture order tie.
+        let sibling_depth = 1;
+        let earlier = layer_span_priority(1, sibling_depth, 0);
+        let later = layer_span_priority(2, sibling_depth, 0);
+        assert!(
+            earlier < later,
+            "the later sibling has higher priority despite equal depth"
+        );
         let styled = vec![
             StyledLayerSpan {
                 start: 0,
                 end: 10,
                 style: red,
-                priority: (0, 0),
+                priority: earlier,
             },
             StyledLayerSpan {
                 start: 3,
                 end: 6,
                 style: green,
-                priority: (1, 0),
+                priority: later,
             },
         ];
         let out = flatten_layer_spans(&styled);
