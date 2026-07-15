@@ -7559,9 +7559,6 @@ pub fn install_process(lua: &Lua, supervisor: &SharedProcessSupervisor) -> mlua:
     Ok(())
 }
 
-/// Build a fresh [`ProcessSupervisor`] and install
-/// `pmacs.process.*` over it. Mirrors [`make_async_runtime`] /
-/// [`make_syntax_registry`] in shape.
 /// `pmacs.gpu.*` — GPU frontend preferences (Arc 4 stage 2, framing
 /// Q#F2). Installs the module and returns the shared preference
 /// handle the `semantic_render` producer reads. Called from
@@ -7677,6 +7674,9 @@ fn validate_font_size(size: f64) -> mlua::Result<u32> {
     Ok((size * 100.0).round() as u32)
 }
 
+/// Build a fresh [`ProcessSupervisor`] and install
+/// `pmacs.process.*` over it. Mirrors [`make_async_runtime`] /
+/// [`make_syntax_registry`] in shape.
 pub fn make_process_supervisor(lua: &Lua) -> mlua::Result<SharedProcessSupervisor> {
     let supervisor = Rc::new(RefCell::new(ProcessSupervisor::new()));
     install_process(lua, &supervisor)?;

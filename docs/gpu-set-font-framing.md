@@ -1,6 +1,7 @@
 # GPU font preference — framing (Arc 4 stage 2, `pmacs.gpu.set_font`)
 
-**Revision 4 — 2026-07-15. Status: awaiting review.**
+**Revision 4 — 2026-07-15. Status: implemented on branch
+`gpu-set-font` (protocol v17); awaiting PR review.**
 
 Revision 4 (framing round 3, findings 1–5): caret preservation is now
 VISUAL-RUN aware rather than source-line-only. The code buffer keeps a
