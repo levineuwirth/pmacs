@@ -1823,6 +1823,14 @@ fn flatten_layer_spans(styled: &[StyledLayerSpan]) -> Vec<StyleSpan> {
     if styled.is_empty() {
         return Vec::new();
     }
+    // Boundary sweep. Every unique span endpoint is a boundary; between
+    // consecutive boundaries the covering set is constant. An ordered
+    // active-set (activate on start, expire on end) keeps each interval's
+    // fold O(active) rather than O(all spans), so the whole pass is
+    // O(spans·log spans + Σ active) — linear in practice (active is bounded
+    // by overlap depth, not the total span count). This matters because the
+    // file-style summary runs this over the *entire* buffer, not just the
+    // viewport.
     let mut bounds: Vec<u64> = Vec::with_capacity(styled.len() * 2);
     for sp in styled {
         bounds.push(sp.start);
@@ -1831,27 +1839,36 @@ fn flatten_layer_spans(styled: &[StyledLayerSpan]) -> Vec<StyleSpan> {
     bounds.sort_unstable();
     bounds.dedup();
 
+    // Span indices ordered by start; activated as the sweep reaches them.
+    let mut by_start: Vec<usize> = (0..styled.len()).collect();
+    by_start.sort_by_key(|&i| styled[i].start);
+    let mut next = 0usize;
+
+    // Active covering spans, kept in ascending-priority order so the fold
+    // is a single in-order pass.
+    let mut active: Vec<usize> = Vec::new();
+
     let mut out: Vec<StyleSpan> = Vec::new();
     for win in bounds.windows(2) {
         let (a, b) = (win[0], win[1]);
-        if b <= a {
+        // Activate spans starting at or before `a` (each activates once).
+        while next < by_start.len() && styled[by_start[next]].start <= a {
+            let idx = by_start[next];
+            let pos = active.partition_point(|&j| styled[j].priority < styled[idx].priority);
+            active.insert(pos, idx);
+            next += 1;
+        }
+        // Expire spans that ended at or before `a` (ranges are half-open).
+        active.retain(|&j| styled[j].end > a);
+        if active.is_empty() {
             continue;
         }
-        // Fold every span covering [a, b) in ascending priority so a
-        // deeper/narrower span overrides, while a span that only sets a
-        // non-color attribute still composes (matches the semantic-client
-        // `effective_style_at` contract).
-        let mut covering: Vec<&StyledLayerSpan> = styled
-            .iter()
-            .filter(|sp| sp.start <= a && sp.end >= b)
-            .collect();
-        if covering.is_empty() {
-            continue;
-        }
-        covering.sort_by_key(|sp| sp.priority);
+        // Fold the active set in ascending priority: a deeper/narrower span
+        // overrides, an attribute-only span still composes (matches the
+        // semantic-client `effective_style_at` contract).
         let mut style = Style::default();
-        for sp in covering {
-            style = crate::overlay::merge_styles(style, sp.style);
+        for &j in &active {
+            style = crate::overlay::merge_styles(style, styled[j].style);
         }
         if style == Style::default() {
             continue;
@@ -3468,6 +3485,36 @@ mod tests {
             covering.style,
             Style::default(),
             "the injected rust keyword is styled"
+        );
+    }
+
+    #[test]
+    fn full_buffer_summary_scales_on_large_grammar_file() {
+        // Perf gate (round-2 finding 1): the file-style summary runs the
+        // flattener over the WHOLE buffer, not the viewport. The ordered
+        // active-set sweep must keep that roughly linear — the pre-sweep
+        // O(spans^2) flatten stalled a large grammar-backed file here.
+        use std::fmt::Write as _;
+        let state = empty_state();
+        let bid = active_buffer(&state);
+        let mut src = String::new();
+        for i in 0..1500 {
+            writeln!(
+                src,
+                "pub fn f_{i}(x: u32) -> u32 {{ let y = x + {i}; y * 2 }}"
+            )
+            .expect("write");
+        }
+        seed_rust_parse_view(&state, bid, src.as_bytes());
+
+        let start = std::time::Instant::now();
+        let summary = scoped_file_summary(&state, bid);
+        let elapsed = start.elapsed();
+        assert!(!summary.is_empty(), "summary produced for a styled buffer");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "full-buffer summary took {elapsed:?}; the sweep must stay ~linear \
+             (a quadratic flatten regresses here)"
         );
     }
 

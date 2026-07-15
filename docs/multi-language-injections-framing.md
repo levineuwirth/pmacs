@@ -83,15 +83,17 @@ docs):
    @injection.language)` + `(code_fence_content) @injection.content`, and
    static `((inline) @injection.content (#set! injection.language
    "markdown_inline"))` (also `html`/`yaml`/`toml`).
-3. **The generic injection contract excludes child ranges and intersects
-   with the parent.** Unless `#set! injection.include-children` is set,
-   the injected ranges are the content node's extent **minus its direct
-   children's ranges**, then **intersected with the parent layer's own
-   included ranges** so a nested injection cannot reintroduce bytes its
-   parent excluded (tree-sitter highlighting docs; the bundled markdown
-   convenience parser shows a markdown-specialized form of the child
-   split at `parser.rs:406-425`). This makes `markdown_inline` a genuine
-   multi-range case (Q#IJ5).
+3. **The injection contract excludes child ranges and intersects with the
+   parent.** Unless `#set! injection.include-children` is set, the injected
+   ranges are the content node's extent **minus its NAMED children's
+   ranges**, then **intersected with the parent layer's own included
+   ranges** so a nested injection cannot reintroduce bytes its parent
+   excluded. *(Implementation note, round 1: excluding ALL children — not
+   just named — shreds a markdown block `inline` node, whose children are
+   anonymous text tokens, into unparseable fragments. Excluding only named
+   children matches `tree-sitter-md`'s own inline splitter,
+   `parser.rs:406-425`, and is correct for every real injection site.)*
+   This makes `markdown_inline` a genuine multi-range case (Q#IJ5).
 4. `LanguageEntry.loader` (`fn() -> Language`) and query-source `&'static
    str` consts are `Send` and touch no grammar C-object until called — a
    worker resolves injected languages **lazily** by indexing `&'static
@@ -154,9 +156,13 @@ in v1. Every headline case is bundled.
 - **max depth** (default 3),
 - **max total layer count** — a *runaway backstop* set well above any
   real document (default **4096**), decoupled from performance; the real
-  perf bound is the Q#IJ10 settle-time guard. Hitting it is **logged, not
-  silent** (surfaced via `pmacs.error`/`*workers*`), and a modest markdown
-  doc's inline layers (one per paragraph/heading) sit far under it.
+  perf bound is the Q#IJ10 settle-time guard. Hitting it is **surfaced, not
+  silent**: `run_parse` sets a `ParseTreeBundle::injection_capped` flag,
+  and `syntax.lua`'s settle tick raises it once per buffer via
+  `pmacs.error` (`_injection_capped`). A modest markdown doc's inline
+  layers (one per paragraph/heading) sit far under the backstop. A real
+  boundary test drives just over 4096 fences and asserts the flag + capped
+  count + intact root.
 - a **visited set on `(language_name, ranges)`** so a same-language
   self-injection over a non-shrinking region can't reproduce itself.
 
@@ -190,14 +196,18 @@ A layer's ranges are built from its `@injection.content` node(s):
 
 - `#set! injection.include-children` → `[node.range]`;
 - otherwise (default; the markdown-inline case) → the node's extent
-  **minus its direct children's ranges**, **then intersected with the
-  parent layer's included ranges** (mechanic #3). Ranges come out ordered
-  and non-overlapping; empty ranges dropped.
+  **minus its NAMED children's ranges** (anonymous token children are the
+  injected text itself and are kept — mechanic #3), **then intersected
+  with the parent layer's included ranges**. Ranges come out ordered and
+  non-overlapping; empty ranges dropped.
 
-Fenced code (`code_fence_content`, no children) → one range; an inline
-paragraph with a link and emphasis → several. Core, not deferred —
-`markdown_inline` needs it. Acceptance parses an inline paragraph with a
-link **and** emphasis, not just plain text.
+Fenced code (`code_fence_content`, no children) → one range; a **multi-line**
+container (a blockquote/list whose inline node carries a named
+`block_continuation` child) → several. Core, not deferred —
+`markdown_inline` needs it. Acceptance asserts `content_node_ranges`
+returns **>1 range** for a multi-line blockquote and that both sides parse
+and highlight (a one-line paragraph would give a single range and could
+not falsify multi-range support).
 
 ### Q#IJ6 — The wire producer flattens layers into disjoint effective spans
 
@@ -308,27 +318,39 @@ half-styled frame. `grammar_style_parse_not_ready` unchanged.
    offsets matching its position in the **full** markdown source.
 4. `dynamic_alias_resolves` — ` ```py `→python, ` ```JS `→javascript
    (case-folded); ` ```nonsense ` → no child, no error, root intact.
-5. `alias_override_from_lua_async` — mutate `injection_aliases` in Lua,
-   then an **async** injected parse resolves the new alias (Q#IJ4 bridge).
-6. `inline_layer_multi_range_link_and_emphasis` — an inline paragraph
-   with a link **and** emphasis becomes a `markdown_inline` layer whose
-   ranges exclude the direct children and highlight correctly (Q#IJ5).
-7. `recursion_bounds_hold` — depth cap, layer-count backstop, and
-   `(language, ranges)` visited guard each terminate; a failing child
-   drops only itself, root installs (Q#IJ3).
-8. `wire_producer_emits_child_spans` — `scoped_style_spans` over a
-   ` ```rust ` fence emits disjoint `StyleSpan`s covering a rust keyword
-   **inside** the fence. **Bite-verified** vs the single-layer producer.
-9. `gpu_overlapping_child_color_wins` — parent-red / child-green overlap
-   applied through `replace_style_spans` then rendered: the child (green)
-   wins. **Bite-verified** vs the current first-span-wins path (Q#IJ6).
-10. `grid_producer_paints_child_span` — `SyntaxHighlightView` paints a
+5. `lua_alias_override_resolves_on_async_parse` — mutate
+   `injection_aliases` in Lua, then an **async** injected parse resolves
+   the new alias (Q#IJ4 bridge). Plus `sync_parse_now_resolves_alias`
+   (round 1): the same must hold on the **synchronous** `_parse_now` path.
+6. `inline_layer_multi_range_excludes_block_continuation` — a **multi-line**
+   blockquote's inline node carries a named `block_continuation`;
+   `content_node_ranges` returns **>1 range** and both sides parse +
+   highlight (Q#IJ5). (A one-line paragraph gives a single range and can't
+   falsify multi-range.)
+7. `recursion_bounds_terminate` — rust macro self-injection terminates
+   within the depth bound; `injection_layer_cap_surfaces_and_preserves_root`
+   drives >4096 fences and asserts the surfaced `injection_capped` flag,
+   the bounded count, and an intact root; a failing child drops only itself
+   (Q#IJ3).
+8. `wire_producer_emits_disjoint_child_spans_in_fence` — `scoped_style_spans`
+   over a ` ```rust ` fence emits disjoint `StyleSpan`s covering a rust
+   keyword **inside** the fence. **Bite-verified** vs the single-layer
+   producer. Plus `full_buffer_summary_scales_on_large_grammar_file`
+   (round 1): the whole-buffer summary path stays ~linear under the event
+   sweep (a quadratic flatten regresses it).
+9. `source_color_folds_overlapping_child_over_parent` — parent-red /
+   child-green overlap driven through the real `spans_from_segments`
+   (`replace_style_spans` body): the child (green) wins the fold.
+   **Bite-verified** vs the first-span-wins path (Q#IJ6).
+10. `grid_paints_injected_child_keyword` — `SyntaxHighlightView` paints a
     rust-keyword cell inside the fence.
-11. `incremental_edit_reflects_in_child` — editing inside a fence shows in
-    child spans after reparse; a **new** fence adds a layer (Q#IJ8).
-12. `many_paragraph_settle_under_budget_tail_covered` — a large all-inline
-    markdown buffer settles within a comfortable budget **and the final
-    paragraph receives a layer/capture** (Q#IJ3 cap + Q#IJ10 guard).
+11. `incremental_edit_reflects_in_child_and_new_fence_adds_layer` — editing
+    inside a fence shows in child spans after reparse; a **new** fence adds
+    a layer (Q#IJ8).
+12. `many_paragraph_settle_under_budget_with_tail_covered` — a large
+    all-inline markdown buffer settles within a comfortable budget **and
+    the final paragraph receives an inline layer** (Q#IJ3 cap + Q#IJ10
+    guard).
 13. `non_injecting_buffer_single_layer` — a plain `.rs` buffer still
     yields exactly one layer (regression guard).
 

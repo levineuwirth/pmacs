@@ -90,6 +90,43 @@ fn lua_alias_override_resolves_on_async_parse() {
     );
 }
 
+/// Round-2 finding: the synchronous parse path (`_parse_now`) must snapshot
+/// injection aliases too — otherwise a `py` fence (or a Lua-added alias)
+/// injects asynchronously but not synchronously. The default `py`→python
+/// alias discriminates the fix: with the empty map it would not resolve.
+#[test]
+fn sync_parse_now_resolves_alias() {
+    let state = EditorState::new();
+    let src = b"# Doc\n\n```py\nx = 1\n```\n";
+    let buf_id = state
+        .lua_host
+        .registry()
+        .borrow_mut()
+        .create_from_bytes("doc.md".to_owned(), src);
+    state
+        .lua_host
+        .lua()
+        .globals()
+        .set("BUF", BufferIdLua(buf_id))
+        .expect("bind BUF");
+    state
+        .lua_host
+        .lua()
+        .load("pmacs.parse._parse_now(BUF, 'markdown')")
+        .exec()
+        .expect("synchronous parse");
+
+    let bundle = state
+        .syntax_registry
+        .view(buf_id)
+        .and_then(|h| h.current())
+        .expect("installed bundle");
+    assert!(
+        bundle.layers.iter().any(|l| l.language_name == "python"),
+        "the `py` fence resolved to python on the synchronous `_parse_now` path"
+    );
+}
+
 /// Framing acceptance #12: a large all-inline markdown buffer settles
 /// (root + one cold inline layer per paragraph) within a comfortable
 /// budget, and the FINAL paragraph still receives an inline layer — the

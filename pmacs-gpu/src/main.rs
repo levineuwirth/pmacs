@@ -4126,11 +4126,7 @@ impl State {
     /// `full = true` path: discard prior styling, take the segments'
     /// spans as authoritative for the declared viewport.
     fn replace_style_spans(&mut self, segments: Vec<StyleSegment>) {
-        self.current_spans.clear();
-        for seg in segments {
-            self.current_spans.extend(seg.spans);
-        }
-        self.current_spans.sort_by_key(|s| s.range.start);
+        self.current_spans = spans_from_segments(segments);
     }
 
     /// `full = false` path: each segment's `range` authoritatively
@@ -6731,6 +6727,21 @@ fn adornment_text_color(fg: CellColor) -> glyphon::Color {
     cell_color_to_glyphon(fg).unwrap_or_else(|| glyphon::Color::rgb(130, 130, 140))
 }
 
+/// The `StyleSpans { full: true }` transform `replace_style_spans` applies:
+/// flatten every segment's spans and start-sort. Extracted as a free
+/// function so it (and `source_color_at`) can be exercised without a live
+/// `State` — the start-sort is the step that makes producer depth-order
+/// irrelevant on the wire, which is why the daemon flattens to disjoint
+/// spans and this consumer folds (framing Q#IJ6).
+fn spans_from_segments(segments: Vec<StyleSegment>) -> Vec<StyleSpan> {
+    let mut spans: Vec<StyleSpan> = Vec::new();
+    for seg in segments {
+        spans.extend(seg.spans);
+    }
+    spans.sort_by_key(|s| s.range.start);
+    spans
+}
+
 fn source_color_at(byte: u64, spans: &[StyleSpan]) -> Option<glyphon::Color> {
     // Fold every covering span in order, matching the semantic-client
     // `effective_style_at` contract (last covering span with a non-default
@@ -8985,24 +8996,29 @@ mod tests {
     #[test]
     fn source_color_folds_overlapping_child_over_parent() {
         // Framing acceptance #9 (GPU consumer): a styled markdown parent
-        // span [0,10) (red) with an injected child span [3,6) (green) on top.
-        // `replace_style_spans` sorts incoming spans by start, so we mirror
-        // that here; `source_color_at` must FOLD the covering spans (child
-        // green wins at a shared byte), not return the first (parent) span.
-        // Bite: the pre-fix first-covering-span code returns red at byte 4.
+        // span [0,10) (red) with an injected child span [3,6) (green) on top,
+        // driven through the ACTUAL `StyleSpans { full: true }` transform
+        // (`spans_from_segments`, the body of `replace_style_spans`) rather
+        // than a hand-rolled sort. `source_color_at` must FOLD the covering
+        // spans (child green wins at a shared byte), not return the first
+        // (parent) span. Bite: the pre-fix first-covering-span code returns
+        // red at byte 4.
         let red = style_with_fg(CellColor::Rgb(200, 0, 0));
         let green = style_with_fg(CellColor::Rgb(0, 200, 0));
-        let mut spans = vec![
-            StyleSpan {
-                range: ByteRange { start: 0, end: 10 },
-                style: red,
-            },
-            StyleSpan {
-                range: ByteRange { start: 3, end: 6 },
-                style: green,
-            },
-        ];
-        spans.sort_by_key(|s| s.range.start); // as replace_style_spans does
+        let segments = vec![StyleSegment {
+            range: ByteRange { start: 0, end: 10 },
+            spans: vec![
+                StyleSpan {
+                    range: ByteRange { start: 0, end: 10 },
+                    style: red,
+                },
+                StyleSpan {
+                    range: ByteRange { start: 3, end: 6 },
+                    style: green,
+                },
+            ],
+        }];
+        let spans = spans_from_segments(segments); // full-frame message application
 
         // Byte 4 is covered by both: the child (green) wins the fold.
         assert_eq!(

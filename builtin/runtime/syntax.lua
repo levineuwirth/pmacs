@@ -22,6 +22,10 @@ local inflight_parse_by_buffer = {}
 local parse_buffer_by_key = {}
 local parse_lang_by_buffer = {}
 local reparse_requested_by_buffer = {}
+-- Buffers already warned about hitting the injection layer cap (Q#IJ3);
+-- keyed like the others so we warn once, and re-arm if the file stops
+-- capping (an edit removed the excess regions).
+local injection_cap_warned = {}
 
 local raw_dispatch = pmacs.parse._dispatch
 
@@ -338,6 +342,19 @@ pmacs._async.tick = function(...)
     if pmacs._async._is_complete(job_id) then
       local key = parse_job_buffer_keys[job_id]
       pmacs.parse._install_settled(job_id)
+      -- Surface the injection layer backstop (Q#IJ3) once per buffer rather
+      -- than dropping embedded regions silently. Best-effort: a missing
+      -- buffer or error here must not stall the settle loop.
+      local capped_buf = key and parse_buffer_by_key[key]
+      if capped_buf and pmacs.parse._injection_capped(capped_buf) then
+        if not injection_cap_warned[key] and pmacs.error then
+          injection_cap_warned[key] = true
+          pmacs.error(
+            "syntax: injection layer cap reached; some embedded regions are unhighlighted")
+        end
+      elseif key then
+        injection_cap_warned[key] = nil
+      end
       pending_parse_jobs[job_id] = nil
       parse_job_buffer_keys[job_id] = nil
       if key and inflight_parse_by_buffer[key] == job_id then

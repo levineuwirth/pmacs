@@ -103,10 +103,16 @@ pub struct ParseTreeBundle {
     /// and the `*workers*` buffer can ask "what grammar produced this?"
     /// without indexing the layer vec.
     pub language_name: String,
-    /// Wall-clock duration of the whole layered parse (excludes dispatch
-    /// queueing, source materialization, and bus delivery). T M4.1
-    /// acceptance criteria are stated in this metric.
+    /// Wall-clock duration of the **root** parse (excludes injection layer
+    /// building and dispatch/materialization/bus overhead). The M4.1
+    /// acceptance perf gates are stated in this metric, so it stays the
+    /// single-tree cost even as injection layers are added on top.
     pub parse_duration: Duration,
+    /// True if injection expansion hit the total-layer backstop (framing
+    /// Q#IJ3) and dropped some regions. Surfaced (not silent) at settle via
+    /// `pmacs.error`; only a pathological file (thousands of embedded
+    /// regions) can set it.
+    pub injection_capped: bool,
 }
 
 /// One injection layer within a [`ParseTreeBundle`] (framing Q#IJ1). A
@@ -179,12 +185,14 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
         depth: 0,
         highlight_query: None,
     }];
-    build_injection_layers(&mut layers, req.source.as_ref(), &req.injection_aliases);
+    let injection_capped =
+        build_injection_layers(&mut layers, req.source.as_ref(), &req.injection_aliases);
     Ok(ParseTreeBundle {
         layers,
         source: req.source,
         language_name: req.language_name,
         parse_duration,
+        injection_capped,
     })
 }
 
@@ -251,17 +259,20 @@ struct InjectionMatch {
 /// appending children in depth-ascending order (Q#IJ1, Q#IJ6 rely on this
 /// ordering). Bounded by depth, total layer count, and a
 /// `(language, ranges)` visited guard (Q#IJ3). BFS by depth so siblings
-/// at a level are grouped before descending.
+/// at a level are grouped before descending. Returns `true` if the
+/// total-layer backstop was hit and some regions were dropped (surfaced at
+/// settle, framing Q#IJ3).
 fn build_injection_layers(
     layers: &mut Vec<Layer>,
     source: &[u8],
     aliases: &HashMap<String, String>,
-) {
+) -> bool {
     let mut query_cache: HashMap<String, Option<Arc<tree_sitter::Query>>> = HashMap::new();
     let mut visited: HashSet<(String, Vec<(usize, usize)>)> = HashSet::new();
     // Frontier entries are (layer index, that layer's included ranges).
     let mut frontier: Vec<(usize, Vec<Range>)> = vec![(0, vec![whole_source_range(source)])];
     let mut depth: u16 = 0;
+    let mut capped = false;
 
     while depth < MAX_INJECTION_DEPTH && !frontier.is_empty() {
         // Children discovered this level: (layer, its ranges) to append and
@@ -274,6 +285,7 @@ fn build_injection_layers(
             };
             for m in collect_injection_matches(&query, &layers[*parent_idx].tree, source) {
                 if layers.len() + children.len() >= MAX_INJECTION_LAYERS {
+                    capped = true;
                     break 'parents; // runaway backstop; tail dropped
                 }
                 let Some(child_lang) = resolve_injected_language(&m.language, aliases) else {
@@ -314,6 +326,7 @@ fn build_injection_layers(
         frontier = next_frontier;
         depth += 1;
     }
+    capped
 }
 
 /// Compile (once, cached) the `injections.scm` for `lang` from the static
@@ -797,16 +810,12 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         highlights_query: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
         injections_query: &[],
     },
-    // T M9.7: markdown grammar for prompt-result buffers with
-    // `_meta.format = "markdown"`. Uses only the block grammar
-    // (`tree_sitter_md::LANGUAGE`) — block-level highlighting (headers,
-    // lists, fenced code blocks, blockquotes) is the v0.1 floor.
-    // Inline highlighting (emphasis, links inside running text) would
-    // require the dual-grammar `MarkdownParser` and is M9.8+ work.
-    // The `markdown_inline` fixture prompt + matching acceptance test
-    // pin this floor: an `**emphasis**` span must not crash, and is
-    // expected to render unhighlighted; any future expansion that
-    // adds inline coverage is additive, not a regression.
+    // T M9.7: markdown block grammar (`tree_sitter_md::LANGUAGE`) — headers,
+    // lists, fenced code blocks, blockquotes. Its `injections.scm` (framing
+    // Q#IJ10) drives two layer kinds: fenced code blocks inject the fence's
+    // named language, and paragraph/heading text injects `markdown_inline`
+    // (the entry below) — so inline emphasis/links are now highlighted, and
+    // the former M9.7 "block-only, inline unhighlighted" floor is retired.
     // Note the constant name: `HIGHLIGHT_QUERY_BLOCK` (singular) is
     // the markdown crate's idiom; `tree-sitter-rust` and
     // `tree-sitter-lua` use `HIGHLIGHTS_QUERY` (plural).
@@ -1281,6 +1290,7 @@ impl SyntaxRegistry {
             source: raw.source.clone(),
             language_name: raw.language_name.clone(),
             parse_duration: raw.parse_duration,
+            injection_capped: raw.injection_capped,
         })
     }
 }
@@ -1597,44 +1607,80 @@ mod tests {
     }
 
     #[test]
-    fn inline_layer_multi_range_link_and_emphasis() {
-        // Framing acceptance #6: a paragraph with a link AND emphasis
-        // becomes a markdown_inline layer whose included ranges exclude the
-        // block grammar's named children — the inline grammar still parses
-        // the emphasis run in a surviving text range.
+    fn inline_layer_multi_range_excludes_block_continuation() {
+        // Framing acceptance #6 (round-2 finding 3): the multi-range path.
+        // A one-line paragraph would give a SINGLE range (a link/emphasis
+        // are child-grammar structures, not block-grammar named children),
+        // so it can't prove multi-range. A MULTI-LINE blockquote's inline
+        // node carries a named `block_continuation` child (the `> ` marker),
+        // which `content_node_ranges` excludes — yielding MORE THAN ONE
+        // included range, the genuine path markdown_inline depends on.
         let reg = SyntaxRegistry::new();
-        let src = b"See [the docs](http://example.com) and *emphasis* here.\n";
-        let bundle = parse_layered(&reg, "markdown", src);
+        let src = b"> first *one*\n> second *two*\n";
+        let language = reg.language("markdown").expect("markdown");
+        let mut buf = fresh_buffer("doc");
+        buf.apply_edit(EditOp::Insert { pos: 0, bytes: src })
+            .unwrap();
+        let view = ParseView::new(&buf, language, "markdown".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let raw = run_parse(req).expect("parse");
+
+        // The inline injection match collects more than one included range.
+        let mut cache = HashMap::new();
+        let query = injection_query_cached(&mut cache, "markdown").expect("md injections");
+        let inline_match = collect_injection_matches(&query, &raw.layers[0].tree, src)
+            .into_iter()
+            .find(|m| m.language == "markdown_inline")
+            .expect("an inline injection match");
+        assert!(
+            inline_match.ranges.len() >= 2,
+            "the multi-line inline node yields >1 range (block_continuation \
+             excluded); got {:?}",
+            inline_match
+                .ranges
+                .iter()
+                .map(|r| (r.start_byte, r.end_byte))
+                .collect::<Vec<_>>()
+        );
+
+        // Both ranges parse and highlight: emphasis is recognized on BOTH
+        // lines, and the resolved layer produces spans.
+        let bundle = reg.resolve_layer_queries(&raw);
         let inline = bundle
             .layers
             .iter()
             .find(|l| l.language_name == "markdown_inline")
-            .expect("inline paragraph becomes a markdown_inline layer");
-        assert_eq!(
-            inline.depth, 1,
-            "inline is a depth-1 injection of the block grammar"
-        );
+            .expect("inline layer");
         let sexp = inline.tree.root_node().to_sexp();
         assert!(
-            sexp.contains("emphasis"),
-            "the inline layer parsed the *emphasis* run: {sexp}"
+            sexp.matches("emphasis").count() >= 2,
+            "the inline grammar parsed emphasis in both ranges: {sexp}"
         );
-        let query = inline
+        let hquery = inline
             .highlight_query
             .as_ref()
             .expect("inline highlights resolved at settle");
-        let spans = compute_highlight_spans_for(query, &inline.tree, &bundle.source, None);
+        let spans = compute_highlight_spans_for(hquery, &inline.tree, &bundle.source, None);
         assert!(
             !spans.is_empty(),
-            "the inline layer produces highlight spans"
+            "the inline layer produces highlight spans across both ranges"
         );
     }
 
     #[test]
     fn recursion_bounds_terminate() {
-        // Framing acceptance #7: rust self-injects into macro token-trees.
-        // Nested injections must terminate (depth cap + visited guard),
-        // never loop — if the guard failed this test would hang.
+        // Framing acceptance #7: rust self-injects into macro token-trees, so
+        // nested injections recurse. This proves the depth bound and, most
+        // importantly, TERMINATION — a completing test (vs a hang) is the
+        // observable guarantee. (The total-layer backstop is exercised
+        // separately by `injection_layer_cap_surfaces_and_preserves_root`;
+        // the `(lang, ranges)` visited guard is a defensive early-out that
+        // no bundled grammar's self-injection-over-a-fixed-range can trip,
+        // so it is covered by inspection + this termination check, not an
+        // isolated positive case.)
         let reg = SyntaxRegistry::new();
         let src =
             b"macro_rules! m { () => { println!(\"{}\", vec![1, 2, 3]); }; }\nfn f() { m!(); }\n";
@@ -1653,6 +1699,44 @@ mod tests {
             bundle.layers.iter().all(|l| l.language_name == "rust"),
             "all layers are rust (self-injection)"
         );
+    }
+
+    #[test]
+    fn injection_layer_cap_surfaces_and_preserves_root() {
+        // Round-2 finding 4: hitting the total-layer backstop must set the
+        // surfaced `injection_capped` flag (not drop silently), bound the
+        // layer count, and keep the root intact.
+        let reg = SyntaxRegistry::new();
+        let fences = MAX_INJECTION_LAYERS + 8; // just over the backstop
+        let mut src = String::with_capacity(fences * 15);
+        for _ in 0..fences {
+            src.push_str("```rust\nx\n```\n\n");
+        }
+        let language = reg.language("markdown").expect("markdown");
+        let mut buf = fresh_buffer("doc");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "markdown".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = run_parse(req).expect("root parse");
+
+        assert!(
+            bundle.injection_capped,
+            "hitting the backstop sets the surfaced flag"
+        );
+        assert!(
+            bundle.layers.len() <= MAX_INJECTION_LAYERS,
+            "layer count is bounded by the backstop; got {}",
+            bundle.layers.len()
+        );
+        assert_eq!(bundle.layers[0].language_name, "markdown", "root intact");
+        assert_eq!(bundle.root_tree().root_node().kind(), "document");
     }
 
     #[test]

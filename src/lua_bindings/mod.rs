@@ -6652,6 +6652,21 @@ pub fn install_parse(
         )?;
     }
 
+    // True if the buffer's installed bundle hit the injection layer backstop
+    // (framing Q#IJ3). `syntax.lua` reads this after settle to surface the
+    // cap once via `pmacs.error` rather than dropping regions silently.
+    {
+        let s = syntax.clone();
+        parse_mod.set(
+            "_injection_capped",
+            lua.create_function(move |_, id: BufferIdLua| {
+                Ok(s.view(id.0)
+                    .and_then(|h| h.current())
+                    .is_some_and(|b| b.injection_capped))
+            })?,
+        )?;
+    }
+
     {
         let s = syntax.clone();
         parse_mod.set(
@@ -6673,7 +6688,11 @@ pub fn install_parse(
             "_parse_now",
             lua.create_function(move |_, (id, lang): (BufferIdLua, String)| {
                 let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
-                let req = handle.make_request();
+                let mut req = handle.make_request();
+                // Snapshot the alias map on the sync path too (framing Q#IJ4)
+                // — otherwise a `py` fence or a Lua-added alias would resolve
+                // asynchronously but not through `_parse_now`.
+                req.injection_aliases = s.injection_alias_snapshot();
                 let bundle = syntax::run_parse(req).map_err(mlua::Error::external)?;
                 // Resolve each layer's highlight query from the registry
                 // cache before install so producers can style every layer
