@@ -1,7 +1,29 @@
 # Theme faces — framing (Arc 4 stage 1, themes)
 
-**Revision 6 — 2026-07-15. Status: implemented on branch
-`theme-faces` (PR #120); revision 6 folds PR round 2.**
+**Revision 7 — 2026-07-15. Status: implemented on branch
+`theme-faces` (PR #120); revision 7 folds PR round 3.**
+
+Revision 7 (PR #120 round 3, findings 1–2): the reset contract is
+now symmetric on the GPU. The round-2 producer reset covered
+search/menu/status baselines, but the GPU's `BufferSnapshot` arm
+only cleared spans, decorations, adornments, summary, and the
+completion popup — a menu (or search) open at switch time survived
+the snapshot with no close message ever coming (the new buffer's
+first CLOSED state is suppressed daemon-side), leaving a stale
+popup that also gated key and pointer interception
+(`daemon_intercepts_keys`) indefinitely. The arm now clears
+`search_prompt`, `menu`, and `status_facts`; the minibuffer is
+deliberately exempt (one global core instance, matching the
+producer's surviving `last_minibuffer` baseline) (finding 1). And
+the round-2 reset broke the diagnostic-count freeze: `last_status`
+was both the peer emission baseline and the stale-store freeze
+source, so a snapshot between didChange and fresh diagnostics
+re-shipped `StatusFacts` with zeroed counts. The freeze source now
+lives apart — `frozen_diag_counts`, daemon-side knowledge about the
+buffer, advanced on every fresh count and read when the store is
+stale — and survives `on_buffer_snapshot_sent`, which keeps killing
+the emission baseline to force the re-send (finding 2). Acceptance
+items 31–32.
 
 Revision 6 (PR #120 round 2, findings 1–2): the producer gains the
 **snapshot/baseline reset contract**
@@ -627,10 +649,19 @@ pub struct ThemeFace {
   needs no call. NOT reset: `last_face_epoch` / `last_theme_faces`
   (this channel is bufferless — the frontend keeps its face table
   across snapshots), the global minibuffer baseline, the
-  per-frontend gutter mode, the revision-keyed diag line cache, and
-  other buffers' baselines (each buffer's own snapshot precedes its
-  revisit). Resetting on a failed write is harmless — the failure
-  mode is one redundant re-send, never staleness.
+  per-frontend gutter mode, the revision-keyed diag line cache,
+  `frozen_diag_counts` (round 3 finding 2: the stale-store freeze
+  source is daemon-side knowledge about the buffer, split from the
+  `last_status` peer baseline precisely so the reset cannot zero
+  mid-edit counts), and other buffers' baselines (each buffer's own
+  snapshot precedes its revisit). Resetting on a failed write is
+  harmless — the failure mode is one redundant re-send, never
+  staleness. The GPU's `BufferSnapshot` arm mirrors the contract
+  (round 3 finding 1): it clears its buffer-scoped facts —
+  search/menu popups (which gate key and pointer interception) and
+  the status band — alongside spans, decorations, adornments,
+  summary, and the completion popup; the minibuffer survives on
+  both sides.
 - `docs/semantic-frontend-protocol.md` gains the channel's contract
   section.
 
@@ -951,3 +982,13 @@ Keybinding-driven tests dispatch keys, never `pmacs.command.invoke`.
     round trip (same text both buffers, isolating the minimap), the
     stale minimap is gone, and applying the re-shipped summary at
     the same generation restores the first visit's pixels exactly.
+31. **Snapshots clear GPU search/menu/status and release the
+    intercept gate** (PR round 3 finding 1, `PMACS_REQUIRE_GPU=1`):
+    with an open search prompt, menu popup, and status facts,
+    applying a `BufferSnapshot` clears all three, flips
+    `daemon_intercepts_keys` back to local key handling, and removes
+    the popup pixels — hand-bitten by disabling the three clears.
+32. **The reset preserves the diagnostic-count freeze** (PR round 3
+    finding 2): render nonzero counts, mark the store stale
+    (didChange), apply the snapshot reset — the re-sent
+    `StatusFacts` carries the frozen nonzero counts, never (0, 0).

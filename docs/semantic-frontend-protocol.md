@@ -119,14 +119,18 @@ variants, and one frontend→instance `Viewport` variant.
 **`BufferSnapshot` resets buffer-scoped interpretation state.** A
 frontend receiving a snapshot drops everything it holds for the
 named buffer — spans, decorations, adornments, minimap summary,
-completion popup — and rebuilds from the frames that follow; the
-instance mirrors this by invalidating its per-buffer emission
-baselines whenever it writes a snapshot, so the frontend's
-post-snapshot viewport declaration receives authoritative re-sends
-even when nothing changed daemon-side (the unchanged-generation
-A → B → A revisit). Bufferless facts (`ThemeFacts`, the minibuffer
-prompt) and per-frontend state (the gutter mode) survive snapshots
-on both sides.
+completion popup, search and menu prompts (which also gate the
+frontend's key/pointer interception), and status facts — and
+rebuilds from the frames that follow; the instance mirrors this by
+invalidating its per-buffer emission baselines whenever it writes a
+snapshot, so the frontend's post-snapshot viewport declaration
+receives authoritative re-sends even when nothing changed
+daemon-side (the unchanged-generation A → B → A revisit). Bufferless
+facts (`ThemeFacts`, the minibuffer prompt) and per-frontend state
+(the gutter mode) survive snapshots on both sides, and the
+instance's stale-store diagnostic-count freeze is daemon knowledge,
+not peer state — the re-sent `StatusFacts` after a snapshot carries
+the frozen counts, never zeros.
 
 ## Capability and version mechanics
 

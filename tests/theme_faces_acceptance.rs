@@ -1,6 +1,6 @@
 // theme_faces_acceptance.rs --- Themes Arc 4 stage 1 acceptance
-// (docs/theme-faces-framing.md, acceptance items 1–19, 24–26, and
-// 28–29; the GPU routes — 20–23, 27, and 30 — live in pmacs-gpu's
+// (docs/theme-faces-framing.md, acceptance items 1–19, 24–26, 28–29,
+// and 32; the GPU routes — 20–23, 27, and 30–31 — live in pmacs-gpu's
 // headless suite).
 
 //! Named UI faces (`ui` / `ui.*` theme entries) + the `ThemeFacts`
@@ -1071,6 +1071,78 @@ fn daemon_reships_the_summary_after_a_real_buffer_round_trip() {
     assert_eq!(
         gen_back, gen_a,
         "the revisit summary arrives at A's unchanged generation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 32 — the snapshot reset must not break the diagnostic-count freeze
+// (PR #120 round 3 finding 2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_reset_keeps_frozen_diag_counts_while_the_store_is_stale() {
+    // `last_status` was both the peer emission baseline AND the
+    // stale-store freeze source, so the round-2 reset zeroed the
+    // counts: a buffer switch between didChange and fresh
+    // diagnostics re-shipped StatusFacts with (0, 0). The freeze
+    // source now lives apart (`frozen_diag_counts`) and survives
+    // `on_buffer_snapshot_sent`.
+    use pmacs::diag::DiagnosticSeverity;
+
+    let mut state = editor();
+    type_str(&mut state, "boom\nfine\n");
+    let uri = attach_diags(
+        &state,
+        vec![
+            diag(DiagnosticSeverity::Error),
+            diag(DiagnosticSeverity::Warning),
+        ],
+    );
+
+    let status_counts = |msgs: &[InstanceMessage]| {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::StatusFacts {
+                diag_errors,
+                diag_warnings,
+                ..
+            } => Some((*diag_errors, *diag_warnings)),
+            _ => None,
+        })
+    };
+
+    let a = active_buffer(&state);
+    let mut sem = semantic(&state);
+    assert_eq!(
+        status_counts(&sem.render_frame(&state)),
+        Some((1, 1)),
+        "fresh counts ship on the first frame"
+    );
+
+    // didChange: the store goes stale — counts freeze, never zero.
+    {
+        let store = state.lsp_manager.borrow().diag_store();
+        store
+            .lock()
+            .expect("diag store lock")
+            .mark_stale(uri.clone());
+    }
+
+    // The daemon writes snapshot(A) mid-staleness (a revisit, or the
+    // F29 upgrade broadcast). The reset kills the emission baseline —
+    // forcing the re-send — but must not discard the freeze source.
+    sem.on_buffer_snapshot_sent(a);
+    sem.set_viewport(
+        a,
+        ByteRange {
+            start: 0,
+            end: 1 << 20,
+        },
+        0,
+    );
+    assert_eq!(
+        status_counts(&sem.render_frame(&state)),
+        Some((1, 1)),
+        "the re-sent StatusFacts preserves the frozen counts"
     );
 }
 

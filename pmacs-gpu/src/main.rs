@@ -2465,6 +2465,22 @@ impl State {
                 // keep hijacking Esc/RET/TAB. The daemon-side session
                 // was already invalidated by the switch.
                 self.completion = None;
+                // PR #120 round 3 finding 1 — the remaining
+                // buffer-scoped facts, same reasoning: search and menu
+                // popups anchor in the prior buffer AND gate key and
+                // pointer interception (`daemon_intercepts_keys`, the
+                // pointer arms), and the new buffer's first CLOSED
+                // state is suppressed daemon-side, so no close message
+                // ever comes — a retained popup would hijack input
+                // forever. The status band's name/counts describe the
+                // buffer we just left; the producer's reset contract
+                // re-ships the new buffer's facts on its first frame.
+                // The minibuffer deliberately survives: it is one
+                // global core instance, matching the producer's
+                // surviving `last_minibuffer` baseline.
+                self.search_prompt = None;
+                self.menu = None;
+                self.status_facts = None;
                 self.cursor_fresh = false;
                 self.optimistic_cursor_floor = None;
                 self.optimistic_floor_set_at = None;
@@ -8774,6 +8790,80 @@ mod tests {
             first_visit,
             state.render_offscreen(),
             "the re-shipped summary restores the first visit's minimap"
+        );
+    }
+
+    #[test]
+    fn headless_snapshot_clears_search_menu_status_and_the_intercept_gate() {
+        // PR #120 round 3 finding 1: search/menu popups anchor in the
+        // prior buffer AND gate key/pointer interception, and the new
+        // buffer's first CLOSED state is suppressed daemon-side, so
+        // no close message ever comes — a `BufferSnapshot` must clear
+        // them (and the stale status band) or the popup hijacks input
+        // forever. The minibuffer is global and deliberately exempt.
+        let text = "alpha\nbeta\n";
+        let Some(mut state) = headless_or_skip(400, 300, text) else {
+            return;
+        };
+        let bid_a = BufferId::next();
+        state.current_buffer_id = Some(bid_a);
+        let _ = state.apply_attach_message(InstanceMessage::DispatchIdle { idle: true });
+        assert!(
+            !state.daemon_intercepts_keys(),
+            "idle with nothing open: keys apply locally"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::SearchPrompt {
+            buffer_id: bid_a,
+            query: Some("al".into()),
+            active: Some(0),
+            total: 1,
+            regex: false,
+            invalid: false,
+        });
+        let _ = state.apply_attach_message(InstanceMessage::MenuPrompt {
+            buffer_id: bid_a,
+            rows: vec![MenuPromptRow {
+                label: "Cut".into(),
+                separator: false,
+            }],
+            active: Some(0),
+        });
+        let _ = state.apply_attach_message(InstanceMessage::StatusFacts {
+            buffer_id: bid_a,
+            name: "old.rs".into(),
+            modified: false,
+            diag_errors: 3,
+            diag_warnings: 1,
+            message: None,
+        });
+        assert!(
+            state.daemon_intercepts_keys(),
+            "an open search/menu round-trips every key"
+        );
+        let with_popups = state.render_offscreen();
+
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+
+        assert!(
+            state.search_prompt.is_none() && state.menu.is_none() && state.status_facts.is_none(),
+            "buffer-scoped search/menu/status facts die with the snapshot"
+        );
+        assert!(
+            !state.daemon_intercepts_keys(),
+            "the intercept gate releases — keys apply locally again"
+        );
+        assert_ne!(
+            with_popups,
+            state.render_offscreen(),
+            "the popup pixels are gone"
         );
     }
 

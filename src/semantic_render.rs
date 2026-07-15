@@ -177,6 +177,16 @@ pub struct SemanticRenderState {
     /// emitted as `StatusFacts` (Q#S1; `message` since v15) —
     /// cached-compare suppression.
     last_status: HashMap<BufferId, (String, bool, u32, u32, Option<String>)>,
+    /// Last *fresh* whole-file diagnostic counts per buffer — the
+    /// freeze source while the diag store is stale (mid-edit counts
+    /// merely lag; flickering to zero per keystroke would be worse).
+    /// Split from `last_status` (PR #120 round 3 finding 2): that map
+    /// is a PEER emission baseline and dies with a `BufferSnapshot`
+    /// (`on_buffer_snapshot_sent`), while this is daemon-side
+    /// knowledge about the buffer and must survive the reset — or a
+    /// buffer switch between didChange and fresh diagnostics would
+    /// re-ship `StatusFacts` with zeroed counts.
+    frozen_diag_counts: HashMap<BufferId, (u32, u32)>,
     /// Last-emitted line-number gutter mode (UX gutter arc, protocol v14) —
     /// cached-compare suppression. Seeded to `Some(Off)` (the frontend's
     /// default) so an off gutter never emits. Per-frontend (one value),
@@ -352,6 +362,7 @@ impl SemanticRenderState {
             last_completion_popup: HashMap::new(),
             last_summary: HashMap::new(),
             last_status: HashMap::new(),
+            frozen_diag_counts: HashMap::new(),
             // Seed to the frontend's default (gutter off): a plain default
             // window never emits `LineNumbers`, so the common case adds no
             // traffic and the first frame is unchanged. Only an actual
@@ -403,10 +414,14 @@ impl SemanticRenderState {
     /// table across snapshots), `last_minibuffer` (one global core
     /// instance, not buffer-scoped), `last_line_numbers`
     /// (per-frontend gutter mode, kept by the frontend across the
-    /// switch), and `diag_line_cache` (a revision-keyed compute
-    /// cache, not a peer-state baseline). Baselines for OTHER buffers
-    /// also survive — the snapshot names one buffer, and any buffer
-    /// the frontend navigates to receives its own snapshot first.
+    /// switch), `diag_line_cache` (a revision-keyed compute cache,
+    /// not a peer-state baseline), and `frozen_diag_counts` (the
+    /// stale-store freeze source — daemon-side knowledge about the
+    /// buffer, not about the peer; deleting it would zero the counts
+    /// on a mid-edit revisit, round 3 finding 2). Baselines for OTHER
+    /// buffers also survive — the snapshot names one buffer, and any
+    /// buffer the frontend navigates to receives its own snapshot
+    /// first.
     pub fn on_buffer_snapshot_sent(&mut self, buffer_id: BufferId) {
         self.last_sent.remove(&buffer_id);
         self.last_style_gate.remove(&buffer_id);
@@ -919,11 +934,24 @@ impl SemanticRenderState {
                 }
             })
         };
-        let cached = self.last_status.get(&buffer_id);
-        let (diag_errors, diag_warnings) =
-            counts.unwrap_or_else(|| cached.map_or((0, 0), |c| (c.2, c.3)));
+        // Fresh counts advance the freeze source; a stale store reads
+        // it back. Never `last_status` — that is the peer emission
+        // baseline and dies with a `BufferSnapshot`, while the frozen
+        // counts are daemon-side knowledge that must survive the
+        // reset (round 3 finding 2).
+        let (diag_errors, diag_warnings) = match counts {
+            Some(fresh) => {
+                self.frozen_diag_counts.insert(buffer_id, fresh);
+                fresh
+            }
+            None => self
+                .frozen_diag_counts
+                .get(&buffer_id)
+                .copied()
+                .unwrap_or((0, 0)),
+        };
         let facts = (name, modified, diag_errors, diag_warnings, message);
-        if cached == Some(&facts) {
+        if self.last_status.get(&buffer_id) == Some(&facts) {
             return None;
         }
         let msg = InstanceMessage::StatusFacts {
