@@ -116,6 +116,18 @@ layout-local frontend consumes). Peer cursors reuse the existing
 is: one capability bit, ~five instance→frontend interpretation
 variants, and one frontend→instance `Viewport` variant.
 
+**`BufferSnapshot` resets buffer-scoped interpretation state.** A
+frontend receiving a snapshot drops everything it holds for the
+named buffer — spans, decorations, adornments, minimap summary,
+completion popup — and rebuilds from the frames that follow; the
+instance mirrors this by invalidating its per-buffer emission
+baselines whenever it writes a snapshot, so the frontend's
+post-snapshot viewport declaration receives authoritative re-sends
+even when nothing changed daemon-side (the unchanged-generation
+A → B → A revisit). Bufferless facts (`ThemeFacts`, the minibuffer
+prompt) and per-frontend state (the gutter mode) survive snapshots
+on both sides.
+
 ## Capability and version mechanics
 
 Identical pattern to `crdt_replica`:

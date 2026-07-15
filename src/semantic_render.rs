@@ -381,6 +381,44 @@ impl SemanticRenderState {
         });
     }
 
+    /// Snapshot/baseline reset contract (PR #120 round 2 finding 1).
+    ///
+    /// A `BufferSnapshot` resets the receiving frontend's
+    /// buffer-scoped render state wholesale — spans, decorations,
+    /// adornments, minimap summary, completion popup (see the GPU's
+    /// `BufferSnapshot` arm) — so every buffer-scoped emission
+    /// baseline this producer holds for that buffer must die with the
+    /// send. Otherwise an unchanged-key revisit (the A → B → A round
+    /// trip at one CRDT generation) suppresses every re-send and the
+    /// frontend never regains the state until an edit, diagnostic
+    /// republish, or theme mutation happens to move the key.
+    ///
+    /// Called by the daemon wherever it writes a `BufferSnapshot` to
+    /// this session's stream. Resetting when the write later fails is
+    /// harmless — the failure mode is one redundant re-send, never
+    /// staleness.
+    ///
+    /// Deliberately NOT reset: `last_face_epoch` / `last_theme_faces`
+    /// (`ThemeFacts` is bufferless — the frontend keeps its face
+    /// table across snapshots), `last_minibuffer` (one global core
+    /// instance, not buffer-scoped), `last_line_numbers`
+    /// (per-frontend gutter mode, kept by the frontend across the
+    /// switch), and `diag_line_cache` (a revision-keyed compute
+    /// cache, not a peer-state baseline). Baselines for OTHER buffers
+    /// also survive — the snapshot names one buffer, and any buffer
+    /// the frontend navigates to receives its own snapshot first.
+    pub fn on_buffer_snapshot_sent(&mut self, buffer_id: BufferId) {
+        self.last_sent.remove(&buffer_id);
+        self.last_style_gate.remove(&buffer_id);
+        self.last_decorations.remove(&buffer_id);
+        self.last_adornments.remove(&buffer_id);
+        self.last_summary.remove(&buffer_id);
+        self.last_status.remove(&buffer_id);
+        self.last_search_prompt.remove(&buffer_id);
+        self.last_menu_prompt.remove(&buffer_id);
+        self.last_completion_popup.remove(&buffer_id);
+    }
+
     /// Project one frame.
     ///
     /// Returns up to three messages — [`InstanceMessage::StyleSpans`]
@@ -2245,6 +2283,63 @@ mod tests {
                 .3,
             face_epoch,
             "the cache key advanced despite the suppressed send"
+        );
+    }
+
+    #[test]
+    fn snapshot_reset_drops_one_buffers_baselines_and_keeps_the_rest() {
+        // PR #120 round 2 finding 1 — the reset contract's scope: a
+        // `BufferSnapshot` for buffer A kills A's buffer-scoped
+        // emission baselines (here: summary and status, the two the
+        // A → B → A round trip visibly strands) while OTHER buffers'
+        // baselines and the bufferless ThemeFacts pair survive.
+        let state = empty_state();
+        let mut s = local();
+        let a = active_buffer(&state);
+        let b = {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            reg.create("other")
+        };
+        s.set_viewport(a, ByteRange { start: 0, end: 64 }, 0);
+        let first = s.render_frame(&state);
+        assert!(
+            first
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::FileStyleSummary { .. })),
+            "first frame ships A's summary"
+        );
+        s.set_viewport(b, ByteRange { start: 0, end: 64 }, 0);
+        let _ = s.render_frame(&state);
+        assert!(s.last_summary.contains_key(&a));
+        assert!(s.last_summary.contains_key(&b));
+        assert!(s.last_status.contains_key(&a));
+        let facts_baseline = s.last_theme_faces.clone();
+        assert!(facts_baseline.is_some(), "first frame shipped ThemeFacts");
+
+        s.on_buffer_snapshot_sent(a);
+
+        assert!(
+            !s.last_summary.contains_key(&a) && !s.last_status.contains_key(&a),
+            "A's baselines die with A's snapshot"
+        );
+        assert!(
+            s.last_summary.contains_key(&b),
+            "B's baselines survive A's snapshot"
+        );
+        assert_eq!(
+            s.last_theme_faces, facts_baseline,
+            "ThemeFacts is bufferless — the face table survives snapshots"
+        );
+
+        // And the behavioral consequence: revisiting A at the SAME
+        // generation re-ships the summary the frontend just dropped.
+        s.set_viewport(a, ByteRange { start: 0, end: 64 }, 0);
+        let back = s.render_frame(&state);
+        assert!(
+            back.iter()
+                .any(|m| matches!(m, InstanceMessage::FileStyleSummary { .. })),
+            "the unchanged-generation revisit re-ships A's summary"
         );
     }
 

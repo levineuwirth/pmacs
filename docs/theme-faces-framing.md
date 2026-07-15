@@ -1,7 +1,35 @@
 # Theme faces — framing (Arc 4 stage 1, themes)
 
-**Revision 5 — 2026-07-14. Status: implemented on branch
-`theme-faces` (PR #120); revision 5 folds PR round 1.**
+**Revision 6 — 2026-07-15. Status: implemented on branch
+`theme-faces` (PR #120); revision 6 folds PR round 2.**
+
+Revision 6 (PR #120 round 2, findings 1–2): the producer gains the
+**snapshot/baseline reset contract**
+(`SemanticRenderState::on_buffer_snapshot_sent`). A `BufferSnapshot`
+resets the receiving frontend's buffer-scoped render state wholesale
+— spans, decorations, adornments, minimap summary, completion popup —
+but the returned viewport only replaced the producer's declared
+viewport, leaving every per-buffer emission baseline intact. On an
+unchanged A → B → A round trip, `last_summary[A]`'s key still
+matched, so the daemon emitted nothing and the frontend never
+regained A's themed minimap (or A's `StatusFacts` — the band kept
+showing B's name) until an edit, diagnostic republish, or theme
+mutation happened to move the key. The daemon now invalidates every
+buffer-scoped baseline for the snapshot's buffer wherever it writes
+one — the active-buffer-follow path and the F29 upgrade broadcast;
+the attach bootstrap needs no call because its session state is
+constructed fresh — general contract, not a minimap special case
+(finding 1). Deliberately surviving the reset: the bufferless
+`ThemeFacts` pair (the frontend keeps its face table across
+snapshots), the global minibuffer baseline, the per-frontend gutter
+mode, and the revision-keyed diag line cache (a compute cache, not a
+peer-state baseline); other buffers' baselines also survive, since
+any buffer the frontend navigates to receives its own snapshot
+first. Acceptance items 28–30 cover the producer round trip (themed
+summary and `StatusFacts` return at one generation), the real-daemon
+wiring over the wire, and the GPU minimap's pixel-identical return.
+The acceptance-suite manifest header now lists the true item split
+(finding 2).
 
 Revision 5 (PR #120 round 1, findings 1–4): accepting a
 `FileStyleSummary` on the GPU now drops the cached minimap vertices —
@@ -585,6 +613,24 @@ pub struct ThemeFace {
   debug-name arm (`main.rs:5606-5628`); `ThemeFace` re-exported from
   `pmacs-protocol/src/lib.rs`; pin tests at `protocol.rs:1710` and
   the ladder test (accept 16, reject 17); postcard round-trip pin.
+- **Snapshot/baseline reset contract** (round 2 finding 1): a
+  `BufferSnapshot` resets the receiving frontend's buffer-scoped
+  render state wholesale, so wherever the daemon writes one it calls
+  `SemanticRenderState::on_buffer_snapshot_sent(buffer_id)`, killing
+  every buffer-scoped emission baseline for that buffer — spans +
+  style gate, decorations, adornments, summary, status, search/menu
+  prompts, completion popup. Without this, an unchanged-generation
+  A → B → A round trip suppressed every re-send and the frontend
+  never regained A's themed minimap or `StatusFacts`. Call sites:
+  the active-buffer-follow path and the F29 upgrade broadcast; the
+  attach bootstrap constructs its session state fresh, so its sweep
+  needs no call. NOT reset: `last_face_epoch` / `last_theme_faces`
+  (this channel is bufferless — the frontend keeps its face table
+  across snapshots), the global minibuffer baseline, the
+  per-frontend gutter mode, the revision-keyed diag line cache, and
+  other buffers' baselines (each buffer's own snapshot precedes its
+  revisit). Resetting on a failed write is harmless — the failure
+  mode is one redundant re-send, never staleness.
 - `docs/semantic-frontend-protocol.md` gains the channel's contract
   section.
 
@@ -886,3 +932,22 @@ Keybinding-driven tests dispatch keys, never `pmacs.command.invoke`.
     (PR round 1 finding 1, `PMACS_REQUIRE_GPU=1`): two summaries at
     one generation with different mark colors render different
     frames — fails without the cache invalidation on accept.
+28. **Snapshot round trip re-ships buffer-scoped state** (PR round 2
+    finding 1): with a themed diag mark on A, driving the producer
+    through the daemon's exact A → B → A sequence
+    (`on_buffer_snapshot_sent` + viewport re-declaration at each
+    switch) re-ships A's `FileStyleSummary` — identical themed
+    payload, UNCHANGED generation — and A's `StatusFacts`; an
+    unchanged tick before the trip stays suppressed. A Rust unit
+    pins the reset's scope: one buffer's baselines die, other
+    buffers' and the bufferless `ThemeFacts` pair survive.
+29. **The daemon wiring, end to end** (PR round 2 finding 1, CRDT):
+    a real daemon session navigating A → B → A via dispatched keys
+    (the active-buffer-follow path writes the snapshots) re-ships
+    `FileStyleSummary` for A at its unchanged generation after the
+    revisit's viewport re-declaration.
+30. **The GPU minimap returns** (PR round 2 finding 1,
+    `PMACS_REQUIRE_GPU=1`): after a real `BufferSnapshot` A → B → A
+    round trip (same text both buffers, isolating the minimap), the
+    stale minimap is gone, and applying the re-shipped summary at
+    the same generation restores the first visit's pixels exactly.

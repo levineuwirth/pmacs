@@ -8711,6 +8711,73 @@ mod tests {
     }
 
     #[test]
+    fn headless_snapshot_round_trip_summary_restores_the_minimap() {
+        // PR #120 round 2 finding 1 (frontend half): a `BufferSnapshot`
+        // drops `current_summary` with the rest of the buffer-scoped
+        // state, so after an A → B → A round trip no stale minimap
+        // may survive — and when the daemon's baseline reset re-ships
+        // the summary at the unchanged generation, the first visit's
+        // pixels must return exactly.
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let (w, h) = (400u32, 300u32);
+        let Some(mut state) = headless_or_skip(w, h, text) else {
+            return;
+        };
+        // Both buffers carry the same text so the frames differ by
+        // the minimap alone.
+        let snapshot = || -> Vec<u8> {
+            let doc = loro::LoroDoc::new();
+            doc.get_text(LORO_TEXT_CONTAINER)
+                .insert(0, text)
+                .expect("insert snapshot text");
+            doc.export(loro::ExportMode::Snapshot)
+                .expect("export snapshot")
+        };
+        let bid_a = BufferId::next();
+        let bid_b = BufferId::next();
+        let visit = |state: &mut State, bid: BufferId| {
+            let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+                buffer_id: bid,
+                crdt_snapshot: snapshot(),
+            });
+            state.view_range = (0, text.len() as u64);
+        };
+        let lines: Vec<CellStyle> = (0..4)
+            .map(|_| CellStyle {
+                fg: CellColor::Rgb(200, 40, 40),
+                ..CellStyle::default()
+            })
+            .collect();
+
+        visit(&mut state, bid_a);
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid_a,
+            generation: 7,
+            lines: lines.clone(),
+        });
+        let first_visit = state.render_offscreen();
+
+        visit(&mut state, bid_b);
+        visit(&mut state, bid_a);
+        assert_ne!(
+            first_visit,
+            state.render_offscreen(),
+            "the round trip dropped the summary — no stale minimap"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid_a,
+            generation: 7,
+            lines,
+        });
+        assert_eq!(
+            first_visit,
+            state.render_offscreen(),
+            "the re-shipped summary restores the first visit's minimap"
+        );
+    }
+
+    #[test]
     fn own_wash_faces_color_local_rects_peers_keep_the_constant() {
         // Acceptance 21 + 23: decode the emitted decoration vertex
         // colors — the LOCAL selection and both search washes resolve

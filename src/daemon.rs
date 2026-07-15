@@ -984,6 +984,7 @@ fn dispatcher_loop(
                         upgraded,
                         &session_registry,
                         &mut streams,
+                        &mut semantic_states,
                     );
                     // The broadcast just delivered this buffer to this
                     // frontend too; record it so the follow check below
@@ -1022,6 +1023,14 @@ fn dispatcher_loop(
                         && last_active_buffer_sent.get(fid) != Some(&active_now)
                     {
                         send_buffer_snapshot_to_frontend(editor, active_now, *fid, &mut streams);
+                        // PR #120 round 2 — the snapshot just wiped
+                        // this frontend's buffer-scoped render state;
+                        // the emission baselines must die with it or
+                        // an unchanged-generation revisit (A → B → A)
+                        // suppresses every re-send.
+                        if let Some(sem) = semantic_states.get_mut(fid) {
+                            sem.on_buffer_snapshot_sent(active_now);
+                        }
                         last_active_buffer_sent.insert(*fid, active_now);
                     }
                 }
@@ -1863,6 +1872,7 @@ fn broadcast_buffer_snapshot_to_replicas(
     buffer_id: crate::buffer::BufferId,
     session_registry: &SessionRegistry,
     streams: &mut HashMap<FrontendId, UnixStream>,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
 ) {
     let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
         return;
@@ -1880,6 +1890,12 @@ fn broadcast_buffer_snapshot_to_replicas(
         }
         if let Err(e) = write_message(stream, &msg) {
             eprintln!("pmacs: F29 send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
+        }
+        // PR #120 round 2 — same reset contract as the follow path:
+        // the snapshot wiped this replica's buffer-scoped render
+        // state, so its emission baselines for the buffer die too.
+        if let Some(sem) = semantic_states.get_mut(fid) {
+            sem.on_buffer_snapshot_sent(buffer_id);
         }
     }
 }

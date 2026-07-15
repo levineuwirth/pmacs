@@ -1,6 +1,7 @@
 // theme_faces_acceptance.rs --- Themes Arc 4 stage 1 acceptance
-// (docs/theme-faces-framing.md, acceptance items 1–19 and 24; the GPU
-// routes 20–23 live in pmacs-gpu's headless suite).
+// (docs/theme-faces-framing.md, acceptance items 1–19, 24–26, and
+// 28–29; the GPU routes — 20–23, 27, and 30 — live in pmacs-gpu's
+// headless suite).
 
 //! Named UI faces (`ui` / `ui.*` theme entries) + the `ThemeFacts`
 //! wire channel (protocol v16).
@@ -230,6 +231,65 @@ fn attach_diags(state: &EditorState, diags: Vec<pmacs::diag::Diagnostic>) -> Str
         .expect("diag store lock")
         .set(uri.clone(), diags);
     uri
+}
+
+// --- Daemon wire helpers (item 29; CRDT suites only) -------------------------
+
+#[cfg(feature = "crdt")]
+fn wire_viewport(
+    stream: &mut std::os::unix::net::UnixStream,
+    fid: FrontendId,
+    buffer_id: pmacs::buffer::BufferId,
+) {
+    pmacs::transport::write_message(
+        stream,
+        &pmacs::protocol::FrontendEvent::Viewport {
+            frontend_id: fid,
+            buffer_id,
+            visible: ByteRange {
+                start: 0,
+                end: 4096,
+            },
+            generation: 0,
+        },
+    )
+    .expect("write Viewport");
+}
+
+#[cfg(feature = "crdt")]
+fn wire_key(
+    stream: &mut std::os::unix::net::UnixStream,
+    fid: FrontendId,
+    key: pmacs::protocol::Key,
+) {
+    pmacs::transport::write_message(
+        stream,
+        &pmacs::protocol::FrontendEvent::Key(pmacs::protocol::KeyEvent {
+            frontend_id: fid,
+            key,
+            mods: pmacs::protocol::Modifiers::NONE,
+            timestamp_ns: 0,
+        }),
+    )
+    .expect("write Key");
+}
+
+/// Read wire messages until `pick` returns, or panic at the deadline.
+#[cfg(feature = "crdt")]
+fn wire_wait_for<T>(
+    stream: &mut std::os::unix::net::UnixStream,
+    what: &str,
+    mut pick: impl FnMut(InstanceMessage) -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(msg) = pmacs::transport::read_message::<InstanceMessage>(stream)
+            && let Some(t) = pick(msg)
+        {
+            return t;
+        }
+    }
+    panic!("timeout waiting for {what}");
 }
 
 // ---------------------------------------------------------------------------
@@ -825,6 +885,193 @@ fn v15_peers_get_no_face_derived_summary_marks() {
         "a v16 peer's marks resolve the face"
     );
     assert!(theme_facts_of(&frame).is_some());
+}
+
+// ---------------------------------------------------------------------------
+// 28 + 29 — snapshot/baseline reset: the A → B → A round trip
+// (PR #120 round 2 finding 1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_round_trip_restores_the_themed_summary_at_one_generation() {
+    // A `BufferSnapshot` wipes the frontend's buffer-scoped render
+    // state, so the producer's emission baselines must die with the
+    // send (`on_buffer_snapshot_sent`). Pre-fix, revisiting A at an
+    // unchanged generation matched `last_summary[A]` and the
+    // frontend never regained the themed minimap — or A's
+    // StatusFacts — until an edit, republish, or theme mutation
+    // happened to move the key.
+    use pmacs::diag::DiagnosticSeverity;
+
+    let mut state = editor();
+    type_str(&mut state, "boom\nfine\n");
+    attach_diags(&state, vec![diag(DiagnosticSeverity::Error)]);
+    exec(
+        &state,
+        r#"pmacs.theme.merge { ["ui.diag.error"] = { fg = 45 } }"#,
+    );
+    exec(&state, "_G.__A = pmacs.window.buffer()");
+
+    let summary_msg = |msgs: &[InstanceMessage]| {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::FileStyleSummary {
+                generation, lines, ..
+            } => Some((*generation, lines.clone())),
+            _ => None,
+        })
+    };
+    let has_status = |msgs: &[InstanceMessage]| {
+        msgs.iter()
+            .any(|m| matches!(m, InstanceMessage::StatusFacts { .. }))
+    };
+    let viewport = ByteRange {
+        start: 0,
+        end: 1 << 20,
+    };
+
+    let a = active_buffer(&state);
+    let mut sem = semantic(&state);
+    let first = sem.render_frame(&state);
+    let (gen_a, themed) = summary_msg(&first).expect("first frame ships the summary");
+    assert_eq!(
+        themed[0].underline_color,
+        Color::Indexed(45),
+        "the mark is themed"
+    );
+    assert!(has_status(&first), "first frame ships StatusFacts");
+    let quiet = sem.render_frame(&state);
+    assert!(
+        summary_msg(&quiet).is_none() && !has_status(&quiet),
+        "an unchanged tick is suppressed"
+    );
+
+    // The daemon switches this session to B: it writes snapshot(B)
+    // (resetting B's baselines) and the frontend re-declares.
+    exec(
+        &state,
+        "local id = pmacs.instance.show(); pmacs.window.switch_buffer(id)",
+    );
+    let b = active_buffer(&state);
+    assert_ne!(a, b, "the instance buffer is a distinct buffer");
+    sem.on_buffer_snapshot_sent(b);
+    sem.set_viewport(b, viewport, 0);
+    let _ = sem.render_frame(&state);
+
+    // ... and back to A. Zero edits: same CRDT generation.
+    exec(&state, "pmacs.window.switch_buffer(_G.__A)");
+    assert_eq!(active_buffer(&state), a);
+    sem.on_buffer_snapshot_sent(a);
+    sem.set_viewport(a, viewport, 0);
+    let back = sem.render_frame(&state);
+    let (gen_back, lines_back) = summary_msg(&back).expect("the revisit re-ships the summary");
+    assert_eq!(
+        gen_back, gen_a,
+        "at the SAME generation — no edit forced it"
+    );
+    assert_eq!(lines_back, themed, "the identical themed payload returns");
+    assert!(has_status(&back), "StatusFacts returns with it");
+}
+
+#[cfg(feature = "crdt")]
+#[test]
+fn daemon_reships_the_summary_after_a_real_buffer_round_trip() {
+    // Item 29 — the daemon wiring for finding 1: a REAL daemon whose
+    // session navigates A → B → A (via dispatched keys, so the
+    // active-buffer-follow path writes the snapshots) must re-ship
+    // `FileStyleSummary` for A at its unchanged generation. Pre-fix,
+    // the producer baselines survived the snapshot and the revisit
+    // was summary-silent forever.
+    use common::daemon::{TestDaemon, build_default_caps};
+    use pmacs::protocol::{AttachRequest, FrontendCapabilities, Hello, Key};
+    use pmacs::transport::{read_message, write_message};
+
+    let daemon = TestDaemon::spawn_with_config(
+        r#"
+        pmacs.command.define {
+          name = "test.go-instance",
+          description = "themes round 2: switch to the instance buffer",
+          fn = function()
+            _G.__orig = pmacs.window.buffer()
+            local id = pmacs.instance.show()
+            pmacs.window.switch_buffer(id)
+          end,
+        }
+        pmacs.command.define {
+          name = "test.go-back",
+          description = "themes round 2: switch back to the original buffer",
+          fn = function() pmacs.window.switch_buffer(_G.__orig) end,
+        }
+        pmacs.keymap.bind { scope = "global", sequence = "<f6>", command = "test.go-instance" }
+        pmacs.keymap.bind { scope = "global", sequence = "<f7>", command = "test.go-back" }
+        "#,
+    );
+
+    let mut stream = daemon.connect();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .unwrap();
+    let hello: Hello = read_message(&mut stream).expect("read Hello");
+    let fid = hello.assigned_frontend_id;
+    write_message(
+        &mut stream,
+        &AttachRequest {
+            protocol_version: 16,
+            frontend_capabilities: FrontendCapabilities {
+                multi_frontend: true,
+                crdt_replica: true,
+                semantic_render: true,
+                ..build_default_caps()
+            },
+            initial_size: CellSize::new(24, 80),
+        },
+    )
+    .expect("write AttachRequest");
+
+    // Learn buffer A from the bootstrap snapshot, declare, and note
+    // the first summary's generation.
+    let a = wire_wait_for(&mut stream, "bootstrap BufferSnapshot", |m| match m {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(buffer_id),
+        _ => None,
+    });
+    wire_viewport(&mut stream, fid, a);
+    let gen_a = wire_wait_for(&mut stream, "first FileStyleSummary(A)", |m| match m {
+        InstanceMessage::FileStyleSummary {
+            buffer_id,
+            generation,
+            ..
+        } if buffer_id == a => Some(generation),
+        _ => None,
+    });
+
+    // A → B: the follow path writes snapshot(B); re-declare for B.
+    wire_key(&mut stream, fid, Key::F(6));
+    let b = wire_wait_for(&mut stream, "BufferSnapshot(B)", |m| match m {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } if buffer_id != a => Some(buffer_id),
+        _ => None,
+    });
+    wire_viewport(&mut stream, fid, b);
+
+    // B → A: the follow path writes snapshot(A) — the reset under
+    // test — and the revisit must re-ship A's summary, unchanged
+    // generation included.
+    wire_key(&mut stream, fid, Key::F(7));
+    wire_wait_for(&mut stream, "BufferSnapshot(A) on revisit", |m| match m {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } if buffer_id == a => Some(()),
+        _ => None,
+    });
+    wire_viewport(&mut stream, fid, a);
+    let gen_back = wire_wait_for(&mut stream, "re-shipped FileStyleSummary(A)", |m| match m {
+        InstanceMessage::FileStyleSummary {
+            buffer_id,
+            generation,
+            ..
+        } if buffer_id == a => Some(generation),
+        _ => None,
+    });
+    assert_eq!(
+        gen_back, gen_a,
+        "the revisit summary arrives at A's unchanged generation"
+    );
 }
 
 // ---------------------------------------------------------------------------
