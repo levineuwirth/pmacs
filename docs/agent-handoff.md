@@ -1,7 +1,7 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-15, by the themes stage-1 session (#120
-post-merge snapshot).** This file is the
+**Last updated: 2026-07-15, after multi-language injections (#122)
+merged; also carries the #120 themes-stage-1 snapshot.** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -11,8 +11,9 @@ reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-15)
 
-- `main` @ `8ce2e9c` (themes stage 1 #120 merged), protocol **v16**
-  (`SUPPORTED=[6..16]`; v15→16 shipped the `ThemeFacts` channel).
+- `main` @ `5e73966` (multi-language injections #122 merged; #120
+  themes stage 1 below it), protocol **v16** (`SUPPORTED=[6..16]`;
+  v15→16 shipped the `ThemeFacts` channel — injections added no wire).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -41,6 +42,34 @@ reads it the way you just did.
     over js/jsx). `compute_highlight_spans` FAILS CLOSED on the
     `#is?`/`#is-not? local` property predicate (no locals processing) —
     drops those captures so shadowed builtins aren't mis-styled.
+- **Multi-language injections (#122) LANDED** — the direct continuation
+  of the #114–#118 highlight arc; four review rounds, framing
+  `docs/multi-language-injections-framing.md` (Q#IJ1–IJ11). A buffer can
+  now hold more than one language: `ParseTreeBundle` holds `Vec<Layer>`
+  (root + injected children, depth-ascending, installed atomically so the
+  existing `StyleGate` + highlight-cache Arc gates still work). The parse
+  worker builds child trees off the static `BUILTIN_LANGUAGES` table
+  (lazy load preserved) via `set_included_ranges` — child node offsets
+  are ABSOLUTE, so injected spans are buffer-coordinate-native; settle
+  resolves each layer's highlight query
+  (`SyntaxRegistry::resolve_layer_queries`). First consumers: markdown
+  fenced code + `markdown_inline` (retires the M9.7 block-only floor).
+  New substrate: `LanguageEntry.injections_query`;
+  `default_injection_aliases` + `SyntaxRegistry::injection_alias_snapshot`
+  (case-folded fence names, Lua-extensible via
+  `pmacs.parse.injection_aliases`, snapshotted into `ParseRequest` so the
+  worker never touches the `Rc` registry or Lua);
+  `ParseTreeBundle.injection_capped` (the 4096-layer backstop, surfaced
+  once/buffer via `pmacs.error` at settle);
+  `compute_highlight_spans_for(query, tree, source, range)` (per-layer);
+  the wire `flatten_layer_spans` event-sweep → DISJOINT effective spans
+  (deeper / later-sibling / narrower wins, keyed by `(layer_index,
+  capture_order)`); GPU `spans_from_segments` + `source_color_at` fold.
+  Two findings to keep: injection ranges exclude only NAMED children
+  (anonymous tokens ARE the injected text — excluding them shreds a block
+  `inline` node; matches tree-sitter-md's own splitter), and the wire
+  flattener runs over the WHOLE buffer via the file-style summary, so it
+  must be an event sweep, not O(spans²).
 - **Compile-mode (Arc 5 stage 1, #113) LANDED** (2026-07-14, 7 rounds;
   framing `docs/compile-mode-framing.md` rev 13). `compile.run` streams
   `/bin/sh -c "exec 2>&1; <cmd>"` into an intercept-read-only
@@ -282,17 +311,23 @@ intercept changes what later callbacks — LSP, completion — observe).
 LSP/persistence: hidden-buffer LSP attach, daemon desktop-restore, the
 *warning* half of external-change detection (verify-visited-file-
 modtime), config registry (no unified config surface yet).
-Highlight/detection (from the #114–#118 side-quest): locals-query
-processing (run each grammar's LOCALS_QUERY so `#is?`/`#is-not? local`
-is honored instead of the current fail-closed drop — restores `.builtin`
-styling for non-shadowed console/require etc.); multi-language
-injections (one-grammar-per-buffer today — blocks per-cell notebook
-highlighting, markdown fenced code blocks, HTML-in-JS); modeline
-detection as a 5th layer (`-*- mode: … -*-` / `# vim: ft=…`); JSON/YAML
-grammars+LSP; byte-accurate multibyte cursor placement in `move_active
-_cursor_to` (still steps one codepoint per LSP byte column). A full
-Jupyter `.ipynb` setup (reader → editable → kernel execution) is a real
-arc gated on JSON + injections, NOT a one-shot.
+Highlight/detection (from the #114–#118 side-quest + injections #122):
+locals-query processing (run each grammar's LOCALS_QUERY so
+`#is?`/`#is-not? local` is honored instead of the current fail-closed
+drop — restores `.builtin` styling for non-shadowed console/require
+etc.); **injection follow-ups now the engine landed (#122)** —
+`injection.combined` (many matches → one shared parse; PHP-in-HTML, some
+comment schemes), child-tree incrementality + range-scoped layer rebuild
+(child layers cold-reparse on every settle today), injectable
+runtime/Lua-registered languages (v1 resolves only against
+`BUILTIN_LANGUAGES`), and the next injection *consumers* gated on new
+grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
+literals, doc-comment code); modeline detection as a 5th layer
+(`-*- mode: … -*-` / `# vim: ft=…`); JSON/YAML grammars+LSP;
+byte-accurate multibyte cursor placement in `move_active_cursor_to`
+(still steps one codepoint per LSP byte column). A full Jupyter `.ipynb`
+setup (reader → editable → kernel execution) is a real arc now gated on
+**JSON** (injections shipped in #122), NOT a one-shot.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
 Themes (full list in theme-faces framing rev 9 "Deferred (named)"):
@@ -307,6 +342,9 @@ surface, chrome bold/italic/underline re-shaping).
 Housekeeping: F-016 `lua_bindings/mod.rs` split paused mid-way
 (tranches 0–2 landed, ~5–8 PRs left; see
 `docs/lua-bindings-split-framing.md`).
+Full cross-cutting index of the non-themes backlog (this list + every
+framing doc's Deferred section + a code sweep, themes excluded, with a
+prioritization north star): `docs/side-quest-backlog.md`.
 
 ## 7. Machine-local facts (desktop) that do NOT travel
 
