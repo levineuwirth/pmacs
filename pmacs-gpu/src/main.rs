@@ -2281,6 +2281,11 @@ impl State {
             gutter_buffer,
             gutter_text_renderer,
         };
+        // Real drawable dimensions from construction (framing Q#F6):
+        // wrapping and `shape_until_cursor` must use the same clip the
+        // painter uses, and a v16 daemon never sends the FontFacts
+        // that would sync them later.
+        state.sync_buffer_dimensions();
         // Shape the initial text through the shared chunk path so the
         // `buffer.lines` ↔ `line_chunk_cache` invariant holds from
         // construction — the caret/anchor projection (framing Q#F6)
@@ -9809,6 +9814,875 @@ mod tests {
             source_color_at(1, &spans),
             Some(glyphon::Color::rgb(200, 0, 0)),
             "a parent-only byte keeps the parent color"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Arc 4 stage 2 (gpu-set-font framing Q#F6/Q#F7): apply_font_facts
+    // and the visual-run caret/scroll substrate. Family routing is
+    // hermetic: the four generated fixture faces load beside the
+    // bundled font (fonts/test/, provenance in LICENSE.txt there).
+    // -----------------------------------------------------------------
+
+    const TEST_MONO_TWO: &[u8] = include_bytes!("../fonts/test/PmacsTestMonoTwo-Regular.ttf");
+    const TEST_PROPORTIONAL: &[u8] =
+        include_bytes!("../fonts/test/PmacsTestProportional-Regular.ttf");
+    const TEST_FAMILY_REGULAR: &[u8] = include_bytes!("../fonts/test/PmacsTestFamily-Regular.ttf");
+    const TEST_FAMILY_BOLD: &[u8] = include_bytes!("../fonts/test/PmacsTestFamily-Bold.ttf");
+
+    fn load_fixture_faces(state: &mut State) {
+        for bytes in [
+            TEST_MONO_TWO,
+            TEST_PROPORTIONAL,
+            TEST_FAMILY_REGULAR,
+            TEST_FAMILY_BOLD,
+        ] {
+            state.font_system.db_mut().load_font_data(bytes.to_vec());
+        }
+    }
+
+    fn font_facts(family: Option<&str>, size_centi_px: Option<u32>) -> InstanceMessage {
+        InstanceMessage::FontFacts {
+            family: family.map(str::to_owned),
+            size_centi_px,
+        }
+    }
+
+    /// Acceptance 16 — wire validation fails closed: an out-of-range
+    /// size rejects the WHOLE message (family included), keeps every
+    /// piece of current state, and re-declares nothing.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn font_facts_out_of_range_sizes_fail_closed() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let baseline = state.render_offscreen();
+        for size in [0u32, 599, 7201, u32::MAX] {
+            let vp =
+                state.apply_attach_message(font_facts(Some("Pmacs Test Mono Two"), Some(size)));
+            assert!(vp.is_none(), "a rejected FontFacts must not re-declare");
+            assert_eq!(state.fm.scale, 1.0, "scale untouched at size {size}");
+            assert_eq!(
+                state.resolved_family, DEFAULT_FONT_FAMILY,
+                "family untouched at size {size} — the whole message is rejected"
+            );
+            assert_eq!(
+                state.render_offscreen(),
+                baseline,
+                "frame byte-identical at size {size}"
+            );
+        }
+    }
+
+    /// Acceptance 9 — the size route re-derives every metric, and the
+    /// `(None, None)` reset reproduces the never-set frame
+    /// byte-for-byte within the process.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn font_size_applies_and_reset_is_byte_identical() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let never_set = state.render_offscreen();
+        let advance_before = state.mono_advance();
+        let visible_before = estimated_visible_lines(state.config.height, state.fm);
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        assert!(
+            (state.fm.scale - 1.5).abs() < f32::EPSILON,
+            "2400 centi-px / 16 = 1.5"
+        );
+        assert!(
+            state.mono_advance() > advance_before,
+            "a larger size widens the measured advance (gutter geometry)"
+        );
+        assert!(
+            estimated_visible_lines(state.config.height, state.fm) < visible_before,
+            "a larger size fits fewer source lines"
+        );
+        let big = state.render_offscreen();
+        assert_ne!(big, never_set, "a 24px preference must change the ink");
+        state.apply_attach_message(font_facts(None, None));
+        assert_eq!(state.fm.scale, 1.0);
+        assert_eq!(state.fm.advance_ratio, 1.0);
+        assert_eq!(
+            state.render_offscreen(),
+            never_set,
+            "the (None, None) reset must reproduce the never-set frame byte-for-byte"
+        );
+    }
+
+    /// Acceptance 17 — metrics and REAL drawable dimensions change
+    /// atomically on all seven buffers, and `resize()` keeps every
+    /// buffer in step through the same helper (`Buffer::size()` is
+    /// the witness).
+    #[test]
+    fn all_seven_buffers_track_metrics_and_dimensions() {
+        fn assert_buffer_dims(state: &State) {
+            let fm = state.fm;
+            let width = state.config.width as f32;
+            let height = state.config.height as f32;
+            let code_metrics = Metrics::new(fm.code_font_size(), fm.code_line_height());
+            let code_width = (state.text_bounds_right() as f32 - state.text_left()).max(0.0);
+            let code_height = (text_area_bottom(state.config.height, fm) - TEXT_TOP).max(0.0);
+            assert_eq!(state.buffer.metrics(), code_metrics);
+            assert_eq!(state.buffer.size(), (Some(code_width), Some(code_height)));
+            assert_eq!(state.gutter_buffer.metrics(), code_metrics);
+            assert_eq!(state.gutter_buffer.size(), (Some(width), Some(code_height)));
+            let status_metrics = Metrics::new(fm.status_font_size(), fm.status_line_height());
+            for buffer in [&state.status_buffer, &state.status_left_buffer] {
+                assert_eq!(buffer.metrics(), status_metrics);
+                assert_eq!(buffer.size(), (Some(width), Some(fm.status_band_height())));
+            }
+            assert_eq!(
+                state.menu_buffer.metrics(),
+                Metrics::new(fm.menu_font_size(), fm.menu_line_height())
+            );
+            assert_eq!(
+                state.menu_buffer.size(),
+                (Some(MENU_MAX_WIDTH), Some(height))
+            );
+            let drop_metrics = Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height());
+            for buffer in [&state.mb_buffer, &state.completion_buffer] {
+                assert_eq!(buffer.metrics(), drop_metrics);
+                assert_eq!(buffer.size(), (Some(MB_DROP_MAX_WIDTH), Some(height)));
+            }
+        }
+        let Some(mut state) = headless_or_skip(320, 240, "one\ntwo\nthree\n") else {
+            return;
+        };
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        assert_buffer_dims(&state);
+        state.resize(500, 400);
+        assert_buffer_dims(&state);
+    }
+
+    /// Acceptance 18 — rows stay rows: after a large size lands, no
+    /// popup label may wrap onto a second visual run that would
+    /// hit-test as the following item.
+    #[test]
+    fn popup_rows_never_wrap_after_a_font_change() {
+        let Some(mut state) = headless_or_skip(320, 600, "text") else {
+            return;
+        };
+        state.apply_attach_message(font_facts(None, Some(7200)));
+        let long = "a very long label ".repeat(8);
+        state.completion = Some(CompletionLocal {
+            buffer_id: BufferId::next(),
+            anchor: 0,
+            prefix_len: 0,
+            rows: vec![
+                CompletionPopupRow {
+                    label: long.clone(),
+                    kind: 3,
+                    detail: Some(long.clone()),
+                },
+                CompletionPopupRow {
+                    label: long.clone(),
+                    kind: 3,
+                    detail: None,
+                },
+            ],
+            selected: Some(0),
+            total: 2,
+        });
+        state.refresh_completion_buffer();
+        state.minibuffer = Some(MinibufferLocal {
+            prompt: "P: ".into(),
+            input: String::new(),
+            cursor: 0,
+            candidates: vec![long.clone(), long.clone()],
+            selected: Some(0),
+            total: 2,
+        });
+        state.refresh_mb_buffer();
+        state.menu = Some(MenuLocal {
+            rows: vec![
+                MenuPromptRow {
+                    label: long.clone(),
+                    separator: false,
+                },
+                MenuPromptRow {
+                    label: long,
+                    separator: false,
+                },
+            ],
+            active: Some(0),
+            anchor_px: (10.0, 10.0),
+        });
+        state.refresh_menu_buffer();
+        for (name, buffer) in [
+            ("completion", &state.completion_buffer),
+            ("minibuffer dropdown", &state.mb_buffer),
+            ("context menu", &state.menu_buffer),
+        ] {
+            assert_eq!(buffer.wrap(), Wrap::None, "{name} buffer must not wrap");
+            let mut seen = std::collections::HashSet::new();
+            for run in buffer.layout_runs() {
+                assert!(
+                    seen.insert(run.line_i),
+                    "{name} row {} wrapped onto a second visual run",
+                    run.line_i
+                );
+            }
+        }
+    }
+
+    /// Acceptance 13 — the two string-equality status caches drop on
+    /// a font change, so an unchanged composed status re-shapes with
+    /// the new attrs on the next frame.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn font_change_invalidates_the_status_shaping_caches() {
+        let Some(mut state) = headless_or_skip(320, 240, "text") else {
+            return;
+        };
+        let _ = state.render_offscreen();
+        let composed_before = state.status_text.clone();
+        assert!(
+            !composed_before.is_empty(),
+            "precondition: a frame composed the status readout"
+        );
+        state.apply_attach_message(font_facts(None, Some(3200)));
+        assert_eq!(
+            state.status_text, "\0",
+            "the sentinel must defeat the string-equality gate"
+        );
+        assert_eq!(state.status_left_text, "\0");
+        let _ = state.render_offscreen();
+        assert_eq!(
+            state.status_buffer.metrics().font_size,
+            state.fm.status_font_size(),
+            "the re-shaped band must carry the derived metrics"
+        );
+        assert_eq!(
+            state.status_text, composed_before,
+            "same composed text, re-shaped anyway"
+        );
+    }
+
+    /// Acceptance 14 — a size that shrinks the visible line count
+    /// re-declares the scoped viewport from the final normalized
+    /// origin.
+    #[test]
+    fn font_change_redeclares_a_shrunken_viewport() {
+        let text = "line of text\n".repeat(40);
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let declared = state.view_range;
+        state.last_viewport_sent = Some(declared);
+        let vp = state
+            .apply_attach_message(font_facts(None, Some(7200)))
+            .expect("fewer lines fit at 72px — the viewport must be re-declared");
+        assert_eq!(vp.buffer_id, bid);
+        assert!(
+            vp.visible.end < declared.1,
+            "the re-declared range must shrink ({} vs {})",
+            vp.visible.end,
+            declared.1
+        );
+    }
+
+    /// Acceptance 10 — both preference bounds render without panic,
+    /// the minibuffer dropdown windows its rows above the band at the
+    /// derived row height, and the context menu keeps its raw-anchor
+    /// clipped route with coherent hit geometry.
+    #[test]
+    fn extreme_sizes_render_with_contained_popups() {
+        let text = "line of text\n".repeat(20);
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        state.apply_attach_message(font_facts(None, Some(600)));
+        let _ = state.render_offscreen();
+        state.apply_attach_message(font_facts(None, Some(7200)));
+        state.minibuffer = Some(MinibufferLocal {
+            prompt: "M-x ".into(),
+            input: String::new(),
+            cursor: 0,
+            candidates: (0..30).map(|i| format!("candidate-{i}")).collect(),
+            selected: Some(0),
+            total: 30,
+        });
+        let (_, count) = state
+            .mb_visible_window()
+            .expect("at least one 90px row fits above the band");
+        let band_top = text_area_bottom(state.config.height, state.fm);
+        assert!(
+            count >= 1 && count as f32 * state.fm.mb_drop_row_height() <= band_top,
+            "{count} visible rows must fit above the band at the derived row height"
+        );
+        state.menu = Some(MenuLocal {
+            rows: (0..20)
+                .map(|i| MenuPromptRow {
+                    label: format!("menu entry {i} with a fairly long label attached"),
+                    separator: false,
+                })
+                .collect(),
+            active: Some(0),
+            anchor_px: (200.0, 300.0),
+        });
+        let px = state.render_offscreen();
+        assert_eq!(
+            px.len(),
+            320 * 400 * 4,
+            "the clipped route renders a full frame"
+        );
+        assert_eq!(
+            state.menu_hit(205.0, 305.0),
+            Some((0, true)),
+            "hit geometry stays coherent on the clipped popup"
+        );
+    }
+
+    /// Acceptance 11 — a caret painted on a wrapped visual run
+    /// survives 16px → 72px → 6px re-wraps, with the normalized
+    /// scroll invariant intact throughout.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn wrapped_caret_survives_size_changes() {
+        let long = "x".repeat(180);
+        let text = format!("{long}\nsecond\nthird\n");
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 180,
+        });
+        state.reshape();
+        state.ensure_caret_painted();
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "precondition: the caret paints at the default size"
+        );
+        state.apply_attach_message(font_facts(None, Some(7200)));
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the caret must survive the 16px → 72px re-wrap"
+        );
+        assert_eq!(
+            state.buffer.scroll().line,
+            0,
+            "normalized: slice-local line 0"
+        );
+        assert_eq!(
+            state.buffer.scroll().horizontal,
+            0.0,
+            "horizontal is discarded"
+        );
+        state.apply_attach_message(font_facts(None, Some(600)));
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "and the reverse 72px → 6px"
+        );
+        assert_eq!(state.buffer.scroll().line, 0);
+    }
+
+    /// Acceptance 11 — an overscan-only caret (shaped but below the
+    /// drawable window) is NOT painted, and a font change must not
+    /// snap the viewport back to it.
+    #[test]
+    fn overscan_caret_never_snaps_the_viewport() {
+        let text = "line of text\n".repeat(40);
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let visible = estimated_visible_lines(state.config.height, state.fm);
+        let overscan_line = visible + 1;
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: state.current_line_starts[overscan_line],
+        });
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "precondition: the overscan caret is not painted"
+        );
+        let top_before = state.scroll_top;
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        assert_eq!(
+            state.scroll_top, top_before,
+            "an unpainted caret must never snap the viewport"
+        );
+    }
+
+    /// Acceptance 11 — `resize()` applies the same painted-before
+    /// policy: shrinking the window re-follows a painted caret
+    /// through the coarse + visual-run + fold pipeline.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn narrowing_resize_keeps_a_wrapped_caret_painted() {
+        let mut text = "short\n".repeat(10);
+        let long = "y".repeat(100);
+        text.push_str(&long);
+        let Some(mut state) = headless_or_skip(640, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: text.len() as u64,
+        });
+        state.reshape();
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "precondition: everything fits at 640x400"
+        );
+        state.resize(320, 150);
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the shrunken window must re-follow the caret into its wrapped run"
+        );
+        assert_eq!(state.buffer.scroll().line, 0);
+        assert_eq!(state.buffer.scroll().horizontal, 0.0);
+    }
+
+    /// Acceptance 11 — the caret projection inverts the chunk cache:
+    /// injected adornment text shifts a caret past the anchor by the
+    /// projected width, while a caret AT the anchor keeps left
+    /// gravity (before the injected text).
+    #[test]
+    fn caret_projection_accounts_for_inline_adornments() {
+        let Some(mut state) = headless_or_skip(320, 240, "ab\ncd") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        let x_plain = state.caret_rect().expect("caret on line 0").x;
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 1,
+        });
+        let x1_plain = state.caret_rect().expect("caret at byte 1").x;
+        state.current_adornments = vec![adornment(1, AdornmentPlacement::AtOffset, "hint")];
+        state.reshape();
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        let x_projected = state.caret_rect().expect("caret past the adornment").x;
+        assert!(
+            x_projected > x_plain + 3.0 * 9.0,
+            "the caret must sit past the injected text ({x_projected} vs {x_plain})"
+        );
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 1,
+        });
+        let x_anchor = state.caret_rect().expect("caret at the anchor").x;
+        assert!(
+            (x_anchor - x1_plain).abs() < 0.5,
+            "an anchor byte keeps left gravity — before the adornment \
+             ({x_anchor} vs {x1_plain})"
+        );
+    }
+
+    /// Acceptance 11 — the `CursorByte` arm follows into a wrapped
+    /// continuation run (the pre-existing source-line-only hole): the
+    /// follow lands as a sub-line residual, normalized to slice-local
+    /// line 0.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn cursor_byte_follows_into_a_wrapped_run() {
+        let long = "z".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 400,
+        });
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the CursorByte arm must follow into the wrapped run"
+        );
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "the follow is a sub-line residual, not a source-line scroll"
+        );
+        assert_eq!(state.buffer.scroll().line, 0);
+        assert_eq!(state.buffer.scroll().horizontal, 0.0);
+    }
+
+    /// Acceptance 11 — an optimistic insertion that creates a new
+    /// bottom-edge wrap follows immediately (waiting a round trip
+    /// reads as a hitch), and the identical confirming `CursorByte`
+    /// needs no second repair.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: comparing a value to itself across a no-op
+    fn optimistic_insertion_follows_a_new_bottom_edge_wrap() {
+        // 320 wide → 304px drawable → 31 glyphs per row at the 9.6px
+        // advance; 240 high → 198px drawable → 9 rows. Exactly 9 full
+        // rows of text puts the caret at the painted bottom edge, and
+        // one more glyph starts row 10 below the clip.
+        let text = "q".repeat(31 * 9);
+        let Some(mut state) = headless_or_skip(320, 240, "") else {
+            return;
+        };
+        let bid = BufferId::next();
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: bid,
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        state.set_frontend_id(FrontendId(9001));
+        state.dispatch_idle = true;
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: text.len() as u64,
+        });
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "precondition: the end caret paints on the last full row"
+        );
+        let send = state
+            .optimistic_crdt_insert(ProtocolKey::Char('q'), Modifiers::NONE)
+            .expect("the optimistic insert path is eligible");
+        assert_eq!(send.buffer_id, bid);
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the insertion wrapped a new bottom row — the caret must follow NOW"
+        );
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "the follow is a visual-run residual"
+        );
+        let residual = state.code_scroll_residual;
+        let top = state.scroll_top;
+        // The daemon confirms the predicted byte: `moved == false`, so
+        // no second repair may disturb the settled scroll.
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: text.len() as u64 + 1,
+        });
+        assert_eq!(state.code_scroll_residual, residual);
+        assert_eq!(state.scroll_top, top);
+    }
+
+    /// Acceptance 11 — an explicit scroll clears the caret-follow
+    /// residual, including a wheel-up at the top clamp whose only
+    /// remaining motion IS the residual.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn explicit_scroll_clears_the_caret_follow_residual() {
+        let long = "w".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 400,
+        });
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "precondition: residual armed"
+        );
+        assert_eq!(
+            state.scroll_top, 0,
+            "single source line: the residual IS the scroll"
+        );
+        let _ = state.scroll_by_lines(-1);
+        assert_eq!(
+            state.code_scroll_residual, 0.0,
+            "wheel-up at the clamp edge must scroll the residual away"
+        );
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "the deep wrapped caret is off-screen again — the user owns the viewport"
+        );
+    }
+
+    /// Acceptance 4 (GPU half) — the caret-follow residual is
+    /// buffer-scoped view state: a `BufferSnapshot` resets it with
+    /// the rest of the view, while the font preference and derived
+    /// metrics survive the switch.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn buffer_snapshot_resets_the_residual_but_not_the_font() {
+        let long = "v".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 400,
+        });
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "precondition: residual armed"
+        );
+        // The replacement buffer wraps too: a leaked residual would
+        // NOT be zeroed by the EOF clamp, so the assertion below can
+        // only pass through the snapshot arm's explicit reset.
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &"u".repeat(400))
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        assert_eq!(
+            state.code_scroll_residual, 0.0,
+            "the residual is buffer-scoped view state"
+        );
+        assert!(
+            (state.fm.scale - 1.5).abs() < f32::EPSILON,
+            "the global font preference survives the switch"
+        );
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+    }
+
+    /// The follow decision is suspended while the minibuffer is open:
+    /// its caret lives in the band, not the code area.
+    #[test]
+    fn open_minibuffer_suppresses_the_caret_follow_decision() {
+        let Some(mut state) = headless_or_skip(320, 240, "hello") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        state.reshape();
+        assert!(state.caret_painted_in_code_clip());
+        state.minibuffer = Some(MinibufferLocal {
+            prompt: ":".into(),
+            input: String::new(),
+            cursor: 0,
+            candidates: Vec::new(),
+            selected: None,
+            total: 0,
+        });
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "an open minibuffer owns the caret — the code-area decision is false"
+        );
+    }
+
+    /// Acceptance 19 — family-dependent geometry on an EMPTY document:
+    /// the measured probe advance (not a shaped code glyph) drives the
+    /// gutter fallback and menu char width through the advance ratio.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: the reset re-measures the identical face
+    fn family_advance_ratio_scales_empty_document_geometry() {
+        let Some(mut state) = headless_or_skip(320, 240, "") else {
+            return;
+        };
+        // Line numbers + a context menu over the EMPTY buffer: no code
+        // glyph has ever shaped, so any advance the geometry uses must
+        // come from the probe.
+        state.line_numbers = LineNumberMode::Absolute;
+        state.menu = Some(MenuLocal {
+            rows: vec![MenuPromptRow {
+                // Long enough that the estimated width sits BETWEEN
+                // the min/max clamps at both ratios — a short label
+                // pins to MENU_MIN_WIDTH and hides the scaling.
+                label: "a context menu entry armed here".into(),
+                separator: false,
+            }],
+            active: Some(0),
+            anchor_px: (40.0, 40.0),
+        });
+        load_fixture_faces(&mut state);
+        let gutter_before = state.gutter_width_px();
+        let menu_w_before = State::menu_width_px(state.menu.as_ref().unwrap(), state.fm);
+        let frame_before = state.render_offscreen();
+        state.apply_attach_message(font_facts(Some("Pmacs Test Mono Two"), None));
+        assert_eq!(state.resolved_family, "Pmacs Test Mono Two");
+        // Fixture advance 720/1000 vs JetBrains Mono 600/1000 → 1.2.
+        assert!(
+            (state.fm.advance_ratio - 1.2).abs() < 0.01,
+            "measured selected/default ratio, got {}",
+            state.fm.advance_ratio
+        );
+        assert!(
+            (state.mono_advance() - 11.52).abs() < 0.1,
+            "the measured NORMAL-face advance is authoritative on an empty \
+             document, got {}",
+            state.mono_advance()
+        );
+        assert!(
+            (state.fm.menu_char_w() - BASE_MENU_CHAR_W * 1.2).abs() < 0.05,
+            "menu hit width follows the ratio, got {}",
+            state.fm.menu_char_w()
+        );
+        assert!(
+            state.gutter_width_px() > gutter_before,
+            "the gutter reservation follows the measured advance"
+        );
+        assert!(
+            State::menu_width_px(state.menu.as_ref().unwrap(), state.fm) > menu_w_before,
+            "the menu hit width follows the measured advance"
+        );
+        state.apply_attach_message(font_facts(None, None));
+        assert_eq!(
+            state.gutter_width_px(),
+            gutter_before,
+            "reset: exact gutter"
+        );
+        assert_eq!(
+            State::menu_width_px(state.menu.as_ref().unwrap(), state.fm),
+            menu_w_before,
+            "reset: exact menu width"
+        );
+        assert_eq!(
+            state.render_offscreen(),
+            frame_before,
+            "reset restores the original frame"
+        );
+    }
+
+    /// Acceptance 12 — unresolvable and proportional families both
+    /// take the total fallback to the sanitized default.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn unresolvable_and_proportional_families_fall_back() {
+        let Some(mut state) = headless_or_skip(320, 240, "text") else {
+            return;
+        };
+        load_fixture_faces(&mut state);
+        let never_set = state.render_offscreen();
+        state.apply_attach_message(font_facts(Some("No Such Family Zzz"), None));
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+        assert_eq!(
+            state.render_offscreen(),
+            never_set,
+            "the unresolvable route renders byte-identically to never-set"
+        );
+        state.apply_attach_message(font_facts(Some("Pmacs Test Proportional"), None));
+        assert_eq!(
+            state.resolved_family, DEFAULT_FONT_FAMILY,
+            "a proportional family must fall back"
+        );
+        assert_eq!(
+            state.fm.advance_ratio, 1.0,
+            "the fallback is the default: ratio 1"
+        );
+        assert_eq!(
+            state.render_offscreen(),
+            never_set,
+            "the rejected route renders byte-identically to never-set"
+        );
+    }
+
+    /// Acceptance 12 — the four-style gate rejects a family whose
+    /// BOLD sibling is proportional, exactly what a normal-only
+    /// query check would wave through.
+    #[test]
+    fn four_style_gate_rejects_a_proportional_bold_sibling() {
+        let Some(mut state) = headless_or_skip(320, 240, "text") else {
+            return;
+        };
+        load_fixture_faces(&mut state);
+        assert!(
+            query_normal_face(state.font_system.db(), "Pmacs Test Family")
+                .and_then(|id| state.font_system.db().face(id))
+                .is_some_and(|face| face.monospaced),
+            "precondition: the NORMAL face alone looks monospaced"
+        );
+        assert!(state.family_is_monospace_everywhere("Pmacs Test Mono Two"));
+        assert!(
+            !state.family_is_monospace_everywhere("Pmacs Test Family"),
+            "the proportional BOLD sibling must fail the four-style gate"
+        );
+        state.apply_attach_message(font_facts(Some("Pmacs Test Family"), None));
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+    }
+
+    /// Acceptance 12 — a valid second monospace family resolves,
+    /// changes the ink, and the `(None, None)` reset restores the
+    /// default frame byte-for-byte.
+    #[test]
+    fn second_monospace_family_changes_the_frame_and_reset_restores() {
+        let Some(mut state) = headless_or_skip(320, 240, "0123456789") else {
+            return;
+        };
+        let default_frame = state.render_offscreen();
+        load_fixture_faces(&mut state);
+        state.apply_attach_message(font_facts(Some("Pmacs Test Mono Two"), None));
+        assert_eq!(state.resolved_family, "Pmacs Test Mono Two");
+        assert_ne!(
+            state.render_offscreen(),
+            default_frame,
+            "different outlines/advances must change the ink"
+        );
+        state.apply_attach_message(font_facts(None, None));
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+        assert_eq!(
+            state.render_offscreen(),
+            default_frame,
+            "the reset restores the default frame byte-for-byte"
+        );
+    }
+
+    /// Acceptance 12 — the sanitizer (parameterized, the production
+    /// path) removes exactly the non-monospace same-family
+    /// collisions: the monospaced default and unrelated families
+    /// survive.
+    #[test]
+    fn sanitizer_removes_only_same_family_proportional_collisions() {
+        let mut db = fontdb::Database::new();
+        let bold_id = *db
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(
+                TEST_FAMILY_BOLD,
+            )))
+            .first()
+            .expect("bold fixture loads");
+        let regular_id = *db
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(
+                TEST_FAMILY_REGULAR,
+            )))
+            .first()
+            .expect("regular fixture loads");
+        let unrelated_id = *db
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(
+                TEST_PROPORTIONAL,
+            )))
+            .first()
+            .expect("proportional fixture loads");
+        sanitize_font_database(&mut db, "Pmacs Test Family", regular_id);
+        assert!(
+            db.face(bold_id).is_none(),
+            "the proportional same-family BOLD collision is removed"
+        );
+        assert!(
+            db.face(regular_id).is_some(),
+            "the monospaced default survives"
+        );
+        assert!(
+            db.face(unrelated_id).is_some(),
+            "an unrelated proportional family is untouched"
         );
     }
 }

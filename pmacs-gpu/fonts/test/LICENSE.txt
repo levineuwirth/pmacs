@@ -1,0 +1,6 @@
+The Pmacs Test* font fixtures in this directory are trivial synthetic
+faces (rectangle glyphs over space, digits, and a-z) generated for the
+pmacs-gpu test suite by the accompanying generate.py script. They are
+original to the pmacs project, contain no third-party outlines or
+data, and are released under the same license as the pmacs source
+tree. They are test fixtures, not usable typefaces.
