@@ -3,7 +3,9 @@
 **Compiled 2026-07-14** from an exhaustive sweep of every framing doc's
 "Deferred (named)" section, the handoff §6 consolidated list, the
 `docs/roadmap-2026-07.md` arcs, and a code-level marker sweep
-(src/, builtin/, pmacs-gpu/, pmacs-protocol/).
+(src/, builtin/, pmacs-gpu/, pmacs-protocol/). **Updated 2026-07-15:**
+multi-language injections shipped (#122) — item pruned to its remaining
+follow-ups; north star and Jupyter gate revised.
 
 **Scope.** This is the *side-quest* backlog: self-contained,
 frontend-agnostic-ish work that does **not** belong to the **themes /
@@ -27,10 +29,17 @@ The direct continuation of the #114–#118 grammar/detection stack.
   `#is?`/`#is-not? local` is honored (restores `.builtin` styling for
   *non-shadowed* console/require etc.), replacing the current
   fail-closed drop in `compute_highlight_spans`.
-- **Multi-language injections** — the load-bearing enabler. One grammar
-  per buffer today (`syntax.lua`, "first language wins"); injections
-  unlock markdown fenced code blocks, HTML-in-JS/CSS, embedded langs,
-  and per-cell notebooks.
+- **Multi-language injections — SHIPPED (#122).** The load-bearing
+  engine landed: `ParseTreeBundle` holds `Vec<Layer>`, the worker builds
+  child trees off the static grammar table, settle resolves per-layer
+  highlight queries; markdown fenced code + `markdown_inline` are the
+  first consumers. Remaining follow-ups: `injection.combined` (many
+  matches → one shared parse; PHP-in-HTML, some comment schemes),
+  child-tree incrementality + range-scoped layer rebuild (children
+  cold-reparse on every settle today), injectable runtime/Lua-registered
+  languages (v1 resolves only against `BUILTIN_LANGUAGES`), and new
+  injection *consumers* gated on grammars — HTML/CSS/GraphQL/SQL
+  (`<script>`/`<style>`, template literals, doc-comment code).
 - **Modeline detection** — a 5th detection layer (`-*- mode: … -*-`,
   `# vim: ft=…`) after extension → filetype → filename → shebang.
 - **JSON + YAML** grammars + LSP (`tree-sitter-json` +
@@ -134,8 +143,8 @@ The direct continuation of the #114–#118 grammar/detection stack.
   (reuse the Arc 1b listview).
 - **Arc 8 — GPU splits / multi-buffer** (largest unscoped design
   problem).
-- **Jupyter `.ipynb`** — reader → editable → kernel execution; gated on
-  JSON + injections.
+- **Jupyter `.ipynb`** — reader → editable → kernel execution; now gated
+  on JSON only (injections shipped in #122).
 - **Git-diff gutter markers** (needs a diff source; rides the gutter).
 
 ---
@@ -216,12 +225,16 @@ guides (visual, not color).
 
 ## North star (highest-leverage first)
 
-Two substrate items unlock the most side quests:
+**Multi-language injections shipped (#122)** — one of the two original
+north-star items is done, so the highest-leverage board is now:
 
 1. **Config registry** — frees ~5 editing/indent/comment features at once.
-2. **Multi-language injections** — frees notebooks, markdown code,
-   embedded langs, and is the honest gate on Jupyter.
+2. **JSON (+ YAML) grammar** — the one remaining gate on the Jupyter
+   `.ipynb` path now that injections exist, and a clean highlight one-shot.
+3. **Locals-query processing** — restores `.builtin` styling for
+   non-shadowed builtins, the last rough edge of the highlight stack.
 
-After those, the cleanest one-shots in the highlight family are
-**JSON/YAML + modeline detection**, and the most-missed editing
-table-stakes are **word-kills + `C-SPC` set-mark**.
+Beyond those, the cleanest one-shots in the highlight family are
+**modeline detection** and the HTML/CSS grammars that light up more
+injection *consumers*; the most-missed editing table-stakes remain
+**word-kills + `C-SPC` set-mark**.
