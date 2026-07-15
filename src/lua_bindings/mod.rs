@@ -6362,7 +6362,7 @@ pub struct ParseNodeLua {
 
 impl ParseNodeLua {
     fn resolve(&self) -> Option<tree_sitter::Node<'_>> {
-        let mut node = self.bundle.tree.root_node();
+        let mut node = self.bundle.root_tree().root_node();
         for &idx in &self.path {
             node = node.child(idx)?;
         }
@@ -6395,7 +6395,9 @@ impl UserData for ParseTreeLua {
         methods.add_method("text", |lua, this, ()| {
             lua.create_string(this.0.source.as_ref())
         });
-        methods.add_method("sexp", |_, this, ()| Ok(this.0.tree.root_node().to_sexp()));
+        methods.add_method("sexp", |_, this, ()| {
+            Ok(this.0.root_tree().root_node().to_sexp())
+        });
     }
 }
 
@@ -6617,6 +6619,21 @@ pub fn install_parse(
         )?;
     }
 
+    // Injection alias write-through (framing Q#IJ4). `syntax.lua` wraps
+    // this in a `pmacs.parse.injection_aliases` proxy table so users write
+    // `pmacs.parse.injection_aliases.mylang = "rust"`. The registry holds
+    // the merged map (defaults + overrides); each dispatch snapshots it.
+    {
+        let s = syntax.clone();
+        parse_mod.set(
+            "_register_injection_alias",
+            lua.create_function(move |_, (alias, lang): (String, String)| {
+                s.register_injection_alias(alias, lang);
+                Ok(())
+            })?,
+        )?;
+    }
+
     {
         let s = syntax.clone();
         parse_mod.set(
@@ -6658,7 +6675,10 @@ pub fn install_parse(
                 let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
                 let req = handle.make_request();
                 let bundle = syntax::run_parse(req).map_err(mlua::Error::external)?;
-                let arc = Arc::new(bundle);
+                // Resolve each layer's highlight query from the registry
+                // cache before install so producers can style every layer
+                // (framing Q#IJ2 stage 2).
+                let arc = s.resolve_layer_queries(&bundle);
                 handle.install(arc.clone());
                 Ok(ParseTreeLua(arc))
             })?,
@@ -6676,7 +6696,10 @@ pub fn install_parse(
             "_dispatch",
             lua.create_function(move |_, (id, lang): (BufferIdLua, String)| {
                 let handle = get_or_create_parse_view(&s, &reg, id.0, &lang)?;
-                let req = handle.make_request();
+                let mut req = handle.make_request();
+                // Snapshot the alias map into the request so the worker can
+                // resolve dynamic fence names off the main thread (Q#IJ4).
+                req.injection_aliases = s.injection_alias_snapshot();
                 let job_id = rt.dispatch_parse(req, None);
                 s.record_parse_job(job_id, id.0);
                 Ok(job_id)
@@ -6707,7 +6730,10 @@ pub fn install_parse(
                     return Ok(false);
                 };
                 if let Some(handle) = s.view(buf_id) {
-                    handle.install(bundle);
+                    // Stage 2 (framing Q#IJ2): resolve each layer's highlight
+                    // query on the main thread before install.
+                    let resolved = s.resolve_layer_queries(&bundle);
+                    handle.install(resolved);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -6737,12 +6763,14 @@ pub fn install_parse(
                         id.0
                     )));
                 };
-                let Some(query) = s.highlights_query(&lang) else {
-                    // No highlights query for this language --- treat as
-                    // a benign no-op so callers don't need to special-case
-                    // grammars without highlights bundled.
+                if s.highlights_query(&lang).is_none() {
+                    // Root language ships no highlights --- treat as a benign
+                    // no-op so callers don't need to special-case grammars
+                    // without highlights bundled. (Injected child layers still
+                    // resolve their own queries at settle; a root-highlight-less
+                    // injector is out of v1 scope.)
                     return Ok(false);
-                };
+                }
                 let theme = s.theme();
                 let core = lua
                     .app_data_ref::<SharedCore>()
@@ -6755,7 +6783,7 @@ pub fn install_parse(
                         id.0
                     )));
                 }
-                let overlay = SyntaxHighlightView::new(handle, query, theme);
+                let overlay = SyntaxHighlightView::new(handle, theme);
                 win.push_overlay(Box::new(overlay));
                 Ok(true)
             })?,

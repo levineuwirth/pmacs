@@ -2700,6 +2700,7 @@ mod tests {
             language_name: "rust".to_owned(),
             prior_tree: None,
             edits: Vec::new(),
+            injection_aliases: Arc::new(std::collections::HashMap::new()),
         };
         let id = rt.dispatch_parse(req, None);
         pump_until(&rt, || rt.is_complete(id));
@@ -2713,7 +2714,7 @@ mod tests {
             other => panic!("unexpected outcome: {other:?}"),
         }
         assert_eq!(bundle.language_name, "rust");
-        assert_eq!(bundle.tree.root_node().kind(), "source_file");
+        assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
         // take_parse_tree was already drained, so handoff is empty.
         assert_eq!(rt.parse_handoff_len(), 0);
     }
@@ -2729,6 +2730,7 @@ mod tests {
             language_name: "rust".to_owned(),
             prior_tree: None,
             edits: Vec::new(),
+            injection_aliases: Arc::new(std::collections::HashMap::new()),
         };
         let id = rt.dispatch_parse(req, None);
         pump_until(&rt, || rt.is_complete(id));

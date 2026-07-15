@@ -44,6 +44,20 @@ function pmacs.parse._dispatch(buf, lang)
   return job_id
 end
 
+-- Injection language aliases (framing Q#IJ4). The registry holds the
+-- merged map (seeded with defaults on the Rust side), and each dispatch
+-- snapshots it into the parse request so the worker can resolve dynamic
+-- fence names (`py` → python, `ts` → typescript). Exposed as a
+-- write-through proxy so users add fence-name aliases from init.lua:
+--   pmacs.parse.injection_aliases.mylang = "rust"
+-- Reads are not proxied (the canonical map lives Rust-side); this is a
+-- write-only extension surface.
+pmacs.parse.injection_aliases = setmetatable({}, {
+  __newindex = function(_, alias, lang)
+    pmacs.parse._register_injection_alias(alias, lang)
+  end,
+})
+
 -- Shebang → language detection ------------------------------------------
 --
 -- Extension detection (`language_for_path`) misses extensionless scripts

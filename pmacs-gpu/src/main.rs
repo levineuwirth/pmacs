@@ -6732,12 +6732,24 @@ fn adornment_text_color(fg: CellColor) -> glyphon::Color {
 }
 
 fn source_color_at(byte: u64, spans: &[StyleSpan]) -> Option<glyphon::Color> {
-    for sp in spans {
-        if sp.range.start <= byte && byte < sp.range.end {
-            return cell_color_to_glyphon(sp.style.fg);
+    // Fold every covering span in order, matching the semantic-client
+    // `effective_style_at` contract (last covering span with a non-default
+    // fg wins) rather than returning the first. The daemon flattens
+    // injection layers into disjoint spans (framing Q#IJ6), so usually at
+    // most one covers a byte — but where spans do overlap (a styled
+    // markdown parent under an injected child), the topmost color must win,
+    // never the outermost. Spans arrive start-sorted, so a narrower nested
+    // span (later start) folds after and overrides its enclosing span.
+    let mut color = None;
+    for sp in spans
+        .iter()
+        .filter(|sp| sp.range.start <= byte && byte < sp.range.end)
+    {
+        if let Some(c) = cell_color_to_glyphon(sp.style.fg) {
+            color = Some(c);
         }
     }
-    None
+    color
 }
 
 /// Convert a `pmacs-protocol::cell::Color` to a `glyphon::Color`.
@@ -8967,6 +8979,42 @@ mod tests {
         assert!(
             has([0.55, 0.60, 0.75, 0.22]),
             "the peer cursor line must keep the CurrentLine constant"
+        );
+    }
+
+    #[test]
+    fn source_color_folds_overlapping_child_over_parent() {
+        // Framing acceptance #9 (GPU consumer): a styled markdown parent
+        // span [0,10) (red) with an injected child span [3,6) (green) on top.
+        // `replace_style_spans` sorts incoming spans by start, so we mirror
+        // that here; `source_color_at` must FOLD the covering spans (child
+        // green wins at a shared byte), not return the first (parent) span.
+        // Bite: the pre-fix first-covering-span code returns red at byte 4.
+        let red = style_with_fg(CellColor::Rgb(200, 0, 0));
+        let green = style_with_fg(CellColor::Rgb(0, 200, 0));
+        let mut spans = vec![
+            StyleSpan {
+                range: ByteRange { start: 0, end: 10 },
+                style: red,
+            },
+            StyleSpan {
+                range: ByteRange { start: 3, end: 6 },
+                style: green,
+            },
+        ];
+        spans.sort_by_key(|s| s.range.start); // as replace_style_spans does
+
+        // Byte 4 is covered by both: the child (green) wins the fold.
+        assert_eq!(
+            source_color_at(4, &spans),
+            Some(glyphon::Color::rgb(0, 200, 0)),
+            "the injected child color wins over the parent at a shared byte"
+        );
+        // Byte 1 is parent-only: stays red.
+        assert_eq!(
+            source_color_at(1, &spans),
+            Some(glyphon::Color::rgb(200, 0, 0)),
+            "a parent-only byte keeps the parent color"
         );
     }
 }

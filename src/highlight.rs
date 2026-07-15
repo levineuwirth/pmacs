@@ -39,7 +39,7 @@ use crate::buffer::Buffer;
 use crate::cell::{CellCoord, CellGrid, Color, Style, UnderlineStyle};
 use crate::lsp::SharedLspManager;
 use crate::overlay::merge_styles;
-use crate::syntax::{HighlightSpan, ParseTreeBundle, ParseViewHandle, compute_highlight_spans};
+use crate::syntax::{HighlightSpan, ParseTreeBundle, ParseViewHandle, compute_highlight_spans_for};
 use crate::view::{View, Viewport};
 
 // ---------------------------------------------------------------------------
@@ -248,6 +248,19 @@ pub type ThemeHandle = Arc<Mutex<Theme>>;
 // SyntaxHighlightView
 // ---------------------------------------------------------------------------
 
+/// Per-layer cached highlight spans + capture names (framing Q#IJ7).
+/// One entry per bundle layer that has a highlight query; kept in the
+/// bundle's depth order so the render paints shallow-to-deep.
+struct LayerSpans {
+    /// Spans for this layer, sorted wider-first per
+    /// [`compute_highlight_spans_for`].
+    spans: Vec<HighlightSpan>,
+    /// Capture names indexed by `HighlightSpan::capture_index` for this
+    /// layer's own query. Layers may use different grammars, so this is
+    /// per-layer, not shared.
+    capture_names: Arc<[String]>,
+}
+
 /// Cached per-bundle highlight state. Keyed by the underlying
 /// `Arc<ParseTreeBundle>`'s identity (compared via `Arc::ptr_eq`),
 /// so a freshly-installed bundle invalidates the cache.
@@ -255,25 +268,19 @@ struct HighlightCache {
     /// The bundle the cache was built against. `None` until the
     /// first render observes a settled bundle.
     bundle: Option<Arc<ParseTreeBundle>>,
-    /// Compiled spans, sorted wider-first per
-    /// [`compute_highlight_spans`].
-    spans: Vec<HighlightSpan>,
+    /// Per-layer spans in depth-ascending order (framing Q#IJ6).
+    layers: Vec<LayerSpans>,
     /// Per-row first-byte offsets into `bundle.source`. `Vec<u32>`
     /// because pmacs files cap at 4 GiB.
     line_offsets: Vec<u32>,
-    /// Capture names indexed by `HighlightSpan::capture_index`.
-    /// Populated alongside `spans` so the render path doesn't need
-    /// to keep a reference into the [`tree_sitter::Query`].
-    capture_names: Arc<[String]>,
 }
 
 impl HighlightCache {
     fn empty() -> Self {
         Self {
             bundle: None,
-            spans: Vec::new(),
+            layers: Vec::new(),
             line_offsets: Vec::new(),
-            capture_names: Arc::from(Vec::<String>::new().into_boxed_slice()),
         }
     }
 }
@@ -283,39 +290,41 @@ impl HighlightCache {
 const TAB_WIDTH: u32 = 8;
 
 /// View that renders syntax highlighting from a tree-sitter parse
-/// tree. Composes over [`crate::text_view::TextView`] per the M2.9
-/// view-composition contract --- it never writes glyphs, only merges
-/// styles into cells the base view has already painted.
+/// tree, including its injection layers. Composes over
+/// [`crate::text_view::TextView`] per the M2.9 view-composition
+/// contract --- it never writes glyphs, only merges styles into cells
+/// the base view has already painted.
 pub struct SyntaxHighlightView {
     parse: ParseViewHandle,
-    query: Arc<tree_sitter::Query>,
     theme: ThemeHandle,
     cache: HighlightCache,
 }
 
 impl SyntaxHighlightView {
-    /// Construct a highlight view over `parse` using `query` and
-    /// `theme`. The initial cache is empty; the first render with
-    /// a settled bundle populates it.
+    /// Construct a highlight view over `parse` using `theme`. Per-layer
+    /// highlight queries come from each `Layer::highlight_query` in the
+    /// bundle (resolved at settle, framing Q#IJ2), so no query is passed
+    /// here. The initial cache is empty; the first render with a settled
+    /// bundle populates it.
     #[must_use]
-    pub fn new(parse: ParseViewHandle, query: Arc<tree_sitter::Query>, theme: ThemeHandle) -> Self {
+    pub fn new(parse: ParseViewHandle, theme: ThemeHandle) -> Self {
         Self {
             parse,
-            query,
             theme,
             cache: HighlightCache::empty(),
         }
     }
 
-    /// Test helper: number of cached highlight spans.
+    /// Test helper: total cached highlight spans across all layers.
     #[must_use]
     pub fn cached_span_count(&self) -> usize {
-        self.cache.spans.len()
+        self.cache.layers.iter().map(|l| l.spans.len()).sum()
     }
 
     /// Refresh `self.cache` if the parse view's current bundle
     /// differs from the cached one. No-op when the bundle pointer
-    /// is unchanged --- the steady-state cost between parses.
+    /// is unchanged --- the steady-state cost between parses. Rebuilds
+    /// spans for every layer that carries a highlight query.
     fn refresh_cache_if_stale(&mut self) {
         let Some(bundle) = self.parse.current() else {
             return;
@@ -328,26 +337,39 @@ impl SyntaxHighlightView {
         if !stale {
             return;
         }
-        let spans = compute_highlight_spans(&self.query, &bundle);
-        let line_offsets = compute_line_offsets(bundle.source.as_ref());
-        let capture_names: Arc<[String]> = self
-            .query
-            .capture_names()
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
+        let source = bundle.source.as_ref();
+        let mut layers = Vec::new();
+        for layer in &bundle.layers {
+            let Some(query) = layer.highlight_query.as_ref() else {
+                continue;
+            };
+            let spans = compute_highlight_spans_for(query, &layer.tree, source, None);
+            if spans.is_empty() {
+                continue;
+            }
+            let capture_names: Arc<[String]> = query
+                .capture_names()
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+            layers.push(LayerSpans {
+                spans,
+                capture_names,
+            });
+        }
+        let line_offsets = compute_line_offsets(source);
         self.cache = HighlightCache {
             bundle: Some(bundle),
-            spans,
+            layers,
             line_offsets,
-            capture_names,
         };
     }
 
-    /// Look up the style for span `s`, consulting the active theme.
-    fn style_for(&self, theme: &Theme, s: HighlightSpan) -> Style {
+    /// Look up the style for span `s` within `layer`, consulting the
+    /// active theme.
+    fn style_for(theme: &Theme, layer: &LayerSpans, s: HighlightSpan) -> Style {
         let idx = s.capture_index as usize;
-        let Some(name) = self.cache.capture_names.get(idx) else {
+        let Some(name) = layer.capture_names.get(idx) else {
             return theme.default_style;
         };
         theme.lookup(name)
@@ -364,7 +386,7 @@ impl View for SyntaxHighlightView {
         let Some(bundle) = self.cache.bundle.clone() else {
             return;
         };
-        if self.cache.spans.is_empty() || self.cache.line_offsets.is_empty() {
+        if self.cache.layers.is_empty() || self.cache.line_offsets.is_empty() {
             return;
         }
         let source: &[u8] = bundle.source.as_ref();
@@ -376,61 +398,64 @@ impl View for SyntaxHighlightView {
         let cell_origin = viewport.cell_origin;
         let total_lines = self.cache.line_offsets.len() as u32;
 
-        for row_offset in 0..max_rows {
-            let line_idx = start_line + row_offset;
-            if line_idx >= total_lines {
-                break;
-            }
-            let line_start = self.cache.line_offsets[line_idx as usize];
-            let line_end = self
-                .cache
-                .line_offsets
-                .get(line_idx as usize + 1)
-                .copied()
-                .unwrap_or(source.len() as u32);
-            // Trim a single trailing newline if any --- the text
-            // view doesn't paint it as a glyph either.
-            let line_end_no_nl = if line_end > line_start
-                && source.get(line_end as usize - 1).copied() == Some(b'\n')
-            {
-                line_end - 1
-            } else {
-                line_end
-            };
-            let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
+        // Paint layers shallow-to-deep (framing Q#IJ6): a deeper layer
+        // merges on top, so an injected child's styling wins within its
+        // region. Within a layer, wider-first ordering (from
+        // `compute_highlight_spans_for`) lets narrower captures override.
+        for layer in &self.cache.layers {
+            for row_offset in 0..max_rows {
+                let line_idx = start_line + row_offset;
+                if line_idx >= total_lines {
+                    break;
+                }
+                let line_start = self.cache.line_offsets[line_idx as usize];
+                let line_end = self
+                    .cache
+                    .line_offsets
+                    .get(line_idx as usize + 1)
+                    .copied()
+                    .unwrap_or(source.len() as u32);
+                // Trim a single trailing newline if any --- the text
+                // view doesn't paint it as a glyph either.
+                let line_end_no_nl = if line_end > line_start
+                    && source.get(line_end as usize - 1).copied() == Some(b'\n')
+                {
+                    line_end - 1
+                } else {
+                    line_end
+                };
+                let line_bytes = &source[line_start as usize..line_end_no_nl as usize];
 
-            // Spans whose start lies on this line. Wider-first
-            // ordering means parents apply before children.
-            // Spans that *cross* lines apply on every line they
-            // touch --- this loop only filters by start, then
-            // intersects with the line range below.
-            for span in self
-                .cache
-                .spans
-                .iter()
-                .filter(|s| s.start_byte < line_end_no_nl && s.end_byte > line_start)
-                .copied()
-            {
-                let style = self.style_for(&theme, span);
-                if style == Style::default() {
-                    // Nothing to merge --- skip the per-cell loop.
-                    continue;
-                }
-                let s_start = span.start_byte.max(line_start);
-                let s_end = span.end_byte.min(line_end_no_nl);
-                let byte_col_start = (s_start - line_start) as usize;
-                let byte_col_end = (s_end - line_start) as usize;
-                let (start_col, end_col) =
-                    byte_range_to_display_cols(line_bytes, byte_col_start, byte_col_end);
-                if end_col <= start_col {
-                    continue;
-                }
-                let cell_row = cell_origin.row + row_offset;
-                let clamped_start = start_col.min(max_cols);
-                let clamped_end = end_col.min(max_cols);
-                for col in clamped_start..clamped_end {
-                    let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
-                    cell.style = merge_styles(cell.style, style);
+                // Spans whose start lies on this line. Spans that *cross*
+                // lines apply on every line they touch --- this loop filters
+                // by intersection, then clips to the line range below.
+                for span in layer
+                    .spans
+                    .iter()
+                    .filter(|s| s.start_byte < line_end_no_nl && s.end_byte > line_start)
+                    .copied()
+                {
+                    let style = Self::style_for(&theme, layer, span);
+                    if style == Style::default() {
+                        // Nothing to merge --- skip the per-cell loop.
+                        continue;
+                    }
+                    let s_start = span.start_byte.max(line_start);
+                    let s_end = span.end_byte.min(line_end_no_nl);
+                    let byte_col_start = (s_start - line_start) as usize;
+                    let byte_col_end = (s_end - line_start) as usize;
+                    let (start_col, end_col) =
+                        byte_range_to_display_cols(line_bytes, byte_col_start, byte_col_end);
+                    if end_col <= start_col {
+                        continue;
+                    }
+                    let cell_row = cell_origin.row + row_offset;
+                    let clamped_start = start_col.min(max_cols);
+                    let clamped_end = end_col.min(max_cols);
+                    for col in clamped_start..clamped_end {
+                        let cell = cells.at(CellCoord::new(cell_row, cell_origin.col + col));
+                        cell.style = merge_styles(cell.style, style);
+                    }
                 }
             }
         }
@@ -1227,5 +1252,57 @@ mod tests {
             "modifier-refined token uses `function.defaultLibrary`"
         );
         assert!(!c.style.bold);
+    }
+
+    #[test]
+    fn grid_paints_injected_child_keyword() {
+        // Framing acceptance #10: the grid `SyntaxHighlightView` paints a
+        // rust keyword cell INSIDE a markdown ```rust fence — styling only
+        // the injected rust layer can produce. Layers paint shallow-to-deep
+        // (framing Q#IJ6), so the rust keyword wins over the markdown root.
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("markdown").expect("markdown grammar");
+        // Line 0: ```rust ; line 1: fn demo() {} ; line 2: ```
+        let src = b"```rust\nfn demo() {}\n```\n";
+        let mut buf = Buffer::new(BufferId::next(), "doc.md");
+        buf.apply_edit(EditOp::Insert { pos: 0, bytes: src })
+            .unwrap();
+        let view = ParseView::new(&buf, language, "markdown".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("markdown parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let cols = 40usize;
+        let rows = 3usize;
+        let mut backing: Vec<Cell> = vec![Cell::default(); rows * cols];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols as u32,
+            size: CellSize::new(rows as u32, cols as u32),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows as u32, cols as u32),
+            gutter_w: 0,
+        };
+        let registry = buf; // keep buf alive
+        hv.render(&registry, viewport, &mut grid);
+
+        // `fn` is at line 1, cols 0..2. default_dark styles `keyword` bold.
+        let c = grid.get(CellCoord::new(1, 0));
+        assert!(
+            c.style.bold,
+            "the injected rust `fn` keyword is painted (bold) inside the fence"
+        );
     }
 }

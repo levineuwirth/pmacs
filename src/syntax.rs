@@ -32,12 +32,12 @@
 //! tests.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tree_sitter::StreamingIterator;
+use tree_sitter::{Node, Point, Range, StreamingIterator};
 
 use crate::async_runtime::JobId;
 use crate::buffer::{Buffer, BufferError, BufferId};
@@ -71,6 +71,14 @@ pub struct ParseRequest {
     /// produced. Empty for cold parses; non-empty drives incremental
     /// re-parse.
     pub edits: Vec<tree_sitter::InputEdit>,
+    /// Snapshot of the injection alias map (framing Q#IJ4). The worker
+    /// resolves a dynamic `@injection.language` fence-name (`py`, `ts`,
+    /// `c++`) through this map — case-folded — before matching it against
+    /// [`BUILTIN_LANGUAGES`]. Snapshotted from the registry at dispatch so
+    /// the worker never touches the main-thread `Rc` registry or a Lua
+    /// table. Empty for the non-layered/legacy callers (no injections
+    /// resolve, root parse unaffected).
+    pub injection_aliases: Arc<HashMap<String, String>>,
 }
 
 /// Output of [`run_parse`]. The runtime's parse-handoff side map
@@ -78,20 +86,56 @@ pub struct ParseRequest {
 /// resolves a buffer id to its current bundle and walks the tree.
 #[derive(Debug)]
 pub struct ParseTreeBundle {
-    /// The freshly-produced parse tree.
-    pub tree: tree_sitter::Tree,
-    /// Source bytes the tree was parsed against. Co-owned with the
-    /// request so node-byte-range lookups can read the underlying
+    /// Injection layers (framing Q#IJ1). `layers[0]` is the root layer
+    /// (the whole buffer, parsed with the buffer's own grammar);
+    /// subsequent entries are injected child layers in depth-ascending
+    /// order. Always non-empty — a parse produces at least the root, so
+    /// [`Self::root_tree`] never panics.
+    pub layers: Vec<Layer>,
+    /// Source bytes every layer's tree was parsed against. Co-owned with
+    /// the request so node-byte-range lookups can read the underlying
     /// text (T M4.1 acceptance: "parse tree introspectable via Lua"
-    /// implies the source the tree references).
+    /// implies the source the tree references). Child layers parse the
+    /// *same* full source via `set_included_ranges`, so their node
+    /// offsets are absolute into these bytes (framing mechanic #1).
     pub source: Arc<[u8]>,
-    /// Language label. Stored alongside the tree so Lua can ask
-    /// "what grammar produced this?".
+    /// Root language label (`layers[0].language_name`). Kept here so Lua
+    /// and the `*workers*` buffer can ask "what grammar produced this?"
+    /// without indexing the layer vec.
     pub language_name: String,
-    /// Wall-clock duration of the parse itself (excludes dispatch
+    /// Wall-clock duration of the whole layered parse (excludes dispatch
     /// queueing, source materialization, and bus delivery). T M4.1
     /// acceptance criteria are stated in this metric.
     pub parse_duration: Duration,
+}
+
+/// One injection layer within a [`ParseTreeBundle`] (framing Q#IJ1). A
+/// layer pairs a parse tree with the language that produced it and the
+/// injection-nesting depth (root = 0). `highlight_query` is resolved on
+/// the main thread at settle from the registry cache (framing Q#IJ2) —
+/// the worker leaves it `None`.
+#[derive(Debug)]
+pub struct Layer {
+    /// Canonical language name of the grammar that produced `tree`.
+    pub language_name: String,
+    /// The layer's parse tree. Node offsets are absolute into the
+    /// bundle's `source` (child layers use `set_included_ranges`).
+    pub tree: tree_sitter::Tree,
+    /// Injection depth: 0 for the root, 1 for a direct injection, etc.
+    pub depth: u16,
+    /// Compiled `highlights.scm` for `language_name`, resolved at settle.
+    /// `None` when the language ships no highlights, or on the worker
+    /// (pre-settle). Producers read it to style this layer.
+    pub highlight_query: Option<Arc<tree_sitter::Query>>,
+}
+
+impl ParseTreeBundle {
+    /// The root layer's tree (`layers[0]`) — the whole-buffer parse.
+    /// Never panics: [`run_parse`] always seeds the root layer.
+    #[must_use]
+    pub fn root_tree(&self) -> &tree_sitter::Tree {
+        &self.layers[0].tree
+    }
 }
 
 /// Run a parse. This is the worker-side body that the runtime's
@@ -115,16 +159,389 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
         }
     }
     let started = Instant::now();
-    let tree = parser
+    let root_tree = parser
         .parse(req.source.as_ref(), prior.as_ref())
         .ok_or_else(|| "parser produced no tree".to_owned())?;
+    // `parse_duration` measures the root parse only — the metric the M4.1
+    // acceptance gates are stated in. Injection layer building (below) is an
+    // additive phase separately guarded by the settle-time budget test; it
+    // must not retroactively inflate this metric.
     let parse_duration = started.elapsed();
+
+    // Seed the root layer, then expand injection layers (framing Q#IJ1).
+    // Injection expansion is best-effort and isolated to the child
+    // (Q#IJ3): a failed/unknown/over-budget child drops that child only —
+    // the root always installs, so this returns `Ok` whenever the root
+    // parsed.
+    let mut layers = vec![Layer {
+        language_name: req.language_name.clone(),
+        tree: root_tree,
+        depth: 0,
+        highlight_query: None,
+    }];
+    build_injection_layers(&mut layers, req.source.as_ref(), &req.injection_aliases);
     Ok(ParseTreeBundle {
-        tree,
+        layers,
         source: req.source,
         language_name: req.language_name,
         parse_duration,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Injection layers (framing Q#IJ2 -- Q#IJ5). Worker-side: this runs on a
+// parse worker, so it touches no `Rc` registry and no Lua — it resolves
+// injected languages by indexing the `&'static BUILTIN_LANGUAGES` table
+// (loaders + `injections_query` sources are `Send`) and case-folds fence
+// names through the `ParseRequest`'s alias snapshot.
+// ---------------------------------------------------------------------------
+
+/// Max injection nesting depth (framing Q#IJ3). markdown→rust is depth 1.
+const MAX_INJECTION_DEPTH: u16 = 3;
+/// Runaway backstop on total layers per buffer (framing Q#IJ3) — set well
+/// above any real document (a markdown doc's one-inline-layer-per-paragraph
+/// sits far under this). Purely anti-runaway; the perf bound is the
+/// settle-time acceptance guard, not this number. If hit, tail layers are
+/// dropped (degraded highlighting on a pathological file only).
+const MAX_INJECTION_LAYERS: usize = 4096;
+
+/// The default fence-name → canonical-language alias map (framing Q#IJ4).
+/// Keys are lowercase; the resolver case-folds before lookup. Seeded into
+/// the registry and snapshotted into each [`ParseRequest`]; also handy for
+/// tests that build a request without the registry.
+#[must_use]
+pub fn default_injection_aliases() -> HashMap<String, String> {
+    [
+        ("js", "javascript"),
+        ("jsx", "javascriptreact"),
+        ("ts", "typescript"),
+        ("tsx", "typescriptreact"),
+        ("py", "python"),
+        ("py3", "python"),
+        ("python3", "python"),
+        ("rs", "rust"),
+        ("sh", "bash"),
+        ("shell", "bash"),
+        ("shellscript", "bash"),
+        ("zsh", "bash"),
+        ("c++", "cpp"),
+        ("cxx", "cpp"),
+        ("cc", "cpp"),
+        ("golang", "go"),
+        ("yml", "yaml"),
+        ("md", "markdown"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_owned(), b.to_owned()))
+    .collect()
+}
+
+/// One injection region resolved from a parent layer's `injections.scm`.
+/// Ranges are already child-excluded and normalized (Q#IJ5) but not yet
+/// intersected with the parent layer's ranges (that happens per-parent in
+/// [`build_injection_layers`], which knows the parent's included ranges).
+struct InjectionMatch {
+    /// Raw language name — dynamic capture text or a static `#set!` value.
+    language: String,
+    /// Child-excluded content ranges for this match, sorted/non-overlapping.
+    ranges: Vec<Range>,
+}
+
+/// Expand injection layers under the already-parsed root (`layers[0]`),
+/// appending children in depth-ascending order (Q#IJ1, Q#IJ6 rely on this
+/// ordering). Bounded by depth, total layer count, and a
+/// `(language, ranges)` visited guard (Q#IJ3). BFS by depth so siblings
+/// at a level are grouped before descending.
+fn build_injection_layers(
+    layers: &mut Vec<Layer>,
+    source: &[u8],
+    aliases: &HashMap<String, String>,
+) {
+    let mut query_cache: HashMap<String, Option<Arc<tree_sitter::Query>>> = HashMap::new();
+    let mut visited: HashSet<(String, Vec<(usize, usize)>)> = HashSet::new();
+    // Frontier entries are (layer index, that layer's included ranges).
+    let mut frontier: Vec<(usize, Vec<Range>)> = vec![(0, vec![whole_source_range(source)])];
+    let mut depth: u16 = 0;
+
+    while depth < MAX_INJECTION_DEPTH && !frontier.is_empty() {
+        // Children discovered this level: (layer, its ranges) to append and
+        // (if any injections themselves) descend into next level.
+        let mut children: Vec<(Layer, Vec<Range>)> = Vec::new();
+        'parents: for (parent_idx, parent_ranges) in &frontier {
+            let parent_lang = layers[*parent_idx].language_name.clone();
+            let Some(query) = injection_query_cached(&mut query_cache, &parent_lang) else {
+                continue;
+            };
+            for m in collect_injection_matches(&query, &layers[*parent_idx].tree, source) {
+                if layers.len() + children.len() >= MAX_INJECTION_LAYERS {
+                    break 'parents; // runaway backstop; tail dropped
+                }
+                let Some(child_lang) = resolve_injected_language(&m.language, aliases) else {
+                    continue; // unknown/unaliased language — skip this child only
+                };
+                let mut ranges = intersect_ranges(&m.ranges, parent_ranges, source);
+                normalize_ranges(&mut ranges);
+                if ranges.is_empty() {
+                    continue;
+                }
+                let key = (child_lang.to_owned(), ranges_key(&ranges));
+                if !visited.insert(key) {
+                    continue; // same (language, ranges) already parsed — cycle guard
+                }
+                let Some(tree) = parse_child(child_lang, &ranges, source) else {
+                    continue; // child parse failed — skip this child only
+                };
+                children.push((
+                    Layer {
+                        language_name: child_lang.to_owned(),
+                        tree,
+                        depth: depth + 1,
+                        highlight_query: None,
+                    },
+                    ranges,
+                ));
+            }
+        }
+        if children.is_empty() {
+            break;
+        }
+        let mut next_frontier = Vec::with_capacity(children.len());
+        for (layer, ranges) in children {
+            let idx = layers.len();
+            layers.push(layer);
+            next_frontier.push((idx, ranges));
+        }
+        frontier = next_frontier;
+        depth += 1;
+    }
+}
+
+/// Compile (once, cached) the `injections.scm` for `lang` from the static
+/// [`BUILTIN_LANGUAGES`] table, or `None` if the language ships none.
+fn injection_query_cached(
+    cache: &mut HashMap<String, Option<Arc<tree_sitter::Query>>>,
+    lang: &str,
+) -> Option<Arc<tree_sitter::Query>> {
+    if let Some(slot) = cache.get(lang) {
+        return slot.clone();
+    }
+    let compiled = BUILTIN_LANGUAGES
+        .iter()
+        .find(|e| e.name == lang)
+        .and_then(|entry| {
+            let source = entry.injections_query.join("\n");
+            if source.trim().is_empty() {
+                return None;
+            }
+            let language = (entry.loader)();
+            tree_sitter::Query::new(&language, &source)
+                .ok()
+                .map(Arc::new)
+        });
+    cache.insert(lang.to_owned(), compiled.clone());
+    compiled
+}
+
+/// Run `query` over `tree` and return each injection region: its raw
+/// language name (dynamic `@injection.language` node text, or static
+/// `#set! injection.language`) and its child-excluded content ranges.
+fn collect_injection_matches(
+    query: &tree_sitter::Query,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+) -> Vec<InjectionMatch> {
+    let names = query.capture_names();
+    let content_cap = names.iter().position(|n| *n == "injection.content");
+    let Some(content_cap) = content_cap.map(|i| i as u32) else {
+        return Vec::new();
+    };
+    let lang_cap = names
+        .iter()
+        .position(|n| *n == "injection.language")
+        .map(|i| i as u32);
+
+    let mut out = Vec::new();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut it = cursor.matches(query, tree.root_node(), source);
+    while let Some(m) = it.next() {
+        // Static language + include-children from `#set!` property settings.
+        let mut static_lang: Option<String> = None;
+        let mut include_children = false;
+        for prop in query.property_settings(m.pattern_index) {
+            match &*prop.key {
+                "injection.language" => {
+                    static_lang = prop.value.as_deref().map(str::to_owned);
+                }
+                "injection.include-children" => include_children = true,
+                _ => {}
+            }
+        }
+        let mut dyn_lang: Option<String> = None;
+        let mut ranges: Vec<Range> = Vec::new();
+        for cap in m.captures {
+            if Some(cap.index) == lang_cap {
+                if let Ok(text) = cap.node.utf8_text(source) {
+                    dyn_lang = Some(text.to_owned());
+                }
+            } else if cap.index == content_cap {
+                ranges.extend(content_node_ranges(cap.node, include_children));
+            }
+        }
+        let Some(language) = static_lang.or(dyn_lang) else {
+            continue;
+        };
+        normalize_ranges(&mut ranges);
+        if ranges.is_empty() {
+            continue;
+        }
+        out.push(InjectionMatch { language, ranges });
+    }
+    out
+}
+
+/// The included ranges for one `@injection.content` node (framing Q#IJ5 /
+/// mechanic #3). With `include_children`, the whole node span; otherwise
+/// the node's extent minus its **named** children's ranges. Anonymous
+/// token children are *kept* — they are the injected text itself, not
+/// structure to exclude. (This matches `tree-sitter-md`'s own inline
+/// splitter, `bindings/rust/parser.rs:410`, which filters on `is_named()`:
+/// excluding a block `inline` node's anonymous text tokens would shred the
+/// paragraph into unparseable fragments. Our real injection sites — a
+/// childless `code_fence_content`, an `inline` with only anonymous
+/// children, an `include-children` macro `token_tree` — all resolve
+/// correctly under this rule.) A node with no named children yields its
+/// whole span.
+fn content_node_ranges(node: Node, include_children: bool) -> Vec<Range> {
+    if include_children {
+        return vec![node.range()];
+    }
+    let mut ranges = Vec::new();
+    let mut start_byte = node.start_byte();
+    let mut start_point = node.start_position();
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                if child.start_byte() > start_byte {
+                    ranges.push(Range {
+                        start_byte,
+                        end_byte: child.start_byte(),
+                        start_point,
+                        end_point: child.start_position(),
+                    });
+                }
+                start_byte = child.end_byte();
+                start_point = child.end_position();
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    if node.end_byte() > start_byte {
+        ranges.push(Range {
+            start_byte,
+            end_byte: node.end_byte(),
+            start_point,
+            end_point: node.end_position(),
+        });
+    }
+    ranges
+}
+
+/// Clip `candidate` ranges to `parent` ranges (framing Q#IJ5): a nested
+/// injection cannot reintroduce bytes its parent excluded. Points are
+/// recomputed only for a clipped edge (unclipped edges keep the node's
+/// exact point). At depth 1 the parent is the whole buffer, so this is a
+/// pass-through.
+fn intersect_ranges(candidate: &[Range], parent: &[Range], source: &[u8]) -> Vec<Range> {
+    let mut out = Vec::new();
+    for c in candidate {
+        for p in parent {
+            let start = c.start_byte.max(p.start_byte);
+            let end = c.end_byte.min(p.end_byte);
+            if end > start {
+                out.push(Range {
+                    start_byte: start,
+                    end_byte: end,
+                    start_point: if start == c.start_byte {
+                        c.start_point
+                    } else {
+                        byte_to_point(source, start)
+                    },
+                    end_point: if end == c.end_byte {
+                        c.end_point
+                    } else {
+                        byte_to_point(source, end)
+                    },
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Sort, drop empty, and merge overlapping ranges so the result satisfies
+/// `set_included_ranges`' sorted/non-overlapping/non-empty contract.
+fn normalize_ranges(ranges: &mut Vec<Range>) {
+    ranges.retain(|r| r.end_byte > r.start_byte);
+    ranges.sort_by_key(|r| r.start_byte);
+    let mut merged: Vec<Range> = Vec::with_capacity(ranges.len());
+    for r in ranges.drain(..) {
+        if let Some(last) = merged.last_mut()
+            && r.start_byte < last.end_byte
+        {
+            if r.end_byte > last.end_byte {
+                last.end_byte = r.end_byte;
+                last.end_point = r.end_point;
+            }
+            continue;
+        }
+        merged.push(r);
+    }
+    *ranges = merged;
+}
+
+/// A hashable identity for a range set (framing Q#IJ3 visited guard).
+fn ranges_key(ranges: &[Range]) -> Vec<(usize, usize)> {
+    ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect()
+}
+
+/// Case-fold `raw`, apply the alias map, then resolve against the bundled
+/// table (framing Q#IJ4). Returns the canonical `&'static` name, or `None`
+/// for an unknown language.
+fn resolve_injected_language(raw: &str, aliases: &HashMap<String, String>) -> Option<&'static str> {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let candidate: &str = aliases.get(&lower).map_or(lower.as_str(), String::as_str);
+    BUILTIN_LANGUAGES
+        .iter()
+        .find(|e| e.name == candidate)
+        .map(|e| e.name)
+}
+
+/// Cold-parse `source` restricted to `ranges` with `lang`'s grammar. Node
+/// offsets in the returned tree are absolute into `source` (mechanic #1).
+fn parse_child(lang: &str, ranges: &[Range], source: &[u8]) -> Option<tree_sitter::Tree> {
+    let entry = BUILTIN_LANGUAGES.iter().find(|e| e.name == lang)?;
+    let language = (entry.loader)();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).ok()?;
+    parser.set_included_ranges(ranges).ok()?;
+    parser.parse(source, None)
+}
+
+/// The whole-buffer range, the root layer's parent range.
+fn whole_source_range(source: &[u8]) -> Range {
+    Range {
+        start_byte: 0,
+        end_byte: source.len(),
+        start_point: Point::new(0, 0),
+        end_point: byte_to_point(source, source.len()),
+    }
 }
 
 /// Convert a byte offset within `source` to a tree-sitter
@@ -285,13 +702,17 @@ impl ParseViewHandle {
     pub fn make_request(&self) -> ParseRequest {
         let mut inner = self.inner.lock().expect("ParseView mutex poisoned");
         let edits = std::mem::take(&mut inner.pending);
-        let prior_tree = inner.current.as_ref().map(|b| b.tree.clone());
+        let prior_tree = inner.current.as_ref().map(|b| b.root_tree().clone());
         ParseRequest {
             source: Arc::from(inner.source.clone()),
             language: inner.language.clone(),
             language_name: inner.language_name.clone(),
             prior_tree,
             edits,
+            // Empty by default; the dispatch binding overrides with the
+            // registry's alias snapshot (framing Q#IJ4). Callers that need
+            // injections and bypass the registry set this themselves.
+            injection_aliases: Arc::new(HashMap::new()),
         }
     }
 
@@ -339,6 +760,13 @@ pub struct LanguageEntry {
     /// slice (or all-empty fragments) means no highlights: the view
     /// runs but emits nothing.
     pub highlights_query: &'static [&'static str],
+    /// Bundled `injections.scm` fragments (framing Q#IJ2), joined with a
+    /// newline and compiled on the parse worker to find embedded-language
+    /// regions. Empty for the many grammars that ship none (or don't
+    /// inject). Names are inconsistent across crates — markdown exposes
+    /// `INJECTION_QUERY_BLOCK`, rust `INJECTIONS_QUERY`, most none — the
+    /// same shape `highlights_query` already absorbs.
+    pub injections_query: &'static [&'static str],
 }
 
 /// Bundled grammars (T M4.2 + M4.3). The order is significant only
@@ -360,12 +788,14 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["rs"],
         loader: || tree_sitter_rust::LANGUAGE.into(),
         highlights_query: &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+        injections_query: &[tree_sitter_rust::INJECTIONS_QUERY],
     },
     LanguageEntry {
         name: "lua",
         extensions: &["lua"],
         loader: || tree_sitter_lua::LANGUAGE.into(),
         highlights_query: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
     // T M9.7: markdown grammar for prompt-result buffers with
     // `_meta.format = "markdown"`. Uses only the block grammar
@@ -385,6 +815,20 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["md", "markdown"],
         loader: || tree_sitter_md::LANGUAGE.into(),
         highlights_query: &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+        injections_query: &[tree_sitter_md::INJECTION_QUERY_BLOCK],
+    },
+    // markdown_inline (framing Q#IJ10) — the inline grammar the block
+    // grammar injects for paragraph/heading text (`#set! injection.language
+    // "markdown_inline"`). No file extension: it is injection-only, never
+    // opened directly by name. Ships an inline highlights query (emphasis,
+    // links, code spans) and its own injections (e.g. inline HTML), so it
+    // recurses like any other layer. Retires the M9.7 block-only floor.
+    LanguageEntry {
+        name: "markdown_inline",
+        extensions: &[],
+        loader: || tree_sitter_md::INLINE_LANGUAGE.into(),
+        highlights_query: &[tree_sitter_md::HIGHLIGHT_QUERY_INLINE],
+        injections_query: &[tree_sitter_md::INJECTION_QUERY_INLINE],
     },
     // T M_B3 — C / C++. Lexical highlighting (keywords / strings /
     // operators) so the grid TUI shows code-shaped C++ on first open.
@@ -406,12 +850,14 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["c", "h"],
         loader: || tree_sitter_c::LANGUAGE.into(),
         highlights_query: &[tree_sitter_c::HIGHLIGHT_QUERY],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "cpp",
         extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "inl", "cppm"],
         loader: || tree_sitter_cpp::LANGUAGE.into(),
         highlights_query: &[tree_sitter_cpp::HIGHLIGHT_QUERY],
+        injections_query: &[],
     },
     // CUDA (`.cu` source, `.cuh` header). A dedicated grammar rather
     // than reusing `cpp`: CUDA extends C++ with `__global__`/`__device__`
@@ -442,6 +888,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_cpp::HIGHLIGHT_QUERY,
             tree_sitter_cuda::HIGHLIGHTS_QUERY,
         ],
+        injections_query: &[],
     },
     // Shell / bash. Lexical highlighting for the shell family; the LSP
     // half (bash-language-server) was already wired in `lsp.lua`. Unlike
@@ -459,6 +906,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["sh", "bash", "zsh", "ksh", "ash", "bats"],
         loader: || tree_sitter_bash::LANGUAGE.into(),
         highlights_query: &[tree_sitter_bash::HIGHLIGHT_QUERY],
+        injections_query: &[],
     },
     // Filename-identified languages. These files usually have no useful
     // extension (`Dockerfile`, `Makefile`, `CMakeLists.txt`), so the bulk
@@ -474,18 +922,21 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["dockerfile", "containerfile"],
         loader: || tree_sitter_containerfile::LANGUAGE.into(),
         highlights_query: &[tree_sitter_containerfile::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "make",
         extensions: &["mk", "make"],
         loader: || tree_sitter_make::LANGUAGE.into(),
         highlights_query: &[tree_sitter_make::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "cmake",
         extensions: &["cmake"],
         loader: || tree_sitter_cmake::LANGUAGE.into(),
         highlights_query: &[tree_sitter_cmake::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
     // Grammar-gap languages — these already had LSP configs but no
     // grammar, so they rendered without lexical color. Each language name
@@ -498,12 +949,14 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["py", "pyi"],
         loader: || tree_sitter_python::LANGUAGE.into(),
         highlights_query: &[tree_sitter_python::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "go",
         extensions: &["go"],
         loader: || tree_sitter_go::LANGUAGE.into(),
         highlights_query: &[tree_sitter_go::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
     // JavaScript / TypeScript. One `tree-sitter-javascript` grammar parses
     // both `.js` and `.jsx`; `tree-sitter-typescript` ships two grammars
@@ -518,6 +971,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["js", "mjs", "cjs"],
         loader: || tree_sitter_javascript::LANGUAGE.into(),
         highlights_query: &[tree_sitter_javascript::HIGHLIGHT_QUERY],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "javascriptreact",
@@ -527,6 +981,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
         ],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "typescript",
@@ -536,6 +991,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_typescript::HIGHLIGHTS_QUERY,
         ],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "typescriptreact",
@@ -546,18 +1002,21 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
             tree_sitter_typescript::HIGHLIGHTS_QUERY,
         ],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "toml",
         extensions: &["toml"],
         loader: || tree_sitter_toml_ng::LANGUAGE.into(),
         highlights_query: &[tree_sitter_toml_ng::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
     LanguageEntry {
         name: "zig",
         extensions: &["zig", "zon"],
         loader: || tree_sitter_zig::LANGUAGE.into(),
         highlights_query: &[tree_sitter_zig::HIGHLIGHTS_QUERY],
+        injections_query: &[],
     },
 ];
 
@@ -587,6 +1046,11 @@ pub struct SyntaxRegistry {
     /// compilation failure (e.g. grammar / query ABI skew) is
     /// cached as `Err(message)` so we don't burn cycles re-trying.
     queries: RefCell<HashMap<String, Result<Arc<tree_sitter::Query>, String>>>,
+    /// Fence-name → canonical-language alias map (framing Q#IJ4). Seeded
+    /// with [`default_injection_aliases`]; Lua adds to it through
+    /// [`Self::register_injection_alias`]. Snapshotted into each
+    /// [`ParseRequest`] at dispatch so the worker reads a `Send` copy.
+    injection_aliases: RefCell<HashMap<String, String>>,
     /// Active theme (T M4.3). Shared with every
     /// [`crate::highlight::SyntaxHighlightView`] attached through
     /// this registry --- editing the theme through Lua updates all
@@ -613,6 +1077,7 @@ impl SyntaxRegistry {
             parse_jobs: RefCell::new(HashMap::new()),
             extra_extensions: RefCell::new(HashMap::new()),
             queries: RefCell::new(HashMap::new()),
+            injection_aliases: RefCell::new(default_injection_aliases()),
             theme: Arc::new(Mutex::new(Theme::default_dark())),
         }
     }
@@ -777,6 +1242,47 @@ impl SyntaxRegistry {
             .insert(lang_name.to_owned(), compiled);
         result
     }
+
+    /// Add or override a fence-name → language alias (framing Q#IJ4). The
+    /// alias key is case-folded to match the resolver. Called from Lua via
+    /// `pmacs.parse.injection_aliases`.
+    pub fn register_injection_alias(&self, alias: impl Into<String>, lang: impl Into<String>) {
+        self.injection_aliases
+            .borrow_mut()
+            .insert(alias.into().to_ascii_lowercase(), lang.into());
+    }
+
+    /// A `Send` snapshot of the alias map for a [`ParseRequest`] (Q#IJ4).
+    #[must_use]
+    pub fn injection_alias_snapshot(&self) -> Arc<HashMap<String, String>> {
+        Arc::new(self.injection_aliases.borrow().clone())
+    }
+
+    /// Stage 2 of the injection handoff (framing Q#IJ2): fill each layer's
+    /// `highlight_query` from this registry's cache and return the resolved
+    /// bundle. The worker leaves the queries `None`; this runs on the main
+    /// thread at settle where the `Rc` query cache lives. Tree clones are
+    /// cheap (`ts_tree_copy` shares subtrees), so rebuilding the bundle is
+    /// near-free.
+    #[must_use]
+    pub fn resolve_layer_queries(&self, raw: &ParseTreeBundle) -> Arc<ParseTreeBundle> {
+        let layers = raw
+            .layers
+            .iter()
+            .map(|l| Layer {
+                language_name: l.language_name.clone(),
+                tree: l.tree.clone(),
+                depth: l.depth,
+                highlight_query: self.highlights_query(&l.language_name),
+            })
+            .collect();
+        Arc::new(ParseTreeBundle {
+            layers,
+            source: raw.source.clone(),
+            language_name: raw.language_name.clone(),
+            parse_duration: raw.parse_duration,
+        })
+    }
 }
 
 impl Default for SyntaxRegistry {
@@ -877,13 +1383,32 @@ pub fn compute_highlight_spans_in_range(
     bundle: &ParseTreeBundle,
     byte_range: Option<std::ops::Range<usize>>,
 ) -> Vec<HighlightSpan> {
+    compute_highlight_spans_for(
+        query,
+        bundle.root_tree(),
+        bundle.source.as_ref(),
+        byte_range,
+    )
+}
+
+/// Like [`compute_highlight_spans_in_range`] but over an explicit
+/// `(tree, source)` — the per-layer form the producers call for each
+/// injection layer (framing Q#IJ7). `source` is the whole buffer; a
+/// child layer's tree carries absolute offsets into it, so the same
+/// capture walk works unchanged.
+#[must_use]
+pub fn compute_highlight_spans_for(
+    query: &tree_sitter::Query,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    byte_range: Option<std::ops::Range<usize>>,
+) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut cursor = tree_sitter::QueryCursor::new();
     if let Some(range) = byte_range {
         cursor.set_byte_range(range);
     }
-    let source: &[u8] = bundle.source.as_ref();
-    let root = bundle.tree.root_node();
+    let root = tree.root_node();
     let mut iter = cursor.captures(query, root, source);
     while let Some((qmatch, capture_idx)) = iter.next() {
         // Fail-closed on the locals property predicate. The capture
@@ -943,6 +1468,283 @@ mod tests {
         let bundle = Arc::new(run_parse(req).expect("parse succeeds"));
         handle.install(bundle.clone());
         bundle
+    }
+
+    /// Parse `src` as `lang` through `reg` with injection layers expanded
+    /// (worker) and each layer's highlight query resolved (settle) — the
+    /// full framing Q#IJ2 handoff. Returns the resolved bundle.
+    fn parse_layered(reg: &SyntaxRegistry, lang: &str, src: &[u8]) -> Arc<ParseTreeBundle> {
+        let language = reg.language(lang).expect("grammar loads");
+        let mut buf = fresh_buffer("doc");
+        buf.apply_edit(EditOp::Insert { pos: 0, bytes: src })
+            .unwrap();
+        let view = ParseView::new(&buf, language, lang.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = run_parse(req).expect("parse succeeds");
+        reg.resolve_layer_queries(&bundle)
+    }
+
+    #[test]
+    fn injection_query_block_compiles() {
+        // ABI guard (framing acceptance #1): the markdown block + inline
+        // injection queries must compile against their grammars. A crate
+        // bump that drifted query and grammar apart surfaces here.
+        let mut cache = HashMap::new();
+        assert!(
+            injection_query_cached(&mut cache, "markdown").is_some(),
+            "markdown ships a compilable injection query"
+        );
+        assert!(
+            injection_query_cached(&mut cache, "markdown_inline").is_some(),
+            "markdown_inline ships a compilable injection query"
+        );
+        // A language with no injections resolves to None, not an error.
+        assert!(injection_query_cached(&mut cache, "toml").is_none());
+    }
+
+    #[test]
+    fn markdown_fence_builds_rust_child_layer() {
+        // Framing acceptance #2.
+        let reg = SyntaxRegistry::new();
+        let src = b"# Title\n\n```rust\nfn demo() { let x = 1; }\n```\n\nText.\n";
+        let bundle = parse_layered(&reg, "markdown", src);
+        assert!(
+            bundle.layers.len() >= 2,
+            "fenced markdown is layered; got {} layer(s)",
+            bundle.layers.len()
+        );
+        assert_eq!(
+            bundle.layers[0].language_name, "markdown",
+            "root is markdown"
+        );
+        let rust = bundle
+            .layers
+            .iter()
+            .find(|l| l.language_name == "rust")
+            .expect("a rust child layer for the ```rust fence");
+        assert_eq!(
+            rust.tree.root_node().kind(),
+            "source_file",
+            "rust root kind"
+        );
+        assert_eq!(rust.depth, 1, "the fence child is at depth 1");
+    }
+
+    #[test]
+    fn child_layer_offsets_are_absolute() {
+        // Framing acceptance #3 / mechanic #1: a node inside the fence has
+        // byte offsets absolute into the FULL markdown source.
+        let reg = SyntaxRegistry::new();
+        let prefix = "# Title\n\n```rust\n";
+        let src = format!("{prefix}fn demo() {{}}\n```\n");
+        let bundle = parse_layered(&reg, "markdown", src.as_bytes());
+        let rust = bundle
+            .layers
+            .iter()
+            .find(|l| l.language_name == "rust")
+            .expect("rust child layer");
+        let fi = rust.tree.root_node().child(0).expect("function_item");
+        assert!(
+            fi.start_byte() >= prefix.len(),
+            "child offset {} is absolute (>= prefix len {})",
+            fi.start_byte(),
+            prefix.len()
+        );
+        let text = &bundle.source[fi.start_byte()..fi.end_byte()];
+        assert!(
+            std::str::from_utf8(text).unwrap().contains("fn demo"),
+            "absolute offsets index the rust code within the full source"
+        );
+    }
+
+    #[test]
+    fn dynamic_alias_resolves_and_unknown_skips() {
+        // Framing acceptance #4: case-folded alias resolution + graceful
+        // skip of an unknown fence language.
+        let reg = SyntaxRegistry::new();
+        for (fence, lang) in [("py", "python"), ("rs", "rust"), ("JS", "javascript")] {
+            let src = format!("```{fence}\nvalue\n```\n");
+            let bundle = parse_layered(&reg, "markdown", src.as_bytes());
+            assert!(
+                bundle.layers.iter().any(|l| l.language_name == lang),
+                "fence ```{fence} resolves to {lang}"
+            );
+        }
+        let bundle = parse_layered(&reg, "markdown", b"```nonsense\nvalue\n```\n");
+        assert!(
+            !bundle.layers.iter().any(|l| l.language_name == "nonsense"),
+            "unknown fence language produces no child layer"
+        );
+        assert_eq!(bundle.layers[0].language_name, "markdown", "root intact");
+        assert_eq!(bundle.root_tree().root_node().kind(), "document");
+    }
+
+    #[test]
+    fn registry_alias_override_resolves_via_snapshot() {
+        // Framing acceptance #5 (Rust-level bridge): a registered alias is
+        // snapshotted into the request and resolved by the worker. The full
+        // Lua-async path is covered in `tests/injection_acceptance.rs`.
+        let reg = SyntaxRegistry::new();
+        reg.register_injection_alias("MyLang", "rust"); // case-folded to `mylang`
+        let bundle = parse_layered(&reg, "markdown", b"```mylang\nfn f() {}\n```\n");
+        assert!(
+            bundle.layers.iter().any(|l| l.language_name == "rust"),
+            "a registered alias resolves the fence to its target grammar"
+        );
+    }
+
+    #[test]
+    fn inline_layer_multi_range_link_and_emphasis() {
+        // Framing acceptance #6: a paragraph with a link AND emphasis
+        // becomes a markdown_inline layer whose included ranges exclude the
+        // block grammar's named children — the inline grammar still parses
+        // the emphasis run in a surviving text range.
+        let reg = SyntaxRegistry::new();
+        let src = b"See [the docs](http://example.com) and *emphasis* here.\n";
+        let bundle = parse_layered(&reg, "markdown", src);
+        let inline = bundle
+            .layers
+            .iter()
+            .find(|l| l.language_name == "markdown_inline")
+            .expect("inline paragraph becomes a markdown_inline layer");
+        assert_eq!(
+            inline.depth, 1,
+            "inline is a depth-1 injection of the block grammar"
+        );
+        let sexp = inline.tree.root_node().to_sexp();
+        assert!(
+            sexp.contains("emphasis"),
+            "the inline layer parsed the *emphasis* run: {sexp}"
+        );
+        let query = inline
+            .highlight_query
+            .as_ref()
+            .expect("inline highlights resolved at settle");
+        let spans = compute_highlight_spans_for(query, &inline.tree, &bundle.source, None);
+        assert!(
+            !spans.is_empty(),
+            "the inline layer produces highlight spans"
+        );
+    }
+
+    #[test]
+    fn recursion_bounds_terminate() {
+        // Framing acceptance #7: rust self-injects into macro token-trees.
+        // Nested injections must terminate (depth cap + visited guard),
+        // never loop — if the guard failed this test would hang.
+        let reg = SyntaxRegistry::new();
+        let src =
+            b"macro_rules! m { () => { println!(\"{}\", vec![1, 2, 3]); }; }\nfn f() { m!(); }\n";
+        let bundle = parse_layered(&reg, "rust", src);
+        assert!(
+            bundle.layers.len() <= MAX_INJECTION_LAYERS,
+            "layer count within the backstop"
+        );
+        let max_depth = bundle.layers.iter().map(|l| l.depth).max().unwrap_or(0);
+        assert!(
+            max_depth <= MAX_INJECTION_DEPTH,
+            "max depth {max_depth} within cap {MAX_INJECTION_DEPTH}"
+        );
+        assert_eq!(bundle.layers[0].language_name, "rust", "root is rust");
+        assert!(
+            bundle.layers.iter().all(|l| l.language_name == "rust"),
+            "all layers are rust (self-injection)"
+        );
+    }
+
+    #[test]
+    fn non_injecting_buffer_single_layer() {
+        // Framing acceptance #13: a plain rust file with no macros produces
+        // exactly one layer — no behavior change for non-injecting content.
+        let reg = SyntaxRegistry::new();
+        let bundle = parse_layered(&reg, "rust", b"fn main() { let x = 1; }\n");
+        assert_eq!(
+            bundle.layers.len(),
+            1,
+            "no injections yields the single root layer"
+        );
+        assert_eq!(bundle.layers[0].depth, 0);
+    }
+
+    #[test]
+    fn incremental_edit_reflects_in_child_and_new_fence_adds_layer() {
+        // Framing acceptance #11: editing inside a fence reflects in the
+        // child layer after reparse; a NEW fence adds a layer.
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("markdown").expect("markdown");
+        let mut buf = fresh_buffer("doc");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"```rust\nfn a() {}\n```\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "markdown".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+
+        let reparse = |handle: &ParseViewHandle| -> Arc<ParseTreeBundle> {
+            let mut req = handle.make_request();
+            req.injection_aliases = reg.injection_alias_snapshot();
+            let bundle = reg.resolve_layer_queries(&run_parse(req).expect("parse"));
+            handle.install(bundle.clone());
+            bundle
+        };
+        let count_fns = |b: &ParseTreeBundle| -> usize {
+            b.layers
+                .iter()
+                .find(|l| l.language_name == "rust")
+                .map_or(0, |l| {
+                    l.tree
+                        .root_node()
+                        .to_sexp()
+                        .matches("function_item")
+                        .count()
+                })
+        };
+
+        let b0 = reparse(&handle);
+        assert_eq!(
+            b0.layers
+                .iter()
+                .filter(|l| l.language_name == "rust")
+                .count(),
+            1,
+            "initial: one rust fence layer"
+        );
+        assert_eq!(count_fns(&b0), 1, "initial rust child has one function");
+
+        // Edit inside the fence: add a second function before the closer.
+        let src = handle.source_snapshot();
+        let at = src
+            .windows(4)
+            .position(|w| w == b"\n```")
+            .expect("closing fence");
+        buf.apply_edit(EditOp::Insert {
+            pos: at as u64,
+            bytes: b"\nfn b() {}",
+        })
+        .unwrap();
+        let b1 = reparse(&handle);
+        assert!(
+            count_fns(&b1) >= 2,
+            "an edit inside the fence is reflected in the rust child layer"
+        );
+
+        // Append a NEW python fence → a new layer appears.
+        let end = buf.len();
+        buf.apply_edit(EditOp::Insert {
+            pos: end,
+            bytes: b"\n```py\nx = 1\n```\n",
+        })
+        .unwrap();
+        let b2 = reparse(&handle);
+        assert!(
+            b2.layers.iter().any(|l| l.language_name == "python"),
+            "a newly-added fence adds its child layer"
+        );
     }
 
     #[test]
@@ -1060,12 +1862,12 @@ mod tests {
         let _vid = buf.attach_view(Box::new(view));
         let bundle = parse_synchronously(&handle);
         assert_eq!(
-            bundle.tree.root_node().kind(),
+            bundle.root_tree().root_node().kind(),
             "translation_unit",
             "CUDA grammar (C-derived) roots at translation_unit"
         );
         assert!(
-            !bundle.tree.root_node().has_error(),
+            !bundle.root_tree().root_node().has_error(),
             "CUDA grammar parses the `<<<...>>>` kernel launch without error"
         );
     }
@@ -1128,12 +1930,12 @@ mod tests {
         let _vid = buf.attach_view(Box::new(view));
         let bundle = parse_synchronously(&handle);
         assert_eq!(
-            bundle.tree.root_node().kind(),
+            bundle.root_tree().root_node().kind(),
             "program",
             "bash grammar roots at `program`"
         );
         assert!(
-            !bundle.tree.root_node().has_error(),
+            !bundle.root_tree().root_node().has_error(),
             "bash grammar parses a representative script without error"
         );
     }
@@ -1232,12 +2034,12 @@ mod tests {
             let _vid = buf.attach_view(Box::new(view));
             let bundle = parse_synchronously(&handle);
             assert_eq!(
-                bundle.tree.root_node().kind(),
+                bundle.root_tree().root_node().kind(),
                 *root_kind,
                 "`{lang}` roots at `{root_kind}`"
             );
             assert!(
-                !bundle.tree.root_node().has_error(),
+                !bundle.root_tree().root_node().has_error(),
                 "`{lang}` parses its snippet without error"
             );
         }
@@ -1319,12 +2121,12 @@ mod tests {
             let _vid = buf.attach_view(Box::new(view));
             let bundle = parse_synchronously(&handle);
             assert_eq!(
-                bundle.tree.root_node().kind(),
+                bundle.root_tree().root_node().kind(),
                 *root_kind,
                 "`{lang}` roots at `{root_kind}`"
             );
             assert!(
-                !bundle.tree.root_node().has_error(),
+                !bundle.root_tree().root_node().has_error(),
                 "`{lang}` parses its snippet without error"
             );
         }
@@ -1486,7 +2288,7 @@ mod tests {
 
         // Cold parse.
         let bundle = parse_synchronously(&handle);
-        assert_eq!(bundle.tree.root_node().kind(), "source_file");
+        assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
         assert_eq!(handle.pending_edit_count(), 0);
 
         // One incremental edit, then re-parse with the new source +
@@ -1498,7 +2300,7 @@ mod tests {
         .unwrap();
         assert_eq!(handle.pending_edit_count(), 1);
         let bundle = parse_synchronously(&handle);
-        assert_eq!(bundle.tree.root_node().kind(), "source_file");
+        assert_eq!(bundle.root_tree().root_node().kind(), "source_file");
         assert_eq!(
             bundle.source.as_ref(),
             b"fn main() { let _ = 1;}\n",
