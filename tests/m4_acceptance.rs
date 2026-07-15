@@ -6265,6 +6265,9 @@ fn m4_gap_grammars_align_with_lsp_configs() {
         ("A.tsx", "typescriptreact"),
         ("Cargo.toml", "toml"),
         ("build.zig", "zig"),
+        ("tsconfig.json", "json"),
+        ("config.yaml", "yaml"),
+        ("ci.yml", "yaml"),
     ] {
         let (grammar, has_cfg): (Option<String>, bool) = s
             .lua_host
@@ -6285,6 +6288,72 @@ fn m4_gap_grammars_align_with_lsp_configs() {
             "{id} has an LSP config the grammar name aligns with"
         );
     }
+}
+
+/// JSON/YAML LSP configs pin the exact server binary and the
+/// `workspace/configuration` sections each server pulls (framing Q#JY2).
+/// The servers are not installed on the build machine, so the section set
+/// is derived from server source/docs and pinned here as the config
+/// contract — a machine with the binaries should confirm them live. The
+/// point is to pin the sections, not merely that some settings table
+/// exists.
+#[test]
+fn m4_json_yaml_lsp_configs_pin_command_and_sections() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let lua = s.lua_host.lua();
+
+    // json: the maintained extracted-bundle binary (NOT the stale
+    // standalone `vscode-json-languageserver`), `--stdio`, and the `json`
+    // + `http` workspace-config sections present (empty ⇒ server defaults;
+    // remote `$schema` fetch left enabled — no `handledSchemaProtocols`).
+    let json_command: String = lua
+        .load("return pmacs.lsp.config.json.command")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        json_command, "vscode-json-language-server",
+        "json uses the extracted-bundle binary, not the stale standalone"
+    );
+    let json_ok: bool = lua
+        .load(
+            "local c = pmacs.lsp.config.json
+             return c.args[1] == '--stdio'
+                 and c.settings.json ~= nil
+                 and c.settings.http ~= nil
+                 and c.settings.handledSchemaProtocols == nil",
+        )
+        .eval()
+        .unwrap();
+    assert!(
+        json_ok,
+        "json config: --stdio, json + http sections present, remote schemas left on"
+    );
+
+    // yaml: `yaml-language-server --stdio`; `yaml` + `http` +
+    // `redhat.telemetry` sections, Red Hat telemetry disabled by default.
+    let yaml_command: String = lua
+        .load("return pmacs.lsp.config.yaml.command")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        yaml_command, "yaml-language-server",
+        "yaml uses the Red Hat yaml-language-server"
+    );
+    let yaml_ok: bool = lua
+        .load(
+            "local c = pmacs.lsp.config.yaml
+             return c.args[1] == '--stdio'
+                 and c.settings.yaml ~= nil
+                 and c.settings.http ~= nil
+                 and c.settings.redhat.telemetry.enabled == false",
+        )
+        .eval()
+        .unwrap();
+    assert!(
+        yaml_ok,
+        "yaml config: --stdio, yaml + http + redhat.telemetry sections, telemetry off"
+    );
 }
 
 /// Typing-perf: the default bundle coalesces full-document

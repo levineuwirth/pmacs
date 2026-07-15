@@ -200,6 +200,40 @@ pmacs.lsp.config.zig = pmacs.lsp.config.zig or {
   args = {},
 }
 
+-- JSON via the maintained `vscode-langservers-extracted` bundle
+-- (`vscode-json-language-server`, NOT the stale standalone
+-- `vscode-json-languageserver` npm package). Schema-driven
+-- diagnostics/completion; auto-associates well-known files
+-- (`package.json`, `tsconfig.json`) via its built-in schema store. It
+-- pulls `workspace/configuration` for the `json` and `http` sections, so
+-- both ship present-not-null (empty ⇒ server defaults). The underlying
+-- Microsoft server is MIT with no telemetry path; its only outbound
+-- behavior is fetching remote `$schema` content, LEFT ENABLED by default
+-- (disabling via `handledSchemaProtocols = {"file"}` would break remote
+-- schemas without a `vscode/content` implementation). Sections are
+-- derived from the server source/docs — the binary is not installed on
+-- this build machine to observe live; verify where it is present.
+pmacs.lsp.config.json = pmacs.lsp.config.json or {
+  command = "vscode-json-language-server",
+  args = { "--stdio" },
+  settings = { json = {}, http = {} },
+}
+
+-- YAML via Red Hat `yaml-language-server`. It pulls
+-- `workspace/configuration` for `yaml`, `http`, and `redhat.telemetry`;
+-- all three ship present-not-null, with Red Hat telemetry disabled by
+-- default (privacy-respecting; inert if the server never asks). Sections
+-- derived from source/docs — verify against an installed binary.
+pmacs.lsp.config.yaml = pmacs.lsp.config.yaml or {
+  command = "yaml-language-server",
+  args = { "--stdio" },
+  settings = {
+    yaml = {},
+    http = {},
+    redhat = { telemetry = { enabled = false } },
+  },
+}
+
 -- LSP-side extension → language map, deliberately independent of the
 -- tree-sitter detection in `pmacs.parse`. Consulted only when
 -- `pmacs.parse.language_for_path` finds nothing (an extension with a
@@ -267,6 +301,11 @@ pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
 -- Zig (zls). `.zon` is Zig Object Notation, handled by the same server.
 pmacs.lsp.filetypes.zig = pmacs.lsp.filetypes.zig or "zig"
 pmacs.lsp.filetypes.zon = pmacs.lsp.filetypes.zon or "zig"
+-- JSON / YAML. Both ship grammars, so `language_for_path` already resolves
+-- these and the map is the stable-id fallback (same role as `lua`/`cuda`).
+pmacs.lsp.filetypes.json = pmacs.lsp.filetypes.json or "json"
+pmacs.lsp.filetypes.yaml = pmacs.lsp.filetypes.yaml or "yaml"
+pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
 
 -- Per-buffer attachment record: { language, server, uri, version }.
 -- Keyed by `tostring(BufferIdLua)` because BufferIdLua hands out fresh

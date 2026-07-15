@@ -1027,6 +1027,27 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         highlights_query: &[tree_sitter_zig::HIGHLIGHTS_QUERY],
         injections_query: &[],
     },
+    // JSON + YAML — config formats, both self-contained highlights and no
+    // injections of their own. Registering `yaml` also lights up markdown
+    // `---` frontmatter via the #122 injection engine (the markdown block
+    // injection query sets `injection.language "yaml"` for `minus_metadata`;
+    // `+++` TOML frontmatter already works). Root kinds: json `document`,
+    // yaml `stream`. `.jsonc`/`.json5` (comments / trailing commas) are a
+    // deferred variant — the plain JSON grammar rejects them.
+    LanguageEntry {
+        name: "json",
+        extensions: &["json"],
+        loader: || tree_sitter_json::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_json::HIGHLIGHTS_QUERY],
+        injections_query: &[],
+    },
+    LanguageEntry {
+        name: "yaml",
+        extensions: &["yaml", "yml"],
+        loader: || tree_sitter_yaml::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
+        injections_query: &[],
+    },
 ];
 
 /// Registry that the Lua surface ([`crate::lua_bindings::install_parse`])
@@ -2060,6 +2081,167 @@ mod tests {
                 "{path} resolves to bash"
             );
         }
+    }
+
+    #[test]
+    fn builtin_languages_include_json_and_yaml() {
+        // Framing acceptance #1: both entries present, claim their
+        // extensions, ship non-empty highlights.
+        let json = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "json")
+            .expect("`json` entry present");
+        assert!(json.extensions.contains(&"json"), "`json` claims `.json`");
+        assert!(!json.highlights_query.is_empty(), "`json` ships highlights");
+        let yaml = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "yaml")
+            .expect("`yaml` entry present");
+        assert!(yaml.extensions.contains(&"yaml"), "`yaml` claims `.yaml`");
+        assert!(yaml.extensions.contains(&"yml"), "`yaml` claims `.yml`");
+        assert!(!yaml.highlights_query.is_empty(), "`yaml` ships highlights");
+    }
+
+    #[test]
+    fn json_grammar_loads_and_parses() {
+        // Framing acceptance #2 / ABI pin: `tree-sitter-json` 0.24 is
+        // accepted by our tree-sitter 0.26 core; a JSON object parses to a
+        // `document` root without error.
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("json").expect("`json` loads");
+        let mut buf = fresh_buffer("data.json");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"{\n  \"name\": \"pmacs\",\n  \"nums\": [1, 2, 3],\n  \"ok\": true\n}\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "json".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.root_tree().root_node().kind(),
+            "document",
+            "json grammar roots at `document`"
+        );
+        assert!(
+            !bundle.root_tree().root_node().has_error(),
+            "json grammar parses an object without error"
+        );
+    }
+
+    #[test]
+    fn yaml_grammar_loads_and_parses() {
+        // Framing acceptance #3 / ABI pin: `tree-sitter-yaml` 0.7 loads and
+        // a YAML mapping parses to a `stream` root without error.
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("yaml").expect("`yaml` loads");
+        let mut buf = fresh_buffer("config.yaml");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"name: pmacs\nversion: 1\ntags:\n  - a\n  - b\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "yaml".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.root_tree().root_node().kind(),
+            "stream",
+            "yaml grammar roots at `stream`"
+        );
+        assert!(
+            !bundle.root_tree().root_node().has_error(),
+            "yaml grammar parses a mapping without error"
+        );
+    }
+
+    #[test]
+    fn json_yaml_highlights_compile() {
+        // Framing acceptance #4: both highlights queries compile against
+        // their grammars and resolve capture classes.
+        let reg = SyntaxRegistry::new();
+        let json = reg
+            .highlights_query("json")
+            .expect("json highlights compile");
+        assert!(
+            json.capture_names().len() >= 3,
+            "json highlights resolve capture classes; got {}",
+            json.capture_names().len()
+        );
+        let yaml = reg
+            .highlights_query("yaml")
+            .expect("yaml highlights compile");
+        assert!(
+            yaml.capture_names().len() >= 3,
+            "yaml highlights resolve capture classes; got {}",
+            yaml.capture_names().len()
+        );
+    }
+
+    #[test]
+    fn language_for_path_resolves_json_yaml() {
+        // Framing acceptance #5.
+        let reg = SyntaxRegistry::new();
+        assert_eq!(
+            reg.language_name_for_path("tsconfig.json").as_deref(),
+            Some("json")
+        );
+        assert_eq!(
+            reg.language_name_for_path("config.yaml").as_deref(),
+            Some("yaml")
+        );
+        assert_eq!(
+            reg.language_name_for_path("ci.yml").as_deref(),
+            Some("yaml")
+        );
+    }
+
+    #[test]
+    fn yaml_frontmatter_injects_in_markdown() {
+        // Framing acceptance #7 — THE headline synergy with #122: a markdown
+        // `---` frontmatter block (a `minus_metadata` node) is injected as
+        // yaml by the bundled markdown injection query, so registering the
+        // yaml grammar lights it up with no extra wiring.
+        let reg = SyntaxRegistry::new();
+        let src = b"---\ntitle: Hello\ntags: [a, b]\n---\n\n# Body\n";
+        let bundle = parse_layered(&reg, "markdown", src);
+        let yaml = bundle
+            .layers
+            .iter()
+            .find(|l| l.language_name == "yaml")
+            .expect("`---` frontmatter yields a yaml child layer");
+        assert_eq!(
+            yaml.tree.root_node().kind(),
+            "stream",
+            "yaml layer roots at stream"
+        );
+        let query = yaml
+            .highlight_query
+            .as_ref()
+            .expect("yaml highlights resolved");
+        let spans = compute_highlight_spans_for(query, &yaml.tree, &bundle.source, None);
+        assert!(!spans.is_empty(), "the yaml frontmatter layer highlights");
+    }
+
+    #[test]
+    fn json_fence_injects_in_markdown() {
+        // Framing acceptance #8: a ```json fence yields a json child layer
+        // through the #122 engine.
+        let reg = SyntaxRegistry::new();
+        let src = b"# Doc\n\n```json\n{\"a\": 1, \"b\": [2, 3]}\n```\n";
+        let bundle = parse_layered(&reg, "markdown", src);
+        let json = bundle
+            .layers
+            .iter()
+            .find(|l| l.language_name == "json")
+            .expect("a ```json fence yields a json child layer");
+        assert_eq!(
+            json.tree.root_node().kind(),
+            "document",
+            "json layer roots at document"
+        );
     }
 
     #[test]
