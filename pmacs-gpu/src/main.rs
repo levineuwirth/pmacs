@@ -60,6 +60,71 @@ const JETBRAINS_MONO: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf
 /// insertion order (availability, not face identity).
 const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
 
+/// Derived per-preference metrics (framing Q#F6). One knob — the
+/// preference size — scales every surface by `size / 16.0`; the
+/// unset default (`scale == 1.0`, `advance_ratio == 1.0`)
+/// reproduces today's `BASE_*` constants bit-for-bit, so never-set
+/// renders byte-identically. `advance_ratio` is the measured
+/// selected/default NORMAL-face advance ratio (the fixed-ASCII
+/// probe): the empty-document gutter fallback and the menu hit
+/// width follow the resolved family without JetBrains-only drift.
+#[derive(Clone, Copy)]
+struct FontMetrics {
+    scale: f32,
+    advance_ratio: f32,
+}
+
+impl Default for FontMetrics {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            advance_ratio: 1.0,
+        }
+    }
+}
+
+impl FontMetrics {
+    fn code_font_size(self) -> f32 {
+        BASE_CODE_FONT_SIZE * self.scale
+    }
+    fn code_line_height(self) -> f32 {
+        BASE_CODE_LINE_HEIGHT * self.scale
+    }
+    fn gutter_advance_fallback(self) -> f32 {
+        BASE_GUTTER_MONO_ADVANCE_FALLBACK * self.scale * self.advance_ratio
+    }
+    fn status_band_height(self) -> f32 {
+        BASE_STATUS_BAND_HEIGHT * self.scale
+    }
+    fn status_font_size(self) -> f32 {
+        BASE_STATUS_FONT_SIZE * self.scale
+    }
+    fn status_line_height(self) -> f32 {
+        BASE_STATUS_LINE_HEIGHT * self.scale
+    }
+    fn menu_row_height(self) -> f32 {
+        BASE_MENU_ROW_HEIGHT * self.scale
+    }
+    fn menu_font_size(self) -> f32 {
+        BASE_MENU_FONT_SIZE * self.scale
+    }
+    fn menu_line_height(self) -> f32 {
+        BASE_MENU_LINE_HEIGHT * self.scale
+    }
+    fn menu_char_w(self) -> f32 {
+        BASE_MENU_CHAR_W * self.scale * self.advance_ratio
+    }
+    fn mb_drop_row_height(self) -> f32 {
+        BASE_MB_DROP_ROW_HEIGHT * self.scale
+    }
+    fn mb_drop_font_size(self) -> f32 {
+        BASE_MB_DROP_FONT_SIZE * self.scale
+    }
+    fn mb_drop_line_height(self) -> f32 {
+        BASE_MB_DROP_LINE_HEIGHT * self.scale
+    }
+}
+
 /// What sanitized assembly retained (framing Q#F6): the default
 /// family name and the bundled face's ID, both asserted present and
 /// monospaced at assembly time. The rejected-family fallback and the
@@ -187,16 +252,16 @@ const MINIMAP_H_PAD: f32 = 3.0;
 const MINIMAP_CODE_COLS: f32 = 100.0;
 const MINIMAP_MIN_STROKE_WIDTH: f32 = 1.5;
 const MINIMAP_MAX_LINE_STROKE_HEIGHT: f32 = 2.0;
-const CODE_LINE_HEIGHT: f32 = 22.0;
+const BASE_CODE_LINE_HEIGHT: f32 = 22.0;
 /// Font size of the code buffer (and the line-number gutter, so their
 /// line heights match and rows align).
-const CODE_FONT_SIZE: f32 = 16.0;
+const BASE_CODE_FONT_SIZE: f32 = 16.0;
 /// Gap in px between the line-number gutter digits and the code
 /// (UX gutter arc, GPU side of sub-arc 1 — mirrors the TUI gutter).
 const GUTTER_GAP_PX: f32 = 10.0;
 /// Fallback monospace advance in px when no shaped glyph is available to
 /// measure (0.6 em at the 16px code font).
-const GUTTER_MONO_ADVANCE_FALLBACK: f32 = 9.6;
+const BASE_GUTTER_MONO_ADVANCE_FALLBACK: f32 = 9.6;
 /// Diagnostic gutter sign (UX gutter sub-arc 2): a thin severity-colored
 /// bar hugging the gutter's left edge, left of the line numbers — the GPU
 /// analogue of the TUI's leading-column sign glyph. `X` is its left inset,
@@ -226,20 +291,20 @@ const JUMP_STYLE_HOLD: std::time::Duration = std::time::Duration::from_millis(25
 /// Status band (Q#S2): one-line strip reserved at the surface
 /// bottom — buffer name + modified star on the left, diagnostics /
 /// cursor / scroll readout on the right.
-const STATUS_BAND_HEIGHT: f32 = 26.0;
+const BASE_STATUS_BAND_HEIGHT: f32 = 26.0;
 const STATUS_BAND_BG: [f32; 4] = [0.105, 0.105, 0.145, 1.0];
 const STATUS_TEXT_PAD: f32 = 10.0;
-const STATUS_FONT_SIZE: f32 = 13.0;
-const STATUS_LINE_HEIGHT: f32 = 18.0;
+const BASE_STATUS_FONT_SIZE: f32 = 13.0;
+const BASE_STATUS_LINE_HEIGHT: f32 = 18.0;
 // Context menu popup (Q#CM1). One row per item/separator; width tracks
 // the widest label (estimated from a fixed per-char advance, which the
 // code font's monospacing makes good enough for hit-testing + the bg
 // quad to agree).
-const MENU_ROW_HEIGHT: f32 = 22.0;
-const MENU_FONT_SIZE: f32 = 14.0;
-const MENU_LINE_HEIGHT: f32 = 22.0;
+const BASE_MENU_ROW_HEIGHT: f32 = 22.0;
+const BASE_MENU_FONT_SIZE: f32 = 14.0;
+const BASE_MENU_LINE_HEIGHT: f32 = 22.0;
 const MENU_PAD_X: f32 = 12.0;
-const MENU_CHAR_W: f32 = 8.4;
+const BASE_MENU_CHAR_W: f32 = 8.4;
 const MENU_MIN_WIDTH: f32 = 140.0;
 const MENU_MAX_WIDTH: f32 = 380.0;
 const MENU_BG: [f32; 4] = [0.16, 0.16, 0.20, 0.98];
@@ -250,9 +315,9 @@ const MENU_SEPARATOR_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 // above the bottom band, best match at the top; reuses the menu popup's
 // colors. Width tracks the widest candidate (measured from the shaped
 // buffer).
-const MB_DROP_ROW_HEIGHT: f32 = 20.0;
-const MB_DROP_FONT_SIZE: f32 = 13.0;
-const MB_DROP_LINE_HEIGHT: f32 = 20.0;
+const BASE_MB_DROP_ROW_HEIGHT: f32 = 20.0;
+const BASE_MB_DROP_FONT_SIZE: f32 = 13.0;
+const BASE_MB_DROP_LINE_HEIGHT: f32 = 20.0;
 const MB_DROP_PAD_X: f32 = 10.0;
 const MB_DROP_MIN_WIDTH: f32 = 160.0;
 const MB_DROP_MAX_WIDTH: f32 = 480.0;
@@ -265,11 +330,16 @@ const MB_DROP_MAX_WIDTH: f32 = 480.0;
 /// show: no candidates, or the window is too short for even one row. When
 /// the whole list fits this is `(0, n)`, identical to the pre-clamp
 /// behavior — the common path is unchanged.
-fn mb_dropdown_window(n: usize, selected: usize, band_top: f32) -> Option<(usize, usize)> {
+fn mb_dropdown_window(
+    n: usize,
+    selected: usize,
+    band_top: f32,
+    fm: FontMetrics,
+) -> Option<(usize, usize)> {
     if n == 0 {
         return None;
     }
-    let max_rows = (band_top / MB_DROP_ROW_HEIGHT).floor() as usize;
+    let max_rows = (band_top / fm.mb_drop_row_height()).floor() as usize;
     if max_rows == 0 {
         return None;
     }
@@ -490,6 +560,15 @@ struct State {
     /// every font resolution.
     #[allow(dead_code)] // consumed by apply_font_facts (next commit)
     font_defaults: FontDefaults,
+    /// Derived metrics for the current preference (Q#F6); default
+    /// reproduces the BASE_* constants exactly.
+    fm: FontMetrics,
+    /// The family every shaped attrs run selects (Q#F6): the
+    /// sanitized default at assembly; replaced only by a
+    /// four-style-monospace-validated resolution in
+    /// `apply_font_facts` — rejected requests fall back HERE, so
+    /// the accessor is total.
+    resolved_family: String,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -1264,7 +1343,7 @@ impl ApplicationHandler<AppEvent> for App {
                 // Q#M7 — arm/disarm edge auto-scroll from the drag's
                 // vertical position; `about_to_wait` runs the ticks.
                 state.edge_scroll_dir =
-                    edge_scroll_direction(position.y as f32, state.config.height);
+                    edge_scroll_direction(position.y as f32, state.config.height, state.fm);
                 // Drag coalescing (predicted finding #4): pixel-rate
                 // motion only ships when the hit byte changes.
                 let Some(byte) = state.hit_test_source_byte(position.x, position.y) else {
@@ -1401,7 +1480,7 @@ impl ApplicationHandler<AppEvent> for App {
                         (-y * WHEEL_LINES_PER_TICK).round() as i64
                     }
                     winit::event::MouseScrollDelta::PixelDelta(p) => {
-                        (-(p.y as f32) / CODE_LINE_HEIGHT).round() as i64
+                        (-(p.y as f32) / state.fm.code_line_height()).round() as i64
                     }
                 };
                 if lines == 0 {
@@ -1947,6 +2026,9 @@ impl State {
         // Pipelines, atlas, and any offscreen texture must all share the
         // render-target format; `config.format` is the single source.
         let format = config.format;
+        // Q#F6: construction always starts at the default metrics;
+        // a preference arriving later re-metrics via apply_font_facts.
+        let fm = FontMetrics::default();
         // Q#F6: sanitized current-order assembly — system fonts, the
         // bundled face (ID retained), the same-family collision
         // filter, generic defaults, THEN FontSystem construction so
@@ -1984,7 +2066,10 @@ impl State {
         // than one line); larger only fits "hello, pmacs"-shaped
         // strings. Picked metrics that look reasonable for code at
         // 800px wide.
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
+        let mut buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(fm.code_font_size(), fm.code_line_height()),
+        );
         buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
@@ -1992,25 +2077,25 @@ impl State {
         );
         let mut status_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(STATUS_FONT_SIZE, STATUS_LINE_HEIGHT),
+            Metrics::new(fm.status_font_size(), fm.status_line_height()),
         );
         status_buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
-            Some(STATUS_BAND_HEIGHT),
+            Some(fm.status_band_height()),
         );
         let mut status_left_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(STATUS_FONT_SIZE, STATUS_LINE_HEIGHT),
+            Metrics::new(fm.status_font_size(), fm.status_line_height()),
         );
         status_left_buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
-            Some(STATUS_BAND_HEIGHT),
+            Some(fm.status_band_height()),
         );
         let mut menu_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(MENU_FONT_SIZE, MENU_LINE_HEIGHT),
+            Metrics::new(fm.menu_font_size(), fm.menu_line_height()),
         );
         menu_buffer.set_size(
             &mut font_system,
@@ -2019,7 +2104,7 @@ impl State {
         );
         let mut mb_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(MB_DROP_FONT_SIZE, MB_DROP_LINE_HEIGHT),
+            Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height()),
         );
         mb_buffer.set_size(
             &mut font_system,
@@ -2030,7 +2115,7 @@ impl State {
         // dropdown's metrics, its own layer.
         let mut completion_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(MB_DROP_FONT_SIZE, MB_DROP_LINE_HEIGHT),
+            Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height()),
         );
         completion_buffer.set_size(
             &mut font_system,
@@ -2041,7 +2126,7 @@ impl State {
         // height as the code buffer so its rows align one-for-one.
         let mut gutter_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(CODE_FONT_SIZE, CODE_LINE_HEIGHT),
+            Metrics::new(fm.code_font_size(), fm.code_line_height()),
         );
         gutter_buffer.set_size(
             &mut font_system,
@@ -2051,7 +2136,7 @@ impl State {
         buffer.set_text(
             &mut font_system,
             initial_text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(DEFAULT_FONT_FAMILY)),
             Shaping::Advanced,
             None,
         );
@@ -2066,6 +2151,8 @@ impl State {
             config,
             font_system,
             font_defaults,
+            fm: FontMetrics::default(),
+            resolved_family: DEFAULT_FONT_FAMILY.to_owned(),
             swash_cache,
             viewport,
             atlas,
@@ -3126,7 +3213,7 @@ impl State {
         let cursor_line = line_starts
             .partition_point(|&s| s <= cursor)
             .saturating_sub(1);
-        let visible = estimated_visible_lines(self.config.height).max(1);
+        let visible = estimated_visible_lines(self.config.height, self.fm).max(1);
         let old = self.scroll_top;
         if cursor_line < self.scroll_top {
             self.scroll_top = cursor_line;
@@ -3145,7 +3232,7 @@ impl State {
             .layout_runs()
             .flat_map(|run| run.glyphs.iter())
             .next()
-            .map_or(GUTTER_MONO_ADVANCE_FALLBACK, |g| g.w)
+            .map_or(self.fm.gutter_advance_fallback(), |g| g.w)
     }
 
     /// Width in px the line-number gutter reserves on the left, or 0 when
@@ -3216,10 +3303,11 @@ impl State {
             let num = mode.number_for(first + i, cursor_line).unwrap_or(0);
             let _ = write!(text, "{num:>digits$}");
         }
+        let family = self.resolved_family.clone();
         self.gutter_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -3297,20 +3385,27 @@ impl State {
     /// (Q#M6). Presses here are consumed locally and never become
     /// `Pointer` events.
     fn in_minimap_band(&self, x: f64, y: f64) -> bool {
-        minimap_band_contains(x as f32, y as f32, self.config.width, self.config.height)
+        minimap_band_contains(
+            x as f32,
+            y as f32,
+            self.config.width,
+            self.config.height,
+            self.fm,
+        )
     }
 
     /// Popup width in pixels (Q#CM1) — widest label estimated from a
     /// fixed per-char advance, padded, clamped. Used by both hit-testing
     /// and the bg quad so they line up.
-    fn menu_width_px(menu: &MenuLocal) -> f32 {
+    fn menu_width_px(menu: &MenuLocal, fm: FontMetrics) -> f32 {
         let max_chars = menu
             .rows
             .iter()
             .map(|r| r.label.chars().count())
             .max()
             .unwrap_or(0);
-        (max_chars as f32 * MENU_CHAR_W + 2.0 * MENU_PAD_X).clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH)
+        (max_chars as f32 * fm.menu_char_w() + 2.0 * MENU_PAD_X)
+            .clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH)
     }
 
     /// Hit-test a pixel against the open popup (Q#CM1). Returns
@@ -3319,13 +3414,13 @@ impl State {
     fn menu_hit(&self, x: f64, y: f64) -> Option<(u32, bool)> {
         let menu = self.menu.as_ref()?;
         let (ax, ay) = menu.anchor_px;
-        let w = f64::from(Self::menu_width_px(menu));
-        let h = menu.rows.len() as f64 * f64::from(MENU_ROW_HEIGHT);
+        let w = f64::from(Self::menu_width_px(menu, self.fm));
+        let h = menu.rows.len() as f64 * f64::from(self.fm.menu_row_height());
         if x < ax || x >= ax + w || y < ay || y >= ay + h {
             return None;
         }
-        let row =
-            (((y - ay) / f64::from(MENU_ROW_HEIGHT)).floor() as usize).min(menu.rows.len() - 1);
+        let row = (((y - ay) / f64::from(self.fm.menu_row_height())).floor() as usize)
+            .min(menu.rows.len() - 1);
         Some((row as u32, !menu.rows[row].separator))
     }
 
@@ -3334,9 +3429,14 @@ impl State {
     /// interpolation. Reuses [`Self::scroll_by_lines`] for the
     /// clamp / rebuild / viewport-send plumbing.
     fn minimap_jump_to(&mut self, y: f64) -> Option<ViewportSend> {
-        let target =
-            minimap_y_to_line(y as f32, self.config.height, self.current_line_starts.len())?;
-        let centered = target.saturating_sub(estimated_visible_lines(self.config.height) / 2);
+        let target = minimap_y_to_line(
+            y as f32,
+            self.config.height,
+            self.current_line_starts.len(),
+            self.fm,
+        )?;
+        let centered =
+            target.saturating_sub(estimated_visible_lines(self.config.height, self.fm) / 2);
         let delta = i64::try_from(centered).unwrap_or(i64::MAX)
             - i64::try_from(self.scroll_top).unwrap_or(i64::MAX);
         self.scroll_by_lines(delta)
@@ -3386,7 +3486,7 @@ impl State {
             return false;
         }
         let chunks = self.chunks_for_line(line_start, content_end);
-        self.buffer.lines[shaped_idx] = line_from_chunks(&chunks);
+        self.buffer.lines[shaped_idx] = line_from_chunks(&chunks, &self.resolved_family);
         self.line_chunk_cache[shaped_idx] = chunks;
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.view_range = (vstart, vend);
@@ -3472,7 +3572,7 @@ impl State {
                 cache.push(chunks);
             } else {
                 let chunks = self.chunks_for_line(ls, ce);
-                lines.push(line_from_chunks(&chunks));
+                lines.push(line_from_chunks(&chunks, &self.resolved_family));
                 cache.push(chunks);
             }
         }
@@ -3516,7 +3616,7 @@ impl State {
         for (i, &(ls, ce)) in ranges.iter().enumerate() {
             let chunks = self.chunks_for_line(ls, ce);
             if chunks != self.line_chunk_cache[i] {
-                self.buffer.lines[i] = line_from_chunks(&chunks);
+                self.buffer.lines[i] = line_from_chunks(&chunks, &self.resolved_family);
                 self.line_chunk_cache[i] = chunks;
                 any = true;
             }
@@ -3713,7 +3813,7 @@ impl State {
         }
         readout.push_str(&format_scroll_indicator(
             self.scroll_top,
-            estimated_visible_lines(self.config.height),
+            estimated_visible_lines(self.config.height, self.fm),
             self.current_line_starts.len(),
             cursor_row,
         ));
@@ -3787,7 +3887,8 @@ impl State {
             .map(|(t, _)| t.as_str())
             .collect::<Vec<_>>()
             .join("  ");
-        let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+        let family = self.resolved_family.clone();
+        let default_attrs = Attrs::new().family(Family::Name(&family));
         if composed != self.status_text {
             let mut rich: Vec<(&str, Attrs)> = Vec::new();
             for (i, (t, c)) in spans.iter().enumerate() {
@@ -3835,9 +3936,9 @@ impl State {
             .map_or(STATUS_BAND_BG, |(quad, _)| quad);
         let rect = MinimapRect {
             x: 0.0,
-            y: text_area_bottom(self.config.height),
+            y: text_area_bottom(self.config.height, self.fm),
             w: self.config.width as f32,
-            h: STATUS_BAND_HEIGHT,
+            h: self.fm.status_band_height(),
             color,
         };
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
@@ -3854,10 +3955,11 @@ impl State {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
+        let family = self.resolved_family.clone();
         self.menu_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -3873,20 +3975,20 @@ impl State {
         };
         let ax = menu.anchor_px.0 as f32;
         let ay = menu.anchor_px.1 as f32;
-        let w = Self::menu_width_px(menu);
+        let w = Self::menu_width_px(menu, self.fm);
         let mut rects = vec![MinimapRect {
             x: ax,
             y: ay,
             w,
-            h: menu.rows.len() as f32 * MENU_ROW_HEIGHT,
+            h: menu.rows.len() as f32 * self.fm.menu_row_height(),
             color: MENU_BG,
         }];
         for (i, row) in menu.rows.iter().enumerate() {
-            let ry = ay + i as f32 * MENU_ROW_HEIGHT;
+            let ry = ay + i as f32 * self.fm.menu_row_height();
             if row.separator {
                 rects.push(MinimapRect {
                     x: ax + MENU_PAD_X,
-                    y: ry + MENU_ROW_HEIGHT / 2.0 - 0.5,
+                    y: ry + self.fm.menu_row_height() / 2.0 - 0.5,
                     w: w - 2.0 * MENU_PAD_X,
                     h: 1.0,
                     color: MENU_SEPARATOR_BG,
@@ -3896,7 +3998,7 @@ impl State {
                     x: ax,
                     y: ry,
                     w,
-                    h: MENU_ROW_HEIGHT,
+                    h: self.fm.menu_row_height(),
                     color: MENU_SELECTED_BG,
                 });
             }
@@ -3911,10 +4013,11 @@ impl State {
             .minibuffer
             .as_ref()
             .map_or_else(String::new, |mb| mb.candidates.join("\n"));
+        let family = self.resolved_family.clone();
         self.mb_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -3928,11 +4031,12 @@ impl State {
     /// candidate-free, or too short for a row. See [`mb_dropdown_window`].
     fn mb_visible_window(&self) -> Option<(usize, usize)> {
         let mb = self.minibuffer.as_ref()?;
-        let band_top = text_area_bottom(self.config.height);
+        let band_top = text_area_bottom(self.config.height, self.fm);
         mb_dropdown_window(
             mb.candidates.len(),
             mb.selected.map_or(0, |s| s as usize),
             band_top,
+            self.fm,
         )
     }
 
@@ -3951,8 +4055,8 @@ impl State {
             .map(|r| r.line_w)
             .fold(0.0_f32, f32::max);
         let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
-        let band_top = text_area_bottom(self.config.height);
-        let top_y = band_top - count as f32 * MB_DROP_ROW_HEIGHT;
+        let band_top = text_area_bottom(self.config.height, self.fm);
+        let top_y = band_top - count as f32 * self.fm.mb_drop_row_height();
         Some((STATUS_TEXT_PAD, top_y, width))
     }
 
@@ -3972,7 +4076,7 @@ impl State {
             x,
             y: top_y,
             w: width,
-            h: count as f32 * MB_DROP_ROW_HEIGHT,
+            h: count as f32 * self.fm.mb_drop_row_height(),
             color: MENU_BG,
         }];
         // Highlight the selection at its row *within the visible window*;
@@ -3983,9 +4087,9 @@ impl State {
         {
             rects.push(MinimapRect {
                 x,
-                y: top_y + (sel - first) as f32 * MB_DROP_ROW_HEIGHT,
+                y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
-                h: MB_DROP_ROW_HEIGHT,
+                h: self.fm.mb_drop_row_height(),
                 color: MENU_SELECTED_BG,
             });
         }
@@ -4009,10 +4113,11 @@ impl State {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
+        let family = self.resolved_family.clone();
         self.completion_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -4077,11 +4182,11 @@ impl State {
             return None;
         }
         let (ax, line_top, line_h) = self.completion_anchor_px()?;
-        let band_top = text_area_bottom(self.config.height);
+        let band_top = text_area_bottom(self.config.height, self.fm);
         let below_px = band_top - (line_top + line_h);
         let above_px = line_top - TEXT_TOP;
-        let max_below = (below_px / MB_DROP_ROW_HEIGHT).floor() as usize;
-        let max_above = (above_px / MB_DROP_ROW_HEIGHT).floor() as usize;
+        let max_below = (below_px / self.fm.mb_drop_row_height()).floor() as usize;
+        let max_above = (above_px / self.fm.mb_drop_row_height()).floor() as usize;
         let (avail, below) = if max_below >= 1 {
             (max_below, true)
         } else {
@@ -4100,7 +4205,7 @@ impl State {
         let top_y = if below {
             line_top + line_h
         } else {
-            line_top - count as f32 * MB_DROP_ROW_HEIGHT
+            line_top - count as f32 * self.fm.mb_drop_row_height()
         };
         Some((first, count, ax, top_y))
     }
@@ -4138,7 +4243,7 @@ impl State {
             x,
             y: top_y,
             w: width,
-            h: count as f32 * MB_DROP_ROW_HEIGHT,
+            h: count as f32 * self.fm.mb_drop_row_height(),
             color: MENU_BG,
         }];
         if let Some(sel) = comp.selected.map(|s| s as usize)
@@ -4147,9 +4252,9 @@ impl State {
         {
             rects.push(MinimapRect {
                 x,
-                y: top_y + (sel - first) as f32 * MB_DROP_ROW_HEIGHT,
+                y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
-                h: MB_DROP_ROW_HEIGHT,
+                h: self.fm.mb_drop_row_height(),
                 color: MENU_SELECTED_BG,
             });
         }
@@ -4396,7 +4501,7 @@ impl State {
         let line_starts = &self.current_line_starts;
         let n = line_starts.len();
         let top = self.scroll_top.min(n.saturating_sub(1));
-        let span = estimated_visible_lines(self.config.height).max(1) + SCROLL_OVERSCAN;
+        let span = estimated_visible_lines(self.config.height, self.fm).max(1) + SCROLL_OVERSCAN;
         let vstart = line_starts[top];
         let bottom = top.saturating_add(span).min(n);
         let vend = if bottom < n {
@@ -4421,7 +4526,7 @@ impl State {
         let mut cache = Vec::with_capacity(ranges.len());
         for &(ls, ce) in &ranges {
             let chunks = self.chunks_for_line(ls, ce);
-            lines.push(line_from_chunks(&chunks));
+            lines.push(line_from_chunks(&chunks, &self.resolved_family));
             cache.push(chunks);
         }
         self.buffer.lines = lines;
@@ -4462,12 +4567,12 @@ impl State {
         self.status_buffer.set_size(
             &mut self.font_system,
             Some(width as f32),
-            Some(STATUS_BAND_HEIGHT),
+            Some(self.fm.status_band_height()),
         );
         self.status_left_buffer.set_size(
             &mut self.font_system,
             Some(width as f32),
-            Some(STATUS_BAND_HEIGHT),
+            Some(self.fm.status_band_height()),
         );
         // UX gutter: resize the line-number buffer too, else it keeps its
         // construction-time (800x200) height and `shape_until_scroll` only
@@ -4736,8 +4841,8 @@ impl State {
             .fold(0.0_f32, f32::max);
         let status_left =
             (self.config.width as f32 - STATUS_TEXT_PAD - status_width).max(TEXT_LEFT);
-        let status_top =
-            text_area_bottom(self.config.height) + (STATUS_BAND_HEIGHT - STATUS_LINE_HEIGHT) / 2.0;
+        let status_top = text_area_bottom(self.config.height, self.fm)
+            + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         // UX gutter: the code's left origin (past the gutter) and the
         // main-text clip-left. Computed here as locals — calling `self.*`
         // inside the `prepare` args would conflict with its `&mut` borrows.
@@ -4775,7 +4880,7 @@ impl State {
                             // Clip at the status band (Q#S3): a final
                             // partially-visible line must not bleed
                             // into the band.
-                            bottom: text_area_bottom(self.config.height).round() as i32,
+                            bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
                         },
                         default_color: Color::rgb(230, 230, 235),
                         custom_glyphs: &[],
@@ -4787,7 +4892,7 @@ impl State {
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
-                            top: text_area_bottom(self.config.height).round() as i32,
+                            top: text_area_bottom(self.config.height, self.fm).round() as i32,
                             right: self.config.width.cast_signed(),
                             bottom: self.config.height.cast_signed(),
                         },
@@ -4804,7 +4909,7 @@ impl State {
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
-                            top: text_area_bottom(self.config.height).round() as i32,
+                            top: text_area_bottom(self.config.height, self.fm).round() as i32,
                             // Stop before the right-aligned readout.
                             right: (status_left - STATUS_TEXT_PAD).max(0.0).round() as i32,
                             bottom: self.config.height.cast_signed(),
@@ -4834,7 +4939,7 @@ impl State {
                     left: 0,
                     top: 0,
                     right: gutter_clip_left,
-                    bottom: text_area_bottom(self.config.height).round() as i32,
+                    bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
                 },
                 // Themes Q#TH5: ui.gutter's {fg} mask colors the digits.
                 default_color: gutter_color,
@@ -4871,8 +4976,9 @@ impl State {
                     bounds: TextBounds {
                         left: ax as i32,
                         top: ay as i32,
-                        right: (ax + Self::menu_width_px(menu)).round() as i32,
-                        bottom: (ay + menu.rows.len() as f32 * MENU_ROW_HEIGHT).round() as i32,
+                        right: (ax + Self::menu_width_px(menu, self.fm)).round() as i32,
+                        bottom: (ay + menu.rows.len() as f32 * self.fm.menu_row_height()).round()
+                            as i32,
                     },
                     default_color: Color::rgb(232, 232, 238),
                     custom_glyphs: &[],
@@ -4905,13 +5011,13 @@ impl State {
             .map(|((first, _count), (x, top_y, width))| TextArea {
                 buffer: &self.mb_buffer,
                 left: x + MB_DROP_PAD_X,
-                top: top_y - first as f32 * MB_DROP_ROW_HEIGHT,
+                top: top_y - first as f32 * self.fm.mb_drop_row_height(),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: x as i32,
                     top: top_y as i32,
                     right: (x + width).round() as i32,
-                    bottom: text_area_bottom(self.config.height).round() as i32,
+                    bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
                 },
                 // Themes Q#TH5 (round 3 finding 1): the candidate
                 // glyph layer is ui.minibuffer.candidate's GPU site;
@@ -4944,13 +5050,13 @@ impl State {
             .map(|((first, count, _ax, _ty), (x, top_y, width))| TextArea {
                 buffer: &self.completion_buffer,
                 left: x + MB_DROP_PAD_X,
-                top: top_y - first as f32 * MB_DROP_ROW_HEIGHT,
+                top: top_y - first as f32 * self.fm.mb_drop_row_height(),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: x as i32,
                     top: top_y as i32,
                     right: (x + width).round() as i32,
-                    bottom: (top_y + count as f32 * MB_DROP_ROW_HEIGHT).round() as i32,
+                    bottom: (top_y + count as f32 * self.fm.mb_drop_row_height()).round() as i32,
                 },
                 default_color: Color::rgb(232, 232, 238),
                 custom_glyphs: &[],
@@ -5093,7 +5199,7 @@ impl State {
         let Some(summary) = self.current_summary.as_ref() else {
             return Vec::new();
         };
-        let visible_lines = estimated_visible_lines(self.config.height);
+        let visible_lines = estimated_visible_lines(self.config.height, self.fm);
         let rects = minimap_rects(
             &summary.lines,
             &self.current_line_shapes,
@@ -5105,6 +5211,7 @@ impl State {
             // made the frozen thumb obvious.)
             self.scroll_top,
             visible_lines,
+            self.fm,
         );
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
@@ -5337,13 +5444,13 @@ impl State {
             0.0
         };
         let cursor_chars = mb.prompt.chars().count() as f32 + mb.cursor as f32;
-        let status_top =
-            text_area_bottom(self.config.height) + (STATUS_BAND_HEIGHT - STATUS_LINE_HEIGHT) / 2.0;
+        let status_top = text_area_bottom(self.config.height, self.fm)
+            + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         Some(MinimapRect {
             x: STATUS_TEXT_PAD + advance * cursor_chars,
             y: status_top,
             w: CARET_WIDTH,
-            h: STATUS_LINE_HEIGHT,
+            h: self.fm.status_line_height(),
             color: CARET_COLOR,
         })
     }
@@ -5555,18 +5662,18 @@ fn minimap_left(surface_width: u32) -> Option<f32> {
 
 /// Where editor content stops and the status band begins (Q#S3) —
 /// the single source for every bottom-of-text computation.
-fn text_area_bottom(surface_height: u32) -> f32 {
-    (surface_height as f32 - STATUS_BAND_HEIGHT).max(0.0)
+fn text_area_bottom(surface_height: u32, fm: FontMetrics) -> f32 {
+    (surface_height as f32 - fm.status_band_height()).max(0.0)
 }
 
 /// The minimap's drawable height: the text area minus its own
 /// top/bottom insets.
-fn minimap_height(surface_height: u32) -> f32 {
-    text_area_bottom(surface_height) - MINIMAP_TOP - MINIMAP_BOTTOM
+fn minimap_height(surface_height: u32, fm: FontMetrics) -> f32 {
+    text_area_bottom(surface_height, fm) - MINIMAP_TOP - MINIMAP_BOTTOM
 }
 
-fn estimated_visible_lines(surface_height: u32) -> usize {
-    ((text_area_bottom(surface_height) - TEXT_TOP.max(0.0)) / CODE_LINE_HEIGHT)
+fn estimated_visible_lines(surface_height: u32, fm: FontMetrics) -> usize {
+    ((text_area_bottom(surface_height, fm) - TEXT_TOP.max(0.0)) / fm.code_line_height())
         .ceil()
         .max(1.0) as usize
 }
@@ -5574,11 +5681,17 @@ fn estimated_visible_lines(surface_height: u32) -> usize {
 /// True when `(x, y)` lies inside the minimap band — the painter's
 /// geometry (`minimap_left` × the `MINIMAP_TOP..bottom` column),
 /// shared by the Q#M6 press hit-test.
-fn minimap_band_contains(x: f32, y: f32, surface_width: u32, surface_height: u32) -> bool {
+fn minimap_band_contains(
+    x: f32,
+    y: f32,
+    surface_width: u32,
+    surface_height: u32,
+    fm: FontMetrics,
+) -> bool {
     let Some(left) = minimap_left(surface_width) else {
         return false;
     };
-    let height = minimap_height(surface_height);
+    let height = minimap_height(surface_height, fm);
     height > 0.0
         && x >= left
         && x < surface_width as f32 - MINIMAP_RIGHT
@@ -5617,10 +5730,10 @@ fn format_scroll_indicator(
 /// `-1` in the band hugging the text area's top, `+1` in the band at
 /// the text area's bottom (above the status band), `None` in the
 /// interior.
-fn edge_scroll_direction(y: f32, surface_height: u32) -> Option<i64> {
+fn edge_scroll_direction(y: f32, surface_height: u32, fm: FontMetrics) -> Option<i64> {
     if y < TEXT_TOP + EDGE_SCROLL_BAND {
         Some(-1)
-    } else if y > text_area_bottom(surface_height) - EDGE_SCROLL_BAND {
+    } else if y > text_area_bottom(surface_height, fm) - EDGE_SCROLL_BAND {
         Some(1)
     } else {
         None
@@ -5631,11 +5744,16 @@ fn edge_scroll_direction(y: f32, surface_height: u32) -> Option<i64> {
 /// of the painter's `y = MINIMAP_TOP + line * height / total`
 /// interpolation, clamped into the file. `None` for an empty file or
 /// a degenerate surface.
-fn minimap_y_to_line(y: f32, surface_height: u32, total_lines: usize) -> Option<usize> {
+fn minimap_y_to_line(
+    y: f32,
+    surface_height: u32,
+    total_lines: usize,
+    fm: FontMetrics,
+) -> Option<usize> {
     if total_lines == 0 {
         return None;
     }
-    let height = minimap_height(surface_height);
+    let height = minimap_height(surface_height, fm);
     if height <= 0.0 {
         return None;
     }
@@ -5650,14 +5768,15 @@ fn minimap_rects(
     surface_height: u32,
     first_visible_line: usize,
     visible_lines: usize,
+    fm: FontMetrics,
 ) -> Vec<MinimapRect> {
     let Some(x) = minimap_left(surface_width) else {
         return Vec::new();
     };
-    if lines.is_empty() || minimap_height(surface_height) <= 0.0 {
+    if lines.is_empty() || minimap_height(surface_height, fm) <= 0.0 {
         return Vec::new();
     }
-    let height = minimap_height(surface_height);
+    let height = minimap_height(surface_height, fm);
     let pixel_rows = height.round().max(1.0) as usize;
     let mut rects = Vec::new();
     rects.push(MinimapRect {
@@ -6692,8 +6811,8 @@ fn px_to_ndc_y(y: f32, height: u32) -> f32 {
 /// text + an attrs span per colored chunk (mirroring `set_rich_text`'s
 /// only-when-non-default rule). Every line gets `LineEnding::Lf` —
 /// the separator byte itself never enters a line's text.
-fn line_from_chunks(chunks: &[RichChunk]) -> glyphon::cosmic_text::BufferLine {
-    let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+fn line_from_chunks(chunks: &[RichChunk], family: &str) -> glyphon::cosmic_text::BufferLine {
+    let default_attrs = Attrs::new().family(Family::Name(family));
     let mut attrs_list = glyphon::cosmic_text::AttrsList::new(&default_attrs);
     let mut text = String::new();
     for chunk in chunks {
@@ -7279,15 +7398,27 @@ mod tests {
     #[test]
     fn mb_dropdown_window_clamps_and_keeps_selection_visible() {
         // Row height is 20.0; a 1000px space fits any producer-capped list.
-        assert_eq!(mb_dropdown_window(5, 2, 1000.0), Some((0, 5)));
+        assert_eq!(
+            mb_dropdown_window(5, 2, 1000.0, FontMetrics::default()),
+            Some((0, 5))
+        );
         // The whole-fits path is identical to no clamp: (0, n).
-        assert_eq!(mb_dropdown_window(10, 9, 1000.0), Some((0, 10)));
+        assert_eq!(
+            mb_dropdown_window(10, 9, 1000.0, FontMetrics::default()),
+            Some((0, 10))
+        );
 
         // A 100px space fits 5 rows. Selection near the top anchors at 0.
-        assert_eq!(mb_dropdown_window(10, 0, 100.0), Some((0, 5)));
+        assert_eq!(
+            mb_dropdown_window(10, 0, 100.0, FontMetrics::default()),
+            Some((0, 5))
+        );
         // Selection past the fold scrolls so it stays visible (bottom edge).
-        assert_eq!(mb_dropdown_window(10, 9, 100.0), Some((5, 5)));
-        let (first, count) = mb_dropdown_window(10, 7, 100.0).unwrap();
+        assert_eq!(
+            mb_dropdown_window(10, 9, 100.0, FontMetrics::default()),
+            Some((5, 5))
+        );
+        let (first, count) = mb_dropdown_window(10, 7, 100.0, FontMetrics::default()).unwrap();
         assert!(
             first <= 7 && 7 < first + count,
             "sel 7 in [{first},{})",
@@ -7295,11 +7426,20 @@ mod tests {
         );
 
         // Degenerate: too short for even one row ⇒ hide, never draw above 0.
-        assert_eq!(mb_dropdown_window(10, 0, 10.0), None);
+        assert_eq!(
+            mb_dropdown_window(10, 0, 10.0, FontMetrics::default()),
+            None
+        );
         // No candidates ⇒ nothing.
-        assert_eq!(mb_dropdown_window(0, 0, 500.0), None);
+        assert_eq!(
+            mb_dropdown_window(0, 0, 500.0, FontMetrics::default()),
+            None
+        );
         // An out-of-range selection is clamped, not panicked.
-        assert_eq!(mb_dropdown_window(3, 99, 1000.0), Some((0, 3)));
+        assert_eq!(
+            mb_dropdown_window(3, 99, 1000.0, FontMetrics::default()),
+            Some((0, 3))
+        );
     }
 
     #[test]
@@ -8012,32 +8152,66 @@ mod tests {
         // The status band reserves 26px (Q#S3), so the text area
         // ends at 574 and the minimap column is y = [12, 562)
         // (height 550).
-        assert!(minimap_band_contains(750.0, 100.0, 800, 600));
+        assert!(minimap_band_contains(
+            750.0,
+            100.0,
+            800,
+            600,
+            FontMetrics::default()
+        ));
         assert!(
-            !minimap_band_contains(739.0, 100.0, 800, 600),
+            !minimap_band_contains(739.0, 100.0, 800, 600, FontMetrics::default()),
             "left of band"
         );
         assert!(
-            !minimap_band_contains(788.0, 100.0, 800, 600),
+            !minimap_band_contains(788.0, 100.0, 800, 600, FontMetrics::default()),
             "right of band"
         );
-        assert!(!minimap_band_contains(750.0, 5.0, 800, 600), "above band");
         assert!(
-            !minimap_band_contains(750.0, 563.0, 800, 600),
+            !minimap_band_contains(750.0, 5.0, 800, 600, FontMetrics::default()),
+            "above band"
+        );
+        assert!(
+            !minimap_band_contains(750.0, 563.0, 800, 600, FontMetrics::default()),
             "below band (status strip)"
         );
         // Too-narrow surfaces have no minimap at all.
-        assert!(!minimap_band_contains(100.0, 100.0, 150, 600));
+        assert!(!minimap_band_contains(
+            100.0,
+            100.0,
+            150,
+            600,
+            FontMetrics::default()
+        ));
 
         // Inverse mapping: height = 550; 100 lines. Top → line 0,
         // bottom → last line, midpoint → ~half.
-        assert_eq!(minimap_y_to_line(12.0, 600, 100), Some(0));
-        assert_eq!(minimap_y_to_line(561.9, 600, 100), Some(99));
-        assert_eq!(minimap_y_to_line(12.0 + 275.0, 600, 100), Some(50));
+        assert_eq!(
+            minimap_y_to_line(12.0, 600, 100, FontMetrics::default()),
+            Some(0)
+        );
+        assert_eq!(
+            minimap_y_to_line(561.9, 600, 100, FontMetrics::default()),
+            Some(99)
+        );
+        assert_eq!(
+            minimap_y_to_line(12.0 + 275.0, 600, 100, FontMetrics::default()),
+            Some(50)
+        );
         // Out-of-band y clamps rather than panics (scrubbing wanders).
-        assert_eq!(minimap_y_to_line(0.0, 600, 100), Some(0));
-        assert_eq!(minimap_y_to_line(9999.0, 600, 100), Some(99));
-        assert_eq!(minimap_y_to_line(100.0, 600, 0), None, "empty file");
+        assert_eq!(
+            minimap_y_to_line(0.0, 600, 100, FontMetrics::default()),
+            Some(0)
+        );
+        assert_eq!(
+            minimap_y_to_line(9999.0, 600, 100, FontMetrics::default()),
+            Some(99)
+        );
+        assert_eq!(
+            minimap_y_to_line(100.0, 600, 0, FontMetrics::default()),
+            None,
+            "empty file"
+        );
     }
 
     #[test]
@@ -8045,16 +8219,32 @@ mod tests {
         // 600px surface: up-band y < 16 + 24 = 40; the text area
         // ends at 574 (status band, Q#S3), so the down-band is
         // y > 574 - 24 = 550.
-        assert_eq!(edge_scroll_direction(10.0, 600), Some(-1));
-        assert_eq!(edge_scroll_direction(39.9, 600), Some(-1));
-        assert_eq!(edge_scroll_direction(40.0, 600), None, "interior");
-        assert_eq!(edge_scroll_direction(300.0, 600), None);
         assert_eq!(
-            edge_scroll_direction(550.0, 600),
+            edge_scroll_direction(10.0, 600, FontMetrics::default()),
+            Some(-1)
+        );
+        assert_eq!(
+            edge_scroll_direction(39.9, 600, FontMetrics::default()),
+            Some(-1)
+        );
+        assert_eq!(
+            edge_scroll_direction(40.0, 600, FontMetrics::default()),
+            None,
+            "interior"
+        );
+        assert_eq!(
+            edge_scroll_direction(300.0, 600, FontMetrics::default()),
+            None
+        );
+        assert_eq!(
+            edge_scroll_direction(550.0, 600, FontMetrics::default()),
             None,
             "band edge exclusive"
         );
-        assert_eq!(edge_scroll_direction(551.0, 600), Some(1));
+        assert_eq!(
+            edge_scroll_direction(551.0, 600, FontMetrics::default()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -8073,7 +8263,15 @@ mod tests {
         let red = style_with_fg(CellColor::Rgb(255, 0, 0));
         let blue = style_with_fg(CellColor::Rgb(0, 0, 255));
         let shapes = minimap_line_shapes("alpha\nbeta\ngamma\ndelta");
-        let rects = minimap_rects(&[red, red, blue, blue], &shapes, 240, 80, 0, 2);
+        let rects = minimap_rects(
+            &[red, red, blue, blue],
+            &shapes,
+            240,
+            80,
+            0,
+            2,
+            FontMetrics::default(),
+        );
 
         assert!(
             rects
@@ -8110,7 +8308,7 @@ mod tests {
             lines.len()
         ];
 
-        let rects = minimap_rects(&lines, &shapes, 240, 120, 0, 30);
+        let rects = minimap_rects(&lines, &shapes, 240, 120, 0, 30, FontMetrics::default());
 
         let pixel_rows = (120.0 - MINIMAP_TOP - MINIMAP_BOTTOM).round() as usize;
         assert!(
@@ -8127,7 +8325,7 @@ mod tests {
             content_cols: 10,
         }];
 
-        assert!(minimap_rects(&lines, &shapes, 120, 120, 0, 1).is_empty());
+        assert!(minimap_rects(&lines, &shapes, 120, 120, 0, 1, FontMetrics::default()).is_empty());
     }
 
     #[test]
@@ -8144,7 +8342,7 @@ mod tests {
             },
         ];
 
-        let rects = minimap_rects(&[red, red], &shapes, 240, 80, 0, 2);
+        let rects = minimap_rects(&[red, red], &shapes, 240, 80, 0, 2, FontMetrics::default());
         let strokes: Vec<_> = rects
             .iter()
             .filter(|r| color_close(r.color, rgb_to_minimap_color(255, 0, 0)))
@@ -8599,7 +8797,7 @@ mod tests {
         };
         state.line_numbers = LineNumberMode::Absolute;
         let text_left = state.text_left().ceil() as u32;
-        let band_top = text_area_bottom(h).floor() as u32;
+        let band_top = text_area_bottom(h, FontMetrics::default()).floor() as u32;
         let base = state.render_offscreen();
         apply_faces(
             &mut state,
