@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use glyphon::cosmic_text::{Cursor, Scroll, Wrap};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, fontdb,
@@ -216,6 +217,42 @@ fn query_normal_face(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> 
         stretch: fontdb::Stretch::Normal,
         style: fontdb::Style::Normal,
     })
+}
+
+/// The fixed ASCII advance probe (framing Q#F6): digits shape one
+/// glyph per char in any face (no ligatures), so the first glyph's
+/// advance is the family's monospace advance at these metrics.
+const ADVANCE_PROBE: &str = "0123456789";
+
+/// Wire-validation bounds for `FontFacts::size_centi_px` — 6.0..=72.0
+/// logical px in integer hundredths (framing Q#F6, fail closed): 0
+/// would panic `Buffer::set_metrics`, and the GPU re-checks on
+/// arrival because this is deserialized protocol input — the
+/// daemon-side Lua range check is a UX courtesy, not a trust
+/// boundary.
+const FONT_SIZE_CENTI_PX_RANGE: std::ops::RangeInclusive<u32> = 600..=7200;
+
+/// Measure `family`'s normal-face glyph advance at `metrics` by
+/// shaping [`ADVANCE_PROBE`] in a scratch buffer — independent of
+/// document contents, so the measurement is deterministic and the
+/// NORMAL face is authoritative even when the first code glyph is
+/// bold/italic. `None` when the family shapes no glyphs.
+fn probe_mono_advance(font_system: &mut FontSystem, family: &str, metrics: Metrics) -> Option<f32> {
+    let mut probe = Buffer::new(font_system, metrics);
+    probe.set_size(font_system, None, None);
+    probe.set_text(
+        font_system,
+        ADVANCE_PROBE,
+        &Attrs::new().family(Family::Name(family)),
+        Shaping::Advanced,
+        None,
+    );
+    probe.shape_until_scroll(font_system, false);
+    probe
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter())
+        .next()
+        .map(|glyph| glyph.w)
 }
 
 /// Initial window size in logical pixels.
@@ -558,7 +595,6 @@ struct State {
     /// What sanitized assembly retained (Q#F6): the default family
     /// and the bundled face ID — the total-fallback anchors for
     /// every font resolution.
-    #[allow(dead_code)] // consumed by apply_font_facts (next commit)
     font_defaults: FontDefaults,
     /// Derived metrics for the current preference (Q#F6); default
     /// reproduces the BASE_* constants exactly.
@@ -569,6 +605,21 @@ struct State {
     /// `apply_font_facts` — rejected requests fall back HERE, so
     /// the accessor is total.
     resolved_family: String,
+    /// The resolved family's measured normal-face advance at the
+    /// current code metrics (the [`ADVANCE_PROBE`] result, Q#F6).
+    /// Authoritative for gutter geometry once a `FontFacts` has been
+    /// applied; `None` until then, falling back to today's
+    /// first-shaped-glyph sampling.
+    measured_mono_advance: Option<f32>,
+    /// The retained normalized code-buffer scroll (framing Q#F6):
+    /// slice-local `line == 0` always holds, this is the `vertical`
+    /// pixel residual within the top source line's visual runs, and
+    /// `horizontal` stays 0 (glyphon 0.11 never applies it). Nonzero
+    /// only after caret-following crossed into a wrapped run;
+    /// explicit wheel/minimap jumps clear it, `BufferSnapshot`
+    /// resets it (buffer-scoped view state), and every full reshape
+    /// reapplies it instead of installing `Scroll::default`.
+    code_scroll_residual: f32,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -2102,6 +2153,13 @@ impl State {
             Some(MENU_MAX_WIDTH),
             Some(config.height as f32),
         );
+        // Rows stay rows (framing Q#F6): the three row-oriented popup
+        // buffers never wrap — their protocols, row windows, selection
+        // quads, and hit tests all assign exactly one row height per
+        // source line, and a label wrapping after a font change would
+        // paint on a second visual row that hit-tests as the following
+        // item. The pixel bounds keep owning horizontal clipping.
+        menu_buffer.set_wrap(&mut font_system, Wrap::None);
         let mut mb_buffer = Buffer::new(
             &mut font_system,
             Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height()),
@@ -2111,6 +2169,7 @@ impl State {
             Some(MB_DROP_MAX_WIDTH),
             Some(config.height as f32),
         );
+        mb_buffer.set_wrap(&mut font_system, Wrap::None);
         // Completion dropdown buffer (Arc 1a): the minibuffer
         // dropdown's metrics, its own layer.
         let mut completion_buffer = Buffer::new(
@@ -2122,6 +2181,7 @@ impl State {
             Some(MB_DROP_MAX_WIDTH),
             Some(config.height as f32),
         );
+        completion_buffer.set_wrap(&mut font_system, Wrap::None);
         // Line-number gutter buffer (UX gutter arc): same font size + line
         // height as the code buffer so its rows align one-for-one.
         let mut gutter_buffer = Buffer::new(
@@ -2133,17 +2193,9 @@ impl State {
             Some(config.width as f32),
             Some(config.height as f32),
         );
-        buffer.set_text(
-            &mut font_system,
-            initial_text,
-            &Attrs::new().family(Family::Name(DEFAULT_FONT_FAMILY)),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut font_system, false);
         let (current_line_starts, current_line_char_starts) = line_offset_tables(initial_text);
 
-        Self {
+        let mut state = Self {
             window,
             device,
             queue,
@@ -2153,6 +2205,8 @@ impl State {
             font_defaults,
             fm: FontMetrics::default(),
             resolved_family: DEFAULT_FONT_FAMILY.to_owned(),
+            measured_mono_advance: None,
+            code_scroll_residual: 0.0,
             swash_cache,
             viewport,
             atlas,
@@ -2226,7 +2280,14 @@ impl State {
             faces: HashMap::new(),
             gutter_buffer,
             gutter_text_renderer,
-        }
+        };
+        // Shape the initial text through the shared chunk path so the
+        // `buffer.lines` ↔ `line_chunk_cache` invariant holds from
+        // construction — the caret/anchor projection (framing Q#F6)
+        // inverts the per-line chunk cache, and a directly-set buffer
+        // would leave it empty.
+        state.reshape();
+        state
     }
 
     fn set_frontend_id(&mut self, frontend_id: FrontendId) {
@@ -2417,13 +2478,12 @@ impl State {
         // `CursorByte` confirms — an optimistic edit on the bottom
         // visible line that wraps (or a Backspace pulling the caret
         // above the top) moves it outside the slice, and waiting a
-        // round trip to scroll reads as a hitch.
-        let viewport = if self.scroll_to_cursor() {
-            self.rebuild_lines_reusing_scroll();
-            self.viewport_send_if_changed(predicted.buffer_id)
-        } else {
-            None
-        };
+        // round trip to scroll reads as a hitch. Visual-run aware
+        // (framing Q#F6): the confirming identical `CursorByte` has
+        // `moved == false`, so deferring wrapped-run repair here
+        // would leave a newly wrapped caret off-screen indefinitely.
+        self.ensure_caret_painted();
+        let viewport = self.viewport_send_if_changed(predicted.buffer_id);
         CrdtOpSend {
             buffer_id: predicted.buffer_id,
             op: CrdtOp { peer_id, bytes },
@@ -2684,7 +2744,11 @@ impl State {
                 self.unconfirmed_edits.clear();
                 // New buffer ⇒ back to the top, and force a viewport
                 // re-declaration for the new buffer's scoped range.
+                // The caret-follow residual is buffer-scoped view
+                // state and resets with it; the global font
+                // preference/metrics survive (framing Q#F6).
                 self.scroll_top = 0;
+                self.code_scroll_residual = 0.0;
                 self.last_viewport_sent = None;
                 if !self.set_text(&text) {
                     self.reshape();
@@ -3047,10 +3111,13 @@ impl State {
                 // jump → Viewport → frame + re-announced CursorByte →
                 // snap, in a loop. Scrolling away from a cursor that
                 // isn't moving is the user's prerogative.
-                if moved && self.scroll_to_cursor() {
-                    // Pure scroll: retained lines keep their shape
-                    // caches; only newly exposed lines shape.
-                    self.rebuild_lines_reusing_scroll();
+                //
+                // The follow is visual-run aware (framing Q#F6): the
+                // shared helper closes the old source-line-only hole
+                // where a caret on a wrapped continuation run below
+                // the band never scrolled into view.
+                if moved {
+                    self.ensure_caret_painted();
                     if let Some(vp) = self.viewport_send_if_changed(buffer_id) {
                         return Some(vp);
                     }
@@ -3138,6 +3205,20 @@ impl State {
                 self.request_redraw();
                 None
             }
+            // Arc 4 stage 2 (framing Q#F6/Q#F7) — the global font
+            // preference. Authoritative per attachment: `(None, None)`
+            // is a real reset to the sanitized defaults, never
+            // inferred from silence. The rebuild may change the
+            // visible slice (new wrapping/metrics), so re-declare the
+            // viewport from the final normalized origin.
+            InstanceMessage::FontFacts {
+                family,
+                size_centi_px,
+            } => {
+                self.apply_font_facts(family.as_deref(), size_centi_px);
+                self.current_buffer_id
+                    .and_then(|bid| self.viewport_send_if_changed(bid))
+            }
             _ => None,
         }
     }
@@ -3223,11 +3304,53 @@ impl State {
         self.scroll_top != old
     }
 
-    /// Monospace glyph advance in px, read from the currently-shaped code
-    /// buffer (every glyph shares it in a monospace font), with a fallback
-    /// when the buffer has no glyphs yet. Used to size the line-number
-    /// gutter (UX gutter arc).
+    /// Bring the own caret's VISUAL run into the drawable code window
+    /// (framing Q#F6) — the shared follow helper for the `CursorByte`
+    /// arm, the optimistic edit completion, and the font/resize
+    /// transactions. The coarse source-line [`Self::scroll_to_cursor`]
+    /// runs first (the byte may be outside the shaped slice), then
+    /// cosmic-text's `Buffer::shape_until_cursor` follows wrapped
+    /// layout runs vertically. Its `Scroll.horizontal` result is
+    /// discarded — glyphon 0.11 never applies horizontal scroll when
+    /// placing glyphs, so retaining it would make state claim a
+    /// scroll the painter never displays. Ends by re-normalizing the
+    /// scroll; callers declare the viewport only after that final
+    /// source origin is stable.
+    fn ensure_caret_painted(&mut self) {
+        let Some(own) = self.own_cursor else {
+            return;
+        };
+        if self.current_buffer_id != Some(own.buffer_id) {
+            return;
+        }
+        if self.scroll_to_cursor() {
+            // Pure scroll: retained lines keep their shape caches;
+            // only newly exposed lines shape.
+            self.rebuild_lines_reusing_scroll();
+        }
+        let byte = own.byte.min(self.current_text.len() as u64);
+        if let Some((slice_i, projected)) = self.code_byte_to_projected(byte) {
+            self.buffer.shape_until_cursor(
+                &mut self.font_system,
+                Cursor::new(slice_i, projected),
+                false,
+            );
+        }
+        self.normalize_code_scroll();
+        self.request_redraw();
+    }
+
+    /// Monospace glyph advance in px, used to size the line-number
+    /// gutter (UX gutter arc). Once a `FontFacts` has been applied the
+    /// measured NORMAL-face probe advance is authoritative (framing
+    /// Q#F6) — different monospaced faces need not share an advance,
+    /// so sampling an arbitrary (possibly bold/italic) code glyph
+    /// could skew the gutter. Before any probe: today's behavior —
+    /// the first shaped glyph, else the ratio-scaled constant.
     fn mono_advance(&self) -> f32 {
+        if let Some(advance) = self.measured_mono_advance {
+            return advance;
+        }
         self.buffer
             .layout_runs()
             .flat_map(|run| run.glyphs.iter())
@@ -3280,9 +3403,13 @@ impl State {
     }
 
     /// Reshape the gutter buffer to the right-aligned line numbers for the
-    /// currently-shaped code lines (UX gutter arc). One number per code
-    /// line starting at `shaped_top`, so the two buffers align row-for-row
-    /// at the same `top` and line height. No-op when the gutter is off.
+    /// currently-shaped code lines (UX gutter arc). The projection mirrors
+    /// the code layout's VISUAL runs (framing Q#F6): each source line's
+    /// number rides its first run and wrapped continuation runs get blank
+    /// gutter rows, then the code buffer's normalized vertical scroll is
+    /// applied verbatim — both buffers share the line height, so rows stay
+    /// aligned when wrapping or a caret-follow residual is active. No-op
+    /// when the gutter is off.
     fn refresh_gutter_buffer(&mut self) {
         use std::fmt::Write as _;
         if !self.line_numbers.is_on() {
@@ -3302,6 +3429,16 @@ impl State {
             }
             let num = mode.number_for(first + i, cursor_line).unwrap_or(0);
             let _ = write!(text, "{num:>digits$}");
+            // Continuation blanks: one empty row per wrapped run past
+            // the first. Unlaid lines (below the drawable window) count
+            // as one row; their gutter rows are equally invisible.
+            let runs = self
+                .buffer
+                .line_layout(&mut self.font_system, i)
+                .map_or(1, |layout| layout.len().max(1));
+            for _ in 1..runs {
+                text.push('\n');
+            }
         }
         let family = self.resolved_family.clone();
         self.gutter_buffer.set_text(
@@ -3311,6 +3448,8 @@ impl State {
             Shaping::Advanced,
             None,
         );
+        self.gutter_buffer
+            .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
         self.gutter_buffer
             .shape_until_scroll(&mut self.font_system, false);
     }
@@ -3372,9 +3511,17 @@ impl State {
             .scroll_top
             .saturating_add_signed(delta as isize)
             .min(max_top);
-        if new_top == self.scroll_top {
+        // An explicit jump owns the viewport wholesale: it also clears
+        // the caret-follow residual (framing Q#F6), so a retained
+        // sub-line offset can't pin the top row. A wheel-up at the top
+        // clamp edge still scrolls when its only remaining motion IS
+        // the residual; a wheel-down pinned at the bottom clamp keeps
+        // the residual (nothing below to reveal).
+        let residual_scrolls_up = delta < 0 && self.code_scroll_residual != 0.0;
+        if new_top == self.scroll_top && !residual_scrolls_up {
             return None;
         }
+        self.code_scroll_residual = 0.0;
         self.scroll_top = new_top;
         self.rebuild_lines_reusing_scroll();
         self.current_buffer_id
@@ -3488,8 +3635,12 @@ impl State {
         let chunks = self.chunks_for_line(line_start, content_end);
         self.buffer.lines[shaped_idx] = line_from_chunks(&chunks, &self.resolved_family);
         self.line_chunk_cache[shaped_idx] = chunks;
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.view_range = (vstart, vend);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        // The edited line's wrap count can shrink under a retained
+        // residual, advancing the slice-local scroll (framing Q#F6);
+        // its rebuilds re-derive `view_range` themselves.
+        self.normalize_code_scroll();
         self.hit_map_dirty = true;
         self.request_redraw();
         true
@@ -3580,8 +3731,9 @@ impl State {
         self.line_chunk_cache = cache;
         self.shaped_top = new_top;
         self.buffer
-            .set_scroll(glyphon::cosmic_text::Scroll::default());
+            .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
         self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.normalize_code_scroll();
         self.hit_map_dirty = true;
         if any_reused || self.line_chunk_cache.is_empty() {
             self.styled_redraw_deadline = None;
@@ -3623,6 +3775,9 @@ impl State {
         }
         if any {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
+            // Adornment chunks can change a line's wrap count under a
+            // retained residual (framing Q#F6).
+            self.normalize_code_scroll();
             self.hit_map_dirty = true;
         }
         // Fresh styling reached the slice — release any held
@@ -4131,41 +4286,26 @@ impl State {
     /// byte. `None` when the popup is closed or the anchor is
     /// scrolled out of the visible slice (the popup then simply
     /// doesn't draw this frame; scrolling back restores it).
-    fn completion_anchor_px(&self) -> Option<(f32, f32, f32)> {
+    fn completion_anchor_px(&mut self) -> Option<(f32, f32, f32)> {
         if !self.completion_open_for_current_buffer() {
             return None; // never paint against a foreign buffer's rope
         }
-        let comp = self.completion.as_ref()?;
+        let anchor = self.completion.as_ref()?.anchor;
         let (vstart, vend) = self.view_range;
-        if vend <= vstart {
+        if vend <= vstart || anchor < vstart || anchor > vend {
             return None;
         }
-        let anchor = comp.anchor;
-        if anchor < vstart || anchor > vend {
+        // The caret mapping, visual-run aware (framing Q#F6): the
+        // anchor's run, not its source line's first run. Off the
+        // drawable window (a wrapped run below the band, or above a
+        // caret-follow residual) counts as scrolled out.
+        let (x, top, line_height) = self.code_byte_px(anchor)?;
+        let y = TEXT_TOP + top;
+        let bottom = text_area_bottom(self.config.height, self.fm);
+        if y >= bottom || y + line_height <= TEXT_TOP {
             return None;
         }
-        let slice = &self.current_text[vstart as usize..vend as usize];
-        let line_offsets = line_byte_offsets(slice);
-        let slice_anchor = anchor - vstart;
-        let (line_lo, _) = source_line_range(slice, slice_anchor);
-        let text_left = self.text_left();
-        for run in self.buffer.layout_runs() {
-            if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
-                continue;
-            }
-            let mut x = text_left;
-            for glyph in run.glyphs {
-                if line_lo + glyph.start as u64 >= slice_anchor {
-                    x = text_left + glyph.x;
-                    break;
-                }
-                // Anchor is past this glyph; track its right edge so an
-                // anchor at line end lands after the final glyph.
-                x = text_left + glyph.x + glyph.w;
-            }
-            return Some((x, TEXT_TOP + run.line_top, run.line_height));
-        }
-        None
+        Some((self.text_left() + x, y, line_height))
     }
 
     /// Layout of the completion dropdown: `(first_row, row_count,
@@ -4175,12 +4315,13 @@ impl State {
     /// visible slice windows around the selection so it stays on
     /// screen when fewer rows fit than the wire shipped (the F-007
     /// discipline).
-    fn completion_dropdown_layout(&self) -> Option<(usize, usize, f32, f32)> {
+    fn completion_dropdown_layout(&mut self) -> Option<(usize, usize, f32, f32)> {
         let comp = self.completion.as_ref()?;
         let n = comp.rows.len();
         if n == 0 {
             return None;
         }
+        let sel = comp.selected.map_or(0, |s| s as usize);
         let (ax, line_top, line_h) = self.completion_anchor_px()?;
         let band_top = text_area_bottom(self.config.height, self.fm);
         let below_px = band_top - (line_top + line_h);
@@ -4196,7 +4337,6 @@ impl State {
             return None;
         }
         let count = n.min(avail);
-        let sel = comp.selected.map_or(0, |s| s as usize);
         let first = if n <= count {
             0
         } else {
@@ -4215,7 +4355,7 @@ impl State {
     /// column shifted back from the window's right margin.
     /// `refresh_completion_buffer` must have run so the width
     /// measurement is current.
-    fn completion_dropdown_rect(&self) -> Option<(f32, f32, f32)> {
+    fn completion_dropdown_rect(&mut self) -> Option<(f32, f32, f32)> {
         let (_first, _count, ax, top_y) = self.completion_dropdown_layout()?;
         let widest = self
             .completion_buffer
@@ -4229,8 +4369,8 @@ impl State {
 
     /// Completion dropdown background + selection-highlight quads.
     /// Empty when closed or the anchor is off-screen.
-    fn completion_dropdown_vertex_bytes(&self) -> Vec<u8> {
-        let Some(comp) = self.completion.as_ref() else {
+    fn completion_dropdown_vertex_bytes(&mut self) -> Vec<u8> {
+        let Some(selected) = self.completion.as_ref().map(|c| c.selected) else {
             return Vec::new();
         };
         let Some((first, count, _ax, _ty)) = self.completion_dropdown_layout() else {
@@ -4246,7 +4386,7 @@ impl State {
             h: count as f32 * self.fm.mb_drop_row_height(),
             color: MENU_BG,
         }];
-        if let Some(sel) = comp.selected.map(|s| s as usize)
+        if let Some(sel) = selected.map(|s| s as usize)
             && sel >= first
             && sel < first + count
         {
@@ -4512,7 +4652,13 @@ impl State {
         (vstart, vend)
     }
 
-    fn reshape(&mut self) {
+    /// Rebuild the shaped slice from `scroll_top` and reapply the
+    /// retained normalized scroll (framing Q#F6) — the raw builder
+    /// shared by [`Self::reshape`] and the [`Self::normalize_code_scroll`]
+    /// fold loop. Callers that end a "final code shape" must run the
+    /// normalizer after so the slice-local `line == 0` invariant is
+    /// re-established.
+    fn rebuild_code_slice(&mut self) {
         // Session S1 — shape only the visible byte slice. Feeding the
         // whole rope to `set_rich_text` (a BufferLine per source line)
         // made large-file editing O(file) per keystroke; cosmic-text
@@ -4533,11 +4679,54 @@ impl State {
         self.line_chunk_cache = cache;
         self.shaped_top = top;
         self.buffer
-            .set_scroll(glyphon::cosmic_text::Scroll::default());
+            .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         // The pointer hit map rebuilds lazily from the same caches
         // (Q#R2) — clicks are rare next to keystrokes/frames.
         self.hit_map_dirty = true;
+    }
+
+    /// Re-establish the normalized code-scroll invariant after a
+    /// final code shape (framing Q#F6): cosmic-text advances the
+    /// slice-local `scroll.line` when new wrapping/metrics push the
+    /// retained vertical residual across source lines. Fold that
+    /// delta into the whole-file `scroll_top`, retain the residual,
+    /// rebuild from the new source origin, and repeat until
+    /// `line == 0`. Every iteration strictly advances the clamped
+    /// source origin; a non-advancing or past-EOF fold clamps to the
+    /// last source line with a default scroll instead of looping.
+    /// `scroll.horizontal` is discarded throughout — glyphon 0.11
+    /// never applies it when placing glyphs, so retaining it would
+    /// claim a scroll the painter never displays.
+    fn normalize_code_scroll(&mut self) {
+        loop {
+            let scroll = self.buffer.scroll();
+            if scroll.horizontal != 0.0 {
+                self.buffer
+                    .set_scroll(Scroll::new(scroll.line, scroll.vertical, 0.0));
+            }
+            if scroll.line == 0 {
+                self.code_scroll_residual = scroll.vertical.max(0.0);
+                return;
+            }
+            let last_line = self.current_line_starts.len().saturating_sub(1);
+            let new_top = self.shaped_top + scroll.line;
+            if new_top > self.shaped_top && new_top <= last_line {
+                self.scroll_top = new_top;
+                self.code_scroll_residual = scroll.vertical;
+                self.rebuild_code_slice();
+            } else {
+                self.scroll_top = last_line;
+                self.code_scroll_residual = 0.0;
+                self.rebuild_code_slice();
+                return;
+            }
+        }
+    }
+
+    fn reshape(&mut self) {
+        self.rebuild_code_slice();
+        self.normalize_code_scroll();
         // Full restyle: release any held post-jump frame (Q#M6).
         self.styled_redraw_deadline = None;
         self.request_redraw();
@@ -4551,7 +4740,227 @@ impl State {
         }
     }
 
+    /// One dimension helper for ALL seven buffers (framing Q#F6):
+    /// metrics and the current REAL drawable dimensions change
+    /// atomically via `set_metrics_and_size` — `set_metrics` alone
+    /// deliberately preserves old dimensions, and the old `resize()`
+    /// only touched four of the seven buffers (the "numbers stop at
+    /// 10" class of skew). Code and gutter get the drawable code
+    /// clip's height (and code its clip width, so wrapping and
+    /// `shape_until_cursor` use the same clip the painter uses); the
+    /// status pair gets the derived band; the row popups get the
+    /// surface height — their protocols window rows themselves.
+    /// `set_metrics_and_size` no-ops when nothing changed, so calling
+    /// this eagerly is cheap.
+    fn sync_buffer_dimensions(&mut self) {
+        let fm = self.fm;
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+        let code_metrics = Metrics::new(fm.code_font_size(), fm.code_line_height());
+        let code_width = (self.text_bounds_right() as f32 - self.text_left()).max(0.0);
+        let code_height = (text_area_bottom(self.config.height, fm) - TEXT_TOP).max(0.0);
+        self.buffer.set_metrics_and_size(
+            &mut self.font_system,
+            code_metrics,
+            Some(code_width),
+            Some(code_height),
+        );
+        self.gutter_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            code_metrics,
+            Some(width),
+            Some(code_height),
+        );
+        let status_metrics = Metrics::new(fm.status_font_size(), fm.status_line_height());
+        self.status_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            status_metrics,
+            Some(width),
+            Some(fm.status_band_height()),
+        );
+        self.status_left_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            status_metrics,
+            Some(width),
+            Some(fm.status_band_height()),
+        );
+        self.menu_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            Metrics::new(fm.menu_font_size(), fm.menu_line_height()),
+            Some(MENU_MAX_WIDTH),
+            Some(height),
+        );
+        let drop_metrics = Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height());
+        self.mb_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            drop_metrics,
+            Some(MB_DROP_MAX_WIDTH),
+            Some(height),
+        );
+        self.completion_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            drop_metrics,
+            Some(MB_DROP_MAX_WIDTH),
+            Some(height),
+        );
+    }
+
+    /// Whether every face the shipped attribute set can select for
+    /// `family` is monospaced (framing Q#F6): the four queries
+    /// reachable through the base `Attrs` — normal, bold, italic, and
+    /// bold-italic, all at normal stretch. fontdb's style matching
+    /// would otherwise let a closer-weight proportional sibling win
+    /// bold/italic text even when the normal query resolved a valid
+    /// monospaced face, silently under-sizing gutter and menu
+    /// advance geometry.
+    fn family_is_monospace_everywhere(&self, family: &str) -> bool {
+        let db = self.font_system.db();
+        [
+            (fontdb::Weight::NORMAL, fontdb::Style::Normal),
+            (fontdb::Weight::BOLD, fontdb::Style::Normal),
+            (fontdb::Weight::NORMAL, fontdb::Style::Italic),
+            (fontdb::Weight::BOLD, fontdb::Style::Italic),
+        ]
+        .into_iter()
+        .all(|(weight, style)| {
+            db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                weight,
+                stretch: fontdb::Stretch::Normal,
+                style,
+            })
+            .and_then(|id| db.face(id))
+            .is_some_and(|face| face.monospaced)
+        })
+    }
+
+    /// Apply a `FontFacts` preference wholesale — framing Q#F6's one
+    /// transaction. Fail-closed wire validation first (this is
+    /// deserialized protocol input; the daemon-side Lua check is a UX
+    /// courtesy, not a trust boundary), then: record the actual
+    /// painted-caret decision, resolve the family (four-style
+    /// monospace gate, total fallback to the sanitized default),
+    /// derive metrics + the measured advance, re-metric/re-size all
+    /// seven buffers, drop the string-equality status caches, reshape
+    /// at the retained scroll, settle the drawable width, re-follow a
+    /// formerly painted caret (or only re-normalize an intentionally
+    /// caret-free viewport), and invalidate dependent layout. No
+    /// frame is submitted between the passes, and no atlas action is
+    /// needed — the per-frame `atlas.trim()` clears `glyphs_in_use`,
+    /// making old-font glyphs eligible for later LRU-style eviction
+    /// under allocation pressure.
+    fn apply_font_facts(&mut self, family: Option<&str>, size_centi_px: Option<u32>) {
+        if let Some(size) = size_centi_px
+            && !FONT_SIZE_CENTI_PX_RANGE.contains(&size)
+        {
+            // 0 would panic `Buffer::set_metrics`; huge values produce
+            // pathological metrics/allocations. Reject the WHOLE
+            // message: current state kept, nothing re-shaped.
+            eprintln!(
+                "pmacs-gpu: ignoring FontFacts with out-of-range size {size} \
+                 (allowed {}..={} hundredths of a logical px)",
+                FONT_SIZE_CENTI_PX_RANGE.start(),
+                FONT_SIZE_CENTI_PX_RANGE.end(),
+            );
+            return;
+        }
+        let caret_was_painted = self.caret_painted_in_code_clip();
+        let resolved = match family {
+            None => self.font_defaults.default_family.clone(),
+            Some(requested) if self.family_is_monospace_everywhere(requested) => {
+                requested.to_owned()
+            }
+            Some(requested) => {
+                // Deterministic frontend fallback, never round-tripped
+                // back — the daemon never learns resolution outcomes.
+                eprintln!(
+                    "pmacs-gpu: font family {requested:?} is unavailable or not \
+                     monospaced across its normal/bold/italic/bold-italic \
+                     queries; falling back to {:?}",
+                    self.font_defaults.default_family
+                );
+                self.font_defaults.default_family.clone()
+            }
+        };
+        #[allow(clippy::cast_precision_loss)] // size <= 7200 is exact in f32
+        let scale = size_centi_px.map_or(1.0, |size| size as f32 / 100.0 / BASE_CODE_FONT_SIZE);
+        // The measure pass (framing Q#F6): a fixed ASCII probe in the
+        // resolved family at the new code metrics, independent of
+        // document contents. The NORMAL-face advance becomes
+        // authoritative for gutter geometry, and the selected/default
+        // ratio scales the const-based fallbacks — the default family
+        // is ratio 1 by construction, so never-set/reset stays
+        // byte-identical.
+        let code_metrics = Metrics::new(BASE_CODE_FONT_SIZE * scale, BASE_CODE_LINE_HEIGHT * scale);
+        let selected_advance = probe_mono_advance(&mut self.font_system, &resolved, code_metrics);
+        let advance_ratio = if resolved == self.font_defaults.default_family {
+            1.0
+        } else {
+            let default_advance = probe_mono_advance(
+                &mut self.font_system,
+                &self.font_defaults.default_family,
+                code_metrics,
+            );
+            match (selected_advance, default_advance) {
+                (Some(selected), Some(default)) if selected > 0.0 && default > 0.0 => {
+                    selected / default
+                }
+                _ => 1.0,
+            }
+        };
+        self.resolved_family = resolved;
+        self.fm = FontMetrics {
+            scale,
+            advance_ratio,
+        };
+        self.measured_mono_advance = selected_advance;
+        // Rows stay rows: idempotent no-wrap on the popup buffers
+        // (assembly set it; a set_wrap no-op costs a comparison).
+        self.menu_buffer.set_wrap(&mut self.font_system, Wrap::None);
+        self.mb_buffer.set_wrap(&mut self.font_system, Wrap::None);
+        self.completion_buffer
+            .set_wrap(&mut self.font_system, Wrap::None);
+        // Metrics + current dimensions atomically on all seven.
+        self.sync_buffer_dimensions();
+        // The two string-equality shaping gates (the popups rebuild
+        // unconditionally per frame). NUL can never equal a composed
+        // status string, so the next frame re-shapes with new attrs
+        // even when its composed text is unchanged.
+        "\0".clone_into(&mut self.status_text);
+        "\0".clone_into(&mut self.status_left_text);
+        // Attrs-bearing reshape at the retained scroll (reshape
+        // normalizes it against the FINAL family/metrics/dims).
+        self.reshape();
+        // Settle the drawable code width: `text_left` depends on the
+        // measured advance via the gutter, so re-derive and reshape
+        // once more if it moved. No frame is submitted between passes.
+        let width_before = self.buffer.size().0;
+        self.sync_buffer_dimensions();
+        if self.buffer.size().0 != width_before {
+            self.reshape();
+        }
+        if caret_was_painted {
+            self.ensure_caret_painted();
+        } else {
+            // Preserve the user's scroll — a font change must never
+            // turn an overscan-only caret into a snap-back.
+            self.normalize_code_scroll();
+        }
+        // Dependent layout: the minimap vertex cache keys on
+        // (generation, size, scroll_top) and would miss a pure
+        // metrics change; hit runs rebuild lazily (reshape dirtied
+        // them).
+        self.minimap_cache = None;
+        self.request_redraw();
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> Option<ViewportSend> {
+        // The same painted-before policy as the font transaction
+        // (framing Q#F6), decided against the OLD geometry: narrowing
+        // must not strand a stationary caret in a new wrap, and
+        // widening an intentionally caret-free viewport only
+        // normalizes its retained scroll.
+        let caret_was_painted = self.caret_painted_in_code_clip();
         self.config.width = width;
         self.config.height = height;
         if let Some(surface) = &self.surface {
@@ -4559,32 +4968,14 @@ impl State {
         }
         self.viewport
             .update(&self.queue, Resolution { width, height });
-        self.buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(height as f32),
-        );
-        self.status_buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(self.fm.status_band_height()),
-        );
-        self.status_left_buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(self.fm.status_band_height()),
-        );
-        // UX gutter: resize the line-number buffer too, else it keeps its
-        // construction-time (800x200) height and `shape_until_scroll` only
-        // shapes the ~10 lines that fit — the "numbers stop at 10" bug.
-        self.gutter_buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(height as f32),
-        );
+        // All seven buffers through the shared dimension helper.
+        self.sync_buffer_dimensions();
         // A taller/shorter window changes the visible line count, so the
         // slice + scoped viewport change (session S1).
         self.reshape();
+        if caret_was_painted {
+            self.ensure_caret_painted();
+        }
         self.request_redraw();
         self.current_buffer_id
             .and_then(|bid| self.viewport_send_if_changed(bid))
@@ -5044,9 +5435,10 @@ impl State {
         // scrolls it up by `first` rows so row `first` lands at `top_y`,
         // and `bounds` clips the rows outside the visible window (the
         // minibuffer dropdown's F-007 shape).
-        let completion_areas: Vec<TextArea> = self
+        let completion_layout = self
             .completion_dropdown_layout()
-            .zip(self.completion_dropdown_rect())
+            .zip(self.completion_dropdown_rect());
+        let completion_areas: Vec<TextArea> = completion_layout
             .map(|((first, count, _ax, _ty), (x, top_y, width))| TextArea {
                 buffer: &self.completion_buffer,
                 left: x + MB_DROP_PAD_X,
@@ -5402,9 +5794,11 @@ impl State {
     }
 
     /// Vertex bytes for the caret quad, drawn *over* the text (B1).
-    /// Empty when no own cursor is known, it's in another buffer, or it
-    /// is scrolled out of the visible slice.
-    fn caret_vertex_bytes(&self) -> Vec<u8> {
+    /// Empty when no own cursor is known, it's in another buffer, or
+    /// its visual run is scrolled outside the drawable code window
+    /// (the caret quad has no `TextBounds` clip of its own, so the
+    /// drawable intersection gates it here).
+    fn caret_vertex_bytes(&mut self) -> Vec<u8> {
         // Q#MB1 — while the minibuffer is open the caret lives in the
         // band at the input cursor, not in the buffer.
         if self.minibuffer.is_some() {
@@ -5413,13 +5807,7 @@ impl State {
                 .map(|r| rects_to_vertex_bytes(&[r], self.config.width, self.config.height))
                 .unwrap_or_default();
         }
-        let (vstart, vend) = self.view_range;
-        if vend <= vstart {
-            return Vec::new();
-        }
-        let slice = &self.current_text[vstart as usize..vend as usize];
-        let line_offsets = line_byte_offsets(slice);
-        let Some(rect) = self.caret_rect(slice, &line_offsets, vstart, vend) else {
+        let Some(rect) = self.code_caret_rect_in_clip() else {
             return Vec::new();
         };
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
@@ -5455,54 +5843,136 @@ impl State {
         })
     }
 
-    /// The caret rectangle for the own cursor, in slice coordinates: a
-    /// thin bar at the left edge of the glyph the cursor sits before (or
-    /// the right edge of the last glyph at line end). `None` when the
-    /// cursor is outside the visible slice. Byte→glyph mapping rebases
-    /// per line (QB3); the cursor is rebased onto the slice first (S1).
-    fn caret_rect(
-        &self,
-        slice: &str,
-        line_offsets: &[u64],
-        vstart: u64,
-        vend: u64,
-    ) -> Option<MinimapRect> {
+    /// Map an absolute source `byte` to `(slice line index, projected
+    /// byte offset within that shaped line)` by inverting the line's
+    /// `line_chunk_cache` projection (framing Q#F6): source bytes are
+    /// not projected bytes once inline adornments inject text. An
+    /// adornment anchor maps to the EARLIEST projected boundary — the
+    /// current left-gravity caret placement, before the injected
+    /// text. `None` when the byte's source line is outside the shaped
+    /// slice.
+    fn code_byte_to_projected(&self, byte: u64) -> Option<(usize, usize)> {
+        let line_idx = self
+            .current_line_starts
+            .partition_point(|&s| s <= byte)
+            .saturating_sub(1);
+        let slice_i = line_idx.checked_sub(self.shaped_top)?;
+        if slice_i >= self.line_chunk_cache.len() {
+            return None;
+        }
+        let rel = byte - self.current_line_starts[line_idx];
+        let mut projected = 0usize;
+        for chunk in &self.line_chunk_cache[slice_i] {
+            match chunk.source {
+                ChunkSource::Source { start } => {
+                    let len = chunk.text.len() as u64;
+                    if rel >= start && rel < start + len {
+                        return Some((slice_i, projected + (rel - start) as usize));
+                    }
+                }
+                ChunkSource::Adornment { anchor } => {
+                    // Source chunks tile the line, so reaching an
+                    // adornment chunk unmatched means the byte sits at
+                    // its anchor boundary (or past line end).
+                    if rel <= anchor {
+                        return Some((slice_i, projected));
+                    }
+                }
+            }
+            projected += chunk.text.len();
+        }
+        // Line end (the `\n` position, or EOF).
+        Some((slice_i, projected))
+    }
+
+    /// The caret geometry `(x, top, line_height)` for an absolute
+    /// source `byte`, in code-area-local space (x excludes
+    /// `text_left`, top excludes `TEXT_TOP`) — visual-run aware
+    /// (framing Q#F6). Inverts the chunk projection, then uses
+    /// cosmic-text's `layout_cursor` on the same Before-affinity
+    /// `Cursor` that `ensure_caret_painted` shapes toward, so a wrap
+    /// boundary selects the same visual run. The vertical position
+    /// accumulates the laid-out run heights above the selected run
+    /// under the normalized scroll; callers decide visibility by
+    /// intersecting with the drawable clip.
+    fn code_byte_px(&mut self, byte: u64) -> Option<(f32, f32, f32)> {
+        let (slice_i, projected) = self.code_byte_to_projected(byte)?;
+        let cursor = Cursor::new(slice_i, projected);
+        let lc = self.buffer.layout_cursor(&mut self.font_system, cursor)?;
+        let scroll = self.buffer.scroll();
+        if slice_i < scroll.line {
+            return None;
+        }
+        let default_line_height = self.buffer.metrics().line_height;
+        let mut top = -scroll.vertical;
+        for line_i in scroll.line..slice_i {
+            let layout = self.buffer.line_layout(&mut self.font_system, line_i)?;
+            for layout_line in layout {
+                top += layout_line.line_height_opt.unwrap_or(default_line_height);
+            }
+        }
+        let layout = self.buffer.line_layout(&mut self.font_system, slice_i)?;
+        for layout_line in layout.iter().take(lc.layout) {
+            top += layout_line.line_height_opt.unwrap_or(default_line_height);
+        }
+        let run = layout.get(lc.layout)?;
+        let line_height = run.line_height_opt.unwrap_or(default_line_height);
+        let x = if lc.glyph < run.glyphs.len() {
+            run.glyphs[lc.glyph].x
+        } else {
+            // Caret after the final glyph (line/run end).
+            run.glyphs.last().map_or(0.0, |glyph| glyph.x + glyph.w)
+        };
+        Some((x, top, line_height))
+    }
+
+    /// The caret rectangle for the own cursor: a thin bar at the left
+    /// edge of the glyph the cursor sits before (or the right edge of
+    /// the last glyph at line end), on the cursor's VISUAL run —
+    /// wrapped continuation runs included (framing Q#F6). `None` when
+    /// the cursor is outside the shaped slice. Callers gate painting
+    /// on the drawable code clip.
+    fn caret_rect(&mut self) -> Option<MinimapRect> {
         let own = self.own_cursor?;
         if self.current_buffer_id != Some(own.buffer_id) {
             return None;
         }
+        let (vstart, vend) = self.view_range;
         let cursor = own.byte;
         if cursor < vstart || cursor > vend {
             return None; // scrolled off-screen
         }
-        let slice_cursor = cursor - vstart;
-        let (line_lo, _) = source_line_range(slice, slice_cursor);
-        // UX gutter: the caret sits in the code area, past the gutter.
-        let text_left = self.text_left();
-        for run in self.buffer.layout_runs() {
-            if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
-                continue;
-            }
-            let line_base = line_lo;
-            let mut x = text_left;
-            for glyph in run.glyphs {
-                if line_base + glyph.start as u64 >= slice_cursor {
-                    x = text_left + glyph.x;
-                    break;
-                }
-                // Cursor is past this glyph; track its right edge so a
-                // cursor at line end lands after the final glyph.
-                x = text_left + glyph.x + glyph.w;
-            }
-            return Some(MinimapRect {
-                x,
-                y: TEXT_TOP + run.line_top,
-                w: CARET_WIDTH,
-                h: run.line_height,
-                color: CARET_COLOR,
-            });
-        }
-        None
+        let (x, top, line_height) = self.code_byte_px(cursor)?;
+        Some(MinimapRect {
+            // UX gutter: the caret sits in the code area, past the gutter.
+            x: self.text_left() + x,
+            y: TEXT_TOP + top,
+            w: CARET_WIDTH,
+            h: line_height,
+            color: CARET_COLOR,
+        })
+    }
+
+    /// [`Self::caret_rect`] intersected with the drawable code clip —
+    /// the painter's own bounds (right of the gutter isn't needed:
+    /// the caret x can't precede `text_left`), NOT `view_range`, so
+    /// the two-line source overscan and wrapped runs clipped below
+    /// the band don't count as painted (framing Q#F6).
+    fn code_caret_rect_in_clip(&mut self) -> Option<MinimapRect> {
+        let rect = self.caret_rect()?;
+        let bottom = text_area_bottom(self.config.height, self.fm);
+        let right = self.text_bounds_right() as f32;
+        (rect.y < bottom && rect.y + rect.h > TEXT_TOP && rect.x < right).then_some(rect)
+    }
+
+    /// The pre-change follow decision (framing Q#F6): whether the own
+    /// caret is ACTUALLY painted inside the drawable code area right
+    /// now — and only while the minibuffer is closed (its caret lives
+    /// in the band). Painted-before ⇒ the font/resize transaction
+    /// re-follows with `ensure_caret_painted`; not painted ⇒ the
+    /// user's scroll is preserved and never snapped back.
+    fn caret_painted_in_code_clip(&mut self) -> bool {
+        self.minibuffer.is_none() && self.code_caret_rect_in_clip().is_some()
     }
 
     /// Push one rect per visual line whose glyphs overlap the
