@@ -3515,7 +3515,7 @@ mod tests {
         seed_rust_parse_view(&state, bid, src.as_bytes());
 
         let start = std::time::Instant::now();
-        let summary = scoped_file_summary(&state, bid);
+        let summary = scoped_file_summary(&state, bid, false);
         let elapsed = start.elapsed();
         assert!(!summary.is_empty(), "summary produced for a styled buffer");
         assert!(
