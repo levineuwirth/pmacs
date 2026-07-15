@@ -1,7 +1,7 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-14, by the syntax-highlight / language-detection
-side-quest session (post-merge snapshot).** This file is the
+**Last updated: 2026-07-15, by the themes stage-1 session (#120
+post-merge snapshot).** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -9,11 +9,10 @@ your persistent memory from it, and **update this file (and commit
 it) whenever project state changes materially** — the next machine
 reads it the way you just did.
 
-## 1. Where the project stands (2026-07-14)
+## 1. Where the project stands (2026-07-15)
 
-- `main` @ `6364064` (grammar-gap #118 merged), protocol **v15**
-  (`SUPPORTED=[6..15]`; no bump since #113 — the highlight side-quest is
-  grammar + Lua only).
+- `main` @ `8ce2e9c` (themes stage 1 #120 merged), protocol **v16**
+  (`SUPPORTED=[6..16]`; v15→16 shipped the `ThemeFacts` channel).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -71,12 +70,27 @@ reads it the way you just did.
   `pmacs.editor.take_typed_edit()` (buffer-revision postcondition,
   Q#AP9). Substrate: `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
   `PMACS_FAKE_LSP_CHANGE_SINK`, `TestDaemon::spawn_with_config`.
-- **NEXT: themes (Arc 4) — IN PROGRESS by the user on `theme-faces`**
-  (the main course; the highlight side-quest above ran parallel to it).
-  Hard parts from the decision discussion: protocol bump v15→16 for a
-  ThemeFacts channel, the LineNumbers/Q#UX1 control-plane template,
-  glyphon font reload. Leave `theme-faces` alone; scout main freshly
-  before any parallel branch.
+- **Themes (Arc 4) stage 1 LANDED — #120 merged after 5 review
+  rounds** (`docs/theme-faces-framing.md` rev 9 is the full record):
+  named UI faces as reserved `ui`/`ui.*` theme entries (12-face
+  inventory, owns-surface-within-mask, masks identical on both
+  frontends); `Theme::face()` walk (`None` when unset); transactional
+  mutators with split syntax/face epochs (fixed the pre-existing
+  mid-session `theme.set` span staleness); `ThemeFacts` channel (v16,
+  one authoritative send per attachment; v15 peers excluded incl. the
+  `FileStyleSummary` face-leak side channel). Review rounds hardened
+  substrate beyond faces: the **snapshot/baseline reset contract**
+  (`on_buffer_snapshot_sent` daemon-side + the GPU arm's symmetric
+  search/menu/status clears; minibuffer, gutter mode, `ThemeFacts`
+  survive both sides) and the **store-sourced diag-count freeze**
+  (per-URI severity totals in `DiagnosticStore`, O(1), survive
+  `mark_stale`).
+- **NEXT: themes stage 2 — `pmacs.gpu.set_font` at protocol v17**
+  (shipped versions are never reused; the `pmacs-gpu-design.md:299`
+  no-wire-change claim is superseded and must be corrected in the
+  stage-2 framing). Glyphon font reload was flagged HARD. Stage 3
+  after: Lua statusline-segment API (segments carry face names).
+  Workflow as always: framing → user approval → branch → gates → PR.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
@@ -232,6 +246,14 @@ New wire surface ⇒ bump + both-frontends support + acceptance.
   (grammars + `pmacs.lsp.filetypes`) is unaffected.
 - Test scratch buffers have no path ⇒ no language; use tempdir files
   when language matters.
+- **Dual-purpose session state is a reset-contract trap** (#120
+  rounds 2–5): `last_status` doubled as the peer emission baseline
+  AND the stale-diag count freeze, so resetting baselines on
+  `BufferSnapshot` zeroed mid-edit counts. Knowledge about a buffer
+  belongs in shared stores (`DiagnosticStore` severity totals), never
+  in per-session baselines; and any daemon-side reset needs its
+  frontend mirror audited in the same round (the GPU snapshot arm
+  missed search/menu/status the first time).
 
 ## 6. Named deferrals (the standing backlog, consolidated)
 
@@ -273,6 +295,15 @@ Jupyter `.ipynb` setup (reader → editable → kernel execution) is a real
 arc gated on JSON + injections, NOT a one-shot.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
+Themes (full list in theme-faces framing rev 9 "Deferred (named)"):
+popup/menu/dropdown bg + selected-row faces, `ui.background` /
+`ui.caret`, `ui.modeline.inactive`, minimap chrome, peer-cursor
+palette (+`ui.selection` for peer rects), `ui.inlay_hint` (needs the
+epoch treatment on its producer), wire alpha, `Indexed` palette
+unification, named-theme registry / light theme / persistence
+(config-registry-blocked), grid-vs-wire `default_style` asymmetry,
+mask widening (gutter bg, wash glyph recolor, statusline bg echo
+surface, chrome bold/italic/underline re-shaping).
 Housekeeping: F-016 `lua_bindings/mod.rs` split paused mid-way
 (tranches 0–2 landed, ~5–8 PRs left; see
 `docs/lua-bindings-split-framing.md`).
