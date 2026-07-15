@@ -1743,12 +1743,6 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
     let Some(bundle) = handle.current() else {
         return Vec::new();
     };
-    let Some(query) = state
-        .syntax_registry
-        .highlights_query(&bundle.language_name)
-    else {
-        return Vec::new();
-    };
     let theme = state
         .syntax_registry
         .theme()
@@ -1756,39 +1750,152 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
         .expect("theme mutex poisoned")
         .clone();
 
-    let source_len = bundle.source.len() as u64;
+    let source: &[u8] = bundle.source.as_ref();
+    let source_len = source.len() as u64;
     let vis_start = vp.visible.start.min(source_len);
     let vis_end = vp.visible.end.min(source_len);
     if vis_end <= vis_start {
         return Vec::new();
     }
 
-    let capture_names = query.capture_names();
-    // Scope the tree-sitter capture walk to the visible byte range so
-    // re-styling on each edit is O(visible), not O(file) — the typing
-    // bottleneck on large files (framing Q#S6). Captures whose nodes
-    // intersect the range are returned, then clipped exactly below.
-    let highlights = crate::syntax::compute_highlight_spans_in_range(
-        &query,
-        &bundle,
-        Some(vis_start as usize..vis_end as usize),
-    );
-    let mut out = Vec::new();
-    for hs in highlights {
-        let s = u64::from(hs.start_byte).max(vis_start);
-        let e = u64::from(hs.end_byte).min(vis_end);
-        if e <= s {
-            continue; // No overlap with the viewport.
-        }
-        let Some(name) = capture_names.get(hs.capture_index as usize) else {
+    // Collect the styled spans from every injection layer, scoping each
+    // capture walk to the visible byte range so re-styling on each edit is
+    // O(visible), not O(file) (framing Q#S6). Each span carries a priority
+    // `(layer_index, capture_order)`: a deeper layer wins over a shallower
+    // one, a later same-depth sibling wins over an earlier one, and within a
+    // layer the wider-first order lets narrower captures override (framing
+    // Q#IJ6). Fully-default styles are dropped (they fold as identity anyway).
+    let mut styled: Vec<StyledLayerSpan> = Vec::new();
+    for (layer_idx, layer) in bundle.layers.iter().enumerate() {
+        let Some(query) = layer.highlight_query.as_ref() else {
             continue;
         };
-        let style = theme.lookup(name);
+        let names = query.capture_names();
+        let highlights = crate::syntax::compute_highlight_spans_for(
+            query,
+            &layer.tree,
+            source,
+            Some(vis_start as usize..vis_end as usize),
+        );
+        for (order, hs) in highlights.iter().enumerate() {
+            let s = u64::from(hs.start_byte).max(vis_start);
+            let e = u64::from(hs.end_byte).min(vis_end);
+            if e <= s {
+                continue;
+            }
+            let Some(name) = names.get(hs.capture_index as usize) else {
+                continue;
+            };
+            let style = theme.lookup(name);
+            if style == Style::default() {
+                continue;
+            }
+            styled.push(StyledLayerSpan {
+                start: s,
+                end: e,
+                style,
+                priority: layer_span_priority(layer_idx, layer.depth, order),
+            });
+        }
+    }
+    flatten_layer_spans(&styled)
+}
+
+type LayerSpanPriority = (u32, u32);
+
+/// Build the total ordering shared by the wire flattener and its sibling
+/// precedence regression test. Keeping the layer index and depth as separate
+/// inputs makes the former `(depth, capture_order)` bug directly falsifiable:
+/// two siblings tie on depth but must differ on layer index.
+fn layer_span_priority(layer_index: usize, _depth: u16, capture_order: usize) -> LayerSpanPriority {
+    (layer_index as u32, capture_order as u32)
+}
+
+/// One styled span from a single injection layer, tagged with a priority
+/// used to resolve overlaps: `(layer_index, capture_order)`, higher wins.
+/// `layer_index` is the position in `bundle.layers` — depth-ascending, so a
+/// deeper layer AND a later same-depth sibling both sort after (and thus
+/// override) an earlier one, exactly matching the grid's shallow-to-deep,
+/// layer-by-layer paint order. `capture_order` is the index in the layer's
+/// wider-first list, so within a layer a narrower capture overrides a wider
+/// one. The pair is unique per span, so the fold order is total (no ties).
+struct StyledLayerSpan {
+    start: u64,
+    end: u64,
+    style: Style,
+    priority: LayerSpanPriority,
+}
+
+/// Flatten possibly-overlapping per-layer styled spans into **disjoint**
+/// `StyleSpan`s whose per-byte style is the priority-ordered fold of every
+/// covering span (framing Q#IJ6). Emitting disjoint spans makes the result
+/// robust to the GPU wire re-sorting spans by start (`replace_style_spans`
+/// / `merge_style_spans`), which would otherwise destroy producer order.
+/// A boundary sweep over the (viewport-bounded) span endpoints; adjacent
+/// equal-style runs are merged for wire economy.
+fn flatten_layer_spans(styled: &[StyledLayerSpan]) -> Vec<StyleSpan> {
+    if styled.is_empty() {
+        return Vec::new();
+    }
+    // Boundary sweep. Every unique span endpoint is a boundary; between
+    // consecutive boundaries the covering set is constant. An ordered
+    // active-set (activate on start, expire on end) keeps each interval's
+    // fold O(active) rather than O(all spans), so the whole pass is
+    // O(spans·log spans + Σ active) — linear in practice (active is bounded
+    // by overlap depth, not the total span count). This matters because the
+    // file-style summary runs this over the *entire* buffer, not just the
+    // viewport.
+    let mut bounds: Vec<u64> = Vec::with_capacity(styled.len() * 2);
+    for sp in styled {
+        bounds.push(sp.start);
+        bounds.push(sp.end);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+
+    // Span indices ordered by start; activated as the sweep reaches them.
+    let mut by_start: Vec<usize> = (0..styled.len()).collect();
+    by_start.sort_by_key(|&i| styled[i].start);
+    let mut next = 0usize;
+
+    // Active covering spans, kept in ascending-priority order so the fold
+    // is a single in-order pass.
+    let mut active: Vec<usize> = Vec::new();
+
+    let mut out: Vec<StyleSpan> = Vec::new();
+    for win in bounds.windows(2) {
+        let (a, b) = (win[0], win[1]);
+        // Activate spans starting at or before `a` (each activates once).
+        while next < by_start.len() && styled[by_start[next]].start <= a {
+            let idx = by_start[next];
+            let pos = active.partition_point(|&j| styled[j].priority < styled[idx].priority);
+            active.insert(pos, idx);
+            next += 1;
+        }
+        // Expire spans that ended at or before `a` (ranges are half-open).
+        active.retain(|&j| styled[j].end > a);
+        if active.is_empty() {
+            continue;
+        }
+        // Fold the active set in ascending priority: a deeper/narrower span
+        // overrides, an attribute-only span still composes (matches the
+        // semantic-client `effective_style_at` contract).
+        let mut style = Style::default();
+        for &j in &active {
+            style = crate::overlay::merge_styles(style, styled[j].style);
+        }
         if style == Style::default() {
-            continue; // Nothing to render — skip the wire byte.
+            continue;
+        }
+        if let Some(last) = out.last_mut()
+            && last.range.end == a
+            && last.style == style
+        {
+            last.range.end = b;
+            continue;
         }
         out.push(StyleSpan {
-            range: ByteRange { start: s, end: e },
+            range: ByteRange { start: a, end: b },
             style,
         });
     }
@@ -3300,13 +3407,196 @@ mod tests {
         let handle = parse_view.handle();
         let req = handle.make_request();
         let bundle = crate::syntax::run_parse(req).expect("initial rust parse");
-        handle.install(std::sync::Arc::new(bundle));
+        // Mirror the production settle path: resolve each layer's highlight
+        // query before install so the producer can style it (framing Q#IJ2).
+        handle.install(state.syntax_registry.resolve_layer_queries(&bundle));
         buf.attach_view(Box::new(parse_view));
         drop(registry);
         core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.rs")));
         drop(core);
         state.syntax_registry.attach_view(buffer_id, handle.clone());
         handle
+    }
+
+    fn seed_markdown_parse_view(
+        state: &EditorState,
+        buffer_id: BufferId,
+        text: &[u8],
+    ) -> crate::syntax::ParseViewHandle {
+        let language = state
+            .syntax_registry
+            .language("markdown")
+            .expect("markdown grammar");
+        let mut core = state.core.borrow_mut();
+        let registry_handle = core.registry.clone();
+        let mut registry = registry_handle.borrow_mut();
+        let buf = registry.get_mut(buffer_id).expect("active buffer");
+        if !text.is_empty() {
+            buf.apply_edit(crate::buffer::EditOp::Insert {
+                pos: 0,
+                bytes: text,
+            })
+            .expect("seed markdown text");
+        }
+        let parse_view = crate::syntax::ParseView::new(buf, language, "markdown".to_owned());
+        let handle = parse_view.handle();
+        let mut req = handle.make_request();
+        req.injection_aliases = state.syntax_registry.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("markdown parse");
+        handle.install(state.syntax_registry.resolve_layer_queries(&bundle));
+        buf.attach_view(Box::new(parse_view));
+        drop(registry);
+        core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.md")));
+        drop(core);
+        state.syntax_registry.attach_view(buffer_id, handle.clone());
+        handle
+    }
+
+    #[test]
+    fn wire_producer_emits_disjoint_child_spans_in_fence() {
+        // Framing acceptance #8: `scoped_style_spans` over a ```rust fence
+        // emits a styled span on the `fn` keyword INSIDE the fence — which
+        // only the injected rust layer can produce (the markdown root has
+        // no keyword styling there). The pre-injection single-layer producer
+        // fails this. Emitted spans are disjoint (framing Q#IJ6 flatten).
+        let state = empty_state();
+        let bid = active_buffer(&state);
+        let src = b"# T\n\n```rust\nfn demo() {}\n```\n";
+        seed_markdown_parse_view(&state, bid, src);
+        let vp = DeclaredViewport {
+            buffer_id: bid,
+            visible: ByteRange {
+                start: 0,
+                end: src.len() as u64,
+            },
+            frontend_generation: 0,
+        };
+        let spans = scoped_style_spans(&state, &vp);
+        assert!(!spans.is_empty(), "layered producer emits style spans");
+
+        // Disjoint (flattened): no two spans overlap.
+        let mut sorted = spans.clone();
+        sorted.sort_by_key(|s| s.range.start);
+        for w in sorted.windows(2) {
+            assert!(
+                w[0].range.end <= w[1].range.start,
+                "flattened spans must be disjoint: {:?} then {:?}",
+                w[0].range,
+                w[1].range
+            );
+        }
+
+        // The `fn` keyword inside the fence carries a non-default style.
+        let fn_off = src
+            .windows(2)
+            .position(|w| w == b"fn")
+            .expect("`fn` present in source") as u64;
+        let covering = spans
+            .iter()
+            .find(|s| s.range.start <= fn_off && fn_off < s.range.end)
+            .expect("a span covers the `fn` keyword inside the fence");
+        assert_ne!(
+            covering.style,
+            Style::default(),
+            "the injected rust keyword is styled"
+        );
+    }
+
+    #[test]
+    fn full_buffer_summary_flatten_scales_on_large_grammar_file() {
+        // Perf gate (round-1 finding 1): the file-style summary runs the
+        // FLATTENER over the WHOLE buffer, not the viewport. The ordered
+        // active-set sweep keeps the flatten O(n·log n + Σ active); the
+        // pre-sweep O(spans^2) flatten stalled a large grammar-backed file
+        // here. (This guards the *flattener* regression specifically — the
+        // summary's separate per-line dominant-style tally is a pre-existing
+        // O(lines × spans) loop, not addressed or claimed linear here.)
+        use std::fmt::Write as _;
+        let state = empty_state();
+        let bid = active_buffer(&state);
+        let mut src = String::new();
+        for i in 0..1500 {
+            writeln!(
+                src,
+                "pub fn f_{i}(x: u32) -> u32 {{ let y = x + {i}; y * 2 }}"
+            )
+            .expect("write");
+        }
+        seed_rust_parse_view(&state, bid, src.as_bytes());
+
+        let start = std::time::Instant::now();
+        let summary = scoped_file_summary(&state, bid, false);
+        let elapsed = start.elapsed();
+        assert!(!summary.is_empty(), "summary produced for a styled buffer");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "full-buffer flatten took {elapsed:?}; the event sweep must stay \
+             ~linear (a quadratic flatten regresses here)"
+        );
+    }
+
+    #[test]
+    fn flatten_same_depth_sibling_later_layer_wins() {
+        // Round-2 finding: two overlapping spans from different sibling
+        // layers must resolve to the LATER layer (higher layer_index),
+        // matching the grid's layer-by-layer paint order. The old
+        // `(depth, order)` priority tied same-depth siblings, and the
+        // active-set insert then reversed them — making the earlier sibling
+        // win, the opposite of the grid. Layer index in the priority fixes
+        // it.
+        use crate::cell::Color;
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
+        let green = Style {
+            fg: Color::Indexed(2),
+            ..Style::default()
+        };
+        // Both spans are depth-1 siblings. Layer index 2 follows layer index
+        // 1, so green must win even though their depth/capture order tie.
+        let sibling_depth = 1;
+        let earlier = layer_span_priority(1, sibling_depth, 0);
+        let later = layer_span_priority(2, sibling_depth, 0);
+        assert!(
+            earlier < later,
+            "the later sibling has higher priority despite equal depth"
+        );
+        let styled = vec![
+            StyledLayerSpan {
+                start: 0,
+                end: 10,
+                style: red,
+                priority: earlier,
+            },
+            StyledLayerSpan {
+                start: 3,
+                end: 6,
+                style: green,
+                priority: later,
+            },
+        ];
+        let out = flatten_layer_spans(&styled);
+        // Byte 4 (covered by both) folds to the later layer (green).
+        let covering = out
+            .iter()
+            .find(|s| s.range.start <= 4 && 4 < s.range.end)
+            .expect("byte 4 covered");
+        assert_eq!(
+            covering.style.fg,
+            Color::Indexed(2),
+            "the later sibling layer wins at the overlap"
+        );
+        // Byte 1 (layer 0 only) keeps the base layer's color.
+        let c1 = out
+            .iter()
+            .find(|s| s.range.start <= 1 && 1 < s.range.end)
+            .expect("byte 1 covered");
+        assert_eq!(
+            c1.style.fg,
+            Color::Indexed(1),
+            "a non-overlapping byte keeps the base layer color"
+        );
     }
 
     #[test]
@@ -3402,7 +3692,7 @@ mod tests {
         );
 
         let bundle = crate::syntax::run_parse(req).expect("settled rust parse");
-        handle.install(std::sync::Arc::new(bundle));
+        handle.install(state.syntax_registry.resolve_layer_queries(&bundle));
         assert_eq!(state.syntax_registry.take_parse_job(9001), Some(bid));
         let settled = s.render_frame(&state);
         assert!(
