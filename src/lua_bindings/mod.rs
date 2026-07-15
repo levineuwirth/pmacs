@@ -7562,6 +7562,121 @@ pub fn install_process(lua: &Lua, supervisor: &SharedProcessSupervisor) -> mlua:
 /// Build a fresh [`ProcessSupervisor`] and install
 /// `pmacs.process.*` over it. Mirrors [`make_async_runtime`] /
 /// [`make_syntax_registry`] in shape.
+/// `pmacs.gpu.*` — GPU frontend preferences (Arc 4 stage 2, framing
+/// Q#F2). Installs the module and returns the shared preference
+/// handle the `semantic_render` producer reads. Called from
+/// `EditorState::new` BEFORE `load_user_config` runs: font selection
+/// is primarily configuration, and an init.lua `set_font` must land
+/// in the same state the first attachment's producer reads.
+///
+/// `set_font` follows the live `pmacs.theme.set` pattern — no
+/// `require_init_phase` gate; mid-session calls re-ship on the next
+/// frame. The kwargs table is STRICT PLAIN DATA: `raw_get` reads,
+/// unknown raw keys are rejected by name, and metatables are never
+/// consulted (`for_each` iterates raw pairs) — a hostile `__index`
+/// cannot inject values, and the whole table is parsed, validated,
+/// and quantized before the lock is taken (all-or-nothing, Q#TH6).
+pub fn make_font_pref(lua: &Lua) -> mlua::Result<crate::font_pref::FontPrefHandle> {
+    let handle = crate::font_pref::new_handle();
+    let gpu = lua.create_table()?;
+    {
+        let h = handle.clone();
+        gpu.set(
+            "set_font",
+            lua.create_function(move |_, spec: Table| -> mlua::Result<()> {
+                // Reject unknown keys first, naming the offender —
+                // raw iteration, so metatable trickery is invisible.
+                let mut unknown: Option<String> = None;
+                spec.clone().for_each(|k: Value, _: Value| {
+                    let name = match &k {
+                        Value::String(s) => s.to_str()?.to_owned(),
+                        other => format!("{other:?}"),
+                    };
+                    if name != "family" && name != "size" && unknown.is_none() {
+                        unknown = Some(name);
+                    }
+                    Ok(())
+                })?;
+                if let Some(key) = unknown {
+                    return Err(mlua::Error::external(format!(
+                        "pmacs.gpu.set_font: unknown field `{key}` (expected `family` and/or `size`)"
+                    )));
+                }
+                // Parse + validate the complete table BEFORE locking.
+                let family = match spec.raw_get::<Value>("family")? {
+                    Value::Nil => None,
+                    Value::String(s) => {
+                        let f = s.to_str()?.to_owned();
+                        if f.is_empty() {
+                            return Err(mlua::Error::external(
+                                "pmacs.gpu.set_font: `family` must be a non-empty string",
+                            ));
+                        }
+                        Some(f)
+                    }
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "pmacs.gpu.set_font: `family` must be a string, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let size_centi_px = match spec.raw_get::<Value>("size")? {
+                    Value::Nil => None,
+                    Value::Integer(i) => Some(validate_font_size(i as f64)?),
+                    Value::Number(n) => Some(validate_font_size(n)?),
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "pmacs.gpu.set_font: `size` must be a number, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let mut pref = h.lock().expect("font pref mutex poisoned");
+                pref.family = family;
+                pref.size_centi_px = size_centi_px;
+                pref.epoch += 1;
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let h = handle.clone();
+        gpu.set(
+            "font",
+            lua.create_function(move |lua, ()| -> mlua::Result<Table> {
+                // A FRESH plain table each call — a getter, never the
+                // stored table or a mutable handle (Q#F2).
+                let t = lua.create_table()?;
+                let pref = h.lock().expect("font pref mutex poisoned");
+                if let Some(f) = &pref.family {
+                    t.set("family", f.clone())?;
+                }
+                if let Some(c) = pref.size_centi_px {
+                    t.set("size", f64::from(c) / 100.0)?;
+                }
+                Ok(t)
+            })?,
+        )?;
+    }
+    let pmacs: Table = lua.globals().get("pmacs")?;
+    pmacs.set("gpu", gpu)?;
+    Ok(handle)
+}
+
+/// Range-check the ORIGINAL value first — `5.999` must error, not
+/// round into range — then quantize to the nearest hundredth of a
+/// logical pixel (framing Q#F2, round 2 finding 5).
+fn validate_font_size(size: f64) -> mlua::Result<u32> {
+    if !size.is_finite() || !(6.0..=72.0).contains(&size) {
+        return Err(mlua::Error::external(format!(
+            "pmacs.gpu.set_font: `size` must be a finite number in [6.0, 72.0] logical px, got {size}"
+        )));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok((size * 100.0).round() as u32)
+}
+
 pub fn make_process_supervisor(lua: &Lua) -> mlua::Result<SharedProcessSupervisor> {
     let supervisor = Rc::new(RefCell::new(ProcessSupervisor::new()));
     install_process(lua, &supervisor)?;

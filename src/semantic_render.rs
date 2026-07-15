@@ -236,6 +236,21 @@ pub struct SemanticRenderState {
     /// and counters stay unthemed, so this producer resolves faces
     /// only when the peer can apply the whole face table.
     peer_knows_theme_facts: bool,
+    /// The font-pref `epoch` this producer last INSPECTED (Q#F5) —
+    /// `Option`, not a bare zero, or an all-default daemon's `0 == 0`
+    /// short-circuit would starve the first authoritative send.
+    /// Advances on computation, not emission.
+    last_font_epoch: Option<u64>,
+    /// The preference the frontend believes (Q#F5), seeded `None` so
+    /// every attachment receives exactly one authoritative
+    /// `FontFacts` — the all-default `(None, None)` included.
+    /// Bufferless: `on_buffer_snapshot_sent` never touches it.
+    last_font_facts: Option<(Option<String>, Option<u32>)>,
+    /// Whether the peer negotiated protocol >= 17 (Q#F4). Unlike the
+    /// theme case there is no pre-v17 side channel that could leak
+    /// font state, so this gate has no summary-style companion
+    /// filter.
+    peer_knows_font_facts: bool,
     /// Cached byte↔line table for the diagnostics projection, keyed
     /// by buffer revision. Building it costs an O(buffer) rope copy
     /// plus a full scan; before this cache, that ran on *every tick*
@@ -336,6 +351,7 @@ impl SemanticRenderState {
     pub fn for_peer(frontend_id: FrontendId, negotiated_protocol_version: u32) -> Self {
         let mut s = Self::new(frontend_id);
         s.peer_knows_theme_facts = negotiated_protocol_version >= 16;
+        s.peer_knows_font_facts = negotiated_protocol_version >= 17;
         s
     }
 
@@ -370,6 +386,13 @@ impl SemanticRenderState {
             last_face_epoch: None,
             last_theme_faces: None,
             peer_knows_theme_facts: true,
+            // Q#F5: both seeded None — the first frame after viewport
+            // declaration always ships an authoritative FontFacts
+            // (the all-default preference included), and the epoch
+            // gate cannot short-circuit an epoch-0 daemon before it.
+            last_font_epoch: None,
+            last_font_facts: None,
+            peer_knows_font_facts: true,
             diag_line_cache: HashMap::new(),
         }
     }
@@ -621,6 +644,7 @@ impl SemanticRenderState {
         out.extend(self.completion_popup_msg(state, vp.buffer_id));
         // --- ThemeFacts (UI faces; themes arc Q#TH7, protocol v16) ---
         out.extend(self.theme_facts_msg(state));
+        out.extend(self.font_facts_msg(state));
         out
     }
 
@@ -1151,6 +1175,41 @@ impl SemanticRenderState {
             return None;
         }
         Some(InstanceMessage::ThemeFacts { faces })
+    }
+
+    /// The `FontFacts` message for this frame, or `None` when the
+    /// preference is unchanged (Arc 4 stage 2, Q#F5, protocol v17).
+    /// The `theme_facts_msg` discipline exactly: an `Option`-seeded
+    /// epoch gate keeps unchanged ticks to one `u64` compare, the
+    /// `Option`-seeded payload baseline decides emission, both
+    /// advance on computation, and every attachment ships exactly
+    /// one authoritative preference — the all-default `(None, None)`
+    /// included — on its first frame after viewport declaration.
+    /// Bufferless: `on_buffer_snapshot_sent` never touches these
+    /// baselines.
+    fn font_facts_msg(&mut self, state: &EditorState) -> Option<InstanceMessage> {
+        // Never produced for a peer below v17 (the daemon write-loop
+        // gate remains as the belt-and-braces filter).
+        if !self.peer_knows_font_facts {
+            return None;
+        }
+        let (facts, epoch) = {
+            let pref = state.font_pref.lock().expect("font pref mutex poisoned");
+            if self.last_font_epoch == Some(pref.epoch) {
+                return None;
+            }
+            ((pref.family.clone(), pref.size_centi_px), pref.epoch)
+        };
+        self.last_font_epoch = Some(epoch);
+        let unchanged = self.last_font_facts.as_ref() == Some(&facts);
+        self.last_font_facts = Some(facts.clone());
+        if unchanged {
+            return None;
+        }
+        Some(InstanceMessage::FontFacts {
+            family: facts.0,
+            size_centi_px: facts.1,
+        })
     }
 
     /// Project the [`Decoration`] set intersecting the declared
@@ -2407,6 +2466,105 @@ mod tests {
         );
     }
 
+    /// Pull the `FontFacts` payload out of a frame, if any.
+    fn font_facts_of(msgs: &[InstanceMessage]) -> Option<(Option<String>, Option<u32>)> {
+        msgs.iter().find_map(|m| match m {
+            InstanceMessage::FontFacts {
+                family,
+                size_centi_px,
+            } => Some((family.clone(), *size_centi_px)),
+            _ => None,
+        })
+    }
+
+    /// Simulate a committed `pmacs.gpu.set_font`: what the Lua setter
+    /// does after its parse/validate/quantize (write + epoch bump).
+    fn set_font(state: &EditorState, family: Option<&str>, size_centi_px: Option<u32>) {
+        let mut pref = state.font_pref.lock().expect("font pref");
+        pref.family = family.map(str::to_owned);
+        pref.size_centi_px = size_centi_px;
+        pref.epoch += 1;
+    }
+
+    #[test]
+    fn font_facts_authoritative_default_then_silent_then_set_emits() {
+        // Q#F5 / acceptance 2-3: the first frame ships the
+        // authoritative all-default preference — the Option epoch
+        // gate must not short-circuit at 0 == 0 — then unchanged
+        // ticks say nothing; a set_font re-ships; an identical
+        // re-set advances the inspected epoch without emitting.
+        let state = empty_state();
+        let mut s = local();
+        let buffer_id = active_buffer(&state);
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+
+        let first = s.render_frame(&state);
+        assert_eq!(
+            font_facts_of(&first),
+            Some((None, None)),
+            "an all-default daemon still ships one authoritative preference"
+        );
+        assert_eq!(
+            font_facts_of(&s.render_frame(&state)),
+            None,
+            "unchanged ticks emit nothing"
+        );
+
+        set_font(&state, Some("Iosevka"), Some(1800));
+        assert_eq!(
+            font_facts_of(&s.render_frame(&state)),
+            Some((Some("Iosevka".into()), Some(1800))),
+            "a live set_font re-ships on the next frame"
+        );
+        assert_eq!(
+            font_facts_of(&s.render_frame(&state)),
+            None,
+            "and suppresses again once shipped"
+        );
+
+        // Identical re-set: epoch bumps, payload unchanged — nothing
+        // emits, but the inspected epoch advances (cache advances on
+        // computation, or every later tick would rebuild).
+        set_font(&state, Some("Iosevka"), Some(1800));
+        let bumped = state.font_pref.lock().expect("font pref").epoch;
+        assert_eq!(
+            font_facts_of(&s.render_frame(&state)),
+            None,
+            "identical re-set is suppressed"
+        );
+        assert_eq!(
+            s.last_font_epoch,
+            Some(bumped),
+            "the inspected epoch advanced despite the suppressed send"
+        );
+    }
+
+    #[test]
+    fn font_facts_never_produced_for_a_v16_peer() {
+        // Q#F4 / acceptance 5 (producer half; the daemon skip arm is
+        // the belt-and-braces filter).
+        let state = empty_state();
+        set_font(&state, None, Some(2000));
+        let buffer_id = active_buffer(&state);
+        let mut v16 = SemanticRenderState::for_peer(FrontendId::LOCAL, 16);
+        v16.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let frame = v16.render_frame(&state);
+        assert_eq!(font_facts_of(&frame), None, "v16 peers get no FontFacts");
+        assert!(
+            frame
+                .iter()
+                .any(|m| matches!(m, InstanceMessage::ThemeFacts { .. })),
+            "the same peer still receives v16 facts"
+        );
+        let mut v17 = SemanticRenderState::for_peer(FrontendId::LOCAL, 17);
+        v17.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        assert_eq!(
+            font_facts_of(&v17.render_frame(&state)),
+            Some((None, Some(2000))),
+            "a v17 peer receives the current preference"
+        );
+    }
+
     #[test]
     fn snapshot_reset_drops_one_buffers_baselines_and_keeps_the_rest() {
         // PR #120 round 2 finding 1 — the reset contract's scope: a
@@ -2451,6 +2609,11 @@ mod tests {
         assert_eq!(
             s.last_theme_faces, facts_baseline,
             "ThemeFacts is bufferless — the face table survives snapshots"
+        );
+        assert_eq!(
+            s.last_font_facts,
+            Some((None, None)),
+            "FontFacts is bufferless too — the preference baseline survives"
         );
 
         // And the behavioral consequence: revisiting A at the SAME
@@ -2500,6 +2663,7 @@ mod tests {
                         | InstanceMessage::SearchPrompt { .. }
                         | InstanceMessage::LineNumbers { .. }
                         | InstanceMessage::ThemeFacts { .. }
+                        | InstanceMessage::FontFacts { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
@@ -2669,14 +2833,15 @@ mod tests {
         // (the frontend clears its viewport), carrying empty segments.
         // FileStyleSummary also emits on the first frame for this buffer
         // (post-M11 minimap producer, generation-keyed), as does
-        // StatusFacts (Q#S1, cached-compare) and the authoritative
-        // ThemeFacts table (Q#TH7 — empty for an unthemed daemon).
+        // StatusFacts (Q#S1, cached-compare), the authoritative
+        // ThemeFacts table (Q#TH7 — empty for an unthemed daemon), and
+        // the authoritative FontFacts preference (Q#F5 — all-default).
         let first = s.render_frame(&state);
         assert_eq!(
             first.len(),
-            5,
+            6,
             "first frame ships StyleSpans + Decorations + FileStyleSummary \
-             + StatusFacts + ThemeFacts"
+             + StatusFacts + ThemeFacts + FontFacts"
         );
         assert_semantic_only(&first);
         let (style_full, _) = style_segments(&first).expect("StyleSpans present");

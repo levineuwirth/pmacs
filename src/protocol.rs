@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_sixteen_for_theme_facts() {
+    fn protocol_version_is_seventeen_for_font_facts() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1708,8 +1708,11 @@ mod tests {
         // Arc 1a Q#C5 bumped 14→15 (`InstanceMessage::CompletionPopup`,
         // additive + daemon-gated). Themes Q#TH7 bumped 15→16
         // (`InstanceMessage::ThemeFacts`, additive + daemon-gated,
-        // appended as the final variant — see the placement pin).
-        assert_eq!(PROTOCOL_VERSION, 16);
+        // appended as the final v16 variant — see the placement pin).
+        // Themes stage 2 Q#F4 bumped 16→17 (`InstanceMessage::
+        // FontFacts`, additive + daemon-gated, appended as the final
+        // variant — see the ThemeFacts placement pin).
+        assert_eq!(PROTOCOL_VERSION, 17);
     }
 
     #[test]
@@ -1783,18 +1786,18 @@ mod tests {
         // (`TripleDown`), v8 (`StatusFacts`), v9 + v10 (`SearchPrompt` +
         // regex/invalid), v11 (the context menu), v12 (the GUI
         // minibuffer), v13 (`LineNumbers`), v14 (`LineNumberMode`), v15
-        // (`CompletionPopup`), v16 (`ThemeFacts`) all interoperate, so
-        // v6 through v16 talk.
-        for accepted in 6..=16 {
+        // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`)
+        // all interoperate, so v6 through v17 talk.
+        for accepted in 6..=17 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 17, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 18, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v16 binary"
+                "v{rejected} must be rejected by a v17 binary"
             );
         }
     }
@@ -1829,6 +1832,47 @@ mod tests {
             let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(msg, decoded);
         }
+    }
+
+    #[test]
+    fn font_facts_round_trips_through_postcard() {
+        // Themes stage 2 Q#F4 (v17): the global GPU font preference.
+        // Pin the all-default (authoritative-unset) and populated
+        // shapes.
+        for msg in [
+            InstanceMessage::FontFacts {
+                family: None,
+                size_centi_px: None,
+            },
+            InstanceMessage::FontFacts {
+                family: Some("Iosevka".into()),
+                size_centi_px: Some(1850),
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn theme_facts_encoding_is_unchanged_by_the_v17_build() {
+        // Q#F4 placement pin: `FontFacts` must be APPENDED after
+        // `ThemeFacts` — the final v16 variant, whose ordinal moves
+        // if anything is inserted before any v16 variant. These are
+        // the exact bytes a v16 binary produced for this value
+        // (discriminant 23 as a postcard varint, then the empty
+        // face vector); the new variant's own round-trip cannot
+        // detect a shift.
+        let msg = InstanceMessage::ThemeFacts { faces: Vec::new() };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        assert_eq!(
+            bytes,
+            [23, 0],
+            "ThemeFacts' v16 wire bytes changed — a variant was \
+             inserted before it; append new InstanceMessage variants \
+             at the end"
+        );
     }
 
     #[test]

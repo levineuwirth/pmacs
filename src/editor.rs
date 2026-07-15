@@ -69,6 +69,10 @@ pub struct EditorState {
     /// supervisor's reader threads, which means a runaway server's
     /// log-flood doesn't stall the editor.
     pub lsp_manager: crate::lsp::SharedLspManager,
+    /// The global GPU font preference (Arc 4 stage 2, Q#F3). Written
+    /// by `pmacs.gpu.set_font`; read by the `semantic_render`
+    /// producer, which relays it as `FontFacts` (protocol v17).
+    pub font_pref: crate::font_pref::FontPrefHandle,
     /// MCP manager (T M9.1). Holds one [`crate::mcp::McpClient`] per
     /// MCP server; rides on top of [`Self::process_supervisor`] for
     /// spawn / I/O / restart, sharing the supervisor with the LSP
@@ -211,6 +215,12 @@ impl EditorState {
         // state, but its search overlay resolves wash faces through
         // this handle.
         core.borrow_mut().theme = Some(syntax_registry.theme());
+        // Arc 4 stage 2 (Q#F2/Q#F3): the GPU font preference and its
+        // `pmacs.gpu` Lua surface. Installed BEFORE load_user_config
+        // below, so an init.lua `set_font` lands in the same handle
+        // the first attachment's semantic producer reads.
+        let font_pref =
+            crate::lua_bindings::make_font_pref(lua_host.lua()).expect("install pmacs.gpu");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/syntax.lua"),
@@ -465,6 +475,7 @@ impl EditorState {
             syntax_registry,
             process_supervisor,
             lsp_manager,
+            font_pref,
             mcp_manager,
             workspace,
             project_indexer,

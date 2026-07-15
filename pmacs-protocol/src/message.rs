@@ -983,17 +983,48 @@ pub enum InstanceMessage {
     /// included — with its first emission after viewport declaration;
     /// cached-compare suppressed thereafter. Daemon-gated `>= 16`.
     ///
-    /// Appended as the FINAL variant deliberately: postcard
+    /// Appended as the final v16 variant deliberately: postcard
     /// discriminants are ordinal, so inserting earlier would shift
     /// every later variant's tag and corrupt v15 peers on ungated
     /// channels. The `CompletionPopup` byte pin in `src/protocol.rs`
-    /// guards this placement.
+    /// guards this placement; the `ThemeFacts` byte pin there guards
+    /// the v17 `FontFacts` placement after it in turn.
     ThemeFacts {
         /// Every stage-1 face that resolves to a style (the Q#TH4
         /// dotted-prefix walk, resolved daemon-side — frontends do
         /// exact-name lookup, no walk), full names, sorted by name
         /// for deterministic comparison.
         faces: Vec<ThemeFace>,
+    },
+    /// Themes arc stage 2 (Q#F4, protocol v17). The daemon-relayed
+    /// GPU font preference. One global instance ⇒ bufferless (the
+    /// [`Self::MinibufferPrompt`] shape). Complete replacement each
+    /// send; `None` means the frontend's built-in default for that
+    /// axis. The daemon relays a PREFERENCE — it never learns
+    /// metrics, advances, or what resolves; the frontend owns
+    /// resolution and every pixel consequence (the no-pixels
+    /// invariant). Every attachment receives exactly one
+    /// authoritative preference — the all-default `(None, None)`
+    /// included — with its first emission after viewport
+    /// declaration; cached-compare suppressed thereafter.
+    /// Daemon-gated `>= 17`.
+    ///
+    /// Appended as the FINAL variant deliberately: postcard
+    /// discriminants are ordinal, so inserting earlier would shift
+    /// every later variant's tag and corrupt v16 peers on ungated
+    /// channels. The `ThemeFacts` byte pin in `src/protocol.rs`
+    /// guards this placement.
+    FontFacts {
+        /// Font family name to resolve frontend-locally, or `None`
+        /// for the frontend's default family query.
+        family: Option<String>,
+        /// Font size in HUNDREDTHS of a logical pixel (1600 =
+        /// today's 16.0) — an integer because this enum derives
+        /// `Eq`, which `f32` cannot satisfy, and because cosmic-text
+        /// metrics are logical pixels, not typographic points.
+        /// Valid range 600..=7200; frontends validate and fail
+        /// closed (deserialized protocol input is untrusted).
+        size_centi_px: Option<u32>,
     },
 }
 
@@ -1373,7 +1404,14 @@ pub enum ResourceBody {
 /// The variant is appended after `CompletionPopup` — the final v15
 /// variant — because postcard discriminants are ordinal and an
 /// earlier insertion would shift existing tags under v15 peers.
-pub const PROTOCOL_VERSION: u32 = 16;
+///
+/// GPU font preference (Q#F4): bumped 16 → 17 for
+/// [`InstanceMessage::FontFacts`] — a new additive variant relaying
+/// the global font preference to GPU-capable peers. Daemon-gated
+/// `< 17`; a v16 peer negotiates v16 and simply keeps its built-in
+/// font. Appended after `ThemeFacts` — the final v16 variant —
+/// same ordinal-discriminant reasoning as every additive bump.
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1436,7 +1474,10 @@ pub const PROTOCOL_VERSION: u32 = 16;
 ///
 /// Q#TH7: extended to `[6, ..., 16]`. `InstanceMessage::ThemeFacts`
 /// is additive and daemon-gated per session, so the ladder resumes.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+///
+/// Q#F4: extended to `[6, ..., 17]`. `InstanceMessage::FontFacts`
+/// is additive and daemon-gated per session, so the ladder resumes.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

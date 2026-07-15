@@ -5836,6 +5836,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::LineNumbers { .. } => "LineNumbers",
         InstanceMessage::CompletionPopup { .. } => "CompletionPopup",
         InstanceMessage::ThemeFacts { .. } => "ThemeFacts",
+        InstanceMessage::FontFacts { .. } => "FontFacts",
     }
 }
 
