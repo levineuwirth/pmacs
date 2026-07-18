@@ -8,7 +8,9 @@ installed, so these tiny fixture faces are generated and committed:
   PmacsTestMonoTwo-Regular.ttf      "Pmacs Test Mono Two"     monospaced,
                                     advance 720/1000 (JetBrains Mono is
                                     600/1000, so the measured advance
-                                    ratio is exactly 1.2)
+                                    ratio is exactly 1.2), with true
+                                    "01" and "fi" ligatures whose advances
+                                    preserve two cells
   PmacsTestProportional-Regular.ttf "Pmacs Test Proportional" varying
                                     advances, not monospaced
   PmacsTestFamily-Regular.ttf       "Pmacs Test Family"       monospaced
@@ -28,6 +30,7 @@ Run from this directory:  python3 generate.py
 Requires fontTools (any recent version).
 """
 
+from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
@@ -35,6 +38,9 @@ UPM = 1000
 CHARS = " 0123456789abcdefghijklmnopqrstuvwxyz"
 ASCENT = 800
 DESCENT = -200
+# Fixed at the first committed fixture generation so re-running this
+# script changes only intentional font data, not the head timestamps.
+FIXTURE_TIMESTAMP = 3866975598
 
 
 def glyph_name(char):
@@ -58,8 +64,18 @@ def empty_glyph():
     return TTGlyphPen(None).glyph()
 
 
-def build(path, family, style, weight, bold, fixed_pitch, advance_for):
+def build(
+    path,
+    family,
+    style,
+    weight,
+    bold,
+    fixed_pitch,
+    advance_for,
+    ligatures=(),
+):
     order = [".notdef"] + [glyph_name(c) for c in CHARS]
+    order += [name for name, _ in ligatures]
     fb = FontBuilder(UPM, isTTF=True)
     fb.setupGlyphOrder(order)
     fb.setupCharacterMap({ord(c): glyph_name(c) for c in CHARS})
@@ -70,6 +86,10 @@ def build(path, family, style, weight, bold, fixed_pitch, advance_for):
         name = glyph_name(c)
         glyphs[name] = empty_glyph() if c == " " else rect_glyph(adv)
         metrics[name] = (adv, 0 if c == " " else 60)
+    for name, components in ligatures:
+        advance = sum(advance_for(c) for c in components)
+        glyphs[name] = rect_glyph(advance)
+        metrics[name] = (advance, 60)
     fb.setupGlyf(glyphs)
     fb.setupHorizontalMetrics(metrics)
     fb.setupHorizontalHeader(ascent=ASCENT, descent=DESCENT)
@@ -87,6 +107,19 @@ def build(path, family, style, weight, bold, fixed_pitch, advance_for):
     fb.setupPost(isFixedPitch=1 if fixed_pitch else 0)
     if bold:
         fb.font["head"].macStyle = 0x01
+    if ligatures:
+        substitutions = "\n".join(
+            "sub %s by %s;"
+            % (" ".join(glyph_name(c) for c in components), name)
+            for name, components in ligatures
+        )
+        addOpenTypeFeaturesFromString(
+            fb.font,
+            "feature liga {\n%s\n} liga;" % substitutions,
+        )
+    fb.font["head"].created = FIXTURE_TIMESTAMP
+    fb.font["head"].modified = FIXTURE_TIMESTAMP
+    fb.font.recalcTimestamp = False
     fb.save(path)
     print("wrote", path)
 
@@ -108,6 +141,10 @@ build(
     bold=False,
     fixed_pitch=True,
     advance_for=lambda c: 720,
+    ligatures=(
+        ("zero_one.liga", "01"),
+        ("f_i.liga", "fi"),
+    ),
 )
 build(
     "PmacsTestProportional-Regular.ttf",

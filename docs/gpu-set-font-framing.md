@@ -1,7 +1,30 @@
 # GPU font preference — framing (Arc 4 stage 2, `pmacs.gpu.set_font`)
 
-**Revision 4 — 2026-07-15. Status: implemented on branch
+**Revision 5 — 2026-07-18. Status: implemented on branch
 `gpu-set-font` (protocol v17); awaiting PR review.**
+
+Revision 5 (PR review, findings 1–5): source bytes that fall inside a
+shaped cluster are normalized to an explicit representable cosmic-text
+cursor before geometry or following; combining-mark and real-ligature
+fixtures pin that they can no longer fall back to the source-line start
+(finding 1). Code-buffer reflow is now one transaction for every
+dynamic horizontal input, not only font application: line-number mode,
+gutter digit-count transitions, minimap appearance/disappearance, full
+text replacement, incremental CRDT edits, and byte-identical
+`BufferSnapshot` summary clearing all synchronize the shaping width
+before the final reshape and re-follow only a previously painted caret
+(finding 2). The monospace advance probe divides the total shaped-run
+width by the probe's cell count, rather than sampling its first glyph;
+the embedded alternate monospace carries a real multi-cell ligature so
+the old result is observably wrong (finding 3). All four fixture fonts
+now enter the explicit database before `FontSystem` construction and
+their retained IDs are checked against cosmic-text's actual
+`is_monospace` classification, removing the post-construction test
+approximation (finding 4). Acceptance 10, 11, 17, and 18 now exercise
+their complete claims at both size bounds, including rendered band
+containment, selection/hit row identity, wrapped completion anchors,
+gutter continuation alignment, reverse caret-free reflow, and both
+directions of caret-free resize (finding 5).
 
 Revision 4 (framing round 3, findings 1–5): caret preservation is now
 VISUAL-RUN aware rather than source-line-only. The code buffer keeps a
@@ -443,6 +466,14 @@ On a `FontFacts` arrival the GPU replaces its font state wholesale:
   one final size/shape pass; no frame is submitted between them.
   `resize()` goes through the same dimension helper for ALL seven
   buffers, closing the existing four-of-seven resize skew.
+  The same helper and settle transaction also own every runtime input
+  that changes the code clip without changing the font: line-number
+  mode, a gutter digit-count transition after full or incremental text,
+  minimap presence after `FileStyleSummary`, and summary removal during
+  even a byte-identical `BufferSnapshot`. Each path captures the old
+  painted-caret predicate before changing geometry, synchronizes the
+  final buffer dimensions before shaping, and follows only when that
+  predicate was true.
 - **Rows stay rows**: menu, minibuffer-candidate, and completion buffers
   explicitly use `Wrap::None`. Their protocols, row-window calculations,
   selection quads, and hit tests all assign exactly one row-height to one
@@ -453,9 +484,13 @@ On a `FontFacts` arrival the GPU replaces its font state wholesale:
   may clip within their single derived band.
 - **Font-dependent advances without default drift**: the internal
   measure pass shapes a fixed ASCII probe in the resolved family at the
-  relevant metrics, independent of document contents. It records the
-  selected/default advance ratio. The empty-code gutter fallback and
-  `menu_char_w` use today's exact constants multiplied by that ratio;
+  relevant metrics, independent of document contents. It sums every
+  shaped run's width and divides by the probe's logical cell count;
+  sampling one glyph is invalid because even a monospaced face may
+  shape several probe characters into one multi-cell ligature. It
+  records the selected/default advance ratio. The empty-code gutter
+  fallback and `menu_char_w` use today's exact constants multiplied by
+  that ratio;
   the sanitized per-process default is therefore ratio 1 and remains
   byte-identical, while an alternate monospace family cannot leave stale
   JetBrains-only gutter/menu geometry. The measured NORMAL-face advance
@@ -505,7 +540,11 @@ On a `FontFacts` arrival the GPU replaces its font state wholesale:
   bytes when inline adornments are present — using the earliest
   projected boundary for an adornment anchor (the current left-gravity
   caret placement), then uses cosmic-text's `layout_cursor`/affinity so
-  a wrap boundary selects the same run as `shape_until_cursor`. A shared
+  a wrap boundary selects the same run as `shape_until_cursor`. A source
+  byte inside a combining or ligature cluster is snapped explicitly to
+  the cluster's logical end with `Before` affinity; it is never handed
+  to cosmic-text as an unrepresentable interior cursor, whose fallback
+  is the source-line start. A shared
   `ensure_caret_painted` helper first performs the existing coarse
   source-line `scroll_to_cursor` and rebuild when the byte is outside the
   shaped slice, then maps the byte to a cosmic-text `Cursor` and calls
@@ -665,7 +704,9 @@ route tests in pmacs-gpu's headless suite (`PMACS_REQUIRE_GPU=1`).
    resets the normalized code scroll with the other BUFFER-scoped view
    state so B cannot inherit A's visual residual. The new buffer shapes
    under the same preference without waiting for a redundant global
-   fact.
+   fact. A byte-identical snapshot also removes the prior buffer's
+   minimap reservation before reshaping, so identical text cannot retain
+   the old buffer's narrower code clip.
 5. **Version gate**: a v16 peer session never receives `FontFacts`
    (producer `for_peer` + daemon skip arm, the real-daemon probe
    shape from stage 1).
@@ -740,8 +781,10 @@ route tests in pmacs-gpu's headless suite (`PMACS_REQUIRE_GPU=1`).
     preservation); a same-family BOLD proportional collision is removed
     during database assembly, styled
     code still selects only monospaced faces, and the bundled ID is
-    present in cosmic-text's monospace-ID set. Direct resolver units
-    cover normal, bold, italic, and bold-italic queries. Both
+    present in cosmic-text's monospace-ID set. All four fixture IDs are
+    retained from the pre-`FontSystem` assembly and checked against
+    cosmic-text's real `is_monospace` classification. Direct resolver
+    units cover normal, bold, italic, and bold-italic queries. Both
     rejected-request routes and the collision-safe default reset render
     byte-identically to never-set.
 13. **GPU shaping-cache invalidation**: with composed band strings
@@ -770,7 +813,9 @@ route tests in pmacs-gpu's headless suite (`PMACS_REQUIRE_GPU=1`).
     for gutter; no buffer retains construction-time or prior-size
     dimensions. A family whose advance changes the gutter width forces
     the final code-width reflow, and the resulting wrap/hit map and
-    rendered clip use that same width.
+    rendered clip use that same width. Line-number enable/disable,
+    gutter digit transitions, and minimap appearance/removal exercise
+    the same dynamic reflow transaction independently of a font change.
 18. **Popup row invariance at both size bounds**: long menu,
     minibuffer-candidate, and completion labels remain one layout run per
     wire row at 600 and 7200 (`Wrap::None`). Their selection quads and
