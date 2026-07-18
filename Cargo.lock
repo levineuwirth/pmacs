@@ -2579,6 +2579,7 @@ dependencies = [
  "loro",
  "pmacs-protocol",
  "pollster",
+ "sys-locale",
  "wgpu",
  "winit",
 ]

@@ -50,6 +50,10 @@ env_logger = "0.11.10"
 # ends up with two cosmic-text versions resolving to the same name.
 glyphon = "0.11.0"
 loro = "=1.12.0"
+# Locale for cosmic-text FontSystem construction (Q#F6 sanitized db
+# assembly) -- the same crate cosmic-text uses internally, so the
+# resolved locale matches what FontSystem::new() would have picked.
+sys-locale = "0.3"
 # Session 1's wire-types crate. Pulled in now so the dep graph is
 # settled from session 2 forward; protocol consumption itself lands
 # in session 3.

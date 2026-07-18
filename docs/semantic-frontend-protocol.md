@@ -126,8 +126,11 @@ invalidating its per-buffer emission baselines whenever it writes a
 snapshot, so the frontend's post-snapshot viewport declaration
 receives authoritative re-sends even when nothing changed
 daemon-side (the unchanged-generation A → B → A revisit). Bufferless
-facts (`ThemeFacts`, the minibuffer prompt) and per-frontend state
-(the gutter mode) survive snapshots on both sides, and the
+facts (`ThemeFacts`, `FontFacts`, the minibuffer prompt) and
+per-frontend state (the gutter mode) survive snapshots on both sides
+(frontend-locally the normalized code scroll — a caret-follow view
+residual — is buffer-scoped and resets, while the resolved font and
+derived metrics survive), and the
 instance's stale-store diagnostic-count freeze is store knowledge,
 not session state — the re-sent `StatusFacts` after a snapshot
 carries the frozen counts, never zeros, including for a session
@@ -244,6 +247,28 @@ ResourceOffer {
 /// postcard discriminants are ordinal.
 ThemeFacts {
     faces: Vec<ThemeFace>, // { name: String, style: Style }, sorted by name
+},
+
+/// The GLOBAL font preference (protocol v17, Arc 4 stage 2,
+/// docs/gpu-set-font-framing.md), written by `pmacs.gpu.set_font`.
+/// Bufferless and authoritative per attachment: every session's
+/// first frame after viewport declaration carries the current
+/// preference — the all-default `(None, None)` included, never
+/// inferred from silence — and it is epoch-gated/cached-compare
+/// suppressed thereafter, so an unchanged preference costs one
+/// small message per attachment. `BufferSnapshot` resets never
+/// touch it on either side. The daemon relays a PREFERENCE only
+/// (no pixels): the frontend resolves the family locally
+/// (monospace-gated, total fallback to its sanitized default) and
+/// owns every metric consequence; sizes travel as integer
+/// hundredths of a logical pixel (1600 = 16.0, validated to
+/// 600..=7200 on BOTH sides — the receiver fails closed on
+/// out-of-range wire values). Daemon-gated `>= 17`; appended as
+/// the FINAL variant — postcard discriminants are ordinal, and the
+/// ThemeFacts byte pin above guards this placement.
+FontFacts {
+    family: Option<String>,     // None = the frontend's default family
+    size_centi_px: Option<u32>, // None = the frontend's default size
 },
 ```
 

@@ -418,6 +418,10 @@ impl Frontend {
             // (the daemon resolves faces at paint time), so it drops
             // this silently like the other semantic families.
             | InstanceMessage::ThemeFacts { .. }
+            // Themes stage 2 Q#F4 — FontFacts is the GPU font
+            // preference; terminal fonts belong to the terminal, so
+            // the cell-grid TUI drops this silently too.
+            | InstanceMessage::FontFacts { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path
@@ -789,6 +793,28 @@ mod tests {
             }],
         })
         .expect("the grid frontend must drop ThemeFacts silently");
+    }
+
+    #[test]
+    fn font_facts_drops_silently_on_the_grid_frontend() {
+        // Themes stage 2 Q#F4 / acceptance 8: terminal fonts belong
+        // to the terminal, so a `FontFacts` reaching the cell-grid
+        // TUI — which never negotiates it — must fall into the
+        // semantic-family silent drop, not error.
+        let mut fe = Frontend {
+            out: BufWriter::new(io::stdout()),
+            size: CellSize::new(24, 80),
+            raw_mode: false,
+            alt_screen: false,
+            bracketed_paste: false,
+            mouse: false,
+            keyboard_enhancement: false,
+        };
+        fe.apply_message(&InstanceMessage::FontFacts {
+            family: Some("Iosevka".into()),
+            size_centi_px: Some(1800),
+        })
+        .expect("the grid frontend must drop FontFacts silently");
     }
 
     #[test]

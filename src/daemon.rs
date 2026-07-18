@@ -1139,6 +1139,11 @@ fn dispatcher_loop(
                 let peer_knows_theme_facts = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 16);
+                // Themes stage 2 Q#F4 — FontFacts gated at v17; a v16
+                // peer simply keeps its built-in font.
+                let peer_knows_font_facts = session_registry
+                    .session_state(*fid)
+                    .is_some_and(|s| s.negotiated_protocol_version >= 17);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1176,6 +1181,9 @@ fn dispatcher_loop(
                     }
                     if !peer_knows_theme_facts && matches!(msg, InstanceMessage::ThemeFacts { .. })
                     {
+                        continue;
+                    }
+                    if !peer_knows_font_facts && matches!(msg, InstanceMessage::FontFacts { .. }) {
                         continue;
                     }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1

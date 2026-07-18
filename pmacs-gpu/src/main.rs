@@ -28,9 +28,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use glyphon::cosmic_text::{Affinity, Cursor, Scroll, Wrap};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, fontdb,
 };
 use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
@@ -52,6 +53,241 @@ use crate::attach::{AttachClient, AttachEvent};
 
 /// Bundled font (SIL Open Font License 1.1 — see `fonts/OFL.txt`).
 const JETBRAINS_MONO: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
+
+#[cfg(test)]
+const TEST_MONO_TWO: &[u8] = include_bytes!("../fonts/test/PmacsTestMonoTwo-Regular.ttf");
+#[cfg(test)]
+const TEST_PROPORTIONAL: &[u8] = include_bytes!("../fonts/test/PmacsTestProportional-Regular.ttf");
+#[cfg(test)]
+const TEST_FAMILY_REGULAR: &[u8] = include_bytes!("../fonts/test/PmacsTestFamily-Regular.ttf");
+#[cfg(test)]
+const TEST_FAMILY_BOLD: &[u8] = include_bytes!("../fonts/test/PmacsTestFamily-Bold.ttf");
+#[cfg(test)]
+const TEST_FONT_SOURCES: &[&[u8]] = &[
+    TEST_MONO_TWO,
+    TEST_PROPORTIONAL,
+    TEST_FAMILY_REGULAR,
+    TEST_FAMILY_BOLD,
+];
+
+/// The default font family — the query `family: None` (and every
+/// rejected requested family) resolves through (framing Q#F6). The
+/// bundle guarantees the query is never empty; a monospaced
+/// system-installed face of the same family may legitimately win by
+/// insertion order (availability, not face identity).
+const DEFAULT_FONT_FAMILY: &str = "JetBrains Mono";
+
+/// Derived per-preference metrics (framing Q#F6). One knob — the
+/// preference size — scales every surface by `size / 16.0`; the
+/// unset default (`scale == 1.0`, `advance_ratio == 1.0`)
+/// reproduces today's `BASE_*` constants bit-for-bit, so never-set
+/// renders byte-identically. `advance_ratio` is the measured
+/// selected/default NORMAL-face advance ratio (the fixed-ASCII
+/// probe): the empty-document gutter fallback and the menu hit
+/// width follow the resolved family without JetBrains-only drift.
+#[derive(Clone, Copy)]
+struct FontMetrics {
+    scale: f32,
+    advance_ratio: f32,
+}
+
+impl Default for FontMetrics {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            advance_ratio: 1.0,
+        }
+    }
+}
+
+impl FontMetrics {
+    fn code_font_size(self) -> f32 {
+        BASE_CODE_FONT_SIZE * self.scale
+    }
+    fn code_line_height(self) -> f32 {
+        BASE_CODE_LINE_HEIGHT * self.scale
+    }
+    fn gutter_advance_fallback(self) -> f32 {
+        BASE_GUTTER_MONO_ADVANCE_FALLBACK * self.scale * self.advance_ratio
+    }
+    fn status_band_height(self) -> f32 {
+        BASE_STATUS_BAND_HEIGHT * self.scale
+    }
+    fn status_font_size(self) -> f32 {
+        BASE_STATUS_FONT_SIZE * self.scale
+    }
+    fn status_line_height(self) -> f32 {
+        BASE_STATUS_LINE_HEIGHT * self.scale
+    }
+    fn menu_row_height(self) -> f32 {
+        BASE_MENU_ROW_HEIGHT * self.scale
+    }
+    fn menu_font_size(self) -> f32 {
+        BASE_MENU_FONT_SIZE * self.scale
+    }
+    fn menu_line_height(self) -> f32 {
+        BASE_MENU_LINE_HEIGHT * self.scale
+    }
+    fn menu_char_w(self) -> f32 {
+        BASE_MENU_CHAR_W * self.scale * self.advance_ratio
+    }
+    fn mb_drop_row_height(self) -> f32 {
+        BASE_MB_DROP_ROW_HEIGHT * self.scale
+    }
+    fn mb_drop_font_size(self) -> f32 {
+        BASE_MB_DROP_FONT_SIZE * self.scale
+    }
+    fn mb_drop_line_height(self) -> f32 {
+        BASE_MB_DROP_LINE_HEIGHT * self.scale
+    }
+}
+
+/// What sanitized assembly retained (framing Q#F6): the default
+/// family name and the bundled face's ID, both asserted present and
+/// monospaced at assembly time. The rejected-family fallback and the
+/// `family: None` default both resolve through
+/// `Family::Name(&default_family)` against the sanitized db, so the
+/// fallback is total and cannot recurse into a proportional
+/// collision.
+struct FontDefaults {
+    default_family: String,
+    bundled_id: fontdb::ID,
+    /// IDs loaded through the optional assembly input. Production
+    /// passes no extras; headless tests retain fixture IDs so they can
+    /// assert cosmic-text classified the final database, not a
+    /// post-construction mutation.
+    #[cfg(test)]
+    extra_ids: Vec<fontdb::ID>,
+}
+
+/// Remove every NON-monospace face that advertises `default_family`
+/// (framing Q#F6, round 3 finding 4): fontdb returns the first
+/// surviving equally-good candidate in insertion order, so a
+/// closer-weight proportional system face could otherwise win
+/// bold/italic queries even when the normal query selected a valid
+/// monospaced face. Parameterized by family + bundled ID so tests
+/// run the PRODUCTION path with an unreserved fixture family. The
+/// bundled face is monospaced and survives by construction.
+fn sanitize_font_database(db: &mut fontdb::Database, default_family: &str, bundled_id: fontdb::ID) {
+    let doomed: Vec<fontdb::ID> = db
+        .faces()
+        .filter(|f| {
+            !f.monospaced
+                && f.id != bundled_id
+                && f.families.iter().any(|(name, _)| name == default_family)
+        })
+        .map(|f| f.id)
+        .collect();
+    for id in doomed {
+        db.remove_face(id);
+    }
+}
+
+/// Sanitized, current-order font database + `FontSystem` (framing
+/// Q#F6): system fonts FIRST (what `FontSystem::new()` does today),
+/// the bundled bytes second — retaining the bundled `fontdb::ID` —
+/// then the collision filter, then cosmic-text's current
+/// generic-family defaults, and only then the `FontSystem`
+/// construction, so its internal monospace-ID set includes every
+/// surviving monospaced face (the bundle included). The locale is
+/// resolved exactly as cosmic-text does (`sys_locale`, `"en-US"`
+/// fallback).
+fn build_font_system(extra_sources: &[&'static [u8]]) -> (FontSystem, FontDefaults) {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    let bundled_ids =
+        db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(JETBRAINS_MONO)));
+    let bundled_id = *bundled_ids
+        .first()
+        .expect("bundled JetBrains Mono contains one face");
+    let extra_ids: Vec<fontdb::ID> = extra_sources
+        .iter()
+        .flat_map(|bytes| db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(*bytes))))
+        .collect();
+    sanitize_font_database(&mut db, DEFAULT_FONT_FAMILY, bundled_id);
+    db.set_monospace_family("Noto Sans Mono");
+    db.set_sans_serif_family("Open Sans");
+    db.set_serif_family("DejaVu Serif");
+    let locale = sys_locale::get_locale().unwrap_or_else(|| String::from("en-US"));
+    let font_system = FontSystem::new_with_locale_and_db(locale, db);
+    #[cfg(not(test))]
+    drop(extra_ids);
+    let defaults = FontDefaults {
+        default_family: DEFAULT_FONT_FAMILY.to_owned(),
+        bundled_id,
+        #[cfg(test)]
+        extra_ids,
+    };
+    // Assembly-time assertions (framing Q#F6): the default query and
+    // the bundled face are present and monospaced — the total
+    // fallback depends on both.
+    debug_assert!(
+        font_system
+            .db()
+            .face(defaults.bundled_id)
+            .is_some_and(|f| f.monospaced),
+        "the bundled face must survive sanitization and be monospaced"
+    );
+    debug_assert!(
+        font_system.is_monospace(defaults.bundled_id),
+        "cosmic-text must register the bundled face as monospace"
+    );
+    debug_assert!(
+        query_normal_face(font_system.db(), &defaults.default_family)
+            .and_then(|id| font_system.db().face(id))
+            .is_some_and(|f| f.monospaced),
+        "the default family query must resolve to a monospaced face"
+    );
+    (font_system, defaults)
+}
+
+/// The normal-style query for `family` — the same `fontdb::Query`
+/// implied by the base `Attrs` installed on all seven buffers
+/// (normal weight, normal style, normal stretch).
+fn query_normal_face(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> {
+    db.query(&fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        weight: fontdb::Weight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    })
+}
+
+/// The fixed ASCII advance probe (framing Q#F6). The measurement uses
+/// its total shaped width divided by this logical cell count; it does
+/// not assume one glyph per digit because a valid monospace face may
+/// substitute multi-cell digit ligatures.
+const ADVANCE_PROBE: &str = "0123456789";
+
+/// Wire-validation bounds for `FontFacts::size_centi_px` — 6.0..=72.0
+/// logical px in integer hundredths (framing Q#F6, fail closed): 0
+/// would panic `Buffer::set_metrics`, and the GPU re-checks on
+/// arrival because this is deserialized protocol input — the
+/// daemon-side Lua range check is a UX courtesy, not a trust
+/// boundary.
+const FONT_SIZE_CENTI_PX_RANGE: std::ops::RangeInclusive<u32> = 600..=7200;
+
+/// Measure `family`'s normal-face cell advance at `metrics` by
+/// shaping [`ADVANCE_PROBE`] in a scratch buffer — independent of
+/// document contents, so the measurement is deterministic and the
+/// NORMAL face is authoritative even when the first code glyph is
+/// bold/italic. Total run width divided by logical cells survives
+/// ligature substitution; `None` when the family shapes no width.
+fn probe_mono_advance(font_system: &mut FontSystem, family: &str, metrics: Metrics) -> Option<f32> {
+    let mut probe = Buffer::new(font_system, metrics);
+    probe.set_size(font_system, None, None);
+    probe.set_text(
+        font_system,
+        ADVANCE_PROBE,
+        &Attrs::new().family(Family::Name(family)),
+        Shaping::Advanced,
+        None,
+    );
+    probe.shape_until_scroll(font_system, false);
+    let total_width: f32 = probe.layout_runs().map(|run| run.line_w).sum();
+    let cells = ADVANCE_PROBE.chars().count() as f32;
+    (total_width > 0.0 && cells > 0.0).then_some(total_width / cells)
+}
 
 /// Initial window size in logical pixels.
 const INITIAL_WIDTH: u32 = 800;
@@ -87,16 +323,16 @@ const MINIMAP_H_PAD: f32 = 3.0;
 const MINIMAP_CODE_COLS: f32 = 100.0;
 const MINIMAP_MIN_STROKE_WIDTH: f32 = 1.5;
 const MINIMAP_MAX_LINE_STROKE_HEIGHT: f32 = 2.0;
-const CODE_LINE_HEIGHT: f32 = 22.0;
+const BASE_CODE_LINE_HEIGHT: f32 = 22.0;
 /// Font size of the code buffer (and the line-number gutter, so their
 /// line heights match and rows align).
-const CODE_FONT_SIZE: f32 = 16.0;
+const BASE_CODE_FONT_SIZE: f32 = 16.0;
 /// Gap in px between the line-number gutter digits and the code
 /// (UX gutter arc, GPU side of sub-arc 1 — mirrors the TUI gutter).
 const GUTTER_GAP_PX: f32 = 10.0;
 /// Fallback monospace advance in px when no shaped glyph is available to
 /// measure (0.6 em at the 16px code font).
-const GUTTER_MONO_ADVANCE_FALLBACK: f32 = 9.6;
+const BASE_GUTTER_MONO_ADVANCE_FALLBACK: f32 = 9.6;
 /// Diagnostic gutter sign (UX gutter sub-arc 2): a thin severity-colored
 /// bar hugging the gutter's left edge, left of the line numbers — the GPU
 /// analogue of the TUI's leading-column sign glyph. `X` is its left inset,
@@ -126,20 +362,20 @@ const JUMP_STYLE_HOLD: std::time::Duration = std::time::Duration::from_millis(25
 /// Status band (Q#S2): one-line strip reserved at the surface
 /// bottom — buffer name + modified star on the left, diagnostics /
 /// cursor / scroll readout on the right.
-const STATUS_BAND_HEIGHT: f32 = 26.0;
+const BASE_STATUS_BAND_HEIGHT: f32 = 26.0;
 const STATUS_BAND_BG: [f32; 4] = [0.105, 0.105, 0.145, 1.0];
 const STATUS_TEXT_PAD: f32 = 10.0;
-const STATUS_FONT_SIZE: f32 = 13.0;
-const STATUS_LINE_HEIGHT: f32 = 18.0;
+const BASE_STATUS_FONT_SIZE: f32 = 13.0;
+const BASE_STATUS_LINE_HEIGHT: f32 = 18.0;
 // Context menu popup (Q#CM1). One row per item/separator; width tracks
 // the widest label (estimated from a fixed per-char advance, which the
 // code font's monospacing makes good enough for hit-testing + the bg
 // quad to agree).
-const MENU_ROW_HEIGHT: f32 = 22.0;
-const MENU_FONT_SIZE: f32 = 14.0;
-const MENU_LINE_HEIGHT: f32 = 22.0;
+const BASE_MENU_ROW_HEIGHT: f32 = 22.0;
+const BASE_MENU_FONT_SIZE: f32 = 14.0;
+const BASE_MENU_LINE_HEIGHT: f32 = 22.0;
 const MENU_PAD_X: f32 = 12.0;
-const MENU_CHAR_W: f32 = 8.4;
+const BASE_MENU_CHAR_W: f32 = 8.4;
 const MENU_MIN_WIDTH: f32 = 140.0;
 const MENU_MAX_WIDTH: f32 = 380.0;
 const MENU_BG: [f32; 4] = [0.16, 0.16, 0.20, 0.98];
@@ -150,9 +386,9 @@ const MENU_SEPARATOR_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 // above the bottom band, best match at the top; reuses the menu popup's
 // colors. Width tracks the widest candidate (measured from the shaped
 // buffer).
-const MB_DROP_ROW_HEIGHT: f32 = 20.0;
-const MB_DROP_FONT_SIZE: f32 = 13.0;
-const MB_DROP_LINE_HEIGHT: f32 = 20.0;
+const BASE_MB_DROP_ROW_HEIGHT: f32 = 20.0;
+const BASE_MB_DROP_FONT_SIZE: f32 = 13.0;
+const BASE_MB_DROP_LINE_HEIGHT: f32 = 20.0;
 const MB_DROP_PAD_X: f32 = 10.0;
 const MB_DROP_MIN_WIDTH: f32 = 160.0;
 const MB_DROP_MAX_WIDTH: f32 = 480.0;
@@ -165,11 +401,16 @@ const MB_DROP_MAX_WIDTH: f32 = 480.0;
 /// show: no candidates, or the window is too short for even one row. When
 /// the whole list fits this is `(0, n)`, identical to the pre-clamp
 /// behavior — the common path is unchanged.
-fn mb_dropdown_window(n: usize, selected: usize, band_top: f32) -> Option<(usize, usize)> {
+fn mb_dropdown_window(
+    n: usize,
+    selected: usize,
+    band_top: f32,
+    fm: FontMetrics,
+) -> Option<(usize, usize)> {
     if n == 0 {
         return None;
     }
-    let max_rows = (band_top / MB_DROP_ROW_HEIGHT).floor() as usize;
+    let max_rows = (band_top / fm.mb_drop_row_height()).floor() as usize;
     if max_rows == 0 {
         return None;
     }
@@ -385,6 +626,34 @@ struct State {
     surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     font_system: FontSystem,
+    /// What sanitized assembly retained (Q#F6): the default family
+    /// and the bundled face ID — the total-fallback anchors for
+    /// every font resolution.
+    font_defaults: FontDefaults,
+    /// Derived metrics for the current preference (Q#F6); default
+    /// reproduces the BASE_* constants exactly.
+    fm: FontMetrics,
+    /// The family every shaped attrs run selects (Q#F6): the
+    /// sanitized default at assembly; replaced only by a
+    /// four-style-monospace-validated resolution in
+    /// `apply_font_facts` — rejected requests fall back HERE, so
+    /// the accessor is total.
+    resolved_family: String,
+    /// The resolved family's measured normal-face advance at the
+    /// current code metrics (the [`ADVANCE_PROBE`] result, Q#F6).
+    /// Authoritative for gutter geometry once a `FontFacts` has been
+    /// applied; `None` until then, falling back to today's
+    /// first-shaped-glyph sampling.
+    measured_mono_advance: Option<f32>,
+    /// The retained normalized code-buffer scroll (framing Q#F6):
+    /// slice-local `line == 0` always holds, this is the `vertical`
+    /// pixel residual within the top source line's visual runs, and
+    /// `horizontal` stays 0 (glyphon 0.11 never applies it). Nonzero
+    /// only after caret-following crossed into a wrapped run;
+    /// explicit wheel/minimap jumps clear it, `BufferSnapshot`
+    /// resets it (buffer-scoped view state), and every full reshape
+    /// reapplies it instead of installing `Scroll::default`.
+    code_scroll_residual: f32,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -1159,7 +1428,7 @@ impl ApplicationHandler<AppEvent> for App {
                 // Q#M7 — arm/disarm edge auto-scroll from the drag's
                 // vertical position; `about_to_wait` runs the ticks.
                 state.edge_scroll_dir =
-                    edge_scroll_direction(position.y as f32, state.config.height);
+                    edge_scroll_direction(position.y as f32, state.config.height, state.fm);
                 // Drag coalescing (predicted finding #4): pixel-rate
                 // motion only ships when the hit byte changes.
                 let Some(byte) = state.hit_test_source_byte(position.x, position.y) else {
@@ -1296,7 +1565,7 @@ impl ApplicationHandler<AppEvent> for App {
                         (-y * WHEEL_LINES_PER_TICK).round() as i64
                     }
                     winit::event::MouseScrollDelta::PixelDelta(p) => {
-                        (-(p.y as f32) / CODE_LINE_HEIGHT).round() as i64
+                        (-(p.y as f32) / state.fm.code_line_height()).round() as i64
                     }
                 };
                 if lines == 0 {
@@ -1781,6 +2050,7 @@ impl State {
             queue,
             config,
             initial_text,
+            &[],
         )
     }
 
@@ -1822,6 +2092,7 @@ impl State {
             queue,
             config,
             initial_text,
+            TEST_FONT_SOURCES,
         ))
     }
 
@@ -1838,12 +2109,19 @@ impl State {
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
         initial_text: &str,
+        extra_font_sources: &[&'static [u8]],
     ) -> Self {
         // Pipelines, atlas, and any offscreen texture must all share the
         // render-target format; `config.format` is the single source.
         let format = config.format;
-        let mut font_system = FontSystem::new();
-        font_system.db_mut().load_font_data(JETBRAINS_MONO.to_vec());
+        // Q#F6: construction always starts at the default metrics;
+        // a preference arriving later re-metrics via apply_font_facts.
+        let fm = FontMetrics::default();
+        // Q#F6: sanitized current-order assembly — system fonts, the
+        // bundled face (ID retained), the same-family collision
+        // filter, generic defaults, THEN FontSystem construction so
+        // its monospace-ID set sees the final database.
+        let (mut font_system, font_defaults) = build_font_system(extra_font_sources);
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let mut viewport = Viewport::new(&device, &cache);
@@ -1876,7 +2154,10 @@ impl State {
         // than one line); larger only fits "hello, pmacs"-shaped
         // strings. Picked metrics that look reasonable for code at
         // 800px wide.
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 22.0));
+        let mut buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(fm.code_font_size(), fm.code_line_height()),
+        );
         buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
@@ -1884,79 +2165,85 @@ impl State {
         );
         let mut status_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(STATUS_FONT_SIZE, STATUS_LINE_HEIGHT),
+            Metrics::new(fm.status_font_size(), fm.status_line_height()),
         );
         status_buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
-            Some(STATUS_BAND_HEIGHT),
+            Some(fm.status_band_height()),
         );
         let mut status_left_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(STATUS_FONT_SIZE, STATUS_LINE_HEIGHT),
+            Metrics::new(fm.status_font_size(), fm.status_line_height()),
         );
         status_left_buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
-            Some(STATUS_BAND_HEIGHT),
+            Some(fm.status_band_height()),
         );
         let mut menu_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(MENU_FONT_SIZE, MENU_LINE_HEIGHT),
+            Metrics::new(fm.menu_font_size(), fm.menu_line_height()),
         );
         menu_buffer.set_size(
             &mut font_system,
             Some(MENU_MAX_WIDTH),
             Some(config.height as f32),
         );
+        // Rows stay rows (framing Q#F6): the three row-oriented popup
+        // buffers never wrap — their protocols, row windows, selection
+        // quads, and hit tests all assign exactly one row height per
+        // source line, and a label wrapping after a font change would
+        // paint on a second visual row that hit-tests as the following
+        // item. The pixel bounds keep owning horizontal clipping.
+        menu_buffer.set_wrap(&mut font_system, Wrap::None);
         let mut mb_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(MB_DROP_FONT_SIZE, MB_DROP_LINE_HEIGHT),
+            Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height()),
         );
         mb_buffer.set_size(
             &mut font_system,
             Some(MB_DROP_MAX_WIDTH),
             Some(config.height as f32),
         );
+        mb_buffer.set_wrap(&mut font_system, Wrap::None);
         // Completion dropdown buffer (Arc 1a): the minibuffer
         // dropdown's metrics, its own layer.
         let mut completion_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(MB_DROP_FONT_SIZE, MB_DROP_LINE_HEIGHT),
+            Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height()),
         );
         completion_buffer.set_size(
             &mut font_system,
             Some(MB_DROP_MAX_WIDTH),
             Some(config.height as f32),
         );
+        completion_buffer.set_wrap(&mut font_system, Wrap::None);
         // Line-number gutter buffer (UX gutter arc): same font size + line
         // height as the code buffer so its rows align one-for-one.
         let mut gutter_buffer = Buffer::new(
             &mut font_system,
-            Metrics::new(CODE_FONT_SIZE, CODE_LINE_HEIGHT),
+            Metrics::new(fm.code_font_size(), fm.code_line_height()),
         );
         gutter_buffer.set_size(
             &mut font_system,
             Some(config.width as f32),
             Some(config.height as f32),
         );
-        buffer.set_text(
-            &mut font_system,
-            initial_text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut font_system, false);
         let (current_line_starts, current_line_char_starts) = line_offset_tables(initial_text);
 
-        Self {
+        let mut state = Self {
             window,
             device,
             queue,
             surface,
             config,
             font_system,
+            font_defaults,
+            fm: FontMetrics::default(),
+            resolved_family: DEFAULT_FONT_FAMILY.to_owned(),
+            measured_mono_advance: None,
+            code_scroll_residual: 0.0,
             swash_cache,
             viewport,
             atlas,
@@ -2030,7 +2317,19 @@ impl State {
             faces: HashMap::new(),
             gutter_buffer,
             gutter_text_renderer,
-        }
+        };
+        // Real drawable dimensions from construction (framing Q#F6):
+        // wrapping and `shape_until_cursor` must use the same clip the
+        // painter uses, and a v16 daemon never sends the FontFacts
+        // that would sync them later.
+        state.sync_buffer_dimensions();
+        // Shape the initial text through the shared chunk path so the
+        // `buffer.lines` ↔ `line_chunk_cache` invariant holds from
+        // construction — the caret/anchor projection (framing Q#F6)
+        // inverts the per-line chunk cache, and a directly-set buffer
+        // would leave it empty.
+        state.reshape();
+        state
     }
 
     fn set_frontend_id(&mut self, frontend_id: FrontendId) {
@@ -2221,13 +2520,12 @@ impl State {
         // `CursorByte` confirms — an optimistic edit on the bottom
         // visible line that wraps (or a Backspace pulling the caret
         // above the top) moves it outside the slice, and waiting a
-        // round trip to scroll reads as a hitch.
-        let viewport = if self.scroll_to_cursor() {
-            self.rebuild_lines_reusing_scroll();
-            self.viewport_send_if_changed(predicted.buffer_id)
-        } else {
-            None
-        };
+        // round trip to scroll reads as a hitch. Visual-run aware
+        // (framing Q#F6): the confirming identical `CursorByte` has
+        // `moved == false`, so deferring wrapped-run repair here
+        // would leave a newly wrapped caret off-screen indefinitely.
+        self.ensure_caret_painted();
+        let viewport = self.viewport_send_if_changed(predicted.buffer_id);
         CrdtOpSend {
             buffer_id: predicted.buffer_id,
             op: CrdtOp { peer_id, bytes },
@@ -2243,6 +2541,7 @@ impl State {
         &mut self,
         delta_batches: &[Vec<loro::TextDelta>],
     ) -> Result<Vec<TextProjectionEdit>, &'static str> {
+        let caret_was_painted = self.caret_painted_in_code_clip();
         let line_count_before = self.current_line_starts.len();
         let edits = apply_loro_text_delta_batches(
             &mut self.current_text,
@@ -2254,6 +2553,10 @@ impl State {
             return Ok(edits);
         }
         self.translate_cached_anchors(&edits);
+        // A newline edit can cross a gutter digit boundary (9 -> 10,
+        // 99 -> 100). Synchronize the painter-derived code width
+        // before any reshape so cosmic-text wraps at the final clip.
+        let geometry_changed = self.sync_buffer_dimensions();
         // Q#R1 — the keystroke case (one edit, no line-structure
         // change) re-shapes only the affected BufferLine; everything
         // else falls back to the full slice reshape.
@@ -2262,8 +2565,11 @@ impl State {
             && !self.current_text
                 [edits[0].start as usize..(edits[0].start + edits[0].inserted_len) as usize]
                 .contains('\n');
-        if !(single_line_edit && self.try_reshape_line(edits[0])) {
+        if geometry_changed || !(single_line_edit && self.try_reshape_line(edits[0])) {
             self.reshape();
+        }
+        if geometry_changed && caret_was_painted {
+            self.ensure_caret_painted();
         }
         Ok(edits)
     }
@@ -2339,12 +2645,17 @@ impl State {
         if self.current_text == text {
             return false;
         }
+        let caret_was_painted = self.caret_painted_in_code_clip();
         self.current_text.clear();
         self.current_text.push_str(text);
         let (line_starts, line_char_starts) = line_offset_tables(text);
         self.current_line_starts = line_starts;
         self.current_line_char_starts = line_char_starts;
+        let geometry_changed = self.sync_buffer_dimensions();
         self.reshape();
+        if geometry_changed && caret_was_painted {
+            self.ensure_caret_painted();
+        }
         true
     }
 
@@ -2488,9 +2799,17 @@ impl State {
                 self.unconfirmed_edits.clear();
                 // New buffer ⇒ back to the top, and force a viewport
                 // re-declaration for the new buffer's scoped range.
+                // The caret-follow residual is buffer-scoped view
+                // state and resets with it; the global font
+                // preference/metrics survive (framing Q#F6).
                 self.scroll_top = 0;
+                self.code_scroll_residual = 0.0;
                 self.last_viewport_sent = None;
                 if !self.set_text(&text) {
+                    // Even byte-identical A -> B snapshots can clear a
+                    // prior minimap, so the new buffer's shaping clip
+                    // must still be synchronized before rebuilding.
+                    self.sync_buffer_dimensions();
                     self.reshape();
                 }
                 self.viewport_send_if_changed(buffer_id)
@@ -2678,10 +2997,7 @@ impl State {
                 buffer_id,
                 generation,
                 lines,
-            } => {
-                self.apply_file_style_summary(buffer_id, generation, lines);
-                None
-            }
+            } => self.apply_file_style_summary(buffer_id, generation, lines),
             // Q#S1 (protocol v8; `message` since v15) — the
             // wire-authoritative half of the status band: name,
             // modified, whole-file diag counts, and the transient
@@ -2710,8 +3026,9 @@ impl State {
             // repaint on change.
             InstanceMessage::LineNumbers { mode, .. } => {
                 if self.line_numbers != mode {
+                    let caret_was_painted = self.caret_painted_in_code_clip();
                     self.line_numbers = mode;
-                    self.request_redraw();
+                    return self.reflow_dynamic_code_geometry(caret_was_painted);
                 }
                 None
             }
@@ -2851,10 +3168,13 @@ impl State {
                 // jump → Viewport → frame + re-announced CursorByte →
                 // snap, in a loop. Scrolling away from a cursor that
                 // isn't moving is the user's prerogative.
-                if moved && self.scroll_to_cursor() {
-                    // Pure scroll: retained lines keep their shape
-                    // caches; only newly exposed lines shape.
-                    self.rebuild_lines_reusing_scroll();
+                //
+                // The follow is visual-run aware (framing Q#F6): the
+                // shared helper closes the old source-line-only hole
+                // where a caret on a wrapped continuation run below
+                // the band never scrolled into view.
+                if moved {
+                    self.ensure_caret_painted();
                     if let Some(vp) = self.viewport_send_if_changed(buffer_id) {
                         return Some(vp);
                     }
@@ -2942,6 +3262,20 @@ impl State {
                 self.request_redraw();
                 None
             }
+            // Arc 4 stage 2 (framing Q#F6/Q#F7) — the global font
+            // preference. Authoritative per attachment: `(None, None)`
+            // is a real reset to the sanitized defaults, never
+            // inferred from silence. The rebuild may change the
+            // visible slice (new wrapping/metrics), so re-declare the
+            // viewport from the final normalized origin.
+            InstanceMessage::FontFacts {
+                family,
+                size_centi_px,
+            } => {
+                self.apply_font_facts(family.as_deref(), size_centi_px);
+                self.current_buffer_id
+                    .and_then(|bid| self.viewport_send_if_changed(bid))
+            }
             _ => None,
         }
     }
@@ -3017,7 +3351,7 @@ impl State {
         let cursor_line = line_starts
             .partition_point(|&s| s <= cursor)
             .saturating_sub(1);
-        let visible = estimated_visible_lines(self.config.height).max(1);
+        let visible = estimated_visible_lines(self.config.height, self.fm).max(1);
         let old = self.scroll_top;
         if cursor_line < self.scroll_top {
             self.scroll_top = cursor_line;
@@ -3027,16 +3361,55 @@ impl State {
         self.scroll_top != old
     }
 
-    /// Monospace glyph advance in px, read from the currently-shaped code
-    /// buffer (every glyph shares it in a monospace font), with a fallback
-    /// when the buffer has no glyphs yet. Used to size the line-number
-    /// gutter (UX gutter arc).
+    /// Bring the own caret's VISUAL run into the drawable code window
+    /// (framing Q#F6) — the shared follow helper for the `CursorByte`
+    /// arm, the optimistic edit completion, and the font/resize
+    /// transactions. The coarse source-line [`Self::scroll_to_cursor`]
+    /// runs first (the byte may be outside the shaped slice), then
+    /// cosmic-text's `Buffer::shape_until_cursor` follows wrapped
+    /// layout runs vertically. Its `Scroll.horizontal` result is
+    /// discarded — glyphon 0.11 never applies horizontal scroll when
+    /// placing glyphs, so retaining it would make state claim a
+    /// scroll the painter never displays. Ends by re-normalizing the
+    /// scroll; callers declare the viewport only after that final
+    /// source origin is stable.
+    fn ensure_caret_painted(&mut self) {
+        let Some(own) = self.own_cursor else {
+            return;
+        };
+        if self.current_buffer_id != Some(own.buffer_id) {
+            return;
+        }
+        if self.scroll_to_cursor() {
+            // Pure scroll: retained lines keep their shape caches;
+            // only newly exposed lines shape.
+            self.rebuild_lines_reusing_scroll();
+        }
+        let byte = own.byte.min(self.current_text.len() as u64);
+        if let Some(cursor) = self.code_byte_to_layout_cursor(byte) {
+            self.buffer
+                .shape_until_cursor(&mut self.font_system, cursor, false);
+        }
+        self.normalize_code_scroll();
+        self.request_redraw();
+    }
+
+    /// Monospace glyph advance in px, used to size the line-number
+    /// gutter (UX gutter arc). Once a `FontFacts` has been applied the
+    /// measured NORMAL-face probe advance is authoritative (framing
+    /// Q#F6) — different monospaced faces need not share an advance,
+    /// so sampling an arbitrary (possibly bold/italic) code glyph
+    /// could skew the gutter. Before any probe: today's behavior —
+    /// the first shaped glyph, else the ratio-scaled constant.
     fn mono_advance(&self) -> f32 {
+        if let Some(advance) = self.measured_mono_advance {
+            return advance;
+        }
         self.buffer
             .layout_runs()
             .flat_map(|run| run.glyphs.iter())
             .next()
-            .map_or(GUTTER_MONO_ADVANCE_FALLBACK, |g| g.w)
+            .map_or(self.fm.gutter_advance_fallback(), |g| g.w)
     }
 
     /// Width in px the line-number gutter reserves on the left, or 0 when
@@ -3084,9 +3457,13 @@ impl State {
     }
 
     /// Reshape the gutter buffer to the right-aligned line numbers for the
-    /// currently-shaped code lines (UX gutter arc). One number per code
-    /// line starting at `shaped_top`, so the two buffers align row-for-row
-    /// at the same `top` and line height. No-op when the gutter is off.
+    /// currently-shaped code lines (UX gutter arc). The projection mirrors
+    /// the code layout's VISUAL runs (framing Q#F6): each source line's
+    /// number rides its first run and wrapped continuation runs get blank
+    /// gutter rows, then the code buffer's normalized vertical scroll is
+    /// applied verbatim — both buffers share the line height, so rows stay
+    /// aligned when wrapping or a caret-follow residual is active. No-op
+    /// when the gutter is off.
     fn refresh_gutter_buffer(&mut self) {
         use std::fmt::Write as _;
         if !self.line_numbers.is_on() {
@@ -3106,14 +3483,27 @@ impl State {
             }
             let num = mode.number_for(first + i, cursor_line).unwrap_or(0);
             let _ = write!(text, "{num:>digits$}");
+            // Continuation blanks: one empty row per wrapped run past
+            // the first. Unlaid lines (below the drawable window) count
+            // as one row; their gutter rows are equally invisible.
+            let runs = self
+                .buffer
+                .line_layout(&mut self.font_system, i)
+                .map_or(1, |layout| layout.len().max(1));
+            for _ in 1..runs {
+                text.push('\n');
+            }
         }
+        let family = self.resolved_family.clone();
         self.gutter_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
+        self.gutter_buffer
+            .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
         self.gutter_buffer
             .shape_until_scroll(&mut self.font_system, false);
     }
@@ -3175,9 +3565,17 @@ impl State {
             .scroll_top
             .saturating_add_signed(delta as isize)
             .min(max_top);
-        if new_top == self.scroll_top {
+        // An explicit jump owns the viewport wholesale: it also clears
+        // the caret-follow residual (framing Q#F6), so a retained
+        // sub-line offset can't pin the top row. A wheel-up at the top
+        // clamp edge still scrolls when its only remaining motion IS
+        // the residual; a wheel-down pinned at the bottom clamp keeps
+        // the residual (nothing below to reveal).
+        let residual_scrolls_up = delta < 0 && self.code_scroll_residual != 0.0;
+        if new_top == self.scroll_top && !residual_scrolls_up {
             return None;
         }
+        self.code_scroll_residual = 0.0;
         self.scroll_top = new_top;
         self.rebuild_lines_reusing_scroll();
         self.current_buffer_id
@@ -3188,20 +3586,27 @@ impl State {
     /// (Q#M6). Presses here are consumed locally and never become
     /// `Pointer` events.
     fn in_minimap_band(&self, x: f64, y: f64) -> bool {
-        minimap_band_contains(x as f32, y as f32, self.config.width, self.config.height)
+        minimap_band_contains(
+            x as f32,
+            y as f32,
+            self.config.width,
+            self.config.height,
+            self.fm,
+        )
     }
 
     /// Popup width in pixels (Q#CM1) — widest label estimated from a
     /// fixed per-char advance, padded, clamped. Used by both hit-testing
     /// and the bg quad so they line up.
-    fn menu_width_px(menu: &MenuLocal) -> f32 {
+    fn menu_width_px(menu: &MenuLocal, fm: FontMetrics) -> f32 {
         let max_chars = menu
             .rows
             .iter()
             .map(|r| r.label.chars().count())
             .max()
             .unwrap_or(0);
-        (max_chars as f32 * MENU_CHAR_W + 2.0 * MENU_PAD_X).clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH)
+        (max_chars as f32 * fm.menu_char_w() + 2.0 * MENU_PAD_X)
+            .clamp(MENU_MIN_WIDTH, MENU_MAX_WIDTH)
     }
 
     /// Hit-test a pixel against the open popup (Q#CM1). Returns
@@ -3210,13 +3615,13 @@ impl State {
     fn menu_hit(&self, x: f64, y: f64) -> Option<(u32, bool)> {
         let menu = self.menu.as_ref()?;
         let (ax, ay) = menu.anchor_px;
-        let w = f64::from(Self::menu_width_px(menu));
-        let h = menu.rows.len() as f64 * f64::from(MENU_ROW_HEIGHT);
+        let w = f64::from(Self::menu_width_px(menu, self.fm));
+        let h = menu.rows.len() as f64 * f64::from(self.fm.menu_row_height());
         if x < ax || x >= ax + w || y < ay || y >= ay + h {
             return None;
         }
-        let row =
-            (((y - ay) / f64::from(MENU_ROW_HEIGHT)).floor() as usize).min(menu.rows.len() - 1);
+        let row = (((y - ay) / f64::from(self.fm.menu_row_height())).floor() as usize)
+            .min(menu.rows.len() - 1);
         Some((row as u32, !menu.rows[row].separator))
     }
 
@@ -3225,9 +3630,14 @@ impl State {
     /// interpolation. Reuses [`Self::scroll_by_lines`] for the
     /// clamp / rebuild / viewport-send plumbing.
     fn minimap_jump_to(&mut self, y: f64) -> Option<ViewportSend> {
-        let target =
-            minimap_y_to_line(y as f32, self.config.height, self.current_line_starts.len())?;
-        let centered = target.saturating_sub(estimated_visible_lines(self.config.height) / 2);
+        let target = minimap_y_to_line(
+            y as f32,
+            self.config.height,
+            self.current_line_starts.len(),
+            self.fm,
+        )?;
+        let centered =
+            target.saturating_sub(estimated_visible_lines(self.config.height, self.fm) / 2);
         let delta = i64::try_from(centered).unwrap_or(i64::MAX)
             - i64::try_from(self.scroll_top).unwrap_or(i64::MAX);
         self.scroll_by_lines(delta)
@@ -3277,10 +3687,14 @@ impl State {
             return false;
         }
         let chunks = self.chunks_for_line(line_start, content_end);
-        self.buffer.lines[shaped_idx] = line_from_chunks(&chunks);
+        self.buffer.lines[shaped_idx] = line_from_chunks(&chunks, &self.resolved_family);
         self.line_chunk_cache[shaped_idx] = chunks;
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.view_range = (vstart, vend);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        // The edited line's wrap count can shrink under a retained
+        // residual, advancing the slice-local scroll (framing Q#F6);
+        // its rebuilds re-derive `view_range` themselves.
+        self.normalize_code_scroll();
         self.hit_map_dirty = true;
         self.request_redraw();
         true
@@ -3363,7 +3777,7 @@ impl State {
                 cache.push(chunks);
             } else {
                 let chunks = self.chunks_for_line(ls, ce);
-                lines.push(line_from_chunks(&chunks));
+                lines.push(line_from_chunks(&chunks, &self.resolved_family));
                 cache.push(chunks);
             }
         }
@@ -3371,8 +3785,9 @@ impl State {
         self.line_chunk_cache = cache;
         self.shaped_top = new_top;
         self.buffer
-            .set_scroll(glyphon::cosmic_text::Scroll::default());
+            .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
         self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.normalize_code_scroll();
         self.hit_map_dirty = true;
         if any_reused || self.line_chunk_cache.is_empty() {
             self.styled_redraw_deadline = None;
@@ -3407,13 +3822,16 @@ impl State {
         for (i, &(ls, ce)) in ranges.iter().enumerate() {
             let chunks = self.chunks_for_line(ls, ce);
             if chunks != self.line_chunk_cache[i] {
-                self.buffer.lines[i] = line_from_chunks(&chunks);
+                self.buffer.lines[i] = line_from_chunks(&chunks, &self.resolved_family);
                 self.line_chunk_cache[i] = chunks;
                 any = true;
             }
         }
         if any {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
+            // Adornment chunks can change a line's wrap count under a
+            // retained residual (framing Q#F6).
+            self.normalize_code_scroll();
             self.hit_map_dirty = true;
         }
         // Fresh styling reached the slice — release any held
@@ -3604,7 +4022,7 @@ impl State {
         }
         readout.push_str(&format_scroll_indicator(
             self.scroll_top,
-            estimated_visible_lines(self.config.height),
+            estimated_visible_lines(self.config.height, self.fm),
             self.current_line_starts.len(),
             cursor_row,
         ));
@@ -3678,7 +4096,8 @@ impl State {
             .map(|(t, _)| t.as_str())
             .collect::<Vec<_>>()
             .join("  ");
-        let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+        let family = self.resolved_family.clone();
+        let default_attrs = Attrs::new().family(Family::Name(&family));
         if composed != self.status_text {
             let mut rich: Vec<(&str, Attrs)> = Vec::new();
             for (i, (t, c)) in spans.iter().enumerate() {
@@ -3726,9 +4145,9 @@ impl State {
             .map_or(STATUS_BAND_BG, |(quad, _)| quad);
         let rect = MinimapRect {
             x: 0.0,
-            y: text_area_bottom(self.config.height),
+            y: text_area_bottom(self.config.height, self.fm),
             w: self.config.width as f32,
-            h: STATUS_BAND_HEIGHT,
+            h: self.fm.status_band_height(),
             color,
         };
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
@@ -3745,10 +4164,11 @@ impl State {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
+        let family = self.resolved_family.clone();
         self.menu_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -3764,20 +4184,20 @@ impl State {
         };
         let ax = menu.anchor_px.0 as f32;
         let ay = menu.anchor_px.1 as f32;
-        let w = Self::menu_width_px(menu);
+        let w = Self::menu_width_px(menu, self.fm);
         let mut rects = vec![MinimapRect {
             x: ax,
             y: ay,
             w,
-            h: menu.rows.len() as f32 * MENU_ROW_HEIGHT,
+            h: menu.rows.len() as f32 * self.fm.menu_row_height(),
             color: MENU_BG,
         }];
         for (i, row) in menu.rows.iter().enumerate() {
-            let ry = ay + i as f32 * MENU_ROW_HEIGHT;
+            let ry = ay + i as f32 * self.fm.menu_row_height();
             if row.separator {
                 rects.push(MinimapRect {
                     x: ax + MENU_PAD_X,
-                    y: ry + MENU_ROW_HEIGHT / 2.0 - 0.5,
+                    y: ry + self.fm.menu_row_height() / 2.0 - 0.5,
                     w: w - 2.0 * MENU_PAD_X,
                     h: 1.0,
                     color: MENU_SEPARATOR_BG,
@@ -3787,7 +4207,7 @@ impl State {
                     x: ax,
                     y: ry,
                     w,
-                    h: MENU_ROW_HEIGHT,
+                    h: self.fm.menu_row_height(),
                     color: MENU_SELECTED_BG,
                 });
             }
@@ -3802,10 +4222,11 @@ impl State {
             .minibuffer
             .as_ref()
             .map_or_else(String::new, |mb| mb.candidates.join("\n"));
+        let family = self.resolved_family.clone();
         self.mb_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -3819,11 +4240,12 @@ impl State {
     /// candidate-free, or too short for a row. See [`mb_dropdown_window`].
     fn mb_visible_window(&self) -> Option<(usize, usize)> {
         let mb = self.minibuffer.as_ref()?;
-        let band_top = text_area_bottom(self.config.height);
+        let band_top = text_area_bottom(self.config.height, self.fm);
         mb_dropdown_window(
             mb.candidates.len(),
             mb.selected.map_or(0, |s| s as usize),
             band_top,
+            self.fm,
         )
     }
 
@@ -3842,8 +4264,8 @@ impl State {
             .map(|r| r.line_w)
             .fold(0.0_f32, f32::max);
         let width = (widest + 2.0 * MB_DROP_PAD_X).clamp(MB_DROP_MIN_WIDTH, MB_DROP_MAX_WIDTH);
-        let band_top = text_area_bottom(self.config.height);
-        let top_y = band_top - count as f32 * MB_DROP_ROW_HEIGHT;
+        let band_top = text_area_bottom(self.config.height, self.fm);
+        let top_y = band_top - count as f32 * self.fm.mb_drop_row_height();
         Some((STATUS_TEXT_PAD, top_y, width))
     }
 
@@ -3863,7 +4285,7 @@ impl State {
             x,
             y: top_y,
             w: width,
-            h: count as f32 * MB_DROP_ROW_HEIGHT,
+            h: count as f32 * self.fm.mb_drop_row_height(),
             color: MENU_BG,
         }];
         // Highlight the selection at its row *within the visible window*;
@@ -3874,9 +4296,9 @@ impl State {
         {
             rects.push(MinimapRect {
                 x,
-                y: top_y + (sel - first) as f32 * MB_DROP_ROW_HEIGHT,
+                y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
-                h: MB_DROP_ROW_HEIGHT,
+                h: self.fm.mb_drop_row_height(),
                 color: MENU_SELECTED_BG,
             });
         }
@@ -3900,10 +4322,11 @@ impl State {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
+        let family = self.resolved_family.clone();
         self.completion_buffer.set_text(
             &mut self.font_system,
             &text,
-            &Attrs::new().family(Family::Name("JetBrains Mono")),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -3917,41 +4340,26 @@ impl State {
     /// byte. `None` when the popup is closed or the anchor is
     /// scrolled out of the visible slice (the popup then simply
     /// doesn't draw this frame; scrolling back restores it).
-    fn completion_anchor_px(&self) -> Option<(f32, f32, f32)> {
+    fn completion_anchor_px(&mut self) -> Option<(f32, f32, f32)> {
         if !self.completion_open_for_current_buffer() {
             return None; // never paint against a foreign buffer's rope
         }
-        let comp = self.completion.as_ref()?;
+        let anchor = self.completion.as_ref()?.anchor;
         let (vstart, vend) = self.view_range;
-        if vend <= vstart {
+        if vend <= vstart || anchor < vstart || anchor > vend {
             return None;
         }
-        let anchor = comp.anchor;
-        if anchor < vstart || anchor > vend {
+        // The caret mapping, visual-run aware (framing Q#F6): the
+        // anchor's run, not its source line's first run. Off the
+        // drawable window (a wrapped run below the band, or above a
+        // caret-follow residual) counts as scrolled out.
+        let (x, top, line_height) = self.code_byte_px(anchor)?;
+        let y = TEXT_TOP + top;
+        let bottom = text_area_bottom(self.config.height, self.fm);
+        if y >= bottom || y + line_height <= TEXT_TOP {
             return None;
         }
-        let slice = &self.current_text[vstart as usize..vend as usize];
-        let line_offsets = line_byte_offsets(slice);
-        let slice_anchor = anchor - vstart;
-        let (line_lo, _) = source_line_range(slice, slice_anchor);
-        let text_left = self.text_left();
-        for run in self.buffer.layout_runs() {
-            if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
-                continue;
-            }
-            let mut x = text_left;
-            for glyph in run.glyphs {
-                if line_lo + glyph.start as u64 >= slice_anchor {
-                    x = text_left + glyph.x;
-                    break;
-                }
-                // Anchor is past this glyph; track its right edge so an
-                // anchor at line end lands after the final glyph.
-                x = text_left + glyph.x + glyph.w;
-            }
-            return Some((x, TEXT_TOP + run.line_top, run.line_height));
-        }
-        None
+        Some((self.text_left() + x, y, line_height))
     }
 
     /// Layout of the completion dropdown: `(first_row, row_count,
@@ -3961,18 +4369,19 @@ impl State {
     /// visible slice windows around the selection so it stays on
     /// screen when fewer rows fit than the wire shipped (the F-007
     /// discipline).
-    fn completion_dropdown_layout(&self) -> Option<(usize, usize, f32, f32)> {
+    fn completion_dropdown_layout(&mut self) -> Option<(usize, usize, f32, f32)> {
         let comp = self.completion.as_ref()?;
         let n = comp.rows.len();
         if n == 0 {
             return None;
         }
+        let sel = comp.selected.map_or(0, |s| s as usize);
         let (ax, line_top, line_h) = self.completion_anchor_px()?;
-        let band_top = text_area_bottom(self.config.height);
+        let band_top = text_area_bottom(self.config.height, self.fm);
         let below_px = band_top - (line_top + line_h);
         let above_px = line_top - TEXT_TOP;
-        let max_below = (below_px / MB_DROP_ROW_HEIGHT).floor() as usize;
-        let max_above = (above_px / MB_DROP_ROW_HEIGHT).floor() as usize;
+        let max_below = (below_px / self.fm.mb_drop_row_height()).floor() as usize;
+        let max_above = (above_px / self.fm.mb_drop_row_height()).floor() as usize;
         let (avail, below) = if max_below >= 1 {
             (max_below, true)
         } else {
@@ -3982,7 +4391,6 @@ impl State {
             return None;
         }
         let count = n.min(avail);
-        let sel = comp.selected.map_or(0, |s| s as usize);
         let first = if n <= count {
             0
         } else {
@@ -3991,7 +4399,7 @@ impl State {
         let top_y = if below {
             line_top + line_h
         } else {
-            line_top - count as f32 * MB_DROP_ROW_HEIGHT
+            line_top - count as f32 * self.fm.mb_drop_row_height()
         };
         Some((first, count, ax, top_y))
     }
@@ -4001,7 +4409,7 @@ impl State {
     /// column shifted back from the window's right margin.
     /// `refresh_completion_buffer` must have run so the width
     /// measurement is current.
-    fn completion_dropdown_rect(&self) -> Option<(f32, f32, f32)> {
+    fn completion_dropdown_rect(&mut self) -> Option<(f32, f32, f32)> {
         let (_first, _count, ax, top_y) = self.completion_dropdown_layout()?;
         let widest = self
             .completion_buffer
@@ -4015,8 +4423,8 @@ impl State {
 
     /// Completion dropdown background + selection-highlight quads.
     /// Empty when closed or the anchor is off-screen.
-    fn completion_dropdown_vertex_bytes(&self) -> Vec<u8> {
-        let Some(comp) = self.completion.as_ref() else {
+    fn completion_dropdown_vertex_bytes(&mut self) -> Vec<u8> {
+        let Some(selected) = self.completion.as_ref().map(|c| c.selected) else {
             return Vec::new();
         };
         let Some((first, count, _ax, _ty)) = self.completion_dropdown_layout() else {
@@ -4029,18 +4437,18 @@ impl State {
             x,
             y: top_y,
             w: width,
-            h: count as f32 * MB_DROP_ROW_HEIGHT,
+            h: count as f32 * self.fm.mb_drop_row_height(),
             color: MENU_BG,
         }];
-        if let Some(sel) = comp.selected.map(|s| s as usize)
+        if let Some(sel) = selected.map(|s| s as usize)
             && sel >= first
             && sel < first + count
         {
             rects.push(MinimapRect {
                 x,
-                y: top_y + (sel - first) as f32 * MB_DROP_ROW_HEIGHT,
+                y: top_y + (sel - first) as f32 * self.fm.mb_drop_row_height(),
                 w: width,
-                h: MB_DROP_ROW_HEIGHT,
+                h: self.fm.mb_drop_row_height(),
                 color: MENU_SELECTED_BG,
             });
         }
@@ -4098,17 +4506,18 @@ impl State {
         buffer_id: BufferId,
         generation: u64,
         lines: Vec<CellStyle>,
-    ) {
+    ) -> Option<ViewportSend> {
         if self.current_buffer_id != Some(buffer_id) {
-            return;
+            return None;
         }
         if self
             .current_summary
             .as_ref()
             .is_some_and(|summary| generation < summary.generation)
         {
-            return;
+            return None;
         }
+        let caret_was_painted = self.caret_painted_in_code_clip();
         self.current_line_shapes = minimap_line_shapes(&self.current_text);
         self.current_summary = Some(FileStyleSummaryState { generation, lines });
         // PR #120 round 1 finding 1: a newly accepted summary can
@@ -4120,7 +4529,7 @@ impl State {
         // summary accepted here is genuinely new and the invalidation
         // is precise.
         self.minimap_cache = None;
-        self.request_redraw();
+        self.reflow_dynamic_code_geometry(caret_was_painted)
     }
 
     /// `full = true` path: discard prior styling, take the segments'
@@ -4287,7 +4696,7 @@ impl State {
         let line_starts = &self.current_line_starts;
         let n = line_starts.len();
         let top = self.scroll_top.min(n.saturating_sub(1));
-        let span = estimated_visible_lines(self.config.height).max(1) + SCROLL_OVERSCAN;
+        let span = estimated_visible_lines(self.config.height, self.fm).max(1) + SCROLL_OVERSCAN;
         let vstart = line_starts[top];
         let bottom = top.saturating_add(span).min(n);
         let vend = if bottom < n {
@@ -4298,7 +4707,13 @@ impl State {
         (vstart, vend)
     }
 
-    fn reshape(&mut self) {
+    /// Rebuild the shaped slice from `scroll_top` and reapply the
+    /// retained normalized scroll (framing Q#F6) — the raw builder
+    /// shared by [`Self::reshape`] and the [`Self::normalize_code_scroll`]
+    /// fold loop. Callers that end a "final code shape" must run the
+    /// normalizer after so the slice-local `line == 0` invariant is
+    /// re-established.
+    fn rebuild_code_slice(&mut self) {
         // Session S1 — shape only the visible byte slice. Feeding the
         // whole rope to `set_rich_text` (a BufferLine per source line)
         // made large-file editing O(file) per keystroke; cosmic-text
@@ -4312,18 +4727,61 @@ impl State {
         let mut cache = Vec::with_capacity(ranges.len());
         for &(ls, ce) in &ranges {
             let chunks = self.chunks_for_line(ls, ce);
-            lines.push(line_from_chunks(&chunks));
+            lines.push(line_from_chunks(&chunks, &self.resolved_family));
             cache.push(chunks);
         }
         self.buffer.lines = lines;
         self.line_chunk_cache = cache;
         self.shaped_top = top;
         self.buffer
-            .set_scroll(glyphon::cosmic_text::Scroll::default());
+            .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         // The pointer hit map rebuilds lazily from the same caches
         // (Q#R2) — clicks are rare next to keystrokes/frames.
         self.hit_map_dirty = true;
+    }
+
+    /// Re-establish the normalized code-scroll invariant after a
+    /// final code shape (framing Q#F6): cosmic-text advances the
+    /// slice-local `scroll.line` when new wrapping/metrics push the
+    /// retained vertical residual across source lines. Fold that
+    /// delta into the whole-file `scroll_top`, retain the residual,
+    /// rebuild from the new source origin, and repeat until
+    /// `line == 0`. Every iteration strictly advances the clamped
+    /// source origin; a non-advancing or past-EOF fold clamps to the
+    /// last source line with a default scroll instead of looping.
+    /// `scroll.horizontal` is discarded throughout — glyphon 0.11
+    /// never applies it when placing glyphs, so retaining it would
+    /// claim a scroll the painter never displays.
+    fn normalize_code_scroll(&mut self) {
+        loop {
+            let scroll = self.buffer.scroll();
+            if scroll.horizontal != 0.0 {
+                self.buffer
+                    .set_scroll(Scroll::new(scroll.line, scroll.vertical, 0.0));
+            }
+            if scroll.line == 0 {
+                self.code_scroll_residual = scroll.vertical.max(0.0);
+                return;
+            }
+            let last_line = self.current_line_starts.len().saturating_sub(1);
+            let new_top = self.shaped_top + scroll.line;
+            if new_top > self.shaped_top && new_top <= last_line {
+                self.scroll_top = new_top;
+                self.code_scroll_residual = scroll.vertical;
+                self.rebuild_code_slice();
+            } else {
+                self.scroll_top = last_line;
+                self.code_scroll_residual = 0.0;
+                self.rebuild_code_slice();
+                return;
+            }
+        }
+    }
+
+    fn reshape(&mut self) {
+        self.rebuild_code_slice();
+        self.normalize_code_scroll();
         // Full restyle: release any held post-jump frame (Q#M6).
         self.styled_redraw_deadline = None;
         self.request_redraw();
@@ -4337,7 +4795,264 @@ impl State {
         }
     }
 
+    /// One dimension helper for ALL seven buffers (framing Q#F6):
+    /// metrics and the current REAL drawable dimensions change
+    /// atomically via `set_metrics_and_size` — `set_metrics` alone
+    /// deliberately preserves old dimensions, and the old `resize()`
+    /// only touched four of the seven buffers (the "numbers stop at
+    /// 10" class of skew). Code and gutter get the drawable code
+    /// clip's height (and code its clip width, so wrapping and
+    /// `shape_until_cursor` use the same clip the painter uses); the
+    /// status pair gets the derived band; the row popups get the
+    /// surface height — their protocols window rows themselves.
+    /// `set_metrics_and_size` no-ops when nothing changed, so calling
+    /// this eagerly is cheap. Returns whether the code buffer's
+    /// metrics or drawable dimensions changed and therefore require
+    /// reshaping before its next frame.
+    fn sync_buffer_dimensions(&mut self) -> bool {
+        let fm = self.fm;
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+        let code_metrics = Metrics::new(fm.code_font_size(), fm.code_line_height());
+        let code_width = (self.text_bounds_right() as f32 - self.text_left()).max(0.0);
+        let code_height = (text_area_bottom(self.config.height, fm) - TEXT_TOP).max(0.0);
+        let code_layout_changed = self.buffer.metrics() != code_metrics
+            || self.buffer.size() != (Some(code_width), Some(code_height));
+        self.buffer.set_metrics_and_size(
+            &mut self.font_system,
+            code_metrics,
+            Some(code_width),
+            Some(code_height),
+        );
+        self.gutter_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            code_metrics,
+            Some(width),
+            Some(code_height),
+        );
+        let status_metrics = Metrics::new(fm.status_font_size(), fm.status_line_height());
+        self.status_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            status_metrics,
+            Some(width),
+            Some(fm.status_band_height()),
+        );
+        self.status_left_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            status_metrics,
+            Some(width),
+            Some(fm.status_band_height()),
+        );
+        self.menu_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            Metrics::new(fm.menu_font_size(), fm.menu_line_height()),
+            Some(MENU_MAX_WIDTH),
+            Some(height),
+        );
+        let drop_metrics = Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height());
+        self.mb_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            drop_metrics,
+            Some(MB_DROP_MAX_WIDTH),
+            Some(height),
+        );
+        self.completion_buffer.set_metrics_and_size(
+            &mut self.font_system,
+            drop_metrics,
+            Some(MB_DROP_MAX_WIDTH),
+            Some(height),
+        );
+        code_layout_changed
+    }
+
+    /// Reflow after a dynamic painter-geometry input changes: gutter
+    /// mode/digit width or minimap presence. The caller captures
+    /// `caret_was_painted` against the old geometry before mutating
+    /// that input. Resize the buffer first, shape once at the final
+    /// clip, normalize the visual residual, and re-follow only a caret
+    /// that was actually painted. A viewport is returned only when
+    /// that settling changed the source range.
+    fn reflow_dynamic_code_geometry(&mut self, caret_was_painted: bool) -> Option<ViewportSend> {
+        if self.sync_buffer_dimensions() {
+            self.reshape();
+            if caret_was_painted {
+                self.ensure_caret_painted();
+            }
+        } else {
+            self.request_redraw();
+        }
+        self.current_buffer_id
+            .and_then(|buffer_id| self.viewport_send_if_changed(buffer_id))
+    }
+
+    /// Whether every face the shipped attribute set can select for
+    /// `family` is monospaced (framing Q#F6): the four queries
+    /// reachable through the base `Attrs` — normal, bold, italic, and
+    /// bold-italic, all at normal stretch. fontdb's style matching
+    /// would otherwise let a closer-weight proportional sibling win
+    /// bold/italic text even when the normal query resolved a valid
+    /// monospaced face, silently under-sizing gutter and menu
+    /// advance geometry.
+    fn family_is_monospace_everywhere(&self, family: &str) -> bool {
+        let db = self.font_system.db();
+        [
+            (fontdb::Weight::NORMAL, fontdb::Style::Normal),
+            (fontdb::Weight::BOLD, fontdb::Style::Normal),
+            (fontdb::Weight::NORMAL, fontdb::Style::Italic),
+            (fontdb::Weight::BOLD, fontdb::Style::Italic),
+        ]
+        .into_iter()
+        .all(|(weight, style)| {
+            db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                weight,
+                stretch: fontdb::Stretch::Normal,
+                style,
+            })
+            .and_then(|id| db.face(id))
+            .is_some_and(|face| face.monospaced)
+        })
+    }
+
+    /// Apply a `FontFacts` preference wholesale — framing Q#F6's one
+    /// transaction. Fail-closed wire validation first (this is
+    /// deserialized protocol input; the daemon-side Lua check is a UX
+    /// courtesy, not a trust boundary), then: record the actual
+    /// painted-caret decision, resolve the family (four-style
+    /// monospace gate, total fallback to the sanitized default),
+    /// derive metrics + the measured advance, re-metric/re-size all
+    /// seven buffers, drop the string-equality status caches, reshape
+    /// at the retained scroll, settle the drawable width, re-follow a
+    /// formerly painted caret (or only re-normalize an intentionally
+    /// caret-free viewport), and invalidate dependent layout. No
+    /// frame is submitted between the passes, and no atlas action is
+    /// needed — the per-frame `atlas.trim()` clears `glyphs_in_use`,
+    /// making old-font glyphs eligible for later LRU-style eviction
+    /// under allocation pressure.
+    fn apply_font_facts(&mut self, family: Option<&str>, size_centi_px: Option<u32>) {
+        if let Some(size) = size_centi_px
+            && !FONT_SIZE_CENTI_PX_RANGE.contains(&size)
+        {
+            // 0 would panic `Buffer::set_metrics`; huge values produce
+            // pathological metrics/allocations. Reject the WHOLE
+            // message: current state kept, nothing re-shaped.
+            eprintln!(
+                "pmacs-gpu: ignoring FontFacts with out-of-range size {size} \
+                 (allowed {}..={} hundredths of a logical px)",
+                FONT_SIZE_CENTI_PX_RANGE.start(),
+                FONT_SIZE_CENTI_PX_RANGE.end(),
+            );
+            return;
+        }
+        let caret_was_painted = self.caret_painted_in_code_clip();
+        let resolved = match family {
+            None => self.font_defaults.default_family.clone(),
+            Some(requested) if self.family_is_monospace_everywhere(requested) => {
+                requested.to_owned()
+            }
+            Some(requested) => {
+                // Deterministic frontend fallback, never round-tripped
+                // back — the daemon never learns resolution outcomes.
+                eprintln!(
+                    "pmacs-gpu: font family {requested:?} is unavailable or not \
+                     monospaced across its normal/bold/italic/bold-italic \
+                     queries; falling back to {:?}",
+                    self.font_defaults.default_family
+                );
+                self.font_defaults.default_family.clone()
+            }
+        };
+        #[allow(clippy::cast_precision_loss)] // size <= 7200 is exact in f32
+        let scale = size_centi_px.map_or(1.0, |size| size as f32 / 100.0 / BASE_CODE_FONT_SIZE);
+        // The measure pass (framing Q#F6): a fixed ASCII probe in the
+        // resolved family at the new code metrics, independent of
+        // document contents. The NORMAL-face advance becomes
+        // authoritative for gutter geometry, and the selected/default
+        // ratio scales the const-based fallbacks — the default family
+        // is ratio 1 by construction, so never-set/reset stays
+        // byte-identical.
+        let code_metrics = Metrics::new(BASE_CODE_FONT_SIZE * scale, BASE_CODE_LINE_HEIGHT * scale);
+        let selected_advance = probe_mono_advance(&mut self.font_system, &resolved, code_metrics);
+        let resolved_is_default = resolved == self.font_defaults.default_family;
+        let advance_ratio = if resolved_is_default {
+            1.0
+        } else {
+            let default_advance = probe_mono_advance(
+                &mut self.font_system,
+                &self.font_defaults.default_family,
+                code_metrics,
+            );
+            match (selected_advance, default_advance) {
+                (Some(selected), Some(default)) if selected > 0.0 && default > 0.0 => {
+                    selected / default
+                }
+                _ => 1.0,
+            }
+        };
+        self.resolved_family = resolved;
+        self.fm = FontMetrics {
+            scale,
+            advance_ratio,
+        };
+        // The default family already has an exact, pre-preference
+        // geometry path: a shaped glyph when present, otherwise the
+        // ratio-scaled baseline constant. Keep using it so resetting
+        // to `(None, None)` is bit-identical to never-set; averaging a
+        // ten-cell f32 run can differ by one ulp. Alternate families
+        // need the measured normal-face advance because their cell
+        // width is not encoded in the baseline.
+        self.measured_mono_advance = if resolved_is_default {
+            None
+        } else {
+            selected_advance
+        };
+        // Rows stay rows: idempotent no-wrap on the popup buffers
+        // (assembly set it; a set_wrap no-op costs a comparison).
+        self.menu_buffer.set_wrap(&mut self.font_system, Wrap::None);
+        self.mb_buffer.set_wrap(&mut self.font_system, Wrap::None);
+        self.completion_buffer
+            .set_wrap(&mut self.font_system, Wrap::None);
+        // Metrics + current dimensions atomically on all seven.
+        self.sync_buffer_dimensions();
+        // The two string-equality shaping gates (the popups rebuild
+        // unconditionally per frame). NUL can never equal a composed
+        // status string, so the next frame re-shapes with new attrs
+        // even when its composed text is unchanged.
+        "\0".clone_into(&mut self.status_text);
+        "\0".clone_into(&mut self.status_left_text);
+        // Attrs-bearing reshape at the retained scroll (reshape
+        // normalizes it against the FINAL family/metrics/dims).
+        self.reshape();
+        // Settle the drawable code width: `text_left` depends on the
+        // measured advance via the gutter, so re-derive and reshape
+        // once more if it moved. No frame is submitted between passes.
+        let width_before = self.buffer.size().0;
+        self.sync_buffer_dimensions();
+        if self.buffer.size().0 != width_before {
+            self.reshape();
+        }
+        if caret_was_painted {
+            self.ensure_caret_painted();
+        } else {
+            // Preserve the user's scroll — a font change must never
+            // turn an overscan-only caret into a snap-back.
+            self.normalize_code_scroll();
+        }
+        // Dependent layout: the minimap vertex cache keys on
+        // (generation, size, scroll_top) and would miss a pure
+        // metrics change; hit runs rebuild lazily (reshape dirtied
+        // them).
+        self.minimap_cache = None;
+        self.request_redraw();
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> Option<ViewportSend> {
+        // The same painted-before policy as the font transaction
+        // (framing Q#F6), decided against the OLD geometry: narrowing
+        // must not strand a stationary caret in a new wrap, and
+        // widening an intentionally caret-free viewport only
+        // normalizes its retained scroll.
+        let caret_was_painted = self.caret_painted_in_code_clip();
         self.config.width = width;
         self.config.height = height;
         if let Some(surface) = &self.surface {
@@ -4345,32 +5060,14 @@ impl State {
         }
         self.viewport
             .update(&self.queue, Resolution { width, height });
-        self.buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(height as f32),
-        );
-        self.status_buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(STATUS_BAND_HEIGHT),
-        );
-        self.status_left_buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(STATUS_BAND_HEIGHT),
-        );
-        // UX gutter: resize the line-number buffer too, else it keeps its
-        // construction-time (800x200) height and `shape_until_scroll` only
-        // shapes the ~10 lines that fit — the "numbers stop at 10" bug.
-        self.gutter_buffer.set_size(
-            &mut self.font_system,
-            Some(width as f32),
-            Some(height as f32),
-        );
+        // All seven buffers through the shared dimension helper.
+        self.sync_buffer_dimensions();
         // A taller/shorter window changes the visible line count, so the
         // slice + scoped viewport change (session S1).
         self.reshape();
+        if caret_was_painted {
+            self.ensure_caret_painted();
+        }
         self.request_redraw();
         self.current_buffer_id
             .and_then(|bid| self.viewport_send_if_changed(bid))
@@ -4627,8 +5324,8 @@ impl State {
             .fold(0.0_f32, f32::max);
         let status_left =
             (self.config.width as f32 - STATUS_TEXT_PAD - status_width).max(TEXT_LEFT);
-        let status_top =
-            text_area_bottom(self.config.height) + (STATUS_BAND_HEIGHT - STATUS_LINE_HEIGHT) / 2.0;
+        let status_top = text_area_bottom(self.config.height, self.fm)
+            + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         // UX gutter: the code's left origin (past the gutter) and the
         // main-text clip-left. Computed here as locals — calling `self.*`
         // inside the `prepare` args would conflict with its `&mut` borrows.
@@ -4666,7 +5363,7 @@ impl State {
                             // Clip at the status band (Q#S3): a final
                             // partially-visible line must not bleed
                             // into the band.
-                            bottom: text_area_bottom(self.config.height).round() as i32,
+                            bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
                         },
                         default_color: Color::rgb(230, 230, 235),
                         custom_glyphs: &[],
@@ -4678,7 +5375,7 @@ impl State {
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
-                            top: text_area_bottom(self.config.height).round() as i32,
+                            top: text_area_bottom(self.config.height, self.fm).round() as i32,
                             right: self.config.width.cast_signed(),
                             bottom: self.config.height.cast_signed(),
                         },
@@ -4695,7 +5392,7 @@ impl State {
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
-                            top: text_area_bottom(self.config.height).round() as i32,
+                            top: text_area_bottom(self.config.height, self.fm).round() as i32,
                             // Stop before the right-aligned readout.
                             right: (status_left - STATUS_TEXT_PAD).max(0.0).round() as i32,
                             bottom: self.config.height.cast_signed(),
@@ -4725,7 +5422,7 @@ impl State {
                     left: 0,
                     top: 0,
                     right: gutter_clip_left,
-                    bottom: text_area_bottom(self.config.height).round() as i32,
+                    bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
                 },
                 // Themes Q#TH5: ui.gutter's {fg} mask colors the digits.
                 default_color: gutter_color,
@@ -4762,8 +5459,9 @@ impl State {
                     bounds: TextBounds {
                         left: ax as i32,
                         top: ay as i32,
-                        right: (ax + Self::menu_width_px(menu)).round() as i32,
-                        bottom: (ay + menu.rows.len() as f32 * MENU_ROW_HEIGHT).round() as i32,
+                        right: (ax + Self::menu_width_px(menu, self.fm)).round() as i32,
+                        bottom: (ay + menu.rows.len() as f32 * self.fm.menu_row_height()).round()
+                            as i32,
                     },
                     default_color: Color::rgb(232, 232, 238),
                     custom_glyphs: &[],
@@ -4796,13 +5494,13 @@ impl State {
             .map(|((first, _count), (x, top_y, width))| TextArea {
                 buffer: &self.mb_buffer,
                 left: x + MB_DROP_PAD_X,
-                top: top_y - first as f32 * MB_DROP_ROW_HEIGHT,
+                top: top_y - first as f32 * self.fm.mb_drop_row_height(),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: x as i32,
                     top: top_y as i32,
                     right: (x + width).round() as i32,
-                    bottom: text_area_bottom(self.config.height).round() as i32,
+                    bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
                 },
                 // Themes Q#TH5 (round 3 finding 1): the candidate
                 // glyph layer is ui.minibuffer.candidate's GPU site;
@@ -4829,19 +5527,20 @@ impl State {
         // scrolls it up by `first` rows so row `first` lands at `top_y`,
         // and `bounds` clips the rows outside the visible window (the
         // minibuffer dropdown's F-007 shape).
-        let completion_areas: Vec<TextArea> = self
+        let completion_layout = self
             .completion_dropdown_layout()
-            .zip(self.completion_dropdown_rect())
+            .zip(self.completion_dropdown_rect());
+        let completion_areas: Vec<TextArea> = completion_layout
             .map(|((first, count, _ax, _ty), (x, top_y, width))| TextArea {
                 buffer: &self.completion_buffer,
                 left: x + MB_DROP_PAD_X,
-                top: top_y - first as f32 * MB_DROP_ROW_HEIGHT,
+                top: top_y - first as f32 * self.fm.mb_drop_row_height(),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: x as i32,
                     top: top_y as i32,
                     right: (x + width).round() as i32,
-                    bottom: (top_y + count as f32 * MB_DROP_ROW_HEIGHT).round() as i32,
+                    bottom: (top_y + count as f32 * self.fm.mb_drop_row_height()).round() as i32,
                 },
                 default_color: Color::rgb(232, 232, 238),
                 custom_glyphs: &[],
@@ -4984,7 +5683,7 @@ impl State {
         let Some(summary) = self.current_summary.as_ref() else {
             return Vec::new();
         };
-        let visible_lines = estimated_visible_lines(self.config.height);
+        let visible_lines = estimated_visible_lines(self.config.height, self.fm);
         let rects = minimap_rects(
             &summary.lines,
             &self.current_line_shapes,
@@ -4996,6 +5695,7 @@ impl State {
             // made the frozen thumb obvious.)
             self.scroll_top,
             visible_lines,
+            self.fm,
         );
         rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
     }
@@ -5186,9 +5886,11 @@ impl State {
     }
 
     /// Vertex bytes for the caret quad, drawn *over* the text (B1).
-    /// Empty when no own cursor is known, it's in another buffer, or it
-    /// is scrolled out of the visible slice.
-    fn caret_vertex_bytes(&self) -> Vec<u8> {
+    /// Empty when no own cursor is known, it's in another buffer, or
+    /// its visual run is scrolled outside the drawable code window
+    /// (the caret quad has no `TextBounds` clip of its own, so the
+    /// drawable intersection gates it here).
+    fn caret_vertex_bytes(&mut self) -> Vec<u8> {
         // Q#MB1 — while the minibuffer is open the caret lives in the
         // band at the input cursor, not in the buffer.
         if self.minibuffer.is_some() {
@@ -5197,13 +5899,7 @@ impl State {
                 .map(|r| rects_to_vertex_bytes(&[r], self.config.width, self.config.height))
                 .unwrap_or_default();
         }
-        let (vstart, vend) = self.view_range;
-        if vend <= vstart {
-            return Vec::new();
-        }
-        let slice = &self.current_text[vstart as usize..vend as usize];
-        let line_offsets = line_byte_offsets(slice);
-        let Some(rect) = self.caret_rect(slice, &line_offsets, vstart, vend) else {
+        let Some(rect) = self.code_caret_rect_in_clip() else {
             return Vec::new();
         };
         rects_to_vertex_bytes(&[rect], self.config.width, self.config.height)
@@ -5228,65 +5924,199 @@ impl State {
             0.0
         };
         let cursor_chars = mb.prompt.chars().count() as f32 + mb.cursor as f32;
-        let status_top =
-            text_area_bottom(self.config.height) + (STATUS_BAND_HEIGHT - STATUS_LINE_HEIGHT) / 2.0;
+        let status_top = text_area_bottom(self.config.height, self.fm)
+            + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         Some(MinimapRect {
             x: STATUS_TEXT_PAD + advance * cursor_chars,
             y: status_top,
             w: CARET_WIDTH,
-            h: STATUS_LINE_HEIGHT,
+            h: self.fm.status_line_height(),
             color: CARET_COLOR,
         })
     }
 
-    /// The caret rectangle for the own cursor, in slice coordinates: a
-    /// thin bar at the left edge of the glyph the cursor sits before (or
-    /// the right edge of the last glyph at line end). `None` when the
-    /// cursor is outside the visible slice. Byte→glyph mapping rebases
-    /// per line (QB3); the cursor is rebased onto the slice first (S1).
-    fn caret_rect(
-        &self,
-        slice: &str,
-        line_offsets: &[u64],
-        vstart: u64,
-        vend: u64,
-    ) -> Option<MinimapRect> {
+    /// Map an absolute source `byte` to `(slice line index, projected
+    /// byte offset within that shaped line)` by inverting the line's
+    /// `line_chunk_cache` projection (framing Q#F6): source bytes are
+    /// not projected bytes once inline adornments inject text. An
+    /// adornment anchor maps to the EARLIEST projected boundary — the
+    /// current left-gravity caret placement, before the injected
+    /// text. `None` when the byte's source line is outside the shaped
+    /// slice.
+    fn code_byte_to_projected(&self, byte: u64) -> Option<(usize, usize)> {
+        let line_idx = self
+            .current_line_starts
+            .partition_point(|&s| s <= byte)
+            .saturating_sub(1);
+        let slice_i = line_idx.checked_sub(self.shaped_top)?;
+        if slice_i >= self.line_chunk_cache.len() {
+            return None;
+        }
+        let rel = byte - self.current_line_starts[line_idx];
+        let mut projected = 0usize;
+        for chunk in &self.line_chunk_cache[slice_i] {
+            match chunk.source {
+                ChunkSource::Source { start } => {
+                    let len = chunk.text.len() as u64;
+                    if rel >= start && rel < start + len {
+                        return Some((slice_i, projected + (rel - start) as usize));
+                    }
+                }
+                ChunkSource::Adornment { anchor } => {
+                    // Source chunks tile the line, so reaching an
+                    // adornment chunk unmatched means the byte sits at
+                    // its anchor boundary (or past line end).
+                    if rel <= anchor {
+                        return Some((slice_i, projected));
+                    }
+                }
+            }
+            projected += chunk.text.len();
+        }
+        // Line end (the `\n` position, or EOF).
+        Some((slice_i, projected))
+    }
+
+    /// Convert an absolute source byte to a cursor cosmic-text can
+    /// represent without taking `Buffer::layout_cursor`'s line-start
+    /// fallback. Exact glyph ends keep `Before` affinity so a wrap
+    /// boundary belongs to the preceding visual run; exact starts use
+    /// `After` when no end exists there. A codepoint boundary inside a
+    /// shaped cluster (combining sequence or ligature) has no native
+    /// layout cursor, so it snaps explicitly to that cluster's logical
+    /// end. Geometry and caret-follow both consume this same cursor.
+    fn code_byte_to_layout_cursor(&mut self, byte: u64) -> Option<Cursor> {
+        let (slice_i, projected) = self.code_byte_to_projected(byte)?;
+        let layout = self.buffer.line_layout(&mut self.font_system, slice_i)?;
+        let mut exact_end = false;
+        let mut exact_start = false;
+        let mut containing_end: Option<usize> = None;
+        let mut previous_end: Option<usize> = None;
+        let mut next_start: Option<usize> = None;
+        for glyph in layout.iter().flat_map(|line| &line.glyphs) {
+            exact_end |= glyph.end == projected;
+            exact_start |= glyph.start == projected;
+            if glyph.start < projected && projected < glyph.end {
+                containing_end = Some(containing_end.map_or(glyph.end, |end| end.min(glyph.end)));
+            }
+            if glyph.end <= projected {
+                previous_end = Some(previous_end.map_or(glyph.end, |end| end.max(glyph.end)));
+            }
+            if glyph.start >= projected {
+                next_start = Some(next_start.map_or(glyph.start, |start| start.min(glyph.start)));
+            }
+        }
+
+        let (index, affinity) = if exact_end {
+            (projected, Affinity::Before)
+        } else if let Some(end) = containing_end {
+            (end, Affinity::Before)
+        } else if exact_start {
+            (projected, Affinity::After)
+        } else if let Some(end) = previous_end {
+            // Zero-width/unshaped codepoints between clusters keep
+            // left gravity rather than falling all the way to x=0.
+            (end, Affinity::Before)
+        } else if let Some(start) = next_start {
+            (start, Affinity::After)
+        } else {
+            // Empty lines have no glyph boundary; cosmic-text's only
+            // representable position is the line start.
+            (0, Affinity::Before)
+        };
+        Some(Cursor::new_with_affinity(slice_i, index, affinity))
+    }
+
+    /// The caret geometry `(x, top, line_height)` for an absolute
+    /// source `byte`, in code-area-local space (x excludes
+    /// `text_left`, top excludes `TEXT_TOP`) — visual-run aware
+    /// (framing Q#F6). Inverts the chunk projection, then uses
+    /// cosmic-text's `layout_cursor` on the same cluster-normalized,
+    /// explicit-affinity `Cursor` that `ensure_caret_painted` shapes
+    /// toward, so a wrap boundary selects the same visual run and an
+    /// interior cluster byte never triggers cosmic-text's line-start
+    /// fallback. The vertical position accumulates the laid-out run
+    /// heights above the selected run under the normalized scroll;
+    /// callers decide visibility by intersecting with the drawable
+    /// clip.
+    fn code_byte_px(&mut self, byte: u64) -> Option<(f32, f32, f32)> {
+        let cursor = self.code_byte_to_layout_cursor(byte)?;
+        let slice_i = cursor.line;
+        let lc = self.buffer.layout_cursor(&mut self.font_system, cursor)?;
+        let scroll = self.buffer.scroll();
+        if slice_i < scroll.line {
+            return None;
+        }
+        let default_line_height = self.buffer.metrics().line_height;
+        let mut top = -scroll.vertical;
+        for line_i in scroll.line..slice_i {
+            let layout = self.buffer.line_layout(&mut self.font_system, line_i)?;
+            for layout_line in layout {
+                top += layout_line.line_height_opt.unwrap_or(default_line_height);
+            }
+        }
+        let layout = self.buffer.line_layout(&mut self.font_system, slice_i)?;
+        for layout_line in layout.iter().take(lc.layout) {
+            top += layout_line.line_height_opt.unwrap_or(default_line_height);
+        }
+        let run = layout.get(lc.layout)?;
+        let line_height = run.line_height_opt.unwrap_or(default_line_height);
+        let x = if lc.glyph < run.glyphs.len() {
+            run.glyphs[lc.glyph].x
+        } else {
+            // Caret after the final glyph (line/run end).
+            run.glyphs.last().map_or(0.0, |glyph| glyph.x + glyph.w)
+        };
+        Some((x, top, line_height))
+    }
+
+    /// The caret rectangle for the own cursor: a thin bar at the left
+    /// edge of the glyph the cursor sits before (or the right edge of
+    /// the last glyph at line end), on the cursor's VISUAL run —
+    /// wrapped continuation runs included (framing Q#F6). `None` when
+    /// the cursor is outside the shaped slice. Callers gate painting
+    /// on the drawable code clip.
+    fn caret_rect(&mut self) -> Option<MinimapRect> {
         let own = self.own_cursor?;
         if self.current_buffer_id != Some(own.buffer_id) {
             return None;
         }
+        let (vstart, vend) = self.view_range;
         let cursor = own.byte;
         if cursor < vstart || cursor > vend {
             return None; // scrolled off-screen
         }
-        let slice_cursor = cursor - vstart;
-        let (line_lo, _) = source_line_range(slice, slice_cursor);
-        // UX gutter: the caret sits in the code area, past the gutter.
-        let text_left = self.text_left();
-        for run in self.buffer.layout_runs() {
-            if line_offsets.get(run.line_i).copied().unwrap_or(0) != line_lo {
-                continue;
-            }
-            let line_base = line_lo;
-            let mut x = text_left;
-            for glyph in run.glyphs {
-                if line_base + glyph.start as u64 >= slice_cursor {
-                    x = text_left + glyph.x;
-                    break;
-                }
-                // Cursor is past this glyph; track its right edge so a
-                // cursor at line end lands after the final glyph.
-                x = text_left + glyph.x + glyph.w;
-            }
-            return Some(MinimapRect {
-                x,
-                y: TEXT_TOP + run.line_top,
-                w: CARET_WIDTH,
-                h: run.line_height,
-                color: CARET_COLOR,
-            });
-        }
-        None
+        let (x, top, line_height) = self.code_byte_px(cursor)?;
+        Some(MinimapRect {
+            // UX gutter: the caret sits in the code area, past the gutter.
+            x: self.text_left() + x,
+            y: TEXT_TOP + top,
+            w: CARET_WIDTH,
+            h: line_height,
+            color: CARET_COLOR,
+        })
+    }
+
+    /// [`Self::caret_rect`] intersected with the drawable code clip —
+    /// the painter's own bounds (right of the gutter isn't needed:
+    /// the caret x can't precede `text_left`), NOT `view_range`, so
+    /// the two-line source overscan and wrapped runs clipped below
+    /// the band don't count as painted (framing Q#F6).
+    fn code_caret_rect_in_clip(&mut self) -> Option<MinimapRect> {
+        let rect = self.caret_rect()?;
+        let bottom = text_area_bottom(self.config.height, self.fm);
+        let right = self.text_bounds_right() as f32;
+        (rect.y < bottom && rect.y + rect.h > TEXT_TOP && rect.x < right).then_some(rect)
+    }
+
+    /// The pre-change follow decision (framing Q#F6): whether the own
+    /// caret is ACTUALLY painted inside the drawable code area right
+    /// now — and only while the minibuffer is closed (its caret lives
+    /// in the band). Painted-before ⇒ the font/resize transaction
+    /// re-follows with `ensure_caret_painted`; not painted ⇒ the
+    /// user's scroll is preserved and never snapped back.
+    fn caret_painted_in_code_clip(&mut self) -> bool {
+        self.minibuffer.is_none() && self.code_caret_rect_in_clip().is_some()
     }
 
     /// Push one rect per visual line whose glyphs overlap the
@@ -5446,18 +6276,18 @@ fn minimap_left(surface_width: u32) -> Option<f32> {
 
 /// Where editor content stops and the status band begins (Q#S3) —
 /// the single source for every bottom-of-text computation.
-fn text_area_bottom(surface_height: u32) -> f32 {
-    (surface_height as f32 - STATUS_BAND_HEIGHT).max(0.0)
+fn text_area_bottom(surface_height: u32, fm: FontMetrics) -> f32 {
+    (surface_height as f32 - fm.status_band_height()).max(0.0)
 }
 
 /// The minimap's drawable height: the text area minus its own
 /// top/bottom insets.
-fn minimap_height(surface_height: u32) -> f32 {
-    text_area_bottom(surface_height) - MINIMAP_TOP - MINIMAP_BOTTOM
+fn minimap_height(surface_height: u32, fm: FontMetrics) -> f32 {
+    text_area_bottom(surface_height, fm) - MINIMAP_TOP - MINIMAP_BOTTOM
 }
 
-fn estimated_visible_lines(surface_height: u32) -> usize {
-    ((text_area_bottom(surface_height) - TEXT_TOP.max(0.0)) / CODE_LINE_HEIGHT)
+fn estimated_visible_lines(surface_height: u32, fm: FontMetrics) -> usize {
+    ((text_area_bottom(surface_height, fm) - TEXT_TOP.max(0.0)) / fm.code_line_height())
         .ceil()
         .max(1.0) as usize
 }
@@ -5465,11 +6295,17 @@ fn estimated_visible_lines(surface_height: u32) -> usize {
 /// True when `(x, y)` lies inside the minimap band — the painter's
 /// geometry (`minimap_left` × the `MINIMAP_TOP..bottom` column),
 /// shared by the Q#M6 press hit-test.
-fn minimap_band_contains(x: f32, y: f32, surface_width: u32, surface_height: u32) -> bool {
+fn minimap_band_contains(
+    x: f32,
+    y: f32,
+    surface_width: u32,
+    surface_height: u32,
+    fm: FontMetrics,
+) -> bool {
     let Some(left) = minimap_left(surface_width) else {
         return false;
     };
-    let height = minimap_height(surface_height);
+    let height = minimap_height(surface_height, fm);
     height > 0.0
         && x >= left
         && x < surface_width as f32 - MINIMAP_RIGHT
@@ -5508,10 +6344,10 @@ fn format_scroll_indicator(
 /// `-1` in the band hugging the text area's top, `+1` in the band at
 /// the text area's bottom (above the status band), `None` in the
 /// interior.
-fn edge_scroll_direction(y: f32, surface_height: u32) -> Option<i64> {
+fn edge_scroll_direction(y: f32, surface_height: u32, fm: FontMetrics) -> Option<i64> {
     if y < TEXT_TOP + EDGE_SCROLL_BAND {
         Some(-1)
-    } else if y > text_area_bottom(surface_height) - EDGE_SCROLL_BAND {
+    } else if y > text_area_bottom(surface_height, fm) - EDGE_SCROLL_BAND {
         Some(1)
     } else {
         None
@@ -5522,11 +6358,16 @@ fn edge_scroll_direction(y: f32, surface_height: u32) -> Option<i64> {
 /// of the painter's `y = MINIMAP_TOP + line * height / total`
 /// interpolation, clamped into the file. `None` for an empty file or
 /// a degenerate surface.
-fn minimap_y_to_line(y: f32, surface_height: u32, total_lines: usize) -> Option<usize> {
+fn minimap_y_to_line(
+    y: f32,
+    surface_height: u32,
+    total_lines: usize,
+    fm: FontMetrics,
+) -> Option<usize> {
     if total_lines == 0 {
         return None;
     }
-    let height = minimap_height(surface_height);
+    let height = minimap_height(surface_height, fm);
     if height <= 0.0 {
         return None;
     }
@@ -5541,14 +6382,15 @@ fn minimap_rects(
     surface_height: u32,
     first_visible_line: usize,
     visible_lines: usize,
+    fm: FontMetrics,
 ) -> Vec<MinimapRect> {
     let Some(x) = minimap_left(surface_width) else {
         return Vec::new();
     };
-    if lines.is_empty() || minimap_height(surface_height) <= 0.0 {
+    if lines.is_empty() || minimap_height(surface_height, fm) <= 0.0 {
         return Vec::new();
     }
-    let height = minimap_height(surface_height);
+    let height = minimap_height(surface_height, fm);
     let pixel_rows = height.round().max(1.0) as usize;
     let mut rects = Vec::new();
     rects.push(MinimapRect {
@@ -5836,6 +6678,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::LineNumbers { .. } => "LineNumbers",
         InstanceMessage::CompletionPopup { .. } => "CompletionPopup",
         InstanceMessage::ThemeFacts { .. } => "ThemeFacts",
+        InstanceMessage::FontFacts { .. } => "FontFacts",
     }
 }
 
@@ -6582,8 +7425,8 @@ fn px_to_ndc_y(y: f32, height: u32) -> f32 {
 /// text + an attrs span per colored chunk (mirroring `set_rich_text`'s
 /// only-when-non-default rule). Every line gets `LineEnding::Lf` —
 /// the separator byte itself never enters a line's text.
-fn line_from_chunks(chunks: &[RichChunk]) -> glyphon::cosmic_text::BufferLine {
-    let default_attrs = Attrs::new().family(Family::Name("JetBrains Mono"));
+fn line_from_chunks(chunks: &[RichChunk], family: &str) -> glyphon::cosmic_text::BufferLine {
+    let default_attrs = Attrs::new().family(Family::Name(family));
     let mut attrs_list = glyphon::cosmic_text::AttrsList::new(&default_attrs);
     let mut text = String::new();
     for chunk in chunks {
@@ -7169,15 +8012,27 @@ mod tests {
     #[test]
     fn mb_dropdown_window_clamps_and_keeps_selection_visible() {
         // Row height is 20.0; a 1000px space fits any producer-capped list.
-        assert_eq!(mb_dropdown_window(5, 2, 1000.0), Some((0, 5)));
+        assert_eq!(
+            mb_dropdown_window(5, 2, 1000.0, FontMetrics::default()),
+            Some((0, 5))
+        );
         // The whole-fits path is identical to no clamp: (0, n).
-        assert_eq!(mb_dropdown_window(10, 9, 1000.0), Some((0, 10)));
+        assert_eq!(
+            mb_dropdown_window(10, 9, 1000.0, FontMetrics::default()),
+            Some((0, 10))
+        );
 
         // A 100px space fits 5 rows. Selection near the top anchors at 0.
-        assert_eq!(mb_dropdown_window(10, 0, 100.0), Some((0, 5)));
+        assert_eq!(
+            mb_dropdown_window(10, 0, 100.0, FontMetrics::default()),
+            Some((0, 5))
+        );
         // Selection past the fold scrolls so it stays visible (bottom edge).
-        assert_eq!(mb_dropdown_window(10, 9, 100.0), Some((5, 5)));
-        let (first, count) = mb_dropdown_window(10, 7, 100.0).unwrap();
+        assert_eq!(
+            mb_dropdown_window(10, 9, 100.0, FontMetrics::default()),
+            Some((5, 5))
+        );
+        let (first, count) = mb_dropdown_window(10, 7, 100.0, FontMetrics::default()).unwrap();
         assert!(
             first <= 7 && 7 < first + count,
             "sel 7 in [{first},{})",
@@ -7185,11 +8040,20 @@ mod tests {
         );
 
         // Degenerate: too short for even one row ⇒ hide, never draw above 0.
-        assert_eq!(mb_dropdown_window(10, 0, 10.0), None);
+        assert_eq!(
+            mb_dropdown_window(10, 0, 10.0, FontMetrics::default()),
+            None
+        );
         // No candidates ⇒ nothing.
-        assert_eq!(mb_dropdown_window(0, 0, 500.0), None);
+        assert_eq!(
+            mb_dropdown_window(0, 0, 500.0, FontMetrics::default()),
+            None
+        );
         // An out-of-range selection is clamped, not panicked.
-        assert_eq!(mb_dropdown_window(3, 99, 1000.0), Some((0, 3)));
+        assert_eq!(
+            mb_dropdown_window(3, 99, 1000.0, FontMetrics::default()),
+            Some((0, 3))
+        );
     }
 
     #[test]
@@ -7902,32 +8766,66 @@ mod tests {
         // The status band reserves 26px (Q#S3), so the text area
         // ends at 574 and the minimap column is y = [12, 562)
         // (height 550).
-        assert!(minimap_band_contains(750.0, 100.0, 800, 600));
+        assert!(minimap_band_contains(
+            750.0,
+            100.0,
+            800,
+            600,
+            FontMetrics::default()
+        ));
         assert!(
-            !minimap_band_contains(739.0, 100.0, 800, 600),
+            !minimap_band_contains(739.0, 100.0, 800, 600, FontMetrics::default()),
             "left of band"
         );
         assert!(
-            !minimap_band_contains(788.0, 100.0, 800, 600),
+            !minimap_band_contains(788.0, 100.0, 800, 600, FontMetrics::default()),
             "right of band"
         );
-        assert!(!minimap_band_contains(750.0, 5.0, 800, 600), "above band");
         assert!(
-            !minimap_band_contains(750.0, 563.0, 800, 600),
+            !minimap_band_contains(750.0, 5.0, 800, 600, FontMetrics::default()),
+            "above band"
+        );
+        assert!(
+            !minimap_band_contains(750.0, 563.0, 800, 600, FontMetrics::default()),
             "below band (status strip)"
         );
         // Too-narrow surfaces have no minimap at all.
-        assert!(!minimap_band_contains(100.0, 100.0, 150, 600));
+        assert!(!minimap_band_contains(
+            100.0,
+            100.0,
+            150,
+            600,
+            FontMetrics::default()
+        ));
 
         // Inverse mapping: height = 550; 100 lines. Top → line 0,
         // bottom → last line, midpoint → ~half.
-        assert_eq!(minimap_y_to_line(12.0, 600, 100), Some(0));
-        assert_eq!(minimap_y_to_line(561.9, 600, 100), Some(99));
-        assert_eq!(minimap_y_to_line(12.0 + 275.0, 600, 100), Some(50));
+        assert_eq!(
+            minimap_y_to_line(12.0, 600, 100, FontMetrics::default()),
+            Some(0)
+        );
+        assert_eq!(
+            minimap_y_to_line(561.9, 600, 100, FontMetrics::default()),
+            Some(99)
+        );
+        assert_eq!(
+            minimap_y_to_line(12.0 + 275.0, 600, 100, FontMetrics::default()),
+            Some(50)
+        );
         // Out-of-band y clamps rather than panics (scrubbing wanders).
-        assert_eq!(minimap_y_to_line(0.0, 600, 100), Some(0));
-        assert_eq!(minimap_y_to_line(9999.0, 600, 100), Some(99));
-        assert_eq!(minimap_y_to_line(100.0, 600, 0), None, "empty file");
+        assert_eq!(
+            minimap_y_to_line(0.0, 600, 100, FontMetrics::default()),
+            Some(0)
+        );
+        assert_eq!(
+            minimap_y_to_line(9999.0, 600, 100, FontMetrics::default()),
+            Some(99)
+        );
+        assert_eq!(
+            minimap_y_to_line(100.0, 600, 0, FontMetrics::default()),
+            None,
+            "empty file"
+        );
     }
 
     #[test]
@@ -7935,16 +8833,32 @@ mod tests {
         // 600px surface: up-band y < 16 + 24 = 40; the text area
         // ends at 574 (status band, Q#S3), so the down-band is
         // y > 574 - 24 = 550.
-        assert_eq!(edge_scroll_direction(10.0, 600), Some(-1));
-        assert_eq!(edge_scroll_direction(39.9, 600), Some(-1));
-        assert_eq!(edge_scroll_direction(40.0, 600), None, "interior");
-        assert_eq!(edge_scroll_direction(300.0, 600), None);
         assert_eq!(
-            edge_scroll_direction(550.0, 600),
+            edge_scroll_direction(10.0, 600, FontMetrics::default()),
+            Some(-1)
+        );
+        assert_eq!(
+            edge_scroll_direction(39.9, 600, FontMetrics::default()),
+            Some(-1)
+        );
+        assert_eq!(
+            edge_scroll_direction(40.0, 600, FontMetrics::default()),
+            None,
+            "interior"
+        );
+        assert_eq!(
+            edge_scroll_direction(300.0, 600, FontMetrics::default()),
+            None
+        );
+        assert_eq!(
+            edge_scroll_direction(550.0, 600, FontMetrics::default()),
             None,
             "band edge exclusive"
         );
-        assert_eq!(edge_scroll_direction(551.0, 600), Some(1));
+        assert_eq!(
+            edge_scroll_direction(551.0, 600, FontMetrics::default()),
+            Some(1)
+        );
     }
 
     #[test]
@@ -7963,7 +8877,15 @@ mod tests {
         let red = style_with_fg(CellColor::Rgb(255, 0, 0));
         let blue = style_with_fg(CellColor::Rgb(0, 0, 255));
         let shapes = minimap_line_shapes("alpha\nbeta\ngamma\ndelta");
-        let rects = minimap_rects(&[red, red, blue, blue], &shapes, 240, 80, 0, 2);
+        let rects = minimap_rects(
+            &[red, red, blue, blue],
+            &shapes,
+            240,
+            80,
+            0,
+            2,
+            FontMetrics::default(),
+        );
 
         assert!(
             rects
@@ -8000,7 +8922,7 @@ mod tests {
             lines.len()
         ];
 
-        let rects = minimap_rects(&lines, &shapes, 240, 120, 0, 30);
+        let rects = minimap_rects(&lines, &shapes, 240, 120, 0, 30, FontMetrics::default());
 
         let pixel_rows = (120.0 - MINIMAP_TOP - MINIMAP_BOTTOM).round() as usize;
         assert!(
@@ -8017,7 +8939,7 @@ mod tests {
             content_cols: 10,
         }];
 
-        assert!(minimap_rects(&lines, &shapes, 120, 120, 0, 1).is_empty());
+        assert!(minimap_rects(&lines, &shapes, 120, 120, 0, 1, FontMetrics::default()).is_empty());
     }
 
     #[test]
@@ -8034,7 +8956,7 @@ mod tests {
             },
         ];
 
-        let rects = minimap_rects(&[red, red], &shapes, 240, 80, 0, 2);
+        let rects = minimap_rects(&[red, red], &shapes, 240, 80, 0, 2, FontMetrics::default());
         let strokes: Vec<_> = rects
             .iter()
             .filter(|r| color_close(r.color, rgb_to_minimap_color(255, 0, 0)))
@@ -8373,6 +9295,168 @@ mod tests {
         );
     }
 
+    #[test]
+    fn line_number_messages_reflow_the_code_width_both_directions() {
+        let Some(mut state) = headless_or_skip(320, 240, "one\ntwo\nthree\n") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let plain_width = state.buffer.size().0.expect("bounded code width");
+
+        let _ = state.apply_attach_message(InstanceMessage::LineNumbers {
+            buffer_id: bid,
+            mode: LineNumberMode::Absolute,
+        });
+        let gutter_width = state.gutter_width_px();
+        assert!(gutter_width > 0.0, "precondition: the gutter fits");
+        assert!(
+            (state.buffer.size().0.expect("bounded code width") - (plain_width - gutter_width))
+                .abs()
+                < 0.01,
+            "enabling line numbers must reshape at the narrower painter clip"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::LineNumbers {
+            buffer_id: bid,
+            mode: LineNumberMode::Off,
+        });
+        assert!(
+            (state.buffer.size().0.expect("bounded code width") - plain_width).abs() < 0.01,
+            "disabling line numbers restores the original shaping width"
+        );
+    }
+
+    #[test]
+    fn incremental_line_count_digit_transitions_reflow_the_code_width() {
+        let nine_lines = (0..9).map(|_| "x").collect::<Vec<_>>().join("\n");
+        let Some(mut state) = headless_or_skip(320, 240, &nine_lines) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let _ = state.apply_attach_message(InstanceMessage::LineNumbers {
+            buffer_id: bid,
+            mode: LineNumberMode::Absolute,
+        });
+        let one_digit_width = state.buffer.size().0.expect("bounded code width");
+
+        let insert = vec![
+            loro::TextDelta::Retain {
+                retain: nine_lines.chars().count(),
+                attributes: None,
+            },
+            loro::TextDelta::Insert {
+                insert: "\nx".to_owned(),
+                attributes: None,
+            },
+        ];
+        state
+            .apply_loro_text_delta_batches(&[insert])
+            .expect("9 -> 10 line insertion applies");
+        assert_eq!(state.current_line_starts.len(), 10);
+        let two_digit_width = state.buffer.size().0.expect("bounded code width");
+        assert!(
+            two_digit_width < one_digit_width,
+            "the second gutter digit must narrow the code buffer immediately"
+        );
+
+        let delete = vec![
+            loro::TextDelta::Retain {
+                retain: nine_lines.chars().count(),
+                attributes: None,
+            },
+            loro::TextDelta::Delete { delete: 2 },
+        ];
+        state
+            .apply_loro_text_delta_batches(&[delete])
+            .expect("10 -> 9 line deletion applies");
+        assert_eq!(state.current_line_starts.len(), 9);
+        assert!(
+            (state.buffer.size().0.expect("bounded code width") - one_digit_width).abs() < 0.01,
+            "crossing back to one digit restores the wider shaping clip"
+        );
+    }
+
+    #[test]
+    fn minimap_presence_reflows_and_refollows_a_painted_caret() {
+        let text = "x".repeat(250);
+        let Some(mut state) = headless_or_skip(320, 240, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: text.len() as u64,
+        });
+        state.ensure_caret_painted();
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "precondition: the end caret paints without a minimap"
+        );
+        let plain_width = state.buffer.size().0.expect("bounded code width");
+
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 1,
+            lines: vec![CellStyle::default()],
+        });
+        let minimap_width = state.buffer.size().0.expect("bounded code width");
+        assert!(
+            minimap_width < plain_width,
+            "a nonempty summary reserves the minimap before reshaping"
+        );
+        assert!(
+            state.code_scroll_residual > 0.0 && state.caret_painted_in_code_clip(),
+            "a previously painted caret is followed into its newly wrapped run"
+        );
+
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: bid,
+            generation: 2,
+            lines: Vec::new(),
+        });
+        assert!(
+            (state.buffer.size().0.expect("bounded code width") - plain_width).abs() < 0.01,
+            "an empty summary removes the minimap and restores the code width"
+        );
+    }
+
+    #[test]
+    fn byte_identical_snapshot_clears_minimap_geometry_before_reshape() {
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let Some(mut state) = headless_or_skip(320, 240, text) else {
+            return;
+        };
+        let first = BufferId::next();
+        state.current_buffer_id = Some(first);
+        let plain_width = state.buffer.size().0.expect("bounded code width");
+        let _ = state.apply_attach_message(InstanceMessage::FileStyleSummary {
+            buffer_id: first,
+            generation: 1,
+            lines: vec![CellStyle::default(); 4],
+        });
+        assert!(
+            state.buffer.size().0.expect("bounded code width") < plain_width,
+            "precondition: the summary reserves minimap width"
+        );
+
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        assert!(state.current_summary.is_none());
+        assert!(
+            (state.buffer.size().0.expect("bounded code width") - plain_width).abs() < 0.01,
+            "a byte-identical snapshot must remove the prior buffer's minimap from the shaping clip"
+        );
+    }
+
     // -----------------------------------------------------------------
     // Themes (Q#TH5/Q#TH7/Q#TH8): GPU face application.
     // -----------------------------------------------------------------
@@ -8391,6 +9475,34 @@ mod tests {
     fn px_at(px: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * width + x) * 4) as usize;
         [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    }
+
+    /// Exclusive pixel bounds of every RGBA pixel that differs.
+    fn frame_diff_bounds(before: &[u8], after: &[u8], width: u32) -> Option<(u32, u32, u32, u32)> {
+        assert_eq!(before.len(), after.len());
+        let mut bounds: Option<(u32, u32, u32, u32)> = None;
+        for (pixel_index, (left, right)) in before
+            .chunks_exact(4)
+            .zip(after.chunks_exact(4))
+            .enumerate()
+        {
+            if left == right {
+                continue;
+            }
+            let pixel_index = u32::try_from(pixel_index).expect("test frame fits u32");
+            let pixel_x = pixel_index % width;
+            let pixel_y = pixel_index / width;
+            bounds = Some(match bounds {
+                None => (pixel_x, pixel_y, pixel_x + 1, pixel_y + 1),
+                Some((min_x, min_y, max_x, max_y)) => (
+                    min_x.min(pixel_x),
+                    min_y.min(pixel_y),
+                    max_x.max(pixel_x + 1),
+                    max_y.max(pixel_y + 1),
+                ),
+            });
+        }
+        bounds
     }
 
     #[test]
@@ -8489,7 +9601,7 @@ mod tests {
         };
         state.line_numbers = LineNumberMode::Absolute;
         let text_left = state.text_left().ceil() as u32;
-        let band_top = text_area_bottom(h).floor() as u32;
+        let band_top = text_area_bottom(h, FontMetrics::default()).floor() as u32;
         let base = state.render_offscreen();
         apply_faces(
             &mut state,
@@ -9031,6 +10143,1301 @@ mod tests {
             source_color_at(1, &spans),
             Some(glyphon::Color::rgb(200, 0, 0)),
             "a parent-only byte keeps the parent color"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Arc 4 stage 2 (gpu-set-font framing Q#F6/Q#F7): apply_font_facts
+    // and the visual-run caret/scroll substrate. Family routing is
+    // hermetic: the four generated fixture faces enter the explicit
+    // database before FontSystem construction (fonts/test/,
+    // provenance in LICENSE.txt there).
+    // -----------------------------------------------------------------
+
+    fn font_facts(family: Option<&str>, size_centi_px: Option<u32>) -> InstanceMessage {
+        InstanceMessage::FontFacts {
+            family: family.map(str::to_owned),
+            size_centi_px,
+        }
+    }
+
+    #[test]
+    fn fixture_monospaces_are_registered_in_font_system_at_construction() {
+        let Some(state) = headless_or_skip(320, 240, "text") else {
+            return;
+        };
+        let mono_id = query_normal_face(state.font_system.db(), "Pmacs Test Mono Two")
+            .expect("fixture face is present in fontdb");
+        let proportional_id = query_normal_face(state.font_system.db(), "Pmacs Test Proportional")
+            .expect("proportional fixture is present");
+        let regular_id = query_normal_face(state.font_system.db(), "Pmacs Test Family")
+            .expect("regular fixture is present");
+        let bold_id = state
+            .font_system
+            .db()
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("Pmacs Test Family")],
+                weight: fontdb::Weight::BOLD,
+                stretch: fontdb::Stretch::Normal,
+                style: fontdb::Style::Normal,
+            })
+            .expect("bold fixture is present");
+        for id in [mono_id, proportional_id, regular_id, bold_id] {
+            assert!(
+                state.font_defaults.extra_ids.contains(&id),
+                "the fixture's load-time ID is retained"
+            );
+        }
+        assert!(
+            state
+                .font_system
+                .is_monospace(state.font_defaults.bundled_id),
+            "the bundled ID is registered too"
+        );
+        assert!(
+            state.font_system.is_monospace(mono_id),
+            "the alternate monospace ID is registered at construction"
+        );
+        assert!(
+            state.font_system.is_monospace(regular_id),
+            "the regular test-family ID is registered at construction"
+        );
+        assert!(
+            !state.font_system.is_monospace(proportional_id)
+                && !state.font_system.is_monospace(bold_id),
+            "proportional fixture IDs stay outside the monospace registry"
+        );
+    }
+
+    /// Acceptance 16 — wire validation fails closed: an out-of-range
+    /// size rejects the WHOLE message (family included), keeps every
+    /// piece of current state, and re-declares nothing.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn font_facts_out_of_range_sizes_fail_closed() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let baseline = state.render_offscreen();
+        for size in [0u32, 599, 7201, u32::MAX] {
+            let vp =
+                state.apply_attach_message(font_facts(Some("Pmacs Test Mono Two"), Some(size)));
+            assert!(vp.is_none(), "a rejected FontFacts must not re-declare");
+            assert_eq!(state.fm.scale, 1.0, "scale untouched at size {size}");
+            assert_eq!(
+                state.resolved_family, DEFAULT_FONT_FAMILY,
+                "family untouched at size {size} — the whole message is rejected"
+            );
+            assert_eq!(
+                state.render_offscreen(),
+                baseline,
+                "frame byte-identical at size {size}"
+            );
+        }
+    }
+
+    /// Acceptance 9 — the size route re-derives every metric, and the
+    /// `(None, None)` reset reproduces the never-set frame
+    /// byte-for-byte within the process.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn font_size_applies_and_reset_is_byte_identical() {
+        let Some(mut state) = headless_or_skip(320, 240, "fn main() {}") else {
+            return;
+        };
+        let never_set = state.render_offscreen();
+        let advance_before = state.mono_advance();
+        let visible_before = estimated_visible_lines(state.config.height, state.fm);
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        assert!(
+            (state.fm.scale - 1.5).abs() < f32::EPSILON,
+            "2400 centi-px / 16 = 1.5"
+        );
+        assert!(
+            state.mono_advance() > advance_before,
+            "a larger size widens the measured advance (gutter geometry)"
+        );
+        assert!(
+            estimated_visible_lines(state.config.height, state.fm) < visible_before,
+            "a larger size fits fewer source lines"
+        );
+        let big = state.render_offscreen();
+        assert_ne!(big, never_set, "a 24px preference must change the ink");
+        state.apply_attach_message(font_facts(None, None));
+        assert_eq!(state.fm.scale, 1.0);
+        assert_eq!(state.fm.advance_ratio, 1.0);
+        assert_eq!(
+            state.render_offscreen(),
+            never_set,
+            "the (None, None) reset must reproduce the never-set frame byte-for-byte"
+        );
+    }
+
+    /// Acceptance 17 — metrics and REAL drawable dimensions change
+    /// atomically on all seven buffers, and `resize()` keeps every
+    /// buffer in step through the same helper (`Buffer::size()` is
+    /// the witness).
+    #[test]
+    fn all_seven_buffers_track_metrics_and_dimensions() {
+        fn assert_buffer_dims(state: &State) {
+            let fm = state.fm;
+            let width = state.config.width as f32;
+            let height = state.config.height as f32;
+            let code_metrics = Metrics::new(fm.code_font_size(), fm.code_line_height());
+            let code_width = (state.text_bounds_right() as f32 - state.text_left()).max(0.0);
+            let code_height = (text_area_bottom(state.config.height, fm) - TEXT_TOP).max(0.0);
+            assert_eq!(state.buffer.metrics(), code_metrics);
+            assert_eq!(state.buffer.size(), (Some(code_width), Some(code_height)));
+            assert_eq!(state.gutter_buffer.metrics(), code_metrics);
+            assert_eq!(state.gutter_buffer.size(), (Some(width), Some(code_height)));
+            let status_metrics = Metrics::new(fm.status_font_size(), fm.status_line_height());
+            for buffer in [&state.status_buffer, &state.status_left_buffer] {
+                assert_eq!(buffer.metrics(), status_metrics);
+                assert_eq!(buffer.size(), (Some(width), Some(fm.status_band_height())));
+            }
+            assert_eq!(
+                state.menu_buffer.metrics(),
+                Metrics::new(fm.menu_font_size(), fm.menu_line_height())
+            );
+            assert_eq!(
+                state.menu_buffer.size(),
+                (Some(MENU_MAX_WIDTH), Some(height))
+            );
+            let drop_metrics = Metrics::new(fm.mb_drop_font_size(), fm.mb_drop_line_height());
+            for buffer in [&state.mb_buffer, &state.completion_buffer] {
+                assert_eq!(buffer.metrics(), drop_metrics);
+                assert_eq!(buffer.size(), (Some(MB_DROP_MAX_WIDTH), Some(height)));
+            }
+        }
+        let Some(mut state) = headless_or_skip(320, 240, "one\ntwo\nthree\n") else {
+            return;
+        };
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        assert_buffer_dims(&state);
+        state.resize(500, 400);
+        assert_buffer_dims(&state);
+    }
+
+    /// Acceptance 18 — rows stay rows at both preference bounds: no
+    /// popup label may wrap onto a second visual run, and selection /
+    /// hit geometry names the same semantic row.
+    #[test]
+    fn popup_rows_never_wrap_after_a_font_change() {
+        for size in [600, 7200] {
+            let Some(mut state) = headless_or_skip(320, 600, "text") else {
+                return;
+            };
+            state.apply_attach_message(font_facts(None, Some(size)));
+            let bid = BufferId::next();
+            state.current_buffer_id = Some(bid);
+            state.view_range = (0, state.current_text.len() as u64);
+            let long = "a very long label ".repeat(8);
+            state.completion = Some(CompletionLocal {
+                buffer_id: bid,
+                anchor: 0,
+                prefix_len: 0,
+                rows: vec![
+                    CompletionPopupRow {
+                        label: long.clone(),
+                        kind: 3,
+                        detail: Some(long.clone()),
+                    },
+                    CompletionPopupRow {
+                        label: long.clone(),
+                        kind: 3,
+                        detail: None,
+                    },
+                ],
+                selected: Some(1),
+                total: 2,
+            });
+            state.refresh_completion_buffer();
+            state.minibuffer = Some(MinibufferLocal {
+                prompt: "P: ".into(),
+                input: String::new(),
+                cursor: 0,
+                candidates: vec![long.clone(), long.clone()],
+                selected: Some(1),
+                total: 2,
+            });
+            state.refresh_mb_buffer();
+            state.menu = Some(MenuLocal {
+                rows: vec![
+                    MenuPromptRow {
+                        label: long.clone(),
+                        separator: false,
+                    },
+                    MenuPromptRow {
+                        label: long,
+                        separator: false,
+                    },
+                ],
+                active: Some(1),
+                anchor_px: (10.0, 10.0),
+            });
+            state.refresh_menu_buffer();
+            for (name, buffer) in [
+                ("completion", &state.completion_buffer),
+                ("minibuffer dropdown", &state.mb_buffer),
+                ("context menu", &state.menu_buffer),
+            ] {
+                assert_eq!(
+                    buffer.wrap(),
+                    Wrap::None,
+                    "{name} buffer must not wrap at {size}"
+                );
+                let mut seen = std::collections::HashSet::new();
+                for run in buffer.layout_runs() {
+                    assert!(
+                        seen.insert(run.line_i),
+                        "{name} row {} wrapped onto a second visual run at {size}",
+                        run.line_i
+                    );
+                }
+            }
+
+            let (first, count) = state.mb_visible_window().expect("minibuffer rows fit");
+            assert!(first <= 1 && 1 < first + count);
+            assert_eq!(
+                state.mb_dropdown_vertex_bytes().len(),
+                2 * 6 * QUAD_VERTEX_STRIDE as usize,
+                "minibuffer background + selected semantic row at {size}"
+            );
+            let (first, count, _, _) = state
+                .completion_dropdown_layout()
+                .expect("completion rows fit");
+            assert!(first <= 1 && 1 < first + count);
+            assert_eq!(
+                state.completion_dropdown_vertex_bytes().len(),
+                2 * 6 * QUAD_VERTEX_STRIDE as usize,
+                "completion background + selected semantic row at {size}"
+            );
+            let row_center = 10.0 + 1.5 * f64::from(state.fm.menu_row_height());
+            assert_eq!(
+                state.menu_hit(15.0, row_center),
+                Some((1, true)),
+                "menu hit-testing must agree with painted row 1 at {size}"
+            );
+            assert_eq!(
+                state.menu_vertex_bytes().len(),
+                2 * 6 * QUAD_VERTEX_STRIDE as usize,
+                "menu background + selected semantic row at {size}"
+            );
+        }
+    }
+
+    /// Acceptance 13 — the two string-equality status caches drop on
+    /// a font change, so an unchanged composed status re-shapes with
+    /// the new attrs on the next frame.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn font_change_invalidates_the_status_shaping_caches() {
+        let Some(mut state) = headless_or_skip(320, 240, "text") else {
+            return;
+        };
+        let _ = state.render_offscreen();
+        let composed_before = state.status_text.clone();
+        assert!(
+            !composed_before.is_empty(),
+            "precondition: a frame composed the status readout"
+        );
+        state.apply_attach_message(font_facts(None, Some(3200)));
+        assert_eq!(
+            state.status_text, "\0",
+            "the sentinel must defeat the string-equality gate"
+        );
+        assert_eq!(state.status_left_text, "\0");
+        let _ = state.render_offscreen();
+        assert_eq!(
+            state.status_buffer.metrics().font_size,
+            state.fm.status_font_size(),
+            "the re-shaped band must carry the derived metrics"
+        );
+        assert_eq!(
+            state.status_text, composed_before,
+            "same composed text, re-shaped anyway"
+        );
+    }
+
+    /// Acceptance 14 — a size that shrinks the visible line count
+    /// re-declares the scoped viewport from the final normalized
+    /// origin.
+    #[test]
+    fn font_change_redeclares_a_shrunken_viewport() {
+        let text = "line of text\n".repeat(40);
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let declared = state.view_range;
+        state.last_viewport_sent = Some(declared);
+        let vp = state
+            .apply_attach_message(font_facts(None, Some(7200)))
+            .expect("fewer lines fit at 72px — the viewport must be re-declared");
+        assert_eq!(vp.buffer_id, bid);
+        assert!(
+            vp.visible.end < declared.1,
+            "the re-declared range must shrink ({} vs {})",
+            vp.visible.end,
+            declared.1
+        );
+    }
+
+    /// Acceptance 10 — both preference bounds keep code ink above the
+    /// derived band, band ink inside it, and the two owned dropdown
+    /// windows inside the surface. The context menu deliberately keeps
+    /// its clipped raw-anchor policy.
+    #[test]
+    #[allow(clippy::too_many_lines)] // one end-to-end assertion block per rendered surface
+    fn extreme_sizes_render_with_contained_popups() {
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 400;
+        for size in [600, 7200] {
+            let ink = "MMMMMMMM\n".repeat(20);
+            let blank = "        \n".repeat(20);
+            let Some(mut state) = headless_or_skip(WIDTH, HEIGHT, &ink) else {
+                return;
+            };
+            state.apply_attach_message(font_facts(None, Some(size)));
+            let bid = BufferId::next();
+            state.current_buffer_id = Some(bid);
+            let ink_frame = state.render_offscreen();
+            assert!(state.set_text(&blank));
+            let blank_frame = state.render_offscreen();
+            let (_, _, _, code_max_y) =
+                frame_diff_bounds(&ink_frame, &blank_frame, WIDTH).expect("code ink differs");
+            let band_top = text_area_bottom(HEIGHT, state.fm);
+            assert!(
+                code_max_y <= band_top.ceil() as u32,
+                "code glyphs cross the derived band at {size}: {code_max_y} > {band_top}"
+            );
+
+            state.status_facts = Some(StatusFactsLocal {
+                buffer_id: bid,
+                name: "font-bounds".into(),
+                modified: false,
+                diag_errors: 0,
+                diag_warnings: 0,
+                message: Some("STATUS".into()),
+            });
+            let status_frame = state.render_offscreen();
+            let (_, status_min_y, _, status_max_y) =
+                frame_diff_bounds(&blank_frame, &status_frame, WIDTH).expect("status ink differs");
+            assert!(
+                status_min_y >= band_top.floor() as u32 && status_max_y <= HEIGHT,
+                "status glyphs escape the derived band at {size}: \
+                 {status_min_y}..{status_max_y}, band starts {band_top}"
+            );
+
+            state.view_range = (0, state.current_text.len() as u64);
+            state.completion = Some(CompletionLocal {
+                buffer_id: bid,
+                anchor: 0,
+                prefix_len: 0,
+                rows: (0..8)
+                    .map(|i| CompletionPopupRow {
+                        label: format!("completion-{i}"),
+                        kind: 3,
+                        detail: None,
+                    })
+                    .collect(),
+                selected: Some(1),
+                total: 8,
+            });
+            state.refresh_completion_buffer();
+            let (first, count, _, _) = state
+                .completion_dropdown_layout()
+                .expect("at least one completion row fits");
+            let (left, top, width) = state
+                .completion_dropdown_rect()
+                .expect("completion rectangle");
+            assert!(first <= 1 && 1 < first + count);
+            assert!(
+                top >= 0.0 && top + count as f32 * state.fm.mb_drop_row_height() <= HEIGHT as f32,
+                "completion dropdown must be vertically surface-contained at {size}"
+            );
+            let completion_frame = state.render_offscreen();
+            let (min_x, min_y, max_x, max_y) =
+                frame_diff_bounds(&status_frame, &completion_frame, WIDTH)
+                    .expect("completion pixels differ");
+            assert!(
+                min_x + 1 >= left.floor() as u32
+                    && min_y + 1 >= top.floor() as u32
+                    && max_x <= (left + width).ceil() as u32 + 1
+                    && max_y
+                        <= (top + count as f32 * state.fm.mb_drop_row_height()).ceil() as u32 + 1,
+                "completion pixels escape their rectangle at {size}: \
+                 {min_x},{min_y}..{max_x},{max_y}"
+            );
+
+            state.completion = None;
+            state.minibuffer = Some(MinibufferLocal {
+                prompt: "M-x ".into(),
+                input: String::new(),
+                cursor: 0,
+                candidates: (0..30).map(|i| format!("candidate-{i}")).collect(),
+                selected: Some(1),
+                total: 30,
+            });
+            state.refresh_mb_buffer();
+            let (first, count) = state
+                .mb_visible_window()
+                .expect("at least one minibuffer row fits");
+            let (_left, top, _width) = state.mb_dropdown_rect().expect("minibuffer rectangle");
+            assert!(first <= 1 && 1 < first + count);
+            assert!(
+                top >= 0.0 && top + count as f32 * state.fm.mb_drop_row_height() <= HEIGHT as f32,
+                "minibuffer dropdown must be vertically surface-contained at {size}"
+            );
+            let px = state.render_offscreen();
+            assert_eq!(px.len(), (WIDTH * HEIGHT * 4) as usize);
+        }
+
+        let Some(mut state) = headless_or_skip(WIDTH, HEIGHT, "text") else {
+            return;
+        };
+        state.apply_attach_message(font_facts(None, Some(7200)));
+        state.menu = Some(MenuLocal {
+            rows: (0..20)
+                .map(|i| MenuPromptRow {
+                    label: format!("menu entry {i} with a fairly long label attached"),
+                    separator: false,
+                })
+                .collect(),
+            active: Some(0),
+            anchor_px: (200.0, 300.0),
+        });
+        let px = state.render_offscreen();
+        assert_eq!(px.len(), (WIDTH * HEIGHT * 4) as usize);
+        assert_eq!(
+            state.menu_hit(205.0, 305.0),
+            Some((0, true)),
+            "hit geometry stays coherent on the deliberately clipped popup"
+        );
+    }
+
+    /// Acceptance 11 — a caret painted on a wrapped visual run
+    /// survives 16px → 72px → 6px re-wraps, with the normalized
+    /// scroll invariant intact throughout.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn wrapped_caret_survives_size_changes() {
+        let long = "x".repeat(180);
+        let text = format!("{long}\nsecond\nthird\n");
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 180,
+        });
+        state.reshape();
+        state.ensure_caret_painted();
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "precondition: the caret paints at the default size"
+        );
+        state.apply_attach_message(font_facts(None, Some(7200)));
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the caret must survive the 16px → 72px re-wrap"
+        );
+        assert_eq!(
+            state.buffer.scroll().line,
+            0,
+            "normalized: slice-local line 0"
+        );
+        assert_eq!(
+            state.buffer.scroll().horizontal,
+            0.0,
+            "horizontal is discarded"
+        );
+        state.apply_attach_message(font_facts(None, Some(600)));
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "and the reverse 72px → 6px"
+        );
+        assert_eq!(state.buffer.scroll().line, 0);
+    }
+
+    /// Acceptance 11 — an overscan-only caret (shaped but below the
+    /// drawable window) is NOT painted, and a font change must not
+    /// snap the viewport back to it.
+    #[test]
+    fn overscan_caret_never_snaps_the_viewport() {
+        let text = "line of text\n".repeat(40);
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let visible = estimated_visible_lines(state.config.height, state.fm);
+        let overscan_line = visible + 1;
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: state.current_line_starts[overscan_line],
+        });
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "precondition: the overscan caret is not painted"
+        );
+        let top_before = state.scroll_top;
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        assert_eq!(
+            state.scroll_top, top_before,
+            "an unpainted caret must never snap the viewport"
+        );
+    }
+
+    /// Acceptance 11 — `resize()` applies the same painted-before
+    /// policy: shrinking the window re-follows a painted caret
+    /// through the coarse + visual-run + fold pipeline.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn narrowing_resize_keeps_a_wrapped_caret_painted() {
+        let mut text = "short\n".repeat(10);
+        let long = "y".repeat(100);
+        text.push_str(&long);
+        let Some(mut state) = headless_or_skip(640, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: text.len() as u64,
+        });
+        state.reshape();
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "precondition: everything fits at 640x400"
+        );
+        state.resize(320, 150);
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the shrunken window must re-follow the caret into its wrapped run"
+        );
+        assert_eq!(state.buffer.scroll().line, 0);
+        assert_eq!(state.buffer.scroll().horizontal, 0.0);
+    }
+
+    /// Acceptance 11 — resize preserves an intentionally caret-free
+    /// viewport in both width directions instead of treating a
+    /// stationary off-screen cursor as a follow request.
+    #[test]
+    fn width_resize_does_not_snap_a_scrolled_away_viewport() {
+        let text = "line of text\n".repeat(80);
+        let Some(mut state) = headless_or_skip(640, 240, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 0,
+        });
+        let _ = state.scroll_by_lines(20);
+        assert!(state.scroll_top > 0);
+        assert!(!state.caret_painted_in_code_clip());
+
+        let narrow_top = state.scroll_top;
+        state.resize(320, 240);
+        assert!(
+            state.scroll_top >= narrow_top && !state.caret_painted_in_code_clip(),
+            "narrowing must preserve the user's caret-free viewport"
+        );
+        let wide_top = state.scroll_top;
+        state.resize(640, 240);
+        assert!(
+            state.scroll_top >= wide_top && !state.caret_painted_in_code_clip(),
+            "widening must preserve the user's caret-free viewport"
+        );
+        assert!(state.buffer.layout_runs().next().is_some());
+    }
+
+    /// Acceptance 11 — a 72px caret-follow residual belongs to the
+    /// viewport, not to the cursor. Moving the cursor off-screen and
+    /// collapsing wraps at 6px normalizes that residual without a
+    /// snap-back or a blank slice.
+    #[test]
+    fn large_to_small_rewrap_preserves_a_caret_free_viewport() {
+        let line = "w".repeat(120);
+        let text = (0..12)
+            .map(|_| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let Some(mut state) = headless_or_skip(320, 240, &text) else {
+            return;
+        };
+        state.apply_attach_message(font_facts(None, Some(7200)));
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: state.current_line_starts[8] + line.len() as u64,
+        });
+        state.ensure_caret_painted();
+        assert!(
+            state.scroll_top > 0 && state.code_scroll_residual > 0.0,
+            "precondition: the large font follows into a deep wrapped run"
+        );
+
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 0,
+        });
+        assert!(!state.caret_painted_in_code_clip());
+        let top_before = state.scroll_top;
+        state.apply_attach_message(font_facts(None, Some(600)));
+        assert!(
+            state.scroll_top >= top_before,
+            "shrinking must not snap the caret-free viewport toward byte zero"
+        );
+        assert_eq!(state.buffer.scroll().line, 0);
+        assert_eq!(
+            state.view_range.0, state.current_line_starts[state.scroll_top],
+            "the declared source range must agree with the normalized origin"
+        );
+        assert!(
+            state.buffer.layout_runs().next().is_some(),
+            "wrap collapse must leave a nonblank shaped slice"
+        );
+        assert!(!state.caret_painted_in_code_clip());
+    }
+
+    /// Acceptance 11 — completion uses the same visual-run-aware byte
+    /// mapping as the caret, so an anchor at the end of a wrapped
+    /// source line follows that run rather than its first run.
+    #[test]
+    fn completion_anchor_tracks_its_wrapped_visual_run() {
+        let text = "c".repeat(180);
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: text.len() as u64,
+        });
+        state.ensure_caret_painted();
+        state.view_range = (0, text.len() as u64);
+        state.completion = Some(CompletionLocal {
+            buffer_id: bid,
+            anchor: text.len() as u64,
+            prefix_len: 0,
+            rows: vec![CompletionPopupRow {
+                label: "candidate".into(),
+                kind: 3,
+                detail: None,
+            }],
+            selected: Some(0),
+            total: 1,
+        });
+        let (_, line_top, line_height) = state
+            .completion_anchor_px()
+            .expect("wrapped anchor is visible");
+        assert!(
+            line_top > TEXT_TOP + state.fm.code_line_height(),
+            "the anchor must be on a continuation run, not source line 0's first run"
+        );
+        let (_, _, _, popup_top) = state
+            .completion_dropdown_layout()
+            .expect("the anchored popup fits");
+        assert!(
+            popup_top >= line_top + line_height - 0.01
+                || popup_top + state.fm.mb_drop_row_height() <= line_top + 0.01,
+            "the popup must be placed relative to the anchor's visual run"
+        );
+    }
+
+    /// Acceptance 11 — the gutter projects one row per CODE visual
+    /// run: the first run carries its source number and continuation
+    /// rows stay blank, leaving the following source number aligned.
+    #[test]
+    fn gutter_rows_align_with_wrapped_code_continuations() {
+        let text = format!("{}\nshort", "g".repeat(50));
+        let Some(mut state) = headless_or_skip(320, 400, &text) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        let _ = state.apply_attach_message(InstanceMessage::LineNumbers {
+            buffer_id: bid,
+            mode: LineNumberMode::Absolute,
+        });
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        state.refresh_gutter_buffer();
+
+        let code_tops: Vec<f32> = state.buffer.layout_runs().map(|run| run.line_top).collect();
+        let gutter_tops: Vec<f32> = state
+            .gutter_buffer
+            .layout_runs()
+            .map(|run| run.line_top)
+            .collect();
+        assert!(
+            state
+                .buffer
+                .layout_runs()
+                .filter(|run| run.line_i == 0)
+                .count()
+                > 1,
+            "precondition: source line 1 wraps"
+        );
+        assert_eq!(gutter_tops.len(), code_tops.len());
+        for (code, gutter) in code_tops.iter().zip(&gutter_tops) {
+            assert!(
+                (code - gutter).abs() < 0.01,
+                "code/gutter visual rows diverged: {code} vs {gutter}"
+            );
+        }
+
+        let first_runs = state
+            .buffer
+            .layout_runs()
+            .filter(|run| run.line_i == 0)
+            .count();
+        assert_eq!(state.gutter_buffer.lines[0].text().trim(), "1");
+        assert!(
+            state.gutter_buffer.lines[1..first_runs]
+                .iter()
+                .all(|line| line.text().is_empty()),
+            "wrapped continuation rows must carry blank gutter labels"
+        );
+        assert_eq!(
+            state.gutter_buffer.lines[first_runs].text().trim(),
+            "2",
+            "the next source-line number must follow all continuation blanks"
+        );
+    }
+
+    /// Acceptance 11 — the caret projection inverts the chunk cache:
+    /// injected adornment text shifts a caret past the anchor by the
+    /// projected width, while a caret AT the anchor keeps left
+    /// gravity (before the injected text).
+    #[test]
+    fn caret_projection_accounts_for_inline_adornments() {
+        let Some(mut state) = headless_or_skip(320, 240, "ab\ncd") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        let x_plain = state.caret_rect().expect("caret on line 0").x;
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 1,
+        });
+        let x1_plain = state.caret_rect().expect("caret at byte 1").x;
+        state.current_adornments = vec![adornment(1, AdornmentPlacement::AtOffset, "hint")];
+        state.reshape();
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        let x_projected = state.caret_rect().expect("caret past the adornment").x;
+        assert!(
+            x_projected > x_plain + 3.0 * 9.0,
+            "the caret must sit past the injected text ({x_projected} vs {x_plain})"
+        );
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 1,
+        });
+        let x_anchor = state.caret_rect().expect("caret at the anchor").x;
+        assert!(
+            (x_anchor - x1_plain).abs() < 0.5,
+            "an anchor byte keeps left gravity — before the adornment \
+             ({x_anchor} vs {x1_plain})"
+        );
+    }
+
+    /// Acceptance 11 — the `CursorByte` arm follows into a wrapped
+    /// continuation run (the pre-existing source-line-only hole): the
+    /// follow lands as a sub-line residual, normalized to slice-local
+    /// line 0.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn cursor_byte_follows_into_a_wrapped_run() {
+        let long = "z".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 400,
+        });
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the CursorByte arm must follow into the wrapped run"
+        );
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "the follow is a sub-line residual, not a source-line scroll"
+        );
+        assert_eq!(state.buffer.scroll().line, 0);
+        assert_eq!(state.buffer.scroll().horizontal, 0.0);
+    }
+
+    /// Acceptance 11 — an optimistic insertion that creates a new
+    /// bottom-edge wrap follows immediately (waiting a round trip
+    /// reads as a hitch), and the identical confirming `CursorByte`
+    /// needs no second repair.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: comparing a value to itself across a no-op
+    fn optimistic_insertion_follows_a_new_bottom_edge_wrap() {
+        // 320 wide → 304px drawable → 31 glyphs per row at the 9.6px
+        // advance; 240 high → 198px drawable → 9 rows. Exactly 9 full
+        // rows of text puts the caret at the painted bottom edge, and
+        // one more glyph starts row 10 below the clip.
+        let text = "q".repeat(31 * 9);
+        let Some(mut state) = headless_or_skip(320, 240, "") else {
+            return;
+        };
+        let bid = BufferId::next();
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &text)
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: bid,
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        state.set_frontend_id(FrontendId(9001));
+        state.dispatch_idle = true;
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: text.len() as u64,
+        });
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "precondition: the end caret paints on the last full row"
+        );
+        let send = state
+            .optimistic_crdt_insert(ProtocolKey::Char('q'), Modifiers::NONE)
+            .expect("the optimistic insert path is eligible");
+        assert_eq!(send.buffer_id, bid);
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "the insertion wrapped a new bottom row — the caret must follow NOW"
+        );
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "the follow is a visual-run residual"
+        );
+        let residual = state.code_scroll_residual;
+        let top = state.scroll_top;
+        // The daemon confirms the predicted byte: `moved == false`, so
+        // no second repair may disturb the settled scroll.
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: text.len() as u64 + 1,
+        });
+        assert_eq!(state.code_scroll_residual, residual);
+        assert_eq!(state.scroll_top, top);
+    }
+
+    /// Acceptance 11 — an explicit scroll clears the caret-follow
+    /// residual, including a wheel-up at the top clamp whose only
+    /// remaining motion IS the residual.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn explicit_scroll_clears_the_caret_follow_residual() {
+        let long = "w".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 400,
+        });
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "precondition: residual armed"
+        );
+        assert_eq!(
+            state.scroll_top, 0,
+            "single source line: the residual IS the scroll"
+        );
+        let _ = state.scroll_by_lines(-1);
+        assert_eq!(
+            state.code_scroll_residual, 0.0,
+            "wheel-up at the clamp edge must scroll the residual away"
+        );
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "the deep wrapped caret is off-screen again — the user owns the viewport"
+        );
+    }
+
+    /// Acceptance 4 (GPU half) — the caret-follow residual is
+    /// buffer-scoped view state: a `BufferSnapshot` resets it with
+    /// the rest of the view, while the font preference and derived
+    /// metrics survive the switch.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn buffer_snapshot_resets_the_residual_but_not_the_font() {
+        let long = "v".repeat(400);
+        let Some(mut state) = headless_or_skip(320, 240, &long) else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+        state.apply_attach_message(font_facts(None, Some(2400)));
+        let _ = state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: bid,
+            byte_pos: 400,
+        });
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "precondition: residual armed"
+        );
+        // The replacement buffer wraps too: a leaked residual would
+        // NOT be zeroed by the EOF clamp, so the assertion below can
+        // only pass through the snapshot arm's explicit reset.
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, &"u".repeat(400))
+            .expect("insert snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("export"),
+        });
+        assert_eq!(
+            state.code_scroll_residual, 0.0,
+            "the residual is buffer-scoped view state"
+        );
+        assert!(
+            (state.fm.scale - 1.5).abs() < f32::EPSILON,
+            "the global font preference survives the switch"
+        );
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+    }
+
+    /// The follow decision is suspended while the minibuffer is open:
+    /// its caret lives in the band, not the code area.
+    #[test]
+    fn open_minibuffer_suppresses_the_caret_follow_decision() {
+        let Some(mut state) = headless_or_skip(320, 240, "hello") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 2,
+        });
+        state.reshape();
+        assert!(state.caret_painted_in_code_clip());
+        state.minibuffer = Some(MinibufferLocal {
+            prompt: ":".into(),
+            input: String::new(),
+            cursor: 0,
+            candidates: Vec::new(),
+            selected: None,
+            total: 0,
+        });
+        assert!(
+            !state.caret_painted_in_code_clip(),
+            "an open minibuffer owns the caret — the code-area decision is false"
+        );
+    }
+
+    #[test]
+    fn cursor_inside_combining_cluster_uses_the_containing_boundary() {
+        let text = "xxe\u{301}z";
+        let Some(mut state) = headless_or_skip(320, 240, text) else {
+            return;
+        };
+        let inside = "xxe".len();
+        let cluster_end = "xxe\u{301}".len();
+        let (slice_i, projected) = state
+            .code_byte_to_projected(inside as u64)
+            .expect("the source byte is in the shaped slice");
+        let ranges: Vec<(usize, usize)> = state
+            .buffer
+            .line_layout(&mut state.font_system, slice_i)
+            .expect("line layout")
+            .iter()
+            .flat_map(|line| line.glyphs.iter().map(|glyph| (glyph.start, glyph.end)))
+            .collect();
+        assert!(
+            ranges
+                .iter()
+                .any(|&(start, end)| start < projected && projected < end),
+            "precondition: the byte between e and its combining mark is inside a shaped cluster; \
+             ranges={ranges:?}"
+        );
+
+        let line_start_x = state.code_byte_px(0).expect("line start").0;
+        let inside_x = state
+            .code_byte_px(inside as u64)
+            .expect("inside-cluster caret")
+            .0;
+        let cluster_end_x = state
+            .code_byte_px(cluster_end as u64)
+            .expect("cluster-end caret")
+            .0;
+        assert!(
+            inside_x > line_start_x,
+            "an inside-cluster cursor must not fall back to line start"
+        );
+        assert!(
+            (inside_x - cluster_end_x).abs() < 0.01,
+            "the unrepresentable interior position snaps to the containing cluster's end"
+        );
+    }
+
+    #[test]
+    fn caret_follow_inside_a_ligature_targets_its_visual_run() {
+        let prefix = "x".repeat(320);
+        let text = format!("{prefix}fiz");
+        let inside = prefix.len() + 1;
+        let Some(mut state) = headless_or_skip(320, 240, &text) else {
+            return;
+        };
+        state.resolved_family = "Pmacs Test Mono Two".to_owned();
+        state.reshape();
+
+        let (slice_i, projected) = state
+            .code_byte_to_projected(inside as u64)
+            .expect("the ligature byte is in the shaped slice");
+        let ranges: Vec<(usize, usize)> = state
+            .buffer
+            .line_layout(&mut state.font_system, slice_i)
+            .expect("line layout")
+            .iter()
+            .flat_map(|line| line.glyphs.iter().map(|glyph| (glyph.start, glyph.end)))
+            .collect();
+        assert!(
+            ranges
+                .iter()
+                .any(|&(start, end)| start < projected && projected < end),
+            "precondition: the generated fixture shapes fi as one cluster; ranges={ranges:?}"
+        );
+
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: inside as u64,
+        });
+        state.ensure_caret_painted();
+        assert!(
+            state.code_scroll_residual > 0.0,
+            "the ligature lives on a deep wrapped run, which must be followed"
+        );
+        assert!(
+            state.caret_painted_in_code_clip(),
+            "geometry and follow must agree on the normalized cluster boundary"
+        );
+    }
+
+    /// Acceptance 19 — family-dependent geometry on an EMPTY document:
+    /// the measured probe advance (not a shaped code glyph) drives the
+    /// gutter fallback and menu char width through the advance ratio.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: the reset re-measures the identical face
+    fn family_advance_ratio_scales_empty_document_geometry() {
+        let Some(mut state) = headless_or_skip(320, 240, "") else {
+            return;
+        };
+        // Line numbers + a context menu over the EMPTY buffer: no code
+        // glyph has ever shaped, so any advance the geometry uses must
+        // come from the probe.
+        state.line_numbers = LineNumberMode::Absolute;
+        state.menu = Some(MenuLocal {
+            rows: vec![MenuPromptRow {
+                // Long enough that the estimated width sits BETWEEN
+                // the min/max clamps at both ratios — a short label
+                // pins to MENU_MIN_WIDTH and hides the scaling.
+                label: "a context menu entry armed here".into(),
+                separator: false,
+            }],
+            active: Some(0),
+            anchor_px: (40.0, 40.0),
+        });
+        let gutter_before = state.gutter_width_px();
+        let menu_w_before = State::menu_width_px(state.menu.as_ref().unwrap(), state.fm);
+        let frame_before = state.render_offscreen();
+        state.apply_attach_message(font_facts(Some("Pmacs Test Mono Two"), None));
+        assert_eq!(state.resolved_family, "Pmacs Test Mono Two");
+        // Fixture advance 720/1000 vs JetBrains Mono 600/1000 → 1.2.
+        assert!(
+            (state.fm.advance_ratio - 1.2).abs() < 0.01,
+            "measured selected/default ratio, got {}",
+            state.fm.advance_ratio
+        );
+        assert!(
+            (state.mono_advance() - 11.52).abs() < 0.1,
+            "the measured NORMAL-face advance is authoritative on an empty \
+             document, got {}",
+            state.mono_advance()
+        );
+        assert!(
+            (state.fm.menu_char_w() - BASE_MENU_CHAR_W * 1.2).abs() < 0.05,
+            "menu hit width follows the ratio, got {}",
+            state.fm.menu_char_w()
+        );
+        assert!(
+            state.gutter_width_px() > gutter_before,
+            "the gutter reservation follows the measured advance"
+        );
+        assert!(
+            State::menu_width_px(state.menu.as_ref().unwrap(), state.fm) > menu_w_before,
+            "the menu hit width follows the measured advance"
+        );
+        state.apply_attach_message(font_facts(None, None));
+        assert_eq!(
+            state.gutter_width_px(),
+            gutter_before,
+            "reset: exact gutter"
+        );
+        assert_eq!(
+            State::menu_width_px(state.menu.as_ref().unwrap(), state.fm),
+            menu_w_before,
+            "reset: exact menu width"
+        );
+        assert_eq!(
+            state.render_offscreen(),
+            frame_before,
+            "reset restores the original frame"
+        );
+    }
+
+    /// Acceptance 12 — unresolvable and proportional families both
+    /// take the total fallback to the sanitized default.
+    #[test]
+    #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
+    fn unresolvable_and_proportional_families_fall_back() {
+        let Some(mut state) = headless_or_skip(320, 240, "text") else {
+            return;
+        };
+        let never_set = state.render_offscreen();
+        state.apply_attach_message(font_facts(Some("No Such Family Zzz"), None));
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+        assert_eq!(
+            state.render_offscreen(),
+            never_set,
+            "the unresolvable route renders byte-identically to never-set"
+        );
+        state.apply_attach_message(font_facts(Some("Pmacs Test Proportional"), None));
+        assert_eq!(
+            state.resolved_family, DEFAULT_FONT_FAMILY,
+            "a proportional family must fall back"
+        );
+        assert_eq!(
+            state.fm.advance_ratio, 1.0,
+            "the fallback is the default: ratio 1"
+        );
+        assert_eq!(
+            state.render_offscreen(),
+            never_set,
+            "the rejected route renders byte-identically to never-set"
+        );
+    }
+
+    /// Acceptance 12 — the four-style gate rejects a family whose
+    /// BOLD sibling is proportional, exactly what a normal-only
+    /// query check would wave through.
+    #[test]
+    fn four_style_gate_rejects_a_proportional_bold_sibling() {
+        let Some(mut state) = headless_or_skip(320, 240, "text") else {
+            return;
+        };
+        assert!(
+            query_normal_face(state.font_system.db(), "Pmacs Test Family")
+                .and_then(|id| state.font_system.db().face(id))
+                .is_some_and(|face| face.monospaced),
+            "precondition: the NORMAL face alone looks monospaced"
+        );
+        assert!(state.family_is_monospace_everywhere("Pmacs Test Mono Two"));
+        assert!(
+            !state.family_is_monospace_everywhere("Pmacs Test Family"),
+            "the proportional BOLD sibling must fail the four-style gate"
+        );
+        state.apply_attach_message(font_facts(Some("Pmacs Test Family"), None));
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+    }
+
+    /// Acceptance 12 — a valid second monospace family resolves,
+    /// changes the ink, and the `(None, None)` reset restores the
+    /// default frame byte-for-byte.
+    #[test]
+    fn second_monospace_family_changes_the_frame_and_reset_restores() {
+        let Some(mut state) = headless_or_skip(320, 240, "0123456789") else {
+            return;
+        };
+        let default_frame = state.render_offscreen();
+        state.apply_attach_message(font_facts(Some("Pmacs Test Mono Two"), None));
+        assert_eq!(state.resolved_family, "Pmacs Test Mono Two");
+        assert_ne!(
+            state.render_offscreen(),
+            default_frame,
+            "different outlines/advances must change the ink"
+        );
+        state.apply_attach_message(font_facts(None, None));
+        assert_eq!(state.resolved_family, DEFAULT_FONT_FAMILY);
+        assert_eq!(
+            state.render_offscreen(),
+            default_frame,
+            "the reset restores the default frame byte-for-byte"
+        );
+    }
+
+    /// Acceptance 12 — the sanitizer (parameterized, the production
+    /// path) removes exactly the non-monospace same-family
+    /// collisions: the monospaced default and unrelated families
+    /// survive.
+    #[test]
+    fn sanitizer_removes_only_same_family_proportional_collisions() {
+        let mut db = fontdb::Database::new();
+        let bold_id = *db
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(
+                TEST_FAMILY_BOLD,
+            )))
+            .first()
+            .expect("bold fixture loads");
+        let regular_id = *db
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(
+                TEST_FAMILY_REGULAR,
+            )))
+            .first()
+            .expect("regular fixture loads");
+        let unrelated_id = *db
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(
+                TEST_PROPORTIONAL,
+            )))
+            .first()
+            .expect("proportional fixture loads");
+        sanitize_font_database(&mut db, "Pmacs Test Family", regular_id);
+        assert!(
+            db.face(bold_id).is_none(),
+            "the proportional same-family BOLD collision is removed"
+        );
+        assert!(
+            db.face(regular_id).is_some(),
+            "the monospaced default survives"
+        );
+        assert!(
+            db.face(unrelated_id).is_some(),
+            "an unrelated proportional family is untouched"
         );
     }
 }
