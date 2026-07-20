@@ -23,9 +23,11 @@ Always true, independent of the handoff:
 - The checkout may be shared with the user: check `git status` for
   foreign uncommitted work before stash, checkout, or branch operations,
   and never delete untracked files you did not create.
-- `githubsucks/main` is the canonical development line. `origin/main`
-  is a release mirror and may lag substantially; never base new work on
-  it without comparing both refs.
+- The canonical development URL is
+  `https://github.com/levineuwirth/pmacs.git`; recovery docs normalize
+  it to the local alias `githubsucks`. Remote names such as `origin` are
+  machine-local and carry no authority by themselves. Bootstrap/verify
+  the alias via `docs/active-work.md` before basing new work.
 - Work is portable only after it is committed and pushed. Uncommitted
   worktree changes, untracked files, and `/tmp` dependencies do not
   travel to another machine.

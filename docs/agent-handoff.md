@@ -141,11 +141,12 @@ commands, read `docs/active-work.md` immediately after this file.
   Completing stage 3 completes Arc 4.
 - **OPEN: JSON + YAML PR #123.** The public PR branch still points to
   the original two-commit implementation (`4be2a65`). Review fixes and
-  live-provider evidence are preserved on checkpoint branch
-  `json-yaml-handoff-2026-07-20`; the real YAML-through-pmacs smoke,
-  rebase, and full gates remain. Do not mistake the PR's old green CI
-  for validation of the checkpoint. Exact recovery is in
-  `docs/active-work.md`.
+  both live-provider paths are preserved on checkpoint branch
+  `json-yaml-handoff-2026-07-20`; the real YAML-through-pmacs smoke now
+  proves auto-attach, network-free configuration, diagnostics, and
+  continued liveness against Red Hat 1.24.0. Rebase and full gates
+  remain. Do not mistake the PR's old green CI for validation of the
+  checkpoint. Exact recovery is in `docs/active-work.md`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or

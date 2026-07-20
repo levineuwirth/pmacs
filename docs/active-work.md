@@ -7,17 +7,39 @@ backlog.
 
 ## Repository authority
 
-- Canonical development remote: `githubsucks`
-  (`https://github.com/levineuwirth/pmacs.git`).
+- Canonical development URL:
+  `https://github.com/levineuwirth/pmacs.git`. This ledger uses the
+  normalized local alias `githubsucks` so its refs and recovery commands
+  are identical on every machine. Remote names are otherwise
+  machine-local: `origin` may name this canonical URL, a release mirror,
+  or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
   `githubsucks/main` @ `f8096ff` (#124 merged, protocol v17).
-- `origin/main` @ `d3fa632` is the release mirror and was 400 commits
-  behind `githubsucks/main` at the snapshot. Do not base new work on it.
+- On the transfer source, `origin/main` named a release mirror at
+  `d3fa632` and lagged badly. On the current destination, `origin` names
+  the canonical URL. This difference is why all recovery begins by
+  verifying URLs and normalizing `githubsucks` rather than trusting
+  `origin/main`.
 - The shared desktop checkout contained unrelated uncommitted work. The
   branches below were prepared in isolated worktrees; never clean or
   overwrite the shared checkout to recover them.
 
-Start on another machine with:
+Start on another machine by inspecting its remotes:
+
+```sh
+git remote -v
+git remote get-url githubsucks
+```
+
+If the second command says the alias is absent, add it; if it prints a
+different URL, stop and resolve that collision rather than overwriting an
+unknown remote:
+
+```sh
+git remote add githubsucks https://github.com/levineuwirth/pmacs.git
+```
+
+Then recover current refs:
 
 ```sh
 git fetch githubsucks --prune
@@ -37,13 +59,13 @@ If it does not, stop and repair the remote/fetch configuration.
 - Original merge base: `56eb67e`; current main is nine commits ahead.
 - Portable checkpoint branch:
   `githubsucks/json-yaml-handoff-2026-07-20`
-- Checkpoint head: `a8b7195`
+- Checkpoint head: `f99870e`
 - The checkpoint is a continuation branch for recovery, not a second
   feature and not a merge target. Finish there, then push its completed
   head to `githubsucks/json-yaml-grammar`.
 
-The checkpoint carries the unpushed review-fix set that previously lived
-only in `../pmacs-jsonyaml`:
+The checkpoint carries the transferred review-fix set plus the completed
+destination-machine continuation:
 
 - push configured settings via
   `workspace/didChangeConfiguration` immediately after `initialized`;
@@ -55,8 +77,12 @@ only in `../pmacs-jsonyaml`:
   `yaml`, `http`, `[yaml]`, `editor`, `files`;
 - corrected telemetry, schema-network, and schema-association claims;
 - PATH-gated real JSON provider integration test.
+- PATH-gated real YAML 1.24.0 integration test with SchemaStore and the
+  Kubernetes CRD catalog disabled for network-free determinism. It pins
+  YAML-specific auto-attach/initialization, a real syntax diagnostic,
+  no crash, and continued initialized state after the diagnostic.
 
-Verification already completed before transfer:
+Verification completed across the source and destination machines:
 
 - JSON provider standalone protocol smoke passed.
 - JSON provider through pmacs passed
@@ -70,19 +96,19 @@ Verification already completed before transfer:
   `yaml`, `http`, `[yaml]`, `editor`, `files`; opening the document
   caused a second scoped `[yaml]` request; invalid YAML produced a real
   parser diagnostic; shutdown exited 0 with empty stderr.
+- `m4_real_yaml_provider_pulls_config_and_reports_diagnostics` passed
+  against `/tmp/pmacs-yamlls` on the destination machine (0.36s).
+- Bite verification passed: with `builtin/runtime/lsp.lua` swapped to
+  pre-JSON/YAML `56eb67e`, the real YAML test failed at the absent YAML
+  config rather than skipping.
 
-Still required on the destination machine:
+Still required:
 
-1. Add the PATH-gated real-YAML pmacs acceptance test, mirroring the
-   JSON test. Disable SchemaStore and Kubernetes CRD catalog access in
-   the test for deterministic, network-free operation.
-2. Run it against the exact Red Hat provider and require:
-   auto-attach, initialized state, a non-empty diagnostic, and no crash.
-3. Update `docs/json-yaml-framing.md` if the live pmacs path reveals any
-   difference from the standalone evidence.
-4. Rebase the checkpoint onto current `githubsucks/main`.
-5. Run the full repository gate suite from `AGENTS.md`.
-6. Push the completed head to `githubsucks/json-yaml-grammar`; confirm
+1. Rebase the checkpoint onto current `githubsucks/main`.
+2. Run the full repository gate suite from `AGENTS.md`, putting both
+   pinned temporary provider prefixes on PATH so neither live smoke can
+   skip.
+3. Push the completed head to `githubsucks/json-yaml-grammar`; confirm
    new PR checks belong to that head. Never merge without the user's
    instruction.
 
