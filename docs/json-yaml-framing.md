@@ -1,12 +1,12 @@
 # JSON + YAML grammars — framing (side quest, highlight family)
 
-**Revision 2 — 2026-07-20. Status: PR #123 open; review-fix
+**Revision 3 — 2026-07-20. Status: PR #123 open; review-fix
 checkpoint preserved on branch `json-yaml-handoff-2026-07-20`.**
 The public PR branch still pointed to the original implementation
 `4be2a65` when this checkpoint was created. JSON provider resolution
 and its real pmacs smoke are complete; the YAML 1.24.0 standalone
-protocol smoke is complete; the real YAML-through-pmacs acceptance,
-rebase onto current main, and full gates remain.
+protocol smoke and real YAML-through-pmacs acceptance are complete;
+rebase onto current main and full gates remain.
 
 **Intent.** Add `tree-sitter-json` and `tree-sitter-yaml` grammars (plus
 their language servers) to the bundle. Two config formats that pmacs
@@ -157,8 +157,8 @@ fences resolve through the #122 engine. Acceptance proves both end to end
 3. The two configuration models are now observed: JSON consumes the
    pushed full settings object; YAML 1.24.0 pulls the five documented
    sections plus a document-scoped `[yaml]` request. The remaining bet
-   is that pmacs answers the real YAML server correctly end to end,
-   which the pending PATH-gated acceptance must prove.
+   was that pmacs answers the real YAML server correctly end to end;
+   the PATH-gated acceptance now proves that against version 1.24.0.
 
 ## Deferred (named)
 
@@ -203,18 +203,17 @@ fences resolve through the #122 engine. Acceptance proves both end to end
     pmacs, receive the pushed default config, open invalid JSON, and
     publish a syntax diagnostic. Skips when the binary is absent.
 12. `m4_real_yaml_provider_pulls_config_and_reports_diagnostics` —
-    **pending on the destination machine**. PATH-gated live smoke for
-    Red Hat `yaml-language-server@1.24.0`: auto-attach through pmacs,
-    disable SchemaStore and Kubernetes CRD catalog network access for
-    determinism, reach initialized, open invalid YAML, publish a
-    diagnostic, and remain alive.
+    PATH-gated live smoke for Red Hat `yaml-language-server@1.24.0`:
+    auto-attach through pmacs, disable SchemaStore and Kubernetes CRD
+    catalog network access for determinism, reach initialized, open
+    invalid YAML, publish a diagnostic, and remain alive.
 
 ## Risks / interactions
 
-- **LSP configuration** (Q#JY2) — JSON push and YAML standalone pulls
-  are observed. The real YAML-through-pmacs path is still pending and
-  is an explicit transfer blocker, not implied complete by source
-  inspection.
+- **LSP configuration** (Q#JY2) — JSON push, YAML standalone pulls, and
+  the real YAML-through-pmacs path are observed. Both live provider
+  tests remain PATH-gated, so release verification must put the pinned
+  binaries on PATH rather than accepting their skip paths.
 - **Themes / injections** — untouched. This is pure grammar+detection
   addition; it consumes the #122 engine, doesn't change it. No protocol
   bump.

@@ -6496,6 +6496,94 @@ fn m4_real_json_provider_receives_config_and_reports_diagnostics() {
     assert_no_lsp_crash(&mut state, "real JSON server");
 }
 
+/// PATH-gated provider smoke: drive Red Hat
+/// `yaml-language-server@1.24.0` through pmacs's default YAML config and
+/// require a syntax diagnostic for an invalid document. `SchemaStore` and
+/// the Kubernetes CRD catalog are disabled in this test so the result is
+/// deterministic and does not depend on network access. CI skips cleanly
+/// when no compatible binary is installed.
+#[test]
+fn m4_real_yaml_provider_pulls_config_and_reports_diagnostics() {
+    use pmacs::editor::EditorState;
+
+    let Ok(command) = which_binary("yaml-language-server") else {
+        eprintln!("yaml-language-server not on PATH; skipping");
+        return;
+    };
+    let command = command.display().to_string();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = std::fs::canonicalize(dir.path())
+        .expect("canonicalize")
+        .join("invalid.yaml");
+    std::fs::write(&file, b"root:\n  broken: [one,\n").expect("write invalid yaml");
+    let file_disp = file.display().to_string();
+    let uri = format!("file://{file_disp}");
+
+    let mut state = EditorState::new();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "local c = pmacs.lsp.config.yaml
+             c.command = '{command}'
+             c.settings.yaml.schemaStore = {{ enable = false }}
+             c.settings.yaml.kubernetesCRDStore = {{ enable = false }}
+             pmacs.buffer.find_or_open('{file_disp}')"
+        ))
+        .exec()
+        .expect("configure real YAML server + open file");
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.language_id=='yaml' and r.state \
+                  and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            30,
+        ),
+        "auto-attached real YAML server never reached initialized"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got_diagnostic = false;
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        got_diagnostic = state
+            .lua_host
+            .lua()
+            .load(format!("return pmacs.diag.count('{uri}') > 0"))
+            .eval()
+            .unwrap_or(false);
+        if got_diagnostic {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        got_diagnostic,
+        "real YAML server produced no diagnostic; config pulls or validation are broken"
+    );
+    assert_no_lsp_crash(&mut state, "real YAML server");
+    let still_initialized: bool = state
+        .lua_host
+        .lua()
+        .load(
+            "for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.language_id=='yaml' and r.state \
+                  and r.state.kind=='initialized' then return true end \
+             end return false",
+        )
+        .eval()
+        .expect("inspect YAML server state");
+    assert!(
+        still_initialized,
+        "real YAML server did not remain alive after publishing diagnostics"
+    );
+}
+
 /// Typing-perf: the default bundle coalesces full-document
 /// `didChange` notifications instead of sending one per keystroke
 /// (each send copies the whole buffer several times and writes

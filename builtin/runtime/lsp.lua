@@ -240,8 +240,10 @@ pmacs.lsp.config.json = pmacs.lsp.config.json or {
 -- live-observed with Red Hat `yaml-language-server@1.24.0`: its initial
 -- pull requests exactly those five sections, and opening a YAML document
 -- requests a second scoped `[yaml]` section. The standalone smoke reached
--- a real syntax diagnostic and clean shutdown; the PATH-gated
--- pmacs-through-server acceptance remains a transfer task.
+-- a real syntax diagnostic and clean shutdown. The PATH-gated pmacs
+-- acceptance also proves auto-attach, initialization, config pulls, a
+-- syntax diagnostic, and continued server liveness with both catalogs
+-- disabled for network-free determinism.
 pmacs.lsp.config.yaml = pmacs.lsp.config.yaml or {
   command = "yaml-language-server",
   args = { "--stdio" },
