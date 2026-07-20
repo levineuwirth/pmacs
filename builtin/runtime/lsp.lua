@@ -200,37 +200,57 @@ pmacs.lsp.config.zig = pmacs.lsp.config.zig or {
   args = {},
 }
 
--- JSON via the maintained `vscode-langservers-extracted` bundle
--- (`vscode-json-language-server`, NOT the stale standalone
--- `vscode-json-languageserver` npm package). Schema-driven
--- diagnostics/completion; auto-associates well-known files
--- (`package.json`, `tsconfig.json`) via its built-in schema store. It
--- pulls `workspace/configuration` for the `json` and `http` sections, so
--- both ship present-not-null (empty ⇒ server defaults). The underlying
--- Microsoft server is MIT with no telemetry path; its only outbound
--- behavior is fetching remote `$schema` content, LEFT ENABLED by default
--- (disabling via `handledSchemaProtocols = {"file"}` would break remote
--- schemas without a `vscode/content` implementation). Sections are
--- derived from the server source/docs — the binary is not installed on
--- this build machine to observe live; verify where it is present.
+-- JSON via the VS Code JSON server, binary `vscode-json-language-server`.
+-- It is a PUSH-model server: it reads config from
+-- `workspace/didChangeConfiguration` (the daemon now sends one after
+-- `initialized`) and does NOT issue `workspace/configuration` pulls, so
+-- without that push these settings would be inert. `json.validate.enable`
+-- is set explicitly true — the server treats a MISSING value as false, so
+-- an empty `json = {}` would silently disable validation. Schema
+-- retrieval performs NETWORK ACCESS for remote `$schema` URLs (left
+-- enabled; `handledSchemaProtocols = {"file"}` would disable it but break
+-- remote schemas without a `vscode/content` impl). Note: the server does
+-- NOT auto-associate `package.json`/`tsconfig.json` — it starts with empty
+-- contributions; explicit `$schema` refs or configured `json.schemas` /
+-- a `json/schemaAssociations` push (not implemented) are required.
+-- Provider: pin `@t1ckbase/vscode-langservers-extracted@2.0.2`
+-- (`npm install -g @t1ckbase/vscode-langservers-extracted@2.0.2`).
+-- Its published payload bundles the JSON server from VS Code 1.129.0,
+-- preserves this command name, and was live-smoked through initialize →
+-- config push → invalid-JSON diagnostic → shutdown. The older unscoped
+-- package is stale and the current `@zed-industries` payload has a broken
+-- JSON launcher; neither is the recommended provider.
 pmacs.lsp.config.json = pmacs.lsp.config.json or {
   command = "vscode-json-language-server",
   args = { "--stdio" },
-  settings = { json = {}, http = {} },
+  settings = {
+    json = { validate = { enable = true } },
+    http = {},
+  },
 }
 
--- YAML via Red Hat `yaml-language-server`. It pulls
--- `workspace/configuration` for `yaml`, `http`, and `redhat.telemetry`;
--- all three ship present-not-null, with Red Hat telemetry disabled by
--- default (privacy-respecting; inert if the server never asks). Sections
--- derived from source/docs — verify against an installed binary.
+-- YAML via Red Hat `yaml-language-server`. On
+-- `workspace/didChangeConfiguration` (now pushed after `initialized`) it
+-- reads the `yaml`, `http`, `[yaml]`, `editor`, and `files` sections — all
+-- ship present-not-null (empty ⇒ server defaults). SchemaStore / remote
+-- schema retrieval performs NETWORK ACCESS by default. The standalone
+-- server does not upload telemetry itself — it emits `telemetry/event`
+-- notifications to its client, and pmacs has no telemetry uploader, so a
+-- `redhat.telemetry` setting would be inert and is not shipped. Sections
+-- live-observed with Red Hat `yaml-language-server@1.24.0`: its initial
+-- pull requests exactly those five sections, and opening a YAML document
+-- requests a second scoped `[yaml]` section. The standalone smoke reached
+-- a real syntax diagnostic and clean shutdown; the PATH-gated
+-- pmacs-through-server acceptance remains a transfer task.
 pmacs.lsp.config.yaml = pmacs.lsp.config.yaml or {
   command = "yaml-language-server",
   args = { "--stdio" },
   settings = {
     yaml = {},
     http = {},
-    redhat = { telemetry = { enabled = false } },
+    ["[yaml]"] = {},
+    editor = {},
+    files = {},
   },
 }
 

@@ -325,13 +325,15 @@ grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
 literals, doc-comment code); modeline detection as a 5th layer
 (`-*- mode: … -*-` / `# vim: ft=…`);
 byte-accurate multibyte cursor placement in `move_active_cursor_to`
-(still steps one codepoint per LSP byte column). **JSON + YAML grammars
-LANDED** (grammar-gap style, `tree-sitter-json`/`-yaml`; LSP configs
-`vscode-json-language-server` / `yaml-language-server`; YAML `---` and
-TOML `+++` markdown frontmatter now highlight via the #122 engine). A
-full Jupyter `.ipynb` setup (reader → editable → kernel execution) has
-both grammar prerequisites in place now (JSON + injections); what remains
-is the reader → editable → kernel arc itself, NOT a one-shot.
+(still steps one codepoint per LSP byte column). **JSON + YAML PR #123
+OPEN** (grammar-gap style, `tree-sitter-json`/`-yaml`; LSP configs
+`vscode-json-language-server` with provider pin
+`@t1ckbase/vscode-langservers-extracted@2.0.2`, plus
+`yaml-language-server`). Review fixes are preserved on
+`json-yaml-handoff-2026-07-20`; the real YAML-through-pmacs smoke,
+rebase, and full gates remain. Once merged, YAML `---` and TOML `+++`
+markdown frontmatter highlight via the #122 engine and the Jupyter
+reader → editable → kernel arc has both grammar prerequisites.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
 Themes (full list in theme-faces framing rev 9 "Deferred (named)"):

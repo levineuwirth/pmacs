@@ -2497,6 +2497,25 @@ impl LspManager {
         }
     }
 
+    /// Push the client's configured `settings` via
+    /// `workspace/didChangeConfiguration` immediately after `initialized`.
+    /// Push-model servers — notably the VS Code JSON server, which listens
+    /// for this notification and does NOT issue `workspace/configuration`
+    /// pulls — only learn their config this way; pull-model servers
+    /// (pyright, clangd, gopls) ignore it and pull instead, so it is safe
+    /// to send unconditionally. No-op when no `settings` are configured.
+    fn push_initial_configuration(&self, sid: LspServerId) {
+        if let Some(client) = self.clients.get(&sid)
+            && let Some(settings) = client.spec.settings.clone()
+        {
+            let cfg = make_notification(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": settings }),
+            );
+            let _ = send_frame_to(&self.supervisor, client, &cfg);
+        }
+    }
+
     fn handle_response(
         &mut self,
         sid: LspServerId,
@@ -2552,6 +2571,9 @@ impl LspManager {
             if let Some(client) = self.clients.get(&sid) {
                 let _ = send_frame_to(&self.supervisor, client, &body);
             }
+            // Push the configured settings right after `initialized`
+            // (before any deferred `didOpen`).
+            self.push_initial_configuration(sid);
             // T M4.5 Option B: honour the server's negotiated
             // `general.positionEncoding`. Absent ⇒ LSP spec default
             // (UTF-16). We advertised `["utf-8","utf-16"]`, so a

@@ -1,5 +1,13 @@
 # JSON + YAML grammars — framing (side quest, highlight family)
 
+**Revision 2 — 2026-07-20. Status: PR #123 open; review-fix
+checkpoint preserved on branch `json-yaml-handoff-2026-07-20`.**
+The public PR branch still pointed to the original implementation
+`4be2a65` when this checkpoint was created. JSON provider resolution
+and its real pmacs smoke are complete; the YAML 1.24.0 standalone
+protocol smoke is complete; the real YAML-through-pmacs acceptance,
+rebase onto current main, and full gates remain.
+
 **Intent.** Add `tree-sitter-json` and `tree-sitter-yaml` grammars (plus
 their language servers) to the bundle. Two config formats that pmacs
 currently renders as plain text, and — the reason this is the natural
@@ -76,30 +84,51 @@ Root kinds (pinned by the ABI test): json `document`, yaml `stream`.
 
 ### Q#JY2 — LSP configs: `vscode-json-language-server` + `yaml-language-server`
 
-- **json:** `vscode-json-language-server --stdio` from the **maintained
-  `vscode-langservers-extracted` bundle** — NOT the stale standalone
-  `vscode-json-languageserver` npm package. Schema-driven
-  diagnostics/completion; auto-associates well-known files
-  (`package.json`, `tsconfig.json`) via its schema store. The underlying
-  Microsoft JSON server is **MIT-licensed with no telemetry path**; its
-  only relevant outbound behavior is fetching remote `$schema` content.
-  **Remote schema retrieval stays enabled by default** — setting
-  `handledSchemaProtocols = {"file"}` would disable server-side HTTP but
-  then remote schemas fail unless pmacs implements the `vscode/content`
-  request (out of scope), so we leave it on and document the behavior.
-- **yaml:** `yaml-language-server --stdio` (Red Hat).
+- **json:** binary `vscode-json-language-server --stdio` (the VS Code
+  JSON server). It is **push-model**: it reads config from
+  `workspace/didChangeConfiguration` and does **not** issue
+  `workspace/configuration` pulls — so pmacs, which previously only
+  *answered* pulls, must now also **push** a `didChangeConfiguration`
+  after `initialized` (a general LSP-client fix in `src/lsp.rs`; pull
+  servers ignore it). `json.validate.enable` is set **explicitly true**
+  — a missing value reads as false and silently disables validation, so
+  an empty `json = {}` is wrong. The server does **not** auto-associate
+  `package.json`/`tsconfig.json` (it starts with empty contributions);
+  explicit `$schema` refs or configured `json.schemas` / a
+  `json/schemaAssociations` push (not implemented) are required. Schema
+  retrieval performs **network access** for remote `$schema` URLs, left
+  enabled (`handledSchemaProtocols = {"file"}` would disable it but break
+  remote schemas without a `vscode/content` impl). **Provider:** pin
+  `@t1ckbase/vscode-langservers-extracted@2.0.2`
+  (`npm install -g @t1ckbase/vscode-langservers-extracted@2.0.2`). Its
+  published payload bundles the JSON server from VS Code 1.129.0,
+  preserves the `vscode-json-language-server` command, and was
+  live-smoked through initialize → config push → invalid-JSON diagnostic
+  → shutdown. The unscoped package is stale; the current
+  `@zed-industries` payload has a broken JSON launcher, so neither is the
+  recommended provider.
+- **yaml:** `yaml-language-server --stdio` (Red Hat). Its settings handler
+  reads the sections **`yaml`, `http`, `[yaml]`, `editor`, `files`** (via
+  `didChangeConfiguration` / pulls) — all ship present-not-null. It does
+  **not** upload telemetry itself (it emits `telemetry/event` to the
+  client; pmacs has no uploader), so a `redhat.telemetry` setting is inert
+  and is not shipped. SchemaStore / remote schema retrieval performs
+  **network access** by default.
 
 Both servers stay **external** (installed by the user), adding **no
 licensing payload** to pmacs; if either is ever bundled, retain its MIT +
-dependency notices. Both **pull `workspace/configuration`** (the
-mechanism that bit CMake in #117), so the config ships **non-nil empty
-settings** matching the taplo/cmake precedent. **Implementation verifies
-the exact `workspace/configuration` sections each real server requests
-and pins those sections in the config + tests** — not merely that a
-non-null settings table exists (if a server is not installed on the
-build machine, the sections are derived from its source/docs and the
-gap is noted, per the basedpyright machine-caveat precedent). Servers
-activate only if installed; the grammar is the always-on value.
+dependency notices. The exact sections are **pinned in the config + a
+test** (not merely "some non-nil table exists"). The pinned JSON
+provider was installed into an isolated temporary prefix and
+live-smoked through pmacs. Red Hat `yaml-language-server@1.24.0` was
+also installed in an isolated prefix and live-smoked over stdio: its
+initial configuration pull was exactly `yaml`, `http`, `[yaml]`,
+`editor`, `files`; opening the document caused a second scoped
+`[yaml]` pull; invalid YAML produced a parser diagnostic; shutdown was
+clean. The remaining gap is the same provider through pmacs.
+Config-push delivery is also proven deterministically through the fake
+server's config sink. Servers activate only if installed; the grammar
+is the always-on value.
 
 ### Q#JY3 — Filetype fallback + alias entries
 
@@ -125,9 +154,11 @@ fences resolve through the #122 engine. Acceptance proves both end to end
    languages — verified by a build; the ABI test is the runtime pin.
 2. The frontmatter/fence synergy needs zero engine changes — it falls out
    of #122 + the markdown injection query.
-3. The LSP `workspace/configuration` shape is the only real unknown;
-   empty-but-present settings + implementation-time verification against
-   the real servers is the mitigation (the #117 CMake lesson).
+3. The two configuration models are now observed: JSON consumes the
+   pushed full settings object; YAML 1.24.0 pulls the five documented
+   sections plus a document-scoped `[yaml]` request. The remaining bet
+   is that pmacs answers the real YAML server correctly end to end,
+   which the pending PATH-gated acceptance must prove.
 
 ## Deferred (named)
 
@@ -159,17 +190,31 @@ fences resolve through the #122 engine. Acceptance proves both end to end
    highlights; **the headline synergy with #122**.
 8. `json_fence_injects_in_markdown` — a ` ```json ` fence yields a `json`
    child layer.
-9. LSP config tests (m4-style): `pmacs.lsp.config.json`/`.yaml` present
-   with the expected command/args (json uses
-   `vscode-json-language-server`), and the settings table carries
-   **exactly the `workspace/configuration` sections each server
-   requests** — pinned, not merely asserted non-nil.
+9. `m4_json_yaml_lsp_configs_pin_command_and_sections` — the configs
+   pin the binary + `json.validate.enable = true` + the exact section
+   sets (json: `json`,`http`; yaml: `yaml`,`http`,`[yaml]`,`editor`,
+   `files`; no inert `redhat.telemetry`) — pinned, not merely non-nil.
+10. `m4_5_initial_config_pushed_via_did_change_configuration` — the
+    daemon PUSHES `workspace/didChangeConfiguration` after `initialized`
+    (the push-model delivery path), verified through the fake server's
+    config sink. Without it, push-only servers' settings are inert.
+11. `m4_real_json_provider_receives_config_and_reports_diagnostics` —
+    PATH-gated live smoke for the pinned provider: initialize through
+    pmacs, receive the pushed default config, open invalid JSON, and
+    publish a syntax diagnostic. Skips when the binary is absent.
+12. `m4_real_yaml_provider_pulls_config_and_reports_diagnostics` —
+    **pending on the destination machine**. PATH-gated live smoke for
+    Red Hat `yaml-language-server@1.24.0`: auto-attach through pmacs,
+    disable SchemaStore and Kubernetes CRD catalog network access for
+    determinism, reach initialized, open invalid YAML, publish a
+    diagnostic, and remain alive.
 
 ## Risks / interactions
 
-- **LSP `workspace/configuration`** (Q#JY2) — the real risk; verified
-  against the servers at implementation time, empty-present settings as
-  the safe default.
+- **LSP configuration** (Q#JY2) — JSON push and YAML standalone pulls
+  are observed. The real YAML-through-pmacs path is still pending and
+  is an explicit transfer blocker, not implied complete by source
+  inspection.
 - **Themes / injections** — untouched. This is pure grammar+detection
   addition; it consumes the #122 engine, doesn't change it. No protocol
   bump.
