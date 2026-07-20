@@ -144,9 +144,10 @@ commands, read `docs/active-work.md` immediately after this file.
   both live-provider paths are preserved on checkpoint branch
   `json-yaml-handoff-2026-07-20`; the real YAML-through-pmacs smoke now
   proves auto-attach, network-free configuration, diagnostics, and
-  continued liveness against Red Hat 1.24.0. Rebase and full gates
-  remain. Do not mistake the PR's old green CI for validation of the
-  checkpoint. Exact recovery is in `docs/active-work.md`.
+  continued liveness against Red Hat 1.24.0. The checkpoint is rebased
+  onto `f8096ff`; full gates remain. Do not mistake the PR's old green
+  CI for validation of the checkpoint. Exact recovery is in
+  `docs/active-work.md`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or

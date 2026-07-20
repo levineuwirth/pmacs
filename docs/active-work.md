@@ -59,7 +59,7 @@ If it does not, stop and repair the remote/fetch configuration.
 - Original merge base: `56eb67e`; current main is nine commits ahead.
 - Portable checkpoint branch:
   `githubsucks/json-yaml-handoff-2026-07-20`
-- Checkpoint head: `f99870e`
+- Checkpoint head: `3ef5e2e`
 - The checkpoint is a continuation branch for recovery, not a second
   feature and not a merge target. Finish there, then push its completed
   head to `githubsucks/json-yaml-grammar`.
@@ -101,14 +101,16 @@ Verification completed across the source and destination machines:
 - Bite verification passed: with `builtin/runtime/lsp.lua` swapped to
   pre-JSON/YAML `56eb67e`, the real YAML test failed at the absent YAML
   config rather than skipping.
+- The four-commit checkpoint rebased cleanly onto canonical
+  `githubsucks/main` @ `f8096ff`; the rewritten portable head was pushed
+  with an exact force-with-lease.
 
 Still required:
 
-1. Rebase the checkpoint onto current `githubsucks/main`.
-2. Run the full repository gate suite from `AGENTS.md`, putting both
+1. Run the full repository gate suite from `AGENTS.md`, putting both
    pinned temporary provider prefixes on PATH so neither live smoke can
    skip.
-3. Push the completed head to `githubsucks/json-yaml-grammar`; confirm
+2. Push the completed head to `githubsucks/json-yaml-grammar`; confirm
    new PR checks belong to that head. Never merge without the user's
    instruction.
 
