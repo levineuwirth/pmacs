@@ -4,6 +4,10 @@ Date: 2026-07-07. Produced from a five-way codebase/docs/memory sweep
 (core editing + persistence, LSP surface, GPU parity, extensibility +
 terminal, deferred-work inventory across all framing docs).
 
+> **Historical planning snapshot.** Several arcs below have since
+> landed. Use `docs/agent-handoff.md` for durable current state and
+> `docs/active-work.md` for open branches and recovery instructions.
+
 **Decision (2026-07-07): push Arc 1 (LSP utility surface), with Arc 2
 (editing table stakes) items interleaved between sub-arcs.**
 

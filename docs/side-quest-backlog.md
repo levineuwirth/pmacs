@@ -42,9 +42,11 @@ The direct continuation of the #114–#118 grammar/detection stack.
   (`<script>`/`<style>`, template literals, doc-comment code).
 - **Modeline detection** — a 5th detection layer (`-*- mode: … -*-`,
   `# vim: ft=…`) after extension → filetype → filename → shebang.
-- **JSON + YAML** grammars + LSP (`tree-sitter-json` +
-  vscode-json-languageserver; yaml-language-server). JSON is also the
-  prerequisite for the notebook path.
+- **JSON + YAML — PR #123 open.** Grammars and LSP configs exist on the
+  feature line; review fixes are preserved on
+  `json-yaml-handoff-2026-07-20`. A real YAML-through-pmacs smoke,
+  rebase, and full gates remain before review resumes. JSON is also the
+  prerequisite for the notebook path; see `docs/active-work.md`.
 - **More grammars for languages with neither grammar nor LSP** — ruby,
   php, html, css, sql, etc.
 - **Grapheme / combining-mark awareness** in the text view
@@ -211,8 +213,8 @@ domain excluded — see below), `editor.rs` split (7 k lines),
 
 ## Excluded — themes / faces main quest (seen, routed elsewhere)
 
-`pmacs.gpu.set_font` + the statusline-segment API; background/selection
-theming; per-peer stable presence colors; exact quad colors per
+The statusline-segment API (Arc 4 stage 3; framing awaiting review);
+background/selection theming; per-peer stable presence colors; exact quad colors per
 decoration kind; GPU gutter background layer / wash recolor / chrome
 bold-italic-underline; current-line highlight refinements; multi-server
 semantic-token *style* blending; the compile-mode **severity→color**
@@ -229,8 +231,8 @@ guides (visual, not color).
 north-star items is done, so the highest-leverage board is now:
 
 1. **Config registry** — frees ~5 editing/indent/comment features at once.
-2. **JSON (+ YAML) grammar** — the one remaining gate on the Jupyter
-   `.ipynb` path now that injections exist, and a clean highlight one-shot.
+2. **Finish JSON + YAML PR #123** — the one remaining gate on the
+   Jupyter `.ipynb` path now that injections exist.
 3. **Locals-query processing** — restores `.builtin` styling for
    non-shadowed builtins, the last rough edge of the highlight stack.
 

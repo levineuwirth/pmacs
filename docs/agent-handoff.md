@@ -1,7 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-15, after multi-language injections (#122)
-merged; also carries the #120 themes-stage-1 snapshot.** This file is the
+**Last updated: 2026-07-20, after the cross-machine continuity audit;
+main still reflects GPU font preferences (#124), themes stage 1 (#120),
+and injections (#122).** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -9,11 +10,14 @@ your persistent memory from it, and **update this file (and commit
 it) whenever project state changes materially** — the next machine
 reads it the way you just did.
 
-## 1. Where the project stands (2026-07-15)
+For volatile branches, checkpoints, verification, and recovery
+commands, read `docs/active-work.md` immediately after this file.
 
-- `main` @ `5e73966` (multi-language injections #122 merged; #120
-  themes stage 1 below it), protocol **v16** (`SUPPORTED=[6..16]`;
-  v15→16 shipped the `ThemeFacts` channel — injections added no wire).
+## 1. Where the project stands (2026-07-20)
+
+- `main` @ `f8096ff` (GPU font preferences #124 merged), protocol
+  **v17** (`SUPPORTED=[6..17]`; v15→16 shipped `ThemeFacts`, v16→17
+  shipped `FontFacts`).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -114,12 +118,38 @@ reads it the way you just did.
   survive both sides) and the **store-sourced diag-count freeze**
   (per-URI severity totals in `DiagnosticStore`, O(1), survive
   `mark_stale`).
-- **NEXT: themes stage 2 — `pmacs.gpu.set_font` at protocol v17**
-  (shipped versions are never reused; the `pmacs-gpu-design.md:299`
-  no-wire-change claim is superseded and must be corrected in the
-  stage-2 framing). Glyphon font reload was flagged HARD. Stage 3
-  after: Lua statusline-segment API (segments carry face names).
-  Workflow as always: framing → user approval → branch → gates → PR.
+- **Themes (Arc 4) stage 2 LANDED — #124 merged after the complete
+  behavioral review** (`docs/gpu-set-font-framing.md` rev 5):
+  `pmacs.gpu.set_font { family?, size? }` is a live global preference;
+  authoritative bufferless `FontFacts` is gated at protocol v17.
+  GPU family resolution is frontend-local and fail-closed to a
+  sanitized monospace default across normal/bold/italic queries;
+  metrics for all seven glyphon buffers derive atomically from one
+  logical-pixel size. The visual-run caret substrate normalizes
+  source bytes through adornments and shaped clusters (including
+  combining sequences/ligatures), preserves deliberately scrolled-away
+  viewports, and reflows on font, gutter, minimap, text, CRDT, resize,
+  and snapshot geometry changes. Test fixtures enter fontdb before
+  `FontSystem` construction; alternate advances are measured across
+  complete shaped runs, not sampled glyphs.
+- **NEXT: themes stage 3 — Lua statusline-segment API.**
+  Revision 1 is preserved on branch `statusline-segments` and awaits
+  review. It scopes additive per-window modeline providers, face-name
+  segments, dynamic `ThemeFacts` inventory, and a new v18
+  `StatuslineSegments` channel; the existing LSP status tracker is the
+  first built-in provider. Approval → implementation → gates → PR.
+  Completing stage 3 completes Arc 4.
+- **OPEN: JSON + YAML PR #123.** The public PR branch still points to
+  the original two-commit implementation (`4be2a65`). Review fixes and
+  live-provider evidence are preserved on checkpoint branch
+  `json-yaml-handoff-2026-07-20`; the real YAML-through-pmacs smoke,
+  rebase, and full gates remain. Do not mistake the PR's old green CI
+  for validation of the checkpoint. Exact recovery is in
+  `docs/active-work.md`.
+- **PARKED: kill-ring browser + persistence.** Revision 2 framing is
+  preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
+  stale and must be repeated before implementation. No PR or
+  implementation is active.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
@@ -238,8 +268,9 @@ buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
 **Protocol** — encoding-breaking bumps are deliberate and versioned
-(`SUPPORTED=[6..15]`). v15 = `CompletionPopup` + `StatusFacts.message`.
-New wire surface ⇒ bump + both-frontends support + acceptance.
+(`SUPPORTED=[6..17]`). v15 = `CompletionPopup` +
+`StatusFacts.message`; v16 = `ThemeFacts`; v17 = `FontFacts`. New wire
+surface ⇒ bump + both-frontends support + acceptance.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),
@@ -323,7 +354,9 @@ runtime/Lua-registered languages (v1 resolves only against
 `BUILTIN_LANGUAGES`), and the next injection *consumers* gated on new
 grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
 literals, doc-comment code); modeline detection as a 5th layer
-(`-*- mode: … -*-` / `# vim: ft=…`); JSON/YAML grammars+LSP;
+  (`-*- mode: … -*-` / `# vim: ft=…`); JSON/YAML grammars+LSP
+  (PR #123 open; checkpoint and remaining verification are in
+  `docs/active-work.md`);
 byte-accurate multibyte cursor placement in `move_active_cursor_to`
 (still steps one codepoint per LSP byte column). A full Jupyter `.ipynb`
 setup (reader → editable → kernel execution) is a real arc now gated on
@@ -358,5 +391,7 @@ Don't expect them in a clone; on the desktop, never delete them.
 When a PR merges, an arc opens/closes, or a decision lands: edit the
 snapshot (§1), append lessons (§5) and deferrals (§6) as they arise,
 bump the date line at the top, and commit — usually riding the same PR
-as the work. Keep it under ~250 lines: this is a briefing, not a log;
-prune sections that stop being true.
+as the work. Keep durable architecture here; put branch hashes,
+machine-local tools, incomplete verification, and recovery commands in
+`docs/active-work.md`. This is a briefing, not a log: prune sections
+that stop being true.
