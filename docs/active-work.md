@@ -130,12 +130,13 @@ Verification completed across the source and destination machines:
 - The completed head was pushed to `githubsucks/json-yaml-grammar` with
   an exact force-with-lease. PR #123 is open against `main` at full OID
   `5c202c54c19c05b0824812a578463ec082810981`; fresh CI run
-  `29778967156` was created for that head.
+  `29778967156` completed successfully for that head: all 12 jobs passed
+  (format; LuaJIT/Lua 5.4 lint and Linux/macOS tests; headless GPU; and
+  M1/M4/M5/M6 gates).
 
 Still required:
 
-1. Let CI run `29778967156` finish and address any findings.
-2. Await user review. Never merge without the user's instruction.
+1. Await user review. Never merge without the user's instruction.
 
 Provider setup is intentionally machine-local:
 

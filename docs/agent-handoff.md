@@ -144,9 +144,9 @@ commands, read `docs/active-work.md` immediately after this file.
   include config push delivery, corrected provider/config claims, and
   both live-provider paths; the real YAML-through-pmacs smoke proves
   auto-attach, network-free configuration, diagnostics, and continued
-  liveness against Red Hat 1.24.0. Fresh CI is running for the exact
-  public head; awaiting CI and user review. Exact recovery is in
-  `docs/active-work.md`.
+  liveness against Red Hat 1.24.0. CI run `29778967156` passed all 12
+  jobs for the exact public head; awaiting user review. Exact recovery
+  is in `docs/active-work.md`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or
