@@ -59,7 +59,7 @@ If it does not, stop and repair the remote/fetch configuration.
 - Original merge base: `56eb67e`; current main is nine commits ahead.
 - Portable checkpoint branch:
   `githubsucks/json-yaml-handoff-2026-07-20`
-- Checkpoint head: `3ef5e2e`
+- Checkpoint head: `5c202c5`
 - The checkpoint is a continuation branch for recovery, not a second
   feature and not a merge target. Finish there, then push its completed
   head to `githubsucks/json-yaml-grammar`.
@@ -104,6 +104,10 @@ Verification completed across the source and destination machines:
 - The four-commit checkpoint rebased cleanly onto canonical
   `githubsucks/main` @ `f8096ff`; the rewritten portable head was pushed
   with an exact force-with-lease.
+- The first post-rebase Clippy pass found one `doc_markdown` warning in
+  the new YAML test comment. The backtick-only correction was amended
+  into the test commit and pushed at the checkpoint head above; the gate
+  is being rerun.
 
 Still required:
 
