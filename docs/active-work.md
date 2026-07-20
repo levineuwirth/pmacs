@@ -37,6 +37,7 @@ If it does not, stop and repair the remote/fetch configuration.
 - Original merge base: `56eb67e`; current main is nine commits ahead.
 - Portable checkpoint branch:
   `githubsucks/json-yaml-handoff-2026-07-20`
+- Checkpoint head: `a8b7195`
 - The checkpoint is a continuation branch for recovery, not a second
   feature and not a merge target. Finish there, then push its completed
   head to `githubsucks/json-yaml-grammar`.
@@ -107,9 +108,13 @@ git worktree add --track \
   githubsucks/json-yaml-handoff-2026-07-20
 ```
 
+If that local branch name already exists, omit `--track -b ...` and
+give the existing local branch as the final argument.
+
 ## Active lane: Arc 4 stage 3 — statusline segments
 
 - Portable branch: `githubsucks/statusline-segments`
+- Framing head: `432e4d4`
 - State: framing only, revision 1, based on `f8096ff` / protocol v17.
 - Status: awaiting user review. No implementation and no PR.
 - Scope: composable per-window Lua modeline providers, dynamic
@@ -130,6 +135,7 @@ git worktree add --track \
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
+- Parked framing head: `503c489`
 - State: framing only, revision 2; no implementation and no PR.
 - Status: explicitly parked by the user on 2026-07-20.
 - Its original scout was based on `0efb5cd`. The preserved framing marks
