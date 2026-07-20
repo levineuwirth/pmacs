@@ -55,14 +55,15 @@ If it does not, stop and repair the remote/fetch configuration.
 
 - PR: <https://github.com/levineuwirth/pmacs/pull/123>
 - Public PR branch: `githubsucks/json-yaml-grammar`
-- Public PR head before the transfer checkpoint: `4be2a65`
-- Original merge base: `56eb67e`; current main is nine commits ahead.
+- Public PR head: `5c202c5`
+- Original merge base was `56eb67e`; the completed branch is rebased onto
+  canonical main `f8096ff`.
 - Portable checkpoint branch:
   `githubsucks/json-yaml-handoff-2026-07-20`
 - Checkpoint head: `5c202c5`
 - The checkpoint is a continuation branch for recovery, not a second
-  feature and not a merge target. Finish there, then push its completed
-  head to `githubsucks/json-yaml-grammar`.
+  feature and not a merge target. Its completed head now exactly matches
+  `githubsucks/json-yaml-grammar`.
 
 The checkpoint carries the transferred review-fix set plus the completed
 destination-machine continuation:
@@ -119,14 +120,22 @@ Verification completed across the source and destination machines:
     real JSON and real YAML tests both ran and passed;
   - `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 102 passed against a
     real GPU device.
+- `cargo test --workspace -- --skip basedpyright` passed as one
+  pipefail-protected invocation with both pinned providers on PATH; its
+  complete machine-local log is
+  `/tmp/pmacs-json-yaml-workspace-5c202c5.log`, and the log confirms both
+  live provider tests ran and passed.
+- Final-head `cargo fmt --check`, `git diff --check`, and clean-worktree
+  audit passed.
+- The completed head was pushed to `githubsucks/json-yaml-grammar` with
+  an exact force-with-lease. PR #123 is open against `main` at full OID
+  `5c202c54c19c05b0824812a578463ec082810981`; fresh CI run
+  `29778967156` was created for that head.
 
 Still required:
 
-1. Run the final one-invocation workspace sweep with basedpyright skipped,
-   retain its full log, then run `git diff --check`.
-2. Push the completed head to `githubsucks/json-yaml-grammar`; confirm
-   new PR checks belong to that head. Never merge without the user's
-   instruction.
+1. Let CI run `29778967156` finish and address any findings.
+2. Await user review. Never merge without the user's instruction.
 
 Provider setup is intentionally machine-local:
 

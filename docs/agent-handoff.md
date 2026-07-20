@@ -139,14 +139,13 @@ commands, read `docs/active-work.md` immediately after this file.
   `StatuslineSegments` channel; the existing LSP status tracker is the
   first built-in provider. Approval → implementation → gates → PR.
   Completing stage 3 completes Arc 4.
-- **OPEN: JSON + YAML PR #123.** The public PR branch still points to
-  the original two-commit implementation (`4be2a65`). Review fixes and
-  both live-provider paths are preserved on checkpoint branch
-  `json-yaml-handoff-2026-07-20`; the real YAML-through-pmacs smoke now
-  proves auto-attach, network-free configuration, diagnostics, and
-  continued liveness against Red Hat 1.24.0. The checkpoint is rebased
-  onto `f8096ff`; full gates remain. Do not mistake the PR's old green
-  CI for validation of the checkpoint. Exact recovery is in
+- **OPEN: JSON + YAML PR #123.** Public and checkpoint branches both
+  point to fully gated `5c202c5`, rebased onto `f8096ff`. Review fixes
+  include config push delivery, corrected provider/config claims, and
+  both live-provider paths; the real YAML-through-pmacs smoke proves
+  auto-attach, network-free configuration, diagnostics, and continued
+  liveness against Red Hat 1.24.0. Fresh CI is running for the exact
+  public head; awaiting CI and user review. Exact recovery is in
   `docs/active-work.md`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
