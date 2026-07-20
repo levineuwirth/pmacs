@@ -106,14 +106,24 @@ Verification completed across the source and destination machines:
   with an exact force-with-lease.
 - The first post-rebase Clippy pass found one `doc_markdown` warning in
   the new YAML test comment. The backtick-only correction was amended
-  into the test commit and pushed at the checkpoint head above; the gate
-  is being rerun.
+  into the test commit and pushed at the checkpoint head above; the
+  standalone rerun passed.
+- Post-rebase gates completed on checkpoint `5c202c5`:
+  - `cargo fmt --check` passed;
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed as its
+    own step;
+  - `cargo test --lib`: 1,594 passed, 3 ignored;
+  - `cargo test --lib --features crdt`: 1,768 passed, 3 ignored;
+  - `cargo test --test m4_acceptance -- --skip basedpyright` with both
+    pinned providers on PATH: 114 passed, 3 ignored, 1 filtered; the
+    real JSON and real YAML tests both ran and passed;
+  - `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 102 passed against a
+    real GPU device.
 
 Still required:
 
-1. Run the full repository gate suite from `AGENTS.md`, putting both
-   pinned temporary provider prefixes on PATH so neither live smoke can
-   skip.
+1. Run the final one-invocation workspace sweep with basedpyright skipped,
+   retain its full log, then run `git diff --check`.
 2. Push the completed head to `githubsucks/json-yaml-grammar`; confirm
    new PR checks belong to that head. Never merge without the user's
    instruction.
