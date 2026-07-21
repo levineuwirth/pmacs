@@ -1,8 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after JSON/YAML (#123) merged and the
-cross-machine continuity audit; main also reflects GPU font preferences
-(#124), themes stage 1 (#120), and injections (#122).** This file is the
+**Last updated: 2026-07-21, after the statusline stage-3 Revision 2
+review update, JSON/YAML (#123) merge, and cross-machine continuity
+audit; main also reflects GPU font preferences (#124), themes stage 1
+(#120), and injections (#122).** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -143,12 +144,13 @@ commands, read `docs/active-work.md` immediately after this file.
   `FontSystem` construction; alternate advances are measured across
   complete shaped runs, not sampled glyphs.
 - **NEXT: themes stage 3 — Lua statusline-segment API.**
-  Revision 1 is preserved on branch `statusline-segments` and awaits
-  review. It scopes additive per-window modeline providers, face-name
-  segments, dynamic `ThemeFacts` inventory, and a new v18
-  `StatuslineSegments` channel; the existing LSP status tracker is the
-  first built-in provider. Approval → implementation → gates → PR.
-  Completing stage 3 completes Arc 4.
+  Revision 2 is preserved on branch `statusline-segments`, re-scouted
+  against `bb17ec9` with no relevant substrate drift, and awaits review.
+  It scopes additive per-window modeline providers, face-name segments,
+  dynamic `ThemeFacts` inventory, and a new v18 `StatuslineSegments`
+  channel; the existing LSP status tracker is the first built-in
+  provider. Approval → implementation → gates → PR. Completing stage 3
+  completes Arc 4.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or
