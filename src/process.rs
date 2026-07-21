@@ -753,29 +753,36 @@ impl TermStatus {
 }
 
 /// Map `libc::strsignal` description strings (as surfaced by
-/// `portable-pty`) to symbolic SIGFOO names. Unknown descriptions pass
-/// through unchanged — better to surface an unfamiliar string than to
-/// fabricate a wrong name. Covers every signal in
+/// `portable-pty`) to symbolic SIGFOO names. Darwin appends the signal
+/// number (for example, `"Terminated: 15"`), while glibc returns only
+/// the description. Unknown descriptions pass through unchanged —
+/// better to surface an unfamiliar string than to fabricate a wrong
+/// name. Covers every signal in
 /// [`super::lua_bindings::parse_signal`]'s accept-list plus the common
 /// fault signals that surface during process crashes.
 fn canonicalize_pty_signal_name(desc: &str) -> String {
-    match desc {
-        "Interrupt" => "SIGINT".to_owned(),
-        "Terminated" => "SIGTERM".to_owned(),
-        "Killed" => "SIGKILL".to_owned(),
-        "Hangup" => "SIGHUP".to_owned(),
-        "Quit" => "SIGQUIT".to_owned(),
-        "User defined signal 1" => "SIGUSR1".to_owned(),
-        "User defined signal 2" => "SIGUSR2".to_owned(),
-        "Aborted" => "SIGABRT".to_owned(),
-        "Segmentation fault" => "SIGSEGV".to_owned(),
-        "Floating point exception" => "SIGFPE".to_owned(),
-        "Illegal instruction" => "SIGILL".to_owned(),
-        "Broken pipe" => "SIGPIPE".to_owned(),
-        "Alarm clock" => "SIGALRM".to_owned(),
-        "Bus error" => "SIGBUS".to_owned(),
-        other => other.to_owned(),
+    let base = desc
+        .rsplit_once(": ")
+        .filter(|(_, number)| number.parse::<u32>().is_ok())
+        .map_or(desc, |(description, _)| description);
+    match base {
+        "Interrupt" => "SIGINT",
+        "Terminated" => "SIGTERM",
+        "Killed" => "SIGKILL",
+        "Hangup" => "SIGHUP",
+        "Quit" => "SIGQUIT",
+        "User defined signal 1" => "SIGUSR1",
+        "User defined signal 2" => "SIGUSR2",
+        "Aborted" => "SIGABRT",
+        "Segmentation fault" => "SIGSEGV",
+        "Floating point exception" => "SIGFPE",
+        "Illegal instruction" => "SIGILL",
+        "Broken pipe" => "SIGPIPE",
+        "Alarm clock" => "SIGALRM",
+        "Bus error" => "SIGBUS",
+        _ => desc,
     }
+    .to_owned()
 }
 
 impl Default for ProcessSupervisor {
@@ -2071,6 +2078,17 @@ mod tests {
                 ProcessEventKind::Exited { .. } | ProcessEventKind::Signaled { .. }
             )
         })
+    }
+
+    #[test]
+    fn pty_signal_names_are_canonical_across_libc_variants() {
+        assert_eq!(canonicalize_pty_signal_name("Terminated"), "SIGTERM");
+        assert_eq!(canonicalize_pty_signal_name("Terminated: 15"), "SIGTERM");
+        assert_eq!(canonicalize_pty_signal_name("Killed: 9"), "SIGKILL");
+        assert_eq!(
+            canonicalize_pty_signal_name("Unknown signal: 99"),
+            "Unknown signal: 99"
+        );
     }
 
     #[test]
