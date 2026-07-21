@@ -55,8 +55,8 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Active lane: Vterm Stage 1 terminal core
 
 - Portable branch: `githubsucks/vterm-core`
-- Implementation commit: `bbc1f33`; current branch head after the documentation
-  baseline correction: `5d7f007`.
+- Implementation commits: `bbc1f33` (Stage 1) and `962944b` (Darwin PTY
+  signal normalization); current branch head: `4d74d64`.
 - Pull request: #126,
   <https://github.com/levineuwirth/pmacs/pull/126> — open, non-draft, targeting
   canonical `main`; not merged.
@@ -66,12 +66,13 @@ If it does not, stop and repair the remote/fetch configuration.
   implemented and must start only after their preceding PR lands.
 - Framing: `docs/vterm-framing.md` Revision 3 on the feature branch maps Stage
   1 Acceptance 1–14 and records the downstream TUI/GPU contract reviews.
-- Final from-start sequence: Clippy clean; 1,657 default + 1,833 CRDT library
-  tests (3 ignored each); 8 default + 9 CRDT vterm acceptance; M4 114 passed
-  (3 ignored, 1 filtered); required GPU 109; workspace 2,764 passed across 79
-  suites (19 ignored, 1 filtered); diff check clean. The initial Clippy run
-  found only missing crate docs in the new acceptance; after fixing it, the
-  complete sequence restarted at gate 1.
+- Final from-start sequence after the portability fix: Clippy clean; 1,658
+  default + 1,834 CRDT library tests (3 ignored each); 8 default + 9 CRDT
+  vterm acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
+  workspace 2,765 passed across 79 suites (19 ignored, 1 filtered); diff check
+  clean. The first pass fixed missing crate docs; PR CI then exposed Darwin's
+  numeric `strsignal` suffix. Both fixes were followed by a complete restart
+  from gate 1.
 - `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
   `bite: OK` because the old crate root could not compile the new terminal API;
   this is explicitly weaker compile-time API evidence, not a clean behavioral
