@@ -1,9 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after the statusline stage-3 Revision 3
-review update, JSON/YAML (#123) merge, and cross-machine continuity
-audit; main also reflects GPU font preferences (#124), themes stage 1
-(#120), and injections (#122).** This file is the
+**Last updated: 2026-07-21, after Themes Arc 4 completed with
+statusline segments (#125), JSON/YAML (#123), GPU font preferences
+(#124), named UI faces (#120), and multi-language injections (#122).**
+This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -16,9 +16,9 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-21)
 
-- `main` @ `bb17ec9` (JSON + YAML #123 merged atop GPU font preferences
-  #124), protocol **v17** (`SUPPORTED=[6..17]`; v15→16 shipped
-  `ThemeFacts`, v16→17 shipped `FontFacts`).
+- `main` @ `7bc0c61` (statusline segments #125), protocol **v18**
+  (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
+  `StatuslineSegments`).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -143,14 +143,18 @@ commands, read `docs/active-work.md` immediately after this file.
   and snapshot geometry changes. Test fixtures enter fontdb before
   `FontSystem` construction; alternate advances are measured across
   complete shaped runs, not sampled glyphs.
-- **NEXT: themes stage 3 — Lua statusline-segment API.**
-  Revision 3 is preserved on branch `statusline-segments`, re-scouted
-  against `bb17ec9` with no relevant substrate drift, and awaits review.
-  It scopes additive per-window modeline providers, face-name segments,
-  dynamic `ThemeFacts` inventory, and a new v18 `StatuslineSegments`
-  channel; the existing LSP status tracker is the first built-in
-  provider. Approval → implementation → gates → PR. Completing stage 3
-  completes Arc 4.
+- **Themes (Arc 4) stage 3 LANDED — #125; ARC 4 COMPLETE**
+  (`docs/statusline-segments-framing.md` rev 3). Strict composable
+  `pmacs.statusline` providers evaluate per frontend/window through a
+  borrow-released three-phase transaction with per-context failure
+  latches. TUI composition is grapheme/display-width correct; the pure
+  built-in LSP provider proves passive-window context. Protocol v18
+  carries complete `StatuslineSegments` replacements and dynamic
+  modeline faces; snapshot baselines reset symmetrically. GPU validates
+  untrusted payloads atomically, shapes rich runs without wrapping, and
+  right-pins the protected suffix under narrow clipping. Review
+  hardening pins fixed-face sortedness, retains flattened provider
+  tracebacks, and names unavailable layout contexts accurately.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or
@@ -165,6 +169,10 @@ commands, read `docs/active-work.md` immediately after this file.
   - **Arc 3 (persistence) COMPLETE** — saveplace/recentf (#98),
     desktop-save (#99), autosave/crash-recovery (#100), save-clobber
     fix (#101).
+  - **Arc 4 (themes + extensibility) COMPLETE** — named UI faces (#120),
+    live GPU font preferences (#124), statusline providers (#125).
+  - **Arc 5 stage 1 COMPLETE** — compile mode (#113); stage 2 vterm is
+    the next formal roadmap stage.
 
 ## 2. How we work (the part that must not drift)
 
@@ -273,9 +281,10 @@ buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
 **Protocol** — encoding-breaking bumps are deliberate and versioned
-(`SUPPORTED=[6..17]`). v15 = `CompletionPopup` +
-`StatusFacts.message`; v16 = `ThemeFacts`; v17 = `FontFacts`. New wire
-surface ⇒ bump + both-frontends support + acceptance.
+(`SUPPORTED=[6..18]`). v15 = `CompletionPopup` +
+`StatusFacts.message`; v16 = `ThemeFacts`; v17 = `FontFacts`; v18 =
+`StatuslineSegments`. New wire surface ⇒ bump + both-frontends support +
+acceptance.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),

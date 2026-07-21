@@ -54,50 +54,37 @@ modes; DAP debugging; GPU splits / multi-buffer / auto-reconnect.
 
 ## Arcs, ranked by value-per-effort
 
-### Arc 1 — LSP utility surface: "light up the dark matter" ← ACTIVE
+### Arc 1 — LSP utility surface: "light up the dark matter" — COMPLETE
 
-Data layer is done; only UI is missing.
+The completion popup and LSP utility panels shipped across #92–#96,
+followed by hardening in #102, #105, and #106. Completion, hover,
+references, document symbols, and the supporting semantic/signature
+paths are now wired through both frontend contracts.
 
-- **1a. In-buffer completion popup** (first). Trigger on typing,
-  TAB/RET accept, both frontends. GPU needs a wire message — mirror the
-  minibuffer-dropdown pattern (protocol v12). Framework + popup view
-  already exist.
-- **1b. Panels**: hover popup, code-action picker, references list,
-  document-symbol outline. Generalize the buffer-list UI pattern
-  (`*buffer-list*` buffer-local bindings) into a reusable list-buffer
-  idiom.
-- **1c. Semantic-token auto-pull fix** (small): pull on attach + on
-  edit-flush, like inlay hints already do.
-- **1d. Signature-help auto-trigger** on `(`.
+### Arc 2 — Editing table stakes — COMPLETE
 
-### Arc 2 — Editing table stakes (interleave with Arc 1)
+Query-replace (#97), the real kill ring and `M-y` (#103/#105/#106),
+comment toggle (#107), auto-indent (#109), and auto-pairing (#110)
+landed.
 
-Each small, core-only, frontend-agnostic: query-replace (isearch
-exists; `search.rs` has no replace API), real kill ring + `M-y`,
-comment/uncomment, auto-indent on newline, auto-pairing.
+### Arc 3 — Persistence/serialization — COMPLETE
 
-### Arc 3 — Persistence/serialization
+Saveplace/recentf (#98), desktop save/restore (#99),
+autosave/crash-recovery (#100), and the save-clobber fix (#101) landed.
 
-Desktop-save (buffer set + layout + cursors → restore), recentf,
-saveplace, autosave + crash recovery, optional backups. Generalize the
-`$XDG_STATE_HOME/pmacs/` pattern from minibuffer history. Framing
-question: what is a "session" in a daemon world; do CRDT snapshots
-ride along.
+### Arc 4 — Themes + extensibility surface — COMPLETE
 
-### Arc 4 — Themes + extensibility surface
+Stages 1–3 landed as #120, #124, and #125: named `ui.*` faces with
+daemon-resolved `ThemeFacts`; the live global `pmacs.gpu.set_font`
+preference at protocol v17; and composable per-window
+`pmacs.statusline` providers transported to semantic/GPU frontends by
+protocol-v18 `StatuslineSegments`.
 
-Extend `pmacs.theme` from syntax captures to named UI faces (modeline,
-minibuffer, gutter, selection, status band); wire GPU chrome to it —
-Q#UX1 lesson applies: rendering is frontend-local but control is
-daemon-owned, so a wire channel (`ThemeFacts`-style) is needed. Add
-`pmacs.gpu.set_font` (designed, never built) and a Lua
-statusline-segment API.
+### Arc 5 — Terminal, staged ← NEXT FORMAL ARC
 
-### Arc 5 — Terminal, staged
-
-- **Stage 1**: compile-mode / grep-mode / shell-command on the existing
-  PTY + ANSI + REPL-package substrate (line-oriented output buffer,
-  error-regex jump-to-file, `M-x compile`). Cheap, transformative.
+- **Stage 1 — LANDED (#113)**: compile mode streams line-oriented
+  process output through the PTY/ANSI substrate, with error-regex
+  navigation and `M-x compile`.
 - **Stage 2 (vterm)**: extend `ansi.rs` into a 2D grid model
   (alt-screen, cursor addressing, scrollback — parser already
   recognizes and discards these), grid-backed buffer view, GPU
