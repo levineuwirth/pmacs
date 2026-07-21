@@ -924,11 +924,16 @@ impl AnsiParser {
             }
             b'P' => self.state = State::DcsEntry,
             b'X' | b'^' | b'_' => self.state = State::SosPmApcString,
-            b'7' | b'8' | b'H' | b'=' | b'>' if self.profile == AnsiParserProfile::FullScreen => {
+            b'7' | b'8' | b'D' | b'E' | b'H' | b'M' | b'=' | b'>'
+                if self.profile == AnsiParserProfile::FullScreen =>
+            {
                 let event = match b {
                     b'7' => AnsiEvent::SaveCursor,
                     b'8' => AnsiEvent::RestoreCursor,
+                    b'D' => AnsiEvent::Index,
+                    b'E' => AnsiEvent::NextLine,
                     b'H' => AnsiEvent::SetTabStop,
+                    b'M' => AnsiEvent::ReverseIndex,
                     b'=' => AnsiEvent::SetMode {
                         mode: TerminalMode::ApplicationKeypad,
                         enabled: true,
@@ -2315,14 +2320,17 @@ mod tests {
 
     #[test]
     fn full_screen_emits_typed_operation_set_across_every_split() {
-        let bytes = b"\x07\t\n\x1bH\x1b[2A\x1b[3B\x1b[4C\x1b[5D\x1b[2E\x1b[2F\
-            \x1b[7G\x1b[8d\x1b[2;3H\x1b[J\x1b[1K\x1b[2X\x1b[3@\x1b[4P\
-            \x1b[2L\x1b[2M\x1b[3S\x1b[2T\x1b[2;20r\x1b[s\x1b[u\x1b[3g\
-            \x1b[?1;6;7;25;1000;1002;1003;1004;1006;2004;2026h\
+        let bytes = b"\x07\t\n\x1bD\x1bE\x1bM\x1bH\x1b[2A\x1b[3B\x1b[4C\x1b[5D\
+            \x1b[2E\x1b[2F\x1b[7G\x1b[8d\x1b[2;3H\x1b[J\x1b[1K\x1b[2X\
+            \x1b[3@\x1b[4P\x1b[2L\x1b[2M\x1b[3S\x1b[2T\x1b[2;20r\x1b[s\
+            \x1b[u\x1b[3g\x1b[?1;6;7;25;1000;1002;1003;1004;1006;2004;2026h\
             \x1b[?47h\x1b[?1047h\x1b[?1049h\x1b[c\x1b[>c\x1b[5n\x1b[6n";
         let mut whole = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
         let expected = whole.feed(bytes);
         assert!(expected.contains(&AnsiEvent::Bell));
+        assert!(expected.contains(&AnsiEvent::Index));
+        assert!(expected.contains(&AnsiEvent::NextLine));
+        assert!(expected.contains(&AnsiEvent::ReverseIndex));
         assert!(expected.contains(&AnsiEvent::CursorPosition { row: 2, col: 3 }));
         assert!(expected.contains(&AnsiEvent::SetScrollingRegion {
             top: 2,

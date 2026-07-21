@@ -1587,12 +1587,13 @@ mod tests {
 
     #[test]
     fn parser_split_points_produce_identical_screen() {
-        let bytes = b"ab\x1b[2;3Hc\x1b[31mD\x1b[2J\x1b[Hdone";
+        let bytes = b"ab\x1b[2;3Hc\x1b[31mD\x1b[2J\x1b[Hdone\x1bE\x1bM\x1bD";
         let mut whole_parser = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
         let mut whole = screen(3, 8);
         for event in whole_parser.feed(bytes) {
             whole.apply_event(event);
         }
+        assert_eq!(whole.snapshot().cursor, Some(CellCoord::new(1, 0)));
         for split in 0..=bytes.len() {
             let mut parser = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
             let mut split_screen = screen(3, 8);
