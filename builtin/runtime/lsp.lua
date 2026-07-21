@@ -200,6 +200,62 @@ pmacs.lsp.config.zig = pmacs.lsp.config.zig or {
   args = {},
 }
 
+-- JSON via the VS Code JSON server, binary `vscode-json-language-server`.
+-- It is a PUSH-model server: it reads config from
+-- `workspace/didChangeConfiguration` (the daemon now sends one after
+-- `initialized`) and does NOT issue `workspace/configuration` pulls, so
+-- without that push these settings would be inert. `json.validate.enable`
+-- is set explicitly true — the server treats a MISSING value as false, so
+-- an empty `json = {}` would silently disable validation. Schema
+-- retrieval performs NETWORK ACCESS for remote `$schema` URLs (left
+-- enabled; `handledSchemaProtocols = {"file"}` would disable it but break
+-- remote schemas without a `vscode/content` impl). Note: the server does
+-- NOT auto-associate `package.json`/`tsconfig.json` — it starts with empty
+-- contributions; explicit `$schema` refs or configured `json.schemas` /
+-- a `json/schemaAssociations` push (not implemented) are required.
+-- Provider: pin `@t1ckbase/vscode-langservers-extracted@2.0.2`
+-- (`npm install -g @t1ckbase/vscode-langservers-extracted@2.0.2`).
+-- Its published payload bundles the JSON server from VS Code 1.129.0,
+-- preserves this command name, and was live-smoked through initialize →
+-- config push → invalid-JSON diagnostic → shutdown. The older unscoped
+-- package is stale and the current `@zed-industries` payload has a broken
+-- JSON launcher; neither is the recommended provider.
+pmacs.lsp.config.json = pmacs.lsp.config.json or {
+  command = "vscode-json-language-server",
+  args = { "--stdio" },
+  settings = {
+    json = { validate = { enable = true } },
+    http = {},
+  },
+}
+
+-- YAML via Red Hat `yaml-language-server`. On
+-- `workspace/didChangeConfiguration` (now pushed after `initialized`) it
+-- reads the `yaml`, `http`, `[yaml]`, `editor`, and `files` sections — all
+-- ship present-not-null (empty ⇒ server defaults). SchemaStore / remote
+-- schema retrieval performs NETWORK ACCESS by default. The standalone
+-- server does not upload telemetry itself — it emits `telemetry/event`
+-- notifications to its client, and pmacs has no telemetry uploader, so a
+-- `redhat.telemetry` setting would be inert and is not shipped. Sections
+-- live-observed with Red Hat `yaml-language-server@1.24.0`: its initial
+-- pull requests exactly those five sections, and opening a YAML document
+-- requests a second scoped `[yaml]` section. The standalone smoke reached
+-- a real syntax diagnostic and clean shutdown. The PATH-gated pmacs
+-- acceptance also proves auto-attach, initialization, config pulls, a
+-- syntax diagnostic, and continued server liveness with both catalogs
+-- disabled for network-free determinism.
+pmacs.lsp.config.yaml = pmacs.lsp.config.yaml or {
+  command = "yaml-language-server",
+  args = { "--stdio" },
+  settings = {
+    yaml = {},
+    http = {},
+    ["[yaml]"] = {},
+    editor = {},
+    files = {},
+  },
+}
+
 -- LSP-side extension → language map, deliberately independent of the
 -- tree-sitter detection in `pmacs.parse`. Consulted only when
 -- `pmacs.parse.language_for_path` finds nothing (an extension with a
@@ -267,6 +323,11 @@ pmacs.lsp.filetypes.toml = pmacs.lsp.filetypes.toml or "toml"
 -- Zig (zls). `.zon` is Zig Object Notation, handled by the same server.
 pmacs.lsp.filetypes.zig = pmacs.lsp.filetypes.zig or "zig"
 pmacs.lsp.filetypes.zon = pmacs.lsp.filetypes.zon or "zig"
+-- JSON / YAML. Both ship grammars, so `language_for_path` already resolves
+-- these and the map is the stable-id fallback (same role as `lua`/`cuda`).
+pmacs.lsp.filetypes.json = pmacs.lsp.filetypes.json or "json"
+pmacs.lsp.filetypes.yaml = pmacs.lsp.filetypes.yaml or "yaml"
+pmacs.lsp.filetypes.yml = pmacs.lsp.filetypes.yml or "yaml"
 
 -- Per-buffer attachment record: { language, server, uri, version }.
 -- Keyed by `tostring(BufferIdLua)` because BufferIdLua hands out fresh

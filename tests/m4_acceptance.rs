@@ -6265,6 +6265,9 @@ fn m4_gap_grammars_align_with_lsp_configs() {
         ("A.tsx", "typescriptreact"),
         ("Cargo.toml", "toml"),
         ("build.zig", "zig"),
+        ("tsconfig.json", "json"),
+        ("config.yaml", "yaml"),
+        ("ci.yml", "yaml"),
     ] {
         let (grammar, has_cfg): (Option<String>, bool) = s
             .lua_host
@@ -6285,6 +6288,298 @@ fn m4_gap_grammars_align_with_lsp_configs() {
             "{id} has an LSP config the grammar name aligns with"
         );
     }
+}
+
+/// JSON/YAML LSP configs pin the server commands and the settings shape
+/// each consumes (framing Q#JY2): JSON receives a pushed full object;
+/// YAML pulls five named sections. The pinned JSON and YAML providers each
+/// have a separate PATH-gated live smoke below. The point is to pin the
+/// contract, not merely assert that some settings table exists.
+#[test]
+fn m4_json_yaml_lsp_configs_pin_command_and_sections() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let lua = s.lua_host.lua();
+
+    // json: the `@t1ckbase/vscode-langservers-extracted@2.0.2` binary
+    // (NOT the stale standalone `vscode-json-languageserver`), `--stdio`,
+    // and the `json` + `http` workspace-config sections present. The
+    // provider preserves this stable command name; its exact pin and live
+    // handshake evidence are documented beside the default config.
+    let json_command: String = lua
+        .load("return pmacs.lsp.config.json.command")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        json_command, "vscode-json-language-server",
+        "json uses the pinned T1ckbase provider's stable command name"
+    );
+    // The JSON server is push-model (reads didChangeConfiguration, no
+    // pulls), so `json.validate.enable` must be EXPLICITLY true — a missing
+    // value reads as false and disables validation. Remote schemas left on.
+    let json_ok: bool = lua
+        .load(
+            "local c = pmacs.lsp.config.json
+             return c.args[1] == '--stdio'
+                 and c.settings.json.validate.enable == true
+                 and c.settings.http ~= nil
+                 and c.settings.handledSchemaProtocols == nil",
+        )
+        .eval()
+        .unwrap();
+    assert!(
+        json_ok,
+        "json config: --stdio, json.validate.enable=true, http present, remote schemas on"
+    );
+
+    // yaml: `yaml-language-server --stdio`. Its settings handler reads the
+    // `yaml`, `http`, `[yaml]`, `editor`, and `files` sections — pin all
+    // five, and confirm the inert `redhat.telemetry` is NOT shipped (the
+    // standalone server emits telemetry events to the client; it does not
+    // upload, and pmacs has no uploader).
+    let yaml_command: String = lua
+        .load("return pmacs.lsp.config.yaml.command")
+        .eval()
+        .unwrap();
+    assert_eq!(
+        yaml_command, "yaml-language-server",
+        "yaml uses the Red Hat yaml-language-server"
+    );
+    let yaml_ok: bool = lua
+        .load(
+            "local c = pmacs.lsp.config.yaml
+             return c.args[1] == '--stdio'
+                 and c.settings.yaml ~= nil
+                 and c.settings.http ~= nil
+                 and c.settings['[yaml]'] ~= nil
+                 and c.settings.editor ~= nil
+                 and c.settings.files ~= nil
+                 and c.settings.redhat == nil",
+        )
+        .eval()
+        .unwrap();
+    assert!(
+        yaml_ok,
+        "yaml config: --stdio, the five pulled sections present, no inert redhat.telemetry"
+    );
+}
+
+/// Round-1 finding (P1): the daemon must PUSH configuration via
+/// `workspace/didChangeConfiguration` after `initialized`. Push-model
+/// servers — notably the VS Code JSON server — never issue
+/// `workspace/configuration` pulls, so without the push their `settings`
+/// (including `json.validate.enable`) are inert. Verified through the fake
+/// server's config sink: the settings the daemon sends are recorded and
+/// inspected, proving delivery end to end.
+#[test]
+fn m4_5_initial_config_pushed_via_did_change_configuration() {
+    use pmacs::editor::EditorState;
+    let mut state = EditorState::new();
+    let fake = fake_lsp_path();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sink = dir.path().join("config.jsonl");
+    let file = dir.path().join("probe.rs");
+    std::fs::write(&file, "fn main() {}\n").expect("write");
+    let sink_disp = sink.display().to_string();
+    let file_disp = file.display().to_string();
+
+    // Point rust at the fake server WITH a settings table and route the
+    // config sink into the spawned process, then open the file (auto-attach
+    // → initialize → initialized → the config push).
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.rust = {{
+               command = '{fake}',
+               env = {{ PMACS_FAKE_LSP_CONFIG_SINK = '{sink_disp}' }},
+               settings = {{ rust = {{ probe = true }} }},
+             }}
+             pmacs.buffer.find_or_open('{file_disp}')"
+        ))
+        .exec()
+        .expect("configure + open");
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            5,
+        ),
+        "fake never initialized"
+    );
+    // A few more ticks for the push + the server's sink write to land.
+    let sink_probe = sink.clone();
+    pump_async(&mut state, move |_| {
+        std::fs::read_to_string(&sink_probe).is_ok_and(|s| s.contains("probe"))
+    });
+
+    let recorded = std::fs::read_to_string(&sink).unwrap_or_else(|e| {
+        panic!("config sink not written ({e}); the didChangeConfiguration push did not arrive")
+    });
+    assert!(
+        recorded.contains("\"probe\":true"),
+        "the daemon pushed the configured settings after initialized: {recorded}"
+    );
+}
+
+/// PATH-gated provider smoke: drive a real `vscode-json-language-server`
+/// through pmacs's default JSON config, including the post-initialize
+/// `didChangeConfiguration` push, and require a syntax diagnostic for an
+/// invalid document. The reviewed provider is
+/// `@t1ckbase/vscode-langservers-extracted@2.0.2`; CI skips cleanly when
+/// no compatible binary is installed.
+#[test]
+fn m4_real_json_provider_receives_config_and_reports_diagnostics() {
+    use pmacs::editor::EditorState;
+
+    let Ok(command) = which_binary("vscode-json-language-server") else {
+        eprintln!("vscode-json-language-server not on PATH; skipping");
+        return;
+    };
+    let command = command.display().to_string();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = std::fs::canonicalize(dir.path())
+        .expect("canonicalize")
+        .join("invalid.json");
+    std::fs::write(&file, b"{\"broken\": }\n").expect("write invalid json");
+    let file_disp = file.display().to_string();
+    let uri = format!("file://{file_disp}");
+
+    let mut state = EditorState::new();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config.json.command = '{command}'
+             pmacs.buffer.find_or_open('{file_disp}')"
+        ))
+        .exec()
+        .expect("configure real JSON server + open file");
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.state and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            30,
+        ),
+        "real JSON server never reached initialized"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got_diagnostic = false;
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        got_diagnostic = state
+            .lua_host
+            .lua()
+            .load(format!("return pmacs.diag.count('{uri}') > 0"))
+            .eval()
+            .unwrap_or(false);
+        if got_diagnostic {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        got_diagnostic,
+        "real JSON server produced no diagnostic; config delivery or validation is broken"
+    );
+    assert_no_lsp_crash(&mut state, "real JSON server");
+}
+
+/// PATH-gated provider smoke: drive Red Hat
+/// `yaml-language-server@1.24.0` through pmacs's default YAML config and
+/// require a syntax diagnostic for an invalid document. `SchemaStore` and
+/// the Kubernetes CRD catalog are disabled in this test so the result is
+/// deterministic and does not depend on network access. CI skips cleanly
+/// when no compatible binary is installed.
+#[test]
+fn m4_real_yaml_provider_pulls_config_and_reports_diagnostics() {
+    use pmacs::editor::EditorState;
+
+    let Ok(command) = which_binary("yaml-language-server") else {
+        eprintln!("yaml-language-server not on PATH; skipping");
+        return;
+    };
+    let command = command.display().to_string();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = std::fs::canonicalize(dir.path())
+        .expect("canonicalize")
+        .join("invalid.yaml");
+    std::fs::write(&file, b"root:\n  broken: [one,\n").expect("write invalid yaml");
+    let file_disp = file.display().to_string();
+    let uri = format!("file://{file_disp}");
+
+    let mut state = EditorState::new();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            "local c = pmacs.lsp.config.yaml
+             c.command = '{command}'
+             c.settings.yaml.schemaStore = {{ enable = false }}
+             c.settings.yaml.kubernetesCRDStore = {{ enable = false }}
+             pmacs.buffer.find_or_open('{file_disp}')"
+        ))
+        .exec()
+        .expect("configure real YAML server + open file");
+
+    assert!(
+        pump_lua_flag(
+            &mut state,
+            "(function() for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.language_id=='yaml' and r.state \
+                  and r.state.kind=='initialized' then return true end \
+             end return false end)()",
+            30,
+        ),
+        "auto-attached real YAML server never reached initialized"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got_diagnostic = false;
+    while Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        got_diagnostic = state
+            .lua_host
+            .lua()
+            .load(format!("return pmacs.diag.count('{uri}') > 0"))
+            .eval()
+            .unwrap_or(false);
+        if got_diagnostic {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        got_diagnostic,
+        "real YAML server produced no diagnostic; config pulls or validation are broken"
+    );
+    assert_no_lsp_crash(&mut state, "real YAML server");
+    let still_initialized: bool = state
+        .lua_host
+        .lua()
+        .load(
+            "for _,r in ipairs(pmacs.lsp.list()) do \
+               if r.language_id=='yaml' and r.state \
+                  and r.state.kind=='initialized' then return true end \
+             end return false",
+        )
+        .eval()
+        .expect("inspect YAML server state");
+    assert!(
+        still_initialized,
+        "real YAML server did not remain alive after publishing diagnostics"
+    );
 }
 
 /// Typing-perf: the default bundle coalesces full-document

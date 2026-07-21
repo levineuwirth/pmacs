@@ -323,11 +323,18 @@ runtime/Lua-registered languages (v1 resolves only against
 `BUILTIN_LANGUAGES`), and the next injection *consumers* gated on new
 grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
 literals, doc-comment code); modeline detection as a 5th layer
-(`-*- mode: … -*-` / `# vim: ft=…`); JSON/YAML grammars+LSP;
+(`-*- mode: … -*-` / `# vim: ft=…`);
 byte-accurate multibyte cursor placement in `move_active_cursor_to`
-(still steps one codepoint per LSP byte column). A full Jupyter `.ipynb`
-setup (reader → editable → kernel execution) is a real arc now gated on
-**JSON** (injections shipped in #122), NOT a one-shot.
+(still steps one codepoint per LSP byte column). **JSON + YAML PR #123
+OPEN** (grammar-gap style, `tree-sitter-json`/`-yaml`; LSP configs
+`vscode-json-language-server` with provider pin
+`@t1ckbase/vscode-langservers-extracted@2.0.2`, plus
+`yaml-language-server`). The public and checkpoint branches are both at
+fully gated `5c202c5`, rebased onto `f8096ff`; the JSON and YAML
+PATH-gated pmacs smokes both passed, and the PR awaits user review.
+Once merged, YAML `---` and TOML `+++` markdown frontmatter highlight via
+the #122 engine and the Jupyter reader → editable → kernel arc has both
+grammar prerequisites.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
 Themes (full list in theme-faces framing rev 9 "Deferred (named)"):
