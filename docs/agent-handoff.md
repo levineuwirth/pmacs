@@ -122,7 +122,8 @@ next machine reads it the way you just did.
     as #125 and completed Arc 4 on `main`.
 - **Vterm Stage 1 terminal core IMPLEMENTED ON `vterm-core`, FULLY GATED,
   AWAITING REVIEW, NOT MERGED** (`docs/vterm-framing.md` rev 3).
-  - Feature commit: `bbc1f33`; pull request: #126,
+  - Implementation commits: `bbc1f33` (Stage 1) and `962944b` (Darwin PTY
+    signal normalization); pull request: #126,
     <https://github.com/levineuwirth/pmacs/pull/126> (open, non-draft,
     targeting `main`).
   - `AnsiParserProfile::{LineOriented, FullScreen}` preserves compile/REPL
@@ -146,14 +147,15 @@ next machine reads it the way you just did.
     output before exact PID/outcome annotation. One-row annotation visibility,
     TERM-ignoring shutdown, spawn rollback, buffer-kill prune, and immutable
     empty CRDT bootstrap are pinned.
-  - Final from-start rerun: Clippy clean; 1,657 default + 1,833 CRDT library
-    tests (3 ignored each); 8 default + 9 CRDT vterm acceptance; M4 114 passed
-    (3 ignored, 1 filtered); required GPU 109; workspace 2,764 passed across
-    79 suites (19 ignored, 1 filtered); diff check clean. The first Clippy
-    attempt found only missing crate docs in the new acceptance; it was fixed
-    and the whole sequence restarted. `scripts/bite main src/lib.rs --test
-    vterm_stage1_acceptance` is green only as the helper's explicitly weaker
-    compile-time API bite.
+  - Final from-start rerun after the portability fix: Clippy clean; 1,658
+    default + 1,834 CRDT library tests (3 ignored each); 8 default + 9 CRDT
+    vterm acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
+    workspace 2,765 passed across 79 suites (19 ignored, 1 filtered); diff
+    check clean. The first gate pass found only missing crate docs in the new
+    acceptance; PR CI then exposed Darwin's numeric `strsignal` suffix. Both
+    fixes were followed by a complete restart from gate 1.
+    `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` is green only
+    as the helper's explicitly weaker compile-time API bite.
   - Stage 2 reviews require a durable focus/input resize owner, owning
     `FrontendId` for the global `C-c` continuation, and local clipboard/BEL
     signal drainage. Stage 3 additionally owns `pmacs-gpu/src/attach.rs`,

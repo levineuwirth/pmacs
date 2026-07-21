@@ -110,18 +110,20 @@ All fourteen Stage 1 criteria are implemented:
 
 ### 0.3 Final gates and bite
 
-After one initial Clippy-only failure for the new acceptance crate's missing
-module documentation, that source issue was fixed and the complete sequence was
-restarted from gate 1:
+The initial gate run found and fixed missing module documentation in the new
+acceptance crate, then restarted from gate 1. After PR #126 opened, its macOS
+Lua 5.4 job exposed Darwin's numeric `strsignal` suffix (`"Terminated: 15"`);
+commit `962944b` normalizes both Darwin and glibc descriptions to the same
+symbolic signal. The complete sequence restarted from gate 1 again:
 
 - `cargo fmt --check`: clean;
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean;
-- default library: 1,657 passed, 3 ignored;
-- CRDT library: 1,833 passed, 3 ignored;
+- default library: 1,658 passed, 3 ignored;
+- CRDT library: 1,834 passed, 3 ignored;
 - Stage 1 acceptance: 8 default + 9 CRDT passed;
 - M4 acceptance: 114 passed, 3 ignored, 1 `basedpyright` filtered;
 - required GPU: 109 passed;
-- workspace: 2,764 passed across 79 suites, 19 ignored, 1 filtered;
+- workspace: 2,765 passed across 79 suites, 19 ignored, 1 filtered;
 - `git diff --check`: clean.
 
 `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
