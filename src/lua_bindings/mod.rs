@@ -4970,6 +4970,9 @@ fn event_to_lua_table(lua: &Lua, ev: &crate::ansi::AnsiEvent) -> mlua::Result<Ta
         }
         AnsiEvent::Bell => t.set("kind", "bell")?,
         AnsiEvent::LineFeed => t.set("kind", "line_feed")?,
+        AnsiEvent::Index => t.set("kind", "index")?,
+        AnsiEvent::NextLine => t.set("kind", "next_line")?,
+        AnsiEvent::ReverseIndex => t.set("kind", "reverse_index")?,
         AnsiEvent::HorizontalTab => t.set("kind", "horizontal_tab")?,
         AnsiEvent::SetTabStop => t.set("kind", "set_tab_stop")?,
         AnsiEvent::ClearTabStop => t.set("kind", "clear_tab_stop")?,

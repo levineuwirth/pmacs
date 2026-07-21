@@ -176,6 +176,12 @@ pub enum AnsiEvent {
     /// Full-screen-only terminal operations.
     Bell,
     LineFeed,
+    /// `ESC D`: advance one row, scrolling at the bottom margin.
+    Index,
+    /// `ESC E`: return to column zero and advance one row.
+    NextLine,
+    /// `ESC M`: move up one row, scrolling down at the top margin.
+    ReverseIndex,
     HorizontalTab,
     SetTabStop,
     ClearTabStop,

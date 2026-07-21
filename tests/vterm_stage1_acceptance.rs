@@ -119,7 +119,10 @@ fn strict_owned_spec_rejects_before_spawn_and_is_mutation_independent() {
     );
     assert_eq!(
         process_spec.env,
-        [(String::from("PMACS_VTERM_OWNED"), String::from("original"))]
+        [
+            (String::from("PMACS_VTERM_OWNED"), String::from("original")),
+            (String::from("TERM"), String::from("xterm-256color")),
+        ]
     );
 }
 
@@ -380,13 +383,14 @@ fn editor_shutdown_kills_term_ignoring_terminal_child() {
             .pid
     };
 
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(pid).expect("pid fits i32"));
     let deadline = Instant::now() + Duration::from_secs(2);
-    let proc_path = format!("/proc/{pid}");
-    while Instant::now() < deadline && std::path::Path::new(&proc_path).exists() {
+    while Instant::now() < deadline && nix::sys::signal::kill(pid, None).is_ok() {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(
-        !std::path::Path::new(&proc_path).exists(),
+    assert_eq!(
+        nix::sys::signal::kill(pid, None),
+        Err(nix::errno::Errno::ESRCH),
         "terminal child {pid} survived EditorState shutdown"
     );
 }

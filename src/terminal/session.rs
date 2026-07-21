@@ -34,7 +34,8 @@ pub struct TerminalSpec {
     pub args: Vec<String>,
     /// Working directory, or the editor process directory when absent.
     pub cwd: Option<PathBuf>,
-    /// Environment overrides inherited by the child.
+    /// Environment overrides inherited by the child. `TERM` defaults to
+    /// `xterm-256color` when the caller does not provide it.
     pub env: Vec<(String, String)>,
     /// Identity-buffer name. Defaults to `*terminal:<command>*`.
     pub name: Option<String>,
@@ -264,6 +265,11 @@ impl TerminalManager {
         process_spec.args = spec.args;
         process_spec.cwd = spec.cwd;
         process_spec.env = spec.env;
+        if !process_spec.env.iter().any(|(name, _)| name == "TERM") {
+            process_spec
+                .env
+                .push(("TERM".into(), "xterm-256color".into()));
+        }
         process_spec.mode = ProcessMode::Pty {
             rows: spec.rows,
             cols: spec.cols,

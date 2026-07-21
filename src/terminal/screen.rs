@@ -199,6 +199,8 @@ impl TerminalScreen {
         })
     }
 
+    /// Apply one parsed terminal operation and return an optional fixed device
+    /// reply for the session manager to queue to the child.
     #[allow(clippy::too_many_lines, clippy::let_and_return, clippy::cast_lossless)]
     pub fn apply_event(&mut self, event: AnsiEvent) -> Option<Vec<u8>> {
         if !matches!(&event, AnsiEvent::Text(_)) {
@@ -233,6 +235,19 @@ impl TerminalScreen {
             }
             AnsiEvent::LineFeed => {
                 self.line_feed(false);
+                None
+            }
+            AnsiEvent::Index => {
+                self.line_feed(false);
+                None
+            }
+            AnsiEvent::NextLine => {
+                self.cursor.col = 0;
+                self.line_feed(false);
+                None
+            }
+            AnsiEvent::ReverseIndex => {
+                self.reverse_index();
                 None
             }
             AnsiEvent::HorizontalTab => {
@@ -410,6 +425,7 @@ impl TerminalScreen {
         reply
     }
 
+    /// Release a synchronized-output batch at EOF or session completion.
     pub fn finish_output(&mut self) {
         if self.modes.synchronized_output {
             self.modes.synchronized_output = false;
@@ -453,6 +469,8 @@ impl TerminalScreen {
         self.finish_output();
     }
 
+    /// Resize the main screen with soft-wrap reflow and clip/pad the alternate
+    /// screen, preserving cursor, history, and application tab-stop state.
     pub fn resize(&mut self, size: CellSize) -> Result<(), ScreenError> {
         validate_size(size)?;
         if size == self.size {
@@ -475,8 +493,11 @@ impl TerminalScreen {
         self.cursor.col = self.cursor.col.min(size.cols as usize - 1);
         self.cursor.pending_wrap = false;
         self.tab_stops.retain(|&col| col < size.cols as usize);
-        for col in (8..size.cols as usize).step_by(8) {
-            self.tab_stops.insert(col);
+        if size.cols > old_size.cols {
+            let first_new_default = (old_size.cols as usize).div_ceil(8) * 8;
+            for col in (first_new_default..size.cols as usize).step_by(8) {
+                self.tab_stops.insert(col);
+            }
         }
         self.enforce_history_budget();
         self.changed();
@@ -747,6 +768,16 @@ impl TerminalScreen {
             self.cursor.row += 1;
         }
         self.changed();
+    }
+
+    fn reverse_index(&mut self) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.row == self.scroll_top {
+            self.scroll_down(1);
+        } else if self.cursor.row > 0 {
+            self.cursor.row -= 1;
+            self.changed();
+        }
     }
 
     fn horizontal_tab(&mut self) {
@@ -1677,6 +1708,46 @@ mod tests {
             budget.apply_event(AnsiEvent::LineFeed);
         }
         assert!(budget.history().len() * 512 <= MAX_TERMINAL_HISTORY_CELLS);
+    }
+
+    #[test]
+    fn index_next_line_and_reverse_index_respect_scrolling_margins() {
+        let mut s = screen(4, 4);
+        for (row, value) in ["aaaa", "bbbb", "cccc", "dddd"].into_iter().enumerate() {
+            s.apply_event(AnsiEvent::CursorPosition {
+                row: row as u32 + 1,
+                col: 1,
+            });
+            s.apply_event(AnsiEvent::Text(value.into()));
+        }
+        s.apply_event(AnsiEvent::SetScrollingRegion {
+            top: 2,
+            bottom: Some(3),
+        });
+        s.apply_event(AnsiEvent::CursorPosition { row: 2, col: 3 });
+        s.apply_event(AnsiEvent::ReverseIndex);
+        assert_eq!(&text(&s.snapshot()), "aaaa    bbbbdddd");
+        assert_eq!(s.snapshot().cursor, Some(CellCoord::new(1, 2)));
+
+        s.apply_event(AnsiEvent::Index);
+        assert_eq!(s.snapshot().cursor, Some(CellCoord::new(2, 2)));
+        s.apply_event(AnsiEvent::NextLine);
+        assert_eq!(&text(&s.snapshot()), "aaaabbbb    dddd");
+        assert_eq!(s.snapshot().cursor, Some(CellCoord::new(2, 0)));
+    }
+
+    #[test]
+    fn resize_only_adds_default_tab_stops_in_new_columns() {
+        let mut s = screen(2, 16);
+        s.apply_event(AnsiEvent::ClearAllTabStops);
+        s.apply_event(AnsiEvent::CursorHorizontalAbsolute(4));
+        s.apply_event(AnsiEvent::SetTabStop);
+        s.resize(CellSize::new(2, 32)).unwrap();
+        s.apply_event(AnsiEvent::CursorHorizontalAbsolute(1));
+        s.apply_event(AnsiEvent::HorizontalTab);
+        assert_eq!(s.snapshot().cursor, Some(CellCoord::new(0, 3)));
+        s.apply_event(AnsiEvent::HorizontalTab);
+        assert_eq!(s.snapshot().cursor, Some(CellCoord::new(0, 16)));
     }
 
     #[test]
