@@ -114,10 +114,20 @@ The direct continuation of the #114–#118 grammar/detection stack.
 
 ## Cross-cutting substrate (unblocks whole clusters — high leverage)
 
-- **Config/settings registry** (`pmacs.config` / defcustom) — blocks
-  language-aware indent, the five hardcoded tab-width sites, per-buffer
-  auto-pair toggle, per-language comment padding, per-project compile
-  commands.
+- ~~**Config/settings registry**~~ — **SHIPPED as #127.** `pmacs.config`
+  exists with global + buffer-local scopes. Unblocked: the per-buffer
+  auto-pair toggle (shipped in the same PR as `editing.auto-pair`),
+  language-aware indent, per-language comment padding, and per-project
+  compile commands — the last three are now ordinary work, expressed as
+  a `buffer.after-load` hook calling `set_local`, not blocked work.
+- **Tab-width rendering parity** — was listed above as a config
+  consequence; it is not. `TAB_WIDTH = 8` appears four times in the
+  daemon (`text_view`, `highlight`, `diag`, `completion`), the GPU
+  minimap's `advance_minimap_col` uses **4**, and the GPU main text path
+  expands tabs *not at all* — raw `\t` reaches glyphon and is shaped by
+  the font. Defining `editor.tab-width` cannot make the GPU honor it;
+  this needs frontend tab expansion plus a wire-or-frontend-local
+  decision. Deferred from #127 on those grounds.
 - **Real `read_only` buffer flag** on both edit paths — true immutability
   for panels / REPL / generated buffers.
 - **Mode system wiring** — dispatch passes an empty mode list (`&[]`);
@@ -227,14 +237,20 @@ guides (visual, not color).
 
 ## North star (highest-leverage first)
 
-**Multi-language injections shipped (#122)** — one of the two original
-north-star items is done, so the highest-leverage board is now:
+**Both original north-star items have now shipped** — multi-language
+injections (#122) and the config registry (#127) — and JSON + YAML
+(#123) merged too. The remaining board:
 
-1. **Config registry** — frees ~5 editing/indent/comment features at once.
-2. **Finish JSON + YAML PR #123** — the one remaining gate on the
-   Jupyter `.ipynb` path now that injections exist.
-3. **Locals-query processing** — restores `.builtin` styling for
+1. **Locals-query processing** — restores `.builtin` styling for
    non-shadowed builtins, the last rough edge of the highlight stack.
+2. **Mode-system wiring** — every editor `KeymapStack::resolve` still
+   passes `&[]`, so mode-scoped keybindings and any mode-scoped setting
+   remain unreachable. Promoted here because #127 made it the largest
+   remaining scoping gap.
+3. **Tab-width rendering parity** — five constants across two crates
+   with two different values, and no tab expansion at all on the GPU
+   main text path. Explicitly NOT a config-registry task; see the entry
+   under "Cross-cutting substrate".
 
 Beyond those, the cleanest one-shots in the highlight family are
 **modeline detection** and the HTML/CSS grammars that light up more

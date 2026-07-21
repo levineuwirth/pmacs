@@ -14,7 +14,7 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `643d1e1` (#126 merged; protocol v18).
+  `githubsucks/main` @ `2e37c04` (#127 merged; protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,7 +48,7 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `643d1e1` or a newer intentional main.
+The first command must expose `2e37c04` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 
@@ -57,6 +57,9 @@ If it does not, stop and repair the remote/fetch configuration.
 - Portable branch: `githubsucks/vterm-framing`
 - Approved framing head: `fb4f8f0`
 - Base: canonical `main` @ `643d1e1` (Vterm Stage 1 / PR #126 merged).
+  `main` has since advanced to `2e37c04` (config registry #127, no
+  runtime overlap with vterm); cut the Stage 2 lane from current `main`,
+  not from `643d1e1`.
 - State: `docs/vterm-framing.md` Revision 7 is framing-only, reviewed, and
   approved for implementation. It closes the final `at_bottom`, terminal
   `C-c` binding-reachability, and context-implicit Lua failure-mode findings.
@@ -103,7 +106,24 @@ git worktree add --track \
   durable handoff refresh, and the keybinding reference correction.
 - It changes no runtime code.
 - Review and merge this documentation branch separately; it must not be
-  folded into PR #123 or either feature framing branch.
+  folded into a feature framing branch.
+- Now also absorbs both landed arcs: Vterm Stage 1 (#126) and the config
+  registry (#127). Canonical `main` is merged into it up to `2e37c04`,
+  so its diff against `main` is documentation only.
+
+## Closed since the last snapshot
+
+- **Config registry — MERGED as #127** (`main` @ `2e37c04`). Its lane
+  (`config-registry`, worktree `../pmacs-config-registry`) is done; the
+  branch is kept but carries nothing unmerged. Durable substrate facts
+  moved to `docs/agent-handoff.md` §1 per rule 3 below.
+- Both this and Vterm Stage 1 ran as **concurrent lanes in sibling
+  worktrees off `main`**, with the shared files (`src/editor.rs`,
+  `src/lua_bindings/mod.rs`, `src/lib.rs`) assigned to one lane each in
+  advance. The rebase of the second lane onto the first had **zero
+  conflicts** — worth repeating for future parallel work, along with its
+  precondition: agree the file split before either lane starts, and keep
+  each lane's footprint in the other's files to a single line.
 
 ## Update protocol
 
