@@ -840,11 +840,24 @@ pmacs.command.define {
 
 -- Opt-in trim-on-save. Getter when nil (the killring.max shape);
 -- default OFF — rewriting bytes on save is a policy, not a default.
-local trim_enabled = false
+-- Migrated to `editing.trim-on-save` (Q#CR8's second adopter) behind
+-- this unchanged signature. Legacy coercion stays lenient (F4): anything
+-- but a literal `false` turns it on, same as the boolean-enable shape
+-- shared by autosave.enable/recentf.enable/saveplace.enable — coerce
+-- FIRST, then hand the registry an already-conforming boolean, since
+-- `pmacs.config.set` itself is strict.
+pmacs.config.define {
+  name = "editing.trim-on-save",
+  description = "Delete trailing whitespace from every line before a save.",
+  type = "boolean",
+  default = false,
+  mutability = "live",
+}
 function pmacs.editops.trim_on_save(on)
-  if on == nil then return trim_enabled end
-  trim_enabled = (on ~= false)
-  return trim_enabled
+  if on == nil then return pmacs.config.get("editing.trim-on-save") end
+  local enabled = (on ~= false)
+  pmacs.config.set("editing.trim-on-save", enabled)
+  return enabled
 end
 
 -- Registered at load time (gated inside) so it runs BEFORE
@@ -861,7 +874,7 @@ pmacs.hook.add("buffer.before-save", function()
   -- either way). Both reports are pcall'd — a broken reporting
   -- channel must not resurrect the veto.
   local ok, err = pcall(function()
-    if trim_enabled then
+    if pmacs.config.get("editing.trim-on-save") then
       trim_active("delete-trailing-whitespace (on save)")
     end
   end)

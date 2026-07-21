@@ -60,6 +60,29 @@ global-only scoping (Q#CR4), `editor.tab_width` as the proving adopter
 - **Bet 6 confirmed and retired** into ground truth, with a correction
   to this doc's own "Init ordering" claim.
 
+**Revision 3 — 2026-07-21, implementation round 1.** Two corrections
+found while building the adopters, both against this document rather
+than against the code.
+- **Acceptance 30 vs 31 contradicted each other** — 31 forbade a
+  "per-frame lookup" that 30 required. Q#CR15's prohibition is about
+  render hot paths (per cell, per line, table construction), not one
+  O(1) scalar `get` per tick. Item 31 reworded.
+- **`builtin/runtime/config.lua` does not exist** (Q#CR14). `pmacs.config`
+  installs from Rust before any runtime chunk, exactly as `pmacs.command`
+  and `pmacs.hook` do, so the chunk had nothing to hold — and the one
+  helper it might have held would have broken acceptance 9 by capturing
+  every builtin define's `SourceLocation` at `config.lua`. Acceptance 26
+  rewritten from a now-vacuous claim. Net effect: this arc touches
+  `src/editor.rs` zero times.
+- **F5's rejection point was unimplementable as written** (Q#CR10).
+  Revision 2 had `define` rejecting `StartupOnly` + `set_local`, but
+  `define` cannot know about a future call and `StartupOnly` is legal
+  alone. Moved to `set_local`, where the combination actually manifests.
+  Acceptance 24 rewritten.
+- The registry's `frozen` flag is driven from the existing
+  `InitCompleteFlag` at write time rather than by a new `editor.rs`
+  call, which is what keeps the zero-touch claim above true.
+
 ---
 
 ## Ground truth (as of `7bc0c61`)
@@ -576,9 +599,22 @@ the posture `require_init_phase` (`mod.rs:663`) already hard-codes for
 Buffer-locals are set at runtime, from `buffer.after-load` hooks that
 fire long after the freeze — so a `StartupOnly` key could never carry a
 buffer-local override, and a `set_local` against one would be dead code
-that looks live. `define` rejects the combination outright with
-`StartupOnlyLocal` rather than shipping a knob whose two halves
-contradict each other.
+that looks live.
+
+**Corrected in revision 3.** Revision 2 said "`define` rejects the
+combination outright", which is not implementable: `define` cannot know
+about a future `set_local`, and `StartupOnly` is perfectly legal on its
+own. The rejection lives where the combination actually manifests —
+**`set_local` returns `StartupOnlyLocal` when the named definition is
+`StartupOnly`**, unconditionally and independent of freeze state, so the
+error is the same before and after startup rather than changing shape
+mid-session.
+
+`reset(name, None)` after the freeze is also refused for a `StartupOnly`
+key: dropping a frozen override would let the default silently reassert
+itself post-freeze, which is the same hazard `set` is blocked for.
+Buffer-local `reset` needs no such check, since such a key can never
+hold a local override in the first place.
 
 The ordering that makes define-before-set safe is the corrected sequence
 in ground truth: builtins define during `EditorState::new()`, user
@@ -598,8 +634,18 @@ later-defined names is deferred.
 write `info["local"]`. The field is present only when a buffer argument
 is given and that buffer holds an override.
 
-`pmacs.config.list()` returns fresh metadata tables, deterministic by
-key. Neither ever exposes an internal table or a listener function.
+`pmacs.config.list()` returns fresh metadata tables in **definition
+order**, matching `names()` and the command/hook registries' "stable
+listing" rule. Neither `describe` nor `list` ever exposes an internal
+table or a listener function.
+
+Revision 3 clarification: revision 2 said "deterministic by key", which
+implementation read as possibly meaning sorted-by-name. The requirement
+is *determinism* — never `HashMap` iteration order — and definition
+order satisfies it while staying consistent with the two sibling
+registries. A UI that wants alphabetical sorts at the presentation
+layer; the substrate does not decide that. Bounds are exposed as flat
+`min` / `max` fields, not a nested `bounds` table.
 
 `M-x describe-setting` renders through `src/help.rs`, following
 `render_hook` / `format_hook_text` (`help.rs:160`, `:170`) so the
@@ -640,13 +686,39 @@ Stage 2: unify the four daemon constants into a resolved value threaded
 through the display-column functions as a parameter — they are pure
 functions today and should stay pure — then answer the GPU question.
 
-### Q#CR14 — Surface in `config.lua`; each module defines its own keys
+### Q#CR14 — No runtime chunk; each module defines its own keys
 
-`builtin/runtime/config.lua` holds the friendly Lua surface only, loaded
-in `EditorState::new()` immediately after `fs.lua` (`editor.rs:206`) and
-before every module that defines or reads a setting — in particular
-before `pair.lua` (`editor.rs:319`), whose own load-before-`lsp.lua`
-contract (`editor.rs:325`) is unaffected.
+**Revised in revision 3.** Revision 2 put a "friendly Lua surface" in
+`builtin/runtime/config.lua`, loaded after `fs.lua`. Implementation
+established there is nothing for that file to hold, so **it does not
+exist**.
+
+Two facts kill it. First, `pmacs.config` is installed entirely from
+Rust by `attach_editor`, which runs before *any* `builtin/runtime/*.lua`
+chunk is evaluated in `EditorState::new()` — so the bindings are already
+the friendly surface, with no raw underscore layer needing a Lua wrapper
+the way `pmacs._async` needs `async.lua`. `pmacs.command` and
+`pmacs.hook` are the precedent: both are pure-Rust surfaces with no
+runtime chunk. Second, the one helper such a file might plausibly hold —
+a shared `define`-wrapping convenience — would actively break acceptance
+9, because `SourceLocation` is captured from Lua debug info at the
+`define` call site, so routing every builtin define through a helper in
+`config.lua` would make every builtin setting report `config.lua` as its
+source instead of its owning module.
+
+The module documentation that revision 2 assigned to that chunk lives in
+the `src/lua_bindings/config.rs` module header instead.
+
+Builtin `define` calls live with their owning modules (F10), not
+centralized. `pair.lua` defines `editing.auto-pair`, `editops.lua`
+defines `editing.trim-on-save`, `autosave.lua` defines
+`autosave.interval-ms`. `pair.lua`'s load-before-`lsp.lua` contract
+(`editor.rs:319`, `:325`) is untouched, and because the bindings install
+ahead of every chunk, no load-order constraint is added by this arc at
+all.
+
+Consequence worth noting for the concurrent vterm lane: this arc now
+touches `src/editor.rs` **zero** times.
 
 **Builtin `define` calls live with their owning modules (F10)**, not
 centralized in `config.lua`. Revision 1 centralized them, which would
@@ -762,8 +834,9 @@ Registry semantics (unit, `src/config_registry.rs`):
 6. Integer and number finite/boundary cases are exact under **both**
    `--features luajit` (default) and
    `--no-default-features --features lua54`.
-7. `list` is deterministic by key; `describe`/`list` never expose an
-   internal mutable table or a listener function.
+7. `list` returns definition order (never `HashMap` order);
+   `describe`/`list` never expose an internal mutable table or a
+   listener function, and each call returns a fresh table.
 8. `names()` / `list()` order is stable across ≥3 defines.
 9. `SourceLocation` is captured from the *defining module's* chunk and
    renders `file:line` — `editing.auto-pair` reports `pair.lua`, not
@@ -817,13 +890,20 @@ Startup and mutability:
     `InitCompleteFlag` explicitly** (`mod.rs:14655-14690` is the
     pattern) — in `--lib` builds `set_init_complete` never runs, so a
     test that omits this passes vacuously.
-24. `define` rejects `mutability = 'startup'` combined with any
-    `set_local` attempt, via `StartupOnlyLocal` (F5).
+24. `set_local` against a `StartupOnly` definition returns
+    `StartupOnlyLocal` both before and after the freeze (F5, corrected
+    in revision 3 — `define` cannot police a future call). A
+    `StartupOnly` global `reset` after the freeze is refused for the
+    same reason `set` is.
 25. A failing `init.lua` preserves prior successful sets and still
     starts the editor; missing `init.lua`, broken `init.lua` and
     `require` package-path behavior are unchanged.
-26. `config.lua` is installed before `pair.lua`, and `pair.lua` still
-    loads before `lsp.lua` (the Q#AP7 contract is untouched).
+26. The `pmacs.config` table is populated before the first
+    `builtin/runtime/*.lua` chunk evaluates — a builtin module's
+    top-level `define` call succeeds — and `pair.lua` still loads before
+    `lsp.lua` (the Q#AP7 contract is untouched). Revision 3: this
+    replaces "`config.lua` is installed before `pair.lua`", which became
+    vacuous when that chunk was removed (Q#CR14).
 
 Adopters:
 
@@ -839,9 +919,18 @@ Adopters:
     buffer-locally suppresses it in that buffer only, with pairing still
     active in a second buffer of the same language.
 30. The autosave tick observes a mid-session interval change without a
-    restart (the existing live-re-read contract, re-pinned).
-31. Neither adopter performs a per-frame or per-cell Lua lookup, and
-    both preserve their previous default behavior exactly.
+    restart (the existing live-re-read contract, re-pinned), whether the
+    change arrived through the wrapper or through a direct
+    `pmacs.config.set`.
+31. No adopter builds a Lua table or performs a string-keyed lookup
+    **per cell or per rendered line**, and all three preserve their
+    previous default behavior exactly. Revision 3 note: this item and
+    item 30 read as contradictory in revision 2 — 30 *requires* the
+    autosave tick to re-read every frame while 31 forbade a "per-frame
+    lookup". Q#CR15's prohibition targets render hot paths, not a single
+    O(1) scalar `get` once per tick, which is exactly what Q#CR8 asks
+    autosave to prove. One scalar `get` per tick is explicitly
+    conforming.
 
 Discovery:
 

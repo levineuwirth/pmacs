@@ -37,6 +37,20 @@ local ed = pmacs.editor
 -- daemon-peer op, so its undo is cross-peer-degraded (documented
 -- limitation; the general fix is chronological cross-peer undo
 -- arbitration, named substrate work).
+
+-- Per-buffer on/off switch (Q#CR8's flagship adopter). Read against the
+-- SOURCE buffer of the typed edit, never the currently active one — see
+-- the hook body below, which resolves it the same way `set_for` resolves
+-- the buffer's pair set (round 2, finding 2): `rec.buffer`, not
+-- `pmacs.window.buffer()`.
+pmacs.config.define {
+  name = "editing.auto-pair",
+  description = "Automatically insert (and skip over) the closing half of a typed pair.",
+  type = "boolean",
+  default = true,
+  mutability = "live",
+}
+
 pmacs.pair.sets = {
   default = { "()", "[]", "{}", '""' },
   python = { "()", "[]", "{}", '""', "''" },
@@ -197,6 +211,12 @@ pmacs.hook.add("buffer.after-edit", function()
   if pmacs.pair._capture_records then pmacs.pair._last_record = rec end
   if not rec then return end
   if not (ed.this_command and ed.this_command() == "buffer.self-insert") then return end
+
+  -- The master switch, per-buffer (Q#CR4): the SOURCE buffer of the
+  -- typed edit, resolved buffer-local -> global -> default(true). A
+  -- second buffer of the same language is untouched by a buffer-local
+  -- override here (acceptance 29).
+  if not pmacs.config.get("editing.auto-pair", rec.buffer) then return end
 
   local buf = pmacs.window.buffer()
   if not buf then return end
