@@ -54,23 +54,40 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Active lane: Arc 4 stage 3 — statusline segments
 
 - Portable branch: `githubsucks/statusline-segments`
-- Framing head: `5ca76c6`
-- State: framing only, revision 3; re-scouted against `bb17ec9` /
-  protocol v17 with no relevant substrate drift.
-- Status: awaiting user review. No implementation and no PR.
-- Scope: composable per-window Lua modeline providers, dynamic
-  modeline-face inventory, and protocol v18
-  `StatuslineSegments`; the built-in LSP segment is the first consumer.
-- Do not implement until the user approves the framing. When approved,
-  continue on this branch so the framing remains the first commit.
+- Feature head:
+  `c3d125ac96b7bf0a8eba60530f8a2adb083cd7a6`
+- Pull request: #125,
+  **feat(statusline): composable modeline segments at protocol v18** —
+  <https://github.com/levineuwirth/pmacs/pull/125>
+- State: Revision 3's Q#SL1-Q#SL11 and Acceptance 1-27 are implemented,
+  committed, pushed, and awaiting review. The branch is **not merged**.
+- Scope delivered: strict composable per-window `pmacs.statusline`
+  providers; borrow-released evaluation and per-context failure latches;
+  legacy-preserving TUI composition; a pure built-in LSP provider;
+  dynamic modeline-face inventory; protocol-v18 authoritative
+  `StatuslineSegments`; snapshot/version symmetry; and atomic GPU
+  validation, face resolution, shaping, clipping, and caching.
+- Full verification, sequential with no flaky rerun: `cargo fmt --check`;
+  workspace/all-target Clippy with `-D warnings`; 1,610 default library
+  tests (3 ignored); 1,784 CRDT library tests (3 ignored); 7 default and
+  8 CRDT statusline acceptance tests; 110 M4 acceptance tests (3
+  ignored, `basedpyright` filtered); 108 required GPU tests; one
+  workspace invocation with 2,704 passing tests across 78 suites (19
+  ignored, `basedpyright` filtered); and `git diff --check`.
+- Recovery state at handoff: `/home/jeans/Repos/active/pmacs-statusline`
+  is clean, its local branch and `githubsucks/statusline-segments` both
+  point at the feature head above, and PR #125 targets canonical `main`.
 
-Recovery worktree:
+Recovery worktree on a machine that does not already have the local
+branch:
 
 ```sh
+git fetch githubsucks statusline-segments
 git worktree add --track \
   -b statusline-segments \
   ../pmacs-statusline \
   githubsucks/statusline-segments
+gh pr view 125 --repo levineuwirth/pmacs
 ```
 
 ## Parked lane: kill-ring browser + persistence
