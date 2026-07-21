@@ -1,6 +1,13 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 1 — 2026-07-21. Status: framing for discussion; no implementation.**
+**Revision 2 — 2026-07-21. Status: decisions folded; awaiting approval, no implementation.**
+
+Revision 2 records the architecture discussion: `C-c` is the terminal editor
+escape (`C-c C-c` sends interrupt); main-screen resize reflows while alternate
+screen clips/pads; exited buffers remain with an Emacs-style process message;
+protocol v19 is additive with complete frames; shared `Style` stays unchanged;
+and one `BufferId` owns one shared process/screen whose most recently active
+frontend controls size.
 
 This framing follows the compile-mode terminal substrate that landed in PR
 #113. `src/process.rs` already owns PTY creation, process groups, bounded
@@ -125,13 +132,13 @@ pub struct TerminalSelectionSpan {
     pub start_col: u32, // inclusive
     pub end_col: u32,   // exclusive
 }
+
 pub enum TerminalProcessState {
     Running,
     Exited(i32),
     Signaled(String),
     Crashed(String),
 }
-
 
 pub struct TerminalSnapshot {
     pub buffer_id: BufferId,
@@ -143,6 +150,7 @@ pub struct TerminalSnapshot {
     pub selection: Vec<TerminalSelectionSpan>,
     pub scroll_offset: u32,
     pub at_bottom: bool,
+    pub pid: u32,
     pub process: TerminalProcessState,
 }
 ```
@@ -183,8 +191,9 @@ Lua `ansi = true` process option retain the line-oriented profile; terminal
 session construction is the only initial full-screen caller. On `finish()`,
 `LineOriented` preserves today's synthetic alternate-screen/style balancing.
 `FullScreen` flushes pending text but does not invent an alternate-screen exit
-or clear cells: a child that crashes in alternate screen leaves its final
-visible screen inspectable. Parser internals reset in both profiles.
+or clear cells. The session manager, after applying the actual final parser
+events, adds the process-exit annotation described in §4.1. Parser internals
+reset in both profiles.
 
 The shared `Cell::Style` remains unchanged in this arc. Existing support covers
 indexed/truecolor foreground/background, bold, italic, underline variants,
@@ -299,12 +308,19 @@ cannot steal batches from each other.
 3. the existing `process.after-tick` hook runs;
 4. LSP/MCP retain their existing later ticks.
 
-At process exit, final drained output is applied before the terminal becomes
-`exited`. The buffer remains visible and copyable with a terminal-local exit
-status; it is not automatically killed. Killing the buffer terminates the
-process/session. A periodic prune handles all buffer-removal paths, including
-Lua callers that bypass the friendly terminal close API. Editor shutdown uses
-the existing supervisor shutdown path and cannot restart a terminal.
+At process exit, final drained output is applied first. The manager then writes
+one synthetic, default-style hard line into the active terminal screen:
+`Process <PID> exited normally with code 0` for zero; `Process <PID> exited
+abnormally with code <code>` for a non-zero code; or `Process <PID> exited
+abnormally with signal <signal>` for signal termination. It emits CRLF first
+when needed so the annotation never overwrites child text. The annotation is
+terminal-owned (not parser output and not rope text), visible and copyable like
+the rest of the screen.
+The buffer remains until the user kills it. Killing the buffer terminates a
+still-live process/session. A periodic prune handles all buffer-removal paths,
+including Lua callers that bypass the friendly terminal close API. Editor
+shutdown uses the existing supervisor shutdown path and cannot restart a
+terminal.
 
 The wire-visible process state has only the four variants above: synchronous
 spawn failure never publishes a session, and `terminate` remains `Running`
@@ -441,10 +457,10 @@ The normalized protocol does not distinguish number-row digits from numeric
 keypad digits, so application-keypad mode is tracked but cannot transform
 those ambiguous `Key::Char` events.
 
-`C-]` is the fixed stage-2 terminal escape prefix. It is consumed and makes the
-next key run through the ordinary editor dispatcher, allowing `C-] C-x ...`
-for editor commands. `C-] C-]` sends a literal Ctrl-] byte. This is an
-intentional fixed stage-2 policy.
+`C-c` is the fixed stage-2 terminal escape prefix. It is consumed and makes the
+next key run through the ordinary editor dispatcher, allowing `C-c C-x ...`
+for editor commands. `C-c C-c` sends the literal Ctrl-C byte required to
+interrupt the child. This is an intentional fixed stage-2 policy.
 
 Paste sends exact bytes, wrapped in `ESC[200~` / `ESC[201~` only while the
 child enabled bracketed paste. It never passes through a command shell or Lua.
@@ -506,6 +522,7 @@ InstanceMessage::TerminalFrame {
     selection: Vec<TerminalSelectionSpan>,
     scroll_offset: u32,
     at_bottom: bool,
+    pid: u32,
     process: TerminalProcessState,
 }
 
@@ -678,8 +695,8 @@ base-branch deletion/auto-close risk and makes each PR's gate evidence honest.
 11. Strict owned `TerminalSpec` values reject before spawn and are
     mutation-independent after spawn.
 12. A real PTY child prints cursor-addressed/alternate-screen content in
-    adversarial chunks; the headless snapshot matches and final output lands
-    before exit state.
+    adversarial chunks; final output lands first, then exact normal/non-zero/
+    signal process annotations are visible and copyable before exit state.
 13. Spawn failure leaves no buffer/session/process residue. Killing a live
     terminal buffer terminates it; editor shutdown leaves no child/reader.
 14. Every rope mutation path (ordinary, intercept-skipping, undo/redo, local
@@ -697,7 +714,7 @@ base-branch deletion/auto-close risk and makes each PR's gate evidence honest.
     and scrolled-back hiding are exact.
 18. Printable, Ctrl, Alt, arrows, Home/End, function keys, application cursor,
     focus reporting, and unknown keys produce the specified PTY bytes.
-19. `C-]` dispatches one editor key; `C-] C-]` sends Ctrl-]; modal minibuffer,
+19. `C-c` dispatches one editor key; `C-c C-c` sends Ctrl-C; modal minibuffer,
     search, menu, and query-replace remain authoritative.
 20. Paste is byte-exact with bracketed wrappers only when enabled.
 21. Mouse-reporting modes receive translated SGR reports. With reporting off,
@@ -766,22 +783,16 @@ Not part of these three PRs:
 Deferral means graceful ignore or documented absence, never escape leakage,
 panic, unbounded allocation, or child leak.
 
-## 12. Review questions
+## 12. Resolved decisions
 
-1. **Escape prefix:** accept fixed `C-]` for the first TUI stage, with
-   `C-] C-]` for literal Ctrl-], or choose a different fixed prefix before
-   implementation?
-2. **Resize:** accept logical-line reflow on the main screen and no reflow on
-   alternate screen?
-3. **Exit:** accept keeping an exited terminal buffer visible/copyable until
-   the user kills it, rather than auto-killing?
-4. **Compatibility:** accept v18 grid support but no terminal surface for v18
-   semantic/GPU peers, while normal v18 document editing remains compatible?
-5. **Wire shape:** accept complete visible `TerminalFrame` replacements for
-   stage 3, with complete-payload compare suppression, instead of introducing
-   a terminal-delta cache in the first GPU PR?
-6. **Style scope:** accept preserving the current shared `Style` encoding and
-   explicitly deferring faint/blink/conceal/strikethrough?
-7. **Session identity:** accept one screen/process per terminal `BufferId`,
-   shared across splits/frontends, with the most recently active frontend's
-   active view controlling PTY size?
+The 2026-07-21 architecture discussion resolved every Revision 1 question:
+
+1. Fixed terminal editor escape: `C-c`; `C-c C-c` sends literal Ctrl-C.
+2. Resize: reflow main-screen soft wraps; clip/pad alternate screen.
+3. Exit: retain the buffer and append the process PID/outcome line from §4.1.
+4. Compatibility: additive v19; v18 grid remains supported, v18 semantic has
+   no terminal surface.
+5. GPU wire: complete visible frames with complete-payload suppression.
+6. Style: preserve the shared encoding and defer unsupported attributes.
+7. Identity: one process/screen per terminal `BufferId`; the most recently
+   active frontend's active view controls PTY size.
