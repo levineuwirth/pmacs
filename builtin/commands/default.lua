@@ -1169,3 +1169,70 @@ cmd { name = "editor.describe-command",
           end,
         }
       end }
+
+-- describe-setting (config registry, acceptance 33) -------------------------
+--
+-- The configuration registry's discovery surface. `pmacs.config.describe`
+-- returns the metadata table at the Rust layer; this is the interactive
+-- way in, modeled on `editor.describe-command` directly above and sharing
+-- its `*help*` buffer handling.
+--
+-- The prompt takes free text: `pmacs.minibuffer.read`'s `source` is a
+-- fixed vocabulary ("commands", "buffers") resolved in Rust, and adding a
+-- settings source means touching the minibuffer candidate machinery,
+-- which this arc deliberately stays out of. `pmacs.config.list()` is the
+-- programmatic way to enumerate names meanwhile; a completion source (and
+-- an M-x list-settings panel) are named deferrals in the framing.
+
+local function describe_setting_lines(name, info)
+  -- Header block mirrors help.rs's `format_hook_text`: aligned label
+  -- column, then a blank line, then the description as prose.
+  local lines = {
+    "Setting: " .. name,
+    "  Type:       " .. tostring(info.type),
+    "  Default:    " .. tostring(info.default),
+    "  Value:      " .. tostring(info.value),
+    "  Mutability: " .. tostring(info.mutability),
+    "  Source:     " .. tostring(info.source),
+  }
+  if info.min ~= nil then lines[#lines + 1] = "  Min:        " .. tostring(info.min) end
+  if info.max ~= nil then lines[#lines + 1] = "  Max:        " .. tostring(info.max) end
+  if type(info.choices) == "table" and #info.choices > 0 then
+    lines[#lines + 1] = "  Choices:    " .. table.concat(info.choices, ", ")
+  end
+  lines[#lines + 1] = ""
+  local desc = info.description
+  if type(desc) ~= "string" or desc == "" then desc = "(no description)" end
+  lines[#lines + 1] = desc
+  lines[#lines + 1] = ""
+  -- Overrides. `global` is the global-chain resolution regardless of the
+  -- buffer argument, so "same as default" is a real, distinguishable
+  -- state from "overridden to the same value" only via is_set — which is
+  -- why this reports the resolved values rather than claiming presence.
+  lines[#lines + 1] = "Global value: " .. tostring(info.global)
+  if info.buffer_local ~= nil then
+    lines[#lines + 1] = "Buffer-local override: " .. tostring(info.buffer_local)
+  end
+  return lines
+end
+
+cmd { name = "editor.describe-setting",
+      description = "Prompt for a setting name and render its definition in *help*.",
+      fn = function()
+        pmacs.minibuffer.read {
+          prompt = "Describe setting: ",
+          history = "command",
+          on_accept = function(name)
+            if name == nil or name == "" then return end
+            -- An undefined name raises NotFound rather than returning nil
+            -- (the define-before-set posture, Q#CR10), so this must pcall.
+            local buf = pmacs.window.buffer()
+            local ok, info = pcall(pmacs.config.describe, name, buf)
+            if not ok or type(info) ~= "table" then
+              pmacs.editor.set_status("describe-setting: no such setting: " .. name)
+              return
+            end
+            show_help_text(table.concat(describe_setting_lines(name, info), "\n"))
+          end,
+        }
+      end }

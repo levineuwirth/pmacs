@@ -24,7 +24,20 @@ pmacs.autosave = pmacs.autosave or {}
 local DEFAULT_INTERVAL_MS = 30000  -- Emacs's auto-save-timeout
 local MIN_INTERVAL_MS = 1000       -- each sweep fsyncs; don't storm
 
-local interval = DEFAULT_INTERVAL_MS
+-- Migrated to `autosave.interval-ms` (Q#CR8's third adopter: integer,
+-- validated, re-read live). The tick below re-reads the registry every
+-- frame — see its comment — so storage moves there instead of a
+-- module-local, but the wrapper's shape and its lenient coercion (F4)
+-- stay exactly as they were.
+pmacs.config.define {
+  name = "autosave.interval-ms",
+  description = "Milliseconds between periodic autosave sweeps.",
+  type = "integer",
+  default = DEFAULT_INTERVAL_MS,
+  min = MIN_INTERVAL_MS,
+  mutability = "live",
+}
+
 local enabled = true
 local last_sweep_ms = nil
 -- Report on the first tick (the startup scan), and after every load.
@@ -38,14 +51,20 @@ end
 
 -- interval_ms([ms]) --- getter when `ms` is nil, else a validated setter.
 -- Shape follows `pmacs.async_config.frame_target_ms`. The tick re-reads
--- this every frame, so a change takes effect immediately -- no restart.
+-- the registry every frame, so a change -- through this wrapper OR a
+-- direct `pmacs.config.set` -- takes effect immediately, no restart.
+-- Legacy coercion stays lenient (F4): floor a fractional `ms` FIRST,
+-- then hand the registry an already-conforming integer, since
+-- `pmacs.config.set` itself demands exactness. The floor-then-min error
+-- message and threshold are unchanged.
 function pmacs.autosave.interval_ms(ms)
-  if ms == nil then return interval end
+  if ms == nil then return pmacs.config.get("autosave.interval-ms") end
   if type(ms) ~= "number" or ms ~= ms or ms < MIN_INTERVAL_MS then
     error("pmacs.autosave.interval_ms: expected a number >= " .. MIN_INTERVAL_MS)
   end
-  interval = math.floor(ms)
-  return interval
+  local floored = math.floor(ms)
+  pmacs.config.set("autosave.interval-ms", floored)
+  return floored
 end
 
 -- sweep() --- force a pass now. Returns (written, blocked, conflicted).
@@ -113,9 +132,10 @@ end
 
 -- The cadence (Q#AS2). `process.after-tick` fires every frame -- and the
 -- run loops tick on a frame *timeout*, not only on input, so this keeps
--- running while the editor is idle. Costs one clock read + a compare per
--- frame, and parks no worker thread (a long `workers.sleep` would hold
--- one of only `available_parallelism - 1` pool threads).
+-- running while the editor is idle. Costs one clock read, one registry
+-- get (a borrowed/copied scalar, no Lua table built -- Q#CR15) and a
+-- compare per frame, and parks no worker thread (a long `workers.sleep`
+-- would hold one of only `available_parallelism - 1` pool threads).
 pmacs.hook.add("process.after-tick", function()
   if needs_report then
     needs_report = false
@@ -127,7 +147,7 @@ pmacs.hook.add("process.after-tick", function()
     last_sweep_ms = now
     return
   end
-  if now - last_sweep_ms >= interval then
+  if now - last_sweep_ms >= pmacs.config.get("autosave.interval-ms") then
     last_sweep_ms = now
     sweep_reporting()
   end

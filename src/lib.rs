@@ -55,6 +55,7 @@ pub mod command;
 pub mod completion;
 pub mod completion_framework;
 pub mod config;
+pub mod config_registry;
 // T M10.2: CRDT-backed buffer state. Feature-gated so v0.1 builds
 // carry zero overhead — the `loro` dependency isn't pulled in, no
 // field on the Buffer struct layout, no branch on `apply_edit`.
