@@ -277,8 +277,9 @@ real bugs in round after round. The cadence that has worked for ~40 PRs:
 7. After merge: update this handoff + your memory.
 
 Commit/PR conventions: commit messages via `git commit -F <file>` (no
-inline backticks through the shell); end with the Claude co-author
-line. PR bodies end with the Claude Code attribution. Clippy runs as
+inline backticks through the shell). **Authorship trailers and PR
+attributions must be truthful:** do not add a Claude co-author trailer or
+Claude Code attribution unless Claude actually contributed. Clippy runs as
 its own step, never `&&`-chained.
 
 ## 3. Gate suite (all green before any PR)
