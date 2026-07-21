@@ -1,15 +1,15 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 4 — 2026-07-21. Status: Stage 1 review round 1 fixes implemented
-and fully gated on `vterm-core`; awaiting review follow-up, not merged. Stages
-2 and 3 are not implemented.**
+**Revision 5 — 2026-07-21. Status: Stage 1 review round 2 fixes implemented
+and fully gated on `vterm-core`; awaiting merge authorization, not merged.
+Stages 2 and 3 are not implemented.**
 
-Revision 4 closes the first Stage 1 review: full-screen parsing now implements
-IND/NEL/RI and terminal children default to `TERM=xterm-256color`; shutdown
-acceptance probes process liveness portably; resize preserves application tab
-stops; the line-oriented EOF flush is explicit; and remaining VT-fidelity,
-performance, and lifecycle nits are recorded below. The architecture remains
-unchanged: `C-c` is the terminal editor escape (`C-c C-c` sends interrupt);
+Revision 5 establishes the renderer-facing cell invariant before Stage 2:
+terminal text discards C0/C1 controls rather than storing host-terminal control
+bytes in grapheme cells. SGR mouse release preserves the released button code;
+review cleanups remove dead screen paths and stale round-trip state; and the
+remaining VT-fidelity and allocation nits are explicit deferrals. Architecture
+is unchanged: `C-c` is the terminal editor escape (`C-c C-c` sends interrupt);
 main-screen resize reflows while alternate screen clips/pads; exited buffers
 remain with an Emacs-style process message; protocol v19 is additive with
 complete frames; shared `Style` stays unchanged; and one `BufferId` owns one
@@ -35,11 +35,12 @@ Arc 5 stage 2 ships as three separately reviewed PRs:
 There is no single mega-PR. Each stage is useful and testable by itself, and a
 later stage starts only after the preceding stage lands on `main`.
 
-## 0. Revision 4 — Stage 1 implementation and review record
+## 0. Revision 5 — Stage 1 implementation and review record
 
-The first of the three vterm PRs is implemented and fully gated on
-`vterm-core`, awaiting review follow-up. Initial feature commit `bbc1f33` and
-review fixes through `bf972a7` are published as open, non-draft PR #126,
+The first of the three vterm PRs is implemented, reviewed, and fully gated on
+`vterm-core`, awaiting merge authorization. Initial feature commit `bbc1f33`,
+first-review fixes through `bf972a7`, and second-review hardening `9797ada` are
+published as open, non-draft PR #126,
 <https://github.com/levineuwirth/pmacs/pull/126>, targeting `main`.
 It is deliberately headless: there is no `pmacs.terminal` Lua module,
 interactive terminal command, TUI paint branch, or GPU/protocol surface yet.
@@ -117,16 +118,17 @@ All fourteen Stage 1 criteria are implemented:
 The initial delivery gate run fixed missing acceptance-crate documentation;
 PR CI then exposed Darwin's numeric `strsignal` suffix, fixed in `962944b`.
 Review round 1's first Clippy pass found only identical LF/IND match arms,
-consolidated in `bf972a7`; the complete sequence restarted from gate 1:
+consolidated in `bf972a7`. Review round 2 added one screen unit and one shared
+acceptance case; the complete sequence restarted from gate 1:
 
 - `cargo fmt --check`: clean;
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean;
-- default library: 1,660 passed, 3 ignored;
-- CRDT library: 1,836 passed, 3 ignored;
-- Stage 1 acceptance: 8 default + 9 CRDT passed;
+- default library: 1,661 passed, 3 ignored;
+- CRDT library: 1,837 passed, 3 ignored;
+- Stage 1 acceptance: 9 default + 10 CRDT passed;
 - M4 acceptance: 114 passed, 3 ignored, 1 `basedpyright` filtered;
 - required GPU: 109 passed;
-- workspace: 2,767 passed across 79 suites, 19 ignored, 1 filtered;
+- workspace: 2,769 passed across 79 suites, 19 ignored, 1 filtered;
 - `git diff --check`: clean.
 
 `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
@@ -139,6 +141,11 @@ parser_split_points_produce_identical_screen` returned `bite: OK` with a clean
 behavioral assertion failure: the pre-dispatch parser left the cursor at row
 zero/column four instead of applying NEL/RI/IND and landing at row one/column
 zero.
+
+`scripts/bite HEAD^ src/terminal/screen.rs --test vterm_stage1_acceptance
+terminal_cells_reject_child_control_characters` returned `bite: OK` with a
+clean behavioral failure: the pre-hardening screen stored control bytes in a
+grapheme cluster rather than preserving the blank snapshot.
 
 ### 0.4 Downstream review findings (not implemented)
 
@@ -186,6 +193,27 @@ intentional latent-bug fix and an observable compatibility contract.
 The Stage 2 Lua `open` surface must uniquify colliding default buffer names
 (`*terminal:sh*`, `*terminal:sh*<2>`, and so on) before terminal creation
 becomes user-visible.
+
+### 0.6 Stage 1 review round 2
+
+The second external review found no ownership, lifecycle, mutation-guard,
+transactional-spawn, final-drain, parser-cap, or reflow defects and judged
+Stage 1 merge-ready. Its renderer-boundary hardening and cheap cleanups are
+resolved before Stage 2:
+
+- `TerminalScreen::write_text` drops every `char::is_control()` value before
+  grapheme segmentation, so parser-produced C1 and direct-event C0/C1 bytes
+  cannot enter copyable or renderable cells. Unit and shared acceptance tests
+  pin a byte-identical blank snapshot.
+- SGR mouse release reports retain the released left/middle/right button code
+  and use the lowercase `m` final.
+- The dead `line_feed` mode parameter and contradictory wide-grapheme branch
+  are removed; all logical-line ID allocation saturates consistently; and
+  terminal prune clears stale round-trip input membership.
+
+Out-of-range DECSTBM bottom clamping, CSI-intermediate clone removal, and a
+separately named configuration-time scrollback-row cap remain explicit
+deferrals in §11.
 
 ## 1. Problem and ownership boundary
 
@@ -941,16 +969,22 @@ Not part of these three PRs:
   origin mode is disabled;
 - combining a character into the preceding cell across intervening SGR or
   cursor-control events;
+- DECSTBM clamping when an explicit bottom margin exceeds the current screen
+  height; the current core leaves the existing scrolling region unchanged;
 - exact xterm `?1047` clear-on-exit and scroll-margin preservation across
   alternate-screen switches;
 - legacy X10 mouse byte encoding when a child enables mouse tracking without
   SGR mode; Stage 2 sends no report for that unsupported combination;
 - nonstandard `CSI 3 K` ignore semantics (the current core clears the line);
 - the ASCII fast path that avoids grapheme-candidate allocation and
-  segmentation for every printable character after another ASCII character;
+  segmentation for every printable character after another ASCII character,
+  and avoiding the per-sequence `intermediates` clone in CSI dispatch;
 - cleanup of the defensive impossible-state path where a terminal spawn
   returns a process without a running PID, and borrow-tolerant `EditorState`
   drop; normal spawn/rollback/prune/shutdown paths remain covered;
+- a separately named configuration-time scrollback-row cap; the current
+  validation conservatively reuses the history-cell cap before the runtime
+  row and cell budgets enforce the effective limit;
 - shell integration, prompt marks, command semantic zones, and cwd reporting;
 - ordinary document search over terminal history;
 - terminal session persistence/reconnect across editor restart;

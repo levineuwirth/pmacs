@@ -1,8 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after Vterm Stage 1 review round 1 was addressed
-and fully gated on `vterm-core` (awaiting follow-up; not merged). Vterm Stages
-2 and 3 are not implemented.** This file is the bridge between development
+**Last updated: 2026-07-21, after Vterm Stage 1 review round 2 was addressed
+and fully gated on `vterm-core` (awaiting merge authorization; not merged).
+Vterm Stages 2 and 3 are not implemented.** This file is the bridge between development
 machines. If you are an agent reading on a fresh clone: this document
 plus the `docs/*-framing.md` files ARE your memory. Read this fully
 before taking on work, seed persistent memory from it, and **update this
@@ -121,11 +121,12 @@ next machine reads it the way you just did.
     `basedpyright` filtered); `git diff --check` clean. Stage 3 landed
     as #125 and completed Arc 4 on `main`.
 - **Vterm Stage 1 terminal core IMPLEMENTED ON `vterm-core`, FULLY GATED,
-  AWAITING REVIEW FOLLOW-UP, NOT MERGED** (`docs/vterm-framing.md` rev 4).
+  AWAITING MERGE AUTHORIZATION, NOT MERGED** (`docs/vterm-framing.md` rev 5).
   - Implementation commits: `bbc1f33` (Stage 1), `962944b` (Darwin signal
-    normalization), and review fixes `f0a235f`, `28f2e6c`, `bf972a7`; pull
-    request: #126, <https://github.com/levineuwirth/pmacs/pull/126> (open,
-    non-draft, targeting `main`).
+    normalization), first-review fixes `f0a235f`, `28f2e6c`, `bf972a7`, and
+    second-review hardening `9797ada`; pull request: #126,
+    <https://github.com/levineuwirth/pmacs/pull/126> (open, non-draft,
+    targeting `main`).
   - `AnsiParserProfile::{LineOriented, FullScreen}` preserves compile/REPL
     behavior while terminal PTYs emit the full cursor/mode/device operation
     set. `src/terminal/{screen,input,session}.rs` owns the state machine,
@@ -150,20 +151,23 @@ next machine reads it the way you just did.
   - Review round 1 added typed IND/NEL/RI with margin-correct screen behavior,
     defaults absent `TERM` to `xterm-256color`, makes shutdown liveness
     acceptance portable with `kill(pid, 0)`, and preserves custom tab stops on
-    resize. Stage 2 must uniquify default terminal buffer names. Exact CUU/CUD
-    margin clamping, combining across controls, xterm alternate-screen details,
-    legacy non-SGR mouse, and the printable ASCII allocation fast path are
-    explicit post-arc deferrals in the framing.
-  - Final from-start rerun after review round 1: Clippy clean; 1,660 default +
-    1,836 CRDT library tests (3 ignored each); 8 default + 9 CRDT vterm
+    resize. Review round 2 rejects C0/C1 controls before they enter screen
+    cells, preserves the released button code in SGR mouse reports, removes
+    dead screen paths, and clears stale round-trip state during prune. Stage 2
+    must uniquify default terminal buffer names.
+  - Exact CUU/CUD and out-of-range DECSTBM clamping, combining across controls,
+    xterm alternate-screen details, legacy non-SGR mouse, printable ASCII and
+    CSI-dispatch allocation fast paths, and scrollback-cap naming are explicit
+    post-arc deferrals in the framing.
+  - Final from-start rerun after review round 2: Clippy clean; 1,661 default +
+    1,837 CRDT library tests (3 ignored each); 9 default + 10 CRDT vterm
     acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
-    workspace 2,767 passed across 79 suites (19 ignored, 1 filtered); diff
-    check clean. The first review Clippy pass found only identical LF/IND match
-    arms; after consolidation the complete sequence restarted at gate 1.
-    `scripts/bite HEAD^ src/ansi.rs --lib
-    parser_split_points_produce_identical_screen` is a clean behavioral bite;
-    the original `main`/crate-root bite remains explicitly weaker compile-time
-    API evidence.
+    workspace 2,769 passed across 79 suites (19 ignored, 1 filtered); diff
+    check clean. `scripts/bite HEAD^ src/terminal/screen.rs --test
+    vterm_stage1_acceptance terminal_cells_reject_child_control_characters`
+    is a clean behavioral bite. The parser dispatch has its independent clean
+    behavioral bite; the original `main`/crate-root bite remains explicitly
+    weaker compile-time API evidence.
   - Stage 2 reviews require a durable focus/input resize owner, owning
     `FrontendId` for the global `C-c` continuation, and local clipboard/BEL
     signal drainage. Stage 3 additionally owns `pmacs-gpu/src/attach.rs`,
