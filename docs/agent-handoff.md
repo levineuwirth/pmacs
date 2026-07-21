@@ -1,6 +1,6 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after the statusline stage-3 Revision 2
+**Last updated: 2026-07-21, after the statusline stage-3 Revision 3
 review update, JSON/YAML (#123) merge, and cross-machine continuity
 audit; main also reflects GPU font preferences (#124), themes stage 1
 (#120), and injections (#122).** This file is the
@@ -144,7 +144,7 @@ commands, read `docs/active-work.md` immediately after this file.
   `FontSystem` construction; alternate advances are measured across
   complete shaped runs, not sampled glyphs.
 - **NEXT: themes stage 3 — Lua statusline-segment API.**
-  Revision 2 is preserved on branch `statusline-segments`, re-scouted
+  Revision 3 is preserved on branch `statusline-segments`, re-scouted
   against `bb17ec9` with no relevant substrate drift, and awaits review.
   It scopes additive per-window modeline providers, face-name segments,
   dynamic `ThemeFacts` inventory, and a new v18 `StatuslineSegments`

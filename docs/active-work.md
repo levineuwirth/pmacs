@@ -54,8 +54,8 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Active lane: Arc 4 stage 3 — statusline segments
 
 - Portable branch: `githubsucks/statusline-segments`
-- Framing head: `957a2d9`
-- State: framing only, revision 2; re-scouted against `bb17ec9` /
+- Framing head: `5ca76c6`
+- State: framing only, revision 3; re-scouted against `bb17ec9` /
   protocol v17 with no relevant substrate drift.
 - Status: awaiting user review. No implementation and no PR.
 - Scope: composable per-window Lua modeline providers, dynamic
