@@ -348,6 +348,14 @@ impl TerminalManager {
             .map(|session| session.process_id)
     }
 
+    /// Monotonic terminal BEL count used for per-frontend delivery baselines.
+    #[must_use]
+    pub fn bell_count(&self, buffer_id: BufferId) -> Option<u64> {
+        self.sessions
+            .get(&buffer_id)
+            .map(|session| session.screen.bell_count())
+    }
+
     /// Ensure an exact terminal view exists without changing its controller.
     ///
     /// Returns `false` when the key's buffer is not a published terminal.

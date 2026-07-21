@@ -2821,6 +2821,12 @@ impl EditorCore {
         self.round_trip_buffers.contains(&self.active_buffer_id())
     }
 
+    /// Whether an explicit buffer requires daemon-owned round-trip input.
+    #[must_use]
+    pub fn active_buffer_round_trips_for(&self, buffer_id: BufferId) -> bool {
+        self.round_trip_buffers.contains(&buffer_id)
+    }
+
     /// Ensure the active window carries a
     /// [`crate::completion::CompletionView`] overlay (deduped by kind).
     /// The view reads the shared popup, so one instance suffices; it
