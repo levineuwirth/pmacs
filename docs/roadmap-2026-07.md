@@ -80,26 +80,34 @@ saveplace, autosave + crash recovery, optional backups. Generalize the
 question: what is a "session" in a daemon world; do CRDT snapshots
 ride along.
 
-### Arc 4 — Themes + extensibility surface — COMPLETE ON FEATURE BRANCH
+### Arc 4 — Themes + extensibility surface — COMPLETE ON `main`
 
-Stages 1 and 2 landed as #120 and #124: named `ui.*` faces with
-daemon-resolved `ThemeFacts`, then the live global
-`pmacs.gpu.set_font` preference at protocol v17. Stage 3 is implemented
-and fully gated on `statusline-segments`, awaiting review and **not yet
-merged**: composable `pmacs.statusline` providers, per-window TUI
-composition, a pure built-in LSP segment, dynamic modeline faces, and
-semantic/GPU transport through protocol v18. Merging stage 3 completes
-Arc 4 on `main`.
+All three stages landed: #120 added named `ui.*` faces and daemon-resolved
+`ThemeFacts`; #124 added the live global `pmacs.gpu.set_font` preference at
+protocol v17; and #125 added composable `pmacs.statusline` providers,
+per-window TUI composition, a pure built-in LSP segment, dynamic modeline
+faces, and semantic/GPU transport through protocol v18.
 
-### Arc 5 — Terminal, staged
+### Arc 5 — Terminal, staged — VTERM STAGE 1 ON FEATURE BRANCH
 
-- **Stage 1**: compile-mode / grep-mode / shell-command on the existing
-  PTY + ANSI + REPL-package substrate (line-oriented output buffer,
-  error-regex jump-to-file, `M-x compile`). Cheap, transformative.
-- **Stage 2 (vterm)**: extend `ansi.rs` into a 2D grid model
-  (alt-screen, cursor addressing, scrollback — parser already
-  recognizes and discards these), grid-backed buffer view, GPU
-  rendering question (grid cells vs text buffer).
+- **Compile-mode landed** in #113: line-oriented PTY/ANSI output,
+  error-regex navigation, and `M-x compile`.
+- **Vterm Stage 1 terminal core** is implemented, two review rounds are
+  addressed, and the branch is fully gated on `vterm-core`; PR #126 awaits
+  merge authorization and is **not merged**. It adds compatibility parser
+  profiles, bounded VT screen/scrollback/reflow state, IND/NEL/RI, input
+  encoders, internal `TerminalManager`, read-only identity buffers, process
+  lifecycle, renderer-safe control-free cells, and headless real-PTY
+  acceptance. It intentionally adds no interactive Lua command or frontend
+  rendering.
+- **Vterm Stage 2 TUI** starts only after Stage 1 merges: terminal-window
+  composition, input/resize, per-context scroll/selection/copy, and the Lua
+  surface.
+- **Vterm Stage 3 protocol/GPU** starts only after Stage 2 merges: additive
+  protocol v19 complete frames, authenticated daemon routing, and native GPU
+  cell rendering. Its framing must resolve the current 16 MiB transport cap's
+  incompatibility with the legal worst complete terminal frame; never silently
+  chunk.
 
 ### Arc 6 — Folding (keystone gutter rider)
 

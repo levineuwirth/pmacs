@@ -1,8 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, with Themes Arc 4 stage 3 implemented and
-fully gated on the `statusline-segments` feature branch (awaiting
-review; not merged).** This file is the bridge between development
+**Last updated: 2026-07-21, after Vterm Stage 1 review round 2 was addressed
+and fully gated on `vterm-core` (awaiting merge authorization; not merged).
+Vterm Stages 2 and 3 are not implemented.** This file is the bridge between development
 machines. If you are an agent reading on a fresh clone: this document
 plus the `docs/*-framing.md` files ARE your memory. Read this fully
 before taking on work, seed persistent memory from it, and **update this
@@ -11,10 +11,8 @@ next machine reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-21)
 
-- Canonical `main` @ `bb17ec9` (#123 merged atop #124), protocol
-  **v17** (`SUPPORTED=[6..17]`). The rebased `statusline-segments`
-  branch implements protocol v18, but v18 is **not on main** until
-  review and merge.
+- Canonical `main` @ `7bc0c61` (#125 merged), protocol
+  **v18** (`SUPPORTED=[6..18]`).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -100,8 +98,7 @@ next machine reads it the way you just did.
   `pmacs.editor.take_typed_edit()` (buffer-revision postcondition,
   Q#AP9). Substrate: `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
   `PMACS_FAKE_LSP_CHANGE_SINK`, `TestDaemon::spawn_with_config`.
-- **Themes (Arc 4) stages 1 and 2 LANDED; stage 3 IMPLEMENTED ON ITS
-  FEATURE BRANCH, AWAITING REVIEW.**
+- **Themes (Arc 4) stages 1–3 LANDED; Arc 4 COMPLETE ON `main`.**
   - Stage 1 (#120, `docs/theme-faces-framing.md` rev 9): named UI faces
     as reserved `ui`/`ui.*` theme entries; transactional split
     syntax/face epochs; protocol-v16 `ThemeFacts`; snapshot/baseline
@@ -110,7 +107,7 @@ next machine reads it the way you just did.
     `pmacs.gpu.set_font` and authoritative protocol-v17 `FontFacts`;
     frontend-local family resolution, live font reload/reflow, and
     visual-run caret geometry.
-  - Stage 3 (`statusline-segments`,
+  - Stage 3 (#125, `statusline-segments`,
     `docs/statusline-segments-framing.md` rev 3): composable strict
     `pmacs.statusline` providers; borrow-released per-window evaluation
     with failure latches; legacy-preserving TUI composition; a pure
@@ -121,8 +118,62 @@ next machine reads it the way you just did.
     Clippy clean; 1,619 default + 1,793 CRDT library tests; 7 default +
     8 CRDT feature acceptance; 114 M4; 109 required GPU; one-invocation
     workspace sweep 2,718 passed across 78 suites (19 ignored,
-    `basedpyright` filtered); `git diff --check` clean. This branch is
-    awaiting review and **must not be described as merged**.
+    `basedpyright` filtered); `git diff --check` clean. Stage 3 landed
+    as #125 and completed Arc 4 on `main`.
+- **Vterm Stage 1 terminal core IMPLEMENTED ON `vterm-core`, FULLY GATED,
+  AWAITING MERGE AUTHORIZATION, NOT MERGED** (`docs/vterm-framing.md` rev 5).
+  - Implementation commits: `bbc1f33` (Stage 1), `962944b` (Darwin signal
+    normalization), first-review fixes `f0a235f`, `28f2e6c`, `bf972a7`, and
+    second-review hardening `9797ada`; pull request: #126,
+    <https://github.com/levineuwirth/pmacs/pull/126> (open, non-draft,
+    targeting `main`).
+  - `AnsiParserProfile::{LineOriented, FullScreen}` preserves compile/REPL
+    behavior while terminal PTYs emit the full cursor/mode/device operation
+    set. `src/terminal/{screen,input,session}.rs` owns the state machine,
+    encoders, and lifecycle registry.
+  - Public session seam: owned strict `TerminalSpec`; owned
+    `TerminalSnapshot`; `TerminalProcessState`; and
+    `SharedTerminalManager = Rc<RefCell<TerminalManager>>` with
+    `open/is_terminal/process_id/snapshot/tick/send/resize/terminate/prune/
+    shutdown`. Stage 1 snapshots are context-free; Stage 2 adds per-view
+    state without a second screen.
+  - `EditorState` tick order is supervisor → terminal-owned PID drain/prune →
+    `process.after-tick`. Terminal IDs are not exposed through
+    `pmacs.process`; ordinary Lua/LSP/MCP ownership is unchanged. Terminal
+    identity buffers are pathless, clean, empty, round-trip, and guarded
+    read-only at every rope/CRDT/history mutation boundary.
+  - Acceptance 1–14 is mapped in the framing. The real PTY bite splits
+    ESC/CSI writes, observes alternate-screen cursor addressing, blocks and
+    resumes through raw `send`, restores the main screen, and pins final
+    output before exact PID/outcome annotation. One-row annotation visibility,
+    TERM-ignoring shutdown, spawn rollback, buffer-kill prune, and immutable
+    empty CRDT bootstrap are pinned.
+  - Review round 1 added typed IND/NEL/RI with margin-correct screen behavior,
+    defaults absent `TERM` to `xterm-256color`, makes shutdown liveness
+    acceptance portable with `kill(pid, 0)`, and preserves custom tab stops on
+    resize. Review round 2 rejects C0/C1 controls before they enter screen
+    cells, preserves the released button code in SGR mouse reports, removes
+    dead screen paths, and clears stale round-trip state during prune. Stage 2
+    must uniquify default terminal buffer names.
+  - Exact CUU/CUD and out-of-range DECSTBM clamping, combining across controls,
+    xterm alternate-screen details, legacy non-SGR mouse, printable ASCII and
+    CSI-dispatch allocation fast paths, and scrollback-cap naming are explicit
+    post-arc deferrals in the framing.
+  - Final from-start rerun after review round 2: Clippy clean; 1,661 default +
+    1,837 CRDT library tests (3 ignored each); 9 default + 10 CRDT vterm
+    acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
+    workspace 2,769 passed across 79 suites (19 ignored, 1 filtered); diff
+    check clean. `scripts/bite HEAD^ src/terminal/screen.rs --test
+    vterm_stage1_acceptance terminal_cells_reject_child_control_characters`
+    is a clean behavioral bite. The parser dispatch has its independent clean
+    behavioral bite; the original `main`/crate-root bite remains explicitly
+    weaker compile-time API evidence.
+  - Stage 2 reviews require a durable focus/input resize owner, owning
+    `FrontendId` for the global `C-c` continuation, and local clipboard/BEL
+    signal drainage. Stage 3 additionally owns `pmacs-gpu/src/attach.rs`,
+    authenticated source routing, protocol-owned wire types/limits, and a
+    deliberate complete-frame limit decision: 16 MiB is insufficient; use a
+    measured legal-worst cap or aggregate bound, never silent chunking.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
