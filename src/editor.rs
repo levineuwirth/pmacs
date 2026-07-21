@@ -12,7 +12,7 @@
 //! them through the dispatcher, and invokes the resulting Lua commands
 //! until the user quits.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -37,6 +37,43 @@ use crate::protocol::FrontendId;
 use crate::view::{View, Viewport};
 use crate::window::{Rect, WindowId};
 
+/// Ephemeral authenticated origin for one interactive command invocation.
+///
+/// The shared slot is installed as Lua app data so Rust dispatch and nested
+/// `pmacs.command.invoke_interactive` calls use the same authority. Guards
+/// restore the prior value, which makes nesting safe and clears the outermost
+/// origin even when a Lua command errors.
+#[derive(Clone, Default)]
+pub(crate) struct InteractiveCommandOrigin(Rc<Cell<Option<FrontendId>>>);
+
+impl InteractiveCommandOrigin {
+    /// Current authenticated frontend while an interactive command runs.
+    #[must_use]
+    pub(crate) fn current(&self) -> Option<FrontendId> {
+        self.0.get()
+    }
+
+    /// Enter an interactive command scope for `frontend_id`.
+    pub(crate) fn enter(&self, frontend_id: FrontendId) -> InteractiveCommandOriginGuard {
+        let previous = self.0.replace(Some(frontend_id));
+        InteractiveCommandOriginGuard {
+            origin: self.clone(),
+            previous,
+        }
+    }
+}
+
+pub(crate) struct InteractiveCommandOriginGuard {
+    origin: InteractiveCommandOrigin,
+    previous: Option<FrontendId>,
+}
+
+impl Drop for InteractiveCommandOriginGuard {
+    fn drop(&mut self) {
+        self.origin.0.set(self.previous);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EditorState
 // ---------------------------------------------------------------------------
@@ -50,6 +87,8 @@ pub struct EditorState {
     pub lua_host: LuaHost,
     /// Multi-key prefix state machine. Driven by the run loop.
     pub dispatcher: KeyDispatcher,
+    /// Authenticated frontend scoped to the current interactive invocation.
+    pub(crate) interactive_origin: InteractiveCommandOrigin,
     /// Main-thread async runtime (T M3.3). Owns the worker pool and
     /// the message bus pair; [`Self::tick_async`] drives one
     /// drain-and-resume pass per run-loop iteration.
@@ -177,6 +216,8 @@ impl EditorState {
             Rc::new(RefCell::new(crate::buffer_registry::BufferRegistry::new()));
         let core = Rc::new(RefCell::new(EditorCore::new(registry.clone())));
         let mut lua_host = LuaHost::with_registry(registry).expect("Lua runtime initialization");
+        let interactive_origin = InteractiveCommandOrigin::default();
+        lua_host.lua().set_app_data(interactive_origin.clone());
         lua_host
             .attach_editor(&core)
             .expect("editor bindings + builtin chunks");
@@ -487,6 +528,7 @@ impl EditorState {
             core,
             lua_host,
             dispatcher: KeyDispatcher::new(),
+            interactive_origin,
             async_runtime,
             syntax_registry,
             process_supervisor,

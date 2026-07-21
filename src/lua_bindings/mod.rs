@@ -5239,11 +5239,18 @@ fn install_command_module(lua: &Lua, commands: &SharedCommandRegistry) -> mlua::
         command.set(
             "invoke_interactive",
             lua.create_function(move |lua, (name, args): (String, Variadic<Value>)| {
-                if let Some(core) = lua.app_data_ref::<SharedCore>() {
+                let frontend_id = lua.app_data_ref::<SharedCore>().map(|core| {
                     let mut core = core.borrow_mut();
-                    let fid = core.active_frontend;
-                    core.rotate_command(fid, &name);
-                }
+                    let frontend_id = core.active_frontend;
+                    core.rotate_command(frontend_id, &name);
+                    frontend_id
+                });
+                let origin = lua
+                    .app_data_ref::<crate::editor::InteractiveCommandOrigin>()
+                    .map(|origin| origin.clone());
+                let _origin_guard = frontend_id
+                    .zip(origin.as_ref())
+                    .map(|(frontend_id, origin)| origin.enter(frontend_id));
                 let body = {
                     let r = cmds.borrow();
                     r.get(&name)
