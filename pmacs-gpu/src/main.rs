@@ -37,10 +37,12 @@ use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
     AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CompletionPopupRow, CrdtOp,
     Decoration, DecorationKind, DecorationSegment, FrontendId, InlineAdornment, InstanceMessage,
-    InstanceSignal, Key as ProtocolKey, LineNumberMode, MenuPromptRow, Modifiers, PointerKind,
-    SelectionSnapshot, StyleSegment, StyleSpan,
+    InstanceSignal, Key as ProtocolKey, LineNumberMode, MAX_STATUSLINE_FACE_BYTES,
+    MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES, MAX_STATUSLINE_TOTAL_TEXT_BYTES,
+    MenuPromptRow, Modifiers, PointerKind, SelectionSnapshot, StatuslineSegment, StyleSegment,
+    StyleSpan,
     cell::{Color as CellColor, Style as CellStyle},
-    is_builtin_pair_char,
+    is_builtin_pair_char, is_modeline_face_name,
 };
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
@@ -874,19 +876,17 @@ struct State {
     squiggle_vertex_buffer: ReusableVertexBuffer,
     caret_vertex_buffer: ReusableVertexBuffer,
     minimap_vertex_buffer: ReusableVertexBuffer,
-    /// Q#S2 — the status band's one-line text. Shaped only when the
-    /// composed status string changes; rendered as a second
-    /// `TextArea` in the same prepare pass as the main buffer.
+    /// Q#S2/Q#SL10 — the status band's shaped right rich text.
     status_buffer: Buffer,
-    /// The string `status_buffer` currently holds, for change
-    /// detection.
-    status_text: String,
-    /// Q#S2 — the band's left side (buffer name + modified dot),
-    /// its own buffer so it left-aligns independently of the
-    /// right-aligned readout.
+    /// Rich runs currently installed in the right status buffer.
+    /// `None` is the invalidation sentinel; an empty vector is valid.
+    status_runs: Option<Vec<(String, Color)>>,
+    /// The independently left-aligned status buffer.
     status_left_buffer: Buffer,
-    /// Change-detection twin of `status_text` for the left side.
-    status_left_text: String,
+    /// Rich runs currently installed in the left status buffer.
+    status_left_runs: Option<Vec<(String, Color)>>,
+    /// Latest atomically validated custom statusline replacement.
+    statusline_segments: Option<StatuslineSegmentsLocal>,
     /// Q#S1 — the wire-authoritative status facts (protocol v8).
     status_facts: Option<StatusFactsLocal>,
     /// Q#SR5 — the live incremental-search prompt (protocol v9), or
@@ -978,6 +978,57 @@ fn completion_kind_glyph(kind: u8) -> char {
         17 | 19 => '/', // file / folder
         _ => '.',
     }
+}
+
+/// Latest validated custom statusline replacement (Q#SL7/Q#SL10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatuslineSegmentsLocal {
+    buffer_id: BufferId,
+    left: Vec<StatuslineSegment>,
+    right: Vec<StatuslineSegment>,
+}
+/// Validate the complete untrusted statusline payload before any state
+/// changes. Numeric and namespace policy lives only in pmacs-protocol.
+fn validate_statusline_segments(
+    left: &[StatuslineSegment],
+    right: &[StatuslineSegment],
+) -> Result<(), &'static str> {
+    let count = left
+        .len()
+        .checked_add(right.len())
+        .ok_or("segment count overflow")?;
+    if count > MAX_STATUSLINE_PROVIDERS {
+        return Err("too many segments");
+    }
+
+    let mut total_text_bytes = 0usize;
+    for segment in left.iter().chain(right) {
+        if segment.text.is_empty() {
+            return Err("empty segment text");
+        }
+        if segment.text.len() > MAX_STATUSLINE_SEGMENT_BYTES {
+            return Err("segment text too long");
+        }
+        if segment.text.chars().any(char::is_control) {
+            return Err("segment text contains a control character");
+        }
+        total_text_bytes = total_text_bytes
+            .checked_add(segment.text.len())
+            .ok_or("total text length overflow")?;
+        if total_text_bytes > MAX_STATUSLINE_TOTAL_TEXT_BYTES {
+            return Err("total segment text too long");
+        }
+        if segment.face.len() > MAX_STATUSLINE_FACE_BYTES {
+            return Err("segment face too long");
+        }
+        if segment.face.chars().any(char::is_control) {
+            return Err("segment face contains a control character");
+        }
+        if !is_modeline_face_name(&segment.face) {
+            return Err("segment face is outside ui.modeline");
+        }
+    }
+    Ok(())
 }
 
 /// The wire-authoritative status facts (Q#S1, protocol v8; `message`
@@ -2172,6 +2223,7 @@ impl State {
             Some(config.width as f32),
             Some(fm.status_band_height()),
         );
+        status_buffer.set_wrap(&mut font_system, Wrap::None);
         let mut status_left_buffer = Buffer::new(
             &mut font_system,
             Metrics::new(fm.status_font_size(), fm.status_line_height()),
@@ -2181,6 +2233,7 @@ impl State {
             Some(config.width as f32),
             Some(fm.status_band_height()),
         );
+        status_left_buffer.set_wrap(&mut font_system, Wrap::None);
         let mut menu_buffer = Buffer::new(
             &mut font_system,
             Metrics::new(fm.menu_font_size(), fm.menu_line_height()),
@@ -2294,9 +2347,10 @@ impl State {
             caret_vertex_buffer: ReusableVertexBuffer::new(),
             minimap_vertex_buffer: ReusableVertexBuffer::new(),
             status_buffer,
-            status_text: String::new(),
+            status_runs: None,
             status_left_buffer,
-            status_left_text: String::new(),
+            status_left_runs: None,
+            statusline_segments: None,
             status_facts: None,
             search_prompt: None,
             minibuffer: None,
@@ -2792,6 +2846,9 @@ impl State {
                 self.search_prompt = None;
                 self.menu = None;
                 self.status_facts = None;
+                self.statusline_segments = None;
+                self.status_runs = None;
+                self.status_left_runs = None;
                 self.cursor_fresh = false;
                 self.optimistic_cursor_floor = None;
                 self.optimistic_floor_set_at = None;
@@ -3042,8 +3099,8 @@ impl State {
             // would keep stale colors indefinitely without this.
             InstanceMessage::ThemeFacts { faces } => {
                 self.faces = faces.into_iter().map(|f| (f.name, f.style)).collect();
-                self.status_text.clear();
-                self.status_left_text.clear();
+                self.status_runs = None;
+                self.status_left_runs = None;
                 self.request_redraw();
                 None
             }
@@ -3260,6 +3317,30 @@ impl State {
                     total,
                 });
                 self.request_redraw();
+                None
+            }
+            // Arc 4 stage 3 (Q#SL7/Q#SL10) — validate the entire
+            // untrusted replacement before changing either side.
+            InstanceMessage::StatuslineSegments {
+                buffer_id,
+                left,
+                right,
+            } => {
+                if let Err(reason) = validate_statusline_segments(&left, &right) {
+                    eprintln!("pmacs-gpu: ignoring invalid StatuslineSegments: {reason}");
+                    return None;
+                }
+                let next = StatuslineSegmentsLocal {
+                    buffer_id,
+                    left,
+                    right,
+                };
+                if self.statusline_segments.as_ref() != Some(&next) {
+                    self.statusline_segments = Some(next);
+                    self.status_runs = None;
+                    self.status_left_runs = None;
+                    self.request_redraw();
+                }
                 None
             }
             // Arc 4 stage 2 (framing Q#F6/Q#F7) — the global font
@@ -3941,14 +4022,10 @@ impl State {
         Some(self.face_wash_or(name, fallback))
     }
 
-    /// The band's left-segment text color, mirroring
-    /// [`Self::compose_status_left`]'s priority: minibuffer/isearch
-    /// content follows `ui.minibuffer`, a transient message follows
-    /// `ui.statusline`, and the buffer name follows `ui.modeline`
-    /// (the framing's content-class applicability, Q#TH3).
+    /// The band's left-segment text color, mirroring the content
+    /// precedence in [`Self::compose_status_left_runs`].
     fn status_left_color(&self) -> Color {
-        const LEFT_DEFAULT: (u8, u8, u8) = (200, 200, 210);
-        let fallback = Color::rgb(LEFT_DEFAULT.0, LEFT_DEFAULT.1, LEFT_DEFAULT.2);
+        let fallback = Color::rgb(200, 200, 210);
         if self.minibuffer.is_some()
             || self
                 .search_prompt
@@ -3965,39 +4042,76 @@ impl State {
         if has_message {
             return self.face_fg_or("ui.statusline", fallback);
         }
-        self.modeline_face_colors().map_or(fallback, |(_, t)| t)
+        self.modeline_face_colors()
+            .map_or(fallback, |(_, text)| text)
     }
 
-    /// Compose the status-band readout (Q#S1): diagnostic counts
-    /// (wire-authoritative, severity-colored, omitted when zero),
-    /// then cursor L:C from the *optimistic* caret (so it tracks
-    /// typing bursts instead of lagging a round trip), then the
-    /// All/Top/Bot/NN% scroll indicator. Returns the colored spans.
-    fn compose_status_spans(&self) -> Vec<(String, Option<Color>)> {
-        use std::fmt::Write as _;
-        let mut spans: Vec<(String, Option<Color>)> = Vec::new();
-        if let Some(facts) = self
-            .status_facts
+    fn status_right_base_color(&self) -> Color {
+        self.modeline_face_colors()
+            .map_or(Color::rgb(168, 168, 180), |(_, text)| text)
+    }
+
+    /// Resolve an exact custom face against `ThemeFacts`. The producer
+    /// already normalizes custom entries to an {fg}-only style; absent
+    /// entries, `ui.modeline`, and defensive `Default` all select the
+    /// effective base modeline color.
+    fn status_segment_color(&self, face: &str, base: Color) -> Color {
+        if face == "ui.modeline" {
+            return base;
+        }
+        self.faces
+            .get(face)
+            .and_then(|style| cell_color_to_glyphon(style.fg))
+            .unwrap_or(base)
+    }
+
+    fn current_statusline_segments(&self) -> Option<&StatuslineSegmentsLocal> {
+        self.statusline_segments
             .as_ref()
-            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
-        {
-            if facts.diag_errors > 0 {
-                // Themes Q#TH5: the counters follow the diag faces
-                // (fg mask; the shaping-cache invalidation in the
-                // ThemeFacts arm makes a recolor with constant counts
-                // actually re-shape, Q#TH8).
-                spans.push((
-                    format!("E:{}", facts.diag_errors),
-                    Some(self.diag_face_fg_or("ui.diag.error", Color::rgb(241, 76, 76))),
-                ));
-            }
-            if facts.diag_warnings > 0 {
-                spans.push((
-                    format!("W:{}", facts.diag_warnings),
-                    Some(self.diag_face_fg_or("ui.diag.warning", Color::rgb(245, 245, 67))),
+            .filter(|segments| Some(segments.buffer_id) == self.current_buffer_id)
+    }
+
+    /// Compose the protected right group. Custom providers precede the
+    /// legacy diagnostic/cursor/scroll suffix. Custom boundaries are one
+    /// base-colored space; the built-in suffix retains its exact two-space
+    /// separators.
+    fn compose_status_runs(&self) -> Vec<(String, Color)> {
+        use std::fmt::Write as _;
+
+        let base = self.status_right_base_color();
+        let mut runs = Vec::new();
+        if let Some(custom) = self.current_statusline_segments() {
+            for segment in &custom.right {
+                if !runs.is_empty() {
+                    runs.push((" ".to_owned(), base));
+                }
+                runs.push((
+                    segment.text.clone(),
+                    self.status_segment_color(&segment.face, base),
                 ));
             }
         }
+
+        let mut builtins = Vec::new();
+        if let Some(facts) = self
+            .status_facts
+            .as_ref()
+            .filter(|facts| Some(facts.buffer_id) == self.current_buffer_id)
+        {
+            if facts.diag_errors > 0 {
+                builtins.push((
+                    format!("E:{}", facts.diag_errors),
+                    self.diag_face_fg_or("ui.diag.error", Color::rgb(241, 76, 76)),
+                ));
+            }
+            if facts.diag_warnings > 0 {
+                builtins.push((
+                    format!("W:{}", facts.diag_warnings),
+                    self.diag_face_fg_or("ui.diag.warning", Color::rgb(245, 245, 67)),
+                ));
+            }
+        }
+
         let mut readout = String::new();
         let mut cursor_row = self.scroll_top;
         if let Some(own) = self.own_cursor
@@ -4009,14 +4123,14 @@ impl State {
             );
             let line = self
                 .current_line_starts
-                .partition_point(|&s| s as usize <= byte)
+                .partition_point(|&start| start as usize <= byte)
                 .saturating_sub(1);
             cursor_row = line;
-            let ls = self.current_line_starts.get(line).copied().unwrap_or(0) as usize;
+            let line_start = self.current_line_starts.get(line).copied().unwrap_or(0) as usize;
             let col = self
                 .current_text
-                .get(ls..byte)
-                .map_or(0, |s| s.chars().count());
+                .get(line_start..byte)
+                .map_or(0, |text| text.chars().count());
             let _ = write!(readout, "L{}:C{}", line + 1, col + 1);
             readout.push_str("  ");
         }
@@ -4026,90 +4140,107 @@ impl State {
             self.current_line_starts.len(),
             cursor_row,
         ));
-        spans.push((readout, None));
-        spans
+        builtins.push((readout, base));
+
+        if !runs.is_empty() {
+            runs.push((" ".to_owned(), base));
+        }
+        for (index, builtin) in builtins.into_iter().enumerate() {
+            if index > 0 {
+                runs.push(("  ".to_owned(), base));
+            }
+            runs.push(builtin);
+        }
+        runs
     }
 
-    /// The band's left side. While an incremental search is running
-    /// (Q#SR5) it shows `I-search: <query> (n/m)` — the prompt takes
-    /// over the band like Emacs's echo area, returning to the buffer
-    /// name + modified dot (v8 `StatusFacts`) when the search ends.
-    fn compose_status_left(&self) -> String {
-        // Q#MB1 — an open minibuffer takes over the band: prompt + input
-        // (the candidates render separately as a dropdown). Measured by
-        // the band caret, so it must stay exactly `prompt + input`.
-        if let Some(mb) = self.minibuffer.as_ref() {
-            return format!("{}{}", mb.prompt, mb.input);
+    /// Compose the left group. Minibuffer, isearch, and transient
+    /// messages suppress custom left segments; ordinary buffer identity
+    /// starts at the leading edge but may be fully clipped by the right group.
+    fn compose_status_left_runs(&self) -> Vec<(String, Color)> {
+        if let Some(minibuffer) = self.minibuffer.as_ref() {
+            return vec![(
+                format!("{}{}", minibuffer.prompt, minibuffer.input),
+                self.status_left_color(),
+            )];
         }
-        if let Some(sp) = self
+        if let Some(search) = self
             .search_prompt
             .as_ref()
-            .filter(|s| Some(s.buffer_id) == self.current_buffer_id)
+            .filter(|search| Some(search.buffer_id) == self.current_buffer_id)
         {
-            let label = if sp.regex {
+            let label = if search.regex {
                 "Regex I-search: "
             } else {
                 "I-search: "
             };
-            let count = if sp.query.is_empty() {
+            let count = if search.query.is_empty() {
                 String::new()
-            } else if sp.invalid {
-                " [invalid]".to_string()
-            } else if sp.total == 0 {
-                " [no match]".to_string()
+            } else if search.invalid {
+                " [invalid]".to_owned()
+            } else if search.total == 0 {
+                " [no match]".to_owned()
             } else {
-                format!(" ({}/{})", sp.active.map_or(0, |a| a + 1), sp.total)
+                format!(
+                    " ({}/{})",
+                    search.active.map_or(0, |active| active + 1),
+                    search.total
+                )
             };
-            return format!("{}{}{}", label, sp.query, count);
+            return vec![(
+                format!("{label}{}{count}", search.query),
+                self.status_left_color(),
+            )];
         }
-        // A transient status message (v15 `StatusFacts.message` — LSP
-        // command summaries like "12 references", error reports) takes
-        // the band over echo-area style; the daemon clears it on the
-        // next keypress, which ships a fresh `StatusFacts` and returns
-        // the band to the buffer name.
-        if let Some(msg) = self
+        if let Some(message) = self
             .status_facts
             .as_ref()
-            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
-            .and_then(|f| f.message.as_deref())
+            .filter(|facts| Some(facts.buffer_id) == self.current_buffer_id)
+            .and_then(|facts| facts.message.as_deref())
         {
-            return msg.to_owned();
+            return vec![(message.to_owned(), self.status_left_color())];
         }
-        match self
+
+        let base = self.status_left_color();
+        let identity = match self
             .status_facts
             .as_ref()
-            .filter(|f| Some(f.buffer_id) == self.current_buffer_id)
+            .filter(|facts| Some(facts.buffer_id) == self.current_buffer_id)
         {
             Some(facts) if facts.modified => format!("{} ●", facts.name),
             Some(facts) => facts.name.clone(),
             None => String::new(),
+        };
+        let mut runs = Vec::new();
+        if !identity.is_empty() {
+            runs.push((identity, base));
         }
+        if let Some(custom) = self.current_statusline_segments() {
+            for segment in &custom.left {
+                if !runs.is_empty() {
+                    runs.push((" ".to_owned(), base));
+                }
+                runs.push((
+                    segment.text.clone(),
+                    self.status_segment_color(&segment.face, base),
+                ));
+            }
+        }
+        runs
     }
 
-    /// Re-shape the status-band text iff the composed content
-    /// changed (short lines — shaping is trivial, but not free per
-    /// frame).
+    /// Re-shape only when the complete ordered rich-run key changes.
+    /// Cache advancement follows successful installation and shaping.
     fn refresh_status_line(&mut self) {
-        let spans = self.compose_status_spans();
-        let composed: String = spans
-            .iter()
-            .map(|(t, _)| t.as_str())
-            .collect::<Vec<_>>()
-            .join("  ");
+        let right = self.compose_status_runs();
+        let left = self.compose_status_left_runs();
         let family = self.resolved_family.clone();
         let default_attrs = Attrs::new().family(Family::Name(&family));
-        if composed != self.status_text {
-            let mut rich: Vec<(&str, Attrs)> = Vec::new();
-            for (i, (t, c)) in spans.iter().enumerate() {
-                if i > 0 {
-                    rich.push(("  ", default_attrs.clone()));
-                }
-                let attrs = match c {
-                    Some(color) => default_attrs.clone().color(*color),
-                    None => default_attrs.clone(),
-                };
-                rich.push((t.as_str(), attrs));
-            }
+
+        if self.status_runs.as_ref() != Some(&right) {
+            let rich = right
+                .iter()
+                .map(|(text, color)| (text.as_str(), default_attrs.clone().color(*color)));
             self.status_buffer.set_rich_text(
                 &mut self.font_system,
                 rich,
@@ -4119,20 +4250,22 @@ impl State {
             );
             self.status_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-            self.status_text = composed;
+            self.status_runs = Some(right);
         }
-        let left = self.compose_status_left();
-        if left != self.status_left_text {
-            self.status_left_buffer.set_text(
+        if self.status_left_runs.as_ref() != Some(&left) {
+            let rich = left
+                .iter()
+                .map(|(text, color)| (text.as_str(), default_attrs.clone().color(*color)));
+            self.status_left_buffer.set_rich_text(
                 &mut self.font_system,
-                &left,
+                rich,
                 &default_attrs,
                 Shaping::Advanced,
                 None,
             );
             self.status_left_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-            self.status_left_text = left;
+            self.status_left_runs = Some(left);
         }
     }
 
@@ -5006,20 +5139,22 @@ impl State {
         } else {
             selected_advance
         };
-        // Rows stay rows: idempotent no-wrap on the popup buffers
-        // (assembly set it; a set_wrap no-op costs a comparison).
+        // Every row-oriented surface stays one row across the metric
+        // transaction, including the two status buffers (Q#SL10).
+        self.status_buffer
+            .set_wrap(&mut self.font_system, Wrap::None);
+        self.status_left_buffer
+            .set_wrap(&mut self.font_system, Wrap::None);
         self.menu_buffer.set_wrap(&mut self.font_system, Wrap::None);
         self.mb_buffer.set_wrap(&mut self.font_system, Wrap::None);
         self.completion_buffer
             .set_wrap(&mut self.font_system, Wrap::None);
         // Metrics + current dimensions atomically on all seven.
         self.sync_buffer_dimensions();
-        // The two string-equality shaping gates (the popups rebuild
-        // unconditionally per frame). NUL can never equal a composed
-        // status string, so the next frame re-shapes with new attrs
-        // even when its composed text is unchanged.
-        "\0".clone_into(&mut self.status_text);
-        "\0".clone_into(&mut self.status_left_text);
+        // Colors and family are attrs embedded in the status buffers.
+        // `None` forces the next frame to install and shape rich runs.
+        self.status_runs = None;
+        self.status_left_runs = None;
         // Attrs-bearing reshape at the retained scroll (reshape
         // normalizes it against the FINAL family/metrics/dims).
         self.reshape();
@@ -5315,15 +5450,15 @@ impl State {
         let after_minimap = debug_frame().then(std::time::Instant::now);
         let text_bounds_right = self.text_bounds_right();
 
-        // Right-align the status readout: measure the shaped width
-        // and place the area flush to the right pad (Q#S2).
+        // Right-align from the true full shaped width. An over-wide
+        // custom prefix may put this origin left of the surface; bounds
+        // clip it while the protected suffix remains pinned.
         let status_width = self
             .status_buffer
             .layout_runs()
-            .map(|r| r.line_w)
+            .map(|run| run.line_w)
             .fold(0.0_f32, f32::max);
-        let status_left =
-            (self.config.width as f32 - STATUS_TEXT_PAD - status_width).max(TEXT_LEFT);
+        let status_left = self.config.width as f32 - STATUS_TEXT_PAD - status_width;
         let status_top = text_area_bottom(self.config.height, self.fm)
             + (self.fm.status_band_height() - self.fm.status_line_height()) / 2.0;
         // UX gutter: the code's left origin (past the gutter) and the
@@ -5393,8 +5528,8 @@ impl State {
                         bounds: TextBounds {
                             left: 0,
                             top: text_area_bottom(self.config.height, self.fm).round() as i32,
-                            // Stop before the right-aligned readout.
-                            right: (status_left - STATUS_TEXT_PAD).max(0.0).round() as i32,
+                            // Stop at the right group's actual origin.
+                            right: status_left.max(0.0).round() as i32,
                             bottom: self.config.height.cast_signed(),
                         },
                         // Themes Q#TH3: the left segment's face follows
@@ -6679,6 +6814,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::CompletionPopup { .. } => "CompletionPopup",
         InstanceMessage::ThemeFacts { .. } => "ThemeFacts",
         InstanceMessage::FontFacts { .. } => "FontFacts",
+        InstanceMessage::StatuslineSegments { .. } => "StatuslineSegments",
     }
 }
 
@@ -9504,6 +9640,493 @@ mod tests {
         }
         bounds
     }
+    fn statusline_segment(text: impl Into<String>, face: impl Into<String>) -> StatuslineSegment {
+        StatuslineSegment {
+            text: text.into(),
+            face: face.into(),
+        }
+    }
+
+    fn apply_statusline(
+        state: &mut State,
+        buffer_id: BufferId,
+        left: Vec<StatuslineSegment>,
+        right: Vec<StatuslineSegment>,
+    ) {
+        let _ = state.apply_attach_message(InstanceMessage::StatuslineSegments {
+            buffer_id,
+            left,
+            right,
+        });
+    }
+
+    fn status_facts(buffer_id: BufferId, message: Option<&str>) -> StatusFactsLocal {
+        StatusFactsLocal {
+            buffer_id,
+            name: "main.rs".to_owned(),
+            modified: true,
+            diag_errors: 1,
+            diag_warnings: 2,
+            message: message.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn statusline_wire_validation_is_atomic_and_accepts_exact_boundaries() {
+        let Some(mut state) = headless_or_skip(420, 260, "text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.status_facts = Some(status_facts(buffer_id, None));
+        apply_statusline(
+            &mut state,
+            buffer_id,
+            vec![statusline_segment("valid", "ui.modeline.good")],
+            vec![statusline_segment("right", "ui.modeline")],
+        );
+        let valid_frame = state.render_offscreen();
+        let valid_state = state
+            .statusline_segments
+            .clone()
+            .expect("valid payload installed");
+        let valid_right_cache = state.status_runs.clone();
+        let valid_left_cache = state.status_left_runs.clone();
+
+        let invalid_payloads = vec![
+            (vec![statusline_segment("", "ui.modeline")], Vec::new()),
+            (
+                vec![statusline_segment(
+                    "x".repeat(MAX_STATUSLINE_SEGMENT_BYTES + 1),
+                    "ui.modeline",
+                )],
+                Vec::new(),
+            ),
+            (
+                vec![statusline_segment("bad\ntext", "ui.modeline")],
+                Vec::new(),
+            ),
+            (
+                vec![statusline_segment(
+                    "bad-face",
+                    format!("ui.modeline.{}", "x".repeat(MAX_STATUSLINE_FACE_BYTES)),
+                )],
+                Vec::new(),
+            ),
+            (
+                vec![statusline_segment("bad-face", "ui.modeline.\u{7f}")],
+                Vec::new(),
+            ),
+            (
+                vec![statusline_segment("wrong-family", "ui.statusline")],
+                Vec::new(),
+            ),
+            (
+                (0..=MAX_STATUSLINE_PROVIDERS)
+                    .map(|index| statusline_segment(format!("s{index}"), "ui.modeline"))
+                    .collect(),
+                Vec::new(),
+            ),
+        ];
+        for (left, right) in invalid_payloads {
+            apply_statusline(&mut state, buffer_id, left, right);
+            assert_eq!(state.statusline_segments.as_ref(), Some(&valid_state));
+            assert_eq!(state.status_runs, valid_right_cache);
+            assert_eq!(state.status_left_runs, valid_left_cache);
+            assert_eq!(
+                state.render_offscreen(),
+                valid_frame,
+                "a rejected replacement must retain the prior frame byte-for-byte"
+            );
+        }
+
+        let max_face = format!(
+            "ui.modeline.{}",
+            "f".repeat(MAX_STATUSLINE_FACE_BYTES - "ui.modeline.".len())
+        );
+        let boundary: Vec<_> = (0..MAX_STATUSLINE_PROVIDERS)
+            .map(|_| statusline_segment("x".repeat(MAX_STATUSLINE_SEGMENT_BYTES), &max_face))
+            .collect();
+        assert_eq!(
+            boundary
+                .iter()
+                .map(|segment| segment.text.len())
+                .sum::<usize>(),
+            MAX_STATUSLINE_TOTAL_TEXT_BYTES
+        );
+        apply_statusline(&mut state, buffer_id, boundary, Vec::new());
+        let installed = state.statusline_segments.as_ref().expect("boundary valid");
+        assert_eq!(installed.left.len(), MAX_STATUSLINE_PROVIDERS);
+        assert_eq!(installed.left[0].face.len(), MAX_STATUSLINE_FACE_BYTES);
+    }
+
+    #[test]
+    fn buffer_snapshot_clears_statusline_mirror_but_keeps_theme_facts() {
+        let Some(mut state) = headless_or_skip(320, 240, "same") else {
+            return;
+        };
+        let first = BufferId::next();
+        state.current_buffer_id = Some(first);
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.modeline.custom",
+                CellStyle {
+                    fg: CellColor::Rgb(10, 20, 30),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        apply_statusline(
+            &mut state,
+            first,
+            vec![statusline_segment("old", "ui.modeline.custom")],
+            Vec::new(),
+        );
+        let _ = state.render_offscreen();
+        assert!(state.statusline_segments.is_some());
+
+        let doc = loro::LoroDoc::new();
+        doc.get_text(LORO_TEXT_CONTAINER)
+            .insert(0, "same")
+            .expect("snapshot text");
+        let _ = state.apply_attach_message(InstanceMessage::BufferSnapshot {
+            buffer_id: BufferId::next(),
+            crdt_snapshot: doc.export(loro::ExportMode::Snapshot).expect("snapshot"),
+        });
+        assert!(state.statusline_segments.is_none());
+        assert!(state.status_runs.is_none());
+        assert!(state.status_left_runs.is_none());
+        assert!(state.faces.contains_key("ui.modeline.custom"));
+    }
+
+    #[test]
+    fn statusline_rich_runs_preserve_builtins_separators_and_face_changes() {
+        let Some(mut state) = headless_or_skip(500, 280, "text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.status_facts = Some(status_facts(buffer_id, None));
+        state.own_cursor = Some(OwnCursor { buffer_id, byte: 0 });
+        apply_faces(
+            &mut state,
+            vec![
+                theme_face(
+                    "ui.modeline.red",
+                    CellStyle {
+                        fg: CellColor::Rgb(230, 20, 30),
+                        ..CellStyle::default()
+                    },
+                ),
+                theme_face(
+                    "ui.modeline.green",
+                    CellStyle {
+                        fg: CellColor::Rgb(20, 220, 40),
+                        ..CellStyle::default()
+                    },
+                ),
+            ],
+        );
+        apply_statusline(
+            &mut state,
+            buffer_id,
+            vec![
+                statusline_segment("L1", "ui.modeline.red"),
+                statusline_segment("L2", "ui.modeline"),
+            ],
+            vec![
+                statusline_segment("R1", "ui.modeline.green"),
+                statusline_segment("R2", "ui.modeline"),
+            ],
+        );
+
+        let left = state.compose_status_left_runs();
+        let right = state.compose_status_runs();
+        let left_text: String = left.iter().map(|(text, _)| text.as_str()).collect();
+        let right_text: String = right.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(left_text, "main.rs ● L1 L2");
+        assert_eq!(right_text, "R1 R2 E:1  W:2  L1:C1  All");
+        let left_base = state.status_left_color();
+        assert_eq!(left[1], (" ".to_owned(), left_base));
+        assert_eq!(left[3], (" ".to_owned(), left_base));
+        let right_base = state.status_right_base_color();
+        assert_eq!(right[1], (" ".to_owned(), right_base));
+        assert_eq!(right[3], (" ".to_owned(), right_base));
+        assert_eq!(right[5], ("  ".to_owned(), right_base));
+        assert_eq!(right[7], ("  ".to_owned(), right_base));
+        assert_eq!(
+            left[2].1,
+            Color::rgb(230, 20, 30),
+            "custom text takes the exact ThemeFacts foreground"
+        );
+        assert_eq!(right[0].1, Color::rgb(20, 220, 40));
+
+        let _ = state.render_offscreen();
+        let before_text: String = state
+            .status_left_runs
+            .as_ref()
+            .expect("left shaped")
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect();
+        apply_statusline(
+            &mut state,
+            buffer_id,
+            vec![
+                statusline_segment("L1", "ui.modeline.green"),
+                statusline_segment("L2", "ui.modeline"),
+            ],
+            vec![
+                statusline_segment("R1", "ui.modeline.green"),
+                statusline_segment("R2", "ui.modeline"),
+            ],
+        );
+        assert!(state.status_runs.is_none());
+        assert!(state.status_left_runs.is_none());
+        let _ = state.render_offscreen();
+        let after = state.status_left_runs.as_ref().expect("left reshaped");
+        assert_eq!(
+            after
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            before_text,
+            "changing only the face name keeps concatenated text constant"
+        );
+        assert_eq!(after[2].1, Color::rgb(20, 220, 40));
+    }
+
+    #[test]
+    fn modal_left_precedence_suppresses_custom_left_but_preserves_right() {
+        let Some(mut state) = headless_or_skip(420, 260, "text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.status_facts = Some(status_facts(buffer_id, None));
+        apply_statusline(
+            &mut state,
+            buffer_id,
+            vec![statusline_segment("CUSTOM-L", "ui.modeline")],
+            vec![statusline_segment("CUSTOM-R", "ui.modeline")],
+        );
+        assert!(state.compose_status_left_runs()[2].0.contains("CUSTOM-L"));
+        let ordinary_right = state.compose_status_runs();
+
+        state.minibuffer = Some(MinibufferLocal {
+            prompt: "M-x ".to_owned(),
+            input: "find".to_owned(),
+            cursor: 4,
+            candidates: Vec::new(),
+            selected: None,
+            total: 0,
+        });
+        assert_eq!(state.compose_status_left_runs()[0].0, "M-x find");
+        assert_eq!(state.compose_status_runs(), ordinary_right);
+
+        state.minibuffer = None;
+        state.search_prompt = Some(SearchPromptLocal {
+            buffer_id,
+            query: "needle".to_owned(),
+            active: Some(0),
+            total: 1,
+            regex: false,
+            invalid: false,
+        });
+        assert_eq!(
+            state.compose_status_left_runs()[0].0,
+            "I-search: needle (1/1)"
+        );
+        assert_eq!(state.compose_status_runs(), ordinary_right);
+
+        state.search_prompt = None;
+        state.status_facts = Some(status_facts(buffer_id, Some("CUSTOM-L")));
+        assert_eq!(state.compose_status_left_runs()[0].0, "CUSTOM-L");
+        assert_eq!(state.compose_status_left_runs().len(), 1);
+        assert_eq!(state.compose_status_runs(), ordinary_right);
+
+        state.status_facts = Some(status_facts(buffer_id, None));
+        assert!(state.compose_status_left_runs()[2].0.contains("CUSTOM-L"));
+    }
+
+    #[test]
+    fn theme_recolor_invalidates_both_rich_caches_and_repaints_custom_text() {
+        let (width, height) = (420, 260);
+        let Some(mut state) = headless_or_skip(width, height, "text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.status_facts = Some(status_facts(buffer_id, None));
+        apply_statusline(
+            &mut state,
+            buffer_id,
+            vec![statusline_segment("RECOLOR", "ui.modeline.custom")],
+            vec![statusline_segment("RECOLOR", "ui.modeline.custom")],
+        );
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.modeline.custom",
+                CellStyle {
+                    fg: CellColor::Rgb(240, 10, 20),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        let red = state.render_offscreen();
+        assert_eq!(
+            state.status_left_runs.as_ref().expect("left shaped")[2].1,
+            Color::rgb(240, 10, 20)
+        );
+
+        apply_faces(
+            &mut state,
+            vec![theme_face(
+                "ui.modeline.custom",
+                CellStyle {
+                    fg: CellColor::Rgb(10, 220, 40),
+                    ..CellStyle::default()
+                },
+            )],
+        );
+        assert!(state.status_runs.is_none());
+        assert!(state.status_left_runs.is_none());
+        let green = state.render_offscreen();
+        assert_ne!(red, green, "constant text must repaint after ThemeFacts");
+        assert_eq!(
+            state.status_left_runs.as_ref().expect("left reshaped")[2].1,
+            Color::rgb(10, 220, 40)
+        );
+        let (_, min_y, _, max_y) =
+            frame_diff_bounds(&red, &green, width).expect("recolor changes pixels");
+        assert!(
+            min_y >= text_area_bottom(height, state.fm).floor() as u32 && max_y <= height,
+            "the recolor stays inside the status band"
+        );
+    }
+
+    #[test]
+    fn built_in_only_overwide_readout_clips_left_and_keeps_its_right_tail_pinned() {
+        let (narrow_width, wide_width, height) = (96, 500, 260);
+        let Some(mut narrow) = headless_or_skip(narrow_width, height, "text") else {
+            return;
+        };
+        let Some(mut wide) = headless_or_skip(wide_width, height, "text") else {
+            return;
+        };
+        for state in [&mut narrow, &mut wide] {
+            let buffer_id = BufferId::next();
+            state.current_buffer_id = Some(buffer_id);
+            state.status_facts = Some(status_facts(buffer_id, None));
+            state.own_cursor = Some(OwnCursor { buffer_id, byte: 0 });
+        }
+
+        let narrow_frame = narrow.render_offscreen();
+        let wide_frame = wide.render_offscreen();
+        assert!(
+            narrow.statusline_segments.is_none() && wide.statusline_segments.is_none(),
+            "fixture must exercise the built-in-only legacy surface"
+        );
+        let narrow_status_width = narrow
+            .status_buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max);
+        let wide_status_width = wide
+            .status_buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max);
+        assert!(
+            (narrow_status_width - wide_status_width).abs() < 0.01,
+            "surface width must not reshape the no-wrap readout"
+        );
+        assert!(
+            narrow_width as f32 - STATUS_TEXT_PAD - narrow_status_width < 0.0,
+            "fixture must force the built-in readout past the left edge"
+        );
+        assert!(
+            wide_width as f32 - STATUS_TEXT_PAD - wide_status_width > 0.0,
+            "comparison surface must fit the complete built-in readout"
+        );
+
+        let band_top = text_area_bottom(height, narrow.fm).floor() as u32;
+        let pinned_tail_width = 80;
+        for y in band_top..height {
+            for offset in 0..pinned_tail_width {
+                assert_eq!(
+                    px_at(&narrow_frame, narrow_width, narrow_width - 1 - offset, y),
+                    px_at(&wide_frame, wide_width, wide_width - 1 - offset, y),
+                    "built-in readout tail moved at right-edge offset {offset}, y={y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overwide_status_runs_never_wrap_and_keep_the_suffix_pinned() {
+        let (width, height) = (800, 300);
+        for size in [600, 7200] {
+            let Some(mut state) = headless_or_skip(width, height, "text") else {
+                return;
+            };
+            let buffer_id = BufferId::next();
+            state.current_buffer_id = Some(buffer_id);
+            state.status_facts = Some(status_facts(buffer_id, None));
+            state.own_cursor = Some(OwnCursor { buffer_id, byte: 0 });
+            state.apply_font_facts(None, Some(size));
+            let baseline = state.render_offscreen();
+            let suffix_width = state
+                .status_buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            let suffix_left = (width as f32 - STATUS_TEXT_PAD - suffix_width)
+                .max(0.0)
+                .ceil() as u32;
+
+            apply_statusline(
+                &mut state,
+                buffer_id,
+                vec![statusline_segment(
+                    "L".repeat(MAX_STATUSLINE_SEGMENT_BYTES),
+                    "ui.modeline",
+                )],
+                vec![statusline_segment(
+                    "R".repeat(MAX_STATUSLINE_SEGMENT_BYTES),
+                    "ui.modeline",
+                )],
+            );
+            let overwide = state.render_offscreen();
+            let full_width = state
+                .status_buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            let actual_origin = width as f32 - STATUS_TEXT_PAD - full_width;
+            assert!(actual_origin < 0.0, "fixture must cross the left edge");
+            assert_eq!(state.status_buffer.wrap(), Wrap::None);
+            assert_eq!(state.status_left_buffer.wrap(), Wrap::None);
+            assert_eq!(state.status_buffer.layout_runs().count(), 1);
+            assert_eq!(state.status_left_buffer.layout_runs().count(), 1);
+
+            let band_top = text_area_bottom(height, state.fm).floor() as u32;
+            for y in band_top..height {
+                for x in suffix_left..width {
+                    assert_eq!(
+                        px_at(&overwide, width, x, y),
+                        px_at(&baseline, width, x, y),
+                        "protected suffix pixel moved at size {size}, ({x},{y})"
+                    );
+                }
+            }
+            let (_, min_y, _, max_y) =
+                frame_diff_bounds(&baseline, &overwide, width).expect("custom text paints");
+            assert!(min_y >= band_top && max_y <= height);
+        }
+    }
 
     #[test]
     fn headless_theme_facts_empty_table_renders_identically() {
@@ -10426,9 +11049,8 @@ mod tests {
         }
     }
 
-    /// Acceptance 13 — the two string-equality status caches drop on
-    /// a font change, so an unchanged composed status re-shapes with
-    /// the new attrs on the next frame.
+    /// Acceptance 13 — the rich-run status caches drop on a font
+    /// change, so unchanged content re-shapes with new attrs.
     #[test]
     #[allow(clippy::float_cmp)] // exact: assigned constants, not computed sums
     fn font_change_invalidates_the_status_shaping_caches() {
@@ -10436,27 +11058,25 @@ mod tests {
             return;
         };
         let _ = state.render_offscreen();
-        let composed_before = state.status_text.clone();
-        assert!(
-            !composed_before.is_empty(),
-            "precondition: a frame composed the status readout"
-        );
+        let right_before = state.status_runs.clone().expect("right cache shaped");
+        let left_before = state
+            .status_left_runs
+            .clone()
+            .expect("left cache shaped, including empty content");
+        assert!(!right_before.is_empty(), "the readout is always present");
+
         state.apply_attach_message(font_facts(None, Some(3200)));
-        assert_eq!(
-            state.status_text, "\0",
-            "the sentinel must defeat the string-equality gate"
-        );
-        assert_eq!(state.status_left_text, "\0");
+        assert!(state.status_runs.is_none());
+        assert!(state.status_left_runs.is_none());
+
         let _ = state.render_offscreen();
         assert_eq!(
             state.status_buffer.metrics().font_size,
             state.fm.status_font_size(),
             "the re-shaped band must carry the derived metrics"
         );
-        assert_eq!(
-            state.status_text, composed_before,
-            "same composed text, re-shaped anyway"
-        );
+        assert_eq!(state.status_runs.as_ref(), Some(&right_before));
+        assert_eq!(state.status_left_runs.as_ref(), Some(&left_before));
     }
 
     /// Acceptance 14 — a size that shrinks the visible line count

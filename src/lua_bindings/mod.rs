@@ -66,6 +66,10 @@ use crate::packages::{
 };
 use crate::protocol::{AttachTarget, AttachmentHandle, InstanceIdentity};
 use crate::rope::Range;
+use crate::statusline::{
+    SharedStatuslineRegistry, StatuslineProviderFailure, StatuslineProviderId, StatuslineRegistry,
+    StatuslineSide,
+};
 use crate::syntax::{self, ParseTreeBundle, ParseView, ParseViewHandle, SharedSyntaxRegistry};
 use crate::workers_buffer;
 
@@ -2011,6 +2015,230 @@ impl UserData for MarkHandleLua {
     }
 }
 
+/// Opaque Lua handle for a statusline provider registration.
+#[derive(Copy, Clone)]
+pub struct StatuslineProviderIdLua(pub StatuslineProviderId);
+
+impl FromLua for StatuslineProviderIdLua {
+    fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+        match value {
+            Value::UserData(data) => Ok(*data.borrow::<Self>()?),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "StatuslineProviderIdLua".to_owned(),
+                message: Some("expected a statusline provider handle".to_owned()),
+            }),
+        }
+    }
+}
+
+impl UserData for StatuslineProviderIdLua {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("raw", |_, this, ()| Ok(this.0.raw()));
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(this.0.to_string())
+        });
+        methods.add_meta_method(
+            mlua::MetaMethod::Eq,
+            |_, this, other: StatuslineProviderIdLua| Ok(this.0 == other.0),
+        );
+    }
+}
+
+/// Retrieve the statusline registry installed with the base `pmacs` table.
+///
+/// `EditorState` and semantic/TUI constructors use this exact shared handle;
+/// bare Lua hosts always receive an empty registry rather than an absent API.
+pub fn statusline_registry(lua: &Lua) -> mlua::Result<SharedStatuslineRegistry> {
+    lua.app_data_ref::<SharedStatuslineRegistry>()
+        .map(|registry| registry.clone())
+        .ok_or_else(|| mlua::Error::external("statusline registry is not installed"))
+}
+
+/// Install the strict `pmacs.statusline` registration/lifecycle surface.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one strict table parser followed by four small lifecycle bindings; splitting obscures the all-fields-before-mutation contract"
+)]
+pub fn install_statusline_module(
+    lua: &Lua,
+    registry: &SharedStatuslineRegistry,
+) -> mlua::Result<Table> {
+    let module = lua.create_table()?;
+    {
+        let registry = registry.clone();
+        module.set(
+            "register",
+            lua.create_function(move |lua, spec: Table| {
+                let mut unknown = None;
+                spec.clone().for_each(|key: Value, _: Value| {
+                    let name = match &key {
+                        Value::String(value) => value.to_str().map_or_else(
+                            |_| "<invalid UTF-8>".to_owned(),
+                            |value| value.to_owned(),
+                        ),
+                        other => format!("{other:?}"),
+                    };
+                    if !matches!(name.as_str(), "name" | "side" | "priority" | "face" | "fn")
+                        && unknown.is_none()
+                    {
+                        unknown = Some(name);
+                    }
+                    Ok(())
+                })?;
+                if let Some(key) = unknown {
+                    return Err(mlua::Error::external(format!(
+                        "pmacs.statusline.register: unknown field `{key}`"
+                    )));
+                }
+
+                let name =
+                    strict_statusline_string(spec.raw_get("name")?, "name", false)?
+                        .expect("required statusline name");
+                let side_value =
+                    strict_statusline_string(spec.raw_get("side")?, "side", false)?
+                        .expect("required statusline side");
+                let side = match side_value.as_str() {
+                    "left" => StatuslineSide::Left,
+                    "right" => StatuslineSide::Right,
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "pmacs.statusline.register: `side` must be \"left\" or \"right\", got {other:?}"
+                        )));
+                    }
+                };
+                let priority = strict_statusline_priority(spec.raw_get("priority")?)?;
+                let face = strict_statusline_string(spec.raw_get("face")?, "face", true)?
+                    .unwrap_or_else(|| "ui.modeline".to_owned());
+                let callback = match spec.raw_get::<Value>("fn")? {
+                    Value::Function(function) => function,
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "pmacs.statusline.register: `fn` must be a function, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                // Every raw field is now parsed and typed; only this final call
+                // mutates the registry.
+                let id = registry.borrow_mut().register(
+                    name,
+                    side,
+                    priority,
+                    face,
+                    callback,
+                    caller_source(lua, 2),
+                )
+                    .map_err(mlua::Error::external)?;
+                Ok(StatuslineProviderIdLua(id))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "unregister",
+            lua.create_function(move |_, id: StatuslineProviderIdLua| {
+                Ok(registry.borrow_mut().unregister(id.0))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "set_priority",
+            lua.create_function(move |_, (id, value): (StatuslineProviderIdLua, Value)| {
+                let priority = strict_statusline_priority(value)?;
+                Ok(registry.borrow_mut().set_priority(id.0, priority))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "set_enabled",
+            lua.create_function(move |_, (id, value): (StatuslineProviderIdLua, Value)| {
+                let Value::Boolean(enabled) = value else {
+                    return Err(mlua::Error::external(
+                        "pmacs.statusline.set_enabled: `enabled` must be a boolean",
+                    ));
+                };
+                Ok(registry.borrow_mut().set_enabled(id.0, enabled))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "providers",
+            lua.create_function(move |lua, ()| {
+                let providers = registry.borrow().providers();
+                let output = lua.create_table_with_capacity(providers.len(), 0)?;
+                for (index, provider) in providers.iter().enumerate() {
+                    let metadata = lua.create_table_with_capacity(0, 6)?;
+                    metadata.raw_set("handle", StatuslineProviderIdLua(provider.id))?;
+                    metadata.raw_set("name", provider.name.as_str())?;
+                    metadata.raw_set("side", provider.side.as_str())?;
+                    metadata.raw_set("priority", provider.priority)?;
+                    metadata.raw_set("face", provider.face.as_str())?;
+                    metadata.raw_set("enabled", provider.enabled)?;
+                    output.raw_set(index + 1, metadata)?;
+                }
+                Ok(output)
+            })?,
+        )?;
+    }
+    Ok(module)
+}
+
+fn strict_statusline_string(
+    value: Value,
+    field: &'static str,
+    optional: bool,
+) -> mlua::Result<Option<String>> {
+    match value {
+        Value::Nil if optional => Ok(None),
+        Value::String(value) => value
+            .to_str()
+            .map(|value| Some(value.to_owned()))
+            .map_err(|_| {
+                mlua::Error::external(format!(
+                    "pmacs.statusline.register: `{field}` must be valid UTF-8"
+                ))
+            }),
+        other => Err(mlua::Error::external(format!(
+            "pmacs.statusline.register: `{field}` must be a string, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn strict_statusline_priority(value: Value) -> mlua::Result<i32> {
+    match value {
+        Value::Nil => Ok(0),
+        Value::Integer(value) => i32::try_from(value).map_err(|_| {
+            mlua::Error::external(
+                "pmacs.statusline priority must be an integer in the signed 32-bit range",
+            )
+        }),
+        Value::Number(value)
+            if value.is_finite()
+                && value.fract() == 0.0
+                && value >= f64::from(i32::MIN)
+                && value <= f64::from(i32::MAX) =>
+        {
+            Ok(value as i32)
+        }
+        Value::Number(_) => Err(mlua::Error::external(
+            "pmacs.statusline priority must be an integer in the signed 32-bit range",
+        )),
+        other => Err(mlua::Error::external(format!(
+            "pmacs.statusline priority must be a number, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module install
 // ---------------------------------------------------------------------------
@@ -2047,6 +2275,8 @@ pub fn install(
     lua.set_app_data(PackageUnloadHooks::new());
     lua.set_app_data(CurrentlyLoadingPackage::new());
     lua.set_app_data(BufferRemoveCallbacks::new());
+    let statusline = Rc::new(RefCell::new(StatuslineRegistry::new()));
+    lua.set_app_data(statusline.clone());
 
     let pmacs = lua.create_table()?;
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
@@ -2054,6 +2284,7 @@ pub fn install(
     pmacs.set("keymap", install_keymap_module(lua, keymaps)?)?;
     pmacs.set("menu", install_menu_module(lua, menus)?)?;
     pmacs.set("hook", install_hook_module(lua, hooks)?)?;
+    pmacs.set("statusline", install_statusline_module(lua, &statusline)?)?;
     // Wall-clock millis (since UNIX epoch). Used by builtin runtime
     // chunks for timeout loops; `os.clock()` only counts CPU time and
     // is a poor fit for "wait until something arrives over I/O".
@@ -5360,6 +5591,48 @@ fn log_hook_error(lua: &Lua, hook_name: &str, err: &crate::hook::HookCallbackErr
     };
     // Notify any window viewing *errors* — same staleness fix as
     // `LuaHost::append_to_errors_buffer`.
+    if let Some((id, edit)) = result {
+        notify_buffer_edit_to_windows(lua, id, &edit);
+    }
+}
+/// Append a first-in-run statusline provider failure to `*errors*`.
+///
+/// The latch decision lives in [`crate::statusline::StatuslineRegistry`];
+/// this function owns only the repository-standard durable sink and window
+/// invalidation.
+pub(crate) fn log_statusline_provider_error(lua: &Lua, failure: &StatuslineProviderFailure) {
+    let message = crate::statusline::sanitize_provider_error_text(&failure.message);
+    let line = format!(
+        "[statusline:{}] provider registered at {} failed for {:?}/{:?}/{:?}/active={}: {}\n",
+        failure.provider_name,
+        failure.source.render(),
+        failure.context.frontend_id,
+        failure.context.window_id,
+        failure.context.buffer_id,
+        failure.context.active,
+        message,
+    );
+    let result = {
+        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
+            return;
+        };
+        let mut registry = app.borrow_mut();
+        let id = match registry.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
+            Some(id) => id,
+            None => registry.create(crate::lua::ERRORS_BUFFER_NAME),
+        };
+        let Ok(buffer) = registry.get_mut(id) else {
+            return;
+        };
+        let position = buffer.len();
+        let edit = buffer
+            .apply_edit(EditOp::Insert {
+                pos: position,
+                bytes: line.as_bytes(),
+            })
+            .ok();
+        edit.map(|edit| (id, edit))
+    };
     if let Some((id, edit)) = result {
         notify_buffer_edit_to_windows(lua, id, &edit);
     }

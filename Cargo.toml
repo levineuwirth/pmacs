@@ -86,6 +86,7 @@ crdt = ["dep:loro", "pmacs-protocol/crdt"]
 crossterm = "0.28"
 thiserror = { workspace = true }
 unicode-width = "0.2"
+unicode-segmentation = "1"
 # Regex engine for in-buffer regex search (Q#RX1). `regex::bytes::Regex`
 # matches over rope-snapshot bytes and yields byte offsets directly.
 # Already in the lockfile transitively; promoted to a direct dependency.

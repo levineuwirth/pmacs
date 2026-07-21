@@ -128,6 +128,7 @@ pub mod semantic_tokens;
 pub mod signature;
 pub mod socket_path;
 pub mod state;
+pub mod statusline;
 pub mod symbol;
 pub mod syntax;
 pub mod text_view;

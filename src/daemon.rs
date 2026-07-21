@@ -791,6 +791,14 @@ fn per_attach_thread(
     let _ = dispatcher_tx.send(DispatcherEvent::SessionDetached { frontend_id });
 }
 
+/// Belt-and-braces write-loop gate for the additive protocol-v18
+/// statusline variant. The producer has its own callback/evaluation gate;
+/// this filter independently prevents an unknown discriminant reaching an
+/// older peer even if a message is injected into the frame vector.
+fn peer_accepts_statusline_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= 18 || !matches!(message, InstanceMessage::StatuslineSegments { .. })
+}
+
 /// T M10.8 — dispatcher loop. The single thread that owns the editor.
 ///
 /// All attached frontends' inputs arrive via the `dispatcher_rx`
@@ -1144,6 +1152,12 @@ fn dispatcher_loop(
                 let peer_knows_font_facts = session_registry
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_protocol_version >= 17);
+                // Q#SL7 — independently gate the v18 statusline variant
+                // even though the semantic producer also skips callbacks
+                // and message construction for older peers.
+                let negotiated_protocol_version = session_registry
+                    .session_state(*fid)
+                    .map_or(0, |s| s.negotiated_protocol_version);
                 for msg in &messages {
                     if !peer_knows_status_facts
                         && matches!(msg, InstanceMessage::StatusFacts { .. })
@@ -1184,6 +1198,9 @@ fn dispatcher_loop(
                         continue;
                     }
                     if !peer_knows_font_facts && matches!(msg, InstanceMessage::FontFacts { .. }) {
+                        continue;
+                    }
+                    if !peer_accepts_statusline_message(negotiated_protocol_version, msg) {
                         continue;
                     }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
@@ -1267,6 +1284,10 @@ fn dispatcher_loop(
                 last_dispatch_idle_sent.remove(fid);
                 last_active_buffer_sent.remove(fid);
                 session_registry.unregister_session(*fid);
+                editor
+                    .statusline_registry
+                    .borrow_mut()
+                    .detach_frontend(*fid);
                 editor.core.borrow_mut().unregister_frontend_view(*fid);
             }
         }
@@ -1639,6 +1660,10 @@ fn handle_dispatcher_event(
             last_dispatch_idle_sent.remove(&frontend_id);
             last_active_buffer_sent.remove(&frontend_id);
             session_registry.unregister_session(frontend_id);
+            editor
+                .statusline_registry
+                .borrow_mut()
+                .detach_frontend(frontend_id);
             {
                 let mut core = editor.core.borrow_mut();
                 core.unregister_frontend_view(frontend_id);
@@ -2553,6 +2578,24 @@ mod tests {
         let b = s.next_frontend_id.fetch_add(1, Ordering::SeqCst);
         assert_eq!(a, 2);
         assert_eq!(b, 3);
+    }
+
+    #[test]
+    fn statusline_segments_write_gate_rejects_v17_independently() {
+        let segments = InstanceMessage::StatuslineSegments {
+            buffer_id: crate::buffer::BufferId::from_raw(1),
+            left: Vec::new(),
+            right: Vec::new(),
+        };
+        assert!(!peer_accepts_statusline_message(17, &segments));
+        assert!(peer_accepts_statusline_message(18, &segments));
+        assert!(peer_accepts_statusline_message(
+            17,
+            &InstanceMessage::FontFacts {
+                family: None,
+                size_centi_px: None,
+            }
+        ));
     }
 
     #[test]

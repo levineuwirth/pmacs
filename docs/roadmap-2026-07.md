@@ -80,14 +80,16 @@ saveplace, autosave + crash recovery, optional backups. Generalize the
 question: what is a "session" in a daemon world; do CRDT snapshots
 ride along.
 
-### Arc 4 — Themes + extensibility surface
+### Arc 4 — Themes + extensibility surface — COMPLETE ON FEATURE BRANCH
 
-Extend `pmacs.theme` from syntax captures to named UI faces (modeline,
-minibuffer, gutter, selection, status band); wire GPU chrome to it —
-Q#UX1 lesson applies: rendering is frontend-local but control is
-daemon-owned, so a wire channel (`ThemeFacts`-style) is needed. Add
-`pmacs.gpu.set_font` (designed, never built) and a Lua
-statusline-segment API.
+Stages 1 and 2 landed as #120 and #124: named `ui.*` faces with
+daemon-resolved `ThemeFacts`, then the live global
+`pmacs.gpu.set_font` preference at protocol v17. Stage 3 is implemented
+and fully gated on `statusline-segments`, awaiting review and **not yet
+merged**: composable `pmacs.statusline` providers, per-window TUI
+composition, a pure built-in LSP segment, dynamic modeline faces, and
+semantic/GPU transport through protocol v18. Merging stage 3 completes
+Arc 4 on `main`.
 
 ### Arc 5 — Terminal, staged
 

@@ -422,6 +422,10 @@ impl Frontend {
             // preference; terminal fonts belong to the terminal, so
             // the cell-grid TUI drops this silently too.
             | InstanceMessage::FontFacts { .. }
+            // Q#SL7 — custom statusline segments are semantic-only;
+            // the grid TUI paints provider output directly from the
+            // registry and silently drops an unexpected wire copy.
+            | InstanceMessage::StatuslineSegments { .. }
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path
@@ -815,6 +819,28 @@ mod tests {
             size_centi_px: Some(1800),
         })
         .expect("the grid frontend must drop FontFacts silently");
+    }
+
+    #[test]
+    fn statusline_segments_drop_silently_on_the_grid_frontend() {
+        let mut fe = Frontend {
+            out: BufWriter::new(io::stdout()),
+            size: CellSize::new(24, 80),
+            raw_mode: false,
+            alt_screen: false,
+            bracketed_paste: false,
+            mouse: false,
+            keyboard_enhancement: false,
+        };
+        fe.apply_message(&InstanceMessage::StatuslineSegments {
+            buffer_id: crate::buffer::BufferId::from_raw(7),
+            left: vec![pmacs_protocol::StatuslineSegment {
+                text: "project".into(),
+                face: "ui.modeline.project".into(),
+            }],
+            right: Vec::new(),
+        })
+        .expect("the grid frontend must drop StatuslineSegments silently");
     }
 
     #[test]

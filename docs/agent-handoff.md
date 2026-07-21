@@ -1,19 +1,20 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-15, after multi-language injections (#122)
-merged; also carries the #120 themes-stage-1 snapshot.** This file is the
-bridge between development machines. If you are an agent reading
-this on a fresh clone: this document plus the `docs/*-framing.md`
-files ARE your memory. Read this fully before taking on work, seed
-your persistent memory from it, and **update this file (and commit
-it) whenever project state changes materially** — the next machine
-reads it the way you just did.
+**Last updated: 2026-07-21, with Themes Arc 4 stage 3 implemented and
+fully gated on the `statusline-segments` feature branch (awaiting
+review; not merged).** This file is the bridge between development
+machines. If you are an agent reading on a fresh clone: this document
+plus the `docs/*-framing.md` files ARE your memory. Read this fully
+before taking on work, seed persistent memory from it, and **update this
+file (and commit it) whenever project state changes materially** — the
+next machine reads it the way you just did.
 
-## 1. Where the project stands (2026-07-15)
+## 1. Where the project stands (2026-07-21)
 
-- `main` @ `5e73966` (multi-language injections #122 merged; #120
-  themes stage 1 below it), protocol **v16** (`SUPPORTED=[6..16]`;
-  v15→16 shipped the `ThemeFacts` channel — injections added no wire).
+- Canonical `main` @ `bb17ec9` (#123 merged atop #124), protocol
+  **v17** (`SUPPORTED=[6..17]`). The rebased `statusline-segments`
+  branch implements protocol v18, but v18 is **not on main** until
+  review and merge.
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -99,27 +100,29 @@ reads it the way you just did.
   `pmacs.editor.take_typed_edit()` (buffer-revision postcondition,
   Q#AP9). Substrate: `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
   `PMACS_FAKE_LSP_CHANGE_SINK`, `TestDaemon::spawn_with_config`.
-- **Themes (Arc 4) stage 1 LANDED — #120 merged after 5 review
-  rounds** (`docs/theme-faces-framing.md` rev 9 is the full record):
-  named UI faces as reserved `ui`/`ui.*` theme entries (12-face
-  inventory, owns-surface-within-mask, masks identical on both
-  frontends); `Theme::face()` walk (`None` when unset); transactional
-  mutators with split syntax/face epochs (fixed the pre-existing
-  mid-session `theme.set` span staleness); `ThemeFacts` channel (v16,
-  one authoritative send per attachment; v15 peers excluded incl. the
-  `FileStyleSummary` face-leak side channel). Review rounds hardened
-  substrate beyond faces: the **snapshot/baseline reset contract**
-  (`on_buffer_snapshot_sent` daemon-side + the GPU arm's symmetric
-  search/menu/status clears; minibuffer, gutter mode, `ThemeFacts`
-  survive both sides) and the **store-sourced diag-count freeze**
-  (per-URI severity totals in `DiagnosticStore`, O(1), survive
-  `mark_stale`).
-- **NEXT: themes stage 2 — `pmacs.gpu.set_font` at protocol v17**
-  (shipped versions are never reused; the `pmacs-gpu-design.md:299`
-  no-wire-change claim is superseded and must be corrected in the
-  stage-2 framing). Glyphon font reload was flagged HARD. Stage 3
-  after: Lua statusline-segment API (segments carry face names).
-  Workflow as always: framing → user approval → branch → gates → PR.
+- **Themes (Arc 4) stages 1 and 2 LANDED; stage 3 IMPLEMENTED ON ITS
+  FEATURE BRANCH, AWAITING REVIEW.**
+  - Stage 1 (#120, `docs/theme-faces-framing.md` rev 9): named UI faces
+    as reserved `ui`/`ui.*` theme entries; transactional split
+    syntax/face epochs; protocol-v16 `ThemeFacts`; snapshot/baseline
+    symmetry; store-sourced diagnostic-count freeze.
+  - Stage 2 (#124, `docs/gpu-set-font-framing.md` rev 5):
+    `pmacs.gpu.set_font` and authoritative protocol-v17 `FontFacts`;
+    frontend-local family resolution, live font reload/reflow, and
+    visual-run caret geometry.
+  - Stage 3 (`statusline-segments`,
+    `docs/statusline-segments-framing.md` rev 3): composable strict
+    `pmacs.statusline` providers; borrow-released per-window evaluation
+    with failure latches; legacy-preserving TUI composition; a pure
+    built-in LSP provider; dynamic modeline faces; protocol-v18
+    `StatuslineSegments`; authoritative-empty/snapshot symmetry; and
+    atomic GPU validation, face resolution, shaping, clipping, and
+    cache invalidation. Acceptance 1-27 is implemented. Final gates:
+    Clippy clean; 1,619 default + 1,793 CRDT library tests; 7 default +
+    8 CRDT feature acceptance; 114 M4; 109 required GPU; one-invocation
+    workspace sweep 2,718 passed across 78 suites (19 ignored,
+    `basedpyright` filtered); `git diff --check` clean. This branch is
+    awaiting review and **must not be described as merged**.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus

@@ -106,8 +106,8 @@ Package entry chunks run during package load, including audit and
 headless load paths. Keep top-level code limited to registration and
 state setup. Surfaces installed by the base Lua host are available
 there: `pmacs.buffer`, `pmacs.command`, `pmacs.keymap`,
-`pmacs.hook`, `pmacs.describe`, `pmacs.help`, `pmacs.attach`,
-`pmacs.now_ms`, and the standard Lua libraries.
+`pmacs.hook`, `pmacs.statusline`, `pmacs.describe`, `pmacs.help`,
+`pmacs.attach`, `pmacs.now_ms`, and the standard Lua libraries.
 
 Editor-state surfaces are available once the editor bridge is
 installed: command bodies invoked by pmacs, main-thread hooks fired by
@@ -413,6 +413,55 @@ is safe even after a partially-successful prior reload). Unlike
 to work whenever `define` works (parity), and packages need to
 call it from `on_unload` hooks that fire on post-init `reload(name)`
 calls.
+
+### Statusline providers: register for every window, unregister on unload
+
+`pmacs.statusline.register` installs a live provider and returns an
+opaque handle. Registration accepts a strict table with only `name`,
+`side`, `priority`, `face`, and `fn`: `name` is a non-empty display
+label, `side` is `"left"` or `"right"`, `priority` defaults to `0`,
+`face` defaults to `"ui.modeline"` and otherwise must be a
+`ui.modeline.*` face, and `fn` is the callback.
+
+Providers are evaluated once for each rendered window context, not once
+for the editor's active buffer. Always read the callback's `ctx.buffer`
+handle; a split's passive window can display a different buffer:
+
+```lua
+local segment = pmacs.statusline.register {
+  name = "mypkg-buffer",
+  side = "left",
+  priority = 20,
+  face = "ui.modeline.mypkg",
+  fn = function(ctx)
+    -- ctx.frontend and ctx.window are integer identities.
+    -- ctx.buffer is this window's Buffer handle, even when passive.
+    local marker = ctx.active and "*" or ""
+    return marker .. ctx.buffer:name()
+  end,
+}
+
+pmacs.packages.on_unload(function()
+  pmacs.statusline.unregister(segment) -- idempotent; false if already gone
+end)
+```
+
+The callback returns a string, `nil`, or `""`; the latter two mean no
+segment. Output is one line (the first newline ends it), control
+characters become spaces, and an over-limit result is omitted as a
+provider failure. Failures are reported once per provider/window
+context until that context succeeds or the provider is disabled and
+re-enabled.
+
+Ordering is deterministic: left providers use priority descending,
+then registration order; right providers use priority ascending, then
+registration order. `pmacs.statusline.providers()` returns fresh
+metadata tables. `set_priority(handle, integer)` and
+`set_enabled(handle, boolean)` return `false` for a stale handle and
+change live output immediately. `unregister(handle)` is idempotent and
+returns whether it removed a live provider. Registering in package
+top-level code without the matching `on_unload` cleanup leaks the old
+provider across `reload(name)`.
 
 ### `pmacs.fs.*` — worker-dispatched filesystem primitives
 
