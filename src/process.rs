@@ -60,7 +60,7 @@ use crossbeam::channel::{self, Receiver, Sender};
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
 
-use crate::ansi::{AnsiEvent, AnsiParser};
+use crate::ansi::{AnsiEvent, AnsiParser, AnsiParserProfile};
 
 // ---------------------------------------------------------------------------
 // Identity and configuration
@@ -216,6 +216,9 @@ pub struct ProcessSpec {
     /// instead of raw stdout bytes. Opt-in so LSP and other byte-stream
     /// consumers keep their existing stdout/stderr contract.
     pub ansi_events: bool,
+    /// Compatibility profile for structured ANSI parsing. Ignored unless
+    /// `ansi_events` is true; ordinary process/Lua callers remain line-oriented.
+    pub ansi_profile: AnsiParserProfile,
     /// Stdin disposition (pipe-mode only; rejected under PTY).
     pub stdin: StdinMode,
     /// Compile-mode group lifecycle (Q#CM3; pipe-mode only, rejected
@@ -245,6 +248,7 @@ impl ProcessSpec {
             mode: ProcessMode::Pipes,
             restart: RestartPolicy::Never,
             ansi_events: false,
+            ansi_profile: AnsiParserProfile::LineOriented,
             stdin: StdinMode::Piped,
             group: false,
         }
@@ -749,29 +753,36 @@ impl TermStatus {
 }
 
 /// Map `libc::strsignal` description strings (as surfaced by
-/// `portable-pty`) to symbolic SIGFOO names. Unknown descriptions pass
-/// through unchanged — better to surface an unfamiliar string than to
-/// fabricate a wrong name. Covers every signal in
+/// `portable-pty`) to symbolic SIGFOO names. Darwin appends the signal
+/// number (for example, `"Terminated: 15"`), while glibc returns only
+/// the description. Unknown descriptions pass through unchanged —
+/// better to surface an unfamiliar string than to fabricate a wrong
+/// name. Covers every signal in
 /// [`super::lua_bindings::parse_signal`]'s accept-list plus the common
 /// fault signals that surface during process crashes.
 fn canonicalize_pty_signal_name(desc: &str) -> String {
-    match desc {
-        "Interrupt" => "SIGINT".to_owned(),
-        "Terminated" => "SIGTERM".to_owned(),
-        "Killed" => "SIGKILL".to_owned(),
-        "Hangup" => "SIGHUP".to_owned(),
-        "Quit" => "SIGQUIT".to_owned(),
-        "User defined signal 1" => "SIGUSR1".to_owned(),
-        "User defined signal 2" => "SIGUSR2".to_owned(),
-        "Aborted" => "SIGABRT".to_owned(),
-        "Segmentation fault" => "SIGSEGV".to_owned(),
-        "Floating point exception" => "SIGFPE".to_owned(),
-        "Illegal instruction" => "SIGILL".to_owned(),
-        "Broken pipe" => "SIGPIPE".to_owned(),
-        "Alarm clock" => "SIGALRM".to_owned(),
-        "Bus error" => "SIGBUS".to_owned(),
-        other => other.to_owned(),
+    let base = desc
+        .rsplit_once(": ")
+        .filter(|(_, number)| number.parse::<u32>().is_ok())
+        .map_or(desc, |(description, _)| description);
+    match base {
+        "Interrupt" => "SIGINT",
+        "Terminated" => "SIGTERM",
+        "Killed" => "SIGKILL",
+        "Hangup" => "SIGHUP",
+        "Quit" => "SIGQUIT",
+        "User defined signal 1" => "SIGUSR1",
+        "User defined signal 2" => "SIGUSR2",
+        "Aborted" => "SIGABRT",
+        "Segmentation fault" => "SIGSEGV",
+        "Floating point exception" => "SIGFPE",
+        "Illegal instruction" => "SIGILL",
+        "Broken pipe" => "SIGPIPE",
+        "Alarm clock" => "SIGALRM",
+        "Bus error" => "SIGBUS",
+        _ => desc,
     }
+    .to_owned()
 }
 
 impl Default for ProcessSupervisor {
@@ -823,6 +834,23 @@ impl ProcessSupervisor {
     /// crashes *after* spawn shows up as a [`Termination::Crashed`]
     /// in the event stream, not as a return error.
     pub fn spawn(&mut self, spec: ProcessSpec) -> Result<ProcessId, String> {
+        self.spawn_inner(spec, true)
+    }
+
+    /// Spawn an unpublished terminal-owned process.
+    ///
+    /// Unlike the public Lua/process path, synchronous failure does not emit an
+    /// event for an ID no caller can own. `TerminalManager` rolls back its
+    /// temporary identity buffer and returns the error directly.
+    pub(crate) fn spawn_terminal(&mut self, spec: ProcessSpec) -> Result<ProcessId, String> {
+        self.spawn_inner(spec, false)
+    }
+
+    fn spawn_inner(
+        &mut self,
+        spec: ProcessSpec,
+        publish_synchronous_failure: bool,
+    ) -> Result<ProcessId, String> {
         if self.shut_down {
             return Err("supervisor is shut down".to_owned());
         }
@@ -834,15 +862,20 @@ impl ProcessSupervisor {
             attempt_count: 0,
             next_restart_at: None,
         };
-        self.start_generation(id, &mut managed)?;
+        self.start_generation(id, &mut managed, publish_synchronous_failure)?;
         self.processes.insert(id, managed);
         Ok(id)
     }
 
-    /// Start a fresh generation for `managed`. Mutates `managed`
-    /// in place; on failure the state is left as
-    /// `Terminated(Crashed{...})` and an event is emitted.
-    fn start_generation(&self, id: ProcessId, managed: &mut ManagedProcess) -> Result<(), String> {
+    /// Start a fresh generation for `managed`. Mutates `managed` in place; on
+    /// failure its state is `Terminated(Crashed{...})`, and the event is emitted
+    /// only when `publish_failure` is true.
+    fn start_generation(
+        &self,
+        id: ProcessId,
+        managed: &mut ManagedProcess,
+        publish_failure: bool,
+    ) -> Result<(), String> {
         managed.attempt_count += 1;
         managed.next_restart_at = None;
         match build_runtime(&managed.spec, id) {
@@ -865,11 +898,13 @@ impl ProcessSupervisor {
                     ended: now,
                 });
                 managed.runtime = None;
-                let _ = self.events_tx.send(ProcessEvent {
-                    id,
-                    kind: ProcessEventKind::Crashed { error: e.clone() },
-                    at: now,
-                });
+                if publish_failure {
+                    let _ = self.events_tx.send(ProcessEvent {
+                        id,
+                        kind: ProcessEventKind::Crashed { error: e.clone() },
+                        at: now,
+                    });
+                }
                 Err(e)
             }
         }
@@ -1207,7 +1242,7 @@ impl ProcessSupervisor {
                 kind: ProcessEventKind::Restarting { attempt },
                 at: now,
             });
-            let _ = self.start_generation(id, &mut managed);
+            let _ = self.start_generation(id, &mut managed, true);
             self.processes.insert(id, managed);
         } else {
             // Schedule a restart attempt for `restart_backoff` from
@@ -1547,7 +1582,12 @@ fn build_pty_runtime(
     )];
     let output_rx = if spec.ansi_events {
         let (ansi_tx, ansi_rx) = channel::bounded::<AnsiBatch>(ANSI_EVENT_CHANNEL_CAP);
-        readers.push(spawn_ansi_parser(byte_rx, ansi_tx, Arc::clone(&cancel)));
+        readers.push(spawn_ansi_parser(
+            byte_rx,
+            ansi_tx,
+            Arc::clone(&cancel),
+            spec.ansi_profile,
+        ));
         RuntimeOutputRx::Ansi(ansi_rx)
     } else {
         RuntimeOutputRx::Bytes(byte_rx)
@@ -1954,9 +1994,10 @@ fn spawn_ansi_parser(
     byte_rx: Receiver<ByteChunk>,
     ansi_tx: Sender<AnsiBatch>,
     cancel: Arc<AtomicBool>,
+    profile: AnsiParserProfile,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut parser = AnsiParser::new();
+        let mut parser = AnsiParser::with_profile(profile);
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return;
@@ -1964,29 +2005,42 @@ fn spawn_ansi_parser(
             let (kind, bytes) = match byte_rx.recv_timeout(READER_SEND_POLL_INTERVAL) {
                 Ok(chunk) => chunk,
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => return,
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    let events = parser.finish();
+                    if !events.is_empty() {
+                        let _ = send_ansi_batch(&ansi_tx, &cancel, events);
+                    }
+                    return;
+                }
             };
             if !matches!(kind, ReaderKind::Stdout) {
                 continue;
             }
-            let mut events = parser.feed(&bytes);
-            if events.is_empty() {
-                continue;
-            }
-            loop {
-                match ansi_tx.send_timeout(events, READER_SEND_POLL_INTERVAL) {
-                    Ok(()) => break,
-                    Err(crossbeam::channel::SendTimeoutError::Timeout(rejected)) => {
-                        if cancel.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        events = rejected;
-                    }
-                    Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => return,
-                }
+            let events = parser.feed(&bytes);
+            if !events.is_empty() && !send_ansi_batch(&ansi_tx, &cancel, events) {
+                return;
             }
         }
     })
+}
+
+fn send_ansi_batch(
+    ansi_tx: &Sender<AnsiBatch>,
+    cancel: &AtomicBool,
+    mut events: AnsiBatch,
+) -> bool {
+    loop {
+        match ansi_tx.send_timeout(events, READER_SEND_POLL_INTERVAL) {
+            Ok(()) => return true,
+            Err(crossbeam::channel::SendTimeoutError::Timeout(rejected)) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return false;
+                }
+                events = rejected;
+            }
+            Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => return false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2024,6 +2078,30 @@ mod tests {
                 ProcessEventKind::Exited { .. } | ProcessEventKind::Signaled { .. }
             )
         })
+    }
+
+    #[test]
+    fn pty_signal_names_are_canonical_across_libc_variants() {
+        assert_eq!(canonicalize_pty_signal_name("Terminated"), "SIGTERM");
+        assert_eq!(canonicalize_pty_signal_name("Terminated: 15"), "SIGTERM");
+        assert_eq!(canonicalize_pty_signal_name("Killed: 9"), "SIGKILL");
+        assert_eq!(
+            canonicalize_pty_signal_name("Unknown signal: 99"),
+            "Unknown signal: 99"
+        );
+    }
+
+    #[test]
+    fn terminal_transactional_spawn_failure_has_no_event_or_process_residue() {
+        let mut supervisor = ProcessSupervisor::new();
+        let spec = ProcessSpec::new(
+            "unpublished-terminal",
+            "/definitely/not/a/real/pmacs-terminal-program",
+        );
+        assert!(supervisor.spawn_terminal(spec).is_err());
+        supervisor.tick();
+        assert_eq!(supervisor.ids().count(), 0);
+        assert!(supervisor.take_all_events().is_empty());
     }
 
     #[test]
@@ -2618,7 +2696,12 @@ mod tests {
         let (byte_tx, byte_rx) = channel::bounded::<ByteChunk>(1);
         let (ansi_tx, _ansi_rx) = channel::bounded::<AnsiBatch>(1);
         let cancel = Arc::new(AtomicBool::new(false));
-        let handle = spawn_ansi_parser(byte_rx, ansi_tx, Arc::clone(&cancel));
+        let handle = spawn_ansi_parser(
+            byte_rx,
+            ansi_tx,
+            Arc::clone(&cancel),
+            AnsiParserProfile::LineOriented,
+        );
         drop(byte_tx);
 
         let deadline = Instant::now() + Duration::from_millis(500);

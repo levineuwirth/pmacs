@@ -21,6 +21,12 @@ against this design:
 - **M11.5** — the headless `SemanticClient` glue + reconstruction-
   equivalence and end-to-end tests.
 
+- **Themes Arc 4 stage 3 (protocol v18)** — composable Lua statusline
+  providers project complete ordered left/right text+face runs through
+  `StatuslineSegments`. The daemon evaluates one callback per matching
+  window context; the frontend owns shaping, separators, clipping, and
+  all pixel placement.
+
 Post-M11 producer arc (the LSP feature arc landed the missing data
 sources, so the "wire in when those features land" promise came due):
 
@@ -97,36 +103,36 @@ prohibited by this contract, not merely discouraged.
 
 ## Composition with v1.0 primitives
 
-The semantic projection ships **no text**. A `semantic_render`
+The semantic projection ships **no document text**. A `semantic_render`
 session is required to also be a text replica — it holds the rope
-locally via the existing `crdt_replica` machinery
-(`BufferSnapshot` to bootstrap, `CrdtOp` to stay live). The
-semantic frame is purely the *interpretation layer* over a buffer
-the frontend already has: styling and decoration keyed by byte
-range. This mirrors how v1.0 already coupled `multi_frontend`
-and `crdt_replica`, and it keeps the new wire tiny — single-digit
-KB for a screenful, diffable at span granularity.
+locally via the existing `crdt_replica` machinery (`BufferSnapshot` to
+bootstrap, `CrdtOp` to stay live). Styling and decorations are purely
+interpretation over bytes the frontend already holds. Protocol v18's
+one deliberate text-bearing exception is `StatuslineSegments`: bounded
+one-line chrome text that is not document content. This preserves the
+semantics-down model while letting daemon-owned Lua state contribute to
+frontend-local modeline layout.
 
 Consequently the new surface is small. Cursor reuses the existing
 `InstanceMessage::CursorByte` (authoritative cursor as a buffer
 offset — added for CRDT optimistic-apply, exactly what a
 layout-local frontend consumes). Peer cursors reuse the existing
 `PresenceUpdate`. Edits and local cursor travel the existing
-`FrontendEvent::CrdtOp` / presence path. The genuinely new wire
-is: one capability bit, ~five instance→frontend interpretation
-variants, and one frontend→instance `Viewport` variant.
+`FrontendEvent::CrdtOp` / presence path. Later interpretation and
+chrome families append under explicit protocol-version gates; v18 adds
+only `StatuslineSegments` to the v17 shape.
 
 **`BufferSnapshot` resets buffer-scoped interpretation state.** A
 frontend receiving a snapshot drops everything it holds for the
 named buffer — spans, decorations, adornments, minimap summary,
 completion popup, search and menu prompts (which also gate the
-frontend's key/pointer interception), and status facts — and
-rebuilds from the frames that follow; the instance mirrors this by
-invalidating its per-buffer emission baselines whenever it writes a
-snapshot, so the frontend's post-snapshot viewport declaration
-receives authoritative re-sends even when nothing changed
-daemon-side (the unchanged-generation A → B → A revisit). Bufferless
-facts (`ThemeFacts`, `FontFacts`, the minibuffer prompt) and
+frontend's key/pointer interception), status facts, and statusline
+segments — and rebuilds from the frames that follow; the instance
+mirrors this by invalidating its per-buffer emission baselines whenever
+it writes a snapshot. The frontend's post-snapshot viewport declaration
+therefore receives authoritative re-sends even when nothing changed
+daemon-side (the unchanged-generation A → B → A revisit).
+Bufferless facts (`ThemeFacts`, `FontFacts`, the minibuffer prompt) and
 per-frontend state (the gutter mode) survive snapshots on both sides
 (frontend-locally the normalized code scroll — a caret-follow view
 residual — is buffer-scoped and resets, while the resolved font and
@@ -238,13 +244,19 @@ ResourceOffer {
 /// declaration; cached-compare suppressed thereafter, so an
 /// unthemed session pays one small message and nothing more.
 /// Resolution (the `ui.*` dotted-prefix inheritance walk) happens
-/// daemon-side over the stage-1 face inventory — frontends do
-/// exact-name lookup only, and apply each face within its
-/// stage-1 component mask (docs/theme-faces-framing.md Q#TH3/Q#TH5:
-/// a set face owns its surface; `Default` components mean the
-/// frontend's plain rendering; out-of-mask components are never
-/// read). Daemon-gated `>= 16`; appended as the FINAL variant —
-/// postcard discriminants are ordinal.
+/// daemon-side; frontends do exact-name lookup only and apply each face
+/// within its stage-1 component mask
+/// (`docs/theme-faces-framing.md` Q#TH3/Q#TH5: a set face owns its
+/// surface; `Default` components mean the frontend's plain rendering;
+/// out-of-mask components are never read).
+///
+/// At protocol v18 the resolved inventory also includes every enabled
+/// statusline provider's exact `ui.modeline.*` face name. Registration,
+/// unregister, and enable changes invalidate that inventory; priority
+/// changes do not. v16/v17 peers retain only the fixed stage-1 set and
+/// never execute statusline providers. Daemon-gated `>= 16`; its
+/// postcard placement remains before `FontFacts` and
+/// `StatuslineSegments`.
 ThemeFacts {
     faces: Vec<ThemeFace>, // { name: String, style: Style }, sorted by name
 },
@@ -263,19 +275,59 @@ ThemeFacts {
 /// owns every metric consequence; sizes travel as integer
 /// hundredths of a logical pixel (1600 = 16.0, validated to
 /// 600..=7200 on BOTH sides — the receiver fails closed on
-/// out-of-range wire values). Daemon-gated `>= 17`; appended as
-/// the FINAL variant — postcard discriminants are ordinal, and the
-/// ThemeFacts byte pin above guards this placement.
+/// out-of-range wire values). Daemon-gated `>= 17`; v18's
+/// `StatuslineSegments` is appended after it because postcard
+/// discriminants are ordinal.
 FontFacts {
     family: Option<String>,     // None = the frontend's default family
     size_centi_px: Option<u32>, // None = the frontend's default size
 },
+
+/// One daemon-evaluated statusline run. `text` is non-empty,
+/// control-free UTF-8; `face` is `ui.modeline` or a valid
+/// `ui.modeline.*` name resolved through `ThemeFacts`.
+StatuslineSegment {
+    text: String,
+    face: String,
+},
+
+/// Themes Arc 4 stage 3 (protocol v18). A complete replacement for one
+/// buffer's custom modeline runs, never a patch. The left vector is in
+/// display order (priority descending, registration id ascending);
+/// right is in display order from the center toward the protected
+/// suffix (priority ascending, registration id ascending).
+StatuslineSegments {
+    buffer_id: BufferId,
+    left: Vec<StatuslineSegment>,
+    right: Vec<StatuslineSegment>,
+},
 ```
 
-Each family member diffs against the previous frame the same way
-`CellDelta` does today — the instance ships changed spans, not
-full re-sends, scoped to the viewport range the frontend last
-declared.
+`StyleSpans` retains its dirty-segment diffing. `StatuslineSegments`
+uses a complete-payload baseline instead: first sight of a buffer sends
+one authoritative replacement, including `left=[]`, `right=[]`; a
+byte-identical later evaluation is silent. Authoritative empty is data,
+not "no message": it clears a prior payload after unregister, disable,
+provider failure, or an evaluation invalidated by callback mutation.
+Nil and empty-string provider returns are simply absent runs.
+
+The v18 producer evaluates only after a matching viewport declaration
+for the semantic session's active daemon window. Provider execution is
+version-gated before evaluation, so a v17 peer incurs no callbacks and
+receives neither this variant nor provider-only dynamic `ThemeFacts`
+entries. The receiver validates a whole message atomically using the
+shared protocol limits (64 runs, 1024 bytes per run, 64 KiB aggregate,
+256-byte valid face names); malformed input leaves the prior payload
+unchanged.
+
+`BufferSnapshot` clears the named buffer's frontend mirror immediately
+and drops the producer baseline. The unchanged-generation A → B → A
+return therefore remains empty until the authoritative re-send arrives,
+then restores the exact prior runs. The instance owns callback order,
+sanitation, face names, and replacement semantics. The frontend owns
+separators (using the adjacent run's face), grapheme shaping, clipping,
+and the protected diagnostic/cursor/scroll suffix; none of those pixel
+decisions return to the daemon.
 
 ## Frontend → instance: `Viewport`
 

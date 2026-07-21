@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_seventeen_for_font_facts() {
+    fn protocol_version_is_eighteen_for_statusline_segments() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1712,7 +1712,10 @@ mod tests {
         // Themes stage 2 Q#F4 bumped 16→17 (`InstanceMessage::
         // FontFacts`, additive + daemon-gated, appended as the final
         // variant — see the ThemeFacts placement pin).
-        assert_eq!(PROTOCOL_VERSION, 17);
+        // Statusline segments Q#SL7 bumped 17→18 (`InstanceMessage::
+        // StatuslineSegments`, additive + daemon-gated, appended after
+        // FontFacts — see the v17 placement pin).
+        assert_eq!(PROTOCOL_VERSION, 18);
     }
 
     #[test]
@@ -1786,18 +1789,18 @@ mod tests {
         // (`TripleDown`), v8 (`StatusFacts`), v9 + v10 (`SearchPrompt` +
         // regex/invalid), v11 (the context menu), v12 (the GUI
         // minibuffer), v13 (`LineNumbers`), v14 (`LineNumberMode`), v15
-        // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`)
-        // all interoperate, so v6 through v17 talk.
-        for accepted in 6..=17 {
+        // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`),
+        // and v18 (`StatuslineSegments`) all interoperate.
+        for accepted in 6..=18 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 18, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 19, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v17 binary"
+                "v{rejected} must be rejected by a v18 binary"
             );
         }
     }
@@ -1852,6 +1855,77 @@ mod tests {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
             let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn statusline_segments_round_trip_through_postcard() {
+        let bid = crate::buffer::BufferId::next();
+        for msg in [
+            InstanceMessage::StatuslineSegments {
+                buffer_id: bid,
+                left: Vec::new(),
+                right: Vec::new(),
+            },
+            InstanceMessage::StatuslineSegments {
+                buffer_id: bid,
+                left: vec![StatuslineSegment {
+                    text: "project".into(),
+                    face: "ui.modeline.project".into(),
+                }],
+                right: vec![
+                    StatuslineSegment {
+                        text: "LSP:ready".into(),
+                        face: "ui.modeline.lsp".into(),
+                    },
+                    StatuslineSegment {
+                        text: "main".into(),
+                        face: "ui.modeline".into(),
+                    },
+                ],
+            },
+        ] {
+            let bytes = postcard::to_allocvec(&msg).expect("encode");
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn font_facts_encoding_is_unchanged_by_the_v18_build() {
+        let msg = InstanceMessage::FontFacts {
+            family: Some("Iosevka".into()),
+            size_centi_px: Some(1850),
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        assert_eq!(
+            bytes,
+            [
+                24, 1, 7, b'I', b'o', b's', b'e', b'v', b'k', b'a', 1, 186, 14
+            ],
+            "FontFacts' v17 wire bytes changed — append new InstanceMessage variants at the end"
+        );
+    }
+
+    #[test]
+    fn shared_face_namespace_predicates_are_exact() {
+        for (name, ui, modeline) in [
+            ("ui", true, false),
+            ("ui.", true, false),
+            ("ui.modeline", true, true),
+            ("ui.modeline.", true, true),
+            ("ui.modeline.lsp", true, true),
+            ("ui.statusline", true, false),
+            ("uix", false, false),
+            ("gui.modeline", false, false),
+            ("", false, false),
+        ] {
+            assert_eq!(is_ui_face_name(name), ui, "UI predicate for {name:?}");
+            assert_eq!(
+                is_modeline_face_name(name),
+                modeline,
+                "modeline predicate for {name:?}"
+            );
         }
     }
 

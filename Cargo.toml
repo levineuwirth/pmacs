@@ -86,6 +86,7 @@ crdt = ["dep:loro", "pmacs-protocol/crdt"]
 crossterm = "0.28"
 thiserror = { workspace = true }
 unicode-width = "0.2"
+unicode-segmentation = "1"
 # Regex engine for in-buffer regex search (Q#RX1). `regex::bytes::Regex`
 # matches over rope-snapshot bytes and yields byte offsets directly.
 # Already in the lockfile transitively; promoted to a direct dependency.
@@ -196,6 +197,13 @@ tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-zig = "1.1"
+# JSON + YAML — config formats + the honest gate on the Jupyter path
+# (JSON). Both are ABI-current (`LANGUAGE: LanguageFn` via
+# `tree-sitter-language`), NOT a `tree-sitter ^0.20` fork. Registering
+# yaml also lights up markdown `---` frontmatter through the #122
+# injection engine (the block injection query already sets yaml for it).
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
 # T M9.7: markdown grammar so prompt result buffers with
 # `_meta.format = "markdown"` get structured highlighting through the
 # same M4 path as rust/lua — no special-case painter in Lua.

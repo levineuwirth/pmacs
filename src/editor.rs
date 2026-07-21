@@ -13,12 +13,15 @@
 //! until the user quits.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::async_runtime::SharedAsyncRuntime;
 use crate::cell::CellCoord;
@@ -61,6 +64,9 @@ pub struct EditorState {
     /// Drop-time `shutdown` enforces SIGTERM-then-SIGKILL so editor
     /// exit cannot leave zombies.
     pub process_supervisor: crate::lua_bindings::SharedProcessSupervisor,
+    /// Terminal session registry. Shared with future terminal Lua bindings;
+    /// snapshots are owned so no screen borrow crosses editor/Lua/render work.
+    pub terminal_manager: crate::terminal::session::SharedTerminalManager,
     /// LSP manager (T M4.5). Holds one [`crate::lsp::LspClient`] per
     /// language server; rides on top of [`Self::process_supervisor`]
     /// for spawn / I/O / restart. Constructed empty; user code
@@ -101,6 +107,8 @@ pub struct EditorState {
     /// Snippet store (T M4.11). Co-owned with the snippet
     /// provider closure inside [`Self::completion_registry`].
     pub snippets: crate::completion_framework::SharedSnippetRegistry,
+    /// Lua statusline providers shared by grid and semantic renderers.
+    pub statusline_registry: crate::statusline::SharedStatuslineRegistry,
     /// Last left-button down event, used to synthesize terminal double
     /// clicks from crossterm's plain Down/Up mouse event stream.
     mouse_click: Option<MouseClickState>,
@@ -128,6 +136,11 @@ impl Drop for EditorState {
     /// stuck mid-handoff stays alive (bounded by its job), which is
     /// still a ~15x improvement over leaking every pool whole.
     fn drop(&mut self) {
+        {
+            let mut supervisor = self.process_supervisor.borrow_mut();
+            self.terminal_manager.borrow_mut().shutdown(&mut supervisor);
+            supervisor.shutdown();
+        }
         self.async_runtime.shutdown_workers();
     }
 }
@@ -167,6 +180,8 @@ impl EditorState {
         lua_host
             .attach_editor(&core)
             .expect("editor bindings + builtin chunks");
+        let statusline_registry = crate::lua_bindings::statusline_registry(lua_host.lua())
+            .expect("statusline registry installed by editor bindings");
         // The on-disk state dirs (minibuffer history + pmacs.state) are
         // deliberately NOT configured here — see `install_state_dirs`,
         // called by the real entry points (`run` / `run_daemon`) only.
@@ -232,6 +247,7 @@ impl EditorState {
         // shutdown enforces no-zombie cleanup at editor exit.
         let process_supervisor = crate::lua_bindings::make_process_supervisor(lua_host.lua())
             .expect("install pmacs.process");
+        let terminal_manager = Rc::new(RefCell::new(crate::terminal::TerminalManager::new()));
         // T M4.5 LSP manager. Wires onto the same supervisor so its
         // spawn/restart/I/O machinery is shared with `pmacs.process.*`.
         // The manager itself is reachable from Lua as `pmacs.lsp.*`.
@@ -474,6 +490,7 @@ impl EditorState {
             async_runtime,
             syntax_registry,
             process_supervisor,
+            terminal_manager,
             lsp_manager,
             font_pref,
             mcp_manager,
@@ -481,21 +498,40 @@ impl EditorState {
             project_indexer,
             completion_registry,
             snippets,
+            statusline_registry,
             mouse_click: None,
         }
     }
 
-    /// One pass of the process supervisor: drain pending I/O / exit
-    /// events and apply restart policies. Mirrors
-    /// [`Self::tick_async`]; the run loop calls both per iteration.
+    /// Transactionally open an internal Stage-1 terminal session.
     ///
-    /// Fires the `process.after-tick` hook (T M6.5) after the supervisor
-    /// tick releases its borrow. Lua subscribers typically own a
-    /// `{[process_id] = handle}` registry and drain events via
-    /// `pmacs.process.events_take(id)`; the REPL package
-    /// (`builtin/packages/repl/init.lua`) is the first such consumer.
+    /// No interactive Lua command is registered until a frontend can render
+    /// terminal snapshots. This Rust seam is used by headless acceptance and
+    /// future bindings.
+    pub fn open_terminal(
+        &mut self,
+        spec: crate::terminal::TerminalSpec,
+    ) -> Result<crate::buffer::BufferId, crate::terminal::TerminalError> {
+        let mut manager = self.terminal_manager.borrow_mut();
+        let mut core = self.core.borrow_mut();
+        let mut supervisor = self.process_supervisor.borrow_mut();
+        manager.open(spec, &mut core, &mut supervisor)
+    }
+
+    /// One pass of the process supervisor and terminal-owned event drain.
+    ///
+    /// Ordering is supervisor tick → terminal drain/prune →
+    /// `process.after-tick`. `TerminalManager` calls `take_events` only for its
+    /// own `ProcessId`s; existing Lua/LSP/MCP ownership remains unchanged.
     pub fn tick_processes(&mut self) {
-        self.process_supervisor.borrow_mut().tick();
+        {
+            let mut supervisor = self.process_supervisor.borrow_mut();
+            supervisor.tick();
+            let mut manager = self.terminal_manager.borrow_mut();
+            manager.tick(&mut supervisor);
+            let mut core = self.core.borrow_mut();
+            manager.prune(&mut core, &mut supervisor);
+        }
         self.lua_host
             .run_hook("process.after-tick", mlua::MultiValue::new());
     }
@@ -2108,6 +2144,25 @@ pub fn paint_frame(
         return None;
     }
     let text_rows = term_size.rows - 1;
+    // Statusline callbacks may call arbitrary editor APIs. Evaluate the
+    // complete visible-window fan-out before the long mutable core borrow
+    // below, then paint only the transactionally validated owned results.
+    let frontend_id = state.core.borrow().active_frontend;
+    let statusline_evaluation = crate::statusline::evaluate_statusline(
+        state.lua_host.lua(),
+        &state.core,
+        &state.statusline_registry,
+        crate::statusline::StatuslineEvaluationTarget::Grid { frontend_id },
+    );
+    let statusline_by_window: HashMap<WindowId, crate::statusline::StatuslineWindowSegments> =
+        match statusline_evaluation.outcome {
+            crate::statusline::StatuslineEvaluationOutcome::Ready(windows) => windows
+                .into_iter()
+                .map(|segments| (segments.context.window_id, segments))
+                .collect(),
+            crate::statusline::StatuslineEvaluationOutcome::Invalidated { .. }
+            | crate::statusline::StatuslineEvaluationOutcome::NoMessage(_) => HashMap::new(),
+        };
 
     // Themes Q#TH9: one theme clone per frame for the chrome faces —
     // the same single-lock discipline as `SyntaxHighlightView::render`.
@@ -2226,6 +2281,7 @@ pub fn paint_frame(
             let guard = diag_store.lock().expect("diag store mutex poisoned");
             diag_mode_line_summary(&guard, buf)
         };
+        let custom = statusline_by_window.get(id);
         paint_mode_line(
             grid,
             &rect,
@@ -2237,6 +2293,9 @@ pub fn paint_frame(
             &scroll,
             &diags,
             mode_line_style(&theme),
+            custom.map_or(&[], |segments| segments.left.as_slice()),
+            custom.map_or(&[], |segments| segments.right.as_slice()),
+            &theme,
         );
     }
     drop(reg);
@@ -2549,9 +2608,131 @@ fn diag_mode_line_summary(
     }
 }
 
+#[derive(Copy, Clone)]
+struct ModeLineRun<'a> {
+    text: &'a str,
+    style: crate::cell::Style,
+}
+
+struct ModeLineGrapheme {
+    glyph: crate::cell::Glyph,
+    width: u32,
+    style: crate::cell::Style,
+}
+
+fn prepare_mode_line_runs(runs: &[ModeLineRun<'_>]) -> Vec<ModeLineGrapheme> {
+    let mut graphemes = Vec::new();
+    for run in runs {
+        let sanitized = run.text.chars().any(char::is_control).then(|| {
+            run.text
+                .chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect::<String>()
+        });
+        let text = sanitized.as_deref().unwrap_or(run.text);
+        for grapheme in text.graphemes(true) {
+            let width = UnicodeWidthStr::width(grapheme) as u32;
+            if width == 0 {
+                continue;
+            }
+            let mut chars = grapheme.chars();
+            let first = chars
+                .next()
+                .expect("unicode segmentation never yields an empty grapheme");
+            let glyph = if chars.next().is_none() {
+                crate::cell::Glyph::Char(first)
+            } else {
+                crate::cell::Glyph::Cluster(grapheme.as_bytes().into())
+            };
+            graphemes.push(ModeLineGrapheme {
+                glyph,
+                width,
+                style: run.style,
+            });
+        }
+    }
+    graphemes
+}
+
+fn mode_line_grapheme_width(graphemes: &[ModeLineGrapheme]) -> u32 {
+    graphemes.iter().map(|grapheme| grapheme.width).sum()
+}
+
+/// Paint complete graphemes at a logical signed origin. A grapheme that
+/// straddles either clip edge is omitted wholesale, so a wide glyph can never
+/// leave a dangling half-cell at a window or left/right collision boundary.
+fn paint_mode_line_graphemes(
+    grid: &mut crate::cell::CellGrid<'_>,
+    rect: &crate::window::Rect,
+    row: u32,
+    origin: i64,
+    clip_start: u32,
+    clip_end: u32,
+    graphemes: &[ModeLineGrapheme],
+) {
+    let mut logical_col = origin;
+    for grapheme in graphemes {
+        let next_col = logical_col + i64::from(grapheme.width);
+        if logical_col >= i64::from(clip_start) && next_col <= i64::from(clip_end) {
+            let local_col =
+                u32::try_from(logical_col).expect("non-negative clipped modeline column");
+            let cell = grid.at(CellCoord::new(row, rect.origin.col + local_col));
+            cell.glyph = grapheme.glyph.clone();
+            cell.style = grapheme.style;
+            for continuation in 1..grapheme.width {
+                let cell = grid.at(CellCoord::new(
+                    row,
+                    rect.origin.col + local_col + continuation,
+                ));
+                cell.glyph = crate::cell::Glyph::Continuation;
+                cell.style = grapheme.style;
+            }
+        }
+        logical_col = next_col;
+    }
+}
+
+fn statusline_segment_style(
+    theme: &crate::highlight::Theme,
+    face: &str,
+    base: crate::cell::Style,
+) -> crate::cell::Style {
+    let Some(override_style) = theme.modeline_segment_face(face) else {
+        return base;
+    };
+    let mut style = base;
+    if style.reverse {
+        style.bg = override_style.fg;
+    } else {
+        style.fg = override_style.fg;
+    }
+    style
+}
+
+fn custom_mode_line_runs<'a>(
+    segments: &'a [crate::statusline::EvaluatedStatuslineSegment],
+    theme: &crate::highlight::Theme,
+    base: crate::cell::Style,
+) -> Vec<ModeLineRun<'a>> {
+    let mut runs = Vec::with_capacity(segments.len().saturating_mul(2));
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            runs.push(ModeLineRun {
+                text: " ",
+                style: base,
+            });
+        }
+        runs.push(ModeLineRun {
+            text: &segment.text,
+            style: statusline_segment_style(theme, &segment.face, base),
+        });
+    }
+    runs
+}
+
 #[allow(
     clippy::too_many_arguments,
-    reason = "the mode line packs nine unrelated facts; bundling them into a struct just adds ceremony"
+    reason = "the modeline packs built-in facts plus two already-evaluated custom sides"
 )]
 fn paint_mode_line(
     grid: &mut crate::cell::CellGrid<'_>,
@@ -2563,10 +2744,10 @@ fn paint_mode_line(
     cursor_col: u32,
     scroll: &str,
     diags: &str,
-    // The resolved row style ([`mode_line_style`]) — this fn is a
-    // pure formatter, so the `ui.modeline` face resolution stays with
-    // the caller (themes arc Q#TH9).
     mode_style: crate::cell::Style,
+    custom_left: &[crate::statusline::EvaluatedStatuslineSegment],
+    custom_right: &[crate::statusline::EvaluatedStatuslineSegment],
+    theme: &crate::highlight::Theme,
 ) {
     if rect.size.rows == 0 || rect.size.cols == 0 {
         return;
@@ -2574,46 +2755,78 @@ fn paint_mode_line(
     let row = rect.origin.row + rect.size.rows - 1;
     let marker = if modified { '*' } else { ' ' };
     let active_marker = if is_active { '+' } else { '-' };
-    let left = format!(" {active_marker}{marker} {name} ");
-    let right = if diags.is_empty() {
+    let protected_left = format!(" {active_marker}{marker} {name} ");
+    let protected_right = if diags.is_empty() {
         format!(" L{}:C{} {scroll} ", cursor_row + 1, cursor_col + 1)
     } else {
         format!(" {diags} L{}:C{} {scroll} ", cursor_row + 1, cursor_col + 1)
     };
 
-    // Fill the row with the mode-line style.
-    for c in 0..rect.size.cols {
-        let cell = grid.at(CellCoord::new(row, rect.origin.col + c));
+    // Fill exactly this window's row once with the base modeline surface.
+    for col in 0..rect.size.cols {
+        let cell = grid.at(CellCoord::new(row, rect.origin.col + col));
         cell.glyph = crate::cell::Glyph::Char(' ');
         cell.style = mode_style;
     }
 
-    // Right-align the cursor / scroll readout. If the window is too
-    // narrow to fit both halves, drop the right side rather than
-    // overlap the buffer name.
-    let right_chars: Vec<char> = right.chars().collect();
-    let right_len = right_chars.len() as u32;
-    let right_start_col = if right_len < rect.size.cols {
-        Some(rect.size.cols - right_len)
-    } else {
-        None
-    };
-    if let Some(start_col) = right_start_col {
-        for (i, ch) in right_chars.iter().enumerate() {
-            let col = rect.origin.col + start_col + i as u32;
-            grid.at(CellCoord::new(row, col)).glyph = crate::cell::Glyph::Char(*ch);
-        }
+    let mut left_runs = Vec::with_capacity(custom_left.len().saturating_mul(2) + 2);
+    left_runs.push(ModeLineRun {
+        text: &protected_left,
+        style: mode_style,
+    });
+    if !custom_left.is_empty() {
+        left_runs.push(ModeLineRun {
+            text: " ",
+            style: mode_style,
+        });
+        left_runs.extend(custom_mode_line_runs(custom_left, theme, mode_style));
     }
+    let left_graphemes = prepare_mode_line_runs(&left_runs);
 
-    // Paint the left side, stopping before the right side begins.
-    let stop_col = right_start_col.unwrap_or(rect.size.cols);
-    for (i, ch) in left.chars().enumerate() {
-        let i = i as u32;
-        if i >= stop_col {
-            break;
+    let protected_right_graphemes = prepare_mode_line_runs(&[ModeLineRun {
+        text: &protected_right,
+        style: mode_style,
+    }]);
+    let protected_right_width = mode_line_grapheme_width(&protected_right_graphemes);
+
+    // Preserve the legacy strict boundary: a suffix as wide as the entire
+    // window is dropped wholesale. Custom text can never cause that drop when
+    // the protected suffix itself still satisfies the legacy fit test.
+    if protected_right_width < rect.size.cols {
+        let mut right_prefix_runs = custom_mode_line_runs(custom_right, theme, mode_style);
+        if !custom_right.is_empty() {
+            right_prefix_runs.push(ModeLineRun {
+                text: " ",
+                style: mode_style,
+            });
         }
-        let col = rect.origin.col + i;
-        grid.at(CellCoord::new(row, col)).glyph = crate::cell::Glyph::Char(ch);
+        let right_prefix_graphemes = prepare_mode_line_runs(&right_prefix_runs);
+        let right_prefix_width = mode_line_grapheme_width(&right_prefix_graphemes);
+        let suffix_start = rect.size.cols - protected_right_width;
+        let right_origin = i64::from(suffix_start) - i64::from(right_prefix_width);
+        let left_clip_end = u32::try_from(right_origin).unwrap_or(0);
+
+        paint_mode_line_graphemes(grid, rect, row, 0, 0, left_clip_end, &left_graphemes);
+        paint_mode_line_graphemes(
+            grid,
+            rect,
+            row,
+            right_origin,
+            0,
+            suffix_start,
+            &right_prefix_graphemes,
+        );
+        paint_mode_line_graphemes(
+            grid,
+            rect,
+            row,
+            i64::from(suffix_start),
+            suffix_start,
+            rect.size.cols,
+            &protected_right_graphemes,
+        );
+    } else {
+        paint_mode_line_graphemes(grid, rect, row, 0, 0, rect.size.cols, &left_graphemes);
     }
 }
 
@@ -6919,6 +7132,403 @@ mod tests {
             let style = cells[(22 * stride + col) as usize].style;
             assert!(style.reverse, "mode line col {col} not reverse video");
         }
+    }
+
+    #[test]
+    fn statusline_no_visible_provider_preserves_ascii_modeline_cells() {
+        let s = fresh_with(b"hello");
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        let actual = (0..80)
+            .map(|col| glyph_at(&cells, stride, 22, col))
+            .collect::<String>();
+        let left = " +  test ";
+        let right = " L1:C1 All ";
+        let expected = format!("{left}{}{right}", " ".repeat(80 - left.len() - right.len()));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn statusline_real_frame_orders_runs_styles_separators_and_keeps_echo_independent() {
+        let s = fresh_with(b"hello");
+        s.core.borrow_mut().status = "echo-only".to_owned();
+        s.lua_host
+            .lua()
+            .load(
+                r#"
+                pmacs.theme.merge {
+                    ["ui.modeline.red"] = { fg = 1 },
+                    ["ui.modeline.blue"] = { fg = 2 },
+                }
+                _G.statusline_handles = {
+                    pmacs.statusline.register {
+                        name = "left-zero", side = "left", priority = 0,
+                        face = "ui.modeline.blue", fn = function() return "L0" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "left-high", side = "left", priority = 10,
+                        face = "ui.modeline.red", fn = function() return "LH" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "left-nil", side = "left", priority = 100,
+                        fn = function() return nil end,
+                    },
+                    pmacs.statusline.register {
+                        name = "left-empty", side = "left", priority = 100,
+                        fn = function() return "" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "left-zero-late", side = "left", priority = 0,
+                        face = "ui.modeline.blue", fn = function() return "L1" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "right-zero", side = "right", priority = 0,
+                        face = "ui.modeline.blue", fn = function() return "R0" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "right-high", side = "right", priority = 10,
+                        face = "ui.modeline.red", fn = function() return "RH" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "right-zero-late", side = "right", priority = 0,
+                        face = "ui.modeline.blue", fn = function() return "R1" end,
+                    },
+                }
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let (cells, stride, _) = render_to_grid(&s, 24, 100);
+        let mode = row_text(&cells, stride, 22, 100);
+        assert!(
+            mode.starts_with(" +  test  LH L0 L1"),
+            "wrong left composition: {mode:?}"
+        );
+        assert!(
+            mode.ends_with("R0 R1 RH  L1:C1 All"),
+            "wrong right composition: {mode:?}"
+        );
+        assert!(!mode.contains("left-nil") && !mode.contains("left-empty"));
+        assert_eq!(row_text(&cells, stride, 23, 100), "echo-only");
+
+        let lh_col = mode.find("LH").unwrap() as u32;
+        let l0_col = mode.find("L0").unwrap() as u32;
+        let rh_col = mode.find("RH").unwrap() as u32;
+        let base = cells[(22 * stride) as usize].style;
+        for col in [lh_col, lh_col + 1, rh_col, rh_col + 1] {
+            let style = cells[(22 * stride + col) as usize].style;
+            assert!(style.reverse);
+            assert_eq!(style.bg, crate::cell::Color::Indexed(1));
+        }
+        for col in [l0_col, l0_col + 1] {
+            let style = cells[(22 * stride + col) as usize].style;
+            assert!(style.reverse);
+            assert_eq!(style.bg, crate::cell::Color::Indexed(2));
+        }
+        assert_eq!(
+            cells[(22 * stride + lh_col + 2) as usize].style,
+            base,
+            "custom/custom separator must retain ui.modeline"
+        );
+        let protected_right_col = mode.find(" L1:C1 All").unwrap() as u32;
+        assert_eq!(
+            cells[(22 * stride + protected_right_col - 1) as usize].style,
+            base,
+            "custom/built-in separator must retain ui.modeline"
+        );
+    }
+
+    #[test]
+    fn statusline_real_frame_evaluates_distinct_split_contexts_and_focus() {
+        let s = fresh_with(b"left");
+        s.lua_host
+            .lua()
+            .load(
+                r#"
+                _G.other_statusline_buffer = pmacs.buffer.create("other")
+                pmacs.window.split_vertical()
+                pmacs.window.switch_buffer(_G.other_statusline_buffer)
+                _G.statusline_seen = {}
+                _G.statusline_context_handle = pmacs.statusline.register {
+                    name = "contexts", side = "left",
+                    fn = function(ctx)
+                        table.insert(_G.statusline_seen, {
+                            frontend = ctx.frontend,
+                            window = ctx.window,
+                            buffer = tostring(ctx.buffer),
+                            active = ctx.active,
+                        })
+                        return ctx.active and "ACTIVE" or "PASSIVE"
+                    end,
+                }
+                _G.statusline_split_clip_handle = pmacs.statusline.register {
+                    name = "split-clipping", side = "right",
+                    fn = function(ctx)
+                        return string.rep(ctx.active and "X" or "Y", 20)
+                    end,
+                }
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let (cells, stride, _) = render_to_grid(&s, 24, 120);
+        let seen: mlua::Table = s.lua_host.lua().globals().get("statusline_seen").unwrap();
+        assert_eq!(seen.raw_len(), 2);
+        let first: mlua::Table = seen.raw_get(1).unwrap();
+        let second: mlua::Table = seen.raw_get(2).unwrap();
+        let first_window: u64 = first.get("window").unwrap();
+        let second_window: u64 = second.get("window").unwrap();
+        let first_buffer: String = first.get("buffer").unwrap();
+        let second_buffer: String = second.get("buffer").unwrap();
+        let first_frontend: u64 = first.get("frontend").unwrap();
+        let second_frontend: u64 = second.get("frontend").unwrap();
+        let first_active: bool = first.get("active").unwrap();
+        let second_active: bool = second.get("active").unwrap();
+        assert_ne!(first_window, second_window);
+        assert_ne!(first_buffer, second_buffer);
+        assert_eq!(first_frontend, FrontendId::LOCAL.0);
+        assert_eq!(second_frontend, FrontendId::LOCAL.0);
+        assert_ne!(first_active, second_active);
+
+        let left_mode = (0..60)
+            .map(|col| glyph_at(&cells, stride, 22, col))
+            .collect::<String>();
+        let right_mode = (60..120)
+            .map(|col| glyph_at(&cells, stride, 22, col))
+            .collect::<String>();
+        assert!(
+            (left_mode.contains("ACTIVE") && right_mode.contains("PASSIVE"))
+                || (left_mode.contains("PASSIVE") && right_mode.contains("ACTIVE"))
+        );
+
+        s.lua_host
+            .lua()
+            .load("_G.statusline_seen = {}; pmacs.window.focus_next()")
+            .exec()
+            .unwrap();
+        let _ = render_to_grid(&s, 24, 120);
+        let seen: mlua::Table = s.lua_host.lua().globals().get("statusline_seen").unwrap();
+        assert_eq!(seen.raw_len(), 2);
+        let now_first: mlua::Table = seen.raw_get(1).unwrap();
+        let now_second: mlua::Table = seen.raw_get(2).unwrap();
+        let active_by_window = |table: &mlua::Table| {
+            (
+                table.get::<u64>("window").unwrap(),
+                table.get::<bool>("active").unwrap(),
+            )
+        };
+        let flipped = [active_by_window(&now_first), active_by_window(&now_second)];
+        assert!(flipped.contains(&(first_window, !first_active)));
+        assert!(flipped.contains(&(second_window, !second_active)));
+        let (narrow_cells, narrow_stride, _) = render_to_grid(&s, 24, 30);
+        let narrow_left = (0..15)
+            .map(|col| glyph_at(&narrow_cells, narrow_stride, 22, col))
+            .collect::<String>();
+        let narrow_right = (15..30)
+            .map(|col| glyph_at(&narrow_cells, narrow_stride, 22, col))
+            .collect::<String>();
+        assert!(
+            (narrow_left.contains('X')
+                && !narrow_left.contains('Y')
+                && narrow_right.contains('Y')
+                && !narrow_right.contains('X'))
+                || (narrow_left.contains('Y')
+                    && !narrow_left.contains('X')
+                    && narrow_right.contains('X')
+                    && !narrow_right.contains('Y')),
+            "custom runs crossed a split boundary: left={narrow_left:?} right={narrow_right:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_real_frame_discards_context_mutated_during_callback() {
+        let s = fresh_with(b"old");
+        s.lua_host
+            .lua()
+            .load(
+                r#"
+                _G.statusline_switch_target = pmacs.buffer.create("switched")
+                _G.statusline_switch_once = true
+                _G.statusline_switch_handle = pmacs.statusline.register {
+                    name = "context-mutator", side = "left",
+                    fn = function()
+                        if _G.statusline_switch_once then
+                            _G.statusline_switch_once = false
+                            pmacs.window.switch_buffer(_G.statusline_switch_target)
+                            return "STALE"
+                        end
+                        return "FRESH"
+                    end,
+                }
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        let first = row_text(&cells, stride, 22, 80);
+        assert!(
+            first.contains("switched"),
+            "callback buffer switch did not land"
+        );
+        assert!(
+            !first.contains("STALE"),
+            "invalidated old-context output reached the new buffer: {first:?}"
+        );
+
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        let second = row_text(&cells, stride, 22, 80);
+        assert!(
+            second.contains("FRESH"),
+            "next valid frame did not evaluate the surviving context: {second:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_real_frame_paints_unicode_clusters_and_sanitizes_all_runs() {
+        let s = fresh_with(b"hello");
+        {
+            let core = s.core.borrow();
+            let registry = core.registry.clone();
+            registry
+                .borrow_mut()
+                .get_mut(core.active_buffer_id())
+                .unwrap()
+                .set_name("na\r\n\u{1b}me");
+        }
+        s.lua_host
+            .lua()
+            .load(
+                r#"
+                _G.statusline_unicode_handle = pmacs.statusline.register {
+                    name = "unicode", side = "left",
+                    fn = function() return "\204\129界e\204\129\27Z" end,
+                }
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let (cells, stride, _) = render_to_grid(&s, 24, 80);
+        let row = &cells[(22 * stride) as usize..(23 * stride) as usize];
+        let wide_col = row
+            .iter()
+            .position(|cell| cell.glyph == crate::cell::Glyph::Char('界'))
+            .expect("CJK grapheme should be present");
+        assert_eq!(row[wide_col + 1].glyph, crate::cell::Glyph::Continuation);
+        assert_eq!(
+            row[wide_col + 2].glyph,
+            crate::cell::Glyph::Cluster("e\u{301}".as_bytes().into())
+        );
+        assert_eq!(row[wide_col + 3].glyph, crate::cell::Glyph::Char(' '));
+        assert_eq!(row[wide_col + 4].glyph, crate::cell::Glyph::Char('Z'));
+        for cell in row {
+            match &cell.glyph {
+                crate::cell::Glyph::Char(ch) => assert!(!ch.is_control()),
+                crate::cell::Glyph::Cluster(bytes) => {
+                    let text = std::str::from_utf8(bytes).unwrap();
+                    assert!(!text.chars().any(char::is_control));
+                    assert_ne!(text, "\u{301}", "standalone zero-width grapheme leaked");
+                }
+                crate::cell::Glyph::Continuation => {}
+            }
+        }
+        let ascii_projection = row
+            .iter()
+            .map(|cell| match cell.glyph {
+                crate::cell::Glyph::Char(ch) => ch,
+                _ => '?',
+            })
+            .collect::<String>();
+        assert!(
+            ascii_projection.contains("na   me"),
+            "buffer-name controls were not replaced independently: {ascii_projection:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_real_frame_clips_custom_edges_but_preserves_protected_suffix() {
+        let s = fresh_with(b"hello");
+        s.lua_host
+            .lua()
+            .load(
+                r#"
+                _G.statusline_clip_handles = {
+                    pmacs.statusline.register {
+                        name = "left-high", side = "left", priority = 10,
+                        fn = function() return "HIGH" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "left-low", side = "left", priority = 0,
+                        fn = function() return "界LOW" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "right-low", side = "right", priority = 0,
+                        fn = function() return "LOW" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "right-high", side = "right", priority = 10,
+                        fn = function() return "HIGH" end,
+                    },
+                }
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let (cells, stride, _) = render_to_grid(&s, 6, 17);
+        let mode = row_text(&cells, stride, 4, 17);
+        assert!(
+            mode.contains("HIGH"),
+            "high-priority right edge lost: {mode:?}"
+        );
+        assert!(
+            !mode.contains("LOW"),
+            "low-priority right edge survived: {mode:?}"
+        );
+        assert!(
+            mode.ends_with(" L1:C1 All"),
+            "protected suffix was not preserved in full: {mode:?}"
+        );
+        assert_ne!(
+            cells[(4 * stride) as usize].glyph,
+            crate::cell::Glyph::Continuation,
+            "a clipped wide grapheme left a continuation at the window edge"
+        );
+
+        let left_only = fresh_with(b"hello");
+        left_only
+            .lua_host
+            .lua()
+            .load(
+                r#"
+                _G.statusline_left_clip_handles = {
+                    pmacs.statusline.register {
+                        name = "left-high", side = "left", priority = 10,
+                        fn = function() return "HIGH" end,
+                    },
+                    pmacs.statusline.register {
+                        name = "left-low", side = "left", priority = 0,
+                        fn = function() return "界LOW" end,
+                    },
+                }
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let (cells, stride, _) = render_to_grid(&left_only, 6, 26);
+        let mode = row_text(&cells, stride, 4, 26);
+        assert!(mode.starts_with(" +  test  HIGH"));
+        assert!(!mode.contains("LOW"));
+        assert!(mode.ends_with(" L1:C1 All"));
+
+        let (cells, stride, _) = render_to_grid(&s, 6, 11);
+        let mode = row_text(&cells, stride, 4, 11);
+        assert!(
+            !mode.contains("L1:C1") && !mode.contains("HIGH") && !mode.contains("LOW"),
+            "a non-fitting protected suffix must drop the whole right group: {mode:?}"
+        );
     }
 
     /// Give the active buffer a file path and return its `file://`

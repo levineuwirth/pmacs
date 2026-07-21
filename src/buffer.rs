@@ -160,6 +160,9 @@ pub struct Buffer {
     rope: Rope,
     name: String,
     is_modified: bool,
+    /// When set, every content mutation is rejected before touching the
+    /// rope, CRDT, history, revision, modified bit, marks, or views.
+    read_only: bool,
     /// Monotonic counter bumped by every successful forward edit, undo,
     /// and redo. Used by the editor to detect "did this command modify
     /// the buffer?" without reaching into the rope. LSP `did_change`
@@ -243,6 +246,7 @@ impl Buffer {
             rope,
             name: name.into(),
             is_modified: false,
+            read_only: false,
             revision: 0,
             views: Vec::new(),
             next_view_id: 0,
@@ -468,6 +472,32 @@ impl Buffer {
         self.is_modified = false;
     }
 
+    /// Whether content mutation is disabled for this buffer.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Enable or disable the buffer-owned content-mutation guard.
+    ///
+    /// This is deliberately independent of edit intercepts: terminal identity
+    /// buffers use it to reject host-side edits, undo/redo, and remote CRDT
+    /// imports as well as ordinary interactive edits.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    fn ensure_writable(&self) -> Result<(), BufferError> {
+        if self.read_only {
+            Err(BufferError::ReadOnly {
+                id: self.id,
+                name: self.name.clone(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Total length of the buffer in bytes.
     #[must_use]
     pub fn len(&self) -> Position {
@@ -614,6 +644,7 @@ impl Buffer {
     /// `apply_edit_skip_intercepts` surfaces a typed error rather
     /// than silently corrupting state.
     pub fn begin_edit(&mut self) -> Result<(), BufferError> {
+        self.ensure_writable()?;
         if self.editing_in_progress {
             return Err(BufferError::ConcurrentEdit {
                 id: self.id,
@@ -661,6 +692,7 @@ impl Buffer {
     ///
     /// Threading: main thread only.
     pub fn apply_edit(&mut self, op: EditOp<'_>) -> Result<Edit, BufferError> {
+        self.ensure_writable()?;
         if self.editing_in_progress {
             return Err(BufferError::ConcurrentEdit {
                 id: self.id,
@@ -732,6 +764,7 @@ impl Buffer {
     /// ops in a CRDT-redundant edge case).
     #[cfg(feature = "crdt")]
     pub fn apply_remote_crdt_op(&mut self, op_bytes: &[u8]) -> Result<Option<Edit>, BufferError> {
+        self.ensure_writable()?;
         if self.editing_in_progress {
             return Err(BufferError::ConcurrentEdit {
                 id: self.id,
@@ -942,6 +975,7 @@ impl Buffer {
         reason = "by-value mirrors apply_edit's signature; the Lua bindings build a fresh EditOp per call"
     )]
     pub fn apply_edit_skip_intercepts(&mut self, op: EditOp<'_>) -> Result<Edit, BufferError> {
+        self.ensure_writable()?;
         let mut views = std::mem::take(&mut self.views);
         let result = self.run_rope_edit_and_broadcast(&mut views, &op);
         self.views = views;
@@ -1187,6 +1221,7 @@ impl Buffer {
     ///
     /// Threading: main thread only.
     pub fn undo(&mut self) -> Result<Edit, BufferError> {
+        self.ensure_writable()?;
         // T M10.4: in CRDT mode, route through loro's UndoManager via
         // the materialize-and-replace path (Day 1 morning audit
         // decision — path (a)). Inverse ops are produced as proper
@@ -1294,6 +1329,7 @@ impl Buffer {
     ///
     /// Threading: main thread only.
     pub fn redo(&mut self) -> Result<Edit, BufferError> {
+        self.ensure_writable()?;
         // T M10.4: in CRDT mode, route through loro's UndoManager.
         #[cfg(feature = "crdt")]
         if self.crdt.is_some() {
@@ -1675,6 +1711,15 @@ pub enum BufferError {
     /// The underlying rope rejected the operation.
     #[error("rope error: {0}")]
     Rope(#[from] RopeError),
+    /// A content mutation was attempted on a buffer whose owner marked it
+    /// read-only. The check runs before all rope, CRDT, and history changes.
+    #[error("buffer `{name}` (id {id:?}) is read-only")]
+    ReadOnly {
+        /// The protected buffer.
+        id: BufferId,
+        /// Buffer name for user-facing diagnostics.
+        name: String,
+    },
     /// `undo` was called with an empty undo stack.
     #[error("nothing to undo")]
     NothingToUndo,
@@ -1822,6 +1867,99 @@ mod tests {
             buf.snapshot_rope().slice(0, buf.len(), &mut out);
         }
         out
+    }
+
+    dual_mode_test!(
+        read_only_rejects_direct_skip_history_mutations,
+        |make, make_bytes| {
+            let mut buf = make_bytes("*read-only*", b"abc");
+            buf.apply_edit(EditOp::Insert {
+                pos: 3,
+                bytes: b"d",
+            })
+            .expect("seed undo history");
+            buf.undo().expect("seed redo history");
+            buf.set_read_only(true);
+
+            let before = (
+                collect(&buf),
+                buf.revision(),
+                buf.is_modified(),
+                buf.undo.len(),
+                buf.redo.len(),
+            );
+            assert!(matches!(
+                buf.begin_edit(),
+                Err(BufferError::ReadOnly { .. })
+            ));
+            assert!(!buf.editing_in_progress());
+            let attempts = [
+                buf.apply_edit(EditOp::Insert {
+                    pos: 0,
+                    bytes: b"x",
+                }),
+                buf.apply_edit_skip_intercepts(EditOp::Replace {
+                    range: Range::new(0, 1),
+                    bytes: b"y",
+                }),
+                buf.undo(),
+                buf.redo(),
+            ];
+            assert!(
+                attempts
+                    .iter()
+                    .all(|result| matches!(result, Err(BufferError::ReadOnly { .. })))
+            );
+            assert_eq!(
+                before,
+                (
+                    collect(&buf),
+                    buf.revision(),
+                    buf.is_modified(),
+                    buf.undo.len(),
+                    buf.redo.len(),
+                )
+            );
+
+            // Keep the generated dual-mode factory used in both configurations.
+            drop(make("*unused*"));
+        }
+    );
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn read_only_rejects_remote_crdt_before_import_and_allows_empty_bootstrap() {
+        let mut protected = Buffer::new(BufferId::next(), "*terminal*");
+        protected.set_read_only(true);
+        protected
+            .upgrade_to_crdt(1)
+            .expect("immutable empty CRDT bootstrap remains valid");
+        let before_snapshot = protected
+            .crdt_state()
+            .expect("CRDT attached")
+            .export_snapshot()
+            .expect("snapshot");
+
+        let donor = crate::crdt::CrdtState::new(2).expect("donor");
+        let version = donor.version();
+        donor.insert(0, "forged").expect("donor edit");
+        let op = donor.export_updates_since(&version).expect("remote op");
+
+        assert!(matches!(
+            protected.apply_remote_crdt_op(&op),
+            Err(BufferError::ReadOnly { .. })
+        ));
+        assert!(protected.is_empty());
+        assert_eq!(protected.revision(), 0);
+        assert!(!protected.is_modified());
+        assert_eq!(
+            protected
+                .crdt_state()
+                .expect("CRDT attached")
+                .export_snapshot()
+                .expect("snapshot"),
+            before_snapshot
+        );
     }
 
     // A view that records every callback for assertions.

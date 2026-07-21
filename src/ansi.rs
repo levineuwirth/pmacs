@@ -43,6 +43,80 @@
 
 use crate::cell::{Color, Style, UnderlineStyle};
 
+/// Parser compatibility profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnsiParserProfile {
+    /// Preserve the compile/REPL byte-stream contract.
+    #[default]
+    LineOriented,
+    /// Emit terminal operations for a stateful full-screen consumer.
+    FullScreen,
+}
+
+#[allow(missing_docs)]
+/// Erase direction for display and line operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EraseMode {
+    ToEnd,
+    ToStart,
+    All,
+    Saved,
+}
+
+#[allow(missing_docs)]
+/// DEC alternate-screen selector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlternateScreenMode {
+    Mode47,
+    Mode1047,
+    Mode1049,
+}
+
+#[allow(missing_docs)]
+/// Terminal modes understood by the screen/input core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalMode {
+    Insert,
+    Origin,
+    AutoWrap,
+    ApplicationCursor,
+    ApplicationKeypad,
+    CursorVisible,
+    BracketedPaste,
+    FocusReporting,
+    SynchronizedOutput,
+    MouseX10,
+    MouseButton,
+    MouseAny,
+    MouseSgr,
+}
+
+#[allow(missing_docs)]
+/// G0/G1 designation target and supported character set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharacterSetSlot {
+    G0,
+    G1,
+}
+
+/// Character set designated into a DEC G0/G1 slot.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharacterSet {
+    Ascii,
+    DecSpecialGraphics,
+}
+
+#[allow(missing_docs)]
+/// Typed terminal query. Only these requests may generate PTY input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceRequest {
+    PrimaryAttributes,
+    SecondaryAttributes,
+    OperatingStatus,
+    CursorPosition,
+}
+
 // ---------------------------------------------------------------------------
 // Public output
 // ---------------------------------------------------------------------------
@@ -53,6 +127,7 @@ use crate::cell::{Color, Style, UnderlineStyle};
 /// at the moment the parser has enough context to commit to it
 /// (e.g., `Text` is emitted at every transition out of Ground, not
 /// per byte).
+#[allow(missing_docs)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnsiEvent {
     /// Append literal text to the consumer's rope. Text never
@@ -98,6 +173,61 @@ pub enum AnsiEvent {
     /// `CSI ? 1049 l`: alternate-screen exited. `Text` and
     /// `SetStyle` resume.
     AlternateScreenExit,
+    /// Full-screen-only terminal operations.
+    Bell,
+    LineFeed,
+    /// `ESC D`: advance one row, scrolling at the bottom margin.
+    Index,
+    /// `ESC E`: return to column zero and advance one row.
+    NextLine,
+    /// `ESC M`: move up one row, scrolling down at the top margin.
+    ReverseIndex,
+    HorizontalTab,
+    SetTabStop,
+    ClearTabStop,
+    ClearAllTabStops,
+    CursorUp(u32),
+    CursorDown(u32),
+    CursorForward(u32),
+    CursorBackward(u32),
+    CursorNextLine(u32),
+    CursorPreviousLine(u32),
+    CursorHorizontalAbsolute(u32),
+    CursorVerticalAbsolute(u32),
+    CursorPosition {
+        row: u32,
+        col: u32,
+    },
+    EraseDisplay(EraseMode),
+    EraseLineMode(EraseMode),
+    EraseCharacters(u32),
+    InsertCharacters(u32),
+    DeleteCharacters(u32),
+    InsertLines(u32),
+    DeleteLines(u32),
+    ScrollUp(u32),
+    ScrollDown(u32),
+    SetScrollingRegion {
+        top: u32,
+        bottom: Option<u32>,
+    },
+    SaveCursor,
+    RestoreCursor,
+    AlternateScreen {
+        mode: AlternateScreenMode,
+        enabled: bool,
+    },
+    SetMode {
+        mode: TerminalMode,
+        enabled: bool,
+    },
+    DesignateCharacterSet {
+        slot: CharacterSetSlot,
+        charset: CharacterSet,
+    },
+    ShiftOut,
+    ShiftIn,
+    DeviceRequest(DeviceRequest),
 }
 
 /// Tunable knobs for [`AnsiParser`].
@@ -155,6 +285,7 @@ enum State {
     Ground,
     Escape,
     EscapeIntermediate,
+    EscapeIgnore,
     CsiEntry,
     CsiParam,
     CsiIntermediate,
@@ -326,6 +457,7 @@ pub struct AnsiParser {
     osc_body: Vec<u8>,
     /// Intermediate bytes for plain ESC sequences (`ESC` + 0x20..=0x2F).
     escape_intermediates: Vec<u8>,
+    profile: AnsiParserProfile,
     config: AnsiParserConfig,
 }
 
@@ -339,12 +471,24 @@ impl AnsiParser {
     /// Construct a parser with default configuration.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_config(AnsiParserConfig::default())
+        Self::with_profile(AnsiParserProfile::LineOriented)
     }
 
-    /// Construct a parser with custom configuration.
+    /// Construct a parser using the selected compatibility profile.
+    #[must_use]
+    pub fn with_profile(profile: AnsiParserProfile) -> Self {
+        Self::with_profile_and_config(profile, AnsiParserConfig::default())
+    }
+
+    /// Construct a line-oriented parser with custom configuration.
     #[must_use]
     pub fn with_config(config: AnsiParserConfig) -> Self {
+        Self::with_profile_and_config(AnsiParserProfile::LineOriented, config)
+    }
+
+    /// Construct a parser with both an explicit profile and configuration.
+    #[must_use]
+    pub fn with_profile_and_config(profile: AnsiParserProfile, config: AnsiParserConfig) -> Self {
         Self {
             state: State::Ground,
             current_style: Style::default(),
@@ -356,6 +500,7 @@ impl AnsiParser {
             csi: CsiCollector::default(),
             osc_body: Vec::new(),
             escape_intermediates: Vec::new(),
+            profile,
             config,
         }
     }
@@ -396,11 +541,11 @@ impl AnsiParser {
         // transition path (flush_text_run) does emit U+FFFD for
         // pending bytes because a non-text byte genuinely
         // interrupts the sequence; feed-boundary doesn't.
-        if !self.text_run.is_empty() && !self.alt_screen_active {
+        if !self.text_run.is_empty() {
             let run = std::mem::take(&mut self.text_run);
-            events.push(AnsiEvent::Text(run));
-        } else {
-            self.text_run.clear();
+            if !self.suppress_visible() {
+                events.push(AnsiEvent::Text(run));
+            }
         }
         events
     }
@@ -431,23 +576,22 @@ impl AnsiParser {
     pub fn finish(&mut self) -> Vec<AnsiEvent> {
         let mut events = Vec::new();
         self.flush_pending_utf8_as_replacement();
-        if !self.text_run.is_empty() && !self.alt_screen_active {
+        if !self.text_run.is_empty() {
             let run = std::mem::take(&mut self.text_run);
-            events.push(AnsiEvent::Text(run));
-        } else {
-            self.text_run.clear();
+            if !self.suppress_visible() {
+                events.push(AnsiEvent::Text(run));
+            }
         }
-        // Balancing state events, in unwind order. `reset` alone
-        // deliberately preserves alt-screen suppression (a
-        // mid-stream reset must not unhide alt-screen contents); a
-        // stream END does end it, observably.
-        if self.alt_screen_active {
-            self.alt_screen_active = false;
-            events.push(AnsiEvent::AlternateScreenExit);
+        if self.profile == AnsiParserProfile::LineOriented {
+            if self.alt_screen_active {
+                self.alt_screen_active = false;
+                events.push(AnsiEvent::AlternateScreenExit);
+            }
+            if self.emitted_style != Style::default() {
+                events.push(AnsiEvent::SetStyle(Style::default()));
+            }
         }
-        if self.emitted_style != Style::default() {
-            events.push(AnsiEvent::SetStyle(Style::default()));
-        }
+        self.alt_screen_active = false;
         self.current_style = Style::default();
         self.emitted_style = Style::default();
         self.reset();
@@ -472,28 +616,53 @@ impl AnsiParser {
             return;
         }
 
-        // Per-state byte cap. The counter increments for every byte
-        // consumed in any non-Ground state, and is reset to zero at
-        // every transition into a fresh sequence (ESC-anywhere) or
-        // back to Ground (normal dispatch / force-recover). At the
-        // limit, the parser drops the in-flight sequence and
-        // returns to Ground; the *current* byte is dropped on the
-        // floor, but subsequent bytes are processed normally as
-        // ordinary text. Spec §sec:ansi-scope: "drops back to ground
-        // state at the next ESC or after a bounded number of bytes
-        // (1 KiB), whichever comes first."
-        if self.state != State::Ground {
+        // Bound retained control-string payload without ever exposing its
+        // overflow as printable text. Once capped, remain in a zero-storage
+        // ignore state until BEL/ST or a fresh ESC sequence provides a safe
+        // recovery boundary.
+        if self.state != State::Ground
+            && !matches!(
+                self.state,
+                State::EscapeIgnore | State::CsiIgnore | State::OscIgnore | State::DcsIgnore
+            )
+        {
             self.ignore_byte_count = self.ignore_byte_count.saturating_add(1);
             if self.ignore_byte_count > self.config.unknown_sequence_byte_limit {
-                self.recover_to_ground();
+                match self.state {
+                    State::OscString | State::OscEscPending => {
+                        self.osc_body.clear();
+                        self.state = State::OscIgnore;
+                        self.ignore_byte_count = 0;
+                    }
+                    State::DcsEntry
+                    | State::DcsParam
+                    | State::DcsIntermediate
+                    | State::DcsPassthrough
+                    | State::SosPmApcString => {
+                        self.state = State::DcsIgnore;
+                        self.ignore_byte_count = 0;
+                    }
+                    State::Escape | State::EscapeIntermediate => {
+                        self.escape_intermediates.clear();
+                        self.state = State::EscapeIgnore;
+                        self.ignore_byte_count = 0;
+                    }
+                    State::CsiEntry | State::CsiParam | State::CsiIntermediate => {
+                        self.csi.reset();
+                        self.state = State::CsiIgnore;
+                        self.ignore_byte_count = 0;
+                    }
+                    _ => self.recover_to_ground(),
+                }
                 return;
             }
         }
 
         match self.state {
             State::Ground => self.feed_ground(b, events),
-            State::Escape => self.feed_escape(b),
-            State::EscapeIntermediate => self.feed_escape_intermediate(b),
+            State::Escape => self.feed_escape(b, events),
+            State::EscapeIntermediate => self.feed_escape_intermediate(b, events),
+            State::EscapeIgnore => self.feed_escape_ignore(b),
             State::CsiEntry => self.feed_csi_entry(b, events),
             State::CsiParam => self.feed_csi_param(b, events),
             State::CsiIntermediate => self.feed_csi_intermediate(b, events),
@@ -530,13 +699,13 @@ impl AnsiParser {
             return;
         }
         let run = std::mem::take(&mut self.text_run);
-        if !self.alt_screen_active {
+        if !self.suppress_visible() {
             events.push(AnsiEvent::Text(run));
         }
     }
 
     fn emit_set_style(&mut self, events: &mut Vec<AnsiEvent>) {
-        if self.alt_screen_active {
+        if self.suppress_visible() {
             return;
         }
         self.emitted_style = self.current_style;
@@ -548,9 +717,13 @@ impl AnsiParser {
     /// paste / `SetTitle`). The alt-screen markers themselves
     /// bypass this.
     fn push_visible(&self, ev: AnsiEvent, events: &mut Vec<AnsiEvent>) {
-        if !self.alt_screen_active {
+        if !self.suppress_visible() {
             events.push(ev);
         }
+    }
+
+    fn suppress_visible(&self) -> bool {
+        self.profile == AnsiParserProfile::LineOriented && self.alt_screen_active
     }
 
     /// Begin a fresh escape sequence (called from ESC-anywhere).
@@ -579,44 +752,53 @@ impl AnsiParser {
     // -----------------------------------------------------------------------
 
     fn feed_ground(&mut self, b: u8, events: &mut Vec<AnsiEvent>) {
-        match b {
-            // CR: flush text, emit CarriageReturn.
-            0x0D => {
-                self.flush_text_run(events);
-                if !self.alt_screen_active {
-                    events.push(AnsiEvent::CarriageReturn);
+        if self.profile == AnsiParserProfile::LineOriented {
+            match b {
+                0x0D => {
+                    self.flush_text_run(events);
+                    self.push_visible(AnsiEvent::CarriageReturn, events);
                 }
+                0x08 => {
+                    self.flush_text_run(events);
+                    self.push_visible(AnsiEvent::Backspace, events);
+                }
+                0x07 | 0x09 | 0x0A | 0x0B | 0x0C | 0x20..=0x7E | 0x80..=0xFF => {
+                    self.push_text_byte(b);
+                }
+                0x00..=0x1F | 0x7F => {}
             }
-            // BS: flush text, emit Backspace.
+            return;
+        }
+        match b {
+            0x07 => {
+                self.flush_text_run(events);
+                events.push(AnsiEvent::Bell);
+            }
             0x08 => {
                 self.flush_text_run(events);
-                if !self.alt_screen_active {
-                    events.push(AnsiEvent::Backspace);
-                }
+                events.push(AnsiEvent::Backspace);
             }
-            // BEL (0x07), VT (0x0B), FF (0x0C), HT (0x09), LF
-            // (0x0A): pass through to text alongside printable
-            // ASCII (0x20..=0x7E). The REPL view treats LF as a
-            // line break in the rope; HT as a literal tab. Other
-            // C0 controls (0x00..=0x06, 0x0E..=0x1F) and DEL
-            // (0x7F) are dropped silently.
-            //
-            // 0x80..=0xFF: UTF-8 lead or continuation byte. Goes
-            // through `push_text_byte`'s stateful decoder so
-            // multi-byte sequences across feeds are buffered until
-            // complete.
-            //
-            // All text bytes route through `push_text_byte` (not
-            // just non-ASCII): an ASCII byte arriving while a
-            // partial UTF-8 sequence is pending invalidates that
-            // sequence (the partial prefix's expected continuation
-            // didn't arrive), and `push_text_byte` is the only
-            // place that knows to flush the partial as `U+FFFD`.
-            // The fast path inside `push_text_byte` keeps the
-            // pure-ASCII case allocation-free.
-            0x07 | 0x09 | 0x0A | 0x0B | 0x0C | 0x20..=0x7E | 0x80..=0xFF => {
-                self.push_text_byte(b);
+            0x09 => {
+                self.flush_text_run(events);
+                events.push(AnsiEvent::HorizontalTab);
             }
+            0x0A..=0x0C => {
+                self.flush_text_run(events);
+                events.push(AnsiEvent::LineFeed);
+            }
+            0x0D => {
+                self.flush_text_run(events);
+                events.push(AnsiEvent::CarriageReturn);
+            }
+            0x0E => {
+                self.flush_text_run(events);
+                events.push(AnsiEvent::ShiftOut);
+            }
+            0x0F => {
+                self.flush_text_run(events);
+                events.push(AnsiEvent::ShiftIn);
+            }
+            0x20..=0x7E | 0x80..=0xFF => self.push_text_byte(b),
             0x00..=0x1F | 0x7F => {}
         }
     }
@@ -726,7 +908,7 @@ impl AnsiParser {
     // Escape
     // -----------------------------------------------------------------------
 
-    fn feed_escape(&mut self, b: u8) {
+    fn feed_escape(&mut self, b: u8, events: &mut Vec<AnsiEvent>) {
         match b {
             0x20..=0x2F => {
                 self.escape_intermediates.push(b);
@@ -740,39 +922,63 @@ impl AnsiParser {
                 self.osc_body.clear();
                 self.state = State::OscString;
             }
-            // DCS / SOS / PM / APC introducers --- parse and discard.
-            b'P' => {
-                self.state = State::DcsEntry;
-            }
-            b'X' | b'^' | b'_' => {
-                self.state = State::SosPmApcString;
-            }
-            // ESC \ in Escape state is a stray ST; final byte for
-            // a bare ESC sequence (0x30..=0x7E) lands here too. We
-            // don't dispatch any single-byte ESC commands in v0.1
-            // (cursor save/restore `ESC 7`/`ESC 8` are deliberately
-            // unsupported per spec); both cases consume and return
-            // to Ground.
-            b'\\' | 0x30..=0x7E => {
+            b'P' => self.state = State::DcsEntry,
+            b'X' | b'^' | b'_' => self.state = State::SosPmApcString,
+            b'7' | b'8' | b'D' | b'E' | b'H' | b'M' | b'=' | b'>'
+                if self.profile == AnsiParserProfile::FullScreen =>
+            {
+                let event = match b {
+                    b'7' => AnsiEvent::SaveCursor,
+                    b'8' => AnsiEvent::RestoreCursor,
+                    b'D' => AnsiEvent::Index,
+                    b'E' => AnsiEvent::NextLine,
+                    b'H' => AnsiEvent::SetTabStop,
+                    b'M' => AnsiEvent::ReverseIndex,
+                    b'=' => AnsiEvent::SetMode {
+                        mode: TerminalMode::ApplicationKeypad,
+                        enabled: true,
+                    },
+                    _ => AnsiEvent::SetMode {
+                        mode: TerminalMode::ApplicationKeypad,
+                        enabled: false,
+                    },
+                };
+                events.push(event);
                 self.recover_to_ground();
             }
-            // C0 controls inside Escape: drop, stay in Escape.
+            b'\\' | 0x30..=0x7E => self.recover_to_ground(),
             _ => {}
         }
     }
 
-    fn feed_escape_intermediate(&mut self, b: u8) {
+    fn feed_escape_intermediate(&mut self, b: u8, events: &mut Vec<AnsiEvent>) {
         match b {
-            0x20..=0x2F => {
-                self.escape_intermediates.push(b);
-            }
-            // Final byte: drop the sequence (no ESC + intermediate
-            // dispatches in v0.1 --- charsets are deliberately
-            // unsupported per spec) and return to Ground.
+            0x20..=0x2F => self.escape_intermediates.push(b),
             0x30..=0x7E => {
+                if self.profile == AnsiParserProfile::FullScreen {
+                    let slot = match self.escape_intermediates.as_slice() {
+                        [b'('] => Some(CharacterSetSlot::G0),
+                        [b')'] => Some(CharacterSetSlot::G1),
+                        _ => None,
+                    };
+                    let charset = match b {
+                        b'0' => Some(CharacterSet::DecSpecialGraphics),
+                        b'B' => Some(CharacterSet::Ascii),
+                        _ => None,
+                    };
+                    if let (Some(slot), Some(charset)) = (slot, charset) {
+                        events.push(AnsiEvent::DesignateCharacterSet { slot, charset });
+                    }
+                }
                 self.recover_to_ground();
             }
             _ => {}
+        }
+    }
+
+    fn feed_escape_ignore(&mut self, b: u8) {
+        if matches!(b, 0x30..=0x7E) {
+            self.recover_to_ground();
         }
     }
 
@@ -850,70 +1056,129 @@ impl AnsiParser {
     /// Dispatch a fully-collected CSI sequence. `final_byte` is the
     /// terminating byte (`0x40..=0x7E`). The collected parameters
     /// are taken from `self.csi`.
+    #[allow(clippy::too_many_lines)]
     fn dispatch_csi(&mut self, final_byte: u8, events: &mut Vec<AnsiEvent>) {
-        let private_marker = self.csi.private_marker;
+        let private = self.csi.private_marker;
+        let intermediates = self.csi.intermediates.clone();
         let params = self.csi.finalize();
-
-        match (private_marker, final_byte) {
-            // SGR.
-            (None, b'm') => self.dispatch_sgr(&params, events),
-            // Erase in line: `CSI [n] K`. n=0 (default) →
-            // EraseToEol; n=2 → EraseLine; n=1 (start to cursor)
-            // and others: parsed and ignored.
-            (None, b'K') => {
-                let n = params.first().map_or(0, |p| p.main);
-                match n {
+        if private.is_none() && final_byte == b'm' {
+            self.dispatch_sgr(&params, events);
+            self.csi.reset();
+            return;
+        }
+        if self.profile == AnsiParserProfile::LineOriented {
+            match (private, final_byte) {
+                (None, b'K') => match param(&params, 0, 0) {
                     0 => self.push_visible(AnsiEvent::EraseToEol, events),
                     2 => self.push_visible(AnsiEvent::EraseLine, events),
                     _ => {}
-                }
-            }
-            // Bracketed paste markers: `CSI 200 ~` / `CSI 201 ~`.
-            (None, b'~') => {
-                let n = params.first().map_or(0, |p| p.main);
-                match n {
+                },
+                (None, b'~') => match param(&params, 0, 0) {
                     200 => self.push_visible(AnsiEvent::BracketedPasteBegin, events),
                     201 => self.push_visible(AnsiEvent::BracketedPasteEnd, events),
                     _ => {}
-                }
-            }
-            // DEC private mode set / reset: `CSI ? <num> h` / `l`.
-            // Of these, only ?1049 (alternate screen) produces an
-            // event; mouse modes (?1000, ?1006), bracketed-paste
-            // mode (?2004), and the long tail are parsed and
-            // discarded per spec §sec:ansi-scope.
-            (Some(b'?'), b'h' | b'l') => {
-                let set = final_byte == b'h';
-                for p in &params {
-                    if p.main == 1049 {
-                        if set && !self.alt_screen_active {
-                            self.alt_screen_active = true;
-                            events.push(AnsiEvent::AlternateScreenEnter);
-                        } else if !set && self.alt_screen_active {
-                            self.alt_screen_active = false;
-                            events.push(AnsiEvent::AlternateScreenExit);
-                            // SGR changes inside the alternate
-                            // screen advanced `current_style` while
-                            // their events were suppressed; the
-                            // consumer still holds the pre-enter
-                            // style. Resynchronize the effective
-                            // style on exit (round-4 finding 2).
-                            if self.current_style != self.emitted_style {
-                                self.emit_set_style(events);
+                },
+                (Some(b'?'), b'h' | b'l') => {
+                    let set = final_byte == b'h';
+                    for p in &params {
+                        if p.main == 1049 {
+                            if set && !self.alt_screen_active {
+                                self.alt_screen_active = true;
+                                events.push(AnsiEvent::AlternateScreenEnter);
+                            } else if !set && self.alt_screen_active {
+                                self.alt_screen_active = false;
+                                events.push(AnsiEvent::AlternateScreenExit);
+                                if self.current_style != self.emitted_style {
+                                    self.emit_set_style(events);
+                                }
                             }
                         }
                     }
                 }
+                _ => {}
             }
-            // Cursor motions (A/B/C/D/E/F/G/H/J/f) and other CSI
-            // commands: parsed and discarded for M6.3. The M6.4
-            // view layer handles intra-line motion (CR / BS) at
-            // its own level; cross-region motion via CSI is in the
-            // "parsed but ignored when it would cross region
-            // boundaries" bucket from §sec:ansi-scope.
-            _ => {}
+            self.csi.reset();
+            return;
         }
 
+        let count = || param(&params, 0, 1).max(1);
+        let event = match (private, intermediates.as_slice(), final_byte) {
+            (None, [], b'A') => Some(AnsiEvent::CursorUp(count())),
+            (None, [], b'B') => Some(AnsiEvent::CursorDown(count())),
+            (None, [], b'C' | b'a') => Some(AnsiEvent::CursorForward(count())),
+            (None, [], b'D') => Some(AnsiEvent::CursorBackward(count())),
+            (None, [], b'E') => Some(AnsiEvent::CursorNextLine(count())),
+            (None, [], b'F') => Some(AnsiEvent::CursorPreviousLine(count())),
+            (None, [], b'G' | b'`') => Some(AnsiEvent::CursorHorizontalAbsolute(
+                param(&params, 0, 1).max(1),
+            )),
+            (None, [], b'd') => Some(AnsiEvent::CursorVerticalAbsolute(
+                param(&params, 0, 1).max(1),
+            )),
+            (None, [], b'H' | b'f') => Some(AnsiEvent::CursorPosition {
+                row: param(&params, 0, 1).max(1),
+                col: param(&params, 1, 1).max(1),
+            }),
+            (None, [], b'J') => erase_mode(param(&params, 0, 0)).map(AnsiEvent::EraseDisplay),
+            (None, [], b'K') => erase_mode(param(&params, 0, 0)).map(AnsiEvent::EraseLineMode),
+            (None, [], b'X') => Some(AnsiEvent::EraseCharacters(count())),
+            (None, [], b'@') => Some(AnsiEvent::InsertCharacters(count())),
+            (None, [], b'P') => Some(AnsiEvent::DeleteCharacters(count())),
+            (None, [], b'L') => Some(AnsiEvent::InsertLines(count())),
+            (None, [], b'M') => Some(AnsiEvent::DeleteLines(count())),
+            (None, [], b'S') => Some(AnsiEvent::ScrollUp(count())),
+            (None, [], b'T') => Some(AnsiEvent::ScrollDown(count())),
+            (None, [], b'r') => Some(AnsiEvent::SetScrollingRegion {
+                top: param(&params, 0, 1).max(1),
+                bottom: params.get(1).map(|p| p.main).filter(|&n| n != 0),
+            }),
+            (None, [], b's') => Some(AnsiEvent::SaveCursor),
+            (None, [], b'u') => Some(AnsiEvent::RestoreCursor),
+            (None, [], b'g') => match param(&params, 0, 0) {
+                0 => Some(AnsiEvent::ClearTabStop),
+                3 => Some(AnsiEvent::ClearAllTabStops),
+                _ => None,
+            },
+            (None, [], b'~') => match param(&params, 0, 0) {
+                200 => Some(AnsiEvent::BracketedPasteBegin),
+                201 => Some(AnsiEvent::BracketedPasteEnd),
+                _ => None,
+            },
+            (None, [], b'h' | b'l') => {
+                let enabled = final_byte == b'h';
+                for p in &params {
+                    if p.main == 4 {
+                        events.push(AnsiEvent::SetMode {
+                            mode: TerminalMode::Insert,
+                            enabled,
+                        });
+                    }
+                }
+                None
+            }
+            (Some(b'?'), [], b'h' | b'l') => {
+                let enabled = final_byte == b'h';
+                for p in &params {
+                    if let Some(ev) = private_mode_event(p.main, enabled) {
+                        events.push(ev);
+                    }
+                }
+                None
+            }
+            (None, [], b'c') => Some(AnsiEvent::DeviceRequest(DeviceRequest::PrimaryAttributes)),
+            (Some(b'>'), [], b'c') => {
+                Some(AnsiEvent::DeviceRequest(DeviceRequest::SecondaryAttributes))
+            }
+            (None, [], b'n') => match param(&params, 0, 0) {
+                5 => Some(AnsiEvent::DeviceRequest(DeviceRequest::OperatingStatus)),
+                6 => Some(AnsiEvent::DeviceRequest(DeviceRequest::CursorPosition)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(event) = event {
+            events.push(event);
+        }
         self.csi.reset();
     }
 
@@ -959,9 +1224,13 @@ impl AnsiParser {
                         _ => UnderlineStyle::Single,
                     };
                 }
-                // 5/6 (blink, rapid blink): mapped to bold per spec
-                // §sec:ansi-scope ("blink-as-bold").
-                5 | 6 => self.current_style.bold = true,
+                // Line-oriented compile/REPL consumers historically render
+                // blink as bold. Full-screen preserves the shared Style
+                // contract: blink is unsupported and leaves it unchanged.
+                5 | 6 if self.profile == AnsiParserProfile::LineOriented => {
+                    self.current_style.bold = true;
+                }
+                5 | 6 => {}
                 7 => self.current_style.reverse = true,
                 // 8 (concealed/invisible): no-op. Out of scope.
                 8 => {}
@@ -975,9 +1244,8 @@ impl AnsiParser {
                 22 => self.current_style.bold = false,
                 23 => self.current_style.italic = false,
                 24 => self.current_style.underline = UnderlineStyle::None,
-                // 25 (blink off): no-op. Symmetry with 5/6 → bold:
-                // we do not unset bold here, since that would also
-                // unset bold acquired via SGR 1.
+                // 25 (blink off): unsupported. It must not unset bold
+                // acquired through SGR 1.
                 25 => {}
                 27 => self.current_style.reverse = false,
                 28 => {}
@@ -1039,11 +1307,12 @@ impl AnsiParser {
             }
             // ESC: begin ST-terminator check (ESC \).
             0x1B => self.state = State::OscEscPending,
-            // 0x20..=0x7F: body bytes. The per-state byte cap
-            // (enforced at the top of `feed_byte`) bounds how many
-            // bytes we'll accept before force-recovering.
-            0x20..=0x7F => self.osc_body.push(b),
-            // Other C0/C1 controls: drop silently, stay in OSC.
+            // OSC payload is UTF-8 bytes, not ASCII. Retain printable ASCII,
+            // DEL (compatibility), and all high bytes; lossy UTF-8 decoding at
+            // dispatch replaces malformed sequences. The per-state cap bounds
+            // retained storage.
+            0x20..=0xFF => self.osc_body.push(b),
+            // Other C0 controls: drop silently, stay in OSC.
             _ => {}
         }
     }
@@ -1083,7 +1352,7 @@ impl AnsiParser {
         let num: Option<u32> = std::str::from_utf8(num_part)
             .ok()
             .and_then(|s| s.parse().ok());
-        if matches!(num, Some(133)) && !self.alt_screen_active {
+        if matches!(num, Some(133)) && !self.suppress_visible() {
             match text_part.first().copied() {
                 Some(b'A') => events.push(AnsiEvent::PromptStart),
                 Some(b'B') => events.push(AnsiEvent::PromptEnd),
@@ -1099,11 +1368,64 @@ impl AnsiParser {
         // above produce events. Other OSC numbers are parsed and
         // discarded per spec §sec:ansi-scope, with the critical
         // guarantee that state alignment is preserved.
-        if matches!(num, Some(0 | 2)) && !self.alt_screen_active {
+        if matches!(num, Some(0 | 2)) && !self.suppress_visible() {
             let title = String::from_utf8_lossy(text_part).into_owned();
             events.push(AnsiEvent::SetTitle(title));
         }
     }
+}
+
+fn param(params: &CsiParams, index: usize, default: u32) -> u32 {
+    params
+        .get(index)
+        .map_or(default, |p| if p.main == 0 { default } else { p.main })
+}
+
+fn erase_mode(value: u32) -> Option<EraseMode> {
+    match value {
+        0 => Some(EraseMode::ToEnd),
+        1 => Some(EraseMode::ToStart),
+        2 => Some(EraseMode::All),
+        3 => Some(EraseMode::Saved),
+        _ => None,
+    }
+}
+
+fn private_mode_event(value: u32, enabled: bool) -> Option<AnsiEvent> {
+    let mode = match value {
+        47 => {
+            return Some(AnsiEvent::AlternateScreen {
+                mode: AlternateScreenMode::Mode47,
+                enabled,
+            });
+        }
+        1047 => {
+            return Some(AnsiEvent::AlternateScreen {
+                mode: AlternateScreenMode::Mode1047,
+                enabled,
+            });
+        }
+        1049 => {
+            return Some(AnsiEvent::AlternateScreen {
+                mode: AlternateScreenMode::Mode1049,
+                enabled,
+            });
+        }
+        1 => TerminalMode::ApplicationCursor,
+        6 => TerminalMode::Origin,
+        7 => TerminalMode::AutoWrap,
+        25 => TerminalMode::CursorVisible,
+        66 => TerminalMode::ApplicationKeypad,
+        1000 => TerminalMode::MouseX10,
+        1002 => TerminalMode::MouseButton,
+        1003 => TerminalMode::MouseAny,
+        1004 => TerminalMode::FocusReporting,
+        1006 => TerminalMode::MouseSgr,
+        2004 => TerminalMode::BracketedPaste,
+        2026 => TerminalMode::SynchronizedOutput,
+        _ => return None,
+    };
+    Some(AnsiEvent::SetMode { mode, enabled })
 }
 
 /// Parse a CSI 38/48 extended-color suffix into a `Color` plus
@@ -1994,5 +2316,178 @@ mod tests {
             "finish must emit the default SetStyle the consumer needs \
              even though the internal style is already default"
         );
+    }
+
+    #[test]
+    fn full_screen_emits_typed_operation_set_across_every_split() {
+        let bytes = b"\x07\t\n\x1bD\x1bE\x1bM\x1bH\x1b[2A\x1b[3B\x1b[4C\x1b[5D\
+            \x1b[2E\x1b[2F\x1b[7G\x1b[8d\x1b[2;3H\x1b[J\x1b[1K\x1b[2X\
+            \x1b[3@\x1b[4P\x1b[2L\x1b[2M\x1b[3S\x1b[2T\x1b[2;20r\x1b[s\
+            \x1b[u\x1b[3g\x1b[?1;6;7;25;1000;1002;1003;1004;1006;2004;2026h\
+            \x1b[?47h\x1b[?1047h\x1b[?1049h\x1b[c\x1b[>c\x1b[5n\x1b[6n";
+        let mut whole = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
+        let expected = whole.feed(bytes);
+        assert!(expected.contains(&AnsiEvent::Bell));
+        assert!(expected.contains(&AnsiEvent::Index));
+        assert!(expected.contains(&AnsiEvent::NextLine));
+        assert!(expected.contains(&AnsiEvent::ReverseIndex));
+        assert!(expected.contains(&AnsiEvent::CursorPosition { row: 2, col: 3 }));
+        assert!(expected.contains(&AnsiEvent::SetScrollingRegion {
+            top: 2,
+            bottom: Some(20)
+        }));
+        assert!(expected.contains(&AnsiEvent::SetMode {
+            mode: TerminalMode::SynchronizedOutput,
+            enabled: true
+        }));
+        assert!(expected.contains(&AnsiEvent::AlternateScreen {
+            mode: AlternateScreenMode::Mode1049,
+            enabled: true
+        }));
+        assert!(expected.contains(&AnsiEvent::DeviceRequest(DeviceRequest::CursorPosition)));
+        for split in 0..=bytes.len() {
+            let mut parser = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
+            let mut actual = parser.feed(&bytes[..split]);
+            actual.extend(parser.feed(&bytes[split..]));
+            assert_eq!(actual, expected, "split {split}");
+        }
+    }
+
+    #[test]
+    fn full_screen_finish_flushes_without_synthetic_balancing() {
+        let mut parser = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
+        let events = parser.feed(b"\x1b[?1049h\x1b[31mred");
+        assert!(events.contains(&AnsiEvent::AlternateScreen {
+            mode: AlternateScreenMode::Mode1049,
+            enabled: true,
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AnsiEvent::SetStyle(_)))
+        );
+        assert!(parser.finish().is_empty());
+        assert!(!parser.alt_screen_active);
+        assert!(parser.finish().is_empty());
+        assert_eq!(parser.feed(b"x"), vec![AnsiEvent::Text("x".into())]);
+    }
+
+    #[test]
+    fn full_screen_charset_designation_and_shift_are_typed() {
+        let mut parser = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
+        assert_eq!(
+            parser.feed(b"\x1b(0\x1b)B\x0e\x0f"),
+            vec![
+                AnsiEvent::DesignateCharacterSet {
+                    slot: CharacterSetSlot::G0,
+                    charset: CharacterSet::DecSpecialGraphics,
+                },
+                AnsiEvent::DesignateCharacterSet {
+                    slot: CharacterSetSlot::G1,
+                    charset: CharacterSet::Ascii,
+                },
+                AnsiEvent::ShiftOut,
+                AnsiEvent::ShiftIn,
+            ]
+        );
+    }
+
+    #[test]
+    fn full_screen_capped_control_strings_recover_invisibly() {
+        let config = AnsiParserConfig {
+            unknown_sequence_byte_limit: 8,
+        };
+        let mut parser = AnsiParser::with_profile_and_config(AnsiParserProfile::FullScreen, config);
+        let events = parser.feed(b"\x1b]52;AAAAAAAABsecret\x1b\\ok\x1bPAAAAAAAAAAAA\x1b\\done");
+        let visible: String = events
+            .iter()
+            .filter_map(|event| match event {
+                AnsiEvent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!visible.contains("secret"));
+        assert!(!visible.contains("AAAA"));
+        assert!(visible.ends_with("done"));
+        assert!(!visible.contains('\x1b'));
+    }
+
+    #[test]
+    fn capped_csi_and_escape_intermediate_never_leak_payload() {
+        let config = AnsiParserConfig {
+            unknown_sequence_byte_limit: 8,
+        };
+        for input in [
+            b"\x1b[12345678901234567890mOK".as_slice(),
+            b"\x1b[?999999999999999999hOK".as_slice(),
+            b"\x1b                    0OK".as_slice(),
+        ] {
+            let mut parser =
+                AnsiParser::with_profile_and_config(AnsiParserProfile::FullScreen, config);
+            let visible: String = parser
+                .feed(input)
+                .into_iter()
+                .filter_map(|event| {
+                    if let AnsiEvent::Text(text) = event {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(visible, "OK", "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn full_screen_unsupported_sgr_attributes_leave_style_unchanged() {
+        let mut parser = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
+        parser.feed(b"\x1b[1;3;31m");
+        let before = parser.current_style;
+        parser.feed(b"\x1b[2;5;6;8;9;25;28;29m");
+        assert_eq!(parser.current_style, before);
+        assert!(before.bold);
+
+        let mut line = AnsiParser::new();
+        line.feed(b"\x1b[5m");
+        assert!(
+            line.current_style.bold,
+            "line-oriented blink-as-bold compatibility"
+        );
+    }
+
+    #[test]
+    fn unicode_osc_titles_survive_every_feed_split() {
+        let bytes = "\u{1b}]2;héllo 世界\u{7}".as_bytes();
+        let mut whole = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
+        let expected = whole.feed(bytes);
+        assert_eq!(expected, vec![AnsiEvent::SetTitle("héllo 世界".into())]);
+        for split in 0..=bytes.len() {
+            let mut parser = AnsiParser::with_profile(AnsiParserProfile::FullScreen);
+            let mut actual = parser.feed(&bytes[..split]);
+            actual.extend(parser.feed(&bytes[split..]));
+            assert_eq!(actual, expected, "split {split}");
+        }
+    }
+
+    #[test]
+    fn malformed_utf8_osc_title_is_replaced_and_bounded() {
+        let config = AnsiParserConfig {
+            unknown_sequence_byte_limit: 32,
+        };
+        let mut parser = AnsiParser::with_profile_and_config(AnsiParserProfile::FullScreen, config);
+        let events = parser.feed(b"\x1b]0;bad\xfftitle\x07");
+        let title = events
+            .into_iter()
+            .find_map(|event| {
+                if let AnsiEvent::SetTitle(title) = event {
+                    Some(title)
+                } else {
+                    None
+                }
+            })
+            .expect("title event");
+        assert_eq!(title, "bad\u{fffd}title");
+        assert!(title.len() <= config.unknown_sequence_byte_limit);
     }
 }

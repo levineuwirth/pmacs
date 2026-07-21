@@ -114,64 +114,85 @@ commands, read `docs/active-work.md` immediately after this file.
   `pmacs.editor.take_typed_edit()` (buffer-revision postcondition,
   Q#AP9). Substrate: `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
   `PMACS_FAKE_LSP_CHANGE_SINK`, `TestDaemon::spawn_with_config`.
-- **Themes (Arc 4) stage 1 LANDED — #120 merged after 5 review
-  rounds** (`docs/theme-faces-framing.md` rev 9 is the full record):
-  named UI faces as reserved `ui`/`ui.*` theme entries (12-face
-  inventory, owns-surface-within-mask, masks identical on both
-  frontends); `Theme::face()` walk (`None` when unset); transactional
-  mutators with split syntax/face epochs (fixed the pre-existing
-  mid-session `theme.set` span staleness); `ThemeFacts` channel (v16,
-  one authoritative send per attachment; v15 peers excluded incl. the
-  `FileStyleSummary` face-leak side channel). Review rounds hardened
-  substrate beyond faces: the **snapshot/baseline reset contract**
-  (`on_buffer_snapshot_sent` daemon-side + the GPU arm's symmetric
-  search/menu/status clears; minibuffer, gutter mode, `ThemeFacts`
-  survive both sides) and the **store-sourced diag-count freeze**
-  (per-URI severity totals in `DiagnosticStore`, O(1), survive
-  `mark_stale`).
-- **Themes (Arc 4) stage 2 LANDED — #124 merged after the complete
-  behavioral review** (`docs/gpu-set-font-framing.md` rev 5):
-  `pmacs.gpu.set_font { family?, size? }` is a live global preference;
-  authoritative bufferless `FontFacts` is gated at protocol v17.
-  GPU family resolution is frontend-local and fail-closed to a
-  sanitized monospace default across normal/bold/italic queries;
-  metrics for all seven glyphon buffers derive atomically from one
-  logical-pixel size. The visual-run caret substrate normalizes
-  source bytes through adornments and shaped clusters (including
-  combining sequences/ligatures), preserves deliberately scrolled-away
-  viewports, and reflows on font, gutter, minimap, text, CRDT, resize,
-  and snapshot geometry changes. Test fixtures enter fontdb before
-  `FontSystem` construction; alternate advances are measured across
-  complete shaped runs, not sampled glyphs.
-- **Themes (Arc 4) stage 3 LANDED — #125; ARC 4 COMPLETE**
-  (`docs/statusline-segments-framing.md` rev 3). Strict composable
-  `pmacs.statusline` providers evaluate per frontend/window through a
-  borrow-released three-phase transaction with per-context failure
-  latches. TUI composition is grapheme/display-width correct; the pure
-  built-in LSP provider proves passive-window context. Protocol v18
-  carries complete `StatuslineSegments` replacements and dynamic
-  modeline faces; snapshot baselines reset symmetrically. GPU validates
-  untrusted payloads atomically, shapes rich runs without wrapping, and
-  right-pins the protected suffix under narrow clipping. Review
-  hardening pins fixed-face sortedness, retains flattened provider
-  tracebacks, and names unavailable layout contexts accurately.
-- **Vterm Stage 1 terminal core LANDED — #126**
-  (`docs/vterm-framing.md` rev 5). `AnsiParserProfile::{LineOriented,
-  FullScreen}` preserves compile/REPL behavior while terminal PTYs emit the
-  full cursor/mode/device operation set. `src/terminal/{screen,input,session}.rs`
-  owns a bounded terminal screen, encoders, and the transactional lifecycle
-  registry; one pathless read-only identity buffer anchors each private
-  process/screen. Review hardening added IND/NEL/RI, `TERM=xterm-256color`,
-  portable shutdown liveness, custom-tab-stop preservation, control-free
-  cells, and button-preserving SGR mouse release. Final gates: 1,661 default +
-  1,837 CRDT library tests; 9 default + 10 CRDT Vterm acceptance; 114 M4; 109
-  required GPU; workspace 2,769 across 79 suites; CI green. This is headless:
-  Vterm Stage 2 TUI/Lua and Stage 3 protocol/GPU start as separate PRs from
-  post-#126 `main`.
+- **Themes (Arc 4) stages 1–3 LANDED; Arc 4 COMPLETE ON `main`.**
+  - Stage 1 (#120, `docs/theme-faces-framing.md` rev 9): named UI faces
+    as reserved `ui`/`ui.*` theme entries; transactional split
+    syntax/face epochs; protocol-v16 `ThemeFacts`; snapshot/baseline
+    symmetry; store-sourced diagnostic-count freeze.
+  - Stage 2 (#124, `docs/gpu-set-font-framing.md` rev 5):
+    `pmacs.gpu.set_font` and authoritative protocol-v17 `FontFacts`;
+    frontend-local family resolution, live font reload/reflow, and
+    visual-run caret geometry.
+  - Stage 3 (#125, `statusline-segments`,
+    `docs/statusline-segments-framing.md` rev 3): composable strict
+    `pmacs.statusline` providers; borrow-released per-window evaluation
+    with failure latches; legacy-preserving TUI composition; a pure
+    built-in LSP provider; dynamic modeline faces; protocol-v18
+    `StatuslineSegments`; authoritative-empty/snapshot symmetry; and
+    atomic GPU validation, face resolution, shaping, clipping, and
+    cache invalidation. Acceptance 1-27 is implemented. Final gates:
+    Clippy clean; 1,619 default + 1,793 CRDT library tests; 7 default +
+    8 CRDT feature acceptance; 114 M4; 109 required GPU; one-invocation
+    workspace sweep 2,718 passed across 78 suites (19 ignored,
+    `basedpyright` filtered); `git diff --check` clean. Stage 3 landed
+    as #125 and completed Arc 4 on `main`.
+- **Vterm Stage 1 terminal core LANDED ON `main` — #126**
+  (`docs/vterm-framing.md` rev 5; merge `643d1e1`).
+  - Implementation commits: `bbc1f33` (Stage 1), `962944b` (Darwin signal
+    normalization), first-review fixes `f0a235f`, `28f2e6c`, `bf972a7`, and
+    second-review hardening `9797ada`; reviewed feature head `fc4e0ce` merged
+    through PR #126, <https://github.com/levineuwirth/pmacs/pull/126>.
+  - `AnsiParserProfile::{LineOriented, FullScreen}` preserves compile/REPL
+    behavior while terminal PTYs emit the full cursor/mode/device operation
+    set. `src/terminal/{screen,input,session}.rs` owns the state machine,
+    encoders, and lifecycle registry.
+  - Public session seam: owned strict `TerminalSpec`; owned
+    `TerminalSnapshot`; `TerminalProcessState`; and
+    `SharedTerminalManager = Rc<RefCell<TerminalManager>>` with
+    `open/is_terminal/process_id/snapshot/tick/send/resize/terminate/prune/
+    shutdown`. Stage 1 snapshots are context-free; Stage 2 adds per-view
+    state without a second screen.
+  - `EditorState` tick order is supervisor → terminal-owned PID drain/prune →
+    `process.after-tick`. Terminal IDs are not exposed through
+    `pmacs.process`; ordinary Lua/LSP/MCP ownership is unchanged. Terminal
+    identity buffers are pathless, clean, empty, round-trip, and guarded
+    read-only at every rope/CRDT/history mutation boundary.
+  - Acceptance 1–14 is mapped in the framing. The real PTY bite splits
+    ESC/CSI writes, observes alternate-screen cursor addressing, blocks and
+    resumes through raw `send`, restores the main screen, and pins final
+    output before exact PID/outcome annotation. One-row annotation visibility,
+    TERM-ignoring shutdown, spawn rollback, buffer-kill prune, and immutable
+    empty CRDT bootstrap are pinned.
+  - Review round 1 added typed IND/NEL/RI with margin-correct screen behavior,
+    defaults absent `TERM` to `xterm-256color`, makes shutdown liveness
+    acceptance portable with `kill(pid, 0)`, and preserves custom tab stops on
+    resize. Review round 2 rejects C0/C1 controls before they enter screen
+    cells, preserves the released button code in SGR mouse reports, removes
+    dead screen paths, and clears stale round-trip state during prune. Stage 2
+    must uniquify default terminal buffer names.
+  - Exact CUU/CUD and out-of-range DECSTBM clamping, combining across controls,
+    xterm alternate-screen details, legacy non-SGR mouse, printable ASCII and
+    CSI-dispatch allocation fast paths, and scrollback-cap naming are explicit
+    post-arc deferrals in the framing.
+  - Final from-start rerun after review round 2: Clippy clean; 1,661 default +
+    1,837 CRDT library tests (3 ignored each); 9 default + 10 CRDT vterm
+    acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
+    workspace 2,769 passed across 79 suites (19 ignored, 1 filtered); diff
+    check clean. `scripts/bite HEAD^ src/terminal/screen.rs --test
+    vterm_stage1_acceptance terminal_cells_reject_child_control_characters`
+    is a clean behavioral bite. The parser dispatch has its independent clean
+    behavioral bite; the original `main`/crate-root bite remains explicitly
+    weaker compile-time API evidence.
+  - Stage 2 reviews require a durable focus/input resize owner, owning
+    `FrontendId` for the global `C-c` continuation, and local clipboard/BEL
+    signal drainage. Stage 3 additionally owns `pmacs-gpu/src/attach.rs`,
+    authenticated source routing, protocol-owned wire types/limits, and a
+    deliberate complete-frame limit decision: 16 MiB is insufficient; use a
+    measured legal-worst cap or aggregate bound, never silent chunking.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
-  preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
-  stale and must be repeated before implementation. No PR or
-  implementation is active.
+  preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
+  and must be repeated before implementation. No PR or implementation is
+  active.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus

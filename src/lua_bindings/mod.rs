@@ -66,6 +66,10 @@ use crate::packages::{
 };
 use crate::protocol::{AttachTarget, AttachmentHandle, InstanceIdentity};
 use crate::rope::Range;
+use crate::statusline::{
+    SharedStatuslineRegistry, StatuslineProviderFailure, StatuslineProviderId, StatuslineRegistry,
+    StatuslineSide,
+};
 use crate::syntax::{self, ParseTreeBundle, ParseView, ParseViewHandle, SharedSyntaxRegistry};
 use crate::workers_buffer;
 
@@ -2011,6 +2015,230 @@ impl UserData for MarkHandleLua {
     }
 }
 
+/// Opaque Lua handle for a statusline provider registration.
+#[derive(Copy, Clone)]
+pub struct StatuslineProviderIdLua(pub StatuslineProviderId);
+
+impl FromLua for StatuslineProviderIdLua {
+    fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+        match value {
+            Value::UserData(data) => Ok(*data.borrow::<Self>()?),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "StatuslineProviderIdLua".to_owned(),
+                message: Some("expected a statusline provider handle".to_owned()),
+            }),
+        }
+    }
+}
+
+impl UserData for StatuslineProviderIdLua {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("raw", |_, this, ()| Ok(this.0.raw()));
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(this.0.to_string())
+        });
+        methods.add_meta_method(
+            mlua::MetaMethod::Eq,
+            |_, this, other: StatuslineProviderIdLua| Ok(this.0 == other.0),
+        );
+    }
+}
+
+/// Retrieve the statusline registry installed with the base `pmacs` table.
+///
+/// `EditorState` and semantic/TUI constructors use this exact shared handle;
+/// bare Lua hosts always receive an empty registry rather than an absent API.
+pub fn statusline_registry(lua: &Lua) -> mlua::Result<SharedStatuslineRegistry> {
+    lua.app_data_ref::<SharedStatuslineRegistry>()
+        .map(|registry| registry.clone())
+        .ok_or_else(|| mlua::Error::external("statusline registry is not installed"))
+}
+
+/// Install the strict `pmacs.statusline` registration/lifecycle surface.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one strict table parser followed by four small lifecycle bindings; splitting obscures the all-fields-before-mutation contract"
+)]
+pub fn install_statusline_module(
+    lua: &Lua,
+    registry: &SharedStatuslineRegistry,
+) -> mlua::Result<Table> {
+    let module = lua.create_table()?;
+    {
+        let registry = registry.clone();
+        module.set(
+            "register",
+            lua.create_function(move |lua, spec: Table| {
+                let mut unknown = None;
+                spec.clone().for_each(|key: Value, _: Value| {
+                    let name = match &key {
+                        Value::String(value) => value.to_str().map_or_else(
+                            |_| "<invalid UTF-8>".to_owned(),
+                            |value| value.to_owned(),
+                        ),
+                        other => format!("{other:?}"),
+                    };
+                    if !matches!(name.as_str(), "name" | "side" | "priority" | "face" | "fn")
+                        && unknown.is_none()
+                    {
+                        unknown = Some(name);
+                    }
+                    Ok(())
+                })?;
+                if let Some(key) = unknown {
+                    return Err(mlua::Error::external(format!(
+                        "pmacs.statusline.register: unknown field `{key}`"
+                    )));
+                }
+
+                let name =
+                    strict_statusline_string(spec.raw_get("name")?, "name", false)?
+                        .expect("required statusline name");
+                let side_value =
+                    strict_statusline_string(spec.raw_get("side")?, "side", false)?
+                        .expect("required statusline side");
+                let side = match side_value.as_str() {
+                    "left" => StatuslineSide::Left,
+                    "right" => StatuslineSide::Right,
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "pmacs.statusline.register: `side` must be \"left\" or \"right\", got {other:?}"
+                        )));
+                    }
+                };
+                let priority = strict_statusline_priority(spec.raw_get("priority")?)?;
+                let face = strict_statusline_string(spec.raw_get("face")?, "face", true)?
+                    .unwrap_or_else(|| "ui.modeline".to_owned());
+                let callback = match spec.raw_get::<Value>("fn")? {
+                    Value::Function(function) => function,
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "pmacs.statusline.register: `fn` must be a function, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                // Every raw field is now parsed and typed; only this final call
+                // mutates the registry.
+                let id = registry.borrow_mut().register(
+                    name,
+                    side,
+                    priority,
+                    face,
+                    callback,
+                    caller_source(lua, 2),
+                )
+                    .map_err(mlua::Error::external)?;
+                Ok(StatuslineProviderIdLua(id))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "unregister",
+            lua.create_function(move |_, id: StatuslineProviderIdLua| {
+                Ok(registry.borrow_mut().unregister(id.0))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "set_priority",
+            lua.create_function(move |_, (id, value): (StatuslineProviderIdLua, Value)| {
+                let priority = strict_statusline_priority(value)?;
+                Ok(registry.borrow_mut().set_priority(id.0, priority))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "set_enabled",
+            lua.create_function(move |_, (id, value): (StatuslineProviderIdLua, Value)| {
+                let Value::Boolean(enabled) = value else {
+                    return Err(mlua::Error::external(
+                        "pmacs.statusline.set_enabled: `enabled` must be a boolean",
+                    ));
+                };
+                Ok(registry.borrow_mut().set_enabled(id.0, enabled))
+            })?,
+        )?;
+    }
+    {
+        let registry = registry.clone();
+        module.set(
+            "providers",
+            lua.create_function(move |lua, ()| {
+                let providers = registry.borrow().providers();
+                let output = lua.create_table_with_capacity(providers.len(), 0)?;
+                for (index, provider) in providers.iter().enumerate() {
+                    let metadata = lua.create_table_with_capacity(0, 6)?;
+                    metadata.raw_set("handle", StatuslineProviderIdLua(provider.id))?;
+                    metadata.raw_set("name", provider.name.as_str())?;
+                    metadata.raw_set("side", provider.side.as_str())?;
+                    metadata.raw_set("priority", provider.priority)?;
+                    metadata.raw_set("face", provider.face.as_str())?;
+                    metadata.raw_set("enabled", provider.enabled)?;
+                    output.raw_set(index + 1, metadata)?;
+                }
+                Ok(output)
+            })?,
+        )?;
+    }
+    Ok(module)
+}
+
+fn strict_statusline_string(
+    value: Value,
+    field: &'static str,
+    optional: bool,
+) -> mlua::Result<Option<String>> {
+    match value {
+        Value::Nil if optional => Ok(None),
+        Value::String(value) => value
+            .to_str()
+            .map(|value| Some(value.to_owned()))
+            .map_err(|_| {
+                mlua::Error::external(format!(
+                    "pmacs.statusline.register: `{field}` must be valid UTF-8"
+                ))
+            }),
+        other => Err(mlua::Error::external(format!(
+            "pmacs.statusline.register: `{field}` must be a string, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn strict_statusline_priority(value: Value) -> mlua::Result<i32> {
+    match value {
+        Value::Nil => Ok(0),
+        Value::Integer(value) => i32::try_from(value).map_err(|_| {
+            mlua::Error::external(
+                "pmacs.statusline priority must be an integer in the signed 32-bit range",
+            )
+        }),
+        Value::Number(value)
+            if value.is_finite()
+                && value.fract() == 0.0
+                && value >= f64::from(i32::MIN)
+                && value <= f64::from(i32::MAX) =>
+        {
+            Ok(value as i32)
+        }
+        Value::Number(_) => Err(mlua::Error::external(
+            "pmacs.statusline priority must be an integer in the signed 32-bit range",
+        )),
+        other => Err(mlua::Error::external(format!(
+            "pmacs.statusline priority must be a number, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Module install
 // ---------------------------------------------------------------------------
@@ -2047,6 +2275,8 @@ pub fn install(
     lua.set_app_data(PackageUnloadHooks::new());
     lua.set_app_data(CurrentlyLoadingPackage::new());
     lua.set_app_data(BufferRemoveCallbacks::new());
+    let statusline = Rc::new(RefCell::new(StatuslineRegistry::new()));
+    lua.set_app_data(statusline.clone());
 
     let pmacs = lua.create_table()?;
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
@@ -2054,6 +2284,7 @@ pub fn install(
     pmacs.set("keymap", install_keymap_module(lua, keymaps)?)?;
     pmacs.set("menu", install_menu_module(lua, menus)?)?;
     pmacs.set("hook", install_hook_module(lua, hooks)?)?;
+    pmacs.set("statusline", install_statusline_module(lua, &statusline)?)?;
     // Wall-clock millis (since UNIX epoch). Used by builtin runtime
     // chunks for timeout loops; `os.clock()` only counts CPU time and
     // is a poor fit for "wait until something arrives over I/O".
@@ -4681,6 +4912,10 @@ fn installed_package_to_lua(lua: &Lua, pkg: &InstalledPackage) -> mlua::Result<T
 ///   `bracketed_paste_begin` / `bracketed_paste_end` /
 ///   `alt_screen_enter` / `alt_screen_exit`: `{ kind=<name> }` only
 /// - `set_title`: `{ kind="set_title", title=<string> }`
+#[allow(
+    clippy::too_many_lines,
+    reason = "exhaustive wire-to-Lua conversion keeps every ANSI variant and field visible in one audited match"
+)]
 fn event_to_lua_table(lua: &Lua, ev: &crate::ansi::AnsiEvent) -> mlua::Result<Table> {
     use crate::ansi::AnsiEvent;
     let t = lua.create_table()?;
@@ -4732,6 +4967,151 @@ fn event_to_lua_table(lua: &Lua, ev: &crate::ansi::AnsiEvent) -> mlua::Result<Ta
         }
         AnsiEvent::AlternateScreenExit => {
             t.set("kind", "alt_screen_exit")?;
+        }
+        AnsiEvent::Bell => t.set("kind", "bell")?,
+        AnsiEvent::LineFeed => t.set("kind", "line_feed")?,
+        AnsiEvent::Index => t.set("kind", "index")?,
+        AnsiEvent::NextLine => t.set("kind", "next_line")?,
+        AnsiEvent::ReverseIndex => t.set("kind", "reverse_index")?,
+        AnsiEvent::HorizontalTab => t.set("kind", "horizontal_tab")?,
+        AnsiEvent::SetTabStop => t.set("kind", "set_tab_stop")?,
+        AnsiEvent::ClearTabStop => t.set("kind", "clear_tab_stop")?,
+        AnsiEvent::ClearAllTabStops => t.set("kind", "clear_all_tab_stops")?,
+        AnsiEvent::CursorUp(count)
+        | AnsiEvent::CursorDown(count)
+        | AnsiEvent::CursorForward(count)
+        | AnsiEvent::CursorBackward(count)
+        | AnsiEvent::CursorNextLine(count)
+        | AnsiEvent::CursorPreviousLine(count)
+        | AnsiEvent::EraseCharacters(count)
+        | AnsiEvent::InsertCharacters(count)
+        | AnsiEvent::DeleteCharacters(count)
+        | AnsiEvent::InsertLines(count)
+        | AnsiEvent::DeleteLines(count)
+        | AnsiEvent::ScrollUp(count)
+        | AnsiEvent::ScrollDown(count) => {
+            let kind = match ev {
+                AnsiEvent::CursorUp(_) => "cursor_up",
+                AnsiEvent::CursorDown(_) => "cursor_down",
+                AnsiEvent::CursorForward(_) => "cursor_forward",
+                AnsiEvent::CursorBackward(_) => "cursor_backward",
+                AnsiEvent::CursorNextLine(_) => "cursor_next_line",
+                AnsiEvent::CursorPreviousLine(_) => "cursor_previous_line",
+                AnsiEvent::EraseCharacters(_) => "erase_characters",
+                AnsiEvent::InsertCharacters(_) => "insert_characters",
+                AnsiEvent::DeleteCharacters(_) => "delete_characters",
+                AnsiEvent::InsertLines(_) => "insert_lines",
+                AnsiEvent::DeleteLines(_) => "delete_lines",
+                AnsiEvent::ScrollUp(_) => "scroll_up",
+                AnsiEvent::ScrollDown(_) => "scroll_down",
+                _ => unreachable!("outer match restricts the event"),
+            };
+            t.set("kind", kind)?;
+            t.set("count", *count)?;
+        }
+        AnsiEvent::CursorHorizontalAbsolute(col) => {
+            t.set("kind", "cursor_horizontal_absolute")?;
+            t.set("col", *col)?;
+        }
+        AnsiEvent::CursorVerticalAbsolute(row) => {
+            t.set("kind", "cursor_vertical_absolute")?;
+            t.set("row", *row)?;
+        }
+        AnsiEvent::CursorPosition { row, col } => {
+            t.set("kind", "cursor_position")?;
+            t.set("row", *row)?;
+            t.set("col", *col)?;
+        }
+        AnsiEvent::EraseDisplay(mode) | AnsiEvent::EraseLineMode(mode) => {
+            t.set(
+                "kind",
+                if matches!(ev, AnsiEvent::EraseDisplay(_)) {
+                    "erase_display"
+                } else {
+                    "erase_line_mode"
+                },
+            )?;
+            t.set(
+                "mode",
+                match mode {
+                    crate::ansi::EraseMode::ToEnd => "to_end",
+                    crate::ansi::EraseMode::ToStart => "to_start",
+                    crate::ansi::EraseMode::All => "all",
+                    crate::ansi::EraseMode::Saved => "saved",
+                },
+            )?;
+        }
+        AnsiEvent::SetScrollingRegion { top, bottom } => {
+            t.set("kind", "set_scrolling_region")?;
+            t.set("top", *top)?;
+            t.set("bottom", *bottom)?;
+        }
+        AnsiEvent::SaveCursor => t.set("kind", "save_cursor")?,
+        AnsiEvent::RestoreCursor => t.set("kind", "restore_cursor")?,
+        AnsiEvent::AlternateScreen { mode, enabled } => {
+            t.set("kind", "alternate_screen")?;
+            t.set(
+                "mode",
+                match mode {
+                    crate::ansi::AlternateScreenMode::Mode47 => 47,
+                    crate::ansi::AlternateScreenMode::Mode1047 => 1047,
+                    crate::ansi::AlternateScreenMode::Mode1049 => 1049,
+                },
+            )?;
+            t.set("enabled", *enabled)?;
+        }
+        AnsiEvent::SetMode { mode, enabled } => {
+            t.set("kind", "set_mode")?;
+            t.set(
+                "mode",
+                match mode {
+                    crate::ansi::TerminalMode::Insert => "insert",
+                    crate::ansi::TerminalMode::Origin => "origin",
+                    crate::ansi::TerminalMode::AutoWrap => "auto_wrap",
+                    crate::ansi::TerminalMode::ApplicationCursor => "application_cursor",
+                    crate::ansi::TerminalMode::ApplicationKeypad => "application_keypad",
+                    crate::ansi::TerminalMode::CursorVisible => "cursor_visible",
+                    crate::ansi::TerminalMode::BracketedPaste => "bracketed_paste",
+                    crate::ansi::TerminalMode::FocusReporting => "focus_reporting",
+                    crate::ansi::TerminalMode::SynchronizedOutput => "synchronized_output",
+                    crate::ansi::TerminalMode::MouseX10 => "mouse_x10",
+                    crate::ansi::TerminalMode::MouseButton => "mouse_button",
+                    crate::ansi::TerminalMode::MouseAny => "mouse_any",
+                    crate::ansi::TerminalMode::MouseSgr => "mouse_sgr",
+                },
+            )?;
+            t.set("enabled", *enabled)?;
+        }
+        AnsiEvent::DesignateCharacterSet { slot, charset } => {
+            t.set("kind", "designate_character_set")?;
+            t.set(
+                "slot",
+                match slot {
+                    crate::ansi::CharacterSetSlot::G0 => "g0",
+                    crate::ansi::CharacterSetSlot::G1 => "g1",
+                },
+            )?;
+            t.set(
+                "charset",
+                match charset {
+                    crate::ansi::CharacterSet::Ascii => "ascii",
+                    crate::ansi::CharacterSet::DecSpecialGraphics => "dec_special_graphics",
+                },
+            )?;
+        }
+        AnsiEvent::ShiftOut => t.set("kind", "shift_out")?,
+        AnsiEvent::ShiftIn => t.set("kind", "shift_in")?,
+        AnsiEvent::DeviceRequest(request) => {
+            t.set("kind", "device_request")?;
+            t.set(
+                "request",
+                match request {
+                    crate::ansi::DeviceRequest::PrimaryAttributes => "primary_attributes",
+                    crate::ansi::DeviceRequest::SecondaryAttributes => "secondary_attributes",
+                    crate::ansi::DeviceRequest::OperatingStatus => "operating_status",
+                    crate::ansi::DeviceRequest::CursorPosition => "cursor_position",
+                },
+            )?;
         }
     }
     Ok(t)
@@ -5360,6 +5740,48 @@ fn log_hook_error(lua: &Lua, hook_name: &str, err: &crate::hook::HookCallbackErr
     };
     // Notify any window viewing *errors* — same staleness fix as
     // `LuaHost::append_to_errors_buffer`.
+    if let Some((id, edit)) = result {
+        notify_buffer_edit_to_windows(lua, id, &edit);
+    }
+}
+/// Append a first-in-run statusline provider failure to `*errors*`.
+///
+/// The latch decision lives in [`crate::statusline::StatuslineRegistry`];
+/// this function owns only the repository-standard durable sink and window
+/// invalidation.
+pub(crate) fn log_statusline_provider_error(lua: &Lua, failure: &StatuslineProviderFailure) {
+    let message = crate::statusline::sanitize_provider_error_text(&failure.message);
+    let line = format!(
+        "[statusline:{}] provider registered at {} failed for {:?}/{:?}/{:?}/active={}: {}\n",
+        failure.provider_name,
+        failure.source.render(),
+        failure.context.frontend_id,
+        failure.context.window_id,
+        failure.context.buffer_id,
+        failure.context.active,
+        message,
+    );
+    let result = {
+        let Some(app) = lua.app_data_ref::<SharedRegistry>() else {
+            return;
+        };
+        let mut registry = app.borrow_mut();
+        let id = match registry.find_by_name(crate::lua::ERRORS_BUFFER_NAME) {
+            Some(id) => id,
+            None => registry.create(crate::lua::ERRORS_BUFFER_NAME),
+        };
+        let Ok(buffer) = registry.get_mut(id) else {
+            return;
+        };
+        let position = buffer.len();
+        let edit = buffer
+            .apply_edit(EditOp::Insert {
+                pos: position,
+                bytes: line.as_bytes(),
+            })
+            .ok();
+        edit.map(|edit| (id, edit))
+    };
     if let Some((id, edit)) = result {
         notify_buffer_edit_to_windows(lua, id, &edit);
     }
@@ -7309,6 +7731,7 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         mode,
         restart,
         ansi_events,
+        ansi_profile: crate::ansi::AnsiParserProfile::LineOriented,
         stdin,
         group,
     })
@@ -7514,7 +7937,14 @@ pub fn install_process(lua: &Lua, supervisor: &SharedProcessSupervisor) -> mlua:
             "list",
             lua.create_function(move |lua, ()| {
                 let sup = s.borrow();
-                let ids: Vec<ProcessId> = sup.ids().collect();
+                let ids: Vec<ProcessId> = sup
+                    .ids()
+                    .filter(|id| {
+                        sup.spec(*id).is_none_or(|spec| {
+                            spec.ansi_profile == crate::ansi::AnsiParserProfile::LineOriented
+                        })
+                    })
+                    .collect();
                 let out = lua.create_table_with_capacity(ids.len(), 0)?;
                 for (i, id) in ids.iter().enumerate() {
                     let row = lua.create_table_with_capacity(0, 3)?;

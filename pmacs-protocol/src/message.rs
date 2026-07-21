@@ -104,6 +104,32 @@ pub const BUILTIN_PAIR_CHARS: [char; 9] = ['(', ')', '[', ']', '{', '}', '"', '\
 pub fn is_builtin_pair_char(c: char) -> bool {
     BUILTIN_PAIR_CHARS.contains(&c)
 }
+/// Maximum number of live statusline providers and wire segments.
+pub const MAX_STATUSLINE_PROVIDERS: usize = 64;
+
+/// Maximum UTF-8 byte length of a statusline provider's display name.
+pub const MAX_STATUSLINE_PROVIDER_NAME_BYTES: usize = 256;
+
+/// Maximum UTF-8 byte length of a statusline segment face name.
+pub const MAX_STATUSLINE_FACE_BYTES: usize = 256;
+
+/// Maximum UTF-8 byte length of one statusline segment's text.
+pub const MAX_STATUSLINE_SEGMENT_BYTES: usize = 1024;
+
+/// Maximum aggregate UTF-8 text bytes in one statusline payload.
+pub const MAX_STATUSLINE_TOTAL_TEXT_BYTES: usize = 64 * 1024;
+
+/// True when `name` belongs to the reserved UI-face namespace.
+#[must_use]
+pub fn is_ui_face_name(name: &str) -> bool {
+    name == "ui" || name.starts_with("ui.")
+}
+
+/// True when `name` is the modeline face or one of its children.
+#[must_use]
+pub fn is_modeline_face_name(name: &str) -> bool {
+    name == "ui.modeline" || name.starts_with("ui.modeline.")
+}
 
 /// Modifier-key set. Bit-flag encoding for compact wire shape.
 ///
@@ -1026,6 +1052,21 @@ pub enum InstanceMessage {
         /// closed (deserialized protocol input is untrusted).
         size_centi_px: Option<u32>,
     },
+    /// Statusline segments (Q#SL7, protocol v18). Custom provider output
+    /// for the semantic frontend's current buffer. This is a complete
+    /// replacement: empty vectors authoritatively mean no custom segments.
+    /// Daemon-gated `>= 18`.
+    ///
+    /// Appended after [`Self::FontFacts`], the final v17 variant, so no
+    /// existing postcard discriminant moves.
+    StatuslineSegments {
+        /// Buffer whose modeline the segments describe.
+        buffer_id: crate::BufferId,
+        /// Left-side custom segments in display order.
+        left: Vec<StatuslineSegment>,
+        /// Right-side custom segments in display order.
+        right: Vec<StatuslineSegment>,
+    },
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -1039,6 +1080,19 @@ pub struct ThemeFace {
     pub name: String,
     /// The daemon-resolved style for this face.
     pub style: crate::cell::Style,
+}
+
+/// One daemon-produced custom modeline segment.
+///
+/// `text` has already been sanitized to one line. `face` is
+/// `ui.modeline` or one of its child names; a missing exact entry in
+/// [`InstanceMessage::ThemeFacts`] means the base modeline text color.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StatuslineSegment {
+    /// Non-empty, single-line segment text.
+    pub text: String,
+    /// Static modeline face name selected at provider registration.
+    pub face: String,
 }
 
 /// Line-number gutter mode for a window (UX gutter arc). Shared across the
@@ -1411,7 +1465,13 @@ pub enum ResourceBody {
 /// `< 17`; a v16 peer negotiates v16 and simply keeps its built-in
 /// font. Appended after `ThemeFacts` — the final v16 variant —
 /// same ordinal-discriminant reasoning as every additive bump.
-pub const PROTOCOL_VERSION: u32 = 17;
+///
+/// Statusline segments (Q#SL7): bumped 17 → 18 for
+/// [`InstanceMessage::StatuslineSegments`] — a new additive variant
+/// carrying custom modeline provider output. Daemon-gated `< 18`; a
+/// v17 peer keeps the built-in status band. Appended after `FontFacts`
+/// so the final v17 discriminant remains stable.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1477,7 +1537,10 @@ pub const PROTOCOL_VERSION: u32 = 17;
 ///
 /// Q#F4: extended to `[6, ..., 17]`. `InstanceMessage::FontFacts`
 /// is additive and daemon-gated per session, so the ladder resumes.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+///
+/// Q#SL7: extended to `[6, ..., 18]`.
+/// [`InstanceMessage::StatuslineSegments`] is additive and daemon-gated.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

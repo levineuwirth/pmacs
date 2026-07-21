@@ -90,7 +90,7 @@ pub struct Theme {
 /// and the `ThemeFacts` producer's key filter.
 #[must_use]
 pub fn is_face_name(name: &str) -> bool {
-    name == "ui" || name.starts_with("ui.")
+    pmacs_protocol::is_ui_face_name(name)
 }
 
 impl Theme {
@@ -224,6 +224,37 @@ impl Theme {
                 None => return None,
             }
         }
+    }
+
+    /// Resolve a custom modeline segment face relative to the already
+    /// resolved `ui.modeline` surface (statusline framing Q#SL6).
+    ///
+    /// Only a concrete foreground from the exact child or an intermediate
+    /// child is returned. The walk stops before `ui.modeline`: reaching the
+    /// base means the segment keeps the base modeline's effective text
+    /// color. An explicitly default foreground also stops inheritance and
+    /// returns to that base. Out-of-mask style components are discarded.
+    #[must_use]
+    pub fn modeline_segment_face(&self, name: &str) -> Option<Style> {
+        debug_assert!(
+            pmacs_protocol::is_modeline_face_name(name),
+            "modeline_segment_face() takes ui.modeline/ui.modeline.* names"
+        );
+        let mut name = name;
+        while name != "ui.modeline" {
+            if let Some(style) = self.by_capture.get(name) {
+                return match style.fg {
+                    Color::Default => None,
+                    fg => Some(Style {
+                        fg,
+                        ..Style::default()
+                    }),
+                };
+            }
+            let index = name.rfind('.')?;
+            name = &name[..index];
+        }
+        None
     }
 
     /// Set the style for one capture name, replacing any prior entry.
@@ -840,6 +871,47 @@ mod tests {
         assert!(!is_face_name("u"));
         assert!(!is_face_name("keyword"));
         assert!(!is_face_name("gui.modeline"));
+    }
+
+    #[test]
+    fn modeline_segment_face_is_base_relative_and_fg_only() {
+        let mut t = Theme::empty();
+        t.insert(
+            "ui.modeline",
+            Style {
+                fg: Color::Indexed(1),
+                bg: Color::Indexed(2),
+                reverse: true,
+                ..Style::default()
+            },
+        );
+        assert_eq!(t.modeline_segment_face("ui.modeline"), None);
+        assert_eq!(t.modeline_segment_face("ui.modeline.unset"), None);
+
+        t.insert(
+            "ui.modeline.project",
+            Style {
+                fg: Color::Indexed(6),
+                bg: Color::Indexed(5),
+                reverse: true,
+                bold: true,
+                ..Style::default()
+            },
+        );
+        assert_eq!(
+            t.modeline_segment_face("ui.modeline.project.branch"),
+            Some(Style {
+                fg: Color::Indexed(6),
+                ..Style::default()
+            })
+        );
+
+        t.insert("ui.modeline.project.branch", Style::default());
+        assert_eq!(
+            t.modeline_segment_face("ui.modeline.project.branch"),
+            None,
+            "an exact default foreground blocks the colored intermediate parent"
+        );
     }
 
     #[test]

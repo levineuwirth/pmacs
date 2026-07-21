@@ -414,6 +414,26 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            ("workspace/didChangeConfiguration", _) => {
+                // Record the pushed `settings` so a test can assert the
+                // daemon delivered configuration after `initialized` (the
+                // push-model config-delivery path push-only servers like the
+                // VS Code JSON server rely on). One JSON line per push.
+                if let Ok(sink) = std::env::var("PMACS_FAKE_LSP_CONFIG_SINK") {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&sink)
+                    {
+                        let settings = params
+                            .get("settings")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        let _ = writeln!(f, "{settings}");
+                    }
+                }
+            }
             ("textDocument/didOpen" | "textDocument/didChange", _) => {
                 let uri = params
                     .get("textDocument")

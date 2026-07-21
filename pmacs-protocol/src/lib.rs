@@ -50,9 +50,11 @@ pub use message::{
     CompletionPopupRow, CursorState, Decoration, DecorationKind, DecorationSegment,
     FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello, InlineAdornment,
     InstanceCapabilities, InstanceIdentity, InstanceMessage, InstanceSignal, Key, KeyEvent,
-    LineNumberMode, MenuPromptRow, Modifiers, MouseButton, MouseEvent, MouseKind,
-    NegotiatedCapabilities, PROTOCOL_VERSION, PointerKind, ResourceBody,
-    SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, StyleSegment, StyleSpan, ThemeFace,
-    is_builtin_pair_char, is_supported_protocol_version, negotiate_capabilities,
+    LineNumberMode, MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDER_NAME_BYTES,
+    MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES, MAX_STATUSLINE_TOTAL_TEXT_BYTES,
+    MenuPromptRow, Modifiers, MouseButton, MouseEvent, MouseKind, NegotiatedCapabilities,
+    PROTOCOL_VERSION, PointerKind, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot,
+    StatuslineSegment, StyleSegment, StyleSpan, ThemeFace, is_builtin_pair_char,
+    is_modeline_face_name, is_supported_protocol_version, is_ui_face_name, negotiate_capabilities,
 };
 pub use transport::{MAX_FRAME_BYTES, TransportError, read_message, write_message};
