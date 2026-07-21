@@ -74,6 +74,8 @@ If it does not, stop and repair the remote/fetch configuration.
   workspace 2,767 passed across 79 suites (19 ignored, 1 filtered); diff check
   clean. The first review Clippy pass found only identical LF/IND match arms;
   after consolidation, the complete sequence restarted from gate 1.
+  Updated PR CI is green across Linux/macOS, Lua 5.4/LuaJIT, GPU, format,
+  lint, and acceptance jobs.
 - `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
   `bite: OK` because the old crate root could not compile the new terminal API;
   this is explicitly weaker compile-time API evidence, not a clean behavioral
