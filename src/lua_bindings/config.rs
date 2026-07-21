@@ -1254,6 +1254,60 @@ mod tests {
     }
 
     #[test]
+    fn a_set_local_first_does_not_open_a_startup_only_write_window() {
+        // Review round 1, finding 2. `set_local` does not call
+        // `maybe_freeze_after_init`, so the concern was that a
+        // `set_local` as the first post-init operation defers the freeze
+        // and lets a subsequent `StartupOnly` write slip through.
+        //
+        // It cannot: `set` and `reset` call `maybe_freeze_after_init` as
+        // their FIRST statement, before the definition lookup and before
+        // the mutator runs, so the freeze always lands ahead of the
+        // check in the very same call. This test drives that exact
+        // ordering -- post-init `set_local` on a Live key, then a
+        // `StartupOnly` write -- and asserts the write is still refused.
+        let (lua, reg) = fresh();
+        let flag = InitCompleteFlag::new();
+        lua.set_app_data(flag.clone());
+        run(
+            &lua,
+            r#"pmacs.config.define{ name="editing.live-one", description="d", type="boolean", default=true }"#,
+        )
+        .unwrap();
+        run(
+            &lua,
+            r#"pmacs.config.define{ name="lsp.root-markers", description="d", type="boolean", default=true, mutability="startup" }"#,
+        )
+        .unwrap();
+
+        flag.set_complete();
+        assert!(
+            !reg.borrow().is_frozen(),
+            "precondition: nothing has triggered the lazy freeze yet"
+        );
+
+        // The first post-init operation is a set_local on a Live key.
+        let buf = BufferId::next();
+        lua.globals().set("__buf", BufferIdLua(buf)).unwrap();
+        run(
+            &lua,
+            "pmacs.config.set_local(__buf, 'editing.live-one', false)",
+        )
+        .unwrap();
+
+        // The StartupOnly write must still be refused.
+        let err = run(&lua, "pmacs.config.set('lsp.root-markers', false)").unwrap_err();
+        assert!(
+            err.to_string().contains("startup-only"),
+            "a set_local first must not open a write window: {err}"
+        );
+        assert!(
+            reg.borrow().is_frozen(),
+            "the set that was refused is itself what triggered the freeze"
+        );
+    }
+
+    #[test]
     fn define_startup_only_always_rejects_set_local() {
         let (lua, _reg) = fresh();
         run(

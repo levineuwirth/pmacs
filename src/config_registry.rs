@@ -356,7 +356,13 @@ impl ConfigValue {
                 value: v,
             });
         }
-        if v.fract() != 0.0 || v < i64::MIN as f64 || v > i64::MAX as f64 {
+        // The bounds are deliberately ASYMMETRIC. `i64::MIN as f64` is
+        // -2^63, which round-trips exactly, so `<` correctly admits it.
+        // `i64::MAX as f64` rounds UP to 2^63 --- one more than
+        // `i64::MAX` --- so a `>` here would admit exactly 2^63 and then
+        // `v as i64` would saturate it to `i64::MAX`, silently storing a
+        // different number than the caller wrote. `>=` rejects it.
+        if v.fract() != 0.0 || v < i64::MIN as f64 || v >= i64::MAX as f64 {
             return Err(ConfigError::NonIntegral {
                 name: name.to_owned(),
                 value: v,
@@ -2120,5 +2126,46 @@ mod tests {
             let err = ConfigValue::int_from_f64("x", v).unwrap_err();
             assert!(matches!(err, ConfigError::NonFiniteNumber { .. }));
         }
+    }
+
+    #[test]
+    fn int_from_f64_rejects_the_saturating_upper_boundary() {
+        // Review round 1, finding 1. `i64::MAX as f64` rounds UP to
+        // 2^63 = 9223372036854775808.0, one more than i64::MAX. With a
+        // `>` guard this value passes validation and `v as i64` then
+        // SATURATES to 9223372036854775807 --- the registry silently
+        // stores a different number than the caller asked for. This
+        // test fails against the `>` form.
+        let boundary = i64::MAX as f64;
+        let err = ConfigValue::int_from_f64("x", boundary).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::NonIntegral { .. }),
+            "2^63 must be rejected, not saturated to i64::MAX"
+        );
+        // Anything beyond it too.
+        assert!(ConfigValue::int_from_f64("x", boundary * 2.0).is_err());
+    }
+
+    #[test]
+    fn int_from_f64_accepts_the_exact_lower_boundary() {
+        // The bounds are asymmetric on purpose: unlike the upper one,
+        // `i64::MIN as f64` IS exactly i64::MIN and round-trips, so
+        // tightening the lower comparison to `<=` alongside the upper
+        // `>=` would wrongly reject a legitimate value.
+        let lo = i64::MIN as f64;
+        assert_eq!(
+            ConfigValue::int_from_f64("x", lo).unwrap(),
+            ConfigValue::Int(i64::MIN),
+            "i64::MIN is representable and must still be accepted"
+        );
+    }
+
+    #[test]
+    fn int_from_f64_accepts_the_largest_representable_integer_below_the_boundary() {
+        // The next f64 below 2^63 is 2^63 - 1024, which is a valid i64.
+        // Pins that the `>=` fix did not over-reject the top of range.
+        let below = (i64::MAX as f64) - 1024.0;
+        let got = ConfigValue::int_from_f64("x", below).unwrap();
+        assert_eq!(got, ConfigValue::Int(9_223_372_036_854_774_784));
     }
 }
