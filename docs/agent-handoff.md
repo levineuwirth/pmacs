@@ -118,9 +118,9 @@ next machine reads it the way you just did.
     `StatuslineSegments`; authoritative-empty/snapshot symmetry; and
     atomic GPU validation, face resolution, shaping, clipping, and
     cache invalidation. Acceptance 1-27 is implemented. Final gates:
-    Clippy clean; 1,617 default + 1,791 CRDT library tests; 7 default +
-    8 CRDT feature acceptance; 114 M4; 108 required GPU; one-invocation
-    workspace sweep 2,715 passed across 78 suites (19 ignored,
+    Clippy clean; 1,619 default + 1,793 CRDT library tests; 7 default +
+    8 CRDT feature acceptance; 114 M4; 109 required GPU; one-invocation
+    workspace sweep 2,718 passed across 78 suites (19 ignored,
     `basedpyright` filtered); `git diff --check` clean. This branch is
     awaiting review and **must not be described as merged**.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:

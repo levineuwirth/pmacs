@@ -2382,6 +2382,14 @@ mod tests {
     }
 
     #[test]
+    fn fixed_ui_face_inventory_is_strictly_sorted() {
+        assert!(
+            UI_FACES.windows(2).all(|pair| pair[0] < pair[1]),
+            "theme_facts_msg uses binary_search; duplicates or unsorted insertions misclassify faces"
+        );
+    }
+
+    #[test]
     fn line_numbers_emitted_on_toggle_then_suppressed() {
         // UX gutter (protocol v13): the daemon ships the per-window gutter
         // mode. Off is the default → no message; toggling on emits

@@ -5601,7 +5601,7 @@ fn log_hook_error(lua: &Lua, hook_name: &str, err: &crate::hook::HookCallbackErr
 /// this function owns only the repository-standard durable sink and window
 /// invalidation.
 pub(crate) fn log_statusline_provider_error(lua: &Lua, failure: &StatuslineProviderFailure) {
-    let message = crate::statusline::sanitize_provider_text(&failure.message);
+    let message = crate::statusline::sanitize_provider_error_text(&failure.message);
     let line = format!(
         "[statusline:{}] provider registered at {} failed for {:?}/{:?}/{:?}/active={}: {}\n",
         failure.provider_name,

@@ -8,6 +8,10 @@ and is fully gated; awaiting review, not merged.**
 Revision 3: closes review findings on authoritative-empty baseline retention
 and the TUI's protected-suffix clipping boundary.
 
+The implementation review corrected the record for the GPU's
+built-in-only narrow-band case: stage 3 deliberately changes the legacy
+clipping edge and now pins that behavior with a headless regression test.
+
 Revision 2: closes review findings on invalidation, terminal-control-safe
 grapheme painting, separator ownership, detached-frontend latches, and the
 unknown-LSP label. Revision 1 was the initial post-#124 architecture scout.
@@ -40,16 +44,17 @@ framed ownership boundary:
   `BufferSnapshot`.
 - The GPU consumes v18 atomically, resolves exact dynamic faces, clips
   provider runs without wrapping or displacing the protected suffix,
-  and preserves its prior valid state on malformed input.
+  deliberately right-pins over-wide built-in-only readouts, and
+  preserves its prior valid state on malformed input.
 - `builtin/runtime/lsp.lua` registers the first pure right-side provider
   from its private attachment map; the Rust tracker exposes bounded
   `init`/`ready`/`degraded`/`crashed`/`stopped`/unknown labels.
 
 The final gate run was sequential and clean: `cargo fmt --check`;
-workspace/all-target Clippy with `-D warnings`; 1,617 default and 1,791
+workspace/all-target Clippy with `-D warnings`; 1,619 default and 1,793
 CRDT library tests; 7 default and 8 CRDT stage-3 acceptance tests; 114
-M4 acceptance tests (3 ignored, `basedpyright` filtered); 108 required
-GPU tests; and the one-invocation workspace sweep (2,715 passed across
+M4 acceptance tests (3 ignored, `basedpyright` filtered); 109 required
+GPU tests; and the one-invocation workspace sweep (2,718 passed across
 78 suites, 19 ignored, `basedpyright` filtered). `git diff --check` was
 clean. No flaky rerun was needed.
 
@@ -437,7 +442,7 @@ or no enabled providers is an O(1) fast path.
 
 ### Q#SL4 - Composition, order, separators, and narrow-window policy
 
-Current built-ins remain protected:
+Current built-in positions remain anchored:
 
 - **Left:** the frontend's current active/modified/buffer-identity group,
   with its existing edge padding, then custom left segments.
@@ -462,20 +467,25 @@ Priority means **survival priority when horizontal space is tight**:
 
 - Left custom providers are ordered by `(priority descending,
   registration id ascending)`. Higher-priority items sit closest to the
-  protected buffer identity. Overflow clips the low-priority tail.
+  leading-edge buffer identity. Overflow clips the low-priority tail.
 - Right custom providers are displayed by `(priority ascending,
   registration id ascending)`, placing higher-priority items closest to
   the protected diagnostic/cursor/scroll suffix. The complete right run
   is right-aligned; overflow clips its low-priority left edge.
 - The protected built-in suffix is never discarded merely because a
   custom provider is long. If the built-in suffix itself cannot fit,
-  each frontend retains today's behavior: the TUI drops the right group
-  wholesale, while the GPU keeps its right edge fixed and clips its left
-  edge. Custom-prefix clipping preserves the complete built-in suffix
-  only when that suffix fits by itself.
+  the TUI retains its legacy wholesale drop. The GPU deliberately
+  changes its legacy narrow-band policy: before stage 3 it pinned the
+  built-in group's left edge and clipped the right tail; stage 3 pins
+  the right edge and clips the left so the readout tail survives.
+  Custom-prefix clipping preserves the complete built-in suffix only
+  when that suffix fits by itself.
 - The left group gets the space before the right group's measured
-  origin and clips at the collision boundary. It never overwrites the
-  right group.
+  origin and clips at the collision boundary, without the legacy GPU's
+  extra 10-pixel gap. It never overwrites the right group. This anchors
+  buffer identity at the leading edge but does not guarantee its
+  survival: an over-wide right group may consume all available left
+  space.
 
 This asymmetric visual ordering is intentional: priority determines
 what survives, not a generic ascending sort that would protect opposite
@@ -743,9 +753,14 @@ same belt as `StatusFacts`.
 - Right placement uses the full shaped width without clamping its
   origin to `TEXT_LEFT`: the run's right edge stays at the right pad,
   while a negative/left-of-surface origin clips low-priority custom
-  prefixes and preserves the built-in tail. The left TextArea clips at
-  the right group's actual origin. Existing geometry bounds still keep
-  all glyphs inside the band.
+  prefixes and preserves the built-in tail. This intentionally changes
+  the legacy built-in-only narrow case, which anchored the readout at
+  `TEXT_LEFT` and clipped its right tail.
+- The left TextArea clips at the right group's actual origin rather
+  than retaining the legacy extra `STATUS_TEXT_PAD` gap. The right
+  group therefore owns collision priority and may fully obscure the
+  left buffer identity in an extremely narrow band. Existing geometry
+  bounds still keep all glyphs inside the band.
 - `ThemeFacts` continues to invalidate both caches. FontFacts already
   re-metrics/re-shapes both status buffers; the new rich runs ride that
   path without a new font transaction.
@@ -845,8 +860,11 @@ TUI, producer, and daemon/wire behavior; protocol pins stay in
 `RenderState`/semantic frame paths, not direct helper-only formatting.
 
 1. **Default preservation:** with no visible provider output, scratch
-   TUI cells and GPU pixels are byte-identical to the pre-stage
-   modeline/status band. The global TUI echo row is unchanged.
+   TUI cells and ordinary non-overlapping GPU modeline/status-band
+   pixels are byte-identical to the pre-stage rendering. The deliberate
+   GPU narrow-band exception pins an over-wide built-in readout's right
+   edge and clips its left edge; a built-in-only headless fixture pins
+   that behavior. The global TUI echo row is unchanged.
 2. **Lua strict contract:** valid registration returns a handle and
    appears in `providers`; bad/unknown side, empty name, non-integer or
    out-of-range priority, non-function `fn`, non-modeline face

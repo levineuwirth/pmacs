@@ -155,8 +155,8 @@ pub struct StatuslineWindowSegments {
 /// Why phase 1 intentionally produced no message.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StatuslineNoMessageReason {
-    /// The frontend/view no longer exists.
-    FrontendUnavailable,
+    /// The target frontend, view, or one of its layout windows no longer exists.
+    ContextUnavailable,
     /// A layout window points at a buffer that has been removed.
     BufferUnavailable,
     /// The semantic frontend's daemon window does not match its declared
@@ -612,13 +612,13 @@ fn capture_target_contexts(
             let view = core
                 .views
                 .get(&frontend_id)
-                .ok_or(StatuslineNoMessageReason::FrontendUnavailable)?;
+                .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
             let mut contexts = Vec::new();
             for window_id in view.layout.iter_ids() {
                 let window = core
                     .windows
                     .get(&window_id)
-                    .ok_or(StatuslineNoMessageReason::FrontendUnavailable)?;
+                    .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
                 if buffers.get(window.buffer_id).is_err() {
                     return Err(StatuslineNoMessageReason::BufferUnavailable);
                 }
@@ -638,11 +638,11 @@ fn capture_target_contexts(
             let view = core
                 .views
                 .get(&frontend_id)
-                .ok_or(StatuslineNoMessageReason::FrontendUnavailable)?;
+                .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
             let window = core
                 .windows
                 .get(&view.active)
-                .ok_or(StatuslineNoMessageReason::FrontendUnavailable)?;
+                .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
             if buffers.get(window.buffer_id).is_err() {
                 return Err(StatuslineNoMessageReason::BufferUnavailable);
             }
@@ -748,6 +748,15 @@ pub fn sanitize_provider_text(text: &str) -> String {
     output
 }
 
+/// Flatten a provider failure into one durable `*errors*` entry while
+/// retaining multi-line traceback content.
+#[must_use]
+pub(crate) fn sanitize_provider_error_text(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,6 +770,48 @@ mod tests {
         let host = LuaHost::with_registry(buffers).expect("Lua host");
         let statusline = statusline_registry(host.lua()).expect("statusline registry");
         (host, core, statusline)
+    }
+
+    #[test]
+    fn provider_output_and_error_log_have_distinct_newline_policies() {
+        let multiline = "boom\nstack\ttrace\r\0";
+        assert_eq!(sanitize_provider_text(multiline), "boom");
+        assert_eq!(
+            sanitize_provider_error_text(multiline),
+            "boom stack trace  "
+        );
+
+        let (host, core, registry) = harness();
+        host.lua()
+            .load(
+                r"
+                pmacs.statusline.register {
+                  name='trace', side='left',
+                  fn=function() error('boom\nstack detail') end,
+                }
+                ",
+            )
+            .exec()
+            .unwrap();
+        let evaluation = evaluate_statusline(
+            host.lua(),
+            &core,
+            &registry,
+            StatuslineEvaluationTarget::Grid {
+                frontend_id: FrontendId::LOCAL,
+            },
+        );
+        assert_eq!(evaluation.new_failures.len(), 1);
+        let errors = host.errors_buffer_text();
+        assert!(
+            errors.contains("boom stack detail") && errors.contains("stack traceback"),
+            "flattened provider traceback must retain every line: {errors:?}"
+        );
+        assert_eq!(
+            errors.lines().count(),
+            1,
+            "one failure run must remain one durable error entry"
+        );
     }
 
     #[test]

@@ -4156,7 +4156,7 @@ impl State {
 
     /// Compose the left group. Minibuffer, isearch, and transient
     /// messages suppress custom left segments; ordinary buffer identity
-    /// stays protected at the leading edge.
+    /// starts at the leading edge but may be fully clipped by the right group.
     fn compose_status_left_runs(&self) -> Vec<(String, Color)> {
         if let Some(minibuffer) = self.minibuffer.as_ref() {
             return vec![(
@@ -10005,6 +10005,64 @@ mod tests {
             min_y >= text_area_bottom(height, state.fm).floor() as u32 && max_y <= height,
             "the recolor stays inside the status band"
         );
+    }
+
+    #[test]
+    fn built_in_only_overwide_readout_clips_left_and_keeps_its_right_tail_pinned() {
+        let (narrow_width, wide_width, height) = (96, 500, 260);
+        let Some(mut narrow) = headless_or_skip(narrow_width, height, "text") else {
+            return;
+        };
+        let Some(mut wide) = headless_or_skip(wide_width, height, "text") else {
+            return;
+        };
+        for state in [&mut narrow, &mut wide] {
+            let buffer_id = BufferId::next();
+            state.current_buffer_id = Some(buffer_id);
+            state.status_facts = Some(status_facts(buffer_id, None));
+            state.own_cursor = Some(OwnCursor { buffer_id, byte: 0 });
+        }
+
+        let narrow_frame = narrow.render_offscreen();
+        let wide_frame = wide.render_offscreen();
+        assert!(
+            narrow.statusline_segments.is_none() && wide.statusline_segments.is_none(),
+            "fixture must exercise the built-in-only legacy surface"
+        );
+        let narrow_status_width = narrow
+            .status_buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max);
+        let wide_status_width = wide
+            .status_buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0_f32, f32::max);
+        assert!(
+            (narrow_status_width - wide_status_width).abs() < 0.01,
+            "surface width must not reshape the no-wrap readout"
+        );
+        assert!(
+            narrow_width as f32 - STATUS_TEXT_PAD - narrow_status_width < 0.0,
+            "fixture must force the built-in readout past the left edge"
+        );
+        assert!(
+            wide_width as f32 - STATUS_TEXT_PAD - wide_status_width > 0.0,
+            "comparison surface must fit the complete built-in readout"
+        );
+
+        let band_top = text_area_bottom(height, narrow.fm).floor() as u32;
+        let pinned_tail_width = 80;
+        for y in band_top..height {
+            for offset in 0..pinned_tail_width {
+                assert_eq!(
+                    px_at(&narrow_frame, narrow_width, narrow_width - 1 - offset, y),
+                    px_at(&wide_frame, wide_width, wide_width - 1 - offset, y),
+                    "built-in readout tail moved at right-edge offset {offset}, y={y}"
+                );
+            }
+        }
     }
 
     #[test]
