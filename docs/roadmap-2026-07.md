@@ -92,12 +92,13 @@ faces, and semantic/GPU transport through protocol v18.
 
 - **Compile-mode landed** in #113: line-oriented PTY/ANSI output,
   error-regex navigation, and `M-x compile`.
-- **Vterm Stage 1 terminal core** is implemented and fully gated on
-  `vterm-core`, awaiting review and **not merged**. It adds the compatibility
-  parser profiles, bounded VT screen/scrollback/reflow state machine, input
-  encoders, internal `TerminalManager`, read-only identity-buffer invariant,
-  process lifecycle/final annotations, and headless real-PTY acceptance. It
-  intentionally adds no interactive Lua command or frontend rendering.
+- **Vterm Stage 1 terminal core** is implemented, review round 1 is addressed,
+  and the branch is fully gated on `vterm-core`; PR #126 awaits review
+  follow-up and is **not merged**. It adds compatibility parser profiles,
+  bounded VT screen/scrollback/reflow state, IND/NEL/RI, input encoders,
+  internal `TerminalManager`, read-only identity buffers, process lifecycle,
+  and headless real-PTY acceptance. It intentionally adds no interactive Lua
+  command or frontend rendering.
 - **Vterm Stage 2 TUI** starts only after Stage 1 merges: terminal-window
   composition, input/resize, per-context scroll/selection/copy, and the Lua
   surface.

@@ -1,16 +1,19 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 3 — 2026-07-21. Status: Stage 1 terminal core implemented and fully
-gated on `vterm-core`, awaiting review; not merged. Stages 2 and 3 are not
-implemented.**
+**Revision 4 — 2026-07-21. Status: Stage 1 review round 1 fixes implemented
+and fully gated on `vterm-core`; awaiting review follow-up, not merged. Stages
+2 and 3 are not implemented.**
 
-Revision 3 records the Stage 1 implementation and downstream consumer reviews.
-The architecture remains unchanged: `C-c` is the terminal editor escape
-(`C-c C-c` sends interrupt); main-screen resize reflows while alternate screen
-clips/pads; exited buffers remain with an Emacs-style process message; protocol
-v19 is additive with complete frames; shared `Style` stays unchanged; and one
-`BufferId` owns one shared process/screen whose most recently active frontend
-controls size.
+Revision 4 closes the first Stage 1 review: full-screen parsing now implements
+IND/NEL/RI and terminal children default to `TERM=xterm-256color`; shutdown
+acceptance probes process liveness portably; resize preserves application tab
+stops; the line-oriented EOF flush is explicit; and remaining VT-fidelity,
+performance, and lifecycle nits are recorded below. The architecture remains
+unchanged: `C-c` is the terminal editor escape (`C-c C-c` sends interrupt);
+main-screen resize reflows while alternate screen clips/pads; exited buffers
+remain with an Emacs-style process message; protocol v19 is additive with
+complete frames; shared `Style` stays unchanged; and one `BufferId` owns one
+shared process/screen whose most recently active frontend controls size.
 
 This framing follows the compile-mode terminal substrate that landed in PR
 #113. `src/process.rs` already owns PTY creation, process groups, bounded
@@ -32,11 +35,12 @@ Arc 5 stage 2 ships as three separately reviewed PRs:
 There is no single mega-PR. Each stage is useful and testable by itself, and a
 later stage starts only after the preceding stage lands on `main`.
 
-## 0. Revision 3 — Stage 1 implementation record
+## 0. Revision 4 — Stage 1 implementation and review record
 
-The first of the three vterm PRs is implemented on `vterm-core`, fully gated,
-and awaiting review. Feature commit `bbc1f33` is published as open, non-draft
-PR #126, <https://github.com/levineuwirth/pmacs/pull/126>, targeting `main`.
+The first of the three vterm PRs is implemented and fully gated on
+`vterm-core`, awaiting review follow-up. Initial feature commit `bbc1f33` and
+review fixes through `bf972a7` are published as open, non-draft PR #126,
+<https://github.com/levineuwirth/pmacs/pull/126>, targeting `main`.
 It is deliberately headless: there is no `pmacs.terminal` Lua module,
 interactive terminal command, TUI paint branch, or GPU/protocol surface yet.
 
@@ -110,26 +114,31 @@ All fourteen Stage 1 criteria are implemented:
 
 ### 0.3 Final gates and bite
 
-The initial gate run found and fixed missing module documentation in the new
-acceptance crate, then restarted from gate 1. After PR #126 opened, its macOS
-Lua 5.4 job exposed Darwin's numeric `strsignal` suffix (`"Terminated: 15"`);
-commit `962944b` normalizes both Darwin and glibc descriptions to the same
-symbolic signal. The complete sequence restarted from gate 1 again:
+The initial delivery gate run fixed missing acceptance-crate documentation;
+PR CI then exposed Darwin's numeric `strsignal` suffix, fixed in `962944b`.
+Review round 1's first Clippy pass found only identical LF/IND match arms,
+consolidated in `bf972a7`; the complete sequence restarted from gate 1:
 
 - `cargo fmt --check`: clean;
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean;
-- default library: 1,658 passed, 3 ignored;
-- CRDT library: 1,834 passed, 3 ignored;
+- default library: 1,660 passed, 3 ignored;
+- CRDT library: 1,836 passed, 3 ignored;
 - Stage 1 acceptance: 8 default + 9 CRDT passed;
 - M4 acceptance: 114 passed, 3 ignored, 1 `basedpyright` filtered;
 - required GPU: 109 passed;
-- workspace: 2,765 passed across 79 suites, 19 ignored, 1 filtered;
+- workspace: 2,767 passed across 79 suites, 19 ignored, 1 filtered;
 - `git diff --check`: clean.
 
 `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
 `bite: OK`: the swapped pre-stage crate root cannot compile the new terminal
 API. This is explicitly the helper's weaker compile-time API bite, not a clean
 behavioral assertion failure.
+
+`scripts/bite HEAD^ src/ansi.rs --lib
+parser_split_points_produce_identical_screen` returned `bite: OK` with a clean
+behavioral assertion failure: the pre-dispatch parser left the cursor at row
+zero/column four instead of applying NEL/RI/IND and landing at row one/column
+zero.
 
 ### 0.4 Downstream review findings (not implemented)
 
@@ -151,6 +160,32 @@ encoding overhead): Stage 3 must either raise and test a measured cap at least
 as large as the legal worst case (review estimate at least 80 MiB), or add a
 shared aggregate payload bound. It must never silently chunk the locked
 complete-frame protocol.
+
+### 0.5 Stage 1 review round 1
+
+The first external review found no ownership, mutation-guard, parser-cap, or
+security regressions. This round resolves its three merge-adjacent findings:
+
+- `ESC D` (IND), `ESC E` (NEL), and `ESC M` (RI) are typed full-screen
+  operations. RI scrolls down only at the top margin; IND/NEL scroll up at the
+  bottom margin, with NEL additionally returning to column zero. The parser's
+  every-byte-split matrix and focused screen-margin test pin the complete path.
+- Terminal children no longer inherit an arbitrary host `TERM`; absent a
+  caller override, their process environment gets `TERM=xterm-256color`.
+- The TERM-ignoring shutdown acceptance uses `kill(pid, 0)` through `nix`
+  instead of Linux-only `/proc`, so macOS now exercises the assertion.
+- Resize retains every surviving application tab stop and installs default
+  stops only in newly added columns.
+
+`spawn_ansi_parser` intentionally calls `AnsiParser::finish()` on channel
+disconnect for both profiles. For existing line-oriented compile/REPL
+consumers, EOF therefore delivers trailing partial text and required synthetic
+style/alternate-screen balancing that older code dropped. This is an
+intentional latent-bug fix and an observable compatibility contract.
+
+The Stage 2 Lua `open` surface must uniquify colliding default buffer names
+(`*terminal:sh*`, `*terminal:sh*<2>`, and so on) before terminal creation
+becomes user-visible.
 
 ## 1. Problem and ownership boundary
 
@@ -774,10 +809,10 @@ Per-stage utilization:
 
 ## 8. Branch and PR plan
 
-Stage 1 is implemented and fully gated on `vterm-core` at `bbc1f33`, published
-as open, non-draft PR #126 (<https://github.com/levineuwirth/pmacs/pull/126>),
-targeting `main` and not merged. Continue the approved plan only after the
-preceding PR lands:
+Stage 1 is implemented and fully gated on `vterm-core`; review fixes through
+`bf972a7` are published in open, non-draft PR #126
+(<https://github.com/levineuwirth/pmacs/pull/126>), targeting `main` and not
+merged. Continue the approved plan only after the preceding PR lands:
 
 1. review PR #126; merge only when the user says;
 2. after stage 1 merges, create `pmacs-vterm-tui`, branch `vterm-tui`, from the
@@ -794,8 +829,9 @@ base-branch deletion/auto-close risk and makes each PR's gate evidence honest.
 
 ### Stage 1 — terminal core
 
-1. Feed every supported CSI/OSC/DEC sequence at every byte split; whole-feed
-   and split-feed screens are identical.
+1. Feed every supported CSI/OSC/DEC sequence, including IND/NEL/RI, at every
+   byte split; whole-feed and split-feed screens are identical. RI and
+   forward-index operations additionally pin exact scrolling-margin behavior.
 2. Split UTF-8, malformed UTF-8, truncated escape, over-cap control string,
    and unknown private sequences recover without panic, unbounded growth, or
    visible escape leakage.
@@ -811,8 +847,9 @@ base-branch deletion/auto-close risk and makes each PR's gate evidence honest.
    glyphs across split feeds.
 7. SGR indexed/truecolor/underline/reverse survives screen operations; ignored
    attributes leave supported fields unchanged.
-8. Main-screen resize reflows only soft wraps and preserves cursor/logical-line
-   identity; alternate-screen resize clips/pads without reflow.
+8. Main-screen resize reflows only soft wraps, preserves cursor/logical-line
+   identity and application tab stops, and adds defaults only in new columns;
+   alternate-screen resize clips/pads without reflow.
 9. Scrollback obeys both row and cell budgets, evicts oldest rows, and keeps
    the visible grid exact.
 10. DA/DSR/CPR query events produce bounded exact response bytes; unsupported
@@ -899,6 +936,21 @@ Not part of these three PRs:
 - kitty keyboard protocol, key release events, media keys, and IME preedit;
 - cursor-shape/blink rendering and numeric-keypad distinction absent from the
   current normalized input/cursor protocol;
+- RIS (`ESC c`), DECALN (`ESC # 8`), and DEC cursor save/restore mode `?1048`;
+- CUU/CUD region clamping when the cursor starts inside scroll margins while
+  origin mode is disabled;
+- combining a character into the preceding cell across intervening SGR or
+  cursor-control events;
+- exact xterm `?1047` clear-on-exit and scroll-margin preservation across
+  alternate-screen switches;
+- legacy X10 mouse byte encoding when a child enables mouse tracking without
+  SGR mode; Stage 2 sends no report for that unsupported combination;
+- nonstandard `CSI 3 K` ignore semantics (the current core clears the line);
+- the ASCII fast path that avoids grapheme-candidate allocation and
+  segmentation for every printable character after another ASCII character;
+- cleanup of the defensive impossible-state path where a terminal spawn
+  returns a process without a running PID, and borrow-tolerant `EditorState`
+  drop; normal spawn/rollback/prune/shutdown paths remain covered;
 - shell integration, prompt marks, command semantic zones, and cwd reporting;
 - ordinary document search over terminal history;
 - terminal session persistence/reconnect across editor restart;
