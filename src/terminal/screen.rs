@@ -234,12 +234,12 @@ impl TerminalScreen {
                 None
             }
             AnsiEvent::LineFeed | AnsiEvent::Index => {
-                self.line_feed(false);
+                self.line_feed();
                 None
             }
             AnsiEvent::NextLine => {
                 self.cursor.col = 0;
-                self.line_feed(false);
+                self.line_feed();
                 None
             }
             AnsiEvent::ReverseIndex => {
@@ -455,7 +455,7 @@ impl TerminalScreen {
         if needs_newline {
             self.cursor.pending_wrap = false;
             self.cursor.col = 0;
-            self.line_feed(false);
+            self.line_feed();
         }
         self.write_text(annotation);
         self.cursor.pending_wrap = false;
@@ -561,6 +561,9 @@ impl TerminalScreen {
     fn write_text(&mut self, text: &str) {
         for ch in text.chars() {
             let ch = self.map_character(ch);
+            if ch.is_control() {
+                continue;
+            }
             if self.try_extend_previous_grapheme(ch) {
                 continue;
             }
@@ -624,9 +627,6 @@ impl TerminalScreen {
         }
         if width == 2 && lead + 1 >= cols {
             self.active_mut().rows[row].cells[lead] = blank(self.style);
-            if old_width == 2 && lead + 1 < cols {
-                self.active_mut().rows[row].cells[lead + 1] = blank(self.style);
-            }
             self.cursor.row = row;
             self.cursor.col = cols - 1;
             self.cursor.pending_wrap = true;
@@ -751,13 +751,11 @@ impl TerminalScreen {
         self.changed();
     }
 
-    fn line_feed(&mut self, soft: bool) {
+    fn line_feed(&mut self) {
         self.cursor.pending_wrap = false;
         let row = self.cursor.row;
-        if !soft {
-            self.active_mut().rows[row].soft_wrapped = false;
-            self.break_chain_after(row);
-        }
+        self.active_mut().rows[row].soft_wrapped = false;
+        self.break_chain_after(row);
         if row == self.scroll_bottom {
             self.scroll_up_internal(1, None);
         } else if row + 1 < self.size.rows as usize {
@@ -1330,7 +1328,7 @@ impl TerminalScreen {
         }
         while rows.len() < size.rows as usize {
             let id = self.next_line_id;
-            self.next_line_id += 1;
+            self.next_line_id = self.next_line_id.saturating_add(1);
             rows.push(TerminalRow::new(new_cols, id, self.style));
         }
         let split = rows.len().saturating_sub(size.rows as usize);
@@ -1396,7 +1394,7 @@ impl Grid {
                 *next_id,
                 Style::default(),
             ));
-            *next_id += 1;
+            *next_id = next_id.saturating_add(1);
         }
         Self {
             rows,
@@ -1614,6 +1612,14 @@ mod tests {
         s.apply_event(AnsiEvent::Text("x".into()));
         assert!(matches!(s.snapshot().cells[0].glyph, Glyph::Char(' ')));
         assert!(matches!(s.snapshot().cells[1].glyph, Glyph::Char('x')));
+    }
+
+    #[test]
+    fn control_characters_never_enter_cells() {
+        let mut s = screen(2, 4);
+        let before = s.snapshot();
+        s.apply_event(AnsiEvent::Text("\u{9b}\n\0".into()));
+        assert_eq!(s.snapshot(), before);
     }
 
     #[test]

@@ -473,7 +473,7 @@ impl TerminalManager {
     }
 
     /// Tear down sessions whose identity buffers were removed by any path.
-    pub fn prune(&mut self, core: &EditorCore, supervisor: &mut ProcessSupervisor) {
+    pub fn prune(&mut self, core: &mut EditorCore, supervisor: &mut ProcessSupervisor) {
         let removed: Vec<BufferId> = {
             let registry = core.registry.borrow();
             self.sessions
@@ -483,6 +483,7 @@ impl TerminalManager {
                 .collect()
         };
         for buffer_id in removed {
+            core.set_round_trip_input(buffer_id, false);
             let Some(session) = self.sessions.remove(&buffer_id) else {
                 continue;
             };

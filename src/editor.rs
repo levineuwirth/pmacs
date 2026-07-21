@@ -529,8 +529,8 @@ impl EditorState {
             supervisor.tick();
             let mut manager = self.terminal_manager.borrow_mut();
             manager.tick(&mut supervisor);
-            let core = self.core.borrow();
-            manager.prune(&core, &mut supervisor);
+            let mut core = self.core.borrow_mut();
+            manager.prune(&mut core, &mut supervisor);
         }
         self.lua_host
             .run_hook("process.after-tick", mlua::MultiValue::new());

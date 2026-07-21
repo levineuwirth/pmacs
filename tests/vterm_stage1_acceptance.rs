@@ -2,11 +2,13 @@
 
 use std::time::{Duration, Instant};
 
+use pmacs::ansi::AnsiEvent;
 use pmacs::buffer::{Buffer, BufferError, BufferId, EditOp};
-use pmacs::cell::Glyph;
+use pmacs::cell::{CellSize, Glyph};
 use pmacs::editor::EditorState;
 use pmacs::process::ProcessState;
 use pmacs::rope::Range;
+use pmacs::terminal::screen::TerminalScreen;
 use pmacs::terminal::{TerminalProcessState, TerminalSpec};
 
 fn rope_bytes(buffer: &Buffer) -> Vec<u8> {
@@ -46,6 +48,14 @@ fn tick_until(
         std::thread::sleep(Duration::from_millis(5));
     }
     panic!("terminal condition did not settle before {timeout:?}");
+}
+
+#[test]
+fn terminal_cells_reject_child_control_characters() {
+    let mut screen = TerminalScreen::new(CellSize::new(2, 4), 0).expect("valid screen");
+    let before = screen.snapshot();
+    screen.apply_event(AnsiEvent::Text("\u{9b}\n\0".into()));
+    assert_eq!(screen.snapshot(), before);
 }
 
 #[test]

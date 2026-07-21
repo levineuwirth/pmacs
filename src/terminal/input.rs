@@ -122,7 +122,7 @@ pub fn encode_mouse(
     }
     let (mut code, release) = match kind {
         MouseKind::Down(button) => (button_code(button), false),
-        MouseKind::Up(_) => (3, true),
+        MouseKind::Up(button) => (button_code(button), true),
         MouseKind::Drag(button) => (button_code(button) + 32, false),
         MouseKind::Move => (35, false),
         MouseKind::ScrollUp => (64, false),
@@ -317,12 +317,12 @@ mod tests {
         );
         assert_eq!(
             encode_mouse(
-                MouseKind::Up(MouseButton::Left),
+                MouseKind::Up(MouseButton::Right),
                 CellCoord::new(4, 9),
                 Modifiers::NONE,
                 m
             ),
-            Some(b"\x1b[<3;10;5m".to_vec())
+            Some(b"\x1b[<2;10;5m".to_vec())
         );
         assert_eq!(
             encode_mouse(
