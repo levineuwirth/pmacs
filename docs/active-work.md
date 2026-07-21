@@ -56,26 +56,23 @@ If it does not, stop and repair the remote/fetch configuration.
 
 - Portable branch: `githubsucks/vterm-core`
 - Implementation commits: `bbc1f33` (Stage 1), `962944b` (Darwin signal),
-  and review fixes `f0a235f`, `28f2e6c`, `bf972a7`; current branch head:
-  `5d50558`.
+  first-review fixes `f0a235f`, `28f2e6c`, `bf972a7`, and second-review
+  hardening `9797ada`; current branch head: `fc4e0ce`.
 - Pull request: #126,
   <https://github.com/levineuwirth/pmacs/pull/126> — open, non-draft, targeting
   canonical `main`; not merged.
-- State: Arc 5 Stage 2's first of three PRs is implemented, review round 1 is
-  addressed, and the branch is fully gated against protocol-v18 `main`. It is
-  the headless terminal core only; the Stage 2 TUI/Lua surface and Stage 3
-  protocol/GPU renderer are not implemented and must start only after their
+- State: Arc 5 Stage 2's first of three PRs is implemented, two review rounds
+  are addressed, and the branch is fully gated against protocol-v18 `main`.
+  It is the headless terminal core only; the Stage 2 TUI/Lua surface and Stage
+  3 protocol/GPU renderer are not implemented and must start only after their
   preceding PR lands.
-- Framing: `docs/vterm-framing.md` Revision 4 maps Stage 1 Acceptance 1–14,
-  records review round 1, and preserves the downstream TUI/GPU contracts.
-- Final from-start sequence after review round 1: Clippy clean; 1,660 default +
-  1,836 CRDT library tests (3 ignored each); 8 default + 9 CRDT vterm
+- Framing: `docs/vterm-framing.md` Revision 5 maps Stage 1 Acceptance 1–14,
+  records both review rounds, and preserves the downstream TUI/GPU contracts.
+- Final from-start sequence after review round 2: Clippy clean; 1,661 default +
+  1,837 CRDT library tests (3 ignored each); 9 default + 10 CRDT vterm
   acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
-  workspace 2,767 passed across 79 suites (19 ignored, 1 filtered); diff check
-  clean. The first review Clippy pass found only identical LF/IND match arms;
-  after consolidation, the complete sequence restarted from gate 1.
-  Updated PR CI is green across Linux/macOS, Lua 5.4/LuaJIT, GPU, format,
-  lint, and acceptance jobs.
+  workspace 2,769 passed across 79 suites (19 ignored, 1 filtered); diff check
+  clean. Updated PR CI for `fc4e0ce` is pending.
 - `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
   `bite: OK` because the old crate root could not compile the new terminal API;
   this is explicitly weaker compile-time API evidence, not a clean behavioral
@@ -83,6 +80,9 @@ If it does not, stop and repair the remote/fetch configuration.
 - `scripts/bite HEAD^ src/ansi.rs --lib
   parser_split_points_produce_identical_screen` returned `bite: OK` with a
   clean behavioral cursor-position failure against the pre-dispatch parser.
+- `scripts/bite HEAD^ src/terminal/screen.rs --test vterm_stage1_acceptance
+  terminal_cells_reject_child_control_characters` returned `bite: OK` with a
+  clean behavioral control-cell failure against the pre-hardening screen.
 
 Recovery worktree, only if no existing worktree owns the branch:
 
