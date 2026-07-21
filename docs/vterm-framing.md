@@ -35,9 +35,10 @@ later stage starts only after the preceding stage lands on `main`.
 ## 0. Revision 3 — Stage 1 implementation record
 
 The first of the three vterm PRs is implemented on `vterm-core`, fully gated,
-and awaiting review. It is deliberately headless: there is no `pmacs.terminal`
-Lua module, interactive terminal command, TUI paint branch, or GPU/protocol
-surface yet.
+and awaiting review. Feature commit `bbc1f33` is published as open, non-draft
+PR #126, <https://github.com/levineuwirth/pmacs/pull/126>, targeting `main`.
+It is deliberately headless: there is no `pmacs.terminal` Lua module,
+interactive terminal command, TUI paint branch, or GPU/protocol surface yet.
 
 ### 0.1 Public seam and ownership
 
@@ -771,10 +772,12 @@ Per-stage utilization:
 
 ## 8. Branch and PR plan
 
-Stage 1 is now implemented and fully gated on `vterm-core`, awaiting review and
-not merged. Continue the approved plan only after the preceding PR lands:
+Stage 1 is implemented and fully gated on `vterm-core` at `bbc1f33`, published
+as open, non-draft PR #126 (<https://github.com/levineuwirth/pmacs/pull/126>),
+targeting `main` and not merged. Continue the approved plan only after the
+preceding PR lands:
 
-1. review `vterm-core`; merge only when the user says;
+1. review PR #126; merge only when the user says;
 2. after stage 1 merges, create `pmacs-vterm-tui`, branch `vterm-tui`, from the
    new `main`; implement/gate/open a second PR;
 3. after stage 2 merges, create `pmacs-vterm-gpu`, branch `vterm-gpu`, from the

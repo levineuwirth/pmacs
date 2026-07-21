@@ -11,10 +11,8 @@ next machine reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-21)
 
-- Canonical `main` @ `bb17ec9` (#123 merged atop #124), protocol
-  **v17** (`SUPPORTED=[6..17]`). The rebased `statusline-segments`
-  branch implements protocol v18, but v18 is **not on main** until
-  review and merge.
+- Canonical `main` @ `7bc0c61` (#125 merged), protocol
+  **v18** (`SUPPORTED=[6..18]`).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -100,8 +98,7 @@ next machine reads it the way you just did.
   `pmacs.editor.take_typed_edit()` (buffer-revision postcondition,
   Q#AP9). Substrate: `buf:path()`, `pmacs.lsp.buffer_language(buf)`,
   `PMACS_FAKE_LSP_CHANGE_SINK`, `TestDaemon::spawn_with_config`.
-- **Themes (Arc 4) stages 1 and 2 LANDED; stage 3 IMPLEMENTED ON ITS
-  FEATURE BRANCH, AWAITING REVIEW.**
+- **Themes (Arc 4) stages 1–3 LANDED; Arc 4 COMPLETE ON `main`.**
   - Stage 1 (#120, `docs/theme-faces-framing.md` rev 9): named UI faces
     as reserved `ui`/`ui.*` theme entries; transactional split
     syntax/face epochs; protocol-v16 `ThemeFacts`; snapshot/baseline
@@ -110,7 +107,7 @@ next machine reads it the way you just did.
     `pmacs.gpu.set_font` and authoritative protocol-v17 `FontFacts`;
     frontend-local family resolution, live font reload/reflow, and
     visual-run caret geometry.
-  - Stage 3 (`statusline-segments`,
+  - Stage 3 (#125, `statusline-segments`,
     `docs/statusline-segments-framing.md` rev 3): composable strict
     `pmacs.statusline` providers; borrow-released per-window evaluation
     with failure latches; legacy-preserving TUI composition; a pure
@@ -121,10 +118,13 @@ next machine reads it the way you just did.
     Clippy clean; 1,619 default + 1,793 CRDT library tests; 7 default +
     8 CRDT feature acceptance; 114 M4; 109 required GPU; one-invocation
     workspace sweep 2,718 passed across 78 suites (19 ignored,
-    `basedpyright` filtered); `git diff --check` clean. This branch is
-    awaiting review and **must not be described as merged**.
+    `basedpyright` filtered); `git diff --check` clean. Stage 3 landed
+    as #125 and completed Arc 4 on `main`.
 - **Vterm Stage 1 terminal core IMPLEMENTED ON `vterm-core`, FULLY GATED,
   AWAITING REVIEW, NOT MERGED** (`docs/vterm-framing.md` rev 3).
+  - Feature commit: `bbc1f33`; pull request: #126,
+    <https://github.com/levineuwirth/pmacs/pull/126> (open, non-draft,
+    targeting `main`).
   - `AnsiParserProfile::{LineOriented, FullScreen}` preserves compile/REPL
     behavior while terminal PTYs emit the full cursor/mode/device operation
     set. `src/terminal/{screen,input,session}.rs` owns the state machine,
