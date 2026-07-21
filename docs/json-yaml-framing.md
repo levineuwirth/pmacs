@@ -1,12 +1,11 @@
 # JSON + YAML grammars — framing (side quest, highlight family)
 
-**Revision 3 — 2026-07-20. Status: PR #123 open; review-fix
-checkpoint preserved on branch `json-yaml-handoff-2026-07-20`.**
-The public PR branch still pointed to the original implementation
-`4be2a65` when this checkpoint was created. JSON provider resolution
-and its real pmacs smoke are complete; the YAML 1.24.0 standalone
-protocol smoke and real YAML-through-pmacs acceptance are complete;
-rebase onto current main and full gates remain.
+**Revision 4 — 2026-07-21. Status: PR #123 open and awaiting review;
+the public and checkpoint branches are at fully gated `5c202c5`, rebased
+onto `main` `f8096ff`.**
+The JSON provider and Red Hat YAML 1.24.0 have each passed their
+PATH-gated pmacs acceptance, in addition to the deterministic fake-server
+config-push proof and the YAML standalone protocol smoke.
 
 **Intent.** Add `tree-sitter-json` and `tree-sitter-yaml` grammars (plus
 their language servers) to the bundle. Two config formats that pmacs
@@ -125,10 +124,10 @@ also installed in an isolated prefix and live-smoked over stdio: its
 initial configuration pull was exactly `yaml`, `http`, `[yaml]`,
 `editor`, `files`; opening the document caused a second scoped
 `[yaml]` pull; invalid YAML produced a parser diagnostic; shutdown was
-clean. The remaining gap is the same provider through pmacs.
-Config-push delivery is also proven deterministically through the fake
-server's config sink. Servers activate only if installed; the grammar
-is the always-on value.
+clean. Both providers have also passed their PATH-gated pmacs acceptance.
+Config-push delivery is proven deterministically through the fake server's
+config sink. Servers activate only if installed; the grammar is the
+always-on value.
 
 ### Q#JY3 — Filetype fallback + alias entries
 

@@ -6292,10 +6292,8 @@ fn m4_gap_grammars_align_with_lsp_configs() {
 
 /// JSON/YAML LSP configs pin the server commands and the settings shape
 /// each consumes (framing Q#JY2): JSON receives a pushed full object;
-/// YAML pulls five named sections. The pinned JSON provider has a separate
-/// PATH-gated live smoke below. YAML 1.24.0's five-section pull was
-/// observed over a standalone protocol smoke; its PATH-gated pmacs
-/// integration test remains a transfer task. The point is to pin the
+/// YAML pulls five named sections. The pinned JSON and YAML providers each
+/// have a separate PATH-gated live smoke below. The point is to pin the
 /// contract, not merely assert that some settings table exists.
 #[test]
 fn m4_json_yaml_lsp_configs_pin_command_and_sections() {

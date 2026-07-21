@@ -329,11 +329,12 @@ byte-accurate multibyte cursor placement in `move_active_cursor_to`
 OPEN** (grammar-gap style, `tree-sitter-json`/`-yaml`; LSP configs
 `vscode-json-language-server` with provider pin
 `@t1ckbase/vscode-langservers-extracted@2.0.2`, plus
-`yaml-language-server`). Review fixes are preserved on
-`json-yaml-handoff-2026-07-20`; the real YAML-through-pmacs smoke,
-rebase, and full gates remain. Once merged, YAML `---` and TOML `+++`
-markdown frontmatter highlight via the #122 engine and the Jupyter
-reader → editable → kernel arc has both grammar prerequisites.
+`yaml-language-server`). The public and checkpoint branches are both at
+fully gated `5c202c5`, rebased onto `f8096ff`; the JSON and YAML
+PATH-gated pmacs smokes both passed, and the PR awaits user review.
+Once merged, YAML `---` and TOML `+++` markdown frontmatter highlight via
+the #122 engine and the Jupyter reader → editable → kernel arc has both
+grammar prerequisites.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
 Themes (full list in theme-faces framing rev 9 "Deferred (named)"):
