@@ -1,10 +1,13 @@
 # Statusline segments - framing (Arc 4 stage 3)
 
-**Revision 1 - 2026-07-18. Transfer status updated 2026-07-20:
-framing preserved on branch `statusline-segments`, based on `main` at
-`f8096ff` (protocol v17); awaiting review. No implementation or PR.**
+**Revision 2 - 2026-07-21. Framing preserved on branch
+`statusline-segments`; re-scouted against `main` `bb17ec9` (protocol v17)
+after JSON/YAML #123 merged. No relevant substrate drift; awaiting review.
+No implementation or PR.**
 
-Revision 1: initial framing after the post-#124 architecture scout.
+Revision 2: closes review findings on invalidation, terminal-control-safe
+grapheme painting, separator ownership, detached-frontend latches, and the
+unknown-LSP label. Revision 1 was the initial post-#124 architecture scout.
 
 Arc 4 names three deliverables: named UI faces, a live GPU font
 preference, and a Lua statusline-segment API
@@ -15,7 +18,7 @@ names to semantic frontends at protocol v18, and uses the existing LSP
 status tracker as the first built-in provider. Completing this stage
 completes Arc 4.
 
-## Ground truth (as of `main` at `f8096ff`, protocol v17)
+## Ground truth (as of `main` at `bb17ec9`, protocol v17)
 
 ### There are two different bottom surfaces in the TUI
 
@@ -142,9 +145,10 @@ completes Arc 4.
 ### A real first consumer is already waiting
 
 - `LspStatusTracker` exists specifically as the stable higher-level
-  state a modeline can read (`src/lsp_status.rs:30-85`). Its labels are
-  the bounded set `init`, `ready`, `idx`, `degraded`, `crashed`, and
-  `stopped`.
+  state a modeline can read (`src/lsp_status.rs:30-85`). Its tracker
+  labels are the bounded set `init`, `ready`, `idx`, `degraded`,
+  `crashed`, and `stopped`; `pmacs.lsp.modeline_label` additionally
+  returns `"?"` for a forgotten/unknown server id (`src/lsp.rs:1190`).
 - Lua already exposes `pmacs.lsp.modeline_label(server)` and a richer
   `status_summary` intended for one call per render frame
   (`src/lua_bindings/mod.rs:8700-8805`).
@@ -339,8 +343,15 @@ Evaluation is a three-phase, borrow-released transaction:
    results only if the registry epoch is unchanged and every
    `(frontend, window)` still exists on the same buffer with the same
    active flag. A callback that changes layout, switches/kills a buffer,
-   or registers/unregisters a provider makes this frame fail closed;
-   the next frame recomputes against the new truth.
+   or registers/unregisters/disables a provider makes this evaluation
+   **invalid**. Invalid is not a silent dropped fan-out: for the
+   declared matching v18 buffer, the producer emits an authoritative
+   replacement `StatuslineSegments { left: [], right: [] }`, clears the
+   corresponding baseline only after queuing that replacement, and
+   discards every evaluated result. If the viewport itself changed, it
+   first clears the prior matching buffer's mirror this way, then the
+   next frame evaluates the new truth. Thus no callback mutation can
+   leave a prior non-empty GPU payload resident indefinitely.
 
 The TUI calls the evaluator at the start of `paint_frame`, before the
 long-lived mutable core borrow. `SemanticRenderState::render_frame`
@@ -364,9 +375,13 @@ Provider failures are independent:
   so a later failure there is reportable again. Unregister and stale
   context cleanup discard the corresponding latches; disabling a
   provider clears all of its latches so re-enable begins a new run.
+  Frontend detach also discards every latch keyed by that `FrontendId`
+  (with a live-context sweep as defense in depth), so a detached session
+  cannot retain failure suppression into a later reconnect.
 - Evaluation snapshots definitions before calls; a provider may
   unregister itself without a `RefCell` panic. The epoch guard drops the
-  old fan-out's result.
+  old fan-out's result and takes the authoritative-empty invalidation
+  path above.
 - Providers are documented as pure, fast render functions. The binding
   cannot prevent a callback from invoking editor mutators, but the
   context/epoch guard prevents wrong-window publication; recurring
@@ -390,6 +405,11 @@ Current built-ins remain protected:
 The compositor inserts exactly one ASCII space between adjacent custom
 segments and at a custom/built-in boundary. Provider text does not need
 to carry padding. No separator is emitted for `nil`/empty results.
+Every compositor-inserted separator is a base `ui.modeline` run: it
+never inherits an adjacent custom segment face. Legacy built-in internal
+spacing retains its current base modeline styling too. This rule is
+identical in TUI cells and GPU rich text, so a face colors only the
+provider's visible text, not the gaps around it.
 Each legacy built-in group stays atomic and byte-for-byte unchanged
 inside: in particular, stage 3 does not normalize the GPU's existing
 two-space diagnostic/readout separators to the TUI's one-space
@@ -508,7 +528,11 @@ If a face-table change and segment payload occur in one frame,
 `ThemeFacts` is ordered before `StatuslineSegments`. A theme-only
 recolor sends `ThemeFacts` but not unchanged segment text; the GPU face
 arm invalidates both status shaping caches, so existing runs reshape
-under the new color.
+under the new color. The invalid-evaluation authoritative-empty path
+uses this same ordering: a provider removal may remove its dynamic face
+from `ThemeFacts`, but its prior non-empty segment payload is replaced
+by empty vectors in that frame rather than being retained beside the
+reduced face inventory.
 
 ### Q#SL7 - Wire: `StatuslineSegments`, protocol v18, appended final
 
@@ -602,6 +626,14 @@ case.
 It receives logical runs `(text, effective Style)` and uses one shared
 single-row painter:
 
+- Before grapheme segmentation, **every** logical run passes through a
+  shared terminal-control sanitizer: provider text, buffer names, mode
+  markers, diagnostics/readouts, and compositor separators alike have
+  all control scalars (including CR, LF, and ESC) replaced with spaces.
+  Provider-return sanitation remains an earlier validation boundary;
+  this final run-level pass is defense in depth for core-owned text.
+  Consequently `Glyph::Cluster`, whose frontend emitter writes bytes
+  verbatim, can never carry a terminal control sequence.
 - Runs are split with `UnicodeSegmentation::graphemes`; width and
   clipping use `UnicodeWidthStr` on each complete grapheme. This stage
   adds `unicode-segmentation` as a direct dependency rather than
@@ -617,6 +649,8 @@ single-row painter:
   Built-in runs keep that style. A set segment face replaces only the
   run's visible foreground per Q#SL6, writing logical `bg` rather than
   `fg` when the base row is reversed.
+- Every separator inserted by Q#SL4 is likewise painted with this base
+  style, regardless of the faces on either side.
 - Right suffix clipping keeps the display-column suffix, preserving the
   built-in tail; left clipping keeps the prefix. No run can write
   outside its window rect or into another split's modeline.
@@ -637,8 +671,11 @@ same belt as `StatusFacts`.
   `fg`, with defensive Default handling also selecting the base. It
   never re-applies the base face's pre-reverse logical foreground.
 - Ordinary left composition becomes rich text: buffer-name/modified
-  base run followed by custom left runs. Modal/message states produce
-  their existing single content run and no custom left runs.
+  base run followed by custom left runs; each Q#SL4 separator is its
+  own base-color rich run. Modal/message states produce their existing
+  single content run and no custom left runs. Right-side custom/built-in
+  separators are likewise base-color runs, never extensions of an
+  adjacent provider face.
 - The two shaping caches become
   `Option<Vec<(text, explicit_color)>>`, seeded/invalidation-set to
   `None`, and retain the complete ordered rich-run vectors after shape.
@@ -786,10 +823,17 @@ TUI, producer, and daemon/wire behavior; protocol pins stay in
    once again. In two splits, success in B does not re-arm a provider
    that remains failing in A; closing A or unregistering the provider
    releases that context's latch, and disable/re-enable starts a new
-   failure run.
+   failure run. Detaching a frontend releases every latch carrying its
+   `FrontendId`; reconnecting and failing again reports once rather than
+   inheriting suppression from the detached session.
 6. **Re-entrant registry mutation:** a provider unregistering itself
-   during evaluation causes no borrow panic, discards the old fan-out by
-   epoch guard, and is absent on the next frame.
+   during evaluation causes no borrow panic and discards the old
+   fan-out by epoch guard. A semantic producer test first establishes a
+   non-empty payload (and its custom face) for the matching buffer, then
+   triggers self-unregister/disable: the invalid evaluation emits one
+   authoritative empty replacement, the reduced `ThemeFacts` precedes
+   that replacement, the resulting GPU frame has no prior text, and the
+   provider is absent on the next frame.
 7. **Context-change guard:** callbacks that switch the window buffer,
    close a split, or kill the source buffer cannot publish text under
    the old context; the next frame evaluates the surviving truth.
@@ -800,7 +844,10 @@ TUI, producer, and daemon/wire behavior; protocol pins stay in
 9. **Ordering and separators:** mixed left/right providers with tied and
    distinct priorities produce the exact Q#SL4 order, stable id tie
    break, and one-space custom boundaries with nil providers absent;
-   the built-in groups retain their legacy internal spacing.
+   the built-in groups retain their legacy internal spacing. With two
+   visibly different custom faces, every custom/custom and
+   custom/built-in separator is pinned to the base `ui.modeline` style
+   in TUI cells and GPU rich runs/pixels.
 10. **TUI placement:** buffer identity remains first on the left;
     custom right segments precede diagnostics/L:C/scroll; the global
     echo row still shows `pmacs.editor.set_status` independently.
@@ -809,12 +856,15 @@ TUI, producer, and daemon/wire behavior; protocol pins stay in
     cluster/continuation cells and no overlap; the combining sequence is
     emitted rather than silently dropped. A narrow split clips the
     low-priority edges while retaining the protected built-in tail and
-    never writes outside its rect.
+    never writes outside its rect. A buffer name containing CR, LF, and
+    ESC is sanitized before segmentation: its resulting `Glyph::Char` /
+    `Glyph::Cluster` cells and captured terminal bytes contain no raw
+    control scalar or escape sequence.
 12. **LSP built-in:** an unattached buffer adds nothing. Attached
     buffers show `LSP:init/ready/idx/degraded/crashed/stopped` as the
-    tracker changes without a buffer edit; a passive split uses its own
-    attachment. Disabling/reprioritizing the discovered provider handle
-    works.
+    tracker changes without a buffer edit, and `LSP:?` for a forgotten
+    server id; a passive split uses its own attachment.
+    Disabling/reprioritizing the discovered provider handle works.
 13. **Version and placement pins:** protocol is 18; ladder accepts
     `6..=18` and rejects 19; empty/populated
     `StatuslineSegments` round-trip; a byte-level `FontFacts` encoding
