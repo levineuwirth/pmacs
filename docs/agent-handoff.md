@@ -11,10 +11,10 @@ next machine reads it the way you just did.
 
 ## 1. Where the project stands (2026-07-21)
 
-- Canonical `main` @ `f8096ff` (#124, Themes stage 2 merged), protocol
-  **v17** (`SUPPORTED=[6..17]`). The `statusline-segments` branch is
-  based there and implements protocol v18, but v18 is **not on main**
-  until review and merge.
+- Canonical `main` @ `bb17ec9` (#123 merged atop #124), protocol
+  **v17** (`SUPPORTED=[6..17]`). The rebased `statusline-segments`
+  branch implements protocol v18, but v18 is **not on main** until
+  review and merge.
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -118,9 +118,9 @@ next machine reads it the way you just did.
     `StatuslineSegments`; authoritative-empty/snapshot symmetry; and
     atomic GPU validation, face resolution, shaping, clipping, and
     cache invalidation. Acceptance 1-27 is implemented. Final gates:
-    Clippy clean; 1,610 default + 1,784 CRDT library tests; 7 default +
-    8 CRDT feature acceptance; 110 M4; 108 required GPU; one-invocation
-    workspace sweep 2,704 passed across 78 suites (19 ignored,
+    Clippy clean; 1,617 default + 1,791 CRDT library tests; 7 default +
+    8 CRDT feature acceptance; 114 M4; 108 required GPU; one-invocation
+    workspace sweep 2,715 passed across 78 suites (19 ignored,
     `basedpyright` filtered); `git diff --check` clean. This branch is
     awaiting review and **must not be described as merged**.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:

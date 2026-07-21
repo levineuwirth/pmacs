@@ -1,8 +1,8 @@
 # Statusline segments - framing (Arc 4 stage 3)
 
 **Revision 3 - 2026-07-21. Implemented on branch
-`statusline-segments` against the post-#124 protocol-v17 base. The
-implementation advances the wire to v18, satisfies Acceptance 1-27,
+`statusline-segments` against current `main` `bb17ec9` (#123 atop #124,
+protocol v17). It advances the wire to v18, satisfies Acceptance 1-27,
 and is fully gated; awaiting review, not merged.**
 
 Revision 3: closes review findings on authoritative-empty baseline retention
@@ -46,10 +46,10 @@ framed ownership boundary:
   `init`/`ready`/`degraded`/`crashed`/`stopped`/unknown labels.
 
 The final gate run was sequential and clean: `cargo fmt --check`;
-workspace/all-target Clippy with `-D warnings`; 1,610 default and 1,784
-CRDT library tests; 7 default and 8 CRDT stage-3 acceptance tests; 110
+workspace/all-target Clippy with `-D warnings`; 1,617 default and 1,791
+CRDT library tests; 7 default and 8 CRDT stage-3 acceptance tests; 114
 M4 acceptance tests (3 ignored, `basedpyright` filtered); 108 required
-GPU tests; and the one-invocation workspace sweep (2,704 passed across
+GPU tests; and the one-invocation workspace sweep (2,715 passed across
 78 suites, 19 ignored, `basedpyright` filtered). `git diff --check` was
 clean. No flaky rerun was needed.
 
