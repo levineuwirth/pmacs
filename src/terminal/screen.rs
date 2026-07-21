@@ -97,6 +97,25 @@ pub struct ScreenSnapshot {
     pub generation: u64,
 }
 
+/// Owned row projection published atomically to terminal views.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenProjection {
+    /// Terminal grid dimensions.
+    pub size: CellSize,
+    /// Whether the projected visible rows belong to the alternate screen.
+    pub alternate_active: bool,
+    /// Retained main-screen history, empty while the alternate screen is active.
+    pub history: Vec<TerminalRow>,
+    /// Active visible rows, including logical-line and soft-wrap metadata.
+    pub visible_rows: Vec<TerminalRow>,
+    /// Published cursor position when visible.
+    pub cursor: Option<CellCoord>,
+    /// Published terminal title.
+    pub title: Option<String>,
+    /// Screen generation represented by this projection.
+    pub generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Cursor {
     row: usize,
@@ -138,7 +157,7 @@ pub struct TerminalScreen {
     tab_stops: BTreeSet<usize>,
     title: Option<String>,
     generation: u64,
-    published: ScreenSnapshot,
+    published: ScreenProjection,
     sync_started: Option<Instant>,
     next_line_id: u64,
     scrollback_rows: usize,
@@ -159,9 +178,11 @@ impl TerminalScreen {
         let mut next_line_id = 1;
         let main = Grid::new(size, &mut next_line_id);
         let alt = Grid::new(size, &mut next_line_id);
-        let published = ScreenSnapshot {
+        let published = ScreenProjection {
             size,
-            cells: flatten(&main.rows),
+            alternate_active: false,
+            history: Vec::new(),
+            visible_rows: main.rows.clone(),
             cursor: Some(CellCoord::new(0, 0)),
             title: None,
             generation: 0,
@@ -502,14 +523,32 @@ impl TerminalScreen {
 
     pub fn snapshot(&self) -> ScreenSnapshot {
         if self.modes.synchronized_output {
-            self.published.clone()
+            snapshot_from_projection(&self.published)
         } else {
             self.current_snapshot()
+        }
+    }
+    /// Return one owned, publication-consistent row projection.
+    #[must_use]
+    pub fn projection(&self) -> ScreenProjection {
+        if self.modes.synchronized_output {
+            self.published.clone()
+        } else {
+            self.current_projection()
         }
     }
 
     pub fn modes(&self) -> TerminalModes {
         self.modes
+    }
+    /// Return whether the published active screen is alternate.
+    #[must_use]
+    pub fn alternate_active(&self) -> bool {
+        if self.modes.synchronized_output {
+            self.published.alternate_active
+        } else {
+            self.alt_active
+        }
     }
     pub fn bell_count(&self) -> u64 {
         self.bell_count
@@ -1380,8 +1419,26 @@ impl TerminalScreen {
             generation: self.generation,
         }
     }
+    fn current_projection(&self) -> ScreenProjection {
+        ScreenProjection {
+            size: self.size,
+            alternate_active: self.alt_active,
+            history: if self.alt_active {
+                Vec::new()
+            } else {
+                self.main.history.iter().cloned().collect()
+            },
+            visible_rows: self.active().rows.clone(),
+            cursor: self
+                .modes
+                .cursor_visible
+                .then(|| CellCoord::new(self.cursor.row as u32, self.cursor.col as u32)),
+            title: self.title.clone(),
+            generation: self.generation,
+        }
+    }
     fn publish(&mut self) {
-        self.published = self.current_snapshot();
+        self.published = self.current_projection();
     }
 }
 
@@ -1489,6 +1546,15 @@ fn glyph_width(glyph: &Glyph) -> usize {
             .ok()
             .map_or(1, |cluster| UnicodeWidthStr::width(cluster).min(2)),
         Glyph::Continuation => 0,
+    }
+}
+fn snapshot_from_projection(projection: &ScreenProjection) -> ScreenSnapshot {
+    ScreenSnapshot {
+        size: projection.size,
+        cells: flatten(&projection.visible_rows),
+        cursor: projection.cursor,
+        title: projection.title.clone(),
+        generation: projection.generation,
     }
 }
 fn resize_grid_clip(
@@ -1625,18 +1691,21 @@ mod tests {
     #[test]
     fn alternate_screen_preserves_main_and_has_no_history() {
         let mut s = screen(2, 4);
+        assert!(!s.alternate_active());
         s.apply_event(AnsiEvent::Text("main".into()));
         let main = s.snapshot();
         s.apply_event(AnsiEvent::AlternateScreen {
             mode: AlternateScreenMode::Mode1049,
             enabled: true,
         });
+        assert!(s.alternate_active());
         s.apply_event(AnsiEvent::Text("alt\nmore".into()));
         assert!(s.history().is_empty());
         s.apply_event(AnsiEvent::AlternateScreen {
             mode: AlternateScreenMode::Mode1049,
             enabled: false,
         });
+        assert!(!s.alternate_active());
         assert_eq!(&s.snapshot().cells[..4], &main.cells[..4]);
     }
 
@@ -1668,17 +1737,35 @@ mod tests {
     }
 
     #[test]
-    fn synchronized_output_gates_snapshot_and_finish_releases() {
+    fn synchronized_output_gates_snapshot_and_row_projection_until_release() {
         let mut s = screen(2, 4);
-        let before = s.snapshot();
+        s.apply_event(AnsiEvent::Text("main".into()));
+        s.apply_event(AnsiEvent::LineFeed);
+        s.apply_event(AnsiEvent::LineFeed);
+        let before_snapshot = s.snapshot();
+        let before_projection = s.projection();
+        assert_eq!(before_projection.history.len(), 1);
+        assert!(!before_projection.alternate_active);
+
         s.apply_event(AnsiEvent::SetMode {
             mode: TerminalMode::SynchronizedOutput,
             enabled: true,
         });
-        s.apply_event(AnsiEvent::Text("x".into()));
-        assert_eq!(s.snapshot(), before);
+        s.apply_event(AnsiEvent::AlternateScreen {
+            mode: AlternateScreenMode::Mode1049,
+            enabled: true,
+        });
+        s.apply_event(AnsiEvent::Text("alt".into()));
+        assert_eq!(s.snapshot(), before_snapshot);
+        assert_eq!(s.projection(), before_projection);
+        assert!(!s.alternate_active());
+
         s.finish_output();
-        assert_ne!(s.snapshot(), before);
+        let released = s.projection();
+        assert!(released.alternate_active);
+        assert!(released.history.is_empty());
+        assert_eq!(s.snapshot().cells, flatten(&released.visible_rows));
+        assert!(s.alternate_active());
     }
 
     #[test]
