@@ -1,6 +1,7 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-20, after the cross-machine continuity audit;
+**Last updated: 2026-07-21, after the JSON/YAML review-documentation
+cleanup and the cross-machine continuity audit;
 main still reflects GPU font preferences (#124), themes stage 1 (#120),
 and injections (#122).** This file is the
 bridge between development machines. If you are an agent reading
@@ -140,13 +141,14 @@ commands, read `docs/active-work.md` immediately after this file.
   first built-in provider. Approval → implementation → gates → PR.
   Completing stage 3 completes Arc 4.
 - **OPEN: JSON + YAML PR #123.** Public and checkpoint branches both
-  point to fully gated `5c202c5`, rebased onto `f8096ff`. Review fixes
-  include config push delivery, corrected provider/config claims, and
-  both live-provider paths; the real YAML-through-pmacs smoke proves
+  point to review-cleanup `ffcb903`, atop fully gated `5c202c5` rebased
+  onto `f8096ff`. Review fixes include config push delivery, corrected
+  provider/config claims, both live-provider paths, and the final stale
+  checkpoint-text cleanup; the real YAML-through-pmacs smoke proves
   auto-attach, network-free configuration, diagnostics, and continued
   liveness against Red Hat 1.24.0. CI run `29778967156` passed all 12
-  jobs for the exact public head; awaiting user review. Exact recovery
-  is in `docs/active-work.md`.
+  jobs for `5c202c5`; the doc-only cleanup passed its targeted checks and
+  the PR awaits user review. Exact recovery is in `docs/active-work.md`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or

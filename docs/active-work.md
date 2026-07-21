@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-20.** This file records volatile work that has not
+**Snapshot: 2026-07-21.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -55,18 +55,18 @@ If it does not, stop and repair the remote/fetch configuration.
 
 - PR: <https://github.com/levineuwirth/pmacs/pull/123>
 - Public PR branch: `githubsucks/json-yaml-grammar`
-- Public PR head: `5c202c5`
+- Public PR head: `ffcb903`
 - Original merge base was `56eb67e`; the completed branch is rebased onto
   canonical main `f8096ff`.
 - Portable checkpoint branch:
   `githubsucks/json-yaml-handoff-2026-07-20`
-- Checkpoint head: `5c202c5`
+- Checkpoint head: `ffcb903`
 - The checkpoint is a continuation branch for recovery, not a second
   feature and not a merge target. Its completed head now exactly matches
   `githubsucks/json-yaml-grammar`.
 
-The checkpoint carries the transferred review-fix set plus the completed
-destination-machine continuation:
+The checkpoint carries the transferred review-fix set, completed
+destination-machine continuation, and final review-documentation cleanup:
 
 - push configured settings via
   `workspace/didChangeConfiguration` immediately after `initialized`;
@@ -133,6 +133,11 @@ Verification completed across the source and destination machines:
   `29778967156` completed successfully for that head: all 12 jobs passed
   (format; LuaJIT/Lua 5.4 lint and Linux/macOS tests; headless GPU; and
   M1/M4/M5/M6 gates).
+- Review cleanup `ffcb903` refreshes the stale YAML transfer-task test
+  comment and the framing/handoff checkpoint status. Its targeted
+  `m4_json_yaml_lsp_configs_pin_command_and_sections`, `cargo fmt --check`,
+  and `git diff --check` verification passed; both public and checkpoint
+  refs were fast-forwarded to it.
 
 Still required:
 
