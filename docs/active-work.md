@@ -55,28 +55,32 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Active lane: Vterm Stage 1 terminal core
 
 - Portable branch: `githubsucks/vterm-core`
-- Implementation commits: `bbc1f33` (Stage 1) and `962944b` (Darwin PTY
-  signal normalization); current branch head: `4d74d64`.
+- Implementation commits: `bbc1f33` (Stage 1), `962944b` (Darwin signal),
+  and review fixes `f0a235f`, `28f2e6c`, `bf972a7`; current branch head:
+  `5d50558`.
 - Pull request: #126,
   <https://github.com/levineuwirth/pmacs/pull/126> — open, non-draft, targeting
   canonical `main`; not merged.
-- State: Arc 5 Stage 2's first of three PRs is implemented and fully gated
-  against protocol-v18 `main`. It is the headless terminal core only; the
-  Stage 2 TUI/Lua surface and Stage 3 protocol/GPU renderer are not
-  implemented and must start only after their preceding PR lands.
-- Framing: `docs/vterm-framing.md` Revision 3 on the feature branch maps Stage
-  1 Acceptance 1–14 and records the downstream TUI/GPU contract reviews.
-- Final from-start sequence after the portability fix: Clippy clean; 1,658
-  default + 1,834 CRDT library tests (3 ignored each); 8 default + 9 CRDT
-  vterm acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
-  workspace 2,765 passed across 79 suites (19 ignored, 1 filtered); diff check
-  clean. The first pass fixed missing crate docs; PR CI then exposed Darwin's
-  numeric `strsignal` suffix. Both fixes were followed by a complete restart
-  from gate 1.
+- State: Arc 5 Stage 2's first of three PRs is implemented, review round 1 is
+  addressed, and the branch is fully gated against protocol-v18 `main`. It is
+  the headless terminal core only; the Stage 2 TUI/Lua surface and Stage 3
+  protocol/GPU renderer are not implemented and must start only after their
+  preceding PR lands.
+- Framing: `docs/vterm-framing.md` Revision 4 maps Stage 1 Acceptance 1–14,
+  records review round 1, and preserves the downstream TUI/GPU contracts.
+- Final from-start sequence after review round 1: Clippy clean; 1,660 default +
+  1,836 CRDT library tests (3 ignored each); 8 default + 9 CRDT vterm
+  acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
+  workspace 2,767 passed across 79 suites (19 ignored, 1 filtered); diff check
+  clean. The first review Clippy pass found only identical LF/IND match arms;
+  after consolidation, the complete sequence restarted from gate 1.
 - `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
   `bite: OK` because the old crate root could not compile the new terminal API;
   this is explicitly weaker compile-time API evidence, not a clean behavioral
   assertion failure.
+- `scripts/bite HEAD^ src/ansi.rs --lib
+  parser_split_points_produce_identical_screen` returned `bite: OK` with a
+  clean behavioral cursor-position failure against the pre-dispatch parser.
 
 Recovery worktree, only if no existing worktree owns the branch:
 
