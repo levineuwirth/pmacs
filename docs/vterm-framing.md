@@ -1,8 +1,7 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 5 — 2026-07-21. Status: Stage 1 review round 2 fixes implemented
-and fully gated on `vterm-core`; awaiting merge authorization, not merged.
-Stages 2 and 3 are not implemented.**
+**Revision 5 — 2026-07-21. Status: Stage 1 landed on `main` through PR #126
+at merge `643d1e1`. Stages 2 and 3 are not implemented.**
 
 Revision 5 establishes the renderer-facing cell invariant before Stage 2:
 terminal text discards C0/C1 controls rather than storing host-terminal control
@@ -37,11 +36,10 @@ later stage starts only after the preceding stage lands on `main`.
 
 ## 0. Revision 5 — Stage 1 implementation and review record
 
-The first of the three vterm PRs is implemented, reviewed, and fully gated on
-`vterm-core`, awaiting merge authorization. Initial feature commit `bbc1f33`,
-first-review fixes through `bf972a7`, and second-review hardening `9797ada` are
-published as open, non-draft PR #126,
-<https://github.com/levineuwirth/pmacs/pull/126>, targeting `main`.
+The first of the three vterm PRs is implemented, reviewed, fully gated, and
+landed on `main` as merge `643d1e1`. Initial feature commit `bbc1f33`,
+first-review fixes through `bf972a7`, and second-review hardening `9797ada`
+shipped through PR #126, <https://github.com/levineuwirth/pmacs/pull/126>.
 It is deliberately headless: there is no `pmacs.terminal` Lua module,
 interactive terminal command, TUI paint branch, or GPU/protocol surface yet.
 
@@ -837,16 +835,13 @@ Per-stage utilization:
 
 ## 8. Branch and PR plan
 
-Stage 1 is implemented and fully gated on `vterm-core`; review fixes through
-`bf972a7` are published in open, non-draft PR #126
-(<https://github.com/levineuwirth/pmacs/pull/126>), targeting `main` and not
-merged. Continue the approved plan only after the preceding PR lands:
+Stage 1 landed on `main` through PR #126 at merge `643d1e1`. Continue the
+approved sequential plan:
 
-1. review PR #126; merge only when the user says;
-2. after stage 1 merges, create `pmacs-vterm-tui`, branch `vterm-tui`, from the
-   new `main`; implement/gate/open a second PR;
-3. after stage 2 merges, create `pmacs-vterm-gpu`, branch `vterm-gpu`, from the
-   new `main`; implement/gate/open the third PR.
+1. create `pmacs-vterm-tui`, branch `vterm-tui`, from post-#126 `main`;
+   implement, gate, and open the second PR;
+2. after Stage 2 merges, create `pmacs-vterm-gpu`, branch `vterm-gpu`, from
+   the new `main`; implement, gate, and open the third PR.
 
 The framing branch is `vterm-framing` in worktree `pmacs-vterm-framing`.
 Implementation branches are not stacked across an unmerged parent. This avoids

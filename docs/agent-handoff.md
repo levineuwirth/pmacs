@@ -1,18 +1,66 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after Vterm Stage 1 review round 2 was addressed
-and fully gated on `vterm-core` (awaiting merge authorization; not merged).
-Vterm Stages 2 and 3 are not implemented.** This file is the bridge between development
-machines. If you are an agent reading on a fresh clone: this document
-plus the `docs/*-framing.md` files ARE your memory. Read this fully
-before taking on work, seed persistent memory from it, and **update this
-file (and commit it) whenever project state changes materially** — the
-next machine reads it the way you just did.
+**Last updated: 2026-07-21, after the config registry (#127) and Vterm
+Stage 1 terminal core (#126) both landed on `main`, atop completed
+Themes Arc 4 (#120/#124/#125). Vterm Stages 2 and 3 are not
+implemented.**
+This file is the
+bridge between development machines. If you are an agent reading
+this on a fresh clone: this document plus the `docs/*-framing.md`
+files ARE your memory. Read this fully before taking on work, seed
+your persistent memory from it, and **update this file (and commit
+it) whenever project state changes materially** — the next machine
+reads it the way you just did.
+
+For volatile branches, checkpoints, verification, and recovery
+commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-21)
 
-- Canonical `main` @ `7bc0c61` (#125 merged), protocol
-  **v18** (`SUPPORTED=[6..18]`).
+- `main` @ `2e37c04` (config registry #127), protocol **v18**
+  (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
+  `StatuslineSegments`).
+- **Config registry LANDED — #127** (`docs/config-registry-framing.md`
+  rev 3; merge `2e37c04`; two review rounds). `pmacs.config` is the
+  typed, introspectable options registry the backlog ranked first, and
+  it closes the "config-registry-blocked" deferrals below. It was built
+  as a PARALLEL LANE alongside vterm in a sibling worktree; the files
+  were assigned per-lane up front and the rebase had zero conflicts.
+  - **Third registry** beside `CommandRegistry`/`HookRegistry`
+    (`src/config_registry.rs`), same R42/R50/duplicate-rejection/
+    `SourceLocation` vocabulary; Lua surface in
+    `src/lua_bindings/config.rs`. **No protocol change (still v18) and
+    ZERO changes to `src/editor.rs`.**
+  - **An override is ALWAYS stored**, even when equal to the value it
+    shadows; only `value_epoch` and listener dispatch key on effective
+    change. The "equal-value set is a no-op" reading silently voids a
+    buffer-local pin: nothing is stored, and a later global `set` flips
+    the very buffer the user pinned.
+  - **Two scopes: global and buffer-local.** `get(name, buf)` resolves
+    local → global → default; **`get(name)` resolves the GLOBAL CHAIN
+    ONLY** and never consults an ambient buffer. Per-language and
+    per-project are *patterns* (a hook calling `set_local`), not scopes
+    the registry knows about. Mode scope is impossible until the mode
+    system is wired — every editor `KeymapStack::resolve` passes `&[]`.
+  - Buffer-locals live in a registry side table purged at
+    `after_buffer_removed`, beside the keymap purge.
+  - Listeners: commit → snapshot → **drop the borrow** → re-enter Lua;
+    a raising listener is logged without blocking the rest or rolling
+    back; a depth bound turns a cycle into a pointed error. **Explicit
+    dispose only** — there is no `MetaMethod::Gc` anywhere in the
+    codebase, and GC timing differs between the two Lua backends.
+  - `StartupOnly` freezes off the existing `InitCompleteFlag` at write
+    time (which is why no `editor.rs` call was needed). In `--lib`
+    builds `set_init_complete` never runs, so a post-freeze test must
+    flip the flag explicitly or it passes vacuously.
+  - Adopters own their own `define`, so `SourceLocation` names the
+    owning module: `editing.auto-pair` (pair.lua, read against the
+    typed edit's SOURCE buffer), `editing.trim-on-save` (editops.lua,
+    read against the buffer being saved), `autosave.interval-ms`
+    (autosave.lua, re-read per tick). **The migration wrappers keep
+    their legacy coercion** — the registry is strict, the legacy setters
+    stay lenient (`trim_on_save("yes")`, `interval_ms(1500.7)`).
+  - `M-x describe-setting` renders into `*help*`.
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -69,6 +117,16 @@ next machine reads it the way you just did.
   `inline` node; matches tree-sitter-md's own splitter), and the wire
   flattener runs over the WHOLE buffer via the file-style summary, so it
   must be an event sweep, not O(spans²).
+- **JSON + YAML grammars and language servers (#123) LANDED** — bundled
+  ABI-current `tree-sitter-json` / `tree-sitter-yaml` cover `.json`,
+  `.yaml`, and `.yml`; the existing injection engine now highlights YAML
+  frontmatter and JSON/YAML fences. Default external LSP configs are the
+  pinned `vscode-json-language-server` provider and
+  `yaml-language-server`; configured settings are pushed after
+  `initialized`, which also supports push-model servers. The fake-server
+  delivery proof and PATH-gated live JSON/YAML provider smokes cover the
+  configuration contract. `.jsonc` / `.json5` remain a deliberate
+  follow-up because the JSON grammar is strict.
 - **Compile-mode (Arc 5 stage 1, #113) LANDED** (2026-07-14, 7 rounds;
   framing `docs/compile-mode-framing.md` rev 13). `compile.run` streams
   `/bin/sh -c "exec 2>&1; <cmd>"` into an intercept-read-only
@@ -120,13 +178,12 @@ next machine reads it the way you just did.
     workspace sweep 2,718 passed across 78 suites (19 ignored,
     `basedpyright` filtered); `git diff --check` clean. Stage 3 landed
     as #125 and completed Arc 4 on `main`.
-- **Vterm Stage 1 terminal core IMPLEMENTED ON `vterm-core`, FULLY GATED,
-  AWAITING MERGE AUTHORIZATION, NOT MERGED** (`docs/vterm-framing.md` rev 5).
+- **Vterm Stage 1 terminal core LANDED ON `main` — #126**
+  (`docs/vterm-framing.md` rev 5; merge `643d1e1`).
   - Implementation commits: `bbc1f33` (Stage 1), `962944b` (Darwin signal
     normalization), first-review fixes `f0a235f`, `28f2e6c`, `bf972a7`, and
-    second-review hardening `9797ada`; pull request: #126,
-    <https://github.com/levineuwirth/pmacs/pull/126> (open, non-draft,
-    targeting `main`).
+    second-review hardening `9797ada`; reviewed feature head `fc4e0ce` merged
+    through PR #126, <https://github.com/levineuwirth/pmacs/pull/126>.
   - `AnsiParserProfile::{LineOriented, FullScreen}` preserves compile/REPL
     behavior while terminal PTYs emit the full cursor/mode/device operation
     set. `src/terminal/{screen,input,session}.rs` owns the state machine,
@@ -174,6 +231,10 @@ next machine reads it the way you just did.
     authenticated source routing, protocol-owned wire types/limits, and a
     deliberate complete-frame limit decision: 16 MiB is insufficient; use a
     measured legal-worst cap or aggregate bound, never silent chunking.
+- **PARKED: kill-ring browser + persistence.** Revision 2 framing is
+  preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
+  and must be repeated before implementation. No PR or implementation is
+  active.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus
@@ -184,6 +245,16 @@ next machine reads it the way you just did.
   - **Arc 3 (persistence) COMPLETE** — saveplace/recentf (#98),
     desktop-save (#99), autosave/crash-recovery (#100), save-clobber
     fix (#101).
+  - **Arc 4 (themes + extensibility) COMPLETE** — named UI faces (#120),
+    live GPU font preferences (#124), statusline providers (#125).
+  - **Arc 5 terminal stage ACTIVE** — compile mode (#113) and Vterm terminal
+    core (#126) landed; Vterm TUI is the next formal stage.
+  - **Config registry COMPLETE (#127)** — not a numbered arc; it was the
+    cross-cutting substrate ranked first on
+    `docs/side-quest-backlog.md`'s north star, and it unblocks the
+    editing/indent/comment items that were config-blocked.
+  - Remaining ranked arcs: 6 folding, 7 DAP, 8 GPU splits, plus the
+    `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
 ## 2. How we work (the part that must not drift)
 
@@ -292,8 +363,10 @@ buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
 **Protocol** — encoding-breaking bumps are deliberate and versioned
-(`SUPPORTED=[6..15]`). v15 = `CompletionPopup` + `StatusFacts.message`.
-New wire surface ⇒ bump + both-frontends support + acceptance.
+(`SUPPORTED=[6..18]`). v15 = `CompletionPopup` +
+`StatusFacts.message`; v16 = `ThemeFacts`; v17 = `FontFacts`; v18 =
+`StatuslineSegments`. New wire surface ⇒ bump + both-frontends support +
+acceptance.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),
@@ -337,6 +410,28 @@ New wire surface ⇒ bump + both-frontends support + acceptance.
   in per-session baselines; and any daemon-side reset needs its
   frontend mirror audited in the same round (the GPU snapshot arm
   missed search/menu/status the first time).
+- **Tab width is a rendering-parity bug, NOT a config gap** (scouted at
+  `7bc0c61` while framing #127; still true). There are FIVE tab-width
+  sites across TWO crates with TWO different values: `TAB_WIDTH = 8` in
+  `src/text_view.rs`, `src/highlight.rs`, `src/diag.rs` and
+  `src/completion.rs`, versus `advance_minimap_col` in
+  `pmacs-gpu/src/main.rs` expanding to **4** — and the GPU's main text
+  path expands tabs *not at all* (buffer bytes reach the frontend raw,
+  so a literal `\t` is shaped by the font). `editor.tab-width` is
+  therefore the obvious-looking first config adopter and is not one:
+  defining the setting cannot make the GPU honor it. Doing it properly
+  needs frontend tab expansion plus a wire-or-frontend-local decision.
+  Deferred from #127 on exactly these grounds; don't re-plan it as a
+  config task.
+- **A test that never runs passes.** Two #127 review-round tests passed
+  vacuously at first: `pmacs.editor.save()` is the RAW save, while
+  `buffer.before-save` fires inside the `buffer.save` COMMAND
+  (`builtin/commands/default.lua`), and `save()` no-ops on an
+  unmodified buffer — so a fixture that opens a file and saves it
+  asserts on bytes nothing rewrote. Dirty the buffer with a real edit
+  and go through `pmacs.command.invoke("buffer.save")`. Caught only
+  because the *other* case failed and the cause was chased instead of
+  the assertion adjusted.
 
 ## 6. Named deferrals (the standing backlog, consolidated)
 
@@ -347,8 +442,9 @@ mid-line comment spans, comment-dwim append-at-EOL, per-language
 comment padding. Pairing (framing "Deferred"): wrap-region on opener,
 pair-aware backspace, RET-inside-pair closer-on-own-line,
 in-string/in-comment inhibit (needs node-at-byte `pmacs.parse`),
-undo amalgamation (pair = one step), balance-aware quotes,
-per-buffer toggle (config-registry-blocked). Editops deferrals (full
+undo amalgamation (pair = one step), balance-aware quotes
+(the per-buffer toggle SHIPPED in #127 as `editing.auto-pair`).
+Editops deferrals (full
 list in its framing): recenter (blocked on viewport facts — the GPU
 never consumes daemon `view_top`), Unicode case/word classes,
 region-spanning move/duplicate, locale collation for sort-lines,
@@ -364,7 +460,20 @@ origin-pinned `buffer.after-edit` fan-out (a context-switching
 intercept changes what later callbacks — LSP, completion — observe).
 LSP/persistence: hidden-buffer LSP attach, daemon desktop-restore, the
 *warning* half of external-change detection (verify-visited-file-
-modtime), config registry (no unified config surface yet).
+modtime).
+Config registry (SHIPPED #127; these are its own named deferrals):
+persistence of settings and the `custom-file` split-brain question,
+`M-x list-settings` as a listview panel, a settings completion source
+for the minibuffer (`minibuffer.read`'s `source` is a fixed Rust-side
+vocabulary), table-valued settings (so `pmacs.lsp.config`,
+`pmacs.pair.sets`, `pmacs.comment.strings` and the `pmacs.parse.*`
+write-through proxies stay raw Lua), migrating the remaining scalar
+setters (`async_config` ×2, `killring.max`, the `enable` booleans) and
+`pmacs.gpu.set_font`, pending-set staging for names defined after
+`init.lua` runs, and a `scope = "global"` define flag — `set_local` is
+currently accepted for `autosave.interval-ms`, where a per-buffer
+value is meaningless.
+**Tab width is NOT a config gap** — see §5.
 Highlight/detection (from the #114–#118 side-quest + injections #122):
 locals-query processing (run each grammar's LOCALS_QUERY so
 `#is?`/`#is-not? local` is honored instead of the current fail-closed
@@ -377,18 +486,11 @@ runtime/Lua-registered languages (v1 resolves only against
 `BUILTIN_LANGUAGES`), and the next injection *consumers* gated on new
 grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
 literals, doc-comment code); modeline detection as a 5th layer
-(`-*- mode: … -*-` / `# vim: ft=…`);
+  (`-*- mode: … -*-` / `# vim: ft=…`);
 byte-accurate multibyte cursor placement in `move_active_cursor_to`
-(still steps one codepoint per LSP byte column). **JSON + YAML PR #123
-OPEN** (grammar-gap style, `tree-sitter-json`/`-yaml`; LSP configs
-`vscode-json-language-server` with provider pin
-`@t1ckbase/vscode-langservers-extracted@2.0.2`, plus
-`yaml-language-server`). The public and checkpoint branches are both at
-fully gated `5c202c5`, rebased onto `f8096ff`; the JSON and YAML
-PATH-gated pmacs smokes both passed, and the PR awaits user review.
-Once merged, YAML `---` and TOML `+++` markdown frontmatter highlight via
-the #122 engine and the Jupyter reader → editable → kernel arc has both
-grammar prerequisites.
+(still steps one codepoint per LSP byte column). A full Jupyter `.ipynb`
+setup (reader → editable → kernel execution) now has its JSON grammar
+prerequisite, but remains a real arc, not a one-shot.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
 Themes (full list in theme-faces framing rev 9 "Deferred (named)"):
@@ -397,7 +499,8 @@ popup/menu/dropdown bg + selected-row faces, `ui.background` /
 palette (+`ui.selection` for peer rects), `ui.inlay_hint` (needs the
 epoch treatment on its producer), wire alpha, `Indexed` palette
 unification, named-theme registry / light theme / persistence
-(config-registry-blocked), grid-vs-wire `default_style` asymmetry,
+(the registry exists now, #127; theme persistence still waits on
+settings persistence), grid-vs-wire `default_style` asymmetry,
 mask widening (gutter bg, wash glyph recolor, statusline bg echo
 surface, chrome bold/italic/underline re-shaping).
 Housekeeping: F-016 `lua_bindings/mod.rs` split paused mid-way
@@ -419,5 +522,7 @@ Don't expect them in a clone; on the desktop, never delete them.
 When a PR merges, an arc opens/closes, or a decision lands: edit the
 snapshot (§1), append lessons (§5) and deferrals (§6) as they arise,
 bump the date line at the top, and commit — usually riding the same PR
-as the work. Keep it under ~250 lines: this is a briefing, not a log;
-prune sections that stop being true.
+as the work. Keep durable architecture here; put branch hashes,
+machine-local tools, incomplete verification, and recovery commands in
+`docs/active-work.md`. This is a briefing, not a log: prune sections
+that stop being true.
