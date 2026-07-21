@@ -1,9 +1,12 @@
 # Statusline segments - framing (Arc 4 stage 3)
 
-**Revision 2 - 2026-07-21. Framing preserved on branch
+**Revision 3 - 2026-07-21. Framing preserved on branch
 `statusline-segments`; re-scouted against `main` `bb17ec9` (protocol v17)
 after JSON/YAML #123 merged. No relevant substrate drift; awaiting review.
 No implementation or PR.**
+
+Revision 3: closes review findings on authoritative-empty baseline retention
+and the TUI's protected-suffix clipping boundary.
 
 Revision 2: closes review findings on invalidation, terminal-control-safe
 grapheme painting, separator ownership, detached-frontend latches, and the
@@ -346,12 +349,20 @@ Evaluation is a three-phase, borrow-released transaction:
    or registers/unregisters/disables a provider makes this evaluation
    **invalid**. Invalid is not a silent dropped fan-out: for the
    declared matching v18 buffer, the producer emits an authoritative
-   replacement `StatuslineSegments { left: [], right: [] }`, clears the
-   corresponding baseline only after queuing that replacement, and
-   discards every evaluated result. If the viewport itself changed, it
-   first clears the prior matching buffer's mirror this way, then the
-   next frame evaluates the new truth. Thus no callback mutation can
-   leave a prior non-empty GPU payload resident indefinitely.
+   replacement `StatuslineSegments { left: [], right: [] }`, records
+   that empty payload as the new emission baseline only after queuing
+   the replacement, and discards every evaluated result. The next frame
+   therefore stays silent if the surviving truth is also empty, or
+   emits the newly evaluated non-empty truth as a change from empty. If
+   a callback changed the initially matching window away from the
+   declared buffer, the empty replacement clears that prior buffer's
+   mirror before the next frame evaluates the new truth. A snapshot ->
+   new-viewport transition that was already stale at phase 1 instead
+   follows that phase's no-message rule: `BufferSnapshot` has already
+   cleared the frontend mirror, and `on_buffer_snapshot_sent` owns the
+   corresponding baseline removal. Thus no callback mutation can leave
+   a prior non-empty GPU payload resident indefinitely, and no invalid
+   evaluation creates a redundant second empty send.
 
 The TUI calls the evaluator at the start of `paint_frame`, before the
 long-lived mutable core borrow. `SemanticRenderState::render_frame`
@@ -426,7 +437,10 @@ Priority means **survival priority when horizontal space is tight**:
   is right-aligned; overflow clips its low-priority left edge.
 - The protected built-in suffix is never discarded merely because a
   custom provider is long. If the built-in suffix itself cannot fit,
-  each frontend retains today's terminal/pixel clipping behavior.
+  each frontend retains today's behavior: the TUI drops the right group
+  wholesale, while the GPU keeps its right edge fixed and clips its left
+  edge. Custom-prefix clipping preserves the complete built-in suffix
+  only when that suffix fits by itself.
 - The left group gets the space before the right group's measured
   origin and clips at the collision boundary. It never overwrites the
   right group.
@@ -651,9 +665,12 @@ single-row painter:
   `fg` when the base row is reversed.
 - Every separator inserted by Q#SL4 is likewise painted with this base
   style, regardless of the faces on either side.
-- Right suffix clipping keeps the display-column suffix, preserving the
-  built-in tail; left clipping keeps the prefix. No run can write
-  outside its window rect or into another split's modeline.
+- When the protected built-in right suffix fits by itself, clipping the
+  combined right group removes only the low-priority custom prefix and
+  preserves that suffix in full. If the built-in suffix itself does not
+  fit, the TUI retains today's wholesale drop instead of introducing a
+  new partial-suffix policy. Left clipping keeps the prefix. No run can
+  write outside its window rect or into another split's modeline.
 
 With no visible provider output, the resulting cells are byte-for-byte
 the current modeline for ordinary ASCII buffers.
@@ -833,7 +850,9 @@ TUI, producer, and daemon/wire behavior; protocol pins stay in
    triggers self-unregister/disable: the invalid evaluation emits one
    authoritative empty replacement, the reduced `ThemeFacts` precedes
    that replacement, the resulting GPU frame has no prior text, and the
-   provider is absent on the next frame.
+   empty replacement becomes the emission baseline. The provider is
+   absent and a still-empty next frame is wire-silent; a surviving good
+   provider instead reappears on that next frame as a change from empty.
 7. **Context-change guard:** callbacks that switch the window buffer,
    close a split, or kill the source buffer cannot publish text under
    the old context; the next frame evaluates the surviving truth.
@@ -854,12 +873,14 @@ TUI, producer, and daemon/wire behavior; protocol pins stay in
 11. **TUI Unicode and clipping bite:** CJK, combining, and ASCII custom
     runs beside a right suffix occupy correct display columns with
     cluster/continuation cells and no overlap; the combining sequence is
-    emitted rather than silently dropped. A narrow split clips the
-    low-priority edges while retaining the protected built-in tail and
-    never writes outside its rect. A buffer name containing CR, LF, and
-    ESC is sanitized before segmentation: its resulting `Glyph::Char` /
-    `Glyph::Cluster` cells and captured terminal bytes contain no raw
-    control scalar or escape sequence.
+    emitted rather than silently dropped. A narrow-split fixture whose
+    built-in suffix fits by itself clips the low-priority custom edges
+    while retaining that suffix in full and never writes outside its
+    rect. A second fixture where the built-in suffix itself does not fit
+    pins the current TUI wholesale-drop behavior. A buffer name
+    containing CR, LF, and ESC is sanitized before segmentation: its
+    resulting `Glyph::Char` / `Glyph::Cluster` cells and captured
+    terminal bytes contain no raw control scalar or escape sequence.
 12. **LSP built-in:** an unattached buffer adds nothing. Attached
     buffers show `LSP:init/ready/idx/degraded/crashed/stopped` as the
     tracker changes without a buffer edit, and `LSP:?` for a forgotten
