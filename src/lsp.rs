@@ -1233,6 +1233,10 @@ impl LspManager {
         let id = LspServerId::next();
         let mut client = LspClient::new(spec);
         self.start_generation(id, &mut client)?;
+        // The statusline may render before the supervisor's next `Started`
+        // event is drained. Seed the documented initializing state now so an
+        // attached live server is never mislabeled as forgotten (`?`).
+        self.status_tracker.ensure(id, Instant::now());
         self.clients.insert(id, client);
         Ok(id)
     }

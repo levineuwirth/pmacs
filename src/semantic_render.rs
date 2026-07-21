@@ -37,7 +37,12 @@ use crate::cell::Style;
 use crate::editor::EditorState;
 use crate::protocol::{
     AdornmentContent, AdornmentPlacement, ByteRange, Decoration, DecorationKind, DecorationSegment,
-    FrontendId, InlineAdornment, InstanceMessage, MenuPromptRow, StyleSegment, StyleSpan,
+    FrontendId, InlineAdornment, InstanceMessage, MenuPromptRow, StatuslineSegment, StyleSegment,
+    StyleSpan,
+};
+use crate::statusline::{
+    StatuslineEvaluation, StatuslineEvaluationOutcome, StatuslineEvaluationTarget,
+    evaluate_statusline,
 };
 
 /// The viewport a `semantic_render` frontend last declared.
@@ -227,6 +232,11 @@ pub struct SemanticRenderState {
     /// viewport declaration. A frontend retaining face state across
     /// attachments is therefore corrected even by an unthemed daemon.
     last_theme_faces: Option<Vec<crate::protocol::ThemeFace>>,
+    /// For v18 peers, the enabled provider-face set epoch inspected by
+    /// `theme_facts_msg`. Kept separate from `last_face_epoch` so
+    /// priority-only provider changes do not rebuild the face table.
+    /// v16/v17 peers never read the registry and leave this `None`.
+    last_statusline_face_set_epoch: Option<u64>,
     /// Whether the peer negotiated protocol >= 16 (PR #120 round 1
     /// finding 3). Faces reach a semantic frontend through TWO
     /// channels: `ThemeFacts` (daemon write-loop gated) and the
@@ -251,6 +261,14 @@ pub struct SemanticRenderState {
     /// font state, so this gate has no summary-style companion
     /// filter.
     peer_knows_font_facts: bool,
+    /// Whether the peer negotiated protocol >= 18 (Q#SL7). This gates
+    /// callback evaluation in the producer, independently of the daemon's
+    /// write-loop gate.
+    peer_knows_statusline_segments: bool,
+    /// Complete replacement baseline per buffer. `None` means the peer has
+    /// never received an authoritative payload, so the first empty result
+    /// must still be emitted.
+    last_statusline: HashMap<BufferId, (Vec<StatuslineSegment>, Vec<StatuslineSegment>)>,
     /// Cached byte↔line table for the diagnostics projection, keyed
     /// by buffer revision. Building it costs an O(buffer) rope copy
     /// plus a full scan; before this cache, that ran on *every tick*
@@ -352,11 +370,12 @@ impl SemanticRenderState {
         let mut s = Self::new(frontend_id);
         s.peer_knows_theme_facts = negotiated_protocol_version >= 16;
         s.peer_knows_font_facts = negotiated_protocol_version >= 17;
+        s.peer_knows_statusline_segments = negotiated_protocol_version >= 18;
         s
     }
 
     /// Fresh session state for frontend `frontend_id`: no viewport
-    /// declared, nothing sent. Assumes a current-build peer (>= 16);
+    /// declared, nothing sent. Assumes a current-build peer (>= 18);
     /// daemon sessions with a real negotiated version use
     /// [`Self::for_peer`].
     #[must_use]
@@ -384,6 +403,7 @@ impl SemanticRenderState {
             // (empty included), and the epoch gate cannot short-circuit
             // an epoch-0 daemon before that send.
             last_face_epoch: None,
+            last_statusline_face_set_epoch: None,
             last_theme_faces: None,
             peer_knows_theme_facts: true,
             // Q#F5: both seeded None — the first frame after viewport
@@ -393,6 +413,8 @@ impl SemanticRenderState {
             last_font_epoch: None,
             last_font_facts: None,
             peer_knows_font_facts: true,
+            peer_knows_statusline_segments: true,
+            last_statusline: HashMap::new(),
             diag_line_cache: HashMap::new(),
         }
     }
@@ -413,10 +435,11 @@ impl SemanticRenderState {
     ///
     /// A `BufferSnapshot` resets the receiving frontend's
     /// buffer-scoped render state wholesale — spans, decorations,
-    /// adornments, minimap summary, completion popup (see the GPU's
-    /// `BufferSnapshot` arm) — so every buffer-scoped emission
-    /// baseline this producer holds for that buffer must die with the
-    /// send. Otherwise an unchanged-key revisit (the A → B → A round
+    /// adornments, minimap summary, completion popup, status facts, and
+    /// statusline segments (see the GPU's `BufferSnapshot` arm) — so
+    /// every buffer-scoped emission baseline this producer holds for
+    /// that buffer must die with the send.
+    /// Otherwise an unchanged-key revisit (the A → B → A round
     /// trip at one CRDT generation) suppresses every re-send and the
     /// frontend never regains the state until an edit, diagnostic
     /// republish, or theme mutation happens to move the key.
@@ -426,7 +449,8 @@ impl SemanticRenderState {
     /// harmless — the failure mode is one redundant re-send, never
     /// staleness.
     ///
-    /// Deliberately NOT reset: `last_face_epoch` / `last_theme_faces`
+    /// Deliberately NOT reset: `last_face_epoch`,
+    /// `last_statusline_face_set_epoch`, and `last_theme_faces`
     /// (`ThemeFacts` is bufferless — the frontend keeps its face
     /// table across snapshots), `last_minibuffer` (one global core
     /// instance, not buffer-scoped), `last_line_numbers`
@@ -449,6 +473,7 @@ impl SemanticRenderState {
         self.last_search_prompt.remove(&buffer_id);
         self.last_menu_prompt.remove(&buffer_id);
         self.last_completion_popup.remove(&buffer_id);
+        self.last_statusline.remove(&buffer_id);
     }
 
     /// Project one frame.
@@ -475,6 +500,23 @@ impl SemanticRenderState {
             // Emit nothing before the frontend declares a viewport.
             return Vec::new();
         };
+
+        // Evaluate callbacks before any long-lived core borrow and before
+        // ThemeFacts is computed. A callback may change the registry; the
+        // post-evaluation face inventory must then precede the authoritative
+        // segment replacement in this same frame. Unsupported peers skip the
+        // evaluator entirely and therefore pay no Lua callback/dynamic-face cost.
+        let statusline_evaluation = self.peer_knows_statusline_segments.then(|| {
+            evaluate_statusline(
+                state.lua_host.lua(),
+                &state.core,
+                &state.statusline_registry,
+                StatuslineEvaluationTarget::Semantic {
+                    frontend_id: self.frontend_id,
+                    declared_buffer: vp.buffer_id,
+                },
+            )
+        });
 
         let generation = buffer_generation(state, vp.buffer_id);
         let mut out = Vec::new();
@@ -645,7 +687,83 @@ impl SemanticRenderState {
         // --- ThemeFacts (UI faces; themes arc Q#TH7, protocol v16) ---
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
+        // Q#SL6/Q#SL8: face inventory must precede segment text.
+        if let Some(evaluation) = statusline_evaluation {
+            self.emit_statusline_segments(evaluation, &mut out);
+        }
         out
+    }
+
+    /// Apply the lead evaluator's publication outcome to the v18 wire
+    /// baseline. Invalidated evaluations discard all callback text and
+    /// publish authoritative empty replacements for the captured old
+    /// contexts; phase-1 stale outcomes publish nothing.
+    fn emit_statusline_segments(
+        &mut self,
+        evaluation: StatuslineEvaluation,
+        out: &mut Vec<InstanceMessage>,
+    ) {
+        let to_wire = |segments: Vec<crate::statusline::EvaluatedStatuslineSegment>| {
+            segments
+                .into_iter()
+                .map(|segment| StatuslineSegment {
+                    text: segment.text,
+                    face: segment.face,
+                })
+                .collect()
+        };
+        let frontend_id = self.frontend_id;
+        match evaluation.outcome {
+            StatuslineEvaluationOutcome::Ready(windows) => {
+                if let Some(window) = windows
+                    .into_iter()
+                    .find(|window| window.context.frontend_id == frontend_id)
+                {
+                    self.emit_statusline_payload(
+                        window.context.buffer_id,
+                        to_wire(window.left),
+                        to_wire(window.right),
+                        out,
+                    );
+                }
+            }
+            StatuslineEvaluationOutcome::Invalidated {
+                authoritative_empty,
+            } => {
+                for context in authoritative_empty
+                    .into_iter()
+                    .filter(|context| context.frontend_id == frontend_id)
+                {
+                    self.emit_statusline_payload(context.buffer_id, Vec::new(), Vec::new(), out);
+                }
+            }
+            StatuslineEvaluationOutcome::NoMessage(_) => {}
+        }
+    }
+
+    fn emit_statusline_payload(
+        &mut self,
+        buffer_id: BufferId,
+        left: Vec<StatuslineSegment>,
+        right: Vec<StatuslineSegment>,
+        out: &mut Vec<InstanceMessage>,
+    ) {
+        if self
+            .last_statusline
+            .get(&buffer_id)
+            .is_some_and(|(old_left, old_right)| old_left == &left && old_right == &right)
+        {
+            return;
+        }
+        let baseline = (left.clone(), right.clone());
+        out.push(InstanceMessage::StatuslineSegments {
+            buffer_id,
+            left,
+            right,
+        });
+        // Advance only after the complete replacement has entered the
+        // frame output, including the authoritative-empty invalidation path.
+        self.last_statusline.insert(buffer_id, baseline);
     }
 
     /// The `CompletionPopup` message for this frame, or `None` when the
@@ -1134,41 +1252,53 @@ impl SemanticRenderState {
         })
     }
 
-    /// The `ThemeFacts` message for this frame, or `None` when the
-    /// face table is unchanged (themes arc Q#TH7, protocol v16).
-    /// Resolves the [`UI_FACES`] inventory through
-    /// [`crate::highlight::Theme::face`] under one lock — resolution
-    /// is daemon-side; frontends do exact-name lookup, no walk. The
-    /// `last_face_epoch` gate keeps unchanged ticks to one u64
-    /// compare; `last_theme_faces` (the frontend's believed table)
-    /// decides emission. Both advance on computation, and both seed
-    /// `None`, so every attachment ships exactly one authoritative
-    /// table — the empty table included — on its first frame.
+    /// Build the authoritative `ThemeFacts` table. v16/v17 peers retain the
+    /// fixed stage-1 inventory and never inspect the statusline registry.
+    /// v18 peers union in enabled provider faces and key recomputation on
+    /// `(theme.face_epoch, registry.face_set_epoch)`.
     fn theme_facts_msg(&mut self, state: &EditorState) -> Option<InstanceMessage> {
-        // PR #120 round 1 finding 3: never even produced for a peer
-        // below v16 (the daemon write-loop gate remains as the
-        // belt-and-braces filter).
         if !self.peer_knows_theme_facts {
             return None;
         }
+
         let theme = state.syntax_registry.theme();
-        let (faces, face_epoch) = {
-            let th = theme.lock().expect("theme mutex poisoned");
+        let th = theme.lock().expect("theme mutex poisoned");
+        let (face_set_epoch, dynamic_faces) = if self.peer_knows_statusline_segments {
+            let registry = state.statusline_registry.borrow();
+            let face_set_epoch = registry.face_set_epoch();
+            if self.last_face_epoch == Some(th.face_epoch)
+                && self.last_statusline_face_set_epoch == Some(face_set_epoch)
+            {
+                return None;
+            }
+            (Some(face_set_epoch), registry.enabled_face_names())
+        } else {
             if self.last_face_epoch == Some(th.face_epoch) {
                 return None;
             }
-            let faces: Vec<crate::protocol::ThemeFace> = UI_FACES
-                .iter()
-                .filter_map(|name| {
-                    th.face(name).map(|style| crate::protocol::ThemeFace {
-                        name: (*name).to_owned(),
-                        style,
-                    })
-                })
-                .collect();
-            (faces, th.face_epoch)
+            (None, Vec::new())
         };
+
+        let mut names: Vec<String> = UI_FACES.iter().map(|name| (*name).to_owned()).collect();
+        names.extend(dynamic_faces);
+        names.sort_unstable();
+        names.dedup();
+        let faces = names
+            .into_iter()
+            .filter_map(|name| {
+                let style = if UI_FACES.binary_search(&name.as_str()).is_ok() {
+                    th.face(&name)
+                } else {
+                    th.modeline_segment_face(&name)
+                };
+                style.map(|style| crate::protocol::ThemeFace { name, style })
+            })
+            .collect::<Vec<_>>();
+        let face_epoch = th.face_epoch;
+        drop(th);
+
         self.last_face_epoch = Some(face_epoch);
+        self.last_statusline_face_set_epoch = face_set_epoch;
         let unchanged = self.last_theme_faces.as_ref() == Some(&faces);
         self.last_theme_faces = Some(faces.clone());
         if unchanged {
@@ -2303,6 +2433,19 @@ mod tests {
         })
     }
 
+    fn statusline_of(
+        msgs: &[InstanceMessage],
+    ) -> Option<(BufferId, Vec<StatuslineSegment>, Vec<StatuslineSegment>)> {
+        msgs.iter().find_map(|message| match message {
+            InstanceMessage::StatuslineSegments {
+                buffer_id,
+                left,
+                right,
+            } => Some((*buffer_id, left.clone(), right.clone())),
+            _ => None,
+        })
+    }
+
     /// Simulate a committed face mutation: what `pmacs.theme.merge`
     /// does after its transactional parse (insert + face-epoch bump).
     fn merge_face(state: &EditorState, name: &str, style: Style) {
@@ -2310,6 +2453,222 @@ mod tests {
         let mut th = theme.lock().expect("theme mutex poisoned");
         th.insert(name, style);
         th.face_epoch += 1;
+    }
+
+    #[test]
+    fn statusline_first_empty_is_authoritative_then_silent_and_snapshot_resends() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let lua = state.lua_host.lua();
+        let callback = lua
+            .load("return function(_) return __baseline_text end")
+            .eval()
+            .expect("callback");
+        state
+            .statusline_registry
+            .borrow_mut()
+            .register(
+                "baseline".into(),
+                crate::statusline::StatuslineSide::Left,
+                0,
+                "ui.modeline".into(),
+                callback,
+                crate::command::SourceLocation::default(),
+            )
+            .expect("register");
+        let mut semantic = SemanticRenderState::for_peer(FrontendId::LOCAL, 18);
+        semantic.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+
+        assert_eq!(
+            statusline_of(&semantic.render_frame(&state)),
+            Some((buffer_id, Vec::new(), Vec::new()))
+        );
+        assert_eq!(statusline_of(&semantic.render_frame(&state)), None);
+
+        lua.globals()
+            .set("__baseline_text", "changed")
+            .expect("set");
+        let changed = vec![StatuslineSegment {
+            text: "changed".into(),
+            face: "ui.modeline".into(),
+        }];
+        assert_eq!(
+            statusline_of(&semantic.render_frame(&state)),
+            Some((buffer_id, changed.clone(), Vec::new()))
+        );
+        assert_eq!(
+            statusline_of(&semantic.render_frame(&state)),
+            None,
+            "byte-identical callback output is silent"
+        );
+
+        semantic.on_buffer_snapshot_sent(buffer_id);
+        assert_eq!(
+            statusline_of(&semantic.render_frame(&state)),
+            Some((buffer_id, changed, Vec::new())),
+            "snapshot reset makes an unchanged revisit authoritative again"
+        );
+    }
+
+    #[test]
+    fn v17_skips_callbacks_and_dynamic_faces_while_v18_orders_theme_first() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        merge_face(
+            &state,
+            "ui.modeline.project",
+            Style {
+                fg: crate::cell::Color::Indexed(6),
+                bg: crate::cell::Color::Indexed(2),
+                bold: true,
+                reverse: true,
+                ..Style::default()
+            },
+        );
+        let lua = state.lua_host.lua();
+        lua.globals().set("__statusline_calls", 0).expect("set");
+        let callback = lua
+            .load(
+                "return function(_) \
+                 __statusline_calls = __statusline_calls + 1; return 'project' end",
+            )
+            .eval()
+            .expect("callback");
+        let provider_id = state
+            .statusline_registry
+            .borrow_mut()
+            .register(
+                "project".into(),
+                crate::statusline::StatuslineSide::Left,
+                0,
+                "ui.modeline.project".into(),
+                callback,
+                crate::command::SourceLocation::default(),
+            )
+            .expect("register");
+
+        let mut v17 = SemanticRenderState::for_peer(FrontendId::LOCAL, 17);
+        v17.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let old_frame = v17.render_frame(&state);
+        assert_eq!(lua.globals().get::<i64>("__statusline_calls").unwrap(), 0);
+        assert_eq!(statusline_of(&old_frame), None);
+        assert!(
+            theme_facts_of(&old_frame)
+                .expect("v17 still receives fixed ThemeFacts")
+                .iter()
+                .all(|face| face.name != "ui.modeline.project")
+        );
+
+        let mut v18 = SemanticRenderState::for_peer(FrontendId::LOCAL, 18);
+        v18.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        let frame = v18.render_frame(&state);
+        assert_eq!(lua.globals().get::<i64>("__statusline_calls").unwrap(), 1);
+        let theme_index = frame
+            .iter()
+            .position(|message| matches!(message, InstanceMessage::ThemeFacts { .. }))
+            .expect("dynamic ThemeFacts");
+        let segments_index = frame
+            .iter()
+            .position(|message| matches!(message, InstanceMessage::StatuslineSegments { .. }))
+            .expect("segments");
+        assert!(theme_index < segments_index);
+        let project_face = theme_facts_of(&frame)
+            .unwrap()
+            .into_iter()
+            .find(|face| face.name == "ui.modeline.project")
+            .expect("exact dynamic face");
+        assert_eq!(
+            project_face.style,
+            Style {
+                fg: crate::cell::Color::Indexed(6),
+                ..Style::default()
+            }
+        );
+
+        let face_epoch = v18.last_statusline_face_set_epoch;
+        assert!(
+            state
+                .statusline_registry
+                .borrow_mut()
+                .set_priority(provider_id, 10)
+        );
+        assert_eq!(theme_facts_of(&v18.render_frame(&state)), None);
+        assert_eq!(v18.last_statusline_face_set_epoch, face_epoch);
+
+        assert!(
+            state
+                .statusline_registry
+                .borrow_mut()
+                .set_enabled(provider_id, false)
+        );
+        let disabled = v18.render_frame(&state);
+        assert!(
+            theme_facts_of(&disabled)
+                .expect("face-set shrink emits")
+                .iter()
+                .all(|face| face.name != "ui.modeline.project")
+        );
+        assert_eq!(
+            statusline_of(&disabled),
+            Some((buffer_id, Vec::new(), Vec::new()))
+        );
+    }
+
+    #[test]
+    fn invalidated_statusline_publishes_one_empty_baseline() {
+        let buffer_id = BufferId::from_raw(77);
+        let mut semantic = local();
+        let mut initial = Vec::new();
+        semantic.emit_statusline_payload(
+            buffer_id,
+            vec![StatuslineSegment {
+                text: "old".into(),
+                face: "ui.modeline".into(),
+            }],
+            Vec::new(),
+            &mut initial,
+        );
+        assert_eq!(initial.len(), 1);
+
+        let mut stale = Vec::new();
+        semantic.emit_statusline_segments(
+            StatuslineEvaluation {
+                outcome: StatuslineEvaluationOutcome::NoMessage(
+                    crate::statusline::StatuslineNoMessageReason::DeclaredBufferMismatch,
+                ),
+                new_failures: Vec::new(),
+            },
+            &mut stale,
+        );
+        assert!(stale.is_empty(), "phase-1 stale evaluation emits nothing");
+        assert_eq!(
+            semantic.last_statusline[&buffer_id].0[0].text, "old",
+            "stale evaluation retains the prior baseline until snapshot reset"
+        );
+
+        let invalidated = || StatuslineEvaluation {
+            outcome: StatuslineEvaluationOutcome::Invalidated {
+                authoritative_empty: vec![crate::statusline::StatuslineContext {
+                    frontend_id: FrontendId::LOCAL,
+                    window_id: crate::window::WindowId::next(),
+                    buffer_id,
+                    active: true,
+                }],
+            },
+            new_failures: Vec::new(),
+        };
+        let mut replacement = Vec::new();
+        semantic.emit_statusline_segments(invalidated(), &mut replacement);
+        assert_eq!(
+            statusline_of(&replacement),
+            Some((buffer_id, Vec::new(), Vec::new()))
+        );
+        let mut unchanged = Vec::new();
+        semantic.emit_statusline_segments(invalidated(), &mut unchanged);
+        assert!(
+            unchanged.is_empty(),
+            "the empty invalidation became baseline"
+        );
     }
 
     #[test]
@@ -2647,9 +3006,10 @@ mod tests {
     /// All `InstanceMessage` variants the semantic projection may
     /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`,
     /// `FileStyleSummary`, `StatusFacts` (Q#S1), `SearchPrompt`
-    /// (Q#SR5), `LineNumbers`, or `ThemeFacts` (Q#TH7) — never
-    /// `CellDelta`, grid `Cursor`, or the still-unwired
-    /// `BlockAdornments` / `FoldState` families.
+    /// (Q#SR5), `LineNumbers`, `ThemeFacts` (Q#TH7), `FontFacts`
+    /// (Q#F5), or `StatuslineSegments` (Q#SL7) — never `CellDelta`,
+    /// grid `Cursor`, or the still-unwired `BlockAdornments` /
+    /// `FoldState` families.
     fn assert_semantic_only(msgs: &[InstanceMessage]) {
         for m in msgs {
             assert!(
@@ -2664,6 +3024,7 @@ mod tests {
                         | InstanceMessage::LineNumbers { .. }
                         | InstanceMessage::ThemeFacts { .. }
                         | InstanceMessage::FontFacts { .. }
+                        | InstanceMessage::StatuslineSegments { .. }
                 ),
                 "semantic projection emitted an unexpected variant: {m:?}"
             );
@@ -2835,13 +3196,14 @@ mod tests {
         // (post-M11 minimap producer, generation-keyed), as does
         // StatusFacts (Q#S1, cached-compare), the authoritative
         // ThemeFacts table (Q#TH7 — empty for an unthemed daemon), and
-        // the authoritative FontFacts preference (Q#F5 — all-default).
+        // the authoritative FontFacts preference (Q#F5 — all-default), and
+        // authoritative empty statusline segments (Q#SL8).
         let first = s.render_frame(&state);
         assert_eq!(
             first.len(),
-            6,
+            7,
             "first frame ships StyleSpans + Decorations + FileStyleSummary \
-             + StatusFacts + ThemeFacts + FontFacts"
+             + StatusFacts + ThemeFacts + FontFacts + StatuslineSegments"
         );
         assert_semantic_only(&first);
         let (style_full, _) = style_segments(&first).expect("StyleSpans present");

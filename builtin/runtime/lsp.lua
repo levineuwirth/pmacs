@@ -791,6 +791,22 @@ function pmacs.lsp.active_attachment()
   return attachments[tostring(buf)]
 end
 
+-- Arc 4 stage 3: pure modeline projection.  This reads the private
+-- per-buffer attachment map directly so passive split windows report their
+-- own buffer instead of the focused window.  It never attaches, flushes
+-- didChange, or issues a request.
+pmacs.statusline.register {
+  name = "lsp",
+  side = "right",
+  priority = 0,
+  face = "ui.modeline.lsp",
+  fn = function(ctx)
+    local rec = attachments[tostring(ctx.buffer)]
+    if not rec then return nil end
+    return "LSP:" .. pmacs.lsp.modeline_label(rec.server)
+  end,
+}
+
 -- Flushing variant for request-issuing callers outside this file
 -- (Q#C8): when the active buffer already has a server attached,
 -- flush any debounced didChange first and return the record, so the

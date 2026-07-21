@@ -1,9 +1,9 @@
 # Statusline segments - framing (Arc 4 stage 3)
 
-**Revision 3 - 2026-07-21. Framing preserved on branch
-`statusline-segments`; re-scouted against `main` `bb17ec9` (protocol v17)
-after JSON/YAML #123 merged. No relevant substrate drift; awaiting review.
-No implementation or PR.**
+**Revision 3 - 2026-07-21. Implemented on branch
+`statusline-segments` against the post-#124 protocol-v17 base. The
+implementation advances the wire to v18, satisfies Acceptance 1-27,
+and is fully gated; awaiting review, not merged.**
 
 Revision 3: closes review findings on authoritative-empty baseline retention
 and the TUI's protected-suffix clipping boundary.
@@ -20,6 +20,38 @@ providers to the per-window modeline, carries their text plus face
 names to semantic frontends at protocol v18, and uses the existing LSP
 status tracker as the first built-in provider. Completing this stage
 completes Arc 4.
+
+## Implementation record (2026-07-21)
+
+The approved Q#SL1-Q#SL11 design is implemented without changing the
+framed ownership boundary:
+
+- `pmacs.statusline` owns a shared editor-global registry with strict
+  registration, lifecycle/introspection, monotonic layout/face-set
+  epochs, borrow-released three-phase evaluation, per-context failure
+  latches, deterministic ordering, and bounded one-line results.
+- TUI composition preserves the legacy modeline when providers are
+  absent, owns separators by adjacent segment face, shapes terminal-safe
+  grapheme runs, and protects the right diagnostic/cursor/scroll suffix.
+- Protocol v18 appends complete `StatuslineSegments` replacements. The
+  semantic producer distinguishes authoritative empty from no message,
+  versions provider execution before callbacks, expands dynamic
+  `ThemeFacts`, and resets buffer baselines symmetrically with
+  `BufferSnapshot`.
+- The GPU consumes v18 atomically, resolves exact dynamic faces, clips
+  provider runs without wrapping or displacing the protected suffix,
+  and preserves its prior valid state on malformed input.
+- `builtin/runtime/lsp.lua` registers the first pure right-side provider
+  from its private attachment map; the Rust tracker exposes bounded
+  `init`/`ready`/`degraded`/`crashed`/`stopped`/unknown labels.
+
+The final gate run was sequential and clean: `cargo fmt --check`;
+workspace/all-target Clippy with `-D warnings`; 1,610 default and 1,784
+CRDT library tests; 7 default and 8 CRDT stage-3 acceptance tests; 110
+M4 acceptance tests (3 ignored, `basedpyright` filtered); 108 required
+GPU tests; and the one-invocation workspace sweep (2,704 passed across
+78 suites, 19 ignored, `basedpyright` filtered). `git diff --check` was
+clean. No flaky rerun was needed.
 
 ## Ground truth (as of `main` at `bb17ec9`, protocol v17)
 
