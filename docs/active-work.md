@@ -72,7 +72,8 @@ If it does not, stop and repair the remote/fetch configuration.
   1,837 CRDT library tests (3 ignored each); 9 default + 10 CRDT vterm
   acceptance; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
   workspace 2,769 passed across 79 suites (19 ignored, 1 filtered); diff check
-  clean. Updated PR CI for `fc4e0ce` is pending.
+  clean. Updated PR CI for `fc4e0ce` is green across Linux/macOS, Lua
+  5.4/LuaJIT, GPU, format, lint, acceptance, and performance jobs.
 - `scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
   `bite: OK` because the old crate root could not compile the new terminal API;
   this is explicitly weaker compile-time API evidence, not a clean behavioral
