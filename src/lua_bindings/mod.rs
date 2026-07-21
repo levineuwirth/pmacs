@@ -4912,6 +4912,10 @@ fn installed_package_to_lua(lua: &Lua, pkg: &InstalledPackage) -> mlua::Result<T
 ///   `bracketed_paste_begin` / `bracketed_paste_end` /
 ///   `alt_screen_enter` / `alt_screen_exit`: `{ kind=<name> }` only
 /// - `set_title`: `{ kind="set_title", title=<string> }`
+#[allow(
+    clippy::too_many_lines,
+    reason = "exhaustive wire-to-Lua conversion keeps every ANSI variant and field visible in one audited match"
+)]
 fn event_to_lua_table(lua: &Lua, ev: &crate::ansi::AnsiEvent) -> mlua::Result<Table> {
     use crate::ansi::AnsiEvent;
     let t = lua.create_table()?;
@@ -4963,6 +4967,148 @@ fn event_to_lua_table(lua: &Lua, ev: &crate::ansi::AnsiEvent) -> mlua::Result<Ta
         }
         AnsiEvent::AlternateScreenExit => {
             t.set("kind", "alt_screen_exit")?;
+        }
+        AnsiEvent::Bell => t.set("kind", "bell")?,
+        AnsiEvent::LineFeed => t.set("kind", "line_feed")?,
+        AnsiEvent::HorizontalTab => t.set("kind", "horizontal_tab")?,
+        AnsiEvent::SetTabStop => t.set("kind", "set_tab_stop")?,
+        AnsiEvent::ClearTabStop => t.set("kind", "clear_tab_stop")?,
+        AnsiEvent::ClearAllTabStops => t.set("kind", "clear_all_tab_stops")?,
+        AnsiEvent::CursorUp(count)
+        | AnsiEvent::CursorDown(count)
+        | AnsiEvent::CursorForward(count)
+        | AnsiEvent::CursorBackward(count)
+        | AnsiEvent::CursorNextLine(count)
+        | AnsiEvent::CursorPreviousLine(count)
+        | AnsiEvent::EraseCharacters(count)
+        | AnsiEvent::InsertCharacters(count)
+        | AnsiEvent::DeleteCharacters(count)
+        | AnsiEvent::InsertLines(count)
+        | AnsiEvent::DeleteLines(count)
+        | AnsiEvent::ScrollUp(count)
+        | AnsiEvent::ScrollDown(count) => {
+            let kind = match ev {
+                AnsiEvent::CursorUp(_) => "cursor_up",
+                AnsiEvent::CursorDown(_) => "cursor_down",
+                AnsiEvent::CursorForward(_) => "cursor_forward",
+                AnsiEvent::CursorBackward(_) => "cursor_backward",
+                AnsiEvent::CursorNextLine(_) => "cursor_next_line",
+                AnsiEvent::CursorPreviousLine(_) => "cursor_previous_line",
+                AnsiEvent::EraseCharacters(_) => "erase_characters",
+                AnsiEvent::InsertCharacters(_) => "insert_characters",
+                AnsiEvent::DeleteCharacters(_) => "delete_characters",
+                AnsiEvent::InsertLines(_) => "insert_lines",
+                AnsiEvent::DeleteLines(_) => "delete_lines",
+                AnsiEvent::ScrollUp(_) => "scroll_up",
+                AnsiEvent::ScrollDown(_) => "scroll_down",
+                _ => unreachable!("outer match restricts the event"),
+            };
+            t.set("kind", kind)?;
+            t.set("count", *count)?;
+        }
+        AnsiEvent::CursorHorizontalAbsolute(col) => {
+            t.set("kind", "cursor_horizontal_absolute")?;
+            t.set("col", *col)?;
+        }
+        AnsiEvent::CursorVerticalAbsolute(row) => {
+            t.set("kind", "cursor_vertical_absolute")?;
+            t.set("row", *row)?;
+        }
+        AnsiEvent::CursorPosition { row, col } => {
+            t.set("kind", "cursor_position")?;
+            t.set("row", *row)?;
+            t.set("col", *col)?;
+        }
+        AnsiEvent::EraseDisplay(mode) | AnsiEvent::EraseLineMode(mode) => {
+            t.set(
+                "kind",
+                if matches!(ev, AnsiEvent::EraseDisplay(_)) {
+                    "erase_display"
+                } else {
+                    "erase_line_mode"
+                },
+            )?;
+            t.set(
+                "mode",
+                match mode {
+                    crate::ansi::EraseMode::ToEnd => "to_end",
+                    crate::ansi::EraseMode::ToStart => "to_start",
+                    crate::ansi::EraseMode::All => "all",
+                    crate::ansi::EraseMode::Saved => "saved",
+                },
+            )?;
+        }
+        AnsiEvent::SetScrollingRegion { top, bottom } => {
+            t.set("kind", "set_scrolling_region")?;
+            t.set("top", *top)?;
+            t.set("bottom", *bottom)?;
+        }
+        AnsiEvent::SaveCursor => t.set("kind", "save_cursor")?,
+        AnsiEvent::RestoreCursor => t.set("kind", "restore_cursor")?,
+        AnsiEvent::AlternateScreen { mode, enabled } => {
+            t.set("kind", "alternate_screen")?;
+            t.set(
+                "mode",
+                match mode {
+                    crate::ansi::AlternateScreenMode::Mode47 => 47,
+                    crate::ansi::AlternateScreenMode::Mode1047 => 1047,
+                    crate::ansi::AlternateScreenMode::Mode1049 => 1049,
+                },
+            )?;
+            t.set("enabled", *enabled)?;
+        }
+        AnsiEvent::SetMode { mode, enabled } => {
+            t.set("kind", "set_mode")?;
+            t.set(
+                "mode",
+                match mode {
+                    crate::ansi::TerminalMode::Insert => "insert",
+                    crate::ansi::TerminalMode::Origin => "origin",
+                    crate::ansi::TerminalMode::AutoWrap => "auto_wrap",
+                    crate::ansi::TerminalMode::ApplicationCursor => "application_cursor",
+                    crate::ansi::TerminalMode::ApplicationKeypad => "application_keypad",
+                    crate::ansi::TerminalMode::CursorVisible => "cursor_visible",
+                    crate::ansi::TerminalMode::BracketedPaste => "bracketed_paste",
+                    crate::ansi::TerminalMode::FocusReporting => "focus_reporting",
+                    crate::ansi::TerminalMode::SynchronizedOutput => "synchronized_output",
+                    crate::ansi::TerminalMode::MouseX10 => "mouse_x10",
+                    crate::ansi::TerminalMode::MouseButton => "mouse_button",
+                    crate::ansi::TerminalMode::MouseAny => "mouse_any",
+                    crate::ansi::TerminalMode::MouseSgr => "mouse_sgr",
+                },
+            )?;
+            t.set("enabled", *enabled)?;
+        }
+        AnsiEvent::DesignateCharacterSet { slot, charset } => {
+            t.set("kind", "designate_character_set")?;
+            t.set(
+                "slot",
+                match slot {
+                    crate::ansi::CharacterSetSlot::G0 => "g0",
+                    crate::ansi::CharacterSetSlot::G1 => "g1",
+                },
+            )?;
+            t.set(
+                "charset",
+                match charset {
+                    crate::ansi::CharacterSet::Ascii => "ascii",
+                    crate::ansi::CharacterSet::DecSpecialGraphics => "dec_special_graphics",
+                },
+            )?;
+        }
+        AnsiEvent::ShiftOut => t.set("kind", "shift_out")?,
+        AnsiEvent::ShiftIn => t.set("kind", "shift_in")?,
+        AnsiEvent::DeviceRequest(request) => {
+            t.set("kind", "device_request")?;
+            t.set(
+                "request",
+                match request {
+                    crate::ansi::DeviceRequest::PrimaryAttributes => "primary_attributes",
+                    crate::ansi::DeviceRequest::SecondaryAttributes => "secondary_attributes",
+                    crate::ansi::DeviceRequest::OperatingStatus => "operating_status",
+                    crate::ansi::DeviceRequest::CursorPosition => "cursor_position",
+                },
+            )?;
         }
     }
     Ok(t)
@@ -7582,6 +7728,7 @@ fn lua_to_spec(table: &Table) -> mlua::Result<ProcessSpec> {
         mode,
         restart,
         ansi_events,
+        ansi_profile: crate::ansi::AnsiParserProfile::LineOriented,
         stdin,
         group,
     })
@@ -7787,7 +7934,14 @@ pub fn install_process(lua: &Lua, supervisor: &SharedProcessSupervisor) -> mlua:
             "list",
             lua.create_function(move |lua, ()| {
                 let sup = s.borrow();
-                let ids: Vec<ProcessId> = sup.ids().collect();
+                let ids: Vec<ProcessId> = sup
+                    .ids()
+                    .filter(|id| {
+                        sup.spec(*id).is_none_or(|spec| {
+                            spec.ansi_profile == crate::ansi::AnsiParserProfile::LineOriented
+                        })
+                    })
+                    .collect();
                 let out = lua.create_table_with_capacity(ids.len(), 0)?;
                 for (i, id) in ids.iter().enumerate() {
                     let row = lua.create_table_with_capacity(0, 3)?;

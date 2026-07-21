@@ -64,6 +64,9 @@ pub struct EditorState {
     /// Drop-time `shutdown` enforces SIGTERM-then-SIGKILL so editor
     /// exit cannot leave zombies.
     pub process_supervisor: crate::lua_bindings::SharedProcessSupervisor,
+    /// Terminal session registry. Shared with future terminal Lua bindings;
+    /// snapshots are owned so no screen borrow crosses editor/Lua/render work.
+    pub terminal_manager: crate::terminal::session::SharedTerminalManager,
     /// LSP manager (T M4.5). Holds one [`crate::lsp::LspClient`] per
     /// language server; rides on top of [`Self::process_supervisor`]
     /// for spawn / I/O / restart. Constructed empty; user code
@@ -133,6 +136,11 @@ impl Drop for EditorState {
     /// stuck mid-handoff stays alive (bounded by its job), which is
     /// still a ~15x improvement over leaking every pool whole.
     fn drop(&mut self) {
+        {
+            let mut supervisor = self.process_supervisor.borrow_mut();
+            self.terminal_manager.borrow_mut().shutdown(&mut supervisor);
+            supervisor.shutdown();
+        }
         self.async_runtime.shutdown_workers();
     }
 }
@@ -239,6 +247,7 @@ impl EditorState {
         // shutdown enforces no-zombie cleanup at editor exit.
         let process_supervisor = crate::lua_bindings::make_process_supervisor(lua_host.lua())
             .expect("install pmacs.process");
+        let terminal_manager = Rc::new(RefCell::new(crate::terminal::TerminalManager::new()));
         // T M4.5 LSP manager. Wires onto the same supervisor so its
         // spawn/restart/I/O machinery is shared with `pmacs.process.*`.
         // The manager itself is reachable from Lua as `pmacs.lsp.*`.
@@ -481,6 +490,7 @@ impl EditorState {
             async_runtime,
             syntax_registry,
             process_supervisor,
+            terminal_manager,
             lsp_manager,
             font_pref,
             mcp_manager,
@@ -493,17 +503,35 @@ impl EditorState {
         }
     }
 
-    /// One pass of the process supervisor: drain pending I/O / exit
-    /// events and apply restart policies. Mirrors
-    /// [`Self::tick_async`]; the run loop calls both per iteration.
+    /// Transactionally open an internal Stage-1 terminal session.
     ///
-    /// Fires the `process.after-tick` hook (T M6.5) after the supervisor
-    /// tick releases its borrow. Lua subscribers typically own a
-    /// `{[process_id] = handle}` registry and drain events via
-    /// `pmacs.process.events_take(id)`; the REPL package
-    /// (`builtin/packages/repl/init.lua`) is the first such consumer.
+    /// No interactive Lua command is registered until a frontend can render
+    /// terminal snapshots. This Rust seam is used by headless acceptance and
+    /// future bindings.
+    pub fn open_terminal(
+        &mut self,
+        spec: crate::terminal::TerminalSpec,
+    ) -> Result<crate::buffer::BufferId, crate::terminal::TerminalError> {
+        let mut manager = self.terminal_manager.borrow_mut();
+        let mut core = self.core.borrow_mut();
+        let mut supervisor = self.process_supervisor.borrow_mut();
+        manager.open(spec, &mut core, &mut supervisor)
+    }
+
+    /// One pass of the process supervisor and terminal-owned event drain.
+    ///
+    /// Ordering is supervisor tick → terminal drain/prune →
+    /// `process.after-tick`. `TerminalManager` calls `take_events` only for its
+    /// own `ProcessId`s; existing Lua/LSP/MCP ownership remains unchanged.
     pub fn tick_processes(&mut self) {
-        self.process_supervisor.borrow_mut().tick();
+        {
+            let mut supervisor = self.process_supervisor.borrow_mut();
+            supervisor.tick();
+            let mut manager = self.terminal_manager.borrow_mut();
+            manager.tick(&mut supervisor);
+            let core = self.core.borrow();
+            manager.prune(&core, &mut supervisor);
+        }
         self.lua_host
             .run_hook("process.after-tick", mlua::MultiValue::new());
     }

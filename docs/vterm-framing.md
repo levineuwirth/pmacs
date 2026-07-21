@@ -1,13 +1,16 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 2 — 2026-07-21. Status: decisions folded; awaiting approval, no implementation.**
+**Revision 3 — 2026-07-21. Status: Stage 1 terminal core implemented and fully
+gated on `vterm-core`, awaiting review; not merged. Stages 2 and 3 are not
+implemented.**
 
-Revision 2 records the architecture discussion: `C-c` is the terminal editor
-escape (`C-c C-c` sends interrupt); main-screen resize reflows while alternate
-screen clips/pads; exited buffers remain with an Emacs-style process message;
-protocol v19 is additive with complete frames; shared `Style` stays unchanged;
-and one `BufferId` owns one shared process/screen whose most recently active
-frontend controls size.
+Revision 3 records the Stage 1 implementation and downstream consumer reviews.
+The architecture remains unchanged: `C-c` is the terminal editor escape
+(`C-c C-c` sends interrupt); main-screen resize reflows while alternate screen
+clips/pads; exited buffers remain with an Emacs-style process message; protocol
+v19 is additive with complete frames; shared `Style` stays unchanged; and one
+`BufferId` owns one shared process/screen whose most recently active frontend
+controls size.
 
 This framing follows the compile-mode terminal substrate that landed in PR
 #113. `src/process.rs` already owns PTY creation, process groups, bounded
@@ -28,6 +31,123 @@ Arc 5 stage 2 ships as three separately reviewed PRs:
 
 There is no single mega-PR. Each stage is useful and testable by itself, and a
 later stage starts only after the preceding stage lands on `main`.
+
+## 0. Revision 3 — Stage 1 implementation record
+
+The first of the three vterm PRs is implemented on `vterm-core`, fully gated,
+and awaiting review. It is deliberately headless: there is no `pmacs.terminal`
+Lua module, interactive terminal command, TUI paint branch, or GPU/protocol
+surface yet.
+
+### 0.1 Public seam and ownership
+
+`src/terminal/session.rs` exports:
+
+- owned `TerminalSpec { command, args, cwd, env, name, rows, cols,
+  scrollback_rows }`, with `new` and strict pre-side-effect `validate`;
+- `TerminalProcessState::{Running, Exited(i32), Signaled(String),
+  Crashed(String)}`;
+- owned `TerminalSnapshot { buffer_id, size, cells, cursor, title,
+  screen_generation, selection, scroll_offset, at_bottom, pid, process }`;
+- `SharedTerminalManager = Rc<RefCell<TerminalManager>>`;
+- `TerminalManager::{new, len, is_empty, open, is_terminal, process_id,
+  snapshot, tick, send, resize, terminate, prune, shutdown}`.
+
+The Stage 1 `snapshot(BufferId)` is intentionally context-free:
+`selection=[]`, `scroll_offset=0`, and `at_bottom=true`. Stage 2 adds
+per-`(FrontendId, WindowId, BufferId)` state and an owned
+`snapshot_for_view(...)`; it must not add a second screen.
+
+`EditorState` owns the one shared manager. Tick order is supervisor `tick` →
+terminal-owned PID drain/watchdog/prune → `process.after-tick`; LSP, MCP, and
+ordinary Lua process events retain their existing owners. `ProcessSpec` gained
+an `AnsiParserProfile`: `ProcessSpec::new` and Lua `ansi=true` stay
+`LineOriented`, while terminal sessions explicitly request `FullScreen`.
+Synchronous unpublished terminal spawn failure emits no orphan process event.
+
+Terminal identity buffers are pathless, clean, empty, and buffer-read-only.
+The guard runs before direct edits, split Lua begin/skip-intercept edits,
+undo/redo, and local/remote CRDT content import. Attaching an immutable empty
+CRDT for semantic identity remains valid.
+
+### 0.2 Stage 1 acceptance mapping
+
+All fourteen Stage 1 criteria are implemented:
+
+1. whole/split parser equivalence:
+   `screen::tests::parser_split_points_produce_identical_screen` plus the ANSI
+   split matrix;
+2. malformed/truncated/over-cap recovery: the 44 `ansi::tests`, including
+   split UTF-8, ignored CSI/OSC/DCS, and forward-progress cases;
+3. cursor/region/edit exactness:
+   `cursor_erase_insert_delete_scroll_and_margins_mutate_exact_regions`;
+4. pending wrap/wide/combining invariants: wide overwrite, split ZWJ/RI/
+   modifier/variation, right-edge, and continuation tests;
+5. alternate/synchronized publication:
+   `alternate_screen_preserves_main_and_has_no_history`,
+   `synchronized_output_gates_snapshot_and_finish_releases`, and watchdog;
+6. DEC G0/G1 + SI/SO: `acs_and_device_replies_are_exact`;
+7. SGR fidelity and ignored attributes: ANSI SGR/color/underline tests plus
+   screen operation coverage;
+8. resize semantics: soft-wrap reflow, wide-boundary/cursor/hard-break tests,
+   alternate clipping, and atomic invalid resize;
+9. dual history limits: `history_obeys_row_and_cell_caps`;
+10. bounded DA/DSR/CPR and unsupported-output safety:
+    `acs_and_device_replies_are_exact` plus parser ignore cases;
+11. strict owned specifications:
+    `strict_owned_spec_rejects_before_spawn_and_is_mutation_independent`;
+12. real adversarial PTY/final drain:
+    `final_output_precedes_exact_nonzero_annotation_and_buffer_is_retained`
+    splits ESC/CSI writes, observes addressed alternate-screen output while
+    running, unblocks raw stdin through `send`, restores the main screen, and
+    proves final output precedes the exact PID/outcome annotation; zero,
+    non-zero, signal, wrapped, and one-row annotations are separately pinned;
+13. lifecycle cleanup: transactional failure, live buffer-kill prune/reap, and
+    TERM-ignoring editor shutdown acceptance;
+14. read-only/CRDT invariants: default + CRDT shared acceptance and focused
+    buffer unit tests cover every mutation route and empty bootstrap.
+
+### 0.3 Final gates and bite
+
+After one initial Clippy-only failure for the new acceptance crate's missing
+module documentation, that source issue was fixed and the complete sequence was
+restarted from gate 1:
+
+- `cargo fmt --check`: clean;
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean;
+- default library: 1,657 passed, 3 ignored;
+- CRDT library: 1,833 passed, 3 ignored;
+- Stage 1 acceptance: 8 default + 9 CRDT passed;
+- M4 acceptance: 114 passed, 3 ignored, 1 `basedpyright` filtered;
+- required GPU: 109 passed;
+- workspace: 2,764 passed across 79 suites, 19 ignored, 1 filtered;
+- `git diff --check`: clean.
+
+`scripts/bite main src/lib.rs --test vterm_stage1_acceptance` returned
+`bite: OK`: the swapped pre-stage crate root cannot compile the new terminal
+API. This is explicitly the helper's weaker compile-time API bite, not a clean
+behavioral assertion failure.
+
+### 0.4 Downstream review findings (not implemented)
+
+Stage 2 must derive PTY resize ownership from a durable accepted-input/focus
+owner before render fan-out, never transient `EditorCore::active_frontend`.
+Because `KeyDispatcher` pending state is global, a terminal `C-c` continuation
+must carry its owning `FrontendId`. Terminal copy should use the existing core
+kill-ring/clipboard setter, while the local run loop must drain/present
+clipboard signals; active-terminal BEL likewise uses the out-of-band frontend
+signal path.
+
+Stage 3 additionally owns `pmacs-gpu/src/attach.rs` for gated terminal
+resize/pointer sending and coalescing. Daemon handlers must authenticate source
+frontend/buffer ownership before input, resize, or pointer routing. Wire-facing
+terminal state, selection, and limits must live in or be re-exported from
+`pmacs-protocol`. The current 16 MiB transport frame cap cannot hold the legal
+worst complete terminal frame (up to roughly 64 MiB of cluster bytes before
+encoding overhead): Stage 3 must either raise and test a measured cap at least
+as large as the legal worst case (review estimate at least 80 MiB), or add a
+shared aggregate payload bound. It must never silently chunk the locked
+complete-frame protocol.
 
 ## 1. Problem and ownership boundary
 
@@ -651,10 +771,10 @@ Per-stage utilization:
 
 ## 8. Branch and PR plan
 
-After this framing is approved:
+Stage 1 is now implemented and fully gated on `vterm-core`, awaiting review and
+not merged. Continue the approved plan only after the preceding PR lands:
 
-1. create sibling worktree `pmacs-vterm-core`, branch `vterm-core`, from current
-   canonical `main`; implement/gate/open PR; merge only when the user says;
+1. review `vterm-core`; merge only when the user says;
 2. after stage 1 merges, create `pmacs-vterm-tui`, branch `vterm-tui`, from the
    new `main`; implement/gate/open a second PR;
 3. after stage 2 merges, create `pmacs-vterm-gpu`, branch `vterm-gpu`, from the

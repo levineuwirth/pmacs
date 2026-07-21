@@ -1,8 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, with Themes Arc 4 stage 3 implemented and
-fully gated on the `statusline-segments` feature branch (awaiting
-review; not merged).** This file is the bridge between development
+**Last updated: 2026-07-21, with Vterm Stage 1 implemented and fully gated on
+the `vterm-core` feature branch (awaiting review; not merged). Vterm Stages 2
+and 3 are not implemented.** This file is the bridge between development
 machines. If you are an agent reading on a fresh clone: this document
 plus the `docs/*-framing.md` files ARE your memory. Read this fully
 before taking on work, seed persistent memory from it, and **update this
@@ -123,6 +123,43 @@ next machine reads it the way you just did.
     workspace sweep 2,718 passed across 78 suites (19 ignored,
     `basedpyright` filtered); `git diff --check` clean. This branch is
     awaiting review and **must not be described as merged**.
+- **Vterm Stage 1 terminal core IMPLEMENTED ON `vterm-core`, FULLY GATED,
+  AWAITING REVIEW, NOT MERGED** (`docs/vterm-framing.md` rev 3).
+  - `AnsiParserProfile::{LineOriented, FullScreen}` preserves compile/REPL
+    behavior while terminal PTYs emit the full cursor/mode/device operation
+    set. `src/terminal/{screen,input,session}.rs` owns the state machine,
+    encoders, and lifecycle registry.
+  - Public session seam: owned strict `TerminalSpec`; owned
+    `TerminalSnapshot`; `TerminalProcessState`; and
+    `SharedTerminalManager = Rc<RefCell<TerminalManager>>` with
+    `open/is_terminal/process_id/snapshot/tick/send/resize/terminate/prune/
+    shutdown`. Stage 1 snapshots are context-free; Stage 2 adds per-view
+    state without a second screen.
+  - `EditorState` tick order is supervisor → terminal-owned PID drain/prune →
+    `process.after-tick`. Terminal IDs are not exposed through
+    `pmacs.process`; ordinary Lua/LSP/MCP ownership is unchanged. Terminal
+    identity buffers are pathless, clean, empty, round-trip, and guarded
+    read-only at every rope/CRDT/history mutation boundary.
+  - Acceptance 1–14 is mapped in the framing. The real PTY bite splits
+    ESC/CSI writes, observes alternate-screen cursor addressing, blocks and
+    resumes through raw `send`, restores the main screen, and pins final
+    output before exact PID/outcome annotation. One-row annotation visibility,
+    TERM-ignoring shutdown, spawn rollback, buffer-kill prune, and immutable
+    empty CRDT bootstrap are pinned.
+  - Final from-start rerun: Clippy clean; 1,657 default + 1,833 CRDT library
+    tests (3 ignored each); 8 default + 9 CRDT vterm acceptance; M4 114 passed
+    (3 ignored, 1 filtered); required GPU 109; workspace 2,764 passed across
+    79 suites (19 ignored, 1 filtered); diff check clean. The first Clippy
+    attempt found only missing crate docs in the new acceptance; it was fixed
+    and the whole sequence restarted. `scripts/bite main src/lib.rs --test
+    vterm_stage1_acceptance` is green only as the helper's explicitly weaker
+    compile-time API bite.
+  - Stage 2 reviews require a durable focus/input resize owner, owning
+    `FrontendId` for the global `C-c` continuation, and local clipboard/BEL
+    signal drainage. Stage 3 additionally owns `pmacs-gpu/src/attach.rs`,
+    authenticated source routing, protocol-owned wire types/limits, and a
+    deliberate complete-frame limit decision: 16 MiB is insufficient; use a
+    measured legal-worst cap or aggregate bound, never silent chunking.
 - Roadmap: `docs/roadmap-2026-07.md` (ranked arcs). Position:
   - **Arc 1 (LSP utility surface) COMPLETE** — completion popup
     (#92/#93), panels/references/outline/hover (#94–#96), plus

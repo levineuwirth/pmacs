@@ -91,15 +91,24 @@ composition, a pure built-in LSP segment, dynamic modeline faces, and
 semantic/GPU transport through protocol v18. Merging stage 3 completes
 Arc 4 on `main`.
 
-### Arc 5 — Terminal, staged
+### Arc 5 — Terminal, staged — VTERM STAGE 1 ON FEATURE BRANCH
 
-- **Stage 1**: compile-mode / grep-mode / shell-command on the existing
-  PTY + ANSI + REPL-package substrate (line-oriented output buffer,
-  error-regex jump-to-file, `M-x compile`). Cheap, transformative.
-- **Stage 2 (vterm)**: extend `ansi.rs` into a 2D grid model
-  (alt-screen, cursor addressing, scrollback — parser already
-  recognizes and discards these), grid-backed buffer view, GPU
-  rendering question (grid cells vs text buffer).
+- **Compile-mode landed** in #113: line-oriented PTY/ANSI output,
+  error-regex navigation, and `M-x compile`.
+- **Vterm Stage 1 terminal core** is implemented and fully gated on
+  `vterm-core`, awaiting review and **not merged**. It adds the compatibility
+  parser profiles, bounded VT screen/scrollback/reflow state machine, input
+  encoders, internal `TerminalManager`, read-only identity-buffer invariant,
+  process lifecycle/final annotations, and headless real-PTY acceptance. It
+  intentionally adds no interactive Lua command or frontend rendering.
+- **Vterm Stage 2 TUI** starts only after Stage 1 merges: terminal-window
+  composition, input/resize, per-context scroll/selection/copy, and the Lua
+  surface.
+- **Vterm Stage 3 protocol/GPU** starts only after Stage 2 merges: additive
+  protocol v19 complete frames, authenticated daemon routing, and native GPU
+  cell rendering. Its framing must resolve the current 16 MiB transport cap's
+  incompatibility with the legal worst complete terminal frame; never silently
+  chunk.
 
 ### Arc 6 — Folding (keystone gutter rider)
 

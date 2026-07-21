@@ -131,6 +131,7 @@ pub mod state;
 pub mod statusline;
 pub mod symbol;
 pub mod syntax;
+pub mod terminal;
 pub mod text_view;
 pub mod transport;
 pub mod view;
