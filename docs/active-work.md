@@ -52,6 +52,28 @@ The first command must expose `643d1e1` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 
+## Vterm Stage 2 framing lane
+
+- Portable branch: `githubsucks/vterm-framing`
+- Approved framing head: `fb4f8f0`
+- Base: canonical `main` @ `643d1e1` (Vterm Stage 1 / PR #126 merged).
+- State: `docs/vterm-framing.md` Revision 7 is framing-only, reviewed, and
+  approved for implementation. It closes the final `at_bottom`, terminal
+  `C-c` binding-reachability, and context-implicit Lua failure-mode findings.
+  There is no Stage 2 runtime implementation or PR yet.
+- Next lane: create `pmacs-vterm-tui` / `vterm-tui` from current canonical
+  `main`, carry the approved framing as its first commit, then implement and
+  gate Stage 2. Do not implement on `vterm-framing`.
+
+Recovery worktree on a machine that does not already own the branch:
+
+```sh
+git worktree add --track \
+  -b vterm-framing \
+  ../pmacs-vterm-framing \
+  githubsucks/vterm-framing
+```
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
