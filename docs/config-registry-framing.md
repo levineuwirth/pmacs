@@ -550,6 +550,14 @@ already-conforming value. The registry stays strict; the legacy API
 stays lenient; acceptance 27-28 pin both directions on inputs no current
 test covers.
 
+One honest divergence from "the wrapper's shape stays exactly as it
+was", found in review round 1: `pmacs.autosave.interval_ms(1e30)`
+previously stored the float, and now raises `NonIntegral` because the
+floored value exceeds `i64` range. The old behavior stored a nonsense
+interval; the new one refuses it. An improvement, but a behavior change
+at the extreme rather than a pure no-op migration, so it is recorded
+here rather than claimed away.
+
 Richer feature-specific APIs are explicitly not deleted:
 `pmacs.gpu.set_font` remains the font preference API until a separately
 framed migration decides how a daemon-global preference and
@@ -809,6 +817,27 @@ points.
 - **`M-x list-settings`** as a listview panel (Q#CR11).
 - **A `customize`-style editing UI**, and a `:set`-style minibuffer
   command.
+- **A `scope = "global"` define flag** (review round 1, finding 2).
+  `set_local` currently succeeds for any `Live` setting, including ones
+  whose consumer only ever reads the global chain. `editing.trim-on-save`
+  was fixed by making its consumer buffer-aware — the save hook now
+  resolves against the buffer being saved — but a per-buffer
+  `autosave.interval-ms` is *semantically* meaningless (there is one
+  sweep timer, not one per buffer) and the API still accepts it, stores
+  it, and reports it from `describe`. That is a stored value nothing
+  reads, the same shape F1 exists to prevent. The fix is a define-time
+  scope declaration letting the registry refuse `set_local` outright,
+  exactly as `StartupOnlyLocal` already refuses another meaningless
+  combination. Deferred rather than taken in review round 1 because it
+  adds public API surface after review.
+- **Field-naming in bound-parse errors** — a bad `min` reports the
+  config name and the expected type but not *which* of `min`/`max`
+  offended. Cheap, but wants its own error variant rather than a
+  synthesized pseudo-name.
+- **`reset(name, buf)` symmetry for `StartupOnly`** — `set_local` is
+  refused with `StartupOnlyLocal` but the buffer-local `reset` is
+  allowed. Unreachable-harmless today (no such local can exist), so a
+  rejection would be symmetry rather than a fix.
 
 ---
 

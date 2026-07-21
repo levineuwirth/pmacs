@@ -225,6 +225,50 @@ fn auto_pair_defaults_on_so_the_migration_changed_no_default() {
 }
 
 // ---------------------------------------------------------------------------
+// Item 13 — the purge runs on the REAL buffer-death path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn killing_a_buffer_through_the_real_path_purges_its_locals() {
+    // Review round 1, finding 4. Every other test of the purge calls
+    // `ConfigRegistry::remove_buffer` directly, so deleting the three
+    // lines wired into `after_buffer_removed` would leave them all
+    // green. This drives `pmacs.buffer.remove`, which is the production
+    // route (`remove_buffer_and_fire` -> `after_buffer_removed`), and
+    // fails if that wiring is absent.
+    //
+    // The assertion reads through the DEAD handle on purpose: BufferIds
+    // are never reused (buffer_registry.rs), so a stale id cannot alias
+    // a later buffer, and `is_set` against it reports exactly whether
+    // the registry still holds that buffer's map.
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let a = write_file(&dir, "a.rs", "");
+    exec(&s, &format!("DEAD = pmacs.buffer.find_or_open({a:?})"));
+    exec(
+        &s,
+        "pmacs.config.set_local(DEAD, 'editing.auto-pair', false)",
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.config.is_set('editing.auto-pair', DEAD)"),
+        "precondition: the buffer-local override is stored"
+    );
+
+    // Switch away first so killing the buffer cannot leave the window
+    // pointing at a dead buffer, then remove it through the real path.
+    exec(&s, "pmacs.buffer.remove(DEAD)");
+
+    assert!(
+        !eval::<bool>(&s, "return pmacs.config.is_set('editing.auto-pair', DEAD)"),
+        "the buffer's locals must be purged when it is removed"
+    );
+    assert!(
+        eval::<bool>(&s, "return pmacs.config.get('editing.auto-pair', DEAD)"),
+        "and resolution falls back to the global default"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Items 27 / 28 — the migration wrappers keep their legacy coercion (F4)
 // ---------------------------------------------------------------------------
 
@@ -243,6 +287,56 @@ fn trim_on_save_wrapper_and_registry_are_interchangeable_both_ways() {
     assert!(
         !via_wrapper,
         "the registry's write must be visible through the wrapper"
+    );
+}
+
+#[test]
+fn trim_on_save_honors_a_buffer_local_override() {
+    // Review round 1, finding 2. The save hook resolves against the
+    // buffer being saved, so `set_local` is a real per-buffer switch
+    // rather than a stored value nothing ever reads.
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let a = write_file(&dir, "a.rs", "");
+    exec(&s, &format!("BUF = pmacs.buffer.find_or_open({a:?})"));
+    // The content must be INSERTED, not merely present on disk:
+    // `save()` no-ops on an unmodified buffer, so a freshly-opened
+    // buffer would leave the file byte-identical and this test would
+    // pass without the save hook ever running.
+    exec(&s, r#"BUF:insert(0, "keep me   \n")"#);
+
+    // Globally on, but off for this buffer: trailing space survives.
+    exec(&s, "pmacs.config.set('editing.trim-on-save', true)");
+    exec(
+        &s,
+        "pmacs.config.set_local(BUF, 'editing.trim-on-save', false)",
+    );
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    assert_eq!(
+        std::fs::read_to_string(&a).unwrap(),
+        "keep me   \n",
+        "a buffer-local false must suppress trimming for this buffer"
+    );
+}
+
+#[test]
+fn trim_on_save_still_falls_back_to_the_global_value() {
+    // The other half of finding 2's fix, and its regression guard:
+    // now that the hook passes a buffer, a broken fallback would make
+    // the global setting silently stop working. A separate editor and
+    // file because `save()` no-ops on an unmodified buffer, so the two
+    // cases cannot share one save cycle.
+    let dir = fresh_state_dir();
+    let s = editor(&dir);
+    let a = write_file(&dir, "a.rs", "");
+    exec(&s, &format!("BUF = pmacs.buffer.find_or_open({a:?})"));
+    exec(&s, r#"BUF:insert(0, "trim me   \n")"#);
+    exec(&s, "pmacs.config.set('editing.trim-on-save', true)");
+    exec(&s, "pmacs.command.invoke('buffer.save')");
+    assert_eq!(
+        std::fs::read_to_string(&a).unwrap(),
+        "trim me\n",
+        "with no buffer-local override the global setting must still apply"
     );
 }
 

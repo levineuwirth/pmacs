@@ -874,7 +874,15 @@ pmacs.hook.add("buffer.before-save", function()
   -- either way). Both reports are pcall'd — a broken reporting
   -- channel must not resurrect the veto.
   local ok, err = pcall(function()
-    if pmacs.config.get("editing.trim-on-save") then
+    -- Resolved against the buffer being saved, not the global chain
+    -- (review round 1, finding 2). `buffer.before-save` fires for the
+    -- ACTIVE buffer -- which is also the one `trim_active` rewrites --
+    -- so passing it here is what makes a buffer-local override mean
+    -- something. Reading globally would accept `set_local`, store it,
+    -- report it from `describe`, and then never consult it: a pin the
+    -- user believes in that does nothing, which is the same failure
+    -- shape F1 exists to prevent.
+    if pmacs.config.get("editing.trim-on-save", pmacs.window.buffer()) then
       trim_active("delete-trailing-whitespace (on save)")
     end
   end)

@@ -185,6 +185,22 @@ enum ConfigBindingError {
         name: String,
     },
 
+    /// `define` carried a spec field that means nothing for the
+    /// declared `type` --- `choices` on a string, `min` on a boolean.
+    /// Correctly spelled, wrongly placed: the R50 whitelist cannot see
+    /// it, so it is checked against the kind instead.
+    #[error(
+        "config field `{field}` is meaningless for type = \"{got_type}\"; \
+         `min`/`max` require integer or number, `choices` requires enum, \
+         `allow_empty` requires string"
+    )]
+    FieldIrrelevantForType {
+        /// The offending field name.
+        field: &'static str,
+        /// The declared type it was paired with.
+        got_type: String,
+    },
+
     /// `define`'s `mutability` field wasn't `"live"` or `"startup"`.
     #[error("unknown config mutability `{got}`; expected one of: live, startup")]
     UnknownMutability {
@@ -347,10 +363,42 @@ fn read_choices(spec: &Table, name: &str) -> mlua::Result<Vec<String>> {
     Ok(choices)
 }
 
+/// Reject spec fields that are meaningless for the declared `type`
+/// (review round 1, finding 3).
+///
+/// `DEFINE_SPEC_FIELDS` whitelists every key for every type, and the
+/// kind parser below only reads the ones its own arm cares about ---
+/// so without this check `{ type = "string", choices = {"a","b"} }`
+/// silently defines a string that accepts anything (the author meant
+/// `enum`), and `{ type = "boolean", min = 1 }` silently drops the
+/// bound. Both are typo-shaped bugs of exactly the class R50 exists to
+/// catch; the whitelist alone only catches misspelled keys, not
+/// correctly-spelled keys on the wrong type.
+fn check_fields_relevant_to_kind(spec: &Table, type_str: &str) -> mlua::Result<()> {
+    let numeric = matches!(type_str, "integer" | "number");
+    for (field, allowed_for) in [
+        ("min", numeric),
+        ("max", numeric),
+        ("choices", type_str == "enum"),
+        ("allow_empty", type_str == "string"),
+    ] {
+        if !allowed_for && !matches!(spec.raw_get::<Value>(field)?, Value::Nil) {
+            return Err(mlua::Error::external(
+                ConfigBindingError::FieldIrrelevantForType {
+                    field,
+                    got_type: type_str.to_owned(),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_kind_and_default(spec: &Table, name: &str) -> mlua::Result<(ConfigKind, ConfigValue)> {
     let type_str: Option<String> = spec.raw_get("type")?;
     let type_str =
         type_str.ok_or_else(|| mlua::Error::external(ConfigBindingError::MissingType))?;
+    check_fields_relevant_to_kind(spec, &type_str)?;
 
     let kind = match type_str.as_str() {
         "boolean" => ConfigKind::Boolean,
@@ -928,6 +976,107 @@ mod tests {
         assert_eq!(
             names, 0,
             "the rejected define must not have registered anything"
+        );
+    }
+
+    // ---- review round 1, finding 3: correctly spelled, wrongly typed --------
+
+    #[test]
+    fn define_rejects_spec_fields_meaningless_for_the_declared_type() {
+        // The R50 whitelist accepts all nine keys for every type, so
+        // these are invisible to it: each field below is spelled
+        // correctly but means nothing for the type it is paired with.
+        // Before the kind cross-check, `type = "string"` with `choices`
+        // silently defined a string that accepts ANYTHING -- the author
+        // plainly meant `enum` -- and `min` on a boolean was dropped.
+        for (spec, offender) in [
+            (
+                r#"{ name="a.b", description="d", type="string", default="x", choices={"a"} }"#,
+                "choices",
+            ),
+            (
+                r#"{ name="a.b", description="d", type="boolean", default=true, min=1 }"#,
+                "min",
+            ),
+            (
+                r#"{ name="a.b", description="d", type="boolean", default=true, max=1 }"#,
+                "max",
+            ),
+            (
+                r#"{ name="a.b", description="d", type="integer", default=1, allow_empty=true }"#,
+                "allow_empty",
+            ),
+            (
+                r#"{ name="a.b", description="d", type="enum", choices={"x"}, default="x", min=1 }"#,
+                "min",
+            ),
+        ] {
+            let (lua, _reg) = fresh();
+            let err = run(&lua, &format!("pmacs.config.define {spec}")).unwrap_err();
+            assert!(
+                err.to_string().contains(offender),
+                "the error must name the misplaced field {offender}: {err}"
+            );
+            let n: i64 = eval(&lua, "return #pmacs.config.list()").unwrap();
+            assert_eq!(n, 0, "a rejected define registers nothing");
+        }
+    }
+
+    #[test]
+    fn define_still_accepts_each_field_on_its_own_type() {
+        // The guard must not over-reject: every field remains legal
+        // where it belongs, including on `number` as well as `integer`.
+        let (lua, _reg) = fresh();
+        for spec in [
+            r#"{ name="a.int", description="d", type="integer", default=5, min=1, max=9 }"#,
+            r#"{ name="a.num", description="d", type="number", default=0.5, min=0.0, max=1.0 }"#,
+            r#"{ name="a.str", description="d", type="string", default="", allow_empty=true }"#,
+            r#"{ name="a.enum", description="d", type="enum", default="x", choices={"x","y"} }"#,
+            r#"{ name="a.bool", description="d", type="boolean", default=true }"#,
+        ] {
+            run(&lua, &format!("pmacs.config.define {spec}"))
+                .unwrap_or_else(|e| panic!("{spec} must be accepted: {e}"));
+        }
+        let n: i64 = eval(&lua, "return #pmacs.config.list()").unwrap();
+        assert_eq!(n, 5);
+    }
+
+    // ---- review round 1, finding 1: the saturating i64 boundary, via Lua ----
+
+    #[test]
+    fn set_rejects_the_saturating_i64_boundary_from_lua() {
+        // 2^63 is a float on BOTH backends (LuaJIT has no integer
+        // subtype; Lua 5.4's `2^63` is a float too). Before the `>=`
+        // fix this stored i64::MAX -- a silent off-by-one against the
+        // module's own "never silently change its value" contract.
+        let (lua, _reg) = fresh();
+        run(
+            &lua,
+            r#"pmacs.config.define{ name="a.n", description="d", type="integer", default=0 }"#,
+        )
+        .unwrap();
+        let err = run(&lua, "pmacs.config.set('a.n', 2^63)").unwrap_err();
+        assert!(
+            err.to_string().contains("integer") || err.to_string().contains("integral"),
+            "2^63 must be refused, not saturated: {err}"
+        );
+        let still: i64 = eval(&lua, "return pmacs.config.get('a.n')").unwrap();
+        assert_eq!(still, 0, "the refused set must not have stored anything");
+    }
+
+    #[test]
+    fn define_rejects_the_saturating_i64_boundary_in_a_bound() {
+        // `min`/`max` go through read_bound_i64 -> lua_exact_i64 ->
+        // int_from_f64, so the same boundary must be refused in a spec.
+        let (lua, _reg) = fresh();
+        let err = run(
+            &lua,
+            r#"pmacs.config.define{ name="a.n", description="d", type="integer", default=0, max=2^63 }"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("integer") || err.to_string().contains("integral"),
+            "a 2^63 bound must be refused: {err}"
         );
     }
 
