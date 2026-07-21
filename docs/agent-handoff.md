@@ -1,9 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after the JSON/YAML review-documentation
-cleanup and the cross-machine continuity audit;
-main still reflects GPU font preferences (#124), themes stage 1 (#120),
-and injections (#122).** This file is the
+**Last updated: 2026-07-21, after JSON/YAML (#123) merged and the
+cross-machine continuity audit; main also reflects GPU font preferences
+(#124), themes stage 1 (#120), and injections (#122).** This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
 files ARE your memory. Read this fully before taking on work, seed
@@ -14,11 +13,11 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-20)
+## 1. Where the project stands (2026-07-21)
 
-- `main` @ `f8096ff` (GPU font preferences #124 merged), protocol
-  **v17** (`SUPPORTED=[6..17]`; v15→16 shipped `ThemeFacts`, v16→17
-  shipped `FontFacts`).
+- `main` @ `bb17ec9` (JSON + YAML #123 merged atop GPU font preferences
+  #124), protocol **v17** (`SUPPORTED=[6..17]`; v15→16 shipped
+  `ThemeFacts`, v16→17 shipped `FontFacts`).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -75,6 +74,16 @@ commands, read `docs/active-work.md` immediately after this file.
   `inline` node; matches tree-sitter-md's own splitter), and the wire
   flattener runs over the WHOLE buffer via the file-style summary, so it
   must be an event sweep, not O(spans²).
+- **JSON + YAML grammars and language servers (#123) LANDED** — bundled
+  ABI-current `tree-sitter-json` / `tree-sitter-yaml` cover `.json`,
+  `.yaml`, and `.yml`; the existing injection engine now highlights YAML
+  frontmatter and JSON/YAML fences. Default external LSP configs are the
+  pinned `vscode-json-language-server` provider and
+  `yaml-language-server`; configured settings are pushed after
+  `initialized`, which also supports push-model servers. The fake-server
+  delivery proof and PATH-gated live JSON/YAML provider smokes cover the
+  configuration contract. `.jsonc` / `.json5` remain a deliberate
+  follow-up because the JSON grammar is strict.
 - **Compile-mode (Arc 5 stage 1, #113) LANDED** (2026-07-14, 7 rounds;
   framing `docs/compile-mode-framing.md` rev 13). `compile.run` streams
   `/bin/sh -c "exec 2>&1; <cmd>"` into an intercept-read-only
@@ -140,15 +149,6 @@ commands, read `docs/active-work.md` immediately after this file.
   `StatuslineSegments` channel; the existing LSP status tracker is the
   first built-in provider. Approval → implementation → gates → PR.
   Completing stage 3 completes Arc 4.
-- **OPEN: JSON + YAML PR #123.** Public and checkpoint branches both
-  point to review-cleanup `ffcb903`, atop fully gated `5c202c5` rebased
-  onto `f8096ff`. Review fixes include config push delivery, corrected
-  provider/config claims, both live-provider paths, and the final stale
-  checkpoint-text cleanup; the real YAML-through-pmacs smoke proves
-  auto-attach, network-free configuration, diagnostics, and continued
-  liveness against Red Hat 1.24.0. CI run `29778967156` passed all 12
-  jobs for `5c202c5`; the doc-only cleanup passed its targeted checks and
-  the PR awaits user review. Exact recovery is in `docs/active-work.md`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or
@@ -357,13 +357,11 @@ runtime/Lua-registered languages (v1 resolves only against
 `BUILTIN_LANGUAGES`), and the next injection *consumers* gated on new
 grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
 literals, doc-comment code); modeline detection as a 5th layer
-  (`-*- mode: … -*-` / `# vim: ft=…`); JSON/YAML grammars+LSP
-  (PR #123 open; checkpoint and remaining verification are in
-  `docs/active-work.md`);
+  (`-*- mode: … -*-` / `# vim: ft=…`);
 byte-accurate multibyte cursor placement in `move_active_cursor_to`
 (still steps one codepoint per LSP byte column). A full Jupyter `.ipynb`
-setup (reader → editable → kernel execution) is a real arc now gated on
-**JSON** (injections shipped in #122), NOT a one-shot.
+setup (reader → editable → kernel execution) now has its JSON grammar
+prerequisite, but remains a real arc, not a one-shot.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
 Themes (full list in theme-faces framing rev 9 "Deferred (named)"):

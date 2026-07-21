@@ -14,7 +14,7 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `f8096ff` (#124 merged, protocol v17).
+  `githubsucks/main` @ `bb17ec9` (#123 merged atop #124, protocol v17).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,125 +48,8 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `f8096ff` or a newer intentional main.
+The first command must expose `bb17ec9` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
-
-## Active lane: PR #123 — JSON + YAML
-
-- PR: <https://github.com/levineuwirth/pmacs/pull/123>
-- Public PR branch: `githubsucks/json-yaml-grammar`
-- Public PR head: `ffcb903`
-- Original merge base was `56eb67e`; the completed branch is rebased onto
-  canonical main `f8096ff`.
-- Portable checkpoint branch:
-  `githubsucks/json-yaml-handoff-2026-07-20`
-- Checkpoint head: `ffcb903`
-- The checkpoint is a continuation branch for recovery, not a second
-  feature and not a merge target. Its completed head now exactly matches
-  `githubsucks/json-yaml-grammar`.
-
-The checkpoint carries the transferred review-fix set, completed
-destination-machine continuation, and final review-documentation cleanup:
-
-- push configured settings via
-  `workspace/didChangeConfiguration` immediately after `initialized`;
-- fake-LSP configuration sink and a deterministic delivery test;
-- explicit `json.validate.enable = true`;
-- JSON provider pin
-  `@t1ckbase/vscode-langservers-extracted@2.0.2`;
-- corrected YAML configuration sections:
-  `yaml`, `http`, `[yaml]`, `editor`, `files`;
-- corrected telemetry, schema-network, and schema-association claims;
-- PATH-gated real JSON provider integration test.
-- PATH-gated real YAML 1.24.0 integration test with SchemaStore and the
-  Kubernetes CRD catalog disabled for network-free determinism. It pins
-  YAML-specific auto-attach/initialization, a real syntax diagnostic,
-  no crash, and continued initialized state after the diagnostic.
-
-Verification completed across the source and destination machines:
-
-- JSON provider standalone protocol smoke passed.
-- JSON provider through pmacs passed
-  `m4_real_json_provider_receives_config_and_reports_diagnostics`.
-- `m4_json_yaml_lsp_configs_pin_command_and_sections` passed.
-- `m4_5_initial_config_pushed_via_did_change_configuration` passed.
-- `cargo fmt --check` and `git diff --check` passed.
-- `yaml-language-server@1.24.0` standalone protocol smoke passed:
-  initialization reported version 1.24.0; the initial
-  `workspace/configuration` request was exactly
-  `yaml`, `http`, `[yaml]`, `editor`, `files`; opening the document
-  caused a second scoped `[yaml]` request; invalid YAML produced a real
-  parser diagnostic; shutdown exited 0 with empty stderr.
-- `m4_real_yaml_provider_pulls_config_and_reports_diagnostics` passed
-  against `/tmp/pmacs-yamlls` on the destination machine (0.36s).
-- Bite verification passed: with `builtin/runtime/lsp.lua` swapped to
-  pre-JSON/YAML `56eb67e`, the real YAML test failed at the absent YAML
-  config rather than skipping.
-- The four-commit checkpoint rebased cleanly onto canonical
-  `githubsucks/main` @ `f8096ff`; the rewritten portable head was pushed
-  with an exact force-with-lease.
-- The first post-rebase Clippy pass found one `doc_markdown` warning in
-  the new YAML test comment. The backtick-only correction was amended
-  into the test commit and pushed at the checkpoint head above; the
-  standalone rerun passed.
-- Post-rebase gates completed on checkpoint `5c202c5`:
-  - `cargo fmt --check` passed;
-  - `cargo clippy --workspace --all-targets -- -D warnings` passed as its
-    own step;
-  - `cargo test --lib`: 1,594 passed, 3 ignored;
-  - `cargo test --lib --features crdt`: 1,768 passed, 3 ignored;
-  - `cargo test --test m4_acceptance -- --skip basedpyright` with both
-    pinned providers on PATH: 114 passed, 3 ignored, 1 filtered; the
-    real JSON and real YAML tests both ran and passed;
-  - `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 102 passed against a
-    real GPU device.
-- `cargo test --workspace -- --skip basedpyright` passed as one
-  pipefail-protected invocation with both pinned providers on PATH; its
-  complete machine-local log is
-  `/tmp/pmacs-json-yaml-workspace-5c202c5.log`, and the log confirms both
-  live provider tests ran and passed.
-- Final-head `cargo fmt --check`, `git diff --check`, and clean-worktree
-  audit passed.
-- The completed head was pushed to `githubsucks/json-yaml-grammar` with
-  an exact force-with-lease. PR #123 is open against `main` at full OID
-  `5c202c54c19c05b0824812a578463ec082810981`; fresh CI run
-  `29778967156` completed successfully for that head: all 12 jobs passed
-  (format; LuaJIT/Lua 5.4 lint and Linux/macOS tests; headless GPU; and
-  M1/M4/M5/M6 gates).
-- Review cleanup `ffcb903` refreshes the stale YAML transfer-task test
-  comment and the framing/handoff checkpoint status. Its targeted
-  `m4_json_yaml_lsp_configs_pin_command_and_sections`, `cargo fmt --check`,
-  and `git diff --check` verification passed; both public and checkpoint
-  refs were fast-forwarded to it.
-
-Still required:
-
-1. Await user review. Never merge without the user's instruction.
-
-Provider setup is intentionally machine-local:
-
-```sh
-npm install --prefix /tmp/pmacs-jsonls \
-  @t1ckbase/vscode-langservers-extracted@2.0.2
-npm install --prefix /tmp/pmacs-yamlls \
-  yaml-language-server@1.24.0
-```
-
-The Node language servers had to run outside the prior machine's
-restrictive execution sandbox. The `/tmp` prefixes and smoke harnesses
-do not travel.
-
-Recovery worktree:
-
-```sh
-git worktree add --track \
-  -b json-yaml-handoff-2026-07-20 \
-  ../pmacs-jsonyaml-home \
-  githubsucks/json-yaml-handoff-2026-07-20
-```
-
-If that local branch name already exists, omit `--track -b ...` and
-give the existing local branch as the final argument.
 
 ## Active lane: Arc 4 stage 3 — statusline segments
 
