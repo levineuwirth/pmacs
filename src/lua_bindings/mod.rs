@@ -55,6 +55,7 @@ use crate::buffer_registry::BufferRegistry;
 use crate::cell::{Color, Style, UnderlineStyle};
 use crate::command::{Command, CommandError, CommandRegistry, SourceLocation};
 use crate::editor_core::EditorCore;
+use crate::editor::InteractiveCommandOrigin;
 use crate::highlight::SyntaxHighlightView;
 use crate::hook::{Hook, HookRegistry};
 use crate::key::{display_sequence, parse_sequence};
@@ -8134,6 +8135,111 @@ pub fn make_terminal_manager(
     Ok(manager)
 }
 
+fn terminal_shared_core(lua: &Lua, operation: &str) -> mlua::Result<SharedCore> {
+    lua.app_data_ref::<SharedCore>()
+        .map(|core| core.clone())
+        .ok_or_else(|| {
+            mlua::Error::external(format!(
+                "pmacs.terminal.{operation}: editor core unavailable"
+            ))
+        })
+}
+
+fn terminal_command_frontend(lua: &Lua, core: &SharedCore) -> crate::protocol::FrontendId {
+    lua.app_data_ref::<InteractiveCommandOrigin>()
+        .and_then(|origin| origin.current())
+        .unwrap_or_else(|| core.borrow().active_frontend)
+}
+
+fn active_terminal_view_key(
+    lua: &Lua,
+    core: &SharedCore,
+    operation: &str,
+) -> mlua::Result<crate::terminal::TerminalViewKey> {
+    let frontend_id = lua
+        .app_data_ref::<InteractiveCommandOrigin>()
+        .and_then(|origin| origin.current())
+        .ok_or_else(|| {
+            mlua::Error::external(format!(
+                "pmacs.terminal.{operation}: requires an interactive frontend context"
+            ))
+        })?;
+    let core = core.borrow();
+    let window = core.active_window_for(frontend_id).ok_or_else(|| {
+        mlua::Error::external(format!(
+            "pmacs.terminal.{operation}: invoking frontend has no active window"
+        ))
+    })?;
+    Ok(crate::terminal::TerminalViewKey::new(
+        frontend_id,
+        core.views
+            .get(&frontend_id)
+            .expect("active window implies registered frontend view")
+            .active,
+        window.buffer_id,
+    ))
+}
+
+fn terminal_view_key_from_context(
+    core: &SharedCore,
+    context: &Table,
+) -> mlua::Result<Option<crate::terminal::TerminalViewKey>> {
+    const FIELDS: &[&str] = &["frontend", "window", "buffer", "active"];
+    let mut unknown = None;
+    context.clone().for_each(|key: Value, _: Value| {
+        if unknown.is_none() {
+            match key {
+                Value::String(value) => {
+                    let value = value.to_str()?;
+                    if !FIELDS.contains(&value.as_ref()) {
+                        unknown = Some(value.to_owned());
+                    }
+                }
+                other => unknown = Some(format!("{other:?}")),
+            }
+        }
+        Ok(())
+    })?;
+    if let Some(field) = unknown {
+        return Err(mlua::Error::external(format!(
+            "pmacs.terminal.view_state: unknown field `{field}`"
+        )));
+    }
+    let frontend_raw = context.get::<i64>("frontend")?;
+    let frontend_id = crate::protocol::FrontendId(u64::try_from(frontend_raw).map_err(|_| {
+        mlua::Error::external("pmacs.terminal.view_state: `frontend` must be nonnegative")
+    })?);
+    let window_raw = u64::try_from(context.get::<i64>("window")?).map_err(|_| {
+        mlua::Error::external("pmacs.terminal.view_state: `window` must be nonnegative")
+    })?;
+    let buffer_id = context.get::<BufferIdLua>("buffer")?.0;
+
+    let core = core.borrow();
+    let Some(view) = core.views.get(&frontend_id) else {
+        return Ok(None);
+    };
+    let Some(window_id) = view
+        .layout
+        .iter_ids()
+        .into_iter()
+        .find(|window_id| window_id.raw() == window_raw)
+    else {
+        return Ok(None);
+    };
+    if core
+        .windows
+        .get(&window_id)
+        .is_none_or(|window| window.buffer_id != buffer_id)
+    {
+        return Ok(None);
+    }
+    Ok(Some(crate::terminal::TerminalViewKey::new(
+        frontend_id,
+        window_id,
+        buffer_id,
+    )))
+}
+
 fn install_terminal(
     lua: &Lua,
     manager: &crate::terminal::SharedTerminalManager,
@@ -8155,6 +8261,12 @@ fn install_terminal(
                     .ok_or_else(|| {
                         mlua::Error::external("pmacs.terminal.open: editor core unavailable")
                     })?;
+                let frontend_id = terminal_command_frontend(lua, &core);
+                if core.borrow().active_window_for(frontend_id).is_none() {
+                    return Err(mlua::Error::external(
+                        "pmacs.terminal.open: target frontend has no active window",
+                    ));
+                }
                 let buffer_id = {
                     let mut manager = manager.borrow_mut();
                     manager
@@ -8167,7 +8279,7 @@ fn install_terminal(
                 };
                 let key = {
                     let mut core = core.borrow_mut();
-                    if let Err(error) = core.switch_active_buffer(buffer_id) {
+                    if let Err(error) = core.switch_active_buffer_for(frontend_id, buffer_id) {
                         let _ = core.registry.borrow_mut().remove(buffer_id);
                         manager
                             .borrow_mut()
@@ -8177,18 +8289,27 @@ fn install_terminal(
                         )));
                     }
                     crate::terminal::TerminalViewKey::new(
-                        core.active_frontend,
-                        core.active_window_id(),
+                        frontend_id,
+                        core.views
+                            .get(&frontend_id)
+                            .expect("checked frontend has active view")
+                            .active,
                         buffer_id,
                     )
                 };
-                {
+                let claimed = {
                     let mut manager = manager.borrow_mut();
-                    if !manager.register_view(key) || !manager.claim_controller(key) {
-                        return Err(mlua::Error::external(
-                            "pmacs.terminal.open: failed to claim the new terminal view",
-                        ));
-                    }
+                    manager.register_view(key) && manager.claim_controller(key)
+                };
+                if !claimed {
+                    let mut core = core.borrow_mut();
+                    let _ = core.registry.borrow_mut().remove(buffer_id);
+                    manager
+                        .borrow_mut()
+                        .prune(&mut core, &mut supervisor.borrow_mut());
+                    return Err(mlua::Error::external(
+                        "pmacs.terminal.open: failed to claim the new terminal view",
+                    ));
                 }
                 run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
                 Ok(BufferIdLua(buffer_id))
@@ -8246,6 +8367,88 @@ fn install_terminal(
                     .borrow_mut()
                     .terminate(buffer.0, &mut supervisor.borrow_mut())
                     .map_err(mlua::Error::external)
+            })?,
+        )?;
+    }
+
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "view_state",
+            lua.create_function(move |lua, context: Table| -> mlua::Result<Option<Table>> {
+                let core = terminal_shared_core(lua, "view_state")?;
+                let Some(key) = terminal_view_key_from_context(&core, &context)? else {
+                    return Ok(None);
+                };
+                let Some(status) = manager.borrow_mut().view_status(key) else {
+                    return Ok(None);
+                };
+                let table = lua.create_table()?;
+                table.set("at_bottom", status.at_bottom)?;
+                table.set("scroll_offset", status.scroll_offset)?;
+                table.set("selection", status.selection)?;
+                Ok(Some(table))
+            })?,
+        )?;
+    }
+
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "scroll",
+            lua.create_function(move |lua, lines: i64| {
+                let lines = i32::try_from(lines).map_err(|_| {
+                    mlua::Error::external("pmacs.terminal.scroll: `lines` exceeds i32 range")
+                })?;
+                let core = terminal_shared_core(lua, "scroll")?;
+                let key = active_terminal_view_key(lua, &core, "scroll")?;
+                Ok(manager.borrow_mut().scroll_lines(key, lines))
+            })?,
+        )?;
+    }
+
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "_scroll_page",
+            lua.create_function(move |lua, direction: i64| {
+                let direction = i32::try_from(direction).map_err(|_| {
+                    mlua::Error::external(
+                        "pmacs.terminal._scroll_page: `direction` exceeds i32 range",
+                    )
+                })?;
+                let core = terminal_shared_core(lua, "_scroll_page")?;
+                let key = active_terminal_view_key(lua, &core, "_scroll_page")?;
+                Ok(manager.borrow_mut().scroll_page(key, direction))
+            })?,
+        )?;
+    }
+
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "scroll_to_bottom",
+            lua.create_function(move |lua, ()| {
+                let core = terminal_shared_core(lua, "scroll_to_bottom")?;
+                let key = active_terminal_view_key(lua, &core, "scroll_to_bottom")?;
+                Ok(manager.borrow_mut().scroll_to_bottom(key))
+            })?,
+        )?;
+    }
+
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "copy_selection",
+            lua.create_function(move |lua, ()| {
+                let core = terminal_shared_core(lua, "copy_selection")?;
+                let key = active_terminal_view_key(lua, &core, "copy_selection")?;
+                let Some(bytes) = manager.borrow_mut().copy_selection(key) else {
+                    return Ok(false);
+                };
+                core.borrow_mut()
+                    .clipboard_set_for(key.frontend_id, bytes);
+                Ok(true)
             })?,
         )?;
     }

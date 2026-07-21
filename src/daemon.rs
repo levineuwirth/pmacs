@@ -1069,10 +1069,20 @@ fn dispatcher_loop(
                 // the sweep below); other-frontend snapshots lag by
                 // at most one tick. Imperceptible at frame cadence.
                 let other_presences = session_registry.other_presences_for(*fid);
+                let render_size = render_states
+                    .get(fid)
+                    .expect("render_state present for attached grid fid")
+                    .size();
+                let terminal_snapshots = editor.prepare_terminal_views(*fid, render_size);
                 let render_state = render_states
                     .get_mut(fid)
                     .expect("render_state present for attached grid fid");
-                render_state.render_frame(editor, &other_presences)
+                render_state.render_frame(
+                    editor,
+                    *fid,
+                    &terminal_snapshots,
+                    &other_presences,
+                )
             };
 
             // T M10.6 per-frontend presence sweep. The snapshot is
@@ -1103,7 +1113,7 @@ fn dispatcher_loop(
                 s.negotiated_capabilities.crdt_replica && s.negotiated_protocol_version >= 4
             }) && let Some(stream) = streams.get_mut(fid)
             {
-                let idle_now = editor.dispatch_idle();
+                let idle_now = editor.dispatch_idle_for(*fid);
                 if last_dispatch_idle_sent.get(fid) != Some(&idle_now) {
                     if let Err(e) =
                         write_message(stream, &InstanceMessage::DispatchIdle { idle: idle_now })
@@ -1298,6 +1308,7 @@ fn dispatcher_loop(
                 last_dispatch_idle_sent.remove(fid);
                 last_active_buffer_sent.remove(fid);
                 terminal_bell_baselines.remove(fid);
+                editor.detach_frontend_input(*fid);
                 editor.terminal_manager.borrow_mut().detach_frontend(*fid);
                 session_registry.unregister_session(*fid);
                 editor
@@ -1368,6 +1379,15 @@ fn dispatcher_loop(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // Accepted terminal context controls PTY size. Apply any focus,
+        // window, or resize changes before consuming another child-output
+        // batch so screen reflow and subsequent bytes share one geometry.
+        for frontend_id in &attached_fids {
+            if let Some(size) = term_sizes.get(frontend_id).copied() {
+                editor.sync_terminal_layout(*frontend_id, size);
+            }
         }
 
         // `tick_async` last: the M4.5 async bridge settles awaiters
@@ -1658,6 +1678,12 @@ fn handle_dispatcher_event(
                         editor.dispatch_menu_pointer(source, index, invoke);
                     }
                 }
+                FrontendEvent::FocusGained(_) => {
+                    editor.dispatch_focus(source, true);
+                }
+                FrontendEvent::FocusLost(_) => {
+                    editor.dispatch_focus(source, false);
+                }
                 FrontendEvent::Paste {
                     frontend_id: claimed_fid,
                     data,
@@ -1680,7 +1706,9 @@ fn handle_dispatcher_event(
                     // source's command chain (Q#KR2), and it fires
                     // `buffer.after-edit` like any other edit (Q#KR10b)
                     // — previously it never did, so LSP missed pastes.
-                    handle_inbound_paste(editor, source, claimed_fid, &data);
+                    if !editor.dispatch_paste(source, &data) {
+                        handle_inbound_paste(editor, source, claimed_fid, &data);
+                    }
                 }
                 _ => {
                     let term_size = *term_sizes
@@ -1721,6 +1749,7 @@ fn handle_dispatcher_event(
             last_dispatch_idle_sent.remove(&frontend_id);
             last_active_buffer_sent.remove(&frontend_id);
             terminal_bell_baselines.remove(&frontend_id);
+            editor.detach_frontend_input(frontend_id);
             editor
                 .terminal_manager
                 .borrow_mut()

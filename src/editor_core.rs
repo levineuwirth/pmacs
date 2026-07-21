@@ -2484,8 +2484,13 @@ impl EditorCore {
     /// read (`C-k`'s killed line, an appended chain), so the Lua ring
     /// pushes the exact bytes here.
     pub fn clipboard_set(&mut self, bytes: Vec<u8>) {
+        self.clipboard_set_for(self.active_frontend, bytes);
+    }
+
+    /// Set and publish clipboard bytes to one authenticated frontend.
+    pub fn clipboard_set_for(&mut self, frontend_id: FrontendId, bytes: Vec<u8>) {
         self.clipboard_slot.clone_from(&bytes);
-        self.pending_clipboard = Some((self.active_frontend, bytes));
+        self.pending_clipboard = Some((frontend_id, bytes));
     }
 
     /// The clipboard slot's current bytes, or `None` when empty (kill
@@ -2895,15 +2900,21 @@ impl EditorCore {
             .map_err(|e| e.to_string())
     }
 
-    /// Switch the active window to a different buffer, allocating a
-    /// fresh [`TextView`] for it.
-    pub fn switch_active_buffer(&mut self, buffer_id: BufferId) -> Result<(), String> {
+    /// Switch one frontend's active window to a different buffer, allocating
+    /// a fresh [`TextView`] for it without changing global active state.
+    pub fn switch_active_buffer_for(
+        &mut self,
+        frontend_id: FrontendId,
+        buffer_id: BufferId,
+    ) -> Result<(), String> {
         let text_view = {
             let reg = self.registry.borrow();
             let buf = reg.get(buffer_id).map_err(|e| e.to_string())?;
             TextView::new(buf)
         };
-        let aw = self.active_window_mut();
+        let aw = self
+            .active_window_mut_for(frontend_id)
+            .ok_or_else(|| format!("frontend {frontend_id:?} has no active window"))?;
         aw.buffer_id = buffer_id;
         aw.text_view = text_view;
         // Overlays were keyed to the previous buffer's coordinates;
@@ -2916,6 +2927,11 @@ impl EditorCore {
         aw.view_top = 0;
         aw.goal_col = None;
         Ok(())
+    }
+
+    /// Switch the globally active frontend's active window.
+    pub fn switch_active_buffer(&mut self, buffer_id: BufferId) -> Result<(), String> {
+        self.switch_active_buffer_for(self.active_frontend, buffer_id)
     }
 }
 
