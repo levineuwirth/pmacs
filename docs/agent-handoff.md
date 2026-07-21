@@ -1,8 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after Themes Arc 4 completed with
-statusline segments (#125), JSON/YAML (#123), GPU font preferences
-(#124), named UI faces (#120), and multi-language injections (#122).**
+**Last updated: 2026-07-21, after Vterm Stage 1 terminal core (#126)
+landed on `main` atop completed Themes Arc 4 (#120/#124/#125). Vterm
+Stages 2 and 3 are not implemented.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -16,7 +16,7 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-21)
 
-- `main` @ `7bc0c61` (statusline segments #125), protocol **v18**
+- `main` @ `643d1e1` (Vterm Stage 1 #126), protocol **v18**
   (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
   `StatuslineSegments`).
 - **Syntax-highlight / language-detection side-quest (#114–#118)
@@ -155,6 +155,19 @@ commands, read `docs/active-work.md` immediately after this file.
   right-pins the protected suffix under narrow clipping. Review
   hardening pins fixed-face sortedness, retains flattened provider
   tracebacks, and names unavailable layout contexts accurately.
+- **Vterm Stage 1 terminal core LANDED — #126**
+  (`docs/vterm-framing.md` rev 5). `AnsiParserProfile::{LineOriented,
+  FullScreen}` preserves compile/REPL behavior while terminal PTYs emit the
+  full cursor/mode/device operation set. `src/terminal/{screen,input,session}.rs`
+  owns a bounded terminal screen, encoders, and the transactional lifecycle
+  registry; one pathless read-only identity buffer anchors each private
+  process/screen. Review hardening added IND/NEL/RI, `TERM=xterm-256color`,
+  portable shutdown liveness, custom-tab-stop preservation, control-free
+  cells, and button-preserving SGR mouse release. Final gates: 1,661 default +
+  1,837 CRDT library tests; 9 default + 10 CRDT Vterm acceptance; 114 M4; 109
+  required GPU; workspace 2,769 across 79 suites; CI green. This is headless:
+  Vterm Stage 2 TUI/Lua and Stage 3 protocol/GPU start as separate PRs from
+  post-#126 `main`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is
   stale and must be repeated before implementation. No PR or
@@ -171,8 +184,8 @@ commands, read `docs/active-work.md` immediately after this file.
     fix (#101).
   - **Arc 4 (themes + extensibility) COMPLETE** — named UI faces (#120),
     live GPU font preferences (#124), statusline providers (#125).
-  - **Arc 5 stage 1 COMPLETE** — compile mode (#113); stage 2 vterm is
-    the next formal roadmap stage.
+  - **Arc 5 terminal stage ACTIVE** — compile mode (#113) and Vterm terminal
+    core (#126) landed; Vterm TUI is the next formal stage.
 
 ## 2. How we work (the part that must not drift)
 
