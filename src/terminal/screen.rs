@@ -233,11 +233,7 @@ impl TerminalScreen {
                 self.changed();
                 None
             }
-            AnsiEvent::LineFeed => {
-                self.line_feed(false);
-                None
-            }
-            AnsiEvent::Index => {
+            AnsiEvent::LineFeed | AnsiEvent::Index => {
                 self.line_feed(false);
                 None
             }
