@@ -14,7 +14,7 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `2e37c04` (#127 merged; protocol v18).
+  `githubsucks/main` @ `f1a2f75` (#128 merged; protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,33 +48,39 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `2e37c04` or a newer intentional main.
+The first command must expose `f1a2f75` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 
-## Vterm Stage 2 framing lane
+## Vterm Stage 2 implementation lane
 
-- Portable branch: `githubsucks/vterm-framing`
-- Approved framing head: `fb4f8f0`
-- Base: canonical `main` @ `643d1e1` (Vterm Stage 1 / PR #126 merged).
-  `main` has since advanced to `2e37c04` (config registry #127, no
-  runtime overlap with vterm); cut the Stage 2 lane from current `main`,
-  not from `643d1e1`.
-- State: `docs/vterm-framing.md` Revision 7 is framing-only, reviewed, and
-  approved for implementation. It closes the final `at_bottom`, terminal
-  `C-c` binding-reachability, and context-implicit Lua failure-mode findings.
-  There is no Stage 2 runtime implementation or PR yet.
-- Next lane: create `pmacs-vterm-tui` / `vterm-tui` from current canonical
-  `main`, carry the approved framing as its first commit, then implement and
-  gate Stage 2. Do not implement on `vterm-framing`.
+- Portable branch: `githubsucks/vterm-tui`
+- Current local head: `da8f6ae`
+- Base: canonical `main` @ `f1a2f75` (handoff refresh #128 atop config
+  registry #127 and Vterm Stage 1 #126).
+- State: `docs/vterm-framing.md` Revision 7 criteria 15–27 are implemented.
+  The lane composes per-frontend/window terminal views in the TUI, installs
+  the strict `pmacs.terminal` API and terminal-local bindings, drains
+  clipboard/BEL through the authenticated frontend, and routes daemon
+  terminal input by connection source. Protocol remains v18; Stage 2 changes
+  neither the wire schema nor the GPU renderer.
+- Implementation commits: `39e07cb`, `7c39535`, `0a846d9`, `0dacac7`,
+  `dc92257`, merge `0ddff24`, and final integration hardening `da8f6ae`.
+- Final from-start verification: `cargo fmt --check`; strict workspace
+  Clippy; 1,742 default + 1,918 CRDT library tests (3 ignored each);
+  Stage 1 acceptance 9 default + 10 CRDT; Stage 2 acceptance 3 default +
+  3 CRDT; statusline acceptance 7 default + 8 CRDT; M4 114 passed
+  (3 ignored, 1 filtered); required GPU 109; workspace 2,869 passed across
+  81 suites (19 ignored, 1 filtered); `git diff --check` clean.
+- Next: push the branch and open the Stage 2 PR against canonical `main`.
 
 Recovery worktree on a machine that does not already own the branch:
 
 ```sh
 git worktree add --track \
-  -b vterm-framing \
-  ../pmacs-vterm-framing \
-  githubsucks/vterm-framing
+  -b vterm-tui \
+  ../pmacs-vterm-tui \
+  githubsucks/vterm-tui
 ```
 
 ## Parked lane: kill-ring browser + persistence
