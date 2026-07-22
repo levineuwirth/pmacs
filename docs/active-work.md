@@ -115,6 +115,38 @@ git worktree add --track \
   githubsucks/vterm-gpu
 ```
 
+## Cross-PR coordination: #135 and #137 overlap
+
+Two PRs are open against canonical `main` at once and they touch the same
+files. **Neither lane copies from or merges the other.** PR #137
+(`tab-width-parity`, "feat(render): unify tab-width projection") is
+APPROVED and FROZEN at `5b23e11`; this lane must not cherry-pick, merge,
+or otherwise absorb it.
+
+**Whichever PR lands SECOND rebases onto the canonical resulting `main`
+and reruns the COMPLETE gate suite** — not a subset, and not the
+pre-rebase results. The overlap is in the renderer and the protocol
+crate's export surface, so a clean textual merge does not imply a
+correct one.
+
+Overlapping paths, and why each one collides:
+
+| Path | #135 (vterm stage 3) | #137 (tab width) |
+| --- | --- | --- |
+| `pmacs-gpu/src/main.rs` | terminal mode: `State` fields, render-batch swaps, input branches, headless probe | tab-width projection in the same renderer |
+| `pmacs-protocol/src/lib.rs` | `pub mod terminal` + the terminal re-export block | its own added export |
+| `Cargo.lock` | `unicode-width` promoted to a workspace dep for `pmacs-protocol` | a `pmacs-gpu` dependency change |
+| `docs/active-work.md`, `docs/agent-handoff.md` | this lane's entries and §1 snapshot | its own entries |
+
+`Cargo.lock` and the docs are mechanical. The two source files are not:
+both PRs edit the GPU renderer's measurement/paint path, and both widen
+`pmacs-protocol`'s public surface in the same `pub use` region. After the
+rebase, re-read the merged region rather than trusting a conflict-free
+apply — in particular that terminal cell geometry (`cell_viewport`,
+`hit_test_cell`, `terminal_run_rect`) still uses the monospace advance
+and is not routed through any new tab-expansion path, since terminal
+columns come from the child and never from document projection.
+
 ## Vterm Stage 3 framing lane (superseded)
 
 - Portable branch: `githubsucks/vterm-stage3-framing`
