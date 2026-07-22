@@ -39,9 +39,9 @@ use crate::protocol::{
     MouseKind as TerminalMouseKind,
 };
 use crate::terminal::TerminalSnapshot;
+use crate::terminal::view::TerminalViewKey;
 use crate::view::{View, Viewport};
 use crate::window::{Rect, WindowId};
-use crate::terminal::view::TerminalViewKey;
 
 /// Ephemeral authenticated origin for one interactive command invocation.
 ///
@@ -300,11 +300,9 @@ impl EditorState {
         // shutdown enforces no-zombie cleanup at editor exit.
         let process_supervisor = crate::lua_bindings::make_process_supervisor(lua_host.lua())
             .expect("install pmacs.process");
-        let terminal_manager = crate::lua_bindings::make_terminal_manager(
-            lua_host.lua(),
-            process_supervisor.clone(),
-        )
-        .expect("install pmacs.terminal");
+        let terminal_manager =
+            crate::lua_bindings::make_terminal_manager(lua_host.lua(), process_supervisor.clone())
+                .expect("install pmacs.terminal");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/terminal.lua"),
@@ -726,9 +724,7 @@ impl EditorState {
         if self
             .dispatchers
             .get(&frontend_id)
-            .is_some_and(|state| {
-                state.terminal_escape || !state.dispatcher.pending().is_empty()
-            })
+            .is_some_and(|state| state.terminal_escape || !state.dispatcher.pending().is_empty())
         {
             return false;
         }
@@ -739,9 +735,7 @@ impl EditorState {
             && !core.menu_is_open()
             && core
                 .active_window_for(frontend_id)
-                .is_some_and(|window| {
-                    !core.active_buffer_round_trips_for(window.buffer_id)
-                })
+                .is_some_and(|window| !core.active_buffer_round_trips_for(window.buffer_id))
     }
 
     /// Local-frontend compatibility wrapper.
@@ -827,6 +821,17 @@ impl EditorState {
             .dispatchers
             .get(&frontend_id)
             .is_some_and(|state| state.terminal_escape);
+        let terminal_local_binding = terminal_key.is_some_and(|view_key| {
+            chord.is_some_and(|chord| {
+                let stack = self.lua_host.keymaps().borrow();
+                stack.buffers.get(&view_key.buffer_id).is_some_and(|map| {
+                    !matches!(
+                        map.lookup(&[chord]),
+                        crate::keymap_tree::Resolution::Unbound
+                    )
+                })
+            })
+        });
         if let Some(view_key) = terminal_key {
             if escaped {
                 self.dispatchers
@@ -847,21 +852,23 @@ impl EditorState {
                     self.claim_terminal_controller(view_key);
                     return;
                 }
-                let Some((terminal_key, modifiers)) = terminal_key_from_crossterm(key) else {
+                if !terminal_local_binding {
+                    let Some((terminal_key, modifiers)) = terminal_key_from_crossterm(key) else {
+                        return;
+                    };
+                    let modes = self
+                        .terminal_manager
+                        .borrow()
+                        .modes_for_view(view_key)
+                        .unwrap_or_default();
+                    if let Some(bytes) =
+                        crate::terminal::input::encode_key(terminal_key, modifiers, modes)
+                    {
+                        self.claim_terminal_controller(view_key);
+                        self.send_terminal_bytes(view_key.buffer_id, &bytes);
+                    }
                     return;
-                };
-                let modes = self
-                    .terminal_manager
-                    .borrow()
-                    .modes_for_view(view_key)
-                    .unwrap_or_default();
-                if let Some(bytes) =
-                    crate::terminal::input::encode_key(terminal_key, modifiers, modes)
-                {
-                    self.claim_terminal_controller(view_key);
-                    self.send_terminal_bytes(view_key.buffer_id, &bytes);
                 }
-                return;
             }
         }
 
@@ -1005,9 +1012,7 @@ impl EditorState {
                 .modes_for_view(key)
                 .unwrap_or_default();
             self.claim_terminal_controller(key);
-            if let Some(bytes) =
-                crate::terminal::input::encode_focus(true, modes.focus_reporting)
-            {
+            if let Some(bytes) = crate::terminal::input::encode_focus(true, modes.focus_reporting) {
                 self.send_terminal_bytes(key.buffer_id, &bytes);
             }
             return;
@@ -1025,9 +1030,7 @@ impl EditorState {
             .borrow()
             .modes_for_view(key)
             .unwrap_or_default();
-        if let Some(bytes) =
-            crate::terminal::input::encode_focus(false, modes.focus_reporting)
-        {
+        if let Some(bytes) = crate::terminal::input::encode_focus(false, modes.focus_reporting) {
             self.send_terminal_bytes(key.buffer_id, &bytes);
         }
         let _ = self.terminal_manager.borrow_mut().release_controller(key);
@@ -1036,11 +1039,7 @@ impl EditorState {
     /// Resize the one session durably controlled by `frontend_id`.
     ///
     /// This is called before process drain and paint, never from rendering.
-    pub fn sync_terminal_layout(
-        &mut self,
-        frontend_id: FrontendId,
-        term_size: CellSize,
-    ) -> bool {
+    pub fn sync_terminal_layout(&mut self, frontend_id: FrontendId, term_size: CellSize) -> bool {
         let Some(key) = self
             .terminal_manager
             .borrow()
@@ -1063,8 +1062,9 @@ impl EditorState {
                 let _ = self.terminal_manager.borrow_mut().release_controller(key);
                 return false;
             }
-            let Some(placement) =
-                window_placements(&core, frontend_id, term_size).get(&key.window_id).copied()
+            let Some(placement) = window_placements(&core, frontend_id, term_size)
+                .get(&key.window_id)
+                .copied()
             else {
                 return false;
             };
@@ -1119,8 +1119,7 @@ impl EditorState {
                 if placement.content.size.rows == 0 || placement.content.size.cols == 0 {
                     continue;
                 }
-                let key =
-                    TerminalViewKey::new(frontend_id, window_id, window.buffer_id);
+                let key = TerminalViewKey::new(frontend_id, window_id, window.buffer_id);
                 if self.terminal_manager.borrow().is_terminal(window.buffer_id) {
                     live.insert(key);
                     sizes.push((key, placement.content.size));
@@ -1395,9 +1394,7 @@ impl EditorState {
             // rotate the boundary so a menu Cut chains like a keybound
             // one. The invoke below bypasses dispatch_key, which would
             // otherwise leave the boundary stale.
-            self.core
-                .borrow_mut()
-                .rotate_command(frontend_id, &command);
+            self.core.borrow_mut().rotate_command(frontend_id, &command);
             // Q#KR10b: menu invocation bypasses dispatch_key's
             // revision check — a menu Cut's edit must still fire
             // `buffer.after-edit`.
@@ -1602,9 +1599,13 @@ impl EditorState {
             return;
         }
 
-        let Some((win_id, rect)) =
-            window_at_cell(&self.core.borrow(), frontend_id, term_size, cell_row, cell_col)
-        else {
+        let Some((win_id, rect)) = window_at_cell(
+            &self.core.borrow(),
+            frontend_id,
+            term_size,
+            cell_row,
+            cell_col,
+        ) else {
             return;
         };
         let inner_rows = rect.size.rows.saturating_sub(1);
@@ -1616,10 +1617,7 @@ impl EditorState {
                 self.mouse_click = None;
                 return;
             }
-            let local = CellCoord::new(
-                local_row,
-                cell_col.saturating_sub(rect.origin.col),
-            );
+            let local = CellCoord::new(local_row, cell_col.saturating_sub(rect.origin.col));
             self.dispatch_terminal_mouse(
                 TerminalViewKey::new(frontend_id, win_id, buffer_id),
                 content_size,
@@ -1746,8 +1744,7 @@ impl EditorState {
             && modes.mouse_sgr
             && coord.row < screen_size.rows
             && coord.col < screen_size.cols
-            && let Some(bytes) =
-                crate::terminal::input::encode_mouse(kind, coord, modifiers, modes)
+            && let Some(bytes) = crate::terminal::input::encode_mouse(kind, coord, modifiers, modes)
         {
             self.claim_terminal_controller(key);
             self.send_terminal_bytes(key.buffer_id, &bytes);
@@ -2220,12 +2217,8 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
         let size = frontend.size();
         let _ = state.sync_terminal_layout(FrontendId::LOCAL, size);
         let terminal_snapshots = state.prepare_terminal_views(FrontendId::LOCAL, size);
-        let mut messages = render_state.render_frame(
-            &state,
-            FrontendId::LOCAL,
-            &terminal_snapshots,
-            &[],
-        );
+        let mut messages =
+            render_state.render_frame(&state, FrontendId::LOCAL, &terminal_snapshots, &[]);
         messages.extend(state.take_local_signals());
         frontend.present_messages(&messages)?;
         if state.core.borrow().quit {
@@ -2745,14 +2738,7 @@ pub fn paint_frame(
     }
     drop(reg);
 
-    paint_status_line(
-        grid,
-        core,
-        &state.lua_host,
-        dispatcher,
-        term_size,
-        &theme,
-    );
+    paint_status_line(grid, core, &state.lua_host, dispatcher, term_size, &theme);
 
     // An active isearch owns the bottom row (its prompt + match
     // readout), but the terminal cursor stays in the buffer at the
@@ -3604,8 +3590,7 @@ fn is_terminal_escape_chord(chord: Chord) -> bool {
 }
 
 fn terminal_key_from_crossterm(key: KeyEvent) -> Option<(TerminalKey, TerminalModifiers)> {
-    let modifiers =
-        crate::protocol::crossterm_translate::mods_from_crossterm(key.modifiers);
+    let modifiers = crate::protocol::crossterm_translate::mods_from_crossterm(key.modifiers);
     let key = crate::protocol::crossterm_translate::keycode_from_crossterm(key.code);
     if matches!(key, TerminalKey::Unknown(_)) {
         return None;
@@ -3749,13 +3734,7 @@ mod tests {
                 stride: size.cols,
                 size,
             };
-            paint_frame(
-                &state,
-                FrontendId::LOCAL,
-                &snapshots,
-                &mut grid,
-                size,
-            )
+            paint_frame(&state, FrontendId::LOCAL, &snapshots, &mut grid, size)
         };
         assert_eq!(backing[0].glyph, crate::cell::Glyph::Char('T'));
         assert!(backing[0].style.reverse);
@@ -4343,7 +4322,11 @@ mod tests {
         // window to the *buffer-list* buffer).
         let mut s = fresh_with(b"");
         s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
-        assert_eq!(local_dispatcher(&s).pending().len(), 1, "C-x should start prefix");
+        assert_eq!(
+            local_dispatcher(&s).pending().len(),
+            1,
+            "C-x should start prefix"
+        );
         s.dispatch_key(FrontendId::LOCAL, ctrl('b'));
         assert!(
             local_dispatcher(&s).pending().is_empty(),
@@ -7656,7 +7639,13 @@ mod tests {
             stride: cols,
             size: crate::cell::CellSize::new(rows, cols),
         };
-        let cursor = paint_frame(s, FrontendId::LOCAL, &HashMap::new(), &mut grid, crate::cell::CellSize::new(rows, cols));
+        let cursor = paint_frame(
+            s,
+            FrontendId::LOCAL,
+            &HashMap::new(),
+            &mut grid,
+            crate::cell::CellSize::new(rows, cols),
+        );
         (backing, cols, cursor)
     }
 

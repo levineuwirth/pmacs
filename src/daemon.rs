@@ -871,10 +871,8 @@ fn dispatcher_loop(
     let mut last_active_buffer_sent: HashMap<FrontendId, crate::buffer::BufferId> = HashMap::new();
     // Active-terminal BEL delivery baseline. Switching away forgets the
     // terminal so historical bells are never replayed on later activation.
-    let mut terminal_bell_baselines: HashMap<
-        FrontendId,
-        (crate::buffer::BufferId, u64),
-    > = HashMap::new();
+    let mut terminal_bell_baselines: HashMap<FrontendId, (crate::buffer::BufferId, u64)> =
+        HashMap::new();
     let mut session_registry = SessionRegistry::new();
     // T M10.11 Q8 — jitter PRNG, seeded once so the
     // convergence-under-jitter scenario is deterministically
@@ -1077,12 +1075,7 @@ fn dispatcher_loop(
                 let render_state = render_states
                     .get_mut(fid)
                     .expect("render_state present for attached grid fid");
-                render_state.render_frame(
-                    editor,
-                    *fid,
-                    &terminal_snapshots,
-                    &other_presences,
-                )
+                render_state.render_frame(editor, *fid, &terminal_snapshots, &other_presences)
             };
 
             // T M10.6 per-frontend presence sweep. The snapshot is
@@ -1537,10 +1530,7 @@ fn handle_dispatcher_event(
     term_sizes: &mut HashMap<FrontendId, CellSize>,
     last_dispatch_idle_sent: &mut HashMap<FrontendId, bool>,
     last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
-    terminal_bell_baselines: &mut HashMap<
-        FrontendId,
-        (crate::buffer::BufferId, u64),
-    >,
+    terminal_bell_baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
     session_registry: &mut SessionRegistry,
 ) {
     match event {
@@ -3069,6 +3059,119 @@ mod tests {
             Some("edit.kill-line"),
             "a bystander frontend's chain is untouched"
         );
+    }
+
+    #[test]
+    fn forged_resize_mutates_only_the_authenticated_frontend() {
+        let source = FrontendId(41);
+        let forged = FrontendId(42);
+        let old_size = CellSize::new(24, 80);
+        let new_size = CellSize::new(31, 97);
+        let mut editor = EditorState::new();
+        let mut render_states = HashMap::from([
+            (source, RenderState::new(old_size)),
+            (forged, RenderState::new(old_size)),
+        ]);
+        let mut semantic_states: HashMap<FrontendId, crate::semantic_render::SemanticRenderState> =
+            HashMap::new();
+        let mut streams: HashMap<FrontendId, UnixStream> = HashMap::new();
+        let mut term_sizes = HashMap::from([(source, old_size), (forged, old_size)]);
+        let mut last_dispatch_idle_sent = HashMap::new();
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+
+        handle_dispatcher_event(
+            DispatcherEvent::FrontendEvent {
+                source,
+                event: FrontendEvent::Resize {
+                    frontend_id: forged,
+                    size: new_size,
+                },
+            },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_dispatch_idle_sent,
+            &mut last_active_buffer_sent,
+            &mut terminal_bell_baselines,
+            &mut session_registry,
+        );
+
+        assert_eq!(render_states[&source].size(), new_size);
+        assert_eq!(term_sizes[&source], new_size);
+        assert_eq!(render_states[&forged].size(), old_size);
+        assert_eq!(term_sizes[&forged], old_size);
+    }
+    #[test]
+    fn terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once() {
+        let mut editor = EditorState::new();
+        let mut spec = crate::terminal::TerminalSpec::new("/bin/sh");
+        spec.args = vec![
+            "-c".into(),
+            "printf '\\a'; IFS= read -r _; printf '\\a'; sleep 30".into(),
+        ];
+        let buffer_id = editor
+            .terminal_manager
+            .borrow_mut()
+            .open(
+                spec,
+                &mut editor.core.borrow_mut(),
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("open bell probe");
+        editor
+            .core
+            .borrow_mut()
+            .switch_active_buffer_for(FrontendId::LOCAL, buffer_id)
+            .expect("display bell probe");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.terminal_manager.borrow().bell_count(buffer_id) != Some(1) {
+            editor.tick_processes();
+            assert!(Instant::now() < deadline, "initial terminal bell timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut baselines = HashMap::new();
+        assert!(!take_pending_terminal_bell(
+            &editor,
+            FrontendId::LOCAL,
+            &mut baselines
+        ));
+
+        editor
+            .terminal_manager
+            .borrow()
+            .send(
+                buffer_id,
+                b"\n",
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("advance bell probe");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.terminal_manager.borrow().bell_count(buffer_id) != Some(2) {
+            editor.tick_processes();
+            assert!(Instant::now() < deadline, "second terminal bell timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(take_pending_terminal_bell(
+            &editor,
+            FrontendId::LOCAL,
+            &mut baselines
+        ));
+        assert!(!take_pending_terminal_bell(
+            &editor,
+            FrontendId::LOCAL,
+            &mut baselines
+        ));
+
+        editor
+            .terminal_manager
+            .borrow_mut()
+            .terminate(buffer_id, &mut editor.process_supervisor.borrow_mut())
+            .expect("terminate bell probe");
     }
 
     /// Kill ring Q#KR10a — the unified paste route trusts only the

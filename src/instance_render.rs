@@ -112,13 +112,7 @@ impl RenderState {
                 stride: self.size.cols,
                 size: self.size,
             };
-            let coord = paint_frame(
-                state,
-                frontend_id,
-                terminal_snapshots,
-                &mut grid,
-                self.size,
-            );
+            let coord = paint_frame(state, frontend_id, terminal_snapshots, &mut grid, self.size);
             // T M10.9 — overlay paint after main paint, before diff.
             // Modifies cells in `next`; diff captures the changes
             // as ordinary style updates.

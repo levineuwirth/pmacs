@@ -54,8 +54,8 @@ use crate::buffer::{BufferId, EditOp, MarkGravity, MarkId};
 use crate::buffer_registry::BufferRegistry;
 use crate::cell::{Color, Style, UnderlineStyle};
 use crate::command::{Command, CommandError, CommandRegistry, SourceLocation};
-use crate::editor_core::EditorCore;
 use crate::editor::InteractiveCommandOrigin;
+use crate::editor_core::EditorCore;
 use crate::highlight::SyntaxHighlightView;
 use crate::hook::{Hook, HookRegistry};
 use crate::key::{display_sequence, parse_sequence};
@@ -8270,11 +8270,7 @@ fn install_terminal(
                 let buffer_id = {
                     let mut manager = manager.borrow_mut();
                     manager
-                        .open(
-                            spec,
-                            &mut core.borrow_mut(),
-                            &mut supervisor.borrow_mut(),
-                        )
+                        .open(spec, &mut core.borrow_mut(), &mut supervisor.borrow_mut())
                         .map_err(mlua::Error::external)?
                 };
                 let key = {
@@ -8351,7 +8347,11 @@ fn install_terminal(
             lua.create_function(move |_, (buffer, bytes): (BufferIdLua, mlua::String)| {
                 manager
                     .borrow()
-                    .send(buffer.0, bytes.as_bytes().as_ref(), &mut supervisor.borrow_mut())
+                    .send(
+                        buffer.0,
+                        bytes.as_bytes().as_ref(),
+                        &mut supervisor.borrow_mut(),
+                    )
                     .map_err(mlua::Error::external)
             })?,
         )?;
@@ -8397,9 +8397,13 @@ fn install_terminal(
         terminal.set(
             "scroll",
             lua.create_function(move |lua, lines: i64| {
-                let lines = i32::try_from(lines).map_err(|_| {
-                    mlua::Error::external("pmacs.terminal.scroll: `lines` exceeds i32 range")
-                })?;
+                let lines = i32::try_from(lines).unwrap_or_else(|_| {
+                    if lines.is_negative() {
+                        i32::MIN
+                    } else {
+                        i32::MAX
+                    }
+                });
                 let core = terminal_shared_core(lua, "scroll")?;
                 let key = active_terminal_view_key(lua, &core, "scroll")?;
                 Ok(manager.borrow_mut().scroll_lines(key, lines))
@@ -8446,8 +8450,7 @@ fn install_terminal(
                 let Some(bytes) = manager.borrow_mut().copy_selection(key) else {
                     return Ok(false);
                 };
-                core.borrow_mut()
-                    .clipboard_set_for(key.frontend_id, bytes);
+                core.borrow_mut().clipboard_set_for(key.frontend_id, bytes);
                 Ok(true)
             })?,
         )?;
@@ -8490,8 +8493,8 @@ fn parse_terminal_spec(table: Table) -> mlua::Result<crate::terminal::TerminalSp
     let command = strict_terminal_string(table.raw_get("command")?, "command", false)?
         .ok_or_else(|| mlua::Error::external("pmacs.terminal.open: missing field `command`"))?;
     let args = strict_terminal_args(table.raw_get("args")?)?;
-    let cwd = strict_terminal_string(table.raw_get("cwd")?, "cwd", true)?
-        .map(std::path::PathBuf::from);
+    let cwd =
+        strict_terminal_string(table.raw_get("cwd")?, "cwd", true)?.map(std::path::PathBuf::from);
     let env = strict_terminal_env(table.raw_get("env")?)?;
     let name = strict_terminal_string(table.raw_get("name")?, "name", true)?;
     let rows = strict_terminal_u16(table.raw_get("rows")?, "rows", 24)?;
@@ -8628,11 +8631,7 @@ fn strict_terminal_u16(value: Value, field: &'static str, default: u16) -> mlua:
     }
 }
 
-fn strict_terminal_usize(
-    value: Value,
-    field: &'static str,
-    default: usize,
-) -> mlua::Result<usize> {
+fn strict_terminal_usize(value: Value, field: &'static str, default: usize) -> mlua::Result<usize> {
     match value {
         Value::Nil => Ok(default),
         Value::Integer(value) => usize::try_from(value).map_err(|_| {

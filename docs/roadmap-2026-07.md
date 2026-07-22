@@ -88,21 +88,18 @@ protocol v17; and #125 added composable `pmacs.statusline` providers,
 per-window TUI composition, a pure built-in LSP segment, dynamic modeline
 faces, and semantic/GPU transport through protocol v18.
 
-### Arc 5 — Terminal, staged — VTERM STAGE 1 ON FEATURE BRANCH
+### Arc 5 — Terminal, staged — VTERM STAGE 2 ON FEATURE BRANCH
 
 - **Compile-mode landed** in #113: line-oriented PTY/ANSI output,
   error-regex navigation, and `M-x compile`.
-- **Vterm Stage 1 terminal core** is implemented, two review rounds are
-  addressed, and the branch is fully gated on `vterm-core`; PR #126 awaits
-  merge authorization and is **not merged**. It adds compatibility parser
+- **Vterm Stage 1 terminal core landed** in #126: compatibility parser
   profiles, bounded VT screen/scrollback/reflow state, IND/NEL/RI, input
   encoders, internal `TerminalManager`, read-only identity buffers, process
   lifecycle, renderer-safe control-free cells, and headless real-PTY
-  acceptance. It intentionally adds no interactive Lua command or frontend
-  rendering.
-- **Vterm Stage 2 TUI** starts only after Stage 1 merges: terminal-window
-  composition, input/resize, per-context scroll/selection/copy, and the Lua
-  surface.
+  acceptance.
+- **Vterm Stage 2 TUI** is implemented on `vterm-tui`: terminal-window
+  composition, input/resize, per-context scroll/selection/copy, authenticated
+  frontend ownership, BEL/clipboard drainage, and the strict Lua surface.
 - **Vterm Stage 3 protocol/GPU** starts only after Stage 2 merges: additive
   protocol v19 complete frames, authenticated daemon routing, and native GPU
   cell rendering. Its framing must resolve the current 16 MiB transport cap's

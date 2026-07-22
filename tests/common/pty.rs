@@ -12,6 +12,7 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,7 +27,8 @@ pub struct PmacsPty {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
     _reader_thread: thread::JoinHandle<()>,
-    _master: Box<dyn portable_pty::MasterPty + Send>,
+    output: Arc<Mutex<Vec<u8>>>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
 }
 
 impl PmacsPty {
@@ -34,6 +36,27 @@ impl PmacsPty {
     pub fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.writer.write_all(bytes)?;
         self.writer.flush()
+    }
+
+    /// Resize the real host PTY in terminal cells.
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    /// Snapshot all bytes emitted by pmacs to its host terminal.
+    #[must_use]
+    pub fn output(&self) -> Vec<u8> {
+        self.output
+            .lock()
+            .expect("PTY output mutex poisoned")
+            .clone()
     }
 
     /// Poll-wait for pmacs to exit, up to `timeout`. Returns the
@@ -103,16 +126,19 @@ pub fn spawn_pmacs_in_pty(args: &[&str], envs: &[(&str, &Path)], rows: u16, cols
 
     let writer = pair.master.take_writer().expect("take_writer");
     let mut reader = pair.master.try_clone_reader().expect("try_clone_reader");
-    // Drain reader to /dev/null so pmacs's writes never block on a
-    // backed-up terminal output buffer. We don't need to inspect the
-    // bytes; the tests assert on exit status and side effects, not
-    // on screen content.
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let captured = output.clone();
+    // Drain and retain reader bytes so terminal-mode restoration can be
+    // asserted without ever exposing pmacs to the test runner's own TTY.
     let reader_thread = thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => return,
-                Ok(_) => {}
+                Ok(read) => captured
+                    .lock()
+                    .expect("PTY output mutex poisoned")
+                    .extend_from_slice(&buf[..read]),
             }
         }
     });
@@ -121,6 +147,7 @@ pub fn spawn_pmacs_in_pty(args: &[&str], envs: &[(&str, &Path)], rows: u16, cols
         child,
         writer,
         _reader_thread: reader_thread,
-        _master: pair.master,
+        output,
+        master: pair.master,
     }
 }

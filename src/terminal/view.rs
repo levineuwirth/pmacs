@@ -7,12 +7,8 @@ use crate::buffer::BufferId;
 use crate::cell::{Cell, CellCoord, CellSize, Glyph, Style};
 use crate::protocol::FrontendId;
 use crate::terminal::screen::{ScreenProjection, TerminalModes, TerminalRow};
-use crate::terminal::session::{
-    TerminalManager, TerminalSelectionSpan, TerminalSnapshot,
-};
-use crate::terminal::{
-    MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS,
-};
+use crate::terminal::session::{TerminalManager, TerminalSelectionSpan, TerminalSnapshot};
+use crate::terminal::{MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS};
 use crate::window::WindowId;
 
 /// One frontend/window projection of a terminal session.
@@ -284,10 +280,7 @@ impl TerminalManager {
         };
         state.selection_froze_top = state.top.is_none();
         if state.top.is_none() {
-            state.top = rows
-                .get(geometry.start)
-                .copied()
-                .map(row_lead);
+            state.top = rows.get(geometry.start).copied().map(row_lead);
         }
         state.selection = Some(TerminalSelection {
             anchor,
@@ -320,7 +313,9 @@ impl TerminalManager {
         let Some(head) = anchor_at(&rows, &geometry, viewport_size, coord) else {
             return false;
         };
-        let changed = state.selection.is_some_and(|selection| selection.head != head);
+        let changed = state
+            .selection
+            .is_some_and(|selection| selection.head != head);
         if let Some(selection) = state.selection.as_mut() {
             selection.head = head;
         }
@@ -372,10 +367,7 @@ impl TerminalManager {
 
     /// Exact controlled view for one frontend, if it still exists.
     #[must_use]
-    pub fn controller_view_for_frontend(
-        &self,
-        frontend_id: FrontendId,
-    ) -> Option<TerminalViewKey> {
+    pub fn controller_view_for_frontend(&self, frontend_id: FrontendId) -> Option<TerminalViewKey> {
         self.controllers.iter().find_map(|(buffer_id, controller)| {
             (controller.frontend_id == frontend_id)
                 .then(|| TerminalViewKey::new(frontend_id, controller.window_id, *buffer_id))
@@ -478,10 +470,7 @@ fn anchor_for(rows: &[&TerminalRow], resolved: ResolvedCell) -> LogicalCellAncho
     }
 }
 
-fn clamp_or_clear(
-    rows: &[&TerminalRow],
-    anchor: LogicalCellAnchor,
-) -> Option<LogicalCellAnchor> {
+fn clamp_or_clear(rows: &[&TerminalRow], anchor: LogicalCellAnchor) -> Option<LogicalCellAnchor> {
     if let Some(resolved) = resolve_anchor(rows, anchor) {
         return Some(anchor_for(rows, resolved));
     }
@@ -537,7 +526,9 @@ fn view_geometry(
     } else {
         0
     };
-    let rows_after_view = rows.len().saturating_sub(start.saturating_add(viewport_rows));
+    let rows_after_view = rows
+        .len()
+        .saturating_sub(start.saturating_add(viewport_rows));
     ViewGeometry {
         start,
         top_padding,
@@ -618,8 +609,7 @@ fn project_snapshot(
     let geometry = view_geometry(&rows, state, viewport_size.rows);
     let mut cells = vec![Cell::default(); viewport_size.area() as usize];
     for retained_row in geometry.start..rows.len() {
-        let Some(target_row) =
-            viewport_row(&geometry, viewport_size.rows as usize, retained_row)
+        let Some(target_row) = viewport_row(&geometry, viewport_size.rows as usize, retained_row)
         else {
             continue;
         };
@@ -665,10 +655,7 @@ fn project_snapshot(
 
     let cursor = if geometry.scroll_offset == 0 {
         projection.cursor.and_then(|cursor| {
-            let retained_row = projection
-                .history
-                .len()
-                .saturating_add(cursor.row as usize);
+            let retained_row = projection.history.len().saturating_add(cursor.row as usize);
             let row = viewport_row(&geometry, viewport_size.rows as usize, retained_row)?;
             (cursor.col < viewport_size.cols).then(|| CellCoord::new(row as u32, cursor.col))
         })
@@ -697,10 +684,7 @@ fn is_default_blank(cell: &Cell) -> bool {
         && cell.attachment.is_none()
 }
 
-fn copy_selection_bytes(
-    rows: &[&TerminalRow],
-    selection: TerminalSelection,
-) -> Option<Vec<u8>> {
+fn copy_selection_bytes(rows: &[&TerminalRow], selection: TerminalSelection) -> Option<Vec<u8>> {
     let (start, end) = normalized_selection(rows, selection)?;
     let mut out = Vec::new();
     for row_index in start.row..=end.row {
@@ -753,9 +737,7 @@ mod tests {
     }
 
     fn projection(history: Vec<TerminalRow>, visible_rows: Vec<TerminalRow>) -> ScreenProjection {
-        let cols = visible_rows
-            .first()
-            .map_or(1, |row| row.cells.len() as u32);
+        let cols = visible_rows.first().map_or(1, |row| row.cells.len() as u32);
         ScreenProjection {
             size: CellSize::new(visible_rows.len() as u32, cols),
             alternate_active: false,
@@ -769,7 +751,10 @@ mod tests {
 
     #[test]
     fn tail_projection_pads_above_and_right_and_translates_cursor() {
-        let mut source = projection(Vec::new(), vec![row(1, 0, "abc", false), row(2, 0, "def", false)]);
+        let mut source = projection(
+            Vec::new(),
+            vec![row(1, 0, "abc", false), row(2, 0, "def", false)],
+        );
         source.cursor = Some(CellCoord::new(1, 2));
         let snapshot = project_snapshot(
             BufferId::next(),
@@ -780,7 +765,11 @@ mod tests {
             TerminalProcessState::Running,
         );
         assert_eq!(snapshot.cells.len(), 20);
-        assert!(snapshot.cells[..10].iter().all(|cell| *cell == Cell::default()));
+        assert!(
+            snapshot.cells[..10]
+                .iter()
+                .all(|cell| *cell == Cell::default())
+        );
         assert_eq!(snapshot.cells[10].glyph, Glyph::Char('a'));
         assert_eq!(snapshot.cells[13], Cell::default());
         assert_eq!(snapshot.cells[15].glyph, Glyph::Char('d'));

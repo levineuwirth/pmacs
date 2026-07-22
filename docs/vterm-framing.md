@@ -1,8 +1,8 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
 **Revision 7 — 2026-07-21. Status: Stage 1 landed on `main` as PR #126
-at merge `643d1e1`; Stages 2 and 3 are not implemented. Stage 2 framing review
-is complete and the contract is ready for implementation.**
+at merge `643d1e1`; Stage 2 is implemented on branch `vterm-tui` and Stage 3
+is not implemented.**
 
 Revision 7 closes the final three precision findings: `at_bottom` is geometric
 and distinct from live-tail following; the fixed `C-c` transport escape
@@ -1133,6 +1133,48 @@ base-branch deletion/auto-close risk and makes each PR's gate evidence honest.
 27. A hermetic real TUI smoke opens `/bin/sh`, runs a cursor-addressed probe,
     exercises key/paste, resize, scroll/select/copy, BEL, and clean exit, then
     proves host raw/alternate-screen state is restored.
+
+#### Stage 2 verification map
+
+The cross-surface suite is `tests/vterm_stage2_acceptance.rs`; focused unit
+coverage remains beside the owning implementation. The criteria map as follows:
+
+- **15:** `lua_surface_is_strict_fresh_transactional_and_context_safe`.
+- **16:** `editor::tests::terminal_snapshot_composes_only_content_and_translates_cursor`
+  plus the real-TUI smoke.
+- **17:** `terminal::view::tests::{tail_projection_pads_above_and_right_and_translates_cursor,
+  frozen_top_is_geometrically_at_bottom_when_view_still_reaches_tail,
+  alternate_switch_clears_view_anchors_and_selection}` and
+  `shared_screen_keeps_view_scroll_selection_and_controller_independent`.
+- **18:** `terminal::input::tests::{utf8_ctrl_and_alt_boundaries,
+  application_cursor_and_xterm_modifiers, ambiguous_digits_ignore_application_keypad,
+  paste_and_focus_are_exact, unsupported_keys_are_invisible}` and the real-TUI
+  input/paste path.
+- **19:** `editor::tests::dispatch_prefix_state_is_independent_per_frontend`,
+  `lua_surface_is_strict_fresh_transactional_and_context_safe`, and the
+  real-TUI terminal-escape/quit path.
+- **20:** `terminal::input::tests::sgr_mouse_modes_modifiers_and_coordinates`
+  plus the real-TUI editor-owned scroll/drag/copy path.
+- **21:** `terminal::view::tests::{copy_joins_soft_wraps_trims_default_blanks_and_separates_hard_rows,
+  wide_continuation_canonicalizes_to_lead_and_copies_once}`,
+  `lua_surface_is_strict_fresh_transactional_and_context_safe`, and the real
+  OSC 52 clipboard assertion.
+- **22:** `lua_surface_is_strict_fresh_transactional_and_context_safe`,
+  `shared_screen_keeps_view_scroll_selection_and_controller_independent`, and
+  the real child-PTY resize assertion.
+- **23:** `daemon::tests::forged_resize_mutates_only_the_authenticated_frontend`,
+  `daemon::tests::inbound_paste_uses_authenticated_source_not_the_claimed_id`,
+  the existing `m5_4_dispatch_{key,mouse}_threads_frontend_id_to_lua_surface`
+  tests, and the multi-frontend detach assertions in
+  `shared_screen_keeps_view_scroll_selection_and_controller_independent`.
+- **24:** the built-in-provider and clipboard assertions in
+  `lua_surface_is_strict_fresh_transactional_and_context_safe`,
+  `daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once`,
+  and the real-TUI BEL/OSC 52 assertions.
+- **25:** `shared_screen_keeps_view_scroll_selection_and_controller_independent`.
+- **26:** both in-process acceptance tests' termination/cleanup assertions and
+  the real-TUI clean-exit/host-restoration assertions.
+- **27:** `real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell`.
 
 ### Stage 3 — GPU/protocol
 
