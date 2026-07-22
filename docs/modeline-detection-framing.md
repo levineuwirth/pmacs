@@ -1,6 +1,7 @@
 # Modeline language detection — side quest
 
-**Status:** Draft for user review, 2026-07-22. No implementation yet.
+**Status:** Revision 2, revised after user review, 2026-07-22. Awaiting
+approval; no implementation yet.
 **Base:** `githubsucks/main` at `d5d9b9c`; protocol v18.
 
 ## Problem
@@ -125,10 +126,12 @@ Read at most 8 KiB from each end of the buffer and inspect:
   `'modelines'=5` behavior.
 
 When the prefix and suffix overlap, deduplicate lines before parsing. Strip one
-trailing `\r` so CRLF and LF behave identically. A candidate line truncated by
-the 8 KiB boundary is not parsed. Detection therefore allocates at most 16 KiB
-per fresh load, independent of file size, and an adversarial giant edge line
-cannot force a whole-buffer copy.
+trailing `\r` so CRLF and LF behave identically. Discard the suffix window's
+leading fragment when its line begins before the 8 KiB boundary; that fragment
+does not count toward the five complete logical lines counted backward from
+buffer end. No truncated candidate is parsed. Detection therefore allocates at
+most 16 KiB per fresh load, independent of file size, and an adversarial giant
+edge line cannot force a whole-buffer copy.
 
 The Emacs 3000-character tail `Local Variables:` mechanism is a separate parser
 with comment-prefix/suffix rules and is excluded.
@@ -147,11 +150,16 @@ Vim/Vi:
 
 - accept `vim:`, `vi:`, and `Vim:` at line start or preceded by ASCII space or
   tab; `Vim:` requires the `set` form, matching Vim;
-- accept optional `set ` / `se ` and exact `ft=NAME`, `ft:NAME`,
-  `filetype=NAME`, or `filetype:NAME` assignments;
-- ignore all other option tokens rather than interpreting them;
-- require a terminating colon for the `set`/`se` form, so a comment suffix is
-  never consumed as an option value;
+- accept only exact `ft=NAME` and `filetype=NAME` assignments; `ft:NAME` and
+  `filetype:NAME` are not modeline assignment forms and are rejected;
+- in the direct form, split option tokens on ASCII whitespace and `:`, so the
+  common `vim:ft=python:sw=4:` form yields `ft=python`;
+- in the `set` / `se` form, end the option section at the first `:` and split
+  only the preceding text on ASCII whitespace; `vim: set sw=4: ft=python`
+  therefore contains no live filetype assignment;
+- ignore all other live option tokens rather than interpreting them;
+- require that terminating colon for the `set` / `se` form, so a comment suffix
+  is never consumed as an option value;
 - reject `ex:`, Vim version predicates, and marker substrings embedded in a
   word.
 
@@ -182,13 +190,16 @@ pmacs.parse.modeline_aliases = {
   sh = "bash",
   shell = "bash",
   ["shell-script"] = "bash",
+  zsh = "bash",
   py = "python",
   js = "javascript",
+  js2 = "javascript",
   jsx = "javascriptreact",
   ts = "typescript",
   tsx = "typescriptreact",
   yml = "yaml",
   makefile = "make",
+  docker = "dockerfile",
 }
 ```
 
@@ -269,15 +280,20 @@ pinned parser/LSP language. Switches preserve both values.
 
 ### Q#MD8 — Malformed or unsupported metadata is fail-closed and quiet
 
-A malformed marker, invalid name, unsupported form, truncated candidate, or
-unknown language never raises from `buffer.after-load` and never emits an
-`*errors*` entry. The detector returns nil and the existing inference chain
-continues.
+A malformed marker, invalid name, unsupported form, or truncated candidate
+never raises from `buffer.after-load` and never emits an `*errors*` entry. The
+detector returns nil and the existing inference chain continues.
 
 A syntactically valid unknown name is different: it is a legitimate major mode
 and is pinned, but `_has_language` and LSP config gates prevent a bogus parser
 or server launch. This preserves #129's custom-mode capability without
 executing file content.
+
+A file can already select a configured language—and therefore which LSP server
+pmacs starts—through its extension or a content-sniffed shebang. Modelines add
+another bounded language selector within that existing capability class; they
+do not introduce automatic execution beyond what current language detection
+already permits.
 
 No enable/disable setting is added. The supported input can only select a
 bounded string already consumed as passive mode/language identity; it cannot
@@ -328,14 +344,19 @@ language server.
    the last `mode` property wins.
 2. **Vim forms:** `vim:`/`vi:` direct and `set` forms resolve `ft` and
    `filetype` in the first/last five lines; CRLF works; `Vim:` requires `set`.
+   The direct `vim:ft=sh:et:sw=2:` form resolves `sh`, while
+   `vim: set sw=4: ft=python` ignores the assignment after the terminating
+   colon. `ft:python` and `filetype:python` resolve nothing in either form.
 3. **Boundary rejection:** sixth-line, sixth-from-end, middle-of-file,
    word-embedded, unterminated, truncated, invalid-character, and overlong
-   candidates do not resolve and do not log errors.
+   candidates do not resolve and do not log errors. A partial line at the start
+   of the suffix byte window is discarded without consuming one of the five
+   complete tail-line slots.
 4. **Conflict order:** overlapping edge windows are deduplicated and the last
    valid assignment in document order wins deterministically.
-5. **Alias behavior:** seeded aliases map `sh → bash`, `c++ → cpp`, and
-   `tsx → typescriptreact`; a user override wins; an invalid alias output is
-   ignored.
+5. **Alias behavior:** seeded aliases map `sh`/`zsh → bash`, `c++ → cpp`,
+   `js2 → javascript`, `tsx → typescriptreact`, and `docker → dockerfile`; a
+   user override wins; an invalid alias output is ignored.
 6. **Explicit precedence:** a `.py` file with a Lua modeline yields `lua` from
    `pmacs.parse.buffer_language`, `pmacs.lsp.active_buffer_language`, the parse
    tree, and `pmacs.buffer.major_mode`.
@@ -343,13 +364,16 @@ language server.
    `prose`, creates no parse view, starts no LSP server, and produces no error.
 8. **No-modeline regression:** extension, filetype, filename, and shebang cases
    retain their present precedence and outputs.
-9. **Pinned lifecycle:** changing a loaded modeline does not change the pinned
-   language, parser, or major mode; switch-away/back remains stable; close and
-   reopen re-evaluates the changed on-disk cookie.
-10. **Explicit override independence:** `set_major_mode` after load changes
+9. **Shebang pin regression:** open an extensionless `#!/bin/sh` file, replace
+   its shebang with `#!/usr/bin/env lua`, and assert the parse tree and
+   `pmacs.lsp.buffer_language` both remain `bash`.
+10. **Pinned modeline lifecycle:** changing a loaded modeline does not change
+    the pinned language, parser, or major mode; switch-away/back remains stable;
+    close and reopen re-evaluates the changed on-disk cookie.
+11. **Explicit override independence:** `set_major_mode` after load changes
     dispatch/statusline but not `pmacs.parse.buffer_language`; switches preserve
     the override.
-11. **Pathless preservation:** syntax-by-buffer-name behavior remains, while
+12. **Pathless preservation:** syntax-by-buffer-name behavior remains, while
     `pmacs.lsp.buffer_language` still returns nil without a backing path.
-12. **Backend parity:** focused acceptance passes with default LuaJIT and
+13. **Backend parity:** focused acceptance passes with default LuaJIT and
     `--no-default-features --features lua54`; protocol remains v18.
