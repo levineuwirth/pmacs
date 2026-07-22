@@ -14,7 +14,8 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `8cbb9f4` (locals-query processing #134; protocol v18).
+  `githubsucks/main` @ `40111dc` (landed-state docs after locals-query #134;
+  protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,8 +49,34 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `8cbb9f4` or a newer intentional main.
+The first command must expose `40111dc` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
+
+## Tab-width rendering parity lane
+
+- Portable branch: `githubsucks/tab-width-parity`.
+- Base: canonical `main` @ `40111dc`; protocol v18.
+- Approved framing: `docs/tab-width-parity-framing.md` revision 2; framing
+  branch head `9f2f0d5`.
+- Implementation head: `9f7bc77`.
+- State: implementation complete; PR pending. One fixed 8-column constant now
+  drives core/TUI columns, GPU code projection, and minimap width. Source bytes
+  and protocol ranges remain unchanged.
+- Verification: `cargo fmt --check`; strict workspace Clippy; 1,763 default,
+  1,939 CRDT, and 1,763 Lua 5.4 library tests; 2 tab-width acceptance tests;
+  M4 121 passed (3 ignored, 1 filtered); required GPU 119; workspace 2,911
+  passed across 83 suites (19 ignored, 1 filtered); `git diff --check`.
+- Concurrent PR #135 owns overlapping `Cargo.lock`, `pmacs-protocol/src/lib.rs`,
+  and `pmacs-gpu/src/main.rs`. This branch deliberately remains based on
+  canonical `main`; rebase and rerun gates if #135 lands first.
+- Recovery:
+
+  ```sh
+  git worktree add --track \
+    -b tab-width-parity \
+    ../pmacs-tab-width-parity \
+    githubsucks/tab-width-parity
+  ```
 
 ## Parked lane: kill-ring browser + persistence
 
