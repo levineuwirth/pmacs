@@ -1,6 +1,6 @@
 # Tab-width rendering parity - side quest
 
-**Status:** Revision 1 framing; awaiting user approval.
+**Status:** Revision 2 framing; review findings incorporated; awaiting user approval.
 
 **Base:** `githubsucks/main` at `40111dc` (landed-state documentation for
 locals-query processing #134); protocol v18.
@@ -66,7 +66,8 @@ text remains byte-for-byte unchanged.
   insertion, tab-to-spaces conversion, or retabbing existing files.
 - Changing what the Tab key inserts. A literal tab remains one source byte.
 - Expanding tabs in protocol payloads or mutating `SemanticFrame` byte ranges.
-- Tabs in statusline, minibuffer, menu, or other non-buffer UI strings.
+- Tabs in statusline, minibuffer, menu, hover panels, or other non-buffer UI
+  strings.
 - A wire schema or protocol-version change.
 
 ## Ground truth and contracts to preserve
@@ -136,9 +137,10 @@ buffer-effective value in every semantic frame (or another versioned frontend
 fact), cache invalidation when it changes, and tests across reconnects. That is
 a separate feature, not hidden scope in this parity fix.
 
-No `PROTOCOL_VERSION` bump: no message variant, field, encoding, capability, or
-negotiation rule changes. Protocol v18 gains a compiled rendering invariant for
-a previously unspecified raw-tab case.
+This work changes no `PROTOCOL_VERSION`: no message variant, field, encoding,
+capability, or negotiation rule changes. It adds a compiled rendering invariant
+for a previously unspecified raw-tab case to the protocol version present on
+its implementation base.
 
 ### Q#TW2 - One core module owns display-column arithmetic
 
@@ -314,9 +316,10 @@ a source-byte coordinate.
 4. **Forward rounding inside a tab is acceptable.** It matches the shipped TUI
    inverse mapping and avoids inventing fractional positions inside one source
    byte.
-5. **A fixed semantic constant does not require protocol v19.** There is no wire
-   representation change. If external v18 clients exist, they remain decodable
-   but must adopt the documented invariant to obtain visual parity.
+5. **The fixed semantic constant needs no protocol-version change.** This work
+   changes no message representation or negotiation rule. Existing compatible
+   clients remain decodable but must adopt the documented invariant to obtain
+   visual parity.
 
 ## Acceptance criteria
 
@@ -349,7 +352,9 @@ a source-byte coordinate.
    expanded space and does not color the following source character.
 10. **Selected/diagnostic tab:** own and peer selections and diagnostic
     squiggles whose source range covers a tab span the full projected interval
-    and remain aligned with following text.
+    and remain aligned with following text. The GPU layout case includes a soft
+    wrap whose boundary falls inside the expanded tab, proving that one source
+    byte produces correct geometry on both visual lines.
 11. **Adornment interaction:** an inline text adornment before a source tab
     contributes to the visible logical column, the tab still ends at the next
     8-column stop, and source/adornment hit gravity remains deterministic.
@@ -360,8 +365,8 @@ a source-byte coordinate.
     shaping, caret position, hit testing, styles/decorations, and minimap shape
     on the next normal refresh without switching buffers or forcing a full
     rebuild.
-14. **No scope creep:** `pmacs.config` gains no tab-width key,
-    `PROTOCOL_VERSION` remains 18, and no wire message shape changes.
+14. **No scope creep:** `pmacs.config` gains no tab-width key, and this work
+    changes no `PROTOCOL_VERSION`, wire message shape, or negotiation rule.
 15. **Quality gates:** focused default/Lua 5.4 tests, the touched acceptance
     suite, both GPU unit and required hardware-backed tests, the standard
     project gates, workspace sweep, and `git diff --check` pass.
@@ -377,7 +382,7 @@ paths rather than inspecting source text:
   overlay tests using byte ranges that cross tabs;
 - GPU projection-map tests for tab expansion and both mapping directions;
 - GPU layout/offscreen tests for caret, selection/diagnostic geometry,
-  wrapping, adornments, and edit freshness;
+  a soft-wrap boundary inside an expanded tab, adornments, and edit freshness;
 - minimap shape tests for tabs and Unicode; and
 - `tests/tab_width_acceptance.rs` rendering one tabbed fixture through the
   core-facing path while the GPU suite proves the frontend projection.
