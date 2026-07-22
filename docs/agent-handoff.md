@@ -1,8 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, with tab-width rendering parity implemented on
-`tab-width-parity` and awaiting review, after locals-query processing (#134)
-landed on `main`. Vterm Stage 3 remains in review as #135.**
+**Last updated: 2026-07-22, with tab-width rendering parity implemented and
+open as PR #137, after locals-query processing (#134) landed on `main`.
+Vterm Stage 3 remains in review as #135.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -315,9 +315,10 @@ commands, read `docs/active-work.md` immediately after this file.
     8 CRDT; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
     workspace 2,882 passed across 82 suites (19 ignored, 1 filtered);
     `git diff --check` clean.
-- **Tab-width rendering parity IMPLEMENTED — review pending**
+- **Tab-width rendering parity IMPLEMENTED — PR #137 OPEN**
   (`docs/tab-width-parity-framing.md` rev 2; branch `tab-width-parity`;
-  implementation `9f7bc77`). Source tabs remain one byte while every buffer
+  implementation `9f7bc77`; <https://github.com/levineuwirth/pmacs/pull/137>).
+  Source tabs remain one byte while every buffer
   renderer follows the shared fixed `pmacs_protocol::TAB_STOP_COLUMNS = 8`.
   - `src/display_width.rs` owns allocation-free Unicode/tab-aware byte-to-column
     accounting for plain text, syntax, diagnostics, completion anchors,

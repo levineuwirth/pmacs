@@ -59,7 +59,8 @@ If it does not, stop and repair the remote/fetch configuration.
 - Approved framing: `docs/tab-width-parity-framing.md` revision 2; framing
   branch head `9f2f0d5`.
 - Implementation head: `9f7bc77`.
-- State: implementation complete; PR pending. One fixed 8-column constant now
+- State: implementation complete; PR #137 open:
+  <https://github.com/levineuwirth/pmacs/pull/137>. One fixed 8-column constant now
   drives core/TUI columns, GPU code projection, and minimap width. Source bytes
   and protocol ranges remain unchanged.
 - Verification: `cargo fmt --check`; strict workspace Clippy; 1,763 default,

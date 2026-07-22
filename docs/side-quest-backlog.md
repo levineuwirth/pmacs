@@ -120,7 +120,7 @@ The direct continuation of the #114–#118 grammar/detection stack.
   language-aware indent, per-language comment padding, and per-project
   compile commands — the last three are now ordinary work, expressed as
   a `buffer.after-load` hook calling `set_local`, not blocked work.
-- ~~**Tab-width rendering parity**~~ — **IMPLEMENTED, IN REVIEW.** One fixed
+- ~~**Tab-width rendering parity**~~ — **IMPLEMENTED, IN REVIEW AS #137.** One fixed
   8-column constant now drives the core/TUI display-column paths, GPU rich-text
   projection, and minimap widths. GPU expansion retains source-tab provenance,
   so caret, hit, selection, and diagnostic geometry remain byte-correct through
@@ -238,7 +238,7 @@ guides (visual, not color).
 **The original north-star items have shipped or reached review** —
 multi-language injections (#122), the config registry (#127), JSON + YAML
 (#123), mode-system wiring (#129), locals queries (#134), and tab-width
-rendering parity (`tab-width-parity`, review pending). The remaining board now
+rendering parity (PR #137, review pending). The remaining board now
 starts with the broader ranked arcs below rather than another unresolved
 cross-frontend rendering invariant.
 
