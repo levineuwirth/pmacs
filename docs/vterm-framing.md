@@ -43,9 +43,9 @@ later stage starts only after the preceding stage lands on `main`.
 The first of the three vterm PRs landed on `main` at merge `643d1e1`.
 Implementation commits `bbc1f33` and `962944b`, first-review fixes through
 `bf972a7`, and second-review hardening through `9797ada` shipped in PR #126,
-<https://github.com/levineuwirth/pmacs/pull/126>. The landed stage is
-deliberately headless: there is no `pmacs.terminal` Lua module, interactive
-terminal command, TUI paint branch, or GPU/protocol surface yet.
+<https://github.com/levineuwirth/pmacs/pull/126>. That landed stage is
+deliberately headless; this Stage 2 branch adds the Lua and TUI surfaces while
+leaving GPU/protocol integration for Stage 3.
 
 ### 0.1 Public seam and ownership
 
@@ -1023,13 +1023,12 @@ Per-stage utilization:
 Stage 1 landed on `main` as PR #126 at merge `643d1e1`. Continue one clean PR
 at a time:
 
-1. Revision 7 framing review complete; implementation contract approved;
-2. create worktree `pmacs-vterm-tui`, branch `vterm-tui`, from current
-   `githubsucks/main`; carry this approved framing as the first commit,
-   implement/gate, and open the second PR;
-3. merge Stage 2 only when the user says;
-4. create `pmacs-vterm-gpu`, branch `vterm-gpu`, from the then-current `main`;
-   implement/gate/open the third PR.
+1. Revision 7 framing review is complete and the implementation contract is
+   approved; Stage 2 is implemented on `vterm-tui`, then gated and opened as
+   the second PR;
+2. merge Stage 2 only when the user says;
+3. create `pmacs-vterm-gpu`, branch `vterm-gpu`, from the then-current `main`;
+   implement, gate, and open the third PR.
 
 The framing branch is `vterm-framing` in worktree `pmacs-vterm-framing`.
 Implementation branches are not stacked across an unmerged parent. This avoids

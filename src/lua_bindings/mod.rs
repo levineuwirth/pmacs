@@ -83,6 +83,7 @@ use crate::workers_buffer;
 // beyond call seams. Public entry points a domain owns are re-exported here
 // so external `crate::lua_bindings::<item>` paths (and in-file uses) stay
 // stable.
+mod config;
 mod diag;
 mod index;
 mod mcp;
@@ -1460,6 +1461,9 @@ fn after_buffer_removed(lua: &Lua, id: BufferId) {
     if let Some(keymaps) = lua.app_data_ref::<SharedKeymapStack>() {
         keymaps.borrow_mut().remove_buffer(id);
     }
+    if let Some(config) = lua.app_data_ref::<config::SharedConfigRegistry>() {
+        config.borrow_mut().remove_buffer(id);
+    }
     let callbacks = match lua.app_data_ref::<BufferRemoveCallbacks>() {
         Some(callbacks) => callbacks.take(id),
         None => Vec::new(),
@@ -2278,6 +2282,9 @@ pub fn install(
     lua.set_app_data(BufferRemoveCallbacks::new());
     let statusline = Rc::new(RefCell::new(StatuslineRegistry::new()));
     lua.set_app_data(statusline.clone());
+    let config_registry: config::SharedConfigRegistry =
+        Rc::new(RefCell::new(crate::config_registry::ConfigRegistry::new()));
+    lua.set_app_data(config_registry.clone());
 
     let pmacs = lua.create_table()?;
     pmacs.set("buffer", install_buffer_module(lua, registry)?)?;
@@ -2286,6 +2293,7 @@ pub fn install(
     pmacs.set("menu", install_menu_module(lua, menus)?)?;
     pmacs.set("hook", install_hook_module(lua, hooks)?)?;
     pmacs.set("statusline", install_statusline_module(lua, &statusline)?)?;
+    pmacs.set("config", config::install_config(lua, &config_registry)?)?;
     // Wall-clock millis (since UNIX epoch). Used by builtin runtime
     // chunks for timeout loops; `os.clock()` only counts CPU time and
     // is a poor fit for "wait until something arrives over I/O".

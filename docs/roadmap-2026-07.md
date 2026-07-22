@@ -4,6 +4,10 @@ Date: 2026-07-07. Produced from a five-way codebase/docs/memory sweep
 (core editing + persistence, LSP surface, GPU parity, extensibility +
 terminal, deferred-work inventory across all framing docs).
 
+> **Historical planning snapshot.** Several arcs below have since
+> landed. Use `docs/agent-handoff.md` for durable current state and
+> `docs/active-work.md` for open branches and recovery instructions.
+
 **Decision (2026-07-07): push Arc 1 (LSP utility surface), with Arc 2
 (editing table stakes) items interleaved between sub-arcs.**
 
@@ -50,61 +54,48 @@ modes; DAP debugging; GPU splits / multi-buffer / auto-reconnect.
 
 ## Arcs, ranked by value-per-effort
 
-### Arc 1 — LSP utility surface: "light up the dark matter" ← ACTIVE
+### Arc 1 — LSP utility surface: "light up the dark matter" — COMPLETE
 
-Data layer is done; only UI is missing.
+The completion popup and LSP utility panels shipped across #92–#96,
+followed by hardening in #102, #105, and #106. Completion, hover,
+references, document symbols, and the supporting semantic/signature
+paths are now wired through both frontend contracts.
 
-- **1a. In-buffer completion popup** (first). Trigger on typing,
-  TAB/RET accept, both frontends. GPU needs a wire message — mirror the
-  minibuffer-dropdown pattern (protocol v12). Framework + popup view
-  already exist.
-- **1b. Panels**: hover popup, code-action picker, references list,
-  document-symbol outline. Generalize the buffer-list UI pattern
-  (`*buffer-list*` buffer-local bindings) into a reusable list-buffer
-  idiom.
-- **1c. Semantic-token auto-pull fix** (small): pull on attach + on
-  edit-flush, like inlay hints already do.
-- **1d. Signature-help auto-trigger** on `(`.
+### Arc 2 — Editing table stakes — COMPLETE
 
-### Arc 2 — Editing table stakes (interleave with Arc 1)
+Query-replace (#97), the real kill ring and `M-y` (#103/#105/#106),
+comment toggle (#107), auto-indent (#109), and auto-pairing (#110)
+landed.
 
-Each small, core-only, frontend-agnostic: query-replace (isearch
-exists; `search.rs` has no replace API), real kill ring + `M-y`,
-comment/uncomment, auto-indent on newline, auto-pairing.
+### Arc 3 — Persistence/serialization — COMPLETE
 
-### Arc 3 — Persistence/serialization
+Saveplace/recentf (#98), desktop save/restore (#99),
+autosave/crash-recovery (#100), and the save-clobber fix (#101) landed.
 
-Desktop-save (buffer set + layout + cursors → restore), recentf,
-saveplace, autosave + crash recovery, optional backups. Generalize the
-`$XDG_STATE_HOME/pmacs/` pattern from minibuffer history. Framing
-question: what is a "session" in a daemon world; do CRDT snapshots
-ride along.
+### Arc 4 — Themes + extensibility surface — COMPLETE
 
-### Arc 4 — Themes + extensibility surface — COMPLETE ON `main`
-
-All three stages landed: #120 added named `ui.*` faces and daemon-resolved
-`ThemeFacts`; #124 added the live global `pmacs.gpu.set_font` preference at
-protocol v17; and #125 added composable `pmacs.statusline` providers,
-per-window TUI composition, a pure built-in LSP segment, dynamic modeline
-faces, and semantic/GPU transport through protocol v18.
+Stages 1–3 landed as #120, #124, and #125: named `ui.*` faces with
+daemon-resolved `ThemeFacts`; the live global `pmacs.gpu.set_font`
+preference at protocol v17; and composable per-window
+`pmacs.statusline` providers transported to semantic/GPU frontends by
+protocol-v18 `StatuslineSegments`.
 
 ### Arc 5 — Terminal, staged — VTERM STAGE 2 ON FEATURE BRANCH
 
-- **Compile-mode landed** in #113: line-oriented PTY/ANSI output,
+- **Compile mode landed in #113**: line-oriented PTY/ANSI output,
   error-regex navigation, and `M-x compile`.
-- **Vterm Stage 1 terminal core landed** in #126: compatibility parser
+- **Vterm Stage 1 terminal core landed in #126**: compatibility parser
   profiles, bounded VT screen/scrollback/reflow state, IND/NEL/RI, input
   encoders, internal `TerminalManager`, read-only identity buffers, process
-  lifecycle, renderer-safe control-free cells, and headless real-PTY
+  lifecycle, control-free renderer-boundary cells, and headless real-PTY
   acceptance.
-- **Vterm Stage 2 TUI** is implemented on `vterm-tui`: terminal-window
+- **Vterm Stage 2 TUI is implemented on `vterm-tui`**: terminal-window
   composition, input/resize, per-context scroll/selection/copy, authenticated
   frontend ownership, BEL/clipboard drainage, and the strict Lua surface.
-- **Vterm Stage 3 protocol/GPU** starts only after Stage 2 merges: additive
-  protocol v19 complete frames, authenticated daemon routing, and native GPU
-  cell rendering. Its framing must resolve the current 16 MiB transport cap's
-  incompatibility with the legal worst complete terminal frame; never silently
-  chunk.
+- **Vterm Stage 3 protocol/GPU follows Stage 2**: additive protocol v19
+  complete frames, authenticated daemon routing, and native GPU terminal
+  rendering. Its framing must resolve the 16 MiB transport cap's incompatibility
+  with the legal worst complete terminal frame; never silently chunk.
 
 ### Arc 6 — Folding (keystone gutter rider)
 
