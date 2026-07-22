@@ -52,6 +52,34 @@ git status --short --branch
 The first command must expose `cac4961` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
+## Folding framing lane (Arc 6)
+
+- Portable branch: `githubsucks/folding`; worktree `../pmacs-folding`.
+- Base: canonical `main` @ `cac4961` (post Vterm Stage 3 #135).
+- Framing head: `ee6c77f` (`docs/folding-framing.md` draft rev 1).
+- State: **framing only, awaiting review then approval.** No implementation.
+  Load-bearing decision (Q#FD1): the bundled grammars ship no fold query and
+  no `folds.scm`, so the roadmap's "tree-sitter fold ranges" is not free; the
+  draft recommends structural node folding (nearest enclosing block-like node
+  >= 2 rows), with indentation fallback and curated queries deferred.
+  `FoldState` already exists in the protocol, declared-but-unproduced (a test
+  pins it is never emitted); no frontend consumes it; gutter markers are
+  frontend-derived like the diagnostic sign bars, so no new wire type. Staged
+  like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
+- PR: none yet — framing is committed to the branch for review, not opened as
+  a PR. Stage 1 implements on this same branch after approval.
+- Next: user review rounds on `docs/folding-framing.md`; bindings (Q#FD4) and
+  the block-kind heuristic (Bet B1) are the two calls flagged for the user.
+
+Recovery worktree:
+
+```sh
+git worktree add --track \
+  -b folding \
+  ../pmacs-folding \
+  githubsucks/folding
+```
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
@@ -87,6 +115,12 @@ git worktree add --track \
   so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
+
+- **Vterm Stage 3 (protocol v19 + GPU terminal) — MERGED as #135** (`main`
+  @ `cac4961`, 2026-07-22, after two review rounds). Arc 5's terminal stage
+  is complete (compile mode #113, Stage 1 #126, Stage 2 #130, Stage 3 #135).
+  Its lane, worktree (`../pmacs-vterm-gpu`), and branch are done; durable
+  substrate facts live in `docs/agent-handoff.md` and `docs/vterm-framing.md`.
 
 - **Branches deleted 2026-07-22 (authorized):** `vterm-stage3-framing`
   (Revision 8 framing; its content is carried on `vterm-gpu`, verified as a
