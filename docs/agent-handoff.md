@@ -1,9 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after the config registry (#127) and Vterm
-Stage 1 terminal core (#126) both landed on `main`, atop completed
-Themes Arc 4 (#120/#124/#125). Vterm Stages 2 and 3 are not
-implemented.**
+**Last updated: 2026-07-22, after mode system wiring (#129) landed on
+`main`, atop the config registry (#127), Vterm Stage 1 terminal core
+(#126), and completed Themes Arc 4 (#120/#124/#125). Vterm Stages 2 and 3
+are not implemented.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -15,9 +15,9 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-21)
+## 1. Where the project stands (2026-07-22)
 
-- `main` @ `2e37c04` (config registry #127), protocol **v18**
+- `main` @ `b4b925d` (mode system wiring #129), protocol **v18**
   (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
   `StatuslineSegments`).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
@@ -40,8 +40,8 @@ commands, read `docs/active-work.md` immediately after this file.
     local → global → default; **`get(name)` resolves the GLOBAL CHAIN
     ONLY** and never consults an ambient buffer. Per-language and
     per-project are *patterns* (a hook calling `set_local`), not scopes
-    the registry knows about. Mode scope is impossible until the mode
-    system is wired — every editor `KeymapStack::resolve` passes `&[]`.
+    the registry knows about. Mode keymaps now resolve through #129, but
+    `pmacs.config` deliberately remains global + buffer-local.
   - Buffer-locals live in a registry side table purged at
     `after_buffer_removed`, beside the keymap purge.
   - Listeners: commit → snapshot → **drop the borrow** → re-enter Lua;
@@ -61,6 +61,25 @@ commands, read `docs/active-work.md` immediately after this file.
     their legacy coercion** — the registry is strict, the legacy setters
     stay lenient (`trim_on_save("yes")`, `interval_ms(1500.7)`).
   - `M-x describe-setting` renders into `*help*`.
+- **Mode system wiring LANDED — #129** (`docs/mode-system-wiring-framing.md`;
+  merge `b4b925d`; one review round). The existing mode-keymap substrate is
+  now live without a protocol change.
+  - `Buffer.major_mode: Option<String>` owns the single major mode. The
+    detected language name initializes it once on `buffer.after-load`, before
+    grammar gating, so server-only languages work; switches never rewrite it.
+    Explicit overrides and clears survive switches. A future reload that fires
+    after-load re-detects, and explicit mode state is not session-persisted.
+  - Dispatch borrows the zero-or-one mode through `Option<&str>::as_slice()`
+    and `&[&str]`: no hot-path mode allocation. Resolution remains
+    buffer-local → mode → global, and registry/keymap borrows end before Lua
+    command invocation.
+  - Lua surfaces: `pmacs.buffer.major_mode` / `set_major_mode` and
+    `pmacs.editor.active_modes`. `pmacs.describe.key`, `pmacs.help.show_key`,
+    and followed percent-encoded `@mode:` links use the same effective context;
+    `pmacs.keymap.lookup` remains raw-global.
+  - The built-in `mode` statusline provider reads `ctx.buffer`, so passive
+    splits render their own mode. Real-daemon acceptance covers all ten framing
+    criteria across both Lua backends and Linux/macOS CI.
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -253,6 +272,8 @@ commands, read `docs/active-work.md` immediately after this file.
     cross-cutting substrate ranked first on
     `docs/side-quest-backlog.md`'s north star, and it unblocks the
     editing/indent/comment items that were config-blocked.
+  - **Mode system wiring COMPLETE (#129)** — major-mode keymaps,
+    introspection, lifecycle initialization, and statusline display shipped.
   - Remaining ranked arcs: 6 folding, 7 DAP, 8 GPU splits, plus the
     `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
@@ -433,6 +454,14 @@ acceptance.
   and go through `pmacs.command.invoke("buffer.save")`. Caught only
   because the *other* case failed and the cause was chased instead of
   the assertion adjusted.
+- **Real-grid acceptance must budget for macOS startup and path width.**
+  A 100 ms first-Hello timeout failed under loaded macOS CI; use the normal
+  five-second handshake window, then short polling reads. An 80-column split
+  also clipped a custom statusline segment after macOS's long
+  `/var/folders/...` temp path while passing on Linux; size the grid for the
+  longest supported fixture path (the mode-system test uses 160 columns per
+  split).
+
 
 ## 6. Named deferrals (the standing backlog, consolidated)
 
@@ -475,6 +504,9 @@ setters (`async_config` ×2, `killring.max`, the `enable` booleans) and
 currently accepted for `autosave.interval-ms`, where a per-buffer
 value is meaningless.
 **Tab width is NOT a config gap** — see §5.
+Mode system (SHIPPED #129): minor modes, `buffer.after-mode-change`,
+mode-scoped settings, modeline detection, `describe-mode`, and persistence of
+explicit major-mode overrides/clears across sessions.
 Highlight/detection (from the #114–#118 side-quest + injections #122):
 locals-query processing (run each grammar's LOCALS_QUERY so
 `#is?`/`#is-not? local` is honored instead of the current fail-closed

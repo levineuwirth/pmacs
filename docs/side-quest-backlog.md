@@ -130,8 +130,8 @@ The direct continuation of the #114–#118 grammar/detection stack.
   decision. Deferred from #127 on those grounds.
 - **Real `read_only` buffer flag** on both edit paths — true immutability
   for panels / REPL / generated buffers.
-- **Mode system wiring** — dispatch passes an empty mode list (`&[]`);
-  mode-scoped keybindings unresolved everywhere.
+- ~~**Mode system wiring**~~ — **SHIPPED as #129.** Per-buffer major modes
+  now drive key dispatch, effective-key introspection, and statusline display.
 - **Buffer-aware edit epoch + origin-pinned `after-edit` fan-out** — a
   command that edits buffer A then switches to B currently evades
   `didChange` / reparse / autosave observers.
@@ -237,17 +237,13 @@ guides (visual, not color).
 
 ## North star (highest-leverage first)
 
-**Both original north-star items have now shipped** — multi-language
-injections (#122) and the config registry (#127) — and JSON + YAML
-(#123) merged too. The remaining board:
+**The original north-star items and mode-system wiring have now shipped** —
+multi-language injections (#122), the config registry (#127), JSON + YAML
+(#123), and mode-system wiring (#129). The remaining board:
 
 1. **Locals-query processing** — restores `.builtin` styling for
    non-shadowed builtins, the last rough edge of the highlight stack.
-2. **Mode-system wiring** — every editor `KeymapStack::resolve` still
-   passes `&[]`, so mode-scoped keybindings and any mode-scoped setting
-   remain unreachable. Promoted here because #127 made it the largest
-   remaining scoping gap.
-3. **Tab-width rendering parity** — five constants across two crates
+2. **Tab-width rendering parity** — five constants across two crates
    with two different values, and no tab expansion at all on the GPU
    main text path. Explicitly NOT a config-registry task; see the entry
    under "Cross-cutting substrate".
