@@ -1,11 +1,12 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after Vterm Stage 3 (protocol v19, GPU
-terminal) was implemented on `vterm-gpu`. Vterm Stage 2 landed as PR #130 and
-modeline detection landed as #132. Mode system wiring (#129), config registry
-(#127), Vterm Stage 1 terminal core (#126), and completed Themes Arc 4
-(#120/#124/#125) are also on `main`. Stage 3 is implemented on `vterm-gpu`
-and awaits review; see `docs/active-work.md`.**
+**Last updated: 2026-07-22, after tab-width rendering parity (#137) and
+locals-query processing (#134) landed on `main`, and canonical `main` was
+merged into the Vterm Stage 3 lane. Vterm Stage 3 (protocol v19, GPU
+terminal) is implemented on `vterm-gpu` and in review as PR #135; see
+`docs/active-work.md`. Vterm Stage 2 (#130), modeline detection (#132),
+mode system wiring (#129), config registry (#127), Vterm Stage 1 (#126),
+and completed Themes Arc 4 (#120/#124/#125) are on `main`.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -19,7 +20,7 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-22)
 
-- `main` @ `1dd47fc` (modeline detection #132 atop Vterm Stage 2 #130),
+- `main` @ `2625ec7` (tab-width parity #137 atop locals-query #134),
   protocol **v18** on `main`, **v19** on `vterm-gpu`
   (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 =
   `FontFacts`, v18 = `StatuslineSegments`).
@@ -83,6 +84,21 @@ commands, read `docs/active-work.md` immediately after this file.
   - The built-in `mode` statusline provider reads `ctx.buffer`, so passive
     splits render their own mode. Real-daemon acceptance covers all ten framing
     criteria across both Lua backends and Linux/macOS CI.
+- **Modeline language detection LANDED — #132**
+  (`docs/modeline-detection-framing.md` rev 2; merge `1dd47fc`). Fresh loads
+  scan bounded Emacs `-*- mode: ... -*-` and Vim/Vi `ft=` / `filetype=`
+  modelines without evaluating file content, normalize common editor aliases,
+  and give explicit modelines precedence over inferred language.
+  - `builtin/runtime/syntax.lua` owns one per-buffer fresh-load decision:
+    modeline → bundled grammar extension → LSP filetype extension → exact
+    filename → shebang. Syntax, initial major mode, pairing, comments, and LSP
+    all reuse that pin; LSP retains its independent backing-path guard.
+  - Editing a modeline or shebang does not switch an attached parser or make
+    language-aware consumers diverge. Close/reopen re-evaluates changed file
+    metadata. Explicit post-load major-mode overrides remain independent.
+  - Bounded valid unknown names remain passive major modes without starting an
+    unavailable parser or server. All thirteen framing criteria are covered on
+    LuaJIT and Lua 5.4. No Rust or protocol surface changed; protocol stays v18.
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -92,25 +108,29 @@ commands, read `docs/active-work.md` immediately after this file.
     the ABI-current `tree-sitter-containerfile`, NOT the dead
     `tree-sitter-dockerfile` which pins `tree-sitter ^0.20`), make,
     cmake, python, go, javascript (+jsx), typescript (+tsx), toml, zig.
-  - **Detection chain** (`resolve_active_language` in syntax.lua /
-    `buffer_language` in lsp.lua): extension → LSP filetype map →
-    filename → shebang. New user-extensible Lua surfaces
-    `pmacs.parse.shebangs` / `.filenames` and
-    `pmacs.parse.language_from_shebang` / `language_from_filename`.
-    Grammar name MUST equal the `pmacs.lsp.config.<name>` key (grammar
-    detection wins over the filetype map, so it fixes the LSP id too).
-    A buffer keeps its first-attached grammar across edits/switches (no
-    re-sniff of a since-edited shebang).
+  - **Detection chain and pin** (`builtin/runtime/syntax.lua`): modeline →
+    grammar extension → LSP filetype map → filename → shebang. User-extensible
+    Lua surfaces include `pmacs.parse.modeline_aliases`, `.shebangs`,
+    `.filenames`, `language_from_modeline`, `language_from_shebang`,
+    `language_from_filename`, and the pinned `buffer_language`.
+    `builtin/runtime/lsp.lua` delegates to that shared decision after enforcing
+    its backing-path requirement. Grammar name MUST equal the
+    `pmacs.lsp.config.<name>` key. A buffer keeps its pinned language across
+    edits/switches; close/reopen performs a fresh bounded inference.
   - **LSP configs added**: dockerfile (`docker-langserver --stdio`),
     cmake (`cmake-language-server`, config via
     `init_options.buildDirectory="build"` — it does NOT pull
     `workspace/configuration`). Make has no server.
-  - **Substrate**: `LanguageEntry.highlights_query` is now
-    `&[&'static str]` — fragments joined base-first, for grammars whose
-    bundled highlights are a `; inherits:` delta (cuda over c/cpp; ts
-    over js/jsx). `compute_highlight_spans` FAILS CLOSED on the
-    `#is?`/`#is-not? local` property predicate (no locals processing) —
-    drops those captures so shadowed builtins aren't mis-styled.
+  - **Substrate**: `LanguageEntry.highlights_query` and `.locals_query` are
+    `&[&'static str]` fragments joined base-first (cuda over c/cpp; ts over
+    js/jsx). Since locals-query processing #134, settle compiles the
+    grammar's `LOCALS_QUERY`, resolves Tree-sitter's scope/definition/value/
+    reference conventions into sorted `LocalFacts`, and stores them beside
+    each layer's tree/query. Work runs once per fresh bundle and only when the
+    highlight query asks about `local`; viewport rendering remains bounded.
+    Both TUI and semantic/GPU producers evaluate `#is?`/`#is-not? local`
+    through the shared capture walk. Non-shadowed JS/TS builtins are restored;
+    shadowed definitions/references keep ordinary variable styling.
 - **Multi-language injections (#122) LANDED** — the direct continuation
   of the #114–#118 highlight arc; four review rounds, framing
   `docs/multi-language-injections-framing.md` (Q#IJ1–IJ11). A buffer can
@@ -130,7 +150,8 @@ commands, read `docs/active-work.md` immediately after this file.
   worker never touches the `Rc` registry or Lua);
   `ParseTreeBundle.injection_capped` (the 4096-layer backstop, surfaced
   once/buffer via `pmacs.error` at settle);
-  `compute_highlight_spans_for(query, tree, source, range)` (per-layer);
+  `compute_highlight_spans_for(query, tree, source, local_facts, range)`
+  (per-layer);
   the wire `flatten_layer_spans` event-sweep → DISJOINT effective spans
   (deeper / later-sibling / narrower wins, keyed by `(layer_index,
   capture_order)`); GPU `spans_from_segments` + `source_color_at` fold.
@@ -279,9 +300,11 @@ commands, read `docs/active-work.md` immediately after this file.
     origin. `pmacs-gpu --headless-probe` drives the real attach client
     without winit (`attach::connect_with_sink`), which is how criterion 37
     gets one real daemon + real PTY + real wgpu path.
-  - **Stage 2 TUI LANDED ON `main` — #130** (`docs/vterm-framing.md`
-    Revision 7, criteria 15–27). `TerminalViewKey` keys per-frontend/window
-    projection state over one shared process/screen; logical row anchors retain
+  - **Stage 2 TUI LANDED ON `main` — #130** (merge `86fc1bc`;
+    `docs/vterm-framing.md` Revision 7, criteria 15–27). `TerminalViewKey` keys
+    per-frontend/window projection state over one shared process/screen; logical
+    row anchors retain
+
     scroll/selection through reflow. One authenticated frontend controls at
     most one session, with atomic replacement and release on
     focus/switch/kill/detach.
@@ -327,15 +350,28 @@ commands, read `docs/active-work.md` immediately after this file.
     8 CRDT; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
     workspace 2,882 passed across 82 suites (19 ignored, 1 filtered);
     `git diff --check` clean.
-  - **Stage 3 framing is Revision 8 on `vterm-stage3-framing`**: additive
-    protocol v19 complete frames/events, dual viewport bootstrap, common
-    validation/aggregate limits, authenticated semantic view adapters, and
-    fixed-cell GPU rendering/input/cache behavior. Criteria 28–37 are mapped.
-    First review found no architectural defect; `c72dfea` pins maximal style
-    and cluster-prefix overhead in the measured frame fixture, corrects the
-    GPU clipboard criterion, and distinguishes Arc 5 stage 2 from its internal
-    Stages 1–3. No implementation branch or PR exists pending explicit user
-    approval.
+- **Tab-width rendering parity LANDED — #137** (merge `2625ec7`;
+  `docs/tab-width-parity-framing.md` rev 2).
+  Source tabs remain one byte while every buffer
+  renderer follows the shared fixed `pmacs_protocol::TAB_STOP_COLUMNS = 8`.
+  - `src/display_width.rs` owns allocation-free Unicode/tab-aware byte-to-column
+    accounting for plain text, syntax, diagnostics, completion anchors,
+    buffer-style overlays, and search washes.
+  - The GPU rich-chunk projection expands source/adornment tabs before
+    cosmic-text shaping and retains first-class source-tab provenance.
+    Carets, hits, selections, peer washes, and diagnostic geometry share the
+    same source/projected boundary rules, including a soft wrap inside one
+    expanded tab.
+  - GPU minimap widths use the same tab/Unicode rule and refresh in the accepted
+    text-edit transaction. No config, wire shape, negotiation, or protocol
+    version changed. Local gates: 1,763 default + 1,939 CRDT + 1,763 Lua 5.4
+    library tests; 2 focused acceptance; M4 121; required GPU 119; workspace
+    2,911 across 83 suites; strict Clippy and diff check clean.
+  - This closes the standing "**tab width is a rendering-parity bug, NOT a
+    config gap**" deferral in §5: one shared constant now drives every
+    renderer. Terminal cells are deliberately OUTSIDE it — a terminal's
+    columns come from the child, so `pmacs-gpu`'s terminal geometry uses
+    the monospace advance and never `TAB_STOP_COLUMNS`.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
   and must be repeated before implementation. No PR or implementation is
@@ -361,6 +397,10 @@ commands, read `docs/active-work.md` immediately after this file.
     editing/indent/comment items that were config-blocked.
   - **Mode system wiring COMPLETE (#129)** — major-mode keymaps,
     introspection, lifecycle initialization, and statusline display shipped.
+  - **Locals-query processing COMPLETE — #134** — grammar locals metadata,
+    lexical resolution, settled per-layer facts, shared TUI/GPU
+    local-predicate filtering, and a registry-wide locals-query invariant
+    shipped without a protocol change.
   - Remaining ranked arcs: 6 folding, 7 DAP, 8 GPU splits, plus the
     `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
@@ -521,19 +561,14 @@ cannot detect a discriminant shift.
   in per-session baselines; and any daemon-side reset needs its
   frontend mirror audited in the same round (the GPU snapshot arm
   missed search/menu/status the first time).
-- **Tab width is a rendering-parity bug, NOT a config gap** (scouted at
-  `7bc0c61` while framing #127; still true). There are FIVE tab-width
-  sites across TWO crates with TWO different values: `TAB_WIDTH = 8` in
-  `src/text_view.rs`, `src/highlight.rs`, `src/diag.rs` and
-  `src/completion.rs`, versus `advance_minimap_col` in
-  `pmacs-gpu/src/main.rs` expanding to **4** — and the GPU's main text
-  path expands tabs *not at all* (buffer bytes reach the frontend raw,
-  so a literal `\t` is shaped by the font). `editor.tab-width` is
-  therefore the obvious-looking first config adopter and is not one:
-  defining the setting cannot make the GPU honor it. Doing it properly
-  needs frontend tab expansion plus a wire-or-frontend-local decision.
-  Deferred from #127 on exactly these grounds; don't re-plan it as a
-  config task.
+- **Tab width is a rendering semantic, NOT a config gap.** The implementation
+  on `tab-width-parity` fixes the width at the TUI's established 8 columns,
+  shares that constant through `pmacs-protocol`, and expands tabs only in each
+  display projection. Defining `editor.tab-width` could not have fixed the GPU:
+  source text and semantic spans stay byte-addressed while cosmic-text needs
+  projected spaces plus an inverse hit/caret map. A future configurable width
+  would require a buffer-effective frontend fact and cache invalidation; do not
+  re-plan it as a scalar config-only change.
 - **A test that never runs passes.** Two #127 review-round tests passed
   vacuously at first: `pmacs.editor.save()` is the RAW save, while
   `buffer.before-save` fires inside the `buffer.save` COMMAND
@@ -626,10 +661,8 @@ and Vim `ft=`/`filetype=` parsing, explicit-over-inferred precedence,
 alias normalization, and shared fresh-load language pinning for
 syntax/highlight/LSP startup.
 Highlight/detection (from the #114–#118 side-quest + injections #122):
-locals-query processing (run each grammar's LOCALS_QUERY so
-`#is?`/`#is-not? local` is honored instead of the current fail-closed
-drop — restores `.builtin` styling for non-shadowed console/require
-etc.); **injection follow-ups now the engine landed (#122)** —
+~~locals-query processing~~ **SHIPPED #134**; remaining injection follow-ups
+now that the engine landed (#122) —
 `injection.combined` (many matches → one shared parse; PHP-in-HTML, some
 comment schemes), child-tree incrementality + range-scoped layer rebuild
 (child layers cold-reparse on every settle today), injectable
@@ -637,6 +670,8 @@ runtime/Lua-registered languages (v1 resolves only against
 `BUILTIN_LANGUAGES`), and the next injection *consumers* gated on new
 grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
 literals, doc-comment code);
+~~modeline detection as a 5th layer (`-*- mode: … -*-` /
+`# vim: ft=…`)~~ **SHIPPED #132**;
 byte-accurate multibyte cursor placement in `move_active_cursor_to`
 (still steps one codepoint per LSP byte column). A full Jupyter `.ipynb`
 setup (reader → editable → kernel execution) now has its JSON grammar

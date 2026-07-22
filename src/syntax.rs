@@ -115,6 +115,14 @@ pub struct ParseTreeBundle {
     pub injection_capped: bool,
 }
 
+/// Lexically-local identifier ranges derived from a grammar's bundled
+/// `locals.scm` query. Ranges are sorted and deduplicated so highlight
+/// predicate checks are allocation-free binary searches.
+#[derive(Debug, Default)]
+pub struct LocalFacts {
+    ranges: Box<[(u32, u32)]>,
+}
+
 /// One injection layer within a [`ParseTreeBundle`] (framing Q#IJ1). A
 /// layer pairs a parse tree with the language that produced it and the
 /// injection-nesting depth (root = 0). `highlight_query` is resolved on
@@ -133,6 +141,10 @@ pub struct Layer {
     /// `None` when the language ships no highlights, or on the worker
     /// (pre-settle). Producers read it to style this layer.
     pub highlight_query: Option<Arc<tree_sitter::Query>>,
+    /// Lexically-local definitions and resolved references for this tree.
+    /// Present only when the highlight query asks about the `local`
+    /// property; computed once when the bundle settles.
+    pub local_facts: Option<Arc<LocalFacts>>,
 }
 
 impl ParseTreeBundle {
@@ -184,6 +196,7 @@ pub fn run_parse(req: ParseRequest) -> Result<ParseTreeBundle, String> {
         tree: root_tree,
         depth: 0,
         highlight_query: None,
+        local_facts: None,
     }];
     let injection_capped =
         build_injection_layers(&mut layers, req.source.as_ref(), &req.injection_aliases);
@@ -309,6 +322,7 @@ fn build_injection_layers(
                         tree,
                         depth: depth + 1,
                         highlight_query: None,
+                        local_facts: None,
                     },
                     ranges,
                 ));
@@ -773,6 +787,10 @@ pub struct LanguageEntry {
     /// slice (or all-empty fragments) means no highlights: the view
     /// runs but emits nothing.
     pub highlights_query: &'static [&'static str],
+    /// Bundled `locals.scm` query fragments, composed base-first like
+    /// [`Self::highlights_query`]. The query supplies lexical scopes,
+    /// definitions, values, and references for `local` property predicates.
+    pub locals_query: &'static [&'static str],
     /// Bundled `injections.scm` fragments (framing Q#IJ2), joined with a
     /// newline and compiled on the parse worker to find embedded-language
     /// regions. Empty for the many grammars that ship none (or don't
@@ -801,6 +819,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["rs"],
         loader: || tree_sitter_rust::LANGUAGE.into(),
         highlights_query: &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[tree_sitter_rust::INJECTIONS_QUERY],
     },
     LanguageEntry {
@@ -808,6 +827,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["lua"],
         loader: || tree_sitter_lua::LANGUAGE.into(),
         highlights_query: &[tree_sitter_lua::HIGHLIGHTS_QUERY],
+        locals_query: &[tree_sitter_lua::LOCALS_QUERY],
         injections_query: &[],
     },
     // T M9.7: markdown block grammar (`tree_sitter_md::LANGUAGE`) — headers,
@@ -824,6 +844,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["md", "markdown"],
         loader: || tree_sitter_md::LANGUAGE.into(),
         highlights_query: &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+        locals_query: &[],
         injections_query: &[tree_sitter_md::INJECTION_QUERY_BLOCK],
     },
     // markdown_inline (framing Q#IJ10) — the inline grammar the block
@@ -837,6 +858,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &[],
         loader: || tree_sitter_md::INLINE_LANGUAGE.into(),
         highlights_query: &[tree_sitter_md::HIGHLIGHT_QUERY_INLINE],
+        locals_query: &[],
         injections_query: &[tree_sitter_md::INJECTION_QUERY_INLINE],
     },
     // T M_B3 — C / C++. Lexical highlighting (keywords / strings /
@@ -859,6 +881,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["c", "h"],
         loader: || tree_sitter_c::LANGUAGE.into(),
         highlights_query: &[tree_sitter_c::HIGHLIGHT_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     LanguageEntry {
@@ -866,6 +889,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp", "inl", "cppm"],
         loader: || tree_sitter_cpp::LANGUAGE.into(),
         highlights_query: &[tree_sitter_cpp::HIGHLIGHT_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     // CUDA (`.cu` source, `.cuh` header). A dedicated grammar rather
@@ -897,6 +921,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_cpp::HIGHLIGHT_QUERY,
             tree_sitter_cuda::HIGHLIGHTS_QUERY,
         ],
+        locals_query: &[],
         injections_query: &[],
     },
     // Shell / bash. Lexical highlighting for the shell family; the LSP
@@ -915,6 +940,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["sh", "bash", "zsh", "ksh", "ash", "bats"],
         loader: || tree_sitter_bash::LANGUAGE.into(),
         highlights_query: &[tree_sitter_bash::HIGHLIGHT_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     // Filename-identified languages. These files usually have no useful
@@ -931,6 +957,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["dockerfile", "containerfile"],
         loader: || tree_sitter_containerfile::LANGUAGE.into(),
         highlights_query: &[tree_sitter_containerfile::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     LanguageEntry {
@@ -938,6 +965,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["mk", "make"],
         loader: || tree_sitter_make::LANGUAGE.into(),
         highlights_query: &[tree_sitter_make::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     LanguageEntry {
@@ -945,6 +973,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["cmake"],
         loader: || tree_sitter_cmake::LANGUAGE.into(),
         highlights_query: &[tree_sitter_cmake::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     // Grammar-gap languages — these already had LSP configs but no
@@ -958,6 +987,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["py", "pyi"],
         loader: || tree_sitter_python::LANGUAGE.into(),
         highlights_query: &[tree_sitter_python::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     LanguageEntry {
@@ -965,6 +995,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["go"],
         loader: || tree_sitter_go::LANGUAGE.into(),
         highlights_query: &[tree_sitter_go::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     // JavaScript / TypeScript. One `tree-sitter-javascript` grammar parses
@@ -980,6 +1011,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["js", "mjs", "cjs"],
         loader: || tree_sitter_javascript::LANGUAGE.into(),
         highlights_query: &[tree_sitter_javascript::HIGHLIGHT_QUERY],
+        locals_query: &[tree_sitter_javascript::LOCALS_QUERY],
         injections_query: &[],
     },
     LanguageEntry {
@@ -990,6 +1022,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
         ],
+        locals_query: &[tree_sitter_javascript::LOCALS_QUERY],
         injections_query: &[],
     },
     LanguageEntry {
@@ -999,6 +1032,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         highlights_query: &[
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        ],
+        locals_query: &[
+            tree_sitter_javascript::LOCALS_QUERY,
+            tree_sitter_typescript::LOCALS_QUERY,
         ],
         injections_query: &[],
     },
@@ -1011,6 +1048,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
             tree_sitter_typescript::HIGHLIGHTS_QUERY,
         ],
+        locals_query: &[
+            tree_sitter_javascript::LOCALS_QUERY,
+            tree_sitter_typescript::LOCALS_QUERY,
+        ],
         injections_query: &[],
     },
     LanguageEntry {
@@ -1018,6 +1059,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["toml"],
         loader: || tree_sitter_toml_ng::LANGUAGE.into(),
         highlights_query: &[tree_sitter_toml_ng::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     LanguageEntry {
@@ -1025,6 +1067,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["zig", "zon"],
         loader: || tree_sitter_zig::LANGUAGE.into(),
         highlights_query: &[tree_sitter_zig::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     // JSON + YAML — config formats, both self-contained highlights and no
@@ -1039,6 +1082,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["json"],
         loader: || tree_sitter_json::LANGUAGE.into(),
         highlights_query: &[tree_sitter_json::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
     LanguageEntry {
@@ -1046,6 +1090,7 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["yaml", "yml"],
         loader: || tree_sitter_yaml::LANGUAGE.into(),
         highlights_query: &[tree_sitter_yaml::HIGHLIGHTS_QUERY],
+        locals_query: &[],
         injections_query: &[],
     },
 ];
@@ -1076,6 +1121,9 @@ pub struct SyntaxRegistry {
     /// compilation failure (e.g. grammar / query ABI skew) is
     /// cached as `Err(message)` so we don't burn cycles re-trying.
     queries: RefCell<HashMap<String, Result<Arc<tree_sitter::Query>, String>>>,
+    /// Compiled `locals.scm` query per language. Like `queries`, both
+    /// compilation failures and absent query sources are cached.
+    local_queries: RefCell<HashMap<String, Result<Arc<tree_sitter::Query>, String>>>,
     /// Fence-name → canonical-language alias map (framing Q#IJ4). Seeded
     /// with [`default_injection_aliases`]; Lua adds to it through
     /// [`Self::register_injection_alias`]. Snapshotted into each
@@ -1107,6 +1155,7 @@ impl SyntaxRegistry {
             parse_jobs: RefCell::new(HashMap::new()),
             extra_extensions: RefCell::new(HashMap::new()),
             queries: RefCell::new(HashMap::new()),
+            local_queries: RefCell::new(HashMap::new()),
             injection_aliases: RefCell::new(default_injection_aliases()),
             theme: Arc::new(Mutex::new(Theme::default_dark())),
         }
@@ -1273,6 +1322,32 @@ impl SyntaxRegistry {
         result
     }
 
+    /// Lazy-compile and cache the bundled `locals.scm` query for
+    /// `lang_name`. Empty sources and compilation failures are cached.
+    #[must_use]
+    pub fn locals_query(&self, lang_name: &str) -> Option<Arc<tree_sitter::Query>> {
+        if let Some(slot) = self.local_queries.borrow().get(lang_name) {
+            return slot.as_ref().ok().cloned();
+        }
+        let language = self.language(lang_name)?;
+        let entry = BUILTIN_LANGUAGES.iter().find(|e| e.name == lang_name);
+        let source = entry.map_or_else(String::new, |e| e.locals_query.join("\n"));
+        if source.trim().is_empty() {
+            self.local_queries
+                .borrow_mut()
+                .insert(lang_name.to_owned(), Err("no locals query".to_owned()));
+            return None;
+        }
+        let compiled = tree_sitter::Query::new(&language, &source)
+            .map(Arc::new)
+            .map_err(|e| format!("compile {lang_name} locals: {e:?}"));
+        let result = compiled.as_ref().ok().cloned();
+        self.local_queries
+            .borrow_mut()
+            .insert(lang_name.to_owned(), compiled);
+        result
+    }
+
     /// Add or override a fence-name → language alias (framing Q#IJ4). The
     /// alias key is case-folded to match the resolver. Called from Lua via
     /// `pmacs.parse.injection_aliases`.
@@ -1299,11 +1374,26 @@ impl SyntaxRegistry {
         let layers = raw
             .layers
             .iter()
-            .map(|l| Layer {
-                language_name: l.language_name.clone(),
-                tree: l.tree.clone(),
-                depth: l.depth,
-                highlight_query: self.highlights_query(&l.language_name),
+            .map(|layer| {
+                let highlight_query = self.highlights_query(&layer.language_name);
+                let local_facts = highlight_query
+                    .as_deref()
+                    .filter(|query| query_uses_local_predicates(query))
+                    .and_then(|_| self.locals_query(&layer.language_name))
+                    .map(|query| {
+                        Arc::new(compute_local_facts(
+                            &query,
+                            &layer.tree,
+                            raw.source.as_ref(),
+                        ))
+                    });
+                Layer {
+                    language_name: layer.language_name.clone(),
+                    tree: layer.tree.clone(),
+                    depth: layer.depth,
+                    highlight_query,
+                    local_facts,
+                }
             })
             .collect();
         Arc::new(ParseTreeBundle {
@@ -1313,6 +1403,148 @@ impl SyntaxRegistry {
             parse_duration: raw.parse_duration,
             injection_capped: raw.injection_capped,
         })
+    }
+}
+
+fn query_uses_local_predicates(query: &tree_sitter::Query) -> bool {
+    (0..query.pattern_count()).any(|pattern| {
+        query
+            .property_predicates(pattern)
+            .iter()
+            .any(|(property, _)| property.key.as_ref() == "local")
+    })
+}
+
+#[derive(Debug)]
+struct LocalDefinition {
+    name_range: std::ops::Range<usize>,
+    value_range: std::ops::Range<usize>,
+}
+
+#[derive(Debug)]
+struct LocalScope {
+    inherits: bool,
+    range: std::ops::Range<usize>,
+    definitions: Vec<LocalDefinition>,
+}
+
+impl LocalFacts {
+    fn contains(&self, start_byte: usize, end_byte: usize) -> bool {
+        let (Ok(start_byte), Ok(end_byte)) = (u32::try_from(start_byte), u32::try_from(end_byte))
+        else {
+            return false;
+        };
+        self.ranges.binary_search(&(start_byte, end_byte)).is_ok()
+    }
+}
+
+/// Resolve lexical definitions and references according to Tree-sitter's
+/// standard `locals.scm` capture conventions.
+fn compute_local_facts(
+    query: &tree_sitter::Query,
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+) -> LocalFacts {
+    let scope_capture = query.capture_index_for_name("local.scope");
+    let definition_capture = query.capture_index_for_name("local.definition");
+    let value_capture = query.capture_index_for_name("local.definition-value");
+    let reference_capture = query.capture_index_for_name("local.reference");
+
+    let mut scopes = vec![LocalScope {
+        inherits: false,
+        range: 0..source.len(),
+        definitions: Vec::new(),
+    }];
+    let mut ranges = Vec::new();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut captures = cursor.captures(query, tree.root_node(), source);
+
+    while let Some((query_match, capture_index)) = captures.next() {
+        let capture = query_match.captures[*capture_index];
+        let node_range = capture.node.byte_range();
+        while scopes.len() > 1
+            && node_range.start > scopes.last().expect("root scope exists").range.end
+        {
+            scopes.pop();
+        }
+
+        if Some(capture.index) == scope_capture {
+            let mut inherits = true;
+            for property in query.property_settings(query_match.pattern_index) {
+                if property.key.as_ref() == "local.scope-inherits" {
+                    inherits = property
+                        .value
+                        .as_deref()
+                        .is_none_or(|value| value == "true");
+                }
+            }
+            scopes.push(LocalScope {
+                inherits,
+                range: node_range,
+                definitions: Vec::new(),
+            });
+            continue;
+        }
+
+        if Some(capture.index) == definition_capture {
+            let Some(_) = source.get(node_range.clone()) else {
+                continue;
+            };
+            let value_range = query_match
+                .captures
+                .iter()
+                .find(|candidate| Some(candidate.index) == value_capture)
+                .map_or(0..0, |candidate| candidate.node.byte_range());
+            scopes
+                .last_mut()
+                .expect("root scope exists")
+                .definitions
+                .push(LocalDefinition {
+                    name_range: node_range.clone(),
+                    value_range,
+                });
+            if let (Ok(start), Ok(end)) = (
+                u32::try_from(node_range.start),
+                u32::try_from(node_range.end),
+            ) {
+                ranges.push((start, end));
+            }
+            continue;
+        }
+
+        if Some(capture.index) != reference_capture {
+            continue;
+        }
+        let Some(name) = source.get(node_range.clone()) else {
+            continue;
+        };
+        let mut resolved = false;
+        for scope in scopes.iter().rev() {
+            if scope.definitions.iter().rev().any(|definition| {
+                node_range.start >= definition.value_range.end
+                    && source.get(definition.name_range.clone()) == Some(name)
+            }) {
+                resolved = true;
+                break;
+            }
+            if !scope.inherits {
+                break;
+            }
+        }
+        if resolved
+            && let (Ok(start), Ok(end)) = (
+                u32::try_from(node_range.start),
+                u32::try_from(node_range.end),
+            )
+        {
+            ranges.push((start, end));
+        }
+    }
+
+    ranges.sort_unstable();
+    ranges.dedup();
+    LocalFacts {
+        ranges: ranges.into_boxed_slice(),
     }
 }
 
@@ -1418,20 +1650,22 @@ pub fn compute_highlight_spans_in_range(
         query,
         bundle.root_tree(),
         bundle.source.as_ref(),
+        bundle.layers[0].local_facts.as_deref(),
         byte_range,
     )
 }
 
 /// Like [`compute_highlight_spans_in_range`] but over an explicit
-/// `(tree, source)` — the per-layer form the producers call for each
-/// injection layer (framing Q#IJ7). `source` is the whole buffer; a
-/// child layer's tree carries absolute offsets into it, so the same
+/// `(tree, source, local_facts)` layer tuple — the form producers call for
+/// each injection layer (framing Q#IJ7 and Q#LQ5). `source` is the whole
+/// buffer; a child layer's tree carries absolute offsets into it, so the same
 /// capture walk works unchanged.
 #[must_use]
 pub fn compute_highlight_spans_for(
     query: &tree_sitter::Query,
     tree: &tree_sitter::Tree,
     source: &[u8],
+    local_facts: Option<&LocalFacts>,
     byte_range: Option<std::ops::Range<usize>>,
 ) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
@@ -1441,30 +1675,33 @@ pub fn compute_highlight_spans_for(
     }
     let root = tree.root_node();
     let mut iter = cursor.captures(query, root, source);
-    while let Some((qmatch, capture_idx)) = iter.next() {
-        // Fail-closed on the locals property predicate. The capture
-        // iterator already applies text predicates (`#eq?`/`#match?`/
-        // `#any-of?`), but `#is? local` / `#is-not? local` are *property*
-        // predicates (`Query::property_predicates`) that need a scope map
-        // built from the grammar's LOCALS_QUERY, which pmacs does not run.
-        // Applying such a capture regardless mis-styles shadowed locals —
-        // e.g. a local `console`/`require` in JS/TS would still capture as
-        // `@variable.builtin`/`@function.builtin`. Until locals processing
-        // exists, drop captures whose pattern carries one; the identifier
-        // falls back to its non-builtin capture. `#set!` (property
-        // *settings*) is a different API and is not consulted here.
-        if query
-            .property_predicates(qmatch.pattern_index)
+    while let Some((query_match, capture_index)) = iter.next() {
+        let capture = query_match.captures[*capture_index];
+        let local_predicates_match = query
+            .property_predicates(query_match.pattern_index)
             .iter()
-            .any(|(prop, _)| &*prop.key == "local")
-        {
+            .filter(|(property, _)| property.key.as_ref() == "local")
+            .all(|(property, positive)| {
+                let node = property.capture_id.map_or(Some(capture.node), |target| {
+                    query_match
+                        .captures
+                        .iter()
+                        .find(|candidate| candidate.index as usize == target)
+                        .map(|candidate| candidate.node)
+                });
+                let is_local = node.is_some_and(|node| {
+                    local_facts
+                        .is_some_and(|facts| facts.contains(node.start_byte(), node.end_byte()))
+                });
+                is_local == *positive
+            });
+        if !local_predicates_match {
             continue;
         }
-        let cap = qmatch.captures[*capture_idx];
         spans.push(HighlightSpan {
-            start_byte: cap.node.start_byte() as u32,
-            end_byte: cap.node.end_byte() as u32,
-            capture_index: cap.index,
+            start_byte: capture.node.start_byte() as u32,
+            end_byte: capture.node.end_byte() as u32,
+            capture_index: capture.index,
         });
     }
     // Wider-first ordering at equal start: later writes (the
@@ -1684,7 +1921,13 @@ mod tests {
             .highlight_query
             .as_ref()
             .expect("inline highlights resolved at settle");
-        let spans = compute_highlight_spans_for(hquery, &inline.tree, &bundle.source, None);
+        let spans = compute_highlight_spans_for(
+            hquery,
+            &inline.tree,
+            &bundle.source,
+            inline.local_facts.as_deref(),
+            None,
+        );
         assert!(
             !spans.is_empty(),
             "the inline layer produces highlight spans across both ranges"
@@ -2221,7 +2464,13 @@ mod tests {
             .highlight_query
             .as_ref()
             .expect("yaml highlights resolved");
-        let spans = compute_highlight_spans_for(query, &yaml.tree, &bundle.source, None);
+        let spans = compute_highlight_spans_for(
+            query,
+            &yaml.tree,
+            &bundle.source,
+            yaml.local_facts.as_deref(),
+            None,
+        );
         assert!(!spans.is_empty(), "the yaml frontmatter layer highlights");
     }
 
@@ -2418,54 +2667,296 @@ mod tests {
     }
 
     #[test]
-    fn javascript_shadowed_builtin_is_not_mislabeled() {
-        // `#is-not? local` (JS/TS use it for console/require/etc.) needs a
-        // scope map from the LOCALS_QUERY we don't run, so
-        // `compute_highlight_spans` drops captures guarded by it. Here
-        // `console` is a LOCAL declaration — it must not surface as a
-        // `*.builtin` capture (which is what a naive run of the shared JS
-        // query would produce).
-        let reg = SyntaxRegistry::new();
-        let language = reg.language("javascript").expect("javascript loads");
-        let query = reg
-            .highlights_query("javascript")
-            .expect("javascript highlights compile");
-        let mut buf = fresh_buffer("shadow.js");
-        buf.apply_edit(EditOp::Insert {
-            pos: 0,
-            bytes: b"const console = 5;\nconsole;\n",
-        })
-        .unwrap();
-        let view = ParseView::new(&buf, language, "javascript".to_owned());
-        let handle = view.handle();
-        let _vid = buf.attach_view(Box::new(view));
-        let bundle = parse_synchronously(&handle);
-        let spans = compute_highlight_spans(&query, &bundle);
-        assert!(!spans.is_empty(), "the JS query produced highlight spans");
-        let names = query.capture_names();
-        let builtin: Vec<&str> = spans
-            .iter()
-            .map(|s| names[s.capture_index as usize])
-            .filter(|n| n.contains("builtin"))
-            .collect();
-        assert!(
-            builtin.is_empty(),
-            "a locally-shadowed `console` must not get a *.builtin capture; got {builtin:?}"
-        );
-        // ...and dropping the builtin pattern must not strip *all* styling:
-        // each `console` occurrence still keeps its ordinary `@variable`
-        // capture (the fallback), so the loss is only the `.builtin` refine.
-        let src = "const console = 5;\nconsole;\n";
-        for (pos, _) in src.match_indices("console") {
-            let (start, end) = (pos as u32, (pos + "console".len()) as u32);
-            let caps: Vec<&str> = spans
-                .iter()
-                .filter(|s| s.start_byte == start && s.end_byte == end)
-                .map(|s| names[s.capture_index as usize])
-                .collect();
+    fn local_sensitive_builtin_highlights_have_compilable_locals_queries() {
+        let registry = SyntaxRegistry::new();
+        for entry in BUILTIN_LANGUAGES {
+            let Some(highlights) = registry.highlights_query(entry.name) else {
+                continue;
+            };
+            if !query_uses_local_predicates(&highlights) {
+                continue;
+            }
             assert!(
-                caps.iter().any(|n| n.starts_with("variable")),
-                "`console` at byte {pos} keeps a variable capture; got {caps:?}"
+                entry
+                    .locals_query
+                    .iter()
+                    .any(|fragment| !fragment.trim().is_empty()),
+                "`{}` highlights use a local predicate but ship no locals query",
+                entry.name
+            );
+            assert!(
+                registry.locals_query(entry.name).is_some(),
+                "`{}` highlights use a local predicate but its locals query does not compile",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_local_predicates_distinguish_lexical_scope() {
+        let registry = SyntaxRegistry::new();
+        let source = b"console.log('outer');\n\
+                       require('outer');\n\
+                       function f(console, require) {\n\
+                         console.log('inner');\n\
+                         require('inner');\n\
+                       }\n\
+                       window.alert('outer');\n";
+        let bundle = parse_layered(&registry, "javascript", source);
+        let layer = &bundle.layers[0];
+        let query = layer
+            .highlight_query
+            .as_deref()
+            .expect("javascript highlights compile");
+        assert!(
+            layer.local_facts.is_some(),
+            "a local-sensitive highlight query must settle lexical facts"
+        );
+        let spans = compute_highlight_spans(query, &bundle);
+        let names = query.capture_names();
+        let captures_at = |start: usize, len: usize| -> Vec<&str> {
+            spans
+                .iter()
+                .filter(|span| {
+                    span.start_byte == start as u32 && span.end_byte == (start + len) as u32
+                })
+                .map(|span| names[span.capture_index as usize])
+                .collect()
+        };
+
+        for identifier in ["console", "require"] {
+            let positions: Vec<usize> = std::str::from_utf8(source)
+                .expect("fixture is UTF-8")
+                .match_indices(identifier)
+                .map(|(position, _)| position)
+                .collect();
+            assert_eq!(positions.len(), 3, "fixture has three `{identifier}` uses");
+            assert!(
+                captures_at(positions[0], identifier.len())
+                    .iter()
+                    .any(|name| name.ends_with(".builtin")),
+                "unshadowed outer `{identifier}` keeps its builtin refinement"
+            );
+            for position in &positions[1..] {
+                let captures = captures_at(*position, identifier.len());
+                assert!(
+                    !captures.iter().any(|name| name.ends_with(".builtin")),
+                    "local `{identifier}` at byte {position} is not builtin: {captures:?}"
+                );
+                assert!(
+                    captures.iter().any(|name| name.starts_with("variable")),
+                    "local `{identifier}` keeps an ordinary variable capture: {captures:?}"
+                );
+            }
+        }
+
+        let window = std::str::from_utf8(source)
+            .expect("fixture is UTF-8")
+            .find("window")
+            .expect("window fixture");
+        assert!(
+            captures_at(window, "window".len())
+                .iter()
+                .any(|name| name == &"variable.builtin"),
+            "an unresolved builtin after the function remains builtin"
+        );
+    }
+
+    #[test]
+    fn positive_and_capture_qualified_local_predicates_use_resolved_facts() {
+        let registry = SyntaxRegistry::new();
+        let source = b"let f = () => {};\nf();\ng();\n";
+        let bundle = parse_layered(&registry, "javascript", source);
+        let language = registry.language("javascript").expect("javascript loads");
+        let facts = bundle.layers[0]
+            .local_facts
+            .as_deref()
+            .expect("javascript local facts settle");
+
+        let positive = tree_sitter::Query::new(&language, "((identifier) @local-id (#is? local))")
+            .expect("positive local predicate compiles");
+        let positive_spans =
+            compute_highlight_spans_for(&positive, bundle.root_tree(), source, Some(facts), None);
+        let f_positions: Vec<usize> = std::str::from_utf8(source)
+            .expect("fixture is UTF-8")
+            .match_indices('f')
+            .map(|(position, _)| position)
+            .collect();
+        assert_eq!(f_positions.len(), 2);
+        for position in f_positions {
+            assert!(
+                positive_spans.iter().any(|span| {
+                    span.start_byte == position as u32 && span.end_byte == (position + 1) as u32
+                }),
+                "definition/reference `f` at byte {position} is local"
+            );
+        }
+        let g_position = std::str::from_utf8(source)
+            .expect("fixture is UTF-8")
+            .find("g()")
+            .expect("g call");
+        assert!(
+            positive_spans
+                .iter()
+                .all(|span| span.start_byte != g_position as u32),
+            "unresolved `g` does not satisfy #is? local"
+        );
+
+        let qualified = tree_sitter::Query::new(
+            &language,
+            "((call_expression function: (identifier) @callee) @call \
+             (#is? @callee local))",
+        )
+        .expect("capture-qualified local predicate compiles");
+        let qualified_spans =
+            compute_highlight_spans_for(&qualified, bundle.root_tree(), source, Some(facts), None);
+        let qualified_names = qualified.capture_names();
+        assert!(
+            qualified_spans.iter().any(|span| {
+                qualified_names[span.capture_index as usize] == "call"
+                    && span.start_byte
+                        == source
+                            .windows(4)
+                            .position(|window| window == b"f();")
+                            .expect("f call") as u32
+            }),
+            "the call whose @callee is local satisfies the qualified predicate"
+        );
+        assert!(
+            qualified_spans
+                .iter()
+                .all(|span| span.start_byte != g_position as u32),
+            "the call whose @callee is unresolved fails the qualified predicate"
+        );
+    }
+
+    #[test]
+    fn local_definition_value_and_scope_inheritance_control_resolution() {
+        let registry = SyntaxRegistry::new();
+        let language = registry.language("javascript").expect("javascript loads");
+
+        let value_source = b"let x = x;\nx;\n";
+        let value_tree = {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&language)
+                .expect("set javascript language");
+            parser
+                .parse(value_source, None)
+                .expect("parse value fixture")
+        };
+        let value_locals = tree_sitter::Query::new(
+            &language,
+            "(variable_declarator \
+               name: (identifier) @local.definition \
+               value: (identifier) @local.definition-value) \
+             (identifier) @local.reference",
+        )
+        .expect("definition-value locals query compiles");
+        let value_facts = compute_local_facts(&value_locals, &value_tree, value_source);
+        let x_positions: Vec<usize> = std::str::from_utf8(value_source)
+            .expect("fixture is UTF-8")
+            .match_indices('x')
+            .map(|(position, _)| position)
+            .collect();
+        assert_eq!(x_positions.len(), 3);
+        assert!(value_facts.contains(x_positions[0], x_positions[0] + 1));
+        assert!(
+            !value_facts.contains(x_positions[1], x_positions[1] + 1),
+            "a definition is not visible inside its own value"
+        );
+        assert!(value_facts.contains(x_positions[2], x_positions[2] + 1));
+
+        let scope_source = b"let x = 1;\nfunction f() { x; }\nx;\n";
+        let scope_tree = {
+            let mut parser = tree_sitter::Parser::new();
+            parser
+                .set_language(&language)
+                .expect("set javascript language");
+            parser
+                .parse(scope_source, None)
+                .expect("parse scope fixture")
+        };
+        let scope_locals = tree_sitter::Query::new(
+            &language,
+            "((function_declaration) @local.scope \
+                (#set! local.scope-inherits false)) \
+             (variable_declarator name: (identifier) @local.definition) \
+             (identifier) @local.reference",
+        )
+        .expect("non-inheriting locals query compiles");
+        let scope_facts = compute_local_facts(&scope_locals, &scope_tree, scope_source);
+        let x_positions: Vec<usize> = std::str::from_utf8(scope_source)
+            .expect("fixture is UTF-8")
+            .match_indices('x')
+            .map(|(position, _)| position)
+            .collect();
+        assert_eq!(x_positions.len(), 3);
+        assert!(scope_facts.contains(x_positions[0], x_positions[0] + 1));
+        assert!(
+            !scope_facts.contains(x_positions[1], x_positions[1] + 1),
+            "a non-inheriting scope cannot see the outer `x`"
+        );
+        assert!(
+            scope_facts.contains(x_positions[2], x_positions[2] + 1),
+            "leaving the scope restores outer resolution"
+        );
+    }
+
+    #[test]
+    fn typescript_locals_compose_javascript_scopes_and_parameter_delta() {
+        let registry = SyntaxRegistry::new();
+        for (language_name, source) in [
+            (
+                "typescript",
+                &b"function f(console: string) { console.log('x'); }\n\
+                   window.alert('x');\n"[..],
+            ),
+            (
+                "typescriptreact",
+                &b"function F(console: string) { return <div>{console}</div>; }\n\
+                   window.alert('x');\n"[..],
+            ),
+        ] {
+            let locals = registry
+                .locals_query(language_name)
+                .unwrap_or_else(|| panic!("{language_name} locals compile"));
+            assert!(
+                locals.capture_index_for_name("local.scope").is_some()
+                    && locals.capture_index_for_name("local.definition").is_some()
+                    && locals.capture_index_for_name("local.reference").is_some(),
+                "{language_name} includes JavaScript's scopes and references"
+            );
+
+            let bundle = parse_layered(&registry, language_name, source);
+            let layer = &bundle.layers[0];
+            let query = layer
+                .highlight_query
+                .as_deref()
+                .expect("highlights compile");
+            let spans = compute_highlight_spans(query, &bundle);
+            let names = query.capture_names();
+            let text = std::str::from_utf8(source).expect("fixture is UTF-8");
+            for (position, _) in text.match_indices("console") {
+                assert!(
+                    spans
+                        .iter()
+                        .filter(|span| {
+                            span.start_byte == position as u32
+                                && span.end_byte == (position + "console".len()) as u32
+                        })
+                        .all(|span| !names[span.capture_index as usize].ends_with(".builtin")),
+                    "{language_name} parameter/reference `console` is local"
+                );
+            }
+            let window = text.find("window").expect("window fixture");
+            assert!(
+                spans.iter().any(|span| {
+                    span.start_byte == window as u32
+                        && span.end_byte == (window + "window".len()) as u32
+                        && names[span.capture_index as usize] == "variable.builtin"
+                }),
+                "{language_name} unresolved `window` remains builtin"
             );
         }
     }

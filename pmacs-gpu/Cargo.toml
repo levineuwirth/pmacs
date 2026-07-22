@@ -61,3 +61,4 @@ pmacs-protocol = { version = "1.0.0", path = "../pmacs-protocol" }
 pollster = "0.4.0"
 wgpu = "29.0.3"
 winit = "0.30.13"
+unicode-width = "0.2"

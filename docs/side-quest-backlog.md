@@ -25,10 +25,10 @@ cross-cutting index. Keep it pruned as items ship.
 
 The direct continuation of the #114–#118 grammar/detection stack.
 
-- **Locals-query processing** — run each grammar's `LOCALS_QUERY` so
-  `#is?`/`#is-not? local` is honored (restores `.builtin` styling for
-  *non-shadowed* console/require etc.), replacing the current
-  fail-closed drop in `compute_highlight_spans`.
+- **Locals-query processing — SHIPPED (#134).** Bundled Lua/JavaScript/
+  TypeScript locals queries now drive settled per-layer lexical facts, and
+  both highlight producers honor `#is?`/`#is-not? local`. Non-shadowed
+  builtins regain `.builtin` styling while shadowed names stay ordinary.
 - **Multi-language injections — SHIPPED (#122).** The load-bearing
   engine landed: `ParseTreeBundle` holds `Vec<Layer>`, the worker builds
   child trees off the static grammar table, settle resolves per-layer
@@ -40,8 +40,8 @@ The direct continuation of the #114–#118 grammar/detection stack.
   languages (v1 resolves only against `BUILTIN_LANGUAGES`), and new
   injection *consumers* gated on grammars — HTML/CSS/GraphQL/SQL
   (`<script>`/`<style>`, template literals, doc-comment code).
-- **Modeline detection** — a 5th detection layer (`-*- mode: … -*-`,
-  `# vim: ft=…`) after extension → filetype → filename → shebang.
+- ~~**Modeline detection**~~ — **SHIPPED as #132.** Bounded Emacs/Vim
+  metadata now precedes extension → filetype → filename → shebang inference.
 - **JSON + YAML — PR #123 open.** Grammars and LSP configs exist on the
   feature line; review fixes are preserved on
   `json-yaml-handoff-2026-07-20`. A real YAML-through-pmacs smoke,
@@ -120,14 +120,12 @@ The direct continuation of the #114–#118 grammar/detection stack.
   language-aware indent, per-language comment padding, and per-project
   compile commands — the last three are now ordinary work, expressed as
   a `buffer.after-load` hook calling `set_local`, not blocked work.
-- **Tab-width rendering parity** — was listed above as a config
-  consequence; it is not. `TAB_WIDTH = 8` appears four times in the
-  daemon (`text_view`, `highlight`, `diag`, `completion`), the GPU
-  minimap's `advance_minimap_col` uses **4**, and the GPU main text path
-  expands tabs *not at all* — raw `\t` reaches glyphon and is shaped by
-  the font. Defining `editor.tab-width` cannot make the GPU honor it;
-  this needs frontend tab expansion plus a wire-or-frontend-local
-  decision. Deferred from #127 on those grounds.
+- ~~**Tab-width rendering parity**~~ — **IMPLEMENTED, IN REVIEW AS #137.** One fixed
+  8-column constant now drives the core/TUI display-column paths, GPU rich-text
+  projection, and minimap widths. GPU expansion retains source-tab provenance,
+  so caret, hit, selection, and diagnostic geometry remain byte-correct through
+  adornments and soft wraps. Source text and protocol ranges remain raw; this
+  adds no config key or wire change. See `docs/tab-width-parity-framing.md`.
 - **Real `read_only` buffer flag** on both edit paths — true immutability
   for panels / REPL / generated buffers.
 - ~~**Mode system wiring**~~ — **SHIPPED as #129.** Per-buffer major modes
@@ -237,18 +235,14 @@ guides (visual, not color).
 
 ## North star (highest-leverage first)
 
-**The original north-star items and mode-system wiring have now shipped** —
+**The original north-star items have shipped or reached review** —
 multi-language injections (#122), the config registry (#127), JSON + YAML
-(#123), and mode-system wiring (#129). The remaining board:
+(#123), mode-system wiring (#129), locals queries (#134), and tab-width
+rendering parity (PR #137, review pending). The remaining board now
+starts with the broader ranked arcs below rather than another unresolved
+cross-frontend rendering invariant.
 
-1. **Locals-query processing** — restores `.builtin` styling for
-   non-shadowed builtins, the last rough edge of the highlight stack.
-2. **Tab-width rendering parity** — five constants across two crates
-   with two different values, and no tab expansion at all on the GPU
-   main text path. Explicitly NOT a config-registry task; see the entry
-   under "Cross-cutting substrate".
-
-Beyond those, the cleanest one-shots in the highlight family are
-**modeline detection** and the HTML/CSS grammars that light up more
-injection *consumers*; the most-missed editing table-stakes remain
-**word-kills + `C-SPC` set-mark**.
+Beyond those, the cleanest remaining one-shots in the highlight family are the
+HTML/CSS grammars that light up more injection *consumers*; modeline detection
+shipped in #132. The most-missed editing table-stakes remain **word-kills +
+`C-SPC` set-mark**.

@@ -95,8 +95,10 @@ protocol-v18 `StatuslineSegments`.
 - **Vterm Stage 3 protocol/GPU is implemented and in review (PR #135)**:
   additive protocol v19 complete frames/events, an aggregate glyph-byte bound
   under the unchanged transport cap, dual viewport bootstrap, authenticated
-  semantic routing, and native fixed-cell GPU terminal rendering. Landing it
-  closes Arc 5's terminal stage.
+  semantic routing, and native fixed-cell GPU terminal rendering. The 16 MiB
+  transport cap is preserved: the measured legal-worst frame encodes to
+  13,437,863 bytes under an 8 MiB aggregate glyph bound, never chunked.
+  Landing it closes Arc 5's terminal stage.
 
 ### Arc 6 — Folding (keystone gutter rider)
 

@@ -43,10 +43,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::buffer::Buffer;
 use crate::cell::{Cell, CellCoord, CellGrid, Style};
+use crate::display_width::byte_range_to_columns;
 use crate::rope::Edit;
 use crate::view::{View, Viewport};
 
@@ -366,30 +365,6 @@ fn line_end(buf: &Buffer, line_offsets: &[u64], line: usize) -> u64 {
     }
 }
 
-fn display_col_for_range(buf: &Buffer, start: u64, end: u64) -> u32 {
-    if end <= start {
-        return 0;
-    }
-    let mut bytes = vec![0u8; (end - start) as usize];
-    buf.snapshot_rope().slice(start, end, &mut bytes);
-    while !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
-        bytes.pop();
-    }
-    let Ok(s) = std::str::from_utf8(&bytes) else {
-        return 0;
-    };
-    let mut col = 0;
-    for ch in s.chars() {
-        let width = if ch == '\t' {
-            8 - (col % 8)
-        } else {
-            UnicodeWidthChar::width(ch).unwrap_or(0) as u32
-        };
-        col += width;
-    }
-    col
-}
-
 fn render_buffer_style_span(
     buf: &Buffer,
     line_offsets: &[u64],
@@ -418,8 +393,14 @@ fn render_buffer_style_span(
         if style_start >= style_end {
             continue;
         }
-        let start_col = display_col_for_range(buf, line_start, style_start);
-        let end_col = display_col_for_range(buf, line_start, style_end);
+        let mut line_prefix = vec![0; (style_end - line_start) as usize];
+        buf.snapshot_rope()
+            .slice(line_start, style_end, &mut line_prefix);
+        let (start_col, end_col) = byte_range_to_columns(
+            &line_prefix,
+            (style_start - line_start) as usize,
+            line_prefix.len(),
+        );
         let start_col = start_col.min(viewport.cell_size.cols);
         let end_col = end_col.min(viewport.cell_size.cols);
         for col in start_col..end_col {
