@@ -1964,6 +1964,7 @@ fn scoped_style_spans(state: &EditorState, vp: &DeclaredViewport) -> Vec<StyleSp
             query,
             &layer.tree,
             source,
+            layer.local_facts.as_deref(),
             Some(vis_start as usize..vis_end as usize),
         );
         for (order, hs) in highlights.iter().enumerate() {
@@ -3918,15 +3919,17 @@ mod tests {
         sid
     }
 
-    fn seed_rust_parse_view(
+    fn seed_parse_view(
         state: &EditorState,
         buffer_id: BufferId,
         text: &[u8],
+        language_name: &str,
+        path: &str,
     ) -> crate::syntax::ParseViewHandle {
         let language = state
             .syntax_registry
-            .language("rust")
-            .expect("rust language");
+            .language(language_name)
+            .unwrap_or_else(|| panic!("{language_name} language"));
         let mut core = state.core.borrow_mut();
         let registry_handle = core.registry.clone();
         let mut registry = registry_handle.borrow_mut();
@@ -3936,21 +3939,29 @@ mod tests {
                 pos: 0,
                 bytes: text,
             })
-            .expect("seed rust text");
+            .expect("seed syntax text");
         }
-        let parse_view = crate::syntax::ParseView::new(buf, language, "rust".to_owned());
+        let parse_view = crate::syntax::ParseView::new(buf, language, language_name.to_owned());
         let handle = parse_view.handle();
         let req = handle.make_request();
-        let bundle = crate::syntax::run_parse(req).expect("initial rust parse");
-        // Mirror the production settle path: resolve each layer's highlight
-        // query before install so the producer can style it (framing Q#IJ2).
+        let bundle = crate::syntax::run_parse(req).expect("initial syntax parse");
+        // Mirror the production settle path: queries and lexical facts travel
+        // with the same bundle the producer reads.
         handle.install(state.syntax_registry.resolve_layer_queries(&bundle));
         buf.attach_view(Box::new(parse_view));
         drop(registry);
-        core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from("/tmp/x.rs")));
+        core.set_buffer_path(buffer_id, Some(std::path::PathBuf::from(path)));
         drop(core);
         state.syntax_registry.attach_view(buffer_id, handle.clone());
         handle
+    }
+
+    fn seed_rust_parse_view(
+        state: &EditorState,
+        buffer_id: BufferId,
+        text: &[u8],
+    ) -> crate::syntax::ParseViewHandle {
+        seed_parse_view(state, buffer_id, text, "rust", "/tmp/x.rs")
     }
 
     fn seed_markdown_parse_view(
@@ -4034,6 +4045,57 @@ mod tests {
             covering.style,
             Style::default(),
             "the injected rust keyword is styled"
+        );
+    }
+
+    #[test]
+    fn viewport_style_producer_uses_settled_local_facts() {
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let source = b"console;\nfunction f(console) { console; }\n";
+        seed_parse_view(&state, buffer_id, source, "javascript", "/tmp/locals.js");
+        state.syntax_registry.theme().lock().expect("theme").insert(
+            "variable.builtin",
+            Style {
+                fg: crate::cell::Color::Indexed(6),
+                ..Style::default()
+            },
+        );
+
+        let style_at = |visible: ByteRange, offset: u64| {
+            scoped_style_spans(
+                &state,
+                &DeclaredViewport {
+                    buffer_id,
+                    visible,
+                    frontend_generation: 0,
+                },
+            )
+            .into_iter()
+            .find(|span| span.range.start <= offset && offset < span.range.end)
+            .map_or_else(Style::default, |span| span.style)
+        };
+
+        assert_eq!(
+            style_at(ByteRange { start: 0, end: 7 }, 0).fg,
+            crate::cell::Color::Indexed(6),
+            "unresolved outer `console` receives the builtin capture"
+        );
+        let inner = source
+            .windows("console".len())
+            .rposition(|window| window == b"console")
+            .expect("inner console") as u64;
+        assert_ne!(
+            style_at(
+                ByteRange {
+                    start: inner,
+                    end: inner + "console".len() as u64,
+                },
+                inner,
+            )
+            .fg,
+            crate::cell::Color::Indexed(6),
+            "viewport-only highlighting still sees the parameter definition outside the viewport"
         );
     }
 
