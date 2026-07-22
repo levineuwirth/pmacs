@@ -19,10 +19,9 @@
 //! Main thread only. The view is held inside a [`Buffer`], which is itself
 //! main-only.
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::buffer::{Buffer, BufferError};
 use crate::cell::{Cell, CellCoord, CellGrid, Glyph, Style};
+use crate::display_width::{advance_char, valid_prefix_width};
 use crate::rope::{Edit, Position};
 use crate::view::{DisplayCoord, View, Viewport};
 
@@ -30,27 +29,9 @@ use crate::view::{DisplayCoord, View, Viewport};
 // Tuning
 // ---------------------------------------------------------------------------
 
-/// Tab stop width in display columns. A `\t` advances to the next column
-/// that is a multiple of this value.
-const TAB_WIDTH: u32 = 8;
-
 /// Line-prefix lengths up to this many bytes are decoded on the stack in
 /// [`TextView::pos_to_display`]; longer prefixes fall back to a heap buffer.
 const STACK_CAP: usize = 256;
-
-/// Display width of `ch` when drawn starting at column `current_col`.
-///
-/// Tabs expand to the next [`TAB_WIDTH`]-aligned column, so they need the
-/// running column to compute width. Everything else delegates to
-/// [`UnicodeWidthChar`]: control characters return 0 (skipped by the
-/// caller), printable characters return 1, wide characters return 2.
-fn char_display_width(ch: char, current_col: u32) -> u32 {
-    if ch == '\t' {
-        TAB_WIDTH - (current_col % TAB_WIDTH)
-    } else {
-        UnicodeWidthChar::width(ch).unwrap_or(0) as u32
-    }
-}
 
 // ---------------------------------------------------------------------------
 // TextView
@@ -196,19 +177,7 @@ impl View for TextView {
             &mut heap_buf
         };
         buf.snapshot_rope().slice(line_start, pos, bytes);
-        // If `pos` fell inside a multi-byte codepoint, keep only the bytes up to
-        // the last complete codepoint. `valid_up_to()` gives that boundary in
-        // one step, replacing the old pop-one-byte-and-revalidate loop. (Only
-        // trailing bytes can be invalid here, since the slice is a prefix of
-        // valid UTF-8 cut at `pos`.)
-        let s = match std::str::from_utf8(bytes) {
-            Ok(valid) => valid,
-            Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap(),
-        };
-        let mut col: u32 = 0;
-        for ch in s.chars() {
-            col += char_display_width(ch, col);
-        }
+        let col = valid_prefix_width(bytes);
         Some(DisplayCoord::new(row_idx as u32, col))
     }
 
@@ -228,7 +197,7 @@ impl View for TextView {
                 walked_bytes = byte_idx;
                 return Some(line_start + walked_bytes as u64);
             }
-            walked_cols += char_display_width(ch, walked_cols);
+            walked_cols = advance_char(walked_cols, ch);
             walked_bytes = byte_idx + ch.len_utf8();
         }
         // Past the line's last codepoint: clamp to the line's visible end.
@@ -265,8 +234,8 @@ impl View for TextView {
                     break;
                 }
                 if ch == '\t' {
-                    // Expand to the next TAB_WIDTH-aligned column with spaces.
-                    let pad = char_display_width(ch, col);
+                    // Expand to the next protocol-wide tab stop with spaces.
+                    let pad = advance_char(col, ch) - col;
                     for _ in 0..pad {
                         if col >= max_cols {
                             break;
@@ -279,7 +248,7 @@ impl View for TextView {
                     }
                     continue;
                 }
-                let width = UnicodeWidthChar::width(ch).unwrap_or(0) as u32;
+                let width = advance_char(col, ch) - col;
                 if width == 0 {
                     // Combining mark or other zero-width control: M1.5
                     // skips; M2+ will attach to the previous cell as
@@ -531,7 +500,7 @@ mod tests {
 
     #[test]
     fn tab_aligned_input_advances_full_width() {
-        // 8 chars then tab: tab pads from col 8 to col 16 (a full TAB_WIDTH).
+        // 8 chars then tab: the protocol tab stop advances col 8 to col 16.
         let (buf, view) = attached(b"01234567\tx");
         assert_eq!(view.pos_to_display(&buf, 8), Some(DisplayCoord::new(0, 8)));
         assert_eq!(view.pos_to_display(&buf, 9), Some(DisplayCoord::new(0, 16)));

@@ -1,6 +1,7 @@
 # Tab-width rendering parity - side quest
 
-**Status:** Revision 2 framing; review findings incorporated; awaiting user approval.
+**Status:** Revision 2 implemented on `tab-width-parity`; all fifteen
+acceptance criteria pass locally. Awaiting pull-request review.
 
 **Base:** `githubsucks/main` at `40111dc` (landed-state documentation for
 locals-query processing #134); protocol v18.

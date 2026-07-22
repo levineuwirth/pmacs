@@ -32,10 +32,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::Buffer;
 use crate::cell::{CellCoord, CellGrid, Color, Glyph, Style, UnderlineStyle};
+use crate::display_width::byte_range_to_columns;
 use crate::overlay::merge_styles;
 use crate::view::{View, Viewport};
 
@@ -388,10 +388,6 @@ pub fn make_shared_store() -> SharedDiagStore {
 // View
 // ---------------------------------------------------------------------------
 
-/// Tab-stop width in display columns, matching
-/// [`crate::text_view`] and [`crate::highlight`].
-const TAB_WIDTH: u32 = 8;
-
 /// The RESOLVED severity color (themes arc Q#TH5): the `ui.diag.*`
 /// face's `fg` when a face is set with a concrete color, else the
 /// built-in [`DiagnosticSeverity::underline_color`]. The diag family
@@ -665,8 +661,7 @@ fn paint_line_markers(
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers (mirror highlight.rs; kept private here to avoid
-// cross-module coupling on internal helpers)
+// Line lookup helpers shared with the completion overlay.
 // ---------------------------------------------------------------------------
 
 pub(crate) fn compute_line_offsets(source: &[u8]) -> Vec<u32> {
@@ -699,40 +694,10 @@ pub(crate) fn line_at_offset(line_offsets: &[u32], offset: u32) -> u32 {
 fn underline_cols_for_line(line_bytes: &[u8], byte_start: u32, byte_end: u32) -> (u32, u32) {
     if byte_end <= byte_start {
         let (anchor, _) =
-            byte_range_to_display_cols(line_bytes, byte_start as usize, byte_start as usize);
+            byte_range_to_columns(line_bytes, byte_start as usize, byte_start as usize);
         (anchor, anchor + 1)
     } else {
-        byte_range_to_display_cols(line_bytes, byte_start as usize, byte_end as usize)
-    }
-}
-
-pub(crate) fn byte_range_to_display_cols(
-    line_bytes: &[u8],
-    byte_start: usize,
-    byte_end: usize,
-) -> (u32, u32) {
-    let bs = byte_start.min(line_bytes.len());
-    let be = byte_end.min(line_bytes.len());
-    let display_to = |upto: usize| -> u32 {
-        let mut take = upto.min(line_bytes.len());
-        while take > 0 && std::str::from_utf8(&line_bytes[..take]).is_err() {
-            take -= 1;
-        }
-        let s = std::str::from_utf8(&line_bytes[..take]).unwrap_or("");
-        let mut col: u32 = 0;
-        for ch in s.chars() {
-            col += char_display_width(ch, col);
-        }
-        col
-    };
-    (display_to(bs), display_to(be))
-}
-
-fn char_display_width(ch: char, current_col: u32) -> u32 {
-    if ch == '\t' {
-        TAB_WIDTH - (current_col % TAB_WIDTH)
-    } else {
-        UnicodeWidthChar::width(ch).unwrap_or(0) as u32
+        byte_range_to_columns(line_bytes, byte_start as usize, byte_end as usize)
     }
 }
 

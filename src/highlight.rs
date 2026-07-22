@@ -33,10 +33,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::buffer::Buffer;
 use crate::cell::{CellCoord, CellGrid, Color, Style, UnderlineStyle};
+use crate::display_width::byte_range_to_columns;
 use crate::lsp::SharedLspManager;
 use crate::overlay::merge_styles;
 use crate::syntax::{HighlightSpan, ParseTreeBundle, ParseViewHandle, compute_highlight_spans_for};
@@ -316,10 +315,6 @@ impl HighlightCache {
     }
 }
 
-/// Tab-stop width in display columns (must match
-/// [`crate::text_view`]; both views write into the same cell grid).
-const TAB_WIDTH: u32 = 8;
-
 /// View that renders syntax highlighting from a tree-sitter parse
 /// tree, including its injection layers. Composes over
 /// [`crate::text_view::TextView`] per the M2.9 view-composition
@@ -482,7 +477,7 @@ impl View for SyntaxHighlightView {
                     let byte_col_start = (s_start - line_start) as usize;
                     let byte_col_end = (s_end - line_start) as usize;
                     let (start_col, end_col) =
-                        byte_range_to_display_cols(line_bytes, byte_col_start, byte_col_end);
+                        byte_range_to_columns(line_bytes, byte_col_start, byte_col_end);
                     if end_col <= start_col {
                         continue;
                     }
@@ -523,40 +518,6 @@ fn line_at_offset(line_offsets: &[u32], offset: u32) -> u32 {
     match line_offsets.binary_search(&offset) {
         Ok(i) => i as u32,
         Err(i) => i.saturating_sub(1) as u32,
-    }
-}
-
-/// Convert a half-open byte-column range `[byte_start, byte_end)`
-/// inside `line_bytes` to a display-column range. UTF-8 aware; tabs
-/// expand to the next [`TAB_WIDTH`]-aligned column. Bytes that don't
-/// form complete codepoints (because the byte range falls inside a
-/// multi-byte char) are skipped, matching
-/// [`crate::text_view::TextView::pos_to_display`]'s conservative
-/// rounding.
-fn byte_range_to_display_cols(line_bytes: &[u8], byte_start: usize, byte_end: usize) -> (u32, u32) {
-    let bs = byte_start.min(line_bytes.len());
-    let be = byte_end.min(line_bytes.len());
-    let display_to = |upto: usize| -> u32 {
-        // Drop trailing bytes that don't form complete codepoints.
-        let mut take = upto.min(line_bytes.len());
-        while take > 0 && std::str::from_utf8(&line_bytes[..take]).is_err() {
-            take -= 1;
-        }
-        let s = std::str::from_utf8(&line_bytes[..take]).unwrap_or("");
-        let mut col: u32 = 0;
-        for ch in s.chars() {
-            col += char_display_width(ch, col);
-        }
-        col
-    };
-    (display_to(bs), display_to(be))
-}
-
-fn char_display_width(ch: char, current_col: u32) -> u32 {
-    if ch == '\t' {
-        TAB_WIDTH - (current_col % TAB_WIDTH)
-    } else {
-        UnicodeWidthChar::width(ch).unwrap_or(0) as u32
     }
 }
 
@@ -737,7 +698,7 @@ impl View for LspStyleView {
                 if end_b <= start_b {
                     continue;
                 }
-                let (start_col, end_col) = byte_range_to_display_cols(line_bytes, start_b, end_b);
+                let (start_col, end_col) = byte_range_to_columns(line_bytes, start_b, end_b);
                 if end_col <= start_col {
                     continue;
                 }
@@ -944,9 +905,9 @@ mod tests {
     fn byte_range_display_cols_ascii_round_trips() {
         let line = b"hello world";
         // "hello" → cols 0..5
-        assert_eq!(byte_range_to_display_cols(line, 0, 5), (0, 5));
+        assert_eq!(byte_range_to_columns(line, 0, 5), (0, 5));
         // "world" → cols 6..11
-        assert_eq!(byte_range_to_display_cols(line, 6, 11), (6, 11));
+        assert_eq!(byte_range_to_columns(line, 6, 11), (6, 11));
     }
 
     #[test]
@@ -954,15 +915,15 @@ mod tests {
         let line = b"\tx";
         // The full line: tab (0..8) + 'x' (8..9). Byte cols 0..2
         // map to display cols 0..9.
-        assert_eq!(byte_range_to_display_cols(line, 0, 2), (0, 9));
+        assert_eq!(byte_range_to_columns(line, 0, 2), (0, 9));
         // Just the tab.
-        assert_eq!(byte_range_to_display_cols(line, 0, 1), (0, 8));
+        assert_eq!(byte_range_to_columns(line, 0, 1), (0, 8));
     }
 
     #[test]
     fn byte_range_display_cols_clamps_past_end() {
         let line = b"hi";
-        assert_eq!(byte_range_to_display_cols(line, 0, 999), (0, 2));
+        assert_eq!(byte_range_to_columns(line, 0, 999), (0, 2));
     }
 
     #[test]
