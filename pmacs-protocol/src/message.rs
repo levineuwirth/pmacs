@@ -393,6 +393,55 @@ pub enum FrontendEvent {
         /// moves the highlight.
         invoke: bool,
     },
+    /// Vterm Stage 3 (protocol v19): the terminal-cell geometry a
+    /// semantic frontend has on screen for `buffer_id`.
+    ///
+    /// This is the terminal twin of [`Self::Viewport`] and keeps the
+    /// same no-pixels contract: it carries a CELL size, never pixel
+    /// extent, DPI, or glyph advances. The frontend divides its own
+    /// drawable rectangle by its own metrics.
+    ///
+    /// A v19 frontend sends both this and `Viewport` after every
+    /// `BufferSnapshot`; the daemon accepts only the declaration
+    /// matching the authenticated active buffer's kind and drops the
+    /// other. That dual declaration is what removes the otherwise
+    /// circular dependency where a frontend would need a terminal frame
+    /// before it knew to ask for one.
+    ///
+    /// Recording the size is not claiming control: a passive view's
+    /// declaration produces its own clipped/padded projection, while
+    /// only the durable controller changes the shared PTY geometry.
+    /// Sent only to a `>= 19` daemon.
+    TerminalResize {
+        /// Which frontend declared the geometry (untrusted; the daemon
+        /// routes by the authenticated session, matching the
+        /// `CrdtOp` / `Viewport` / `Pointer` source-trust rule).
+        frontend_id: FrontendId,
+        /// Terminal identity buffer the frontend was displaying.
+        buffer_id: crate::BufferId,
+        /// Content rectangle size in terminal cells.
+        size: CellSize,
+    },
+    /// Vterm Stage 3 (protocol v19): a pointer gesture a semantic
+    /// frontend hit-tested to a terminal CELL.
+    ///
+    /// Terminal windows have no source bytes to hit-test against, so
+    /// this replaces [`Self::Pointer`] inside the terminal clip. Once
+    /// accepted it follows the landed Stage 2 pointer path: child SGR
+    /// mouse reporting when eligible, otherwise per-view scroll,
+    /// selection, or context menu. Sent only to a `>= 19` daemon.
+    TerminalPointer {
+        /// Which frontend produced the gesture (untrusted, as above).
+        frontend_id: FrontendId,
+        /// Terminal identity buffer the frontend was displaying.
+        buffer_id: crate::BufferId,
+        /// Cell the pointer is over, within the last declared viewport.
+        coord: CellCoord,
+        /// Which gesture step this is.
+        kind: MouseKind,
+        /// Modifiers held during the gesture.
+        mods: Modifiers,
+    },
 }
 
 /// Gesture step for [`FrontendEvent::Pointer`]. Double-click
@@ -437,7 +486,9 @@ impl FrontendEvent {
             | Self::CrdtOp { frontend_id, .. }
             | Self::Viewport { frontend_id, .. }
             | Self::Pointer { frontend_id, .. }
-            | Self::MenuPointer { frontend_id, .. } => *frontend_id,
+            | Self::MenuPointer { frontend_id, .. }
+            | Self::TerminalResize { frontend_id, .. }
+            | Self::TerminalPointer { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -1067,6 +1118,25 @@ pub enum InstanceMessage {
         /// Right-side custom segments in display order.
         right: Vec<StatuslineSegment>,
     },
+    /// Vterm Stage 3 (protocol v19). The complete visible terminal grid
+    /// for the receiving frontend's active terminal window.
+    ///
+    /// A terminal identity buffer's `BufferSnapshot` is an empty CRDT
+    /// anchor, so a semantic frontend has no text to lay out; this
+    /// carries the cells instead. It is a whole-grid replacement, never
+    /// a delta, and it is validated by
+    /// [`crate::terminal::TerminalFrame::validate`] both before the
+    /// daemon emits it and after the frontend decodes it.
+    ///
+    /// Suppression compares the COMPLETE ordered payload, not
+    /// `screen_generation`: selection, scroll, viewport, and process
+    /// state all change without advancing that counter, and a
+    /// generation-keyed producer would go silent on exactly those
+    /// view-only updates. Daemon-gated `>= 19`.
+    ///
+    /// Appended after [`Self::StatuslineSegments`], the final v18
+    /// variant, so no existing postcard discriminant moves.
+    TerminalFrame(crate::terminal::TerminalFrame),
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -1471,7 +1541,19 @@ pub enum ResourceBody {
 /// carrying custom modeline provider output. Daemon-gated `< 18`; a
 /// v17 peer keeps the built-in status band. Appended after `FontFacts`
 /// so the final v17 discriminant remains stable.
-pub const PROTOCOL_VERSION: u32 = 18;
+///
+/// Vterm Stage 3: bumped 18 → 19 for the terminal family —
+/// [`InstanceMessage::TerminalFrame`] (daemon-gated `< 19`) plus
+/// [`FrontendEvent::TerminalResize`] and
+/// [`FrontendEvent::TerminalPointer`] (frontend-gated, sent only to a
+/// `>= 19` instance). All three are appended after their enum's final
+/// v18 variant, so the ladder resumes on the v6 encoding floor: a v18
+/// grid peer keeps receiving Stage 2's composed `CellDelta` terminal
+/// windows, and a v18 semantic peer keeps ordinary document editing
+/// with no terminal surface at all. This is the first bump to gate in
+/// BOTH directions at once, which is why criterion 28 pins the two
+/// send filters independently.
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1540,7 +1622,13 @@ pub const PROTOCOL_VERSION: u32 = 18;
 ///
 /// Q#SL7: extended to `[6, ..., 18]`.
 /// [`InstanceMessage::StatuslineSegments`] is additive and daemon-gated.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] = &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
+///
+/// Vterm Stage 3: extended to `[6, ..., 19]`. The terminal family is
+/// additive in both directions — `TerminalFrame` is daemon-gated,
+/// `TerminalResize` / `TerminalPointer` are frontend-gated — so v18 and
+/// v19 binaries interoperate with terminal traffic simply absent.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] =
+    &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

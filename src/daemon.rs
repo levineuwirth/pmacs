@@ -799,6 +799,34 @@ fn peer_accepts_statusline_message(protocol_version: u32, message: &InstanceMess
     protocol_version >= 18 || !matches!(message, InstanceMessage::StatuslineSegments { .. })
 }
 
+/// Whether a session negotiated the v19 wire, and may therefore drive
+/// terminal state inbound.
+///
+/// The outbound `TerminalFrame` is gated twice — in the producer and in
+/// the write loop — and the inbound direction is now symmetric. A
+/// pre-v19 peer cannot construct these variants at all (its enum lacks
+/// them), so this only ever refuses a hand-rolled client; the a32
+/// forgery tests already prove such an event can reach nothing but the
+/// sender's own authenticated active view. It is defense in depth, and
+/// it makes "gated in both directions" true of the code rather than
+/// only of the frontends we ship.
+fn peer_declared_terminal_support(
+    session_registry: &SessionRegistry,
+    frontend_id: FrontendId,
+) -> bool {
+    session_registry
+        .session_state(frontend_id)
+        .is_some_and(|state| state.negotiated_protocol_version >= 19)
+}
+
+/// The same belt-and-braces write-loop gate for the additive
+/// protocol-v19 terminal frame. The semantic producer skips construction
+/// for an older peer; this filter independently prevents an unknown
+/// discriminant reaching one, so neither gate alone is load-bearing.
+fn peer_accepts_terminal_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= 19 || !matches!(message, InstanceMessage::TerminalFrame(_))
+}
+
 /// T M10.8 — dispatcher loop. The single thread that owns the editor.
 ///
 /// All attached frontends' inputs arrive via the `dispatcher_rx`
@@ -1078,9 +1106,42 @@ fn dispatcher_loop(
                 render_state.render_frame(editor, *fid, &terminal_snapshots, &other_presences)
             };
 
+            // Vterm Stage 3 — a semantic frontend showing a terminal has
+            // no document cursor: the identity buffer is empty, so a
+            // `CursorByte` would describe byte 0 of a buffer with no
+            // text and scroll the frontend's document view against it.
+            let terminal_mode = semantic_states
+                .get(fid)
+                .is_some_and(crate::semantic_render::SemanticRenderState::in_terminal_mode);
+
             // T M10.6 per-frontend presence sweep. The snapshot is
             // computed from this frontend's view; the sweep then
             // produces broadcasts to OTHER multi-frontend recipients.
+            //
+            // Terminal mode does NOT skip this (PR #135 review finding 1).
+            // `sweep` is diff-keyed on `last_broadcast`, so a skip can
+            // only ever FREEZE a frontend's presence — it can never
+            // retract it. Sweeping truthfully moves the presence into
+            // the terminal identity buffer, which is what takes this
+            // frontend's caret off every peer showing the document.
+            //
+            // Honest note on why the skip was not a live bug: the
+            // buffer-follow above clears the terminal declaration when
+            // it ships the snapshot, so `render_frame` reports
+            // `terminal_active == false` on the tick a window first
+            // shows a terminal, and the declaration cannot arrive until
+            // a later tick (the frontend learns the buffer id FROM that
+            // snapshot). Every entry into terminal mode is therefore
+            // already preceded by one truthful sweep. The skip was
+            // load-bearing on that ordering and bought nothing; removing
+            // it makes "presence follows the frontend" structural
+            // instead of a property of tick sequencing.
+            //
+            // The framing's "suppress presence for the terminal identity
+            // buffer" is a RENDER rule — no peer overlay is painted
+            // inside a terminal — which the GPU honors by not preparing
+            // the decoration batch in terminal mode. It was never a
+            // reason to stop telling peers where this frontend went.
             let snapshot = build_presence_snapshot(editor, *fid);
             let broadcasts = session_registry.sweep(&[(*fid, snapshot)]);
 
@@ -1217,6 +1278,14 @@ fn dispatcher_loop(
                     if !peer_knows_font_facts && matches!(msg, InstanceMessage::FontFacts { .. }) {
                         continue;
                     }
+                    // Vterm Stage 3 — TerminalFrame gated at v19. A v18
+                    // semantic peer keeps the empty identity snapshot and
+                    // no terminal surface; a v18 grid peer is unaffected
+                    // because it composes terminal windows into its own
+                    // CellDelta.
+                    if !peer_accepts_terminal_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
                     if !peer_accepts_statusline_message(negotiated_protocol_version, msg) {
                         continue;
                     }
@@ -1266,6 +1335,7 @@ fn dispatcher_loop(
                 // optimistic-apply path consumes byte_pos; the legacy
                 // paint path consumes the grid coord.
                 if !write_failed
+                    && !terminal_mode
                     && session_registry
                         .session_state(*fid)
                         .is_some_and(|s| s.negotiated_capabilities.crdt_replica)
@@ -1379,6 +1449,18 @@ fn dispatcher_loop(
         for frontend_id in &attached_fids {
             if let Some(size) = term_sizes.get(frontend_id).copied() {
                 editor.sync_terminal_layout(*frontend_id, size);
+            }
+            // Vterm Stage 3 — the semantic twin, right beside the grid
+            // sync so both frontend kinds resize the screen before the
+            // next child-output drain. The frontend declared a CONTENT
+            // rectangle, so this consumes the size directly instead of
+            // running the TUI placement helper, which would subtract a
+            // modeline the GPU never drew.
+            if let Some((buffer_id, size)) = semantic_states
+                .get(frontend_id)
+                .and_then(crate::semantic_render::SemanticRenderState::terminal_viewport)
+            {
+                editor.sync_semantic_terminal_layout(*frontend_id, buffer_id, size);
             }
         }
 
@@ -1621,7 +1703,30 @@ fn handle_dispatcher_event(
                     // session never sends this; if one does, there is
                     // no `SemanticRenderState` to update and it is a
                     // benign no-op.
-                    if semantic_states.contains_key(&source) {
+                    // Vterm Stage 3 — a v19 frontend declares BOTH a
+                    // byte viewport and a terminal cell size after every
+                    // snapshot, because an empty terminal identity
+                    // snapshot does not announce itself as a terminal.
+                    // The daemon keeps only the declaration appropriate
+                    // to the authenticated source's ACTIVE buffer.
+                    //
+                    // Keying on the active buffer rather than the
+                    // declared one is load-bearing: `Viewport` also
+                    // ALIGNS the window to the buffer it names, so a
+                    // stale document viewport still in flight when a
+                    // command opens a terminal would drag the frontend
+                    // straight back off it. The declared buffer is
+                    // checked too — a terminal has no byte viewport to
+                    // honor from any direction.
+                    let terminal_context = {
+                        let manager = editor.terminal_manager.borrow();
+                        let core = editor.core.borrow();
+                        let active = core
+                            .active_window_for(source)
+                            .is_some_and(|window| manager.is_terminal(window.buffer_id));
+                        active || manager.is_terminal(buffer_id)
+                    };
+                    if semantic_states.contains_key(&source) && !terminal_context {
                         // Phase B (B1) — the Viewport declares *which
                         // buffer this frontend is displaying*. Align its
                         // editor window to that buffer so keyboard input
@@ -1635,6 +1740,50 @@ fn handle_dispatcher_event(
                         if let Some(sem) = semantic_states.get_mut(&source) {
                             sem.set_viewport(buffer_id, visible, generation);
                         }
+                    }
+                }
+                FrontendEvent::TerminalResize {
+                    buffer_id, size, ..
+                } => {
+                    // Vterm Stage 3 — the terminal half of the dual
+                    // declaration. Routed by the authenticated `source`;
+                    // the payload's `frontend_id` is never read.
+                    //
+                    // Recording the geometry is what lets a PASSIVE view
+                    // receive its own clipped/padded projection, so the
+                    // record happens for any accepted declaration. Only
+                    // the durable controller's declaration reaches the
+                    // shared PTY — a declaration never claims control.
+                    if semantic_states.contains_key(&source)
+                        && peer_declared_terminal_support(session_registry, source)
+                        && editor.semantic_terminal_declaration_is_active(source, buffer_id)
+                    {
+                        if let Some(sem) = semantic_states.get_mut(&source) {
+                            sem.set_terminal_viewport(buffer_id, size);
+                        }
+                        editor.sync_semantic_terminal_layout(source, buffer_id, size);
+                    }
+                }
+                FrontendEvent::TerminalPointer {
+                    buffer_id,
+                    coord,
+                    kind,
+                    mods,
+                    ..
+                } => {
+                    // Vterm Stage 3 — a terminal-cell gesture. The
+                    // adapter re-derives the window from the
+                    // authenticated source and checks the coordinate
+                    // against the geometry that source declared, so a
+                    // forged id, a stale buffer, a missing declaration,
+                    // or an out-of-bounds cell all drop before any view,
+                    // controller, selection, menu, or PTY mutation.
+                    if semantic_states.contains_key(&source)
+                        && peer_declared_terminal_support(session_registry, source)
+                    {
+                        editor.dispatch_semantic_terminal_pointer(
+                            source, buffer_id, coord, kind, mods,
+                        );
                     }
                 }
                 FrontendEvent::Pointer {
@@ -2653,6 +2802,18 @@ fn apply_event(
                 "pmacs daemon: FrontendEvent::MenuPointer from a grid session; dropping"
             );
         }
+        FrontendEvent::TerminalResize { .. } | FrontendEvent::TerminalPointer { .. } => {
+            // Vterm Stage 3 — the terminal declarations belong to
+            // semantic sessions and are routed by the authenticated
+            // source in `handle_dispatcher_event`. A grid session
+            // resizes its terminal through the Stage 2 layout path, so
+            // one arriving here is a protocol violation; drop it
+            // rather than letting a payload-trusted id reach a view.
+            eprintln!(
+                "pmacs daemon: terminal declaration from a grid session; dropping \
+                 (grid terminals resize through the Stage 2 layout path)"
+            );
+        }
     }
 }
 
@@ -2685,6 +2846,67 @@ mod tests {
                 size_centi_px: None,
             }
         ));
+    }
+
+    #[test]
+    fn terminal_frame_write_gate_rejects_v18_independently() {
+        let frame = InstanceMessage::TerminalFrame(crate::terminal::TerminalFrame {
+            buffer_id: crate::buffer::BufferId::from_raw(2),
+            size: crate::cell::CellSize::new(1, 1),
+            cells: vec![crate::cell::Cell::default()],
+            cursor: None,
+            title: None,
+            screen_generation: 0,
+            selection: Vec::new(),
+            scroll_offset: 0,
+            at_bottom: true,
+            pid: 1,
+            process: crate::terminal::TerminalProcessState::Running,
+        });
+        assert!(!peer_accepts_terminal_message(18, &frame));
+        assert!(peer_accepts_terminal_message(19, &frame));
+        // The gate is variant-scoped: it must not silence anything else
+        // on an older wire.
+        assert!(peer_accepts_terminal_message(
+            18,
+            &InstanceMessage::StatuslineSegments {
+                buffer_id: crate::buffer::BufferId::from_raw(2),
+                left: Vec::new(),
+                right: Vec::new(),
+            }
+        ));
+    }
+
+    #[test]
+    fn inbound_terminal_events_require_a_negotiated_v19_session() {
+        // Review round 2, finding 5: the outbound `TerminalFrame` was
+        // gated twice (producer + write loop) while the inbound
+        // declarations relied on the frontend's send gate alone. A
+        // pre-v19 peer cannot construct these variants, so this only
+        // refuses a hand-rolled client — but it makes "gated in both
+        // directions" true of the code, not just of the frontends we
+        // ship.
+        let mut registry = SessionRegistry::new();
+        let semantic = crate::protocol::NegotiatedCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        };
+        let old_peer = FrontendId(2);
+        let new_peer = FrontendId(3);
+        registry.register_session(
+            old_peer,
+            crate::presence::SessionState::new(18, semantic, 0),
+        );
+        registry.register_session(
+            new_peer,
+            crate::presence::SessionState::new(19, semantic, 1),
+        );
+
+        assert!(!peer_declared_terminal_support(&registry, old_peer));
+        assert!(peer_declared_terminal_support(&registry, new_peer));
+        // An unknown session is refused rather than defaulted open.
+        assert!(!peer_declared_terminal_support(&registry, FrontendId(99)));
     }
 
     #[test]

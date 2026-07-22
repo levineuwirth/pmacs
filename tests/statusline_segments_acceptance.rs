@@ -781,11 +781,16 @@ fn a12_builtin_lsp_provider_tracks_real_attachment_and_unknown_label() {
 // (the drop arm itself is pinned beside Frontend::apply_message).
 #[test]
 fn a13_17_26_protocol_semantic_init_late_join_and_version_cost() {
-    assert_eq!(PROTOCOL_VERSION, 18);
-    for version in 6..=18 {
+    // Vterm Stage 3 appended the terminal family as v19. This
+    // acceptance owns the STATUSLINE variant's placement and gate, so
+    // it tracks the current wire version rather than pinning 18: the
+    // v18 floor it actually cares about is asserted below and in
+    // `peer_accepts_statusline_message`.
+    assert_eq!(PROTOCOL_VERSION, 19);
+    for version in 6..=19 {
         assert!(is_supported_protocol_version(version));
     }
-    assert!(!is_supported_protocol_version(19));
+    assert!(!is_supported_protocol_version(20));
     let sample = InstanceMessage::StatuslineSegments {
         buffer_id: BufferId::from_raw(9),
         left: vec![StatuslineSegment {

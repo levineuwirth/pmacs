@@ -46,3 +46,9 @@ crdt = []
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
+# Vterm Stage 3: `TerminalFrame::validate` is the ONE structural policy
+# for terminal cells, so the column-width and wide-continuation rules
+# live here rather than being re-implemented per frontend. That needs a
+# direct width table; pinned through the workspace so this crate and
+# `pmacs`'s terminal screen measure glyphs identically.
+unicode-width = { workspace = true }

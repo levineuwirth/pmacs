@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 
 use crate::buffer::BufferId;
-use crate::cell::Style;
+use crate::cell::{CellSize, Style};
 use crate::editor::EditorState;
 use crate::protocol::{
     AdornmentContent, AdornmentPlacement, ByteRange, Decoration, DecorationKind, DecorationSegment,
@@ -44,6 +44,7 @@ use crate::statusline::{
     StatuslineEvaluation, StatuslineEvaluationOutcome, StatuslineEvaluationTarget,
     evaluate_statusline,
 };
+use crate::terminal::TerminalFrame;
 
 /// The viewport a `semantic_render` frontend last declared.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,6 +132,10 @@ fn minibuffer_window(candidates: &[String], selected: Option<usize>) -> (Vec<Str
 /// Owns one `semantic_render` session's projection state: the last
 /// viewport the frontend declared, and the diff baseline per buffer
 /// for the `StyleSpans` and `Decorations` families.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent per-peer capability and latch flags"
+)]
 pub struct SemanticRenderState {
     /// The session this projection serves. Selection is per-window
     /// (per-frontend) state, so the decoration projection needs the
@@ -276,6 +281,31 @@ pub struct SemanticRenderState {
     /// when the store is non-stale and non-empty) — a steady-state
     /// CPU burn for a value that changes only when the buffer does.
     diag_line_cache: HashMap<BufferId, DiagLineCache>,
+    /// Whether the peer negotiated protocol >= 19 (Vterm Stage 3). A
+    /// v18 semantic peer receives the terminal identity buffer's empty
+    /// snapshot and nothing else: terminal use is unsupported and
+    /// invisible there, while ordinary document editing is unchanged.
+    peer_knows_terminal_frames: bool,
+    /// The terminal-cell geometry this frontend last declared, or
+    /// `None` before its first accepted `TerminalResize`. One value,
+    /// not a map: a frontend displays at most one terminal at a time
+    /// (its active window), and the buffer travels with the size so a
+    /// declaration outliving a switch cannot project the wrong session.
+    terminal_viewport: Option<(BufferId, CellSize)>,
+    /// The last terminal frame this peer received, compared in FULL.
+    ///
+    /// Not keyed on `screen_generation`: selection, scroll, viewport,
+    /// and process state all change without advancing that counter, so
+    /// a generation-keyed baseline goes silent on exactly the view-only
+    /// updates the frontend needs. `None` means the peer has received
+    /// no frame, so the next valid one is authoritative.
+    last_terminal_frame: Option<TerminalFrame>,
+    /// Whether an invalid terminal snapshot was already reported since
+    /// the last valid frame. Bounds the log to one line per distinct
+    /// failure rather than one per tick while the condition persists.
+    terminal_error_latched: bool,
+    /// Whether the most recent render pass projected a terminal.
+    terminal_active: bool,
 }
 
 /// One [`SemanticRenderState::diag_line_cache`] entry: the line-start
@@ -371,6 +401,7 @@ impl SemanticRenderState {
         s.peer_knows_theme_facts = negotiated_protocol_version >= 16;
         s.peer_knows_font_facts = negotiated_protocol_version >= 17;
         s.peer_knows_statusline_segments = negotiated_protocol_version >= 18;
+        s.peer_knows_terminal_frames = negotiated_protocol_version >= 19;
         s
     }
 
@@ -416,6 +447,11 @@ impl SemanticRenderState {
             peer_knows_statusline_segments: true,
             last_statusline: HashMap::new(),
             diag_line_cache: HashMap::new(),
+            peer_knows_terminal_frames: true,
+            terminal_viewport: None,
+            last_terminal_frame: None,
+            terminal_error_latched: false,
+            terminal_active: false,
         }
     }
 
@@ -429,6 +465,59 @@ impl SemanticRenderState {
             visible,
             frontend_generation: generation,
         });
+    }
+
+    /// Record the terminal-cell geometry this frontend declared
+    /// (`FrontendEvent::TerminalResize`, accepted by the daemon only
+    /// when it names the authenticated source's active terminal).
+    ///
+    /// Replacing the declaration for a DIFFERENT buffer drops the frame
+    /// baseline: the next frame describes another session entirely, and
+    /// comparing it against the old one could suppress it.
+    pub fn set_terminal_viewport(&mut self, buffer_id: BufferId, size: CellSize) {
+        if self
+            .terminal_viewport
+            .is_some_and(|(previous, _)| previous != buffer_id)
+        {
+            self.clear_terminal_baseline();
+        }
+        self.terminal_viewport = Some((buffer_id, size));
+    }
+
+    /// The terminal geometry this frontend last declared.
+    ///
+    /// The daemon reads this to apply the semantic layout sync beside
+    /// the landed grid sync, before the next child-output drain.
+    #[must_use]
+    pub fn terminal_viewport(&self) -> Option<(BufferId, CellSize)> {
+        self.terminal_viewport
+    }
+
+    /// Whether the last render pass projected a terminal.
+    ///
+    /// The daemon consults this to suppress the document `CursorByte`
+    /// and the presence sweep: a terminal identity buffer is empty, so
+    /// both would describe a cursor at byte 0 of a buffer with no text.
+    /// It tracks the PASS, not the baseline — a first frame rejected by
+    /// validation still means this frontend is displaying a terminal,
+    /// and falling back to the document path there would paint an empty
+    /// buffer over a live session.
+    #[must_use]
+    pub fn in_terminal_mode(&self) -> bool {
+        self.terminal_active
+    }
+
+    /// Forget the terminal frame baseline so the next valid frame is
+    /// authoritative, and re-arm the invalid-frame log.
+    fn clear_terminal_baseline(&mut self) {
+        self.last_terminal_frame = None;
+        self.terminal_error_latched = false;
+    }
+
+    /// Drop terminal projection state on detach or context replacement.
+    pub fn on_terminal_context_released(&mut self) {
+        self.terminal_viewport = None;
+        self.clear_terminal_baseline();
     }
 
     /// Snapshot/baseline reset contract (PR #120 round 2 finding 1).
@@ -464,6 +553,14 @@ impl SemanticRenderState {
     /// buffer, and any buffer the frontend navigates to receives its
     /// own snapshot first.
     pub fn on_buffer_snapshot_sent(&mut self, buffer_id: BufferId) {
+        // Vterm Stage 3: a snapshot takes the GPU out of terminal mode
+        // unconditionally — it clears the prior frame and every
+        // terminal-only cache before painting. Both sides must forget
+        // together, and the frontend re-declares its geometry
+        // immediately after applying the snapshot, so dropping the
+        // declaration here costs one message, not a stuck terminal.
+        self.terminal_viewport = None;
+        self.clear_terminal_baseline();
         self.last_sent.remove(&buffer_id);
         self.last_style_gate.remove(&buffer_id);
         self.last_decorations.remove(&buffer_id);
@@ -496,6 +593,14 @@ impl SemanticRenderState {
     /// to say (no hints, no prior non-empty send).
     #[allow(clippy::too_many_lines)]
     pub fn render_frame(&mut self, state: &EditorState) -> Vec<InstanceMessage> {
+        // Vterm Stage 3: a terminal window suppresses the whole document
+        // projection. It is checked FIRST because the terminal identity
+        // buffer is a valid (empty) document — running the document path
+        // over it would ship an authoritative empty styling/summary
+        // resync on top of the live cell grid.
+        if let Some(messages) = self.terminal_frame_pass(state) {
+            return messages;
+        }
         let Some(vp) = self.viewport.clone() else {
             // Emit nothing before the frontend declares a viewport.
             return Vec::new();
@@ -685,6 +790,125 @@ impl SemanticRenderState {
         // --- CompletionPopup (Arc 1a Q#C5, protocol v15) ---
         out.extend(self.completion_popup_msg(state, vp.buffer_id));
         // --- ThemeFacts (UI faces; themes arc Q#TH7, protocol v16) ---
+        out.extend(self.theme_facts_msg(state));
+        out.extend(self.font_facts_msg(state));
+        // Q#SL6/Q#SL8: face inventory must precede segment text.
+        if let Some(evaluation) = statusline_evaluation {
+            self.emit_statusline_segments(evaluation, &mut out);
+        }
+        out
+    }
+
+    /// Project this frontend's active terminal, or `None` when it is
+    /// not displaying one (so the document path runs instead).
+    ///
+    /// Returning `Some` means terminal mode: the caller emits exactly
+    /// these messages and no document family at all. What survives is
+    /// the buffer-independent chrome the native frontend still needs —
+    /// status band, theme, font, statusline, menu, and minibuffer — plus
+    /// the frame itself.
+    fn terminal_frame_pass(&mut self, state: &EditorState) -> Option<Vec<InstanceMessage>> {
+        // A v18 peer has no terminal surface at all: it keeps the
+        // document path over the empty identity buffer, exactly as it
+        // did before this protocol version existed.
+        //
+        // Every path out of terminal mode clears `terminal_active`
+        // explicitly. An early `?` that left it set would keep the
+        // daemon suppressing this frontend's `CursorByte` and presence
+        // long after it went back to editing a document.
+        let declaration = self
+            .peer_knows_terminal_frames
+            .then_some(self.terminal_viewport)
+            .flatten();
+        let Some((buffer_id, size)) = declaration else {
+            self.terminal_active = false;
+            return None;
+        };
+        let Some(snapshot) =
+            state.prepare_semantic_terminal_view(self.frontend_id, buffer_id, size)
+        else {
+            // The window switched away, the session died, or the
+            // declared size went out of range. Leave terminal mode and
+            // let the document path resume.
+            self.terminal_active = false;
+            self.clear_terminal_baseline();
+            return None;
+        };
+        self.terminal_active = true;
+
+        // Evaluate callbacks before `ThemeFacts` for the same reason the
+        // document path does: a callback may register a face, and the
+        // face inventory must precede the segment text that names it.
+        let statusline_evaluation = self.peer_knows_statusline_segments.then(|| {
+            evaluate_statusline(
+                state.lua_host.lua(),
+                &state.core,
+                &state.statusline_registry,
+                StatuslineEvaluationTarget::Semantic {
+                    frontend_id: self.frontend_id,
+                    declared_buffer: buffer_id,
+                },
+            )
+        });
+
+        let mut out = Vec::new();
+        let frame = snapshot.into_terminal_frame();
+        // Complete-payload comparison FIRST, and not on
+        // `screen_generation`: a scroll, a selection change, or a
+        // process exit must reach the frontend even though the screen
+        // itself is byte-identical.
+        //
+        // Comparing before validating is also what keeps the steady
+        // state cheap. Only validated frames are ever stored, so a frame
+        // equal to the baseline has already passed — re-running the
+        // per-cell width and topology checks every tick would recompute
+        // a verdict we hold.
+        if self.last_terminal_frame.as_ref() == Some(&frame) {
+            self.terminal_error_latched = false;
+            out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+            return Some(out);
+        }
+        match frame.validate() {
+            Ok(()) => {
+                self.terminal_error_latched = false;
+                self.last_terminal_frame = Some(frame.clone());
+                out.push(InstanceMessage::TerminalFrame(frame));
+            }
+            Err(error) => {
+                // Never emit a malformed or truncated frame. The peer
+                // keeps the last valid one; one bounded log line marks
+                // the condition until a valid frame clears the latch.
+                if !self.terminal_error_latched {
+                    self.terminal_error_latched = true;
+                    eprintln!(
+                        "pmacs: terminal frame for {:?} on {:?} failed validation, \
+                         retaining the last valid frame: {error}",
+                        buffer_id, self.frontend_id
+                    );
+                }
+            }
+        }
+
+        out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+        Some(out)
+    }
+
+    /// The buffer-independent chrome a terminal-mode frontend still
+    /// needs, in the order the document path emits it.
+    ///
+    /// Shared by both terminal-pass exits so an unchanged frame and a
+    /// changed one ship exactly the same chrome — the suppression is
+    /// about the FRAME, never about the status band going quiet.
+    fn terminal_chrome(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+        statusline_evaluation: Option<StatuslineEvaluation>,
+    ) -> Vec<InstanceMessage> {
+        let mut out = Vec::new();
+        out.extend(self.status_facts_msg(state, buffer_id));
+        out.extend(self.menu_prompt_msg(state, buffer_id));
+        out.extend(self.minibuffer_prompt_msg(state, buffer_id));
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.

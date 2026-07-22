@@ -7,8 +7,11 @@ use crate::buffer::BufferId;
 use crate::cell::{Cell, CellCoord, CellSize, Glyph, Style};
 use crate::protocol::FrontendId;
 use crate::terminal::screen::{BorrowedScreenProjection, TerminalModes, TerminalRow};
-use crate::terminal::session::{TerminalManager, TerminalSelectionSpan, TerminalSnapshot};
-use crate::terminal::{MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS};
+use crate::terminal::session::{TerminalManager, TerminalSnapshot};
+use crate::terminal::{
+    MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalProcessState,
+    TerminalSelectionSpan,
+};
 use crate::window::WindowId;
 
 /// One frontend/window projection of a terminal session.
@@ -245,9 +248,56 @@ impl TerminalManager {
     /// Return the publication-consistent child grid size for one view.
     #[must_use]
     pub(crate) fn screen_size_for_view(&self, key: TerminalViewKey) -> Option<CellSize> {
+        self.screen_size(key.buffer_id)
+    }
+
+    /// The shared screen's current size, read from the borrowed
+    /// projection.
+    ///
+    /// Deliberately not `snapshot(..).size`: that clones the whole
+    /// visible cell grid, and geometry comparison runs on every
+    /// dispatcher tick for every frontend with a declared terminal.
+    #[must_use]
+    pub fn screen_size(&self, buffer_id: BufferId) -> Option<CellSize> {
         self.sessions
-            .get(&key.buffer_id)
+            .get(&buffer_id)
             .map(|session| session.screen.projection_ref().size)
+    }
+
+    /// Record an exact view's declared viewport size without projecting.
+    ///
+    /// Vterm Stage 3: a semantic frontend declares terminal geometry
+    /// through its own message rather than through a layout pass, and a
+    /// PASSIVE view must still record its size — that is what lets it
+    /// receive its own clipped/padded projection instead of the
+    /// controller's. Recording a size is deliberately not claiming
+    /// control; the caller decides whether to resize the PTY.
+    ///
+    /// Returns `false` for an unknown session or an out-of-range size,
+    /// leaving prior geometry untouched.
+    pub fn record_view_size(&mut self, key: TerminalViewKey, viewport_size: CellSize) -> bool {
+        if !valid_viewport(viewport_size) {
+            return false;
+        }
+        let Some(session) = self.sessions.get(&key.buffer_id) else {
+            return false;
+        };
+        let projection = session.screen.projection_ref();
+        let bell_count = session.screen.bell_count();
+        let state = self.views.entry(key).or_insert_with(|| TerminalViewState {
+            alternate_active: Some(projection.alternate_active),
+            last_bell_count: bell_count,
+            ..TerminalViewState::default()
+        });
+        normalize_state(state, projection);
+        state.viewport_size = Some(viewport_size);
+        true
+    }
+
+    /// The viewport size an exact view last declared or rendered at.
+    #[must_use]
+    pub fn declared_view_size(&self, key: TerminalViewKey) -> Option<CellSize> {
+        self.views.get(&key).and_then(|state| state.viewport_size)
     }
 
     /// Return fresh geometric status for one registered view.
@@ -670,7 +720,7 @@ fn project_snapshot(
     projection: BorrowedScreenProjection<'_>,
     state: &TerminalViewState,
     pid: u32,
-    process: crate::terminal::session::TerminalProcessState,
+    process: TerminalProcessState,
 ) -> TerminalSnapshot {
     let rows = retained_rows(projection);
     let geometry = view_geometry(&rows, state, viewport_size.rows);
@@ -782,8 +832,8 @@ fn copy_selection_bytes(rows: &RetainedRows<'_>, selection: TerminalSelection) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::TerminalProcessState;
     use crate::terminal::screen::ScreenProjection;
-    use crate::terminal::session::TerminalProcessState;
 
     fn row(id: u64, offset: u32, text: &str, soft_wrapped: bool) -> TerminalRow {
         TerminalRow {

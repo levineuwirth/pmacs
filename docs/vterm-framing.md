@@ -1,22 +1,34 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 7 — 2026-07-21. Status: Stage 1 landed on `main` as PR #126
-at merge `643d1e1`; Stage 2 is implemented on branch `vterm-tui` and Stage 3
-is not implemented.**
+**Revision 9 — 2026-07-22. Status: Stage 1 landed on `main` as PR #126
+at merge `643d1e1`; Stage 2 landed as PR #130 at merge `86fc1bc`; Stage 3
+is IMPLEMENTED on `vterm-gpu` and awaits review. Revision 8's framing text
+below is preserved verbatim as the approved contract; §0.9 records what the
+implementation actually did, including the two places it had to go beyond
+the letter of the framing.**
 
-Revision 7 closes the final three precision findings: `at_bottom` is geometric
-and distinct from live-tail following; the fixed `C-c` transport escape
-deliberately makes ordinary `C-c`-leading bindings unreachable in terminal
-windows; and context-implicit Lua view operations require an authenticated
-interactive origin with exact boolean/error results. Revision 6's durable
-controller and per-view identities, logical-cell anchors, frontend-explicit
-grid rendering, per-frontend dispatch, authenticated v18 input, local
-clipboard/BEL drainage, default-name uniquification, mouse override, and
-resize ordering remain unchanged. Main-screen resize reflows while alternate
-screen clips/pads; exited buffers remain with an Emacs-style process message;
-protocol v19 is additive with complete frames; shared `Style` stays unchanged;
-and one `BufferId` owns one shared process/screen whose most recently accepted
-frontend/window context controls size.
+Revision 8 re-scouts the final stage against the integrated protocol-v18 tree
+and closes its remaining producer/frontend boundary decisions. Protocol v19
+uses one validated complete `TerminalFrame`; a shared 8 MiB aggregate glyph
+budget keeps the largest legal postcard message below the existing 16 MiB
+transport cap instead of broadening every connection's allocation ceiling.
+The first-frame bootstrap is explicit: after every `BufferSnapshot`, a v19 GPU
+sends the document viewport and, when the drawable terminal cell size is
+nonzero, terminal-cell geometry; the daemon accepts only the declaration
+appropriate to the authenticated active buffer.
+Semantic terminal rendering is per frontend/window. Passive views never resize
+the PTY, and terminal mode retains existing statusline, menu, minibuffer, and
+BEL/clipboard channels while suppressing document projection and presence.
+
+Revision 7's geometric `at_bottom`, fixed `C-c` transport escape,
+authenticated context-implicit Lua operations, durable controller and per-view
+identities, logical-cell anchors, frontend-explicit grid rendering,
+per-frontend dispatch, authenticated v18 input, local clipboard/BEL drainage,
+default-name uniquification, mouse override, and resize ordering remain
+unchanged. Main-screen resize reflows while alternate screen clips/pads;
+exited buffers remain with an Emacs-style process message; shared `Style`
+stays unchanged; and one `BufferId` owns one shared process/screen whose most
+recently accepted frontend/window context controls size.
 
 This framing follows the compile-mode terminal substrate that landed in PR
 #113. `src/process.rs` already owns PTY creation, process groups, bounded
@@ -26,7 +38,8 @@ emits only the line-oriented subset compile-mode needs. Vterm does not replace
 either subsystem. It extends their contracts and adds the missing terminal
 screen state machine.
 
-Arc 5 stage 2 ships as three separately reviewed PRs:
+Arc 5 stage 2 (vterm) ships as three separately reviewed internal stages,
+one PR each:
 
 1. **terminal core** — full-screen VT events, `TerminalScreen`, internal
    session ownership/contracts, and headless real-PTY acceptance;
@@ -38,7 +51,7 @@ Arc 5 stage 2 ships as three separately reviewed PRs:
 There is no single mega-PR. Each stage is useful and testable by itself, and a
 later stage starts only after the preceding stage lands on `main`.
 
-## 0. Revision 7 — landed Stage 1 and reviewed Stage 2 contract
+## 0. Revision 8 — landed internal Stages 1–2 and framed Stage 3
 
 The first of the three vterm PRs landed on `main` at merge `643d1e1`.
 Implementation commits `bbc1f33` and `962944b`, first-review fixes through
@@ -189,14 +202,13 @@ The final framing review pinned three precision contracts:
   `active_frontend`.
 
 Stage 3 additionally owns `pmacs-gpu/src/attach.rs` for gated terminal
-resize/pointer sending and coalescing. New daemon event variants must apply the
+resize/pointer sending and coalescing. New daemon event variants apply the
 same authenticated-source rule. Wire-facing terminal state, selection, and
-limits live in or are re-exported from `pmacs-protocol`. The current 16 MiB
-transport frame cap cannot hold the legal worst complete terminal frame (up to
-roughly 64 MiB of cluster bytes before encoding overhead): Stage 3 must either
-raise and test a measured cap at least as large as the legal worst case
-(review estimate at least 80 MiB), or add a shared aggregate payload bound. It
-must never silently chunk the locked complete-frame protocol.
+limits live in or are re-exported from `pmacs-protocol`. Revision 8 resolves
+the complete-frame size finding with a shared 8 MiB aggregate glyph-byte
+bound: the maximum legal encoded frame is measured below the unchanged
+16 MiB transport cap. The producer rejects rather than truncates or silently
+chunks an over-bound internal snapshot.
 
 ### 0.5 Stage 1 review round 1
 
@@ -244,6 +256,229 @@ resolved before Stage 2:
 Out-of-range DECSTBM bottom clamping, CSI-intermediate clone removal, and a
 separately named configuration-time scrollback-row cap remain explicit
 deferrals in §11.
+
+### 0.7 Stage 2 landing and Stage 3 re-scout
+
+Stage 2 landed on `main` as PR #130 at merge `86fc1bc` after two review
+rounds. Its integrated tree is the Stage 3 base: protocol v18, four terminal
+view-state acceptance cases in both default and CRDT builds, 109 required-GPU
+tests, and the authenticated daemon/TUI seams described in §§5 and 9. Stage 3
+does not reopen the landed escape, controller, selection, copy, resize, or Lua
+contracts.
+
+The current tree exposes five Stage 3 integration facts that are now locked:
+
+- A semantic frontend learns a buffer switch from `BufferSnapshot`, but an
+  empty terminal identity snapshot does not identify itself as terminal.
+  Therefore the GPU sends both its ordinary byte viewport and a
+  version-gated terminal-cell size after each snapshot; the daemon ignores the
+  inapplicable declaration. No buffer-kind flag or pixel geometry is added.
+- The existing TUI layout adapter subtracts modelines and handles splits from
+  a whole terminal size. Reusing it for the GPU would subtract chrome twice.
+  Stage 3 adds exact active-window semantic adapters whose `CellSize` already
+  describes the terminal content rectangle.
+- `screen_generation` does not cover selection, scroll, or process-state
+  changes. Silence is therefore based on equality of the complete ordered
+  wire payload, not on any one generation counter.
+- The legal Stage 1 cell bounds can exceed the 16 MiB transport cap when every
+  cell carries a maximal combining cluster. Rather than raising the allocation
+  ceiling for all pre-handshake and established messages, v19 adds an 8 MiB
+  aggregate glyph-byte limit and proves the largest legal encoded frame stays
+  below `MAX_FRAME_BYTES`.
+- The GPU's document shaper cannot define terminal column origins. Terminal
+  mode uses fixed cell geometry: explicit row/column rectangles own
+  background, underline, selection, cursor, clipping, and hit testing; text
+  runs are positioned at cell origins and never determine later cell
+  positions.
+
+### 0.8 Stage 3 framing review round 1
+
+The first external Stage 3 review verified the Revision 8 base, named seams,
+limits, Stage 1/2 compatibility, and continuity state and found no
+architectural defect. This round closes its three precision findings:
+
+- The measured maximum payload fixture now maximizes legal `Style` bytes on
+  every cell and distributes the exact glyph budget across legal clusters with
+  lengths chosen to maximize serialized length-prefix overhead.
+- GPU acceptance names terminal copy through `InstanceSignal::Clipboard` and
+  the existing OS clipboard path; it does not imply that child OSC 52 is
+  honored.
+- Arc 5 stage 2 is the vterm delivery; capitalized Stages 1–3 are its three
+  internal PR stages.
+
+### 0.9 Stage 3 as built
+
+Stage 3 is implemented on `vterm-gpu`, cut from canonical `main` @ `1dd47fc`
+rather than stacked on the documentation branch, with the approved Revision 8
+framing as its first commit. Criteria 28–37 are implemented.
+
+**Protocol.** `pmacs-protocol` gained `src/terminal.rs`, which now owns the
+shared row/column/visible-cell/grapheme/metadata bounds (re-exported from
+`crate::terminal::*` so every Stage 1/2 caller keeps its path and no duplicate
+type exists), `TerminalProcessState`, `TerminalSelectionSpan`, `TerminalFrame`,
+and `TerminalFrame::validate`. `unicode-width` was promoted to a workspace
+dependency so the terminal screen and the wire validator measure glyph columns
+with one table. Discriminants: `InstanceMessage::TerminalFrame` is 26,
+`FrontendEvent::TerminalResize` 11, `TerminalPointer` 12 — each appended after
+its enum's final v18 variant, with placement pins on `StatuslineSegments` and
+`MenuPointer` guarding them. `SUPPORTED_PROTOCOL_VERSIONS` is `[6..=19]`.
+
+The measured maximum legal frame — 512x512, one maximal selection span per row,
+maximum title and process metadata, the maximal-encoding `Style` on every cell,
+and the exact 8 MiB aggregate glyph budget distributed to maximize serialized
+length-prefix overhead — encodes to **13,437,863 bytes**, against the unchanged
+16,777,216-byte transport cap. A one-byte-over aggregate is rejected before
+serialization.
+
+**Two decisions the implementation had to make.**
+
+1. *The `Viewport` gate keys on the ACTIVE buffer, not the declared one.*
+   §6.2 says "a document buffer accepts only `Viewport`; an active terminal
+   buffer accepts only `TerminalResize`", and the first implementation read
+   that as a test on the buffer the message names. That is not sufficient:
+   `Viewport` also ALIGNS the frontend's window to the buffer it names, so a
+   stale document viewport still in flight when a command opened a terminal
+   dragged the frontend straight back off it — the real-daemon acceptance
+   showed the window oscillating and no frame ever arriving. The daemon now
+   drops `Viewport` when the authenticated source's active window shows a
+   terminal (and, defensively, when the declared buffer is itself a terminal).
+   This is the framing's own wording taken literally; it is recorded here
+   because the weaker reading looks correct and silently produces a terminal
+   that never paints.
+2. *The producer clears terminal mode on every exit path.* `in_terminal_mode`
+   is used daemon-side to suppress `CursorByte` and the presence sweep. An
+   early return from the terminal pass that left the flag set kept those
+   suppressed after the frontend went back to a document. Every path out of
+   the pass now clears it explicitly.
+
+**Renderer.** `pmacs-gpu/src/terminal.rs` is a pure, cell-space paint planner:
+it resolves a validated frame into background/underline/selection/cursor runs
+and explicitly positioned text runs, taking the frontend's two default colors
+as parameters so every paint rule is unit-testable without a GPU. `main.rs`
+holds a two-state machine (`Document` / `Terminal`), builds one shaped buffer
+per text run so a wide or cluster glyph's advance can never choose the next
+column's origin, and swaps the document quad/squiggle/caret/minimap/gutter
+batches for terminal ones while leaving the status band and popup layers alone.
+
+**Criterion 37.** The GPU is a separate binary that depends only on
+`pmacs-protocol`, so the single real path is driven as a process:
+`pmacs-gpu --headless-probe <socket> <report>` attaches through the REAL
+`attach` client (the reader sink was generalized so the winit path and the probe
+share one handshake, outbox, and writer), presses a real key that opens a real
+`/bin/sh` child, applies real `TerminalFrame`s, composites real pixels through
+`render_to_view`, sends real input and a real geometry change, and writes named
+observations the acceptance asserts on. `tests/vterm_stage3_acceptance.rs`
+`a37_…` is that test; it is CRDT-gated because the daemon advertises
+`crdt_replica` / `semantic_render` only on CRDT builds.
+
+**Verification (from a clean tree).** `cargo fmt --check`; strict workspace
+Clippy; 1,757 default + 1,933 CRDT library tests (3 ignored each); Stage 1
+acceptance 9 default + 10 CRDT; Stage 2 acceptance 4 default + 4 CRDT; Stage 3
+acceptance 4 default + 5 CRDT (the fifth is the CRDT-gated real-daemon path);
+statusline acceptance 7 default + 8 CRDT; M4 120 passed (3 ignored, 1 filtered);
+required GPU 127; one-invocation workspace sweep 2,919 passed across 83 suites
+(19 ignored); `git diff --check` clean. One unexplained single failure of the
+required-GPU suite occurred once mid-session and did not reproduce across eight
+subsequent runs including the full sweep; its identity was not captured.
+
+### 0.10 Stage 3 review round 1
+
+PR #135's first review found no correctness blocker, confirmed the required-GPU
+suite clean across four runs (twelve total with the author's), and raised two
+design questions plus three minor notes. All five are addressed.
+
+- **Presence while in terminal mode (finding 1) — fix kept, prediction not
+  reproduced.** The review predicted that skipping the presence sweep freezes
+  `last_broadcast` at the abandoned document position, leaving peers painting a
+  stale caret. It does not: the buffer-follow clears the terminal declaration
+  when it ships the snapshot, so `terminal_active` is false on the tick a window
+  first shows a terminal, and the declaration cannot arrive until a later tick
+  (the frontend learns the buffer id FROM that snapshot). One truthful sweep
+  always lands first. A real-daemon two-frontend test written to catch the
+  freeze passes against the pre-fix tree — the bite is VACUOUS, and it is
+  labelled a regression guard rather than fix evidence. The skip is removed
+  anyway: it was load-bearing on tick ordering and bought nothing, and its
+  removal makes "presence follows the frontend" structural.
+- **Hover claimed durable control (finding 2) — real, fixed, bite-verified.**
+  `apply_terminal_gesture` claimed the controller before dispatching, including
+  for `Move`, which does nothing. A semantic frontend reports motion at pixel
+  rate, so sweeping the mouse across a PASSIVE split's terminal took durable
+  control and the next layout sync resized the shared PTY to that background
+  view's geometry — exactly the theft the controller rule exists to prevent.
+  Bare motion no longer claims; every deliberate gesture still does.
+  `scripts/bite HEAD src/editor.rs` on
+  `hover_does_not_steal_terminal_control_from_the_active_frontend` is a clean
+  behavioral bite (assertion failure, not a compile error).
+- **Terminal motion is deduplicated by cell (finding 3).** Sub-cell motion
+  resolved to the same coordinate and still crossed the wire, where each event
+  is a daemon-side gesture. `State::terminal_motion_is_new` now gates it, and
+  press/release re-arm the memo so the first drag after a press still reports.
+  Its unit test cannot bite — the seam did not exist pre-fix — and says so.
+- **Declarations record only once sent (finding 4).**
+  `terminal_declaration_if_changed` is now a pure query and
+  `note_terminal_declaration_sent` records, so a failed write is retried instead
+  of suppressed as already-declared. The existing `a35` test caught the contract
+  change and now pins both halves.
+- **Unchanged frames are no longer re-validated (finding 5).** The complete
+  payload comparison runs before `validate`; only validated frames are ever
+  stored, so a frame equal to the baseline has already passed. The chrome tail
+  is factored into `terminal_chrome` so both exits emit it identically.
+
+Post-review gates: `cargo fmt --check`; strict workspace Clippy; 1,757 default +
+1,933 CRDT library tests; Stage 1 acceptance 9/10, Stage 2 4/4, Stage 3 5/7,
+statusline 7/8 (default/CRDT); M4 120; required GPU 128; workspace sweep 2,921
+across 83 suites (19 ignored); `git diff --check` clean.
+
+### 0.11 Stage 3 review round 2
+
+The second review verified all five round-1 fixes in code, re-ran the
+required-GPU suite clean (a thirteenth consecutive pass, closing the flake
+caveat), and found one new low-severity defect plus minor items.
+
+- **A disconnect in terminal mode hid the notice (finding 1) — real, fixed,
+  hand-verified.** `AttachEvent::Disconnected` set the placeholder text but
+  never left terminal mode, where the document code layer is not prepared at
+  all and the terminal glyph layer keeps painting its last frame. The user was
+  left looking at a frozen, live-looking terminal that silently ignored input —
+  and with GPU auto-reconnect a named deferral, until relaunch.
+  `State::on_daemon_disconnected` now leaves terminal mode, forces a repaint
+  even when the notice text is byte-identical, and requests a redraw. Its test
+  lives in the same file as the fix, so `scripts/bite`'s file granularity
+  cannot bite it; the equivalent was done by hand — neutralizing only the
+  `exit_terminal_mode()` call makes the test fail, restoring it makes it pass.
+- **Per-tick full-grid clone removed (finding 2).**
+  `sync_semantic_terminal_layout` compared geometry via `snapshot(..).size`,
+  cloning the whole visible cell grid every dispatcher tick to answer one
+  comparison. `TerminalManager::screen_size` reads it from the borrowed
+  projection instead.
+- **Roadmap and handoff Arc 5 lines corrected (finding 3).** Both still said
+  Stage 3 was framed and awaiting approval, contradicting this PR's own ledger.
+- **A press that misses the grid no longer arms a drag (nit).** It set
+  `pointer_drag_active` unconditionally, so a later in-grid motion sent a
+  `Drag` with no preceding `Down`. Daemon-side impact was nil
+  (`update_selection` bails without a drag anchor), but the state is now
+  honest. A release still always ends the drag, including one that wandered
+  outside the grid.
+- **Inbound terminal events now require a negotiated v19 session (finding 5).**
+  The outbound `TerminalFrame` was gated twice while the inbound declarations
+  relied on the frontend's send gate alone. A pre-v19 peer cannot construct
+  these variants, so this only refuses a hand-rolled client — and the a32
+  forgery tests already prove such an event reaches nothing but the sender's
+  own authenticated active view — but the asymmetry was not deliberate, and
+  "gated in both directions" should be true of the code rather than only of the
+  frontends we ship.
+
+Deferred from this round, named: **terminal wheel gestures discard scroll
+magnitude.** One winit wheel event becomes one terminal gesture regardless of
+the lines it accumulated, so a two-tick event scrolls the same distance as a
+one-tick event, while the document path scrolls by `lines`. Closing it means
+either sending N gestures (chattier) or widening the terminal pointer event
+with a magnitude — a protocol change. Not worth either inside this stage.
+
+Post-round-2 gates: `cargo fmt --check`; strict workspace Clippy; 1,758 default
++ 1,934 CRDT library tests; Stage 1 acceptance 9/10, Stage 2 4/4, Stage 3 5/7,
+statusline 7/8 (default/CRDT); M4 120; required GPU 129; workspace sweep 2,923
+across 83 suites (19 ignored); `git diff --check` clean.
 
 ## 1. Problem and ownership boundary
 
@@ -881,24 +1116,28 @@ interval by adding the semantic terminal surface.
 
 ## 6. Stage 3 — protocol v19 and GPU integration
 
-### 6.1 Wire additions
+### 6.1 Protocol-owned wire contract
 
-Protocol v19 appends, never inserts, these final variants:
+Protocol v19 appends, never inserts, one instance message and two frontend
+events after the final v18 variants:
 
 ```rust
-InstanceMessage::TerminalFrame {
-    buffer_id: BufferId,
-    size: CellSize,
-    cells: Vec<Cell>,
-    cursor: Option<CellCoord>,
-    title: Option<String>,
-    screen_generation: u64,
-    selection: Vec<TerminalSelectionSpan>,
-    scroll_offset: u32,
-    at_bottom: bool,
-    pid: u32,
-    process: TerminalProcessState,
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TerminalFrame {
+    pub buffer_id: BufferId,
+    pub size: CellSize,
+    pub cells: Vec<Cell>,
+    pub cursor: Option<CellCoord>,
+    pub title: Option<String>,
+    pub screen_generation: u64,
+    pub selection: Vec<TerminalSelectionSpan>,
+    pub scroll_offset: u32,
+    pub at_bottom: bool,
+    pub pid: u32,
+    pub process: TerminalProcessState,
 }
+
+InstanceMessage::TerminalFrame(TerminalFrame)
 
 FrontendEvent::TerminalResize {
     frontend_id: FrontendId,
@@ -915,75 +1154,247 @@ FrontendEvent::TerminalPointer {
 }
 ```
 
+`TerminalProcessState`, `TerminalSelectionSpan`, and every limit needed to
+validate these values move to or are re-exported from `pmacs-protocol`; core
+paths may re-export them so Stage 1/2 callers do not gain duplicate types.
+The shared limits are the landed row, column, visible-cell, grapheme, and
+metadata bounds plus:
+
+```rust
+pub const MAX_TERMINAL_FRAME_GLYPH_BYTES: usize = 8 * 1024 * 1024;
+```
+
+The aggregate counts each `Char`'s UTF-8 length, every `Cluster` byte, and zero
+for `Continuation`, with checked addition. `TerminalFrame::validate` is the
+single structural policy used before daemon emission and after GPU decode.
+`pmacs-protocol` takes the direct `unicode-width` dependency needed to validate
+one/two-column glyph and continuation topology; another frontend must not
+copy that policy.
+
+The existing `MAX_FRAME_BYTES = 16 MiB` remains unchanged. A protocol test
+constructs the maximum row/column frame with one maximal legal selection span
+per row and maximum title/process metadata. Every cell carries a legal
+one-column `Cluster` plus the maximal-encoding legal `Style`: RGB foreground,
+background, and underline color, a non-`None` underline, and all boolean flags
+set. The fixture distributes the exact aggregate budget across a legal cluster
+in every cell and chooses cluster lengths to maximize total serialized
+length-prefix overhead rather than packing bytes into a few maximal clusters.
+This maximizes cluster and per-cell style overhead together. It serializes
+the enclosing `InstanceMessage` with `postcard::to_allocvec` and asserts the
+measured length is below `MAX_FRAME_BYTES`. A one-byte-over aggregate is
+rejected before serialization.
+This is a wire-specific bound, not a mutation of the TUI screen: if a child
+constructs a larger internal snapshot, the semantic producer retains its last
+valid baseline, emits nothing malformed or truncated, and logs the first
+distinct bounded error until a valid frame clears the latch.
+
 `TerminalFrame` is a complete visible-grid replacement. Empty is not a clear
-sentinel: valid terminal sizes are non-zero and `cells.len()` must equal area.
-Complete replacement is chosen over a second diff/cache protocol for the first
-GPU stage. `screen_generation` advances on screen/process/title mutation;
-scroll/selection have their own per-context epochs. The producer caches and
-compares the complete context payload, so a view-only change still sends even
-when `screen_generation` is unchanged, while an identical payload is silent.
+sentinel: valid terminal dimensions are nonzero and `cells.len()` equals the
+checked area exactly. `screen_generation` describes the published terminal
+screen/title generation; selection, scroll, viewport, and process state may
+change without it. The producer compares every ordered field against one
+retained baseline per semantic frontend context. A view-only change therefore
+sends; a byte-identical/equal payload is silent. Buffer snapshot, detach, and
+context replacement clear that baseline so the next valid terminal frame is
+authoritative.
 
-All terminal frame fields are untrusted at the GPU boundary. Validation checks
-shared row/column/area limits, exact area, cursor bounds, title length,
-selection ordering/non-overlap/bounds, cluster UTF-8 and cluster-byte limits,
-continuation structure, and attachment absence.
-Invalid input is rejected atomically and the last valid terminal frame remains
-painted.
+Validation is atomic and covers:
 
-The daemon routes terminal resize/pointer events by authenticated session
-source. Claimed frontend and buffer must match the source's active terminal
-window. A mismatch is dropped without resizing, selecting, or writing PTY
-input.
+- shared nonzero row/column/checked-area and aggregate-glyph limits;
+- exact cell area; each caller separately requires the expected current
+  `buffer_id`;
+- cursor bounds;
+- title and process-state metadata length/control-character rules;
+- valid nonempty cluster UTF-8 within the per-cluster limit;
+- printable one/two-column leading glyphs, required wide continuations, and no
+  orphan continuation; continuation style is ignored in favor of its lead;
+- no `Attachment` in any terminal cell;
+- strictly increasing, one-per-row, nonempty selection spans inside the frame;
+- `at_bottom == (scroll_offset == 0)`.
 
-The protocol remains compatible with v18 where structurally possible:
+Invalid daemon output is never written. Invalid GPU input retains the previous
+valid frame, requests no redraw, and reports one latched diagnostic rather than
+partially applying cells or metadata.
 
-- v18 grid peers need no new message and continue to receive composed
-  `CellDelta` terminal windows;
+Compatibility remains additive:
+
+- v18 grid peers keep receiving the Stage 2 composed `CellDelta` terminal
+  windows;
 - v18 semantic peers receive the immutable empty identity snapshot but no
-  terminal variant. They cannot display the terminal screen; terminal use from
-  those peers is unsupported, while normal document editing remains supported;
-- v19 frontends gate the new outbound event variants on negotiated version;
-- postcard byte pins cover the old final variants plus the newly appended
-  discriminants.
+  terminal message. Terminal use remains unsupported and invisible for those
+  peers; ordinary document editing remains supported;
+- v19 frontends send `TerminalResize`/`TerminalPointer` only to a negotiated
+  v19 daemon;
+- the v19 daemon filters `TerminalFrame` from every wire below v19;
+- postcard pins preserve every v18 discriminant and pin all three appended
+  v19 discriminants.
 
-### 6.2 Semantic producer
+### 6.2 First-frame bootstrap and authenticated routing
 
-When a semantic frontend's active buffer is a terminal, its producer emits
-`TerminalFrame` plus the existing global theme/font/statusline facts that still
-apply. It suppresses document-only style spans, decorations, inlays, block
-adornments, folds, file summaries, line numbers, and document cursor layout for
-that buffer. On switching back to a document, existing caches are invalidated
-so the first document frame is a full authoritative resync.
+`BufferSnapshot` remains the one semantic display-switch message. It carries
+the terminal identity buffer's valid empty CRDT state and adds no terminal
+flag. Immediately after applying any snapshot, a v19 GPU sends the existing
+`Viewport` for the new replica/generation and, when its derived terminal
+content rectangle has at least one row and column, `TerminalResize` with the
+new `buffer_id` and size in cells. A zero-area window sends no terminal
+declaration until a later geometry change yields a valid size.
 
-The terminal frame is scoped to the authenticated frontend/window context,
-because scrollback offset and selection are per view. A frame for one split or
-frontend must never overwrite another context's baseline.
+The daemon authenticates the connection source before reading any claimed
+`frontend_id`. A document buffer accepts only `Viewport`; an active terminal
+buffer accepts only `TerminalResize`. The inapplicable declaration is dropped
+without mutation or logging noise. This dual declaration occurs only after a
+snapshot or an actual geometry change, not every frame, and removes the
+otherwise circular dependency where the GPU would need a terminal frame before
+it knew to request one.
 
-A GPU frontend reports its terminal viewport in **cells**, computed from its
-own font metrics and pixel allocation. No pixel dimensions, glyph advances,
-or DPI cross the daemon boundary. The daemon accepts a resize only from the
-controlling active frontend defined in §5.4.
+For an authenticated active terminal window, a valid `TerminalResize` always
+records that exact `(frontend, window, buffer)` view size so passive frontends
+can receive their own clipped/padded projection. It resizes the PTY only when
+that exact view is the durable controller from §5.4; resize never claims
+control. The semantic adapter consumes a content `CellSize` directly and does
+not run the TUI placement helper or subtract a modeline again. Unchanged,
+zero/out-of-range, passive, and failed resizes retain existing geometry under
+the Stage 2 ordering contract.
 
-### 6.3 GPU renderer
+`TerminalPointer` must match the authenticated source, active terminal buffer,
+and last accepted terminal viewport, and its coordinate must be in bounds.
+Once accepted, it follows the same Stage 2 terminal pointer path: child SGR
+mouse reporting when eligible, otherwise per-view scroll/selection/context
+menu. Like other accepted pointer/input/focus events, it may claim control.
+A forged source, stale buffer, missing declaration, or out-of-bounds coordinate
+is dropped before view, controller, selection, menu, or PTY mutation.
 
-The GPU keeps a dedicated terminal render mode keyed by active `buffer_id`.
-It does not synthesize rope text from cells. Layout rules:
+Key, paste, focus, detach, BEL, and clipboard keep their landed event/message
+types. The daemon continues to overwrite client-claimed IDs with the
+authenticated source before terminal dispatch. Terminal mode adds no raw-byte
+input message and never sends child bytes through Lua or a shell.
 
-- one terminal column equals the active monospace cell advance;
-- `Glyph::Continuation` consumes a column and draws nothing;
-- clusters shape as one cell origin with the declared one/two-column footprint;
-- terminal foreground/background/reverse/style resolve from the cell, not
-  syntax or UI faces;
-- selection spans resolve through `ui.selection` over child cells; cursor
-  placement comes from terminal snapshot state;
-- rows never wrap in the frontend; clipping is by terminal cell bounds;
-- status band remains outside the terminal grid;
-- theme/font changes invalidate terminal shaping and geometry caches;
-- a font-size or window-size change recomputes the cell viewport and sends one
-  `TerminalResize` after suppression of identical sizes.
+### 6.3 Semantic producer and editor adapters
 
-Terminal mouse hit-testing is frontend-local pixel -> terminal cell. The GPU
-sends `TerminalPointer`, never a fake source byte offset.
+`SemanticRenderState` stores the optional terminal viewport and last valid
+terminal-frame baseline for its one authenticated frontend. When the active
+buffer is terminal and a matching viewport exists, it requests an owned
+snapshot for the exact active `TerminalViewKey`, validates/converts it, and
+emits `TerminalFrame` only on complete-payload change.
+
+The editor-side contract is narrow:
+
+```rust
+prepare_semantic_terminal_view(
+    frontend_id: FrontendId,
+    buffer_id: BufferId,
+    size: CellSize,
+) -> Option<TerminalSnapshot>
+
+sync_semantic_terminal_layout(
+    frontend_id: FrontendId,
+    buffer_id: BufferId,
+    size: CellSize,
+) -> bool
+
+dispatch_semantic_terminal_pointer(
+    frontend_id: FrontendId,
+    buffer_id: BufferId,
+    size: CellSize,
+    coord: CellCoord,
+    kind: MouseKind,
+    mods: Modifiers,
+) -> bool
+```
+
+Each method derives the active `WindowId` from `frontend_id`, verifies that it
+still displays `buffer_id`, and delegates to the existing manager/view/input
+state machines. No method accepts a client-supplied window identity. Semantic
+layout sync runs after event coalescing, before `tick_processes`, exactly beside
+the landed grid sync; snapshot production occurs on the following render pass
+from the already-published screen.
+
+The terminal producer retains the buffer-independent/UI messages required by
+the native frontend: `StatusFacts`, `ThemeFacts`, `FontFacts`,
+`StatuslineSegments`, `MenuPrompt`, and `MinibufferPrompt`, plus daemon-owned
+`DispatchIdle`, `Signal`, and lifecycle messages. The built-in terminal
+statusline provider therefore remains the source of title/process/scroll text.
+It suppresses document-only style spans, decorations, inlays, block
+adornments, folds, file summaries, search/completion surfaces, line numbers,
+document `CursorByte`, and presence for the terminal identity buffer.
+
+On terminal activation the GPU clears/ignores every document-local visual
+cache before painting the first frame. On switching back, snapshot reset clears
+the producer's document baselines so the first matching document viewport
+receives the existing full authoritative style/decoration/summary resync.
+Terminal baselines are per frontend context; one split/frontend can never
+suppress or overwrite another's scroll/selection projection.
+
+### 6.4 GPU state and fixed-cell renderer
+
+The GPU state machine is explicit: `Document` or
+`Terminal { buffer_id, frame, derived paint caches }`. `BufferSnapshot`
+immediately leaves terminal mode, clears the prior terminal frame and
+terminal-only caches, and restores document defaults. A valid matching
+`TerminalFrame` enters terminal mode. A stale-buffer frame is ignored; an
+identical valid frame is retained without rebuild or redraw.
+
+Terminal geometry is the drawable code rectangle above the existing status
+band, with no document gutter or minimap. Rows and columns are
+`floor(pixel_extent / active_cell_metric)`, clamped through the shared
+nonzero protocol limits. Pixels, scale, DPI, and glyph advances never cross
+the wire. Rows never wrap; excess frame rows/columns clip to the declared cell
+rectangle and undersized content is padded with terminal defaults.
+
+Painting is cell-derived rather than rope-derived:
+
+- Every cell rectangle has a fixed origin from `(row, col)` and the active
+  monospace metrics. Backgrounds coalesce only adjacent equal resolved colors.
+- `Default` foreground/background map to the GPU's existing plain-text/window
+  defaults; indexed colors use the existing xterm palette; truecolor is exact.
+  `reverse` swaps the two resolved colors. A continuation draws no glyph and
+  inherits its lead cell's paint semantics.
+- Text shaping is split into explicitly positioned row runs. Contiguous
+  single-width ASCII may share one monospace buffer with rich attribute spans;
+  non-ASCII/cluster/wide leads start at an explicit cell origin and are clipped
+  to their declared one/two-cell footprint. A shaped advance never chooses the
+  next run's column.
+- Bold and italic use font attributes. Single/double/dotted/dashed underlines
+  use fixed-cell quads; curly uses the existing squiggle pipeline. Default
+  underline color follows the post-reverse foreground.
+- Terminal selection is a separate fixed-cell wash resolved through the
+  existing GPU `ui.selection` site; it never rewrites child cell styles.
+  Cursor visibility/position comes only from the frame and paints through the
+  existing caret primitive inside the terminal clip.
+- The status band and its provider runs remain outside/above terminal paint.
+  Document decoration, presence, caret, gutter, and minimap batches are not
+  prepared or drawn in terminal mode.
+
+### 6.5 GPU input, signals, and cache invalidation
+
+Keyboard, paste, focus, and detach reuse existing attach messages and daemon
+encoding. Inside the terminal clip, GPU mouse hit testing is
+pixel-to-`CellCoord`; press/release/drag/move/wheel sends `TerminalPointer`
+instead of a source-byte `Pointer`. The status band/outside clip is never a
+terminal hit. Move/drag events coalesce only while kind, coordinate, and
+modifiers are unchanged.
+
+Window resize, scale change, accepted `FontFacts`, and buffer snapshot
+recompute the cell viewport. One changed size sends one version-gated
+`TerminalResize`; an equal size is silent. A font change clears terminal shape
+and geometry caches until a matching-size authoritative frame arrives.
+
+Invalidation is deliberately narrow:
+
+- a changed terminal frame rebuilds cell text/background/underline/selection/
+  cursor data, but not statusline buffers;
+- `ThemeFacts` rebuilds the selection/status color sites, not child cell
+  shaping;
+- `FontFacts` rebuilds shape and geometry and emits a changed cell viewport;
+- status/statusline/menu/minibuffer messages touch only their existing caches;
+- a duplicate valid terminal frame and an unchanged geometry declaration do
+  no work.
+
+`InstanceSignal::Bell` requests one frontend attention event for each new
+active-terminal BEL; historical/passive suppression remains daemon-owned.
+`InstanceSignal::Clipboard` keeps the existing OS clipboard path. OSC title is
+sanitized frame/statusline metadata only and never becomes a raw window-title
+or terminal-control operation.
 
 ## 7. Four-agent execution plan
 
@@ -993,19 +1404,20 @@ coherent.
 
 | Owner | Stable scope | Primary files |
 | --- | --- | --- |
-| Lead/integrator | contracts first; `TerminalManager`, Lua/builtin wiring, lifecycle/signal integration, shared acceptance, gates, docs, branches/PRs | `src/terminal/session.rs`, `src/lua_bindings/mod.rs`, `builtin/runtime/terminal.lua`, narrow Stage 2 authenticated-dispatch sections of `src/daemon.rs`, `tests/vterm_*_acceptance.rs`, docs |
-| VT core agent | encoder corrections and screen query seams needed by view projection; no renderer ownership | `src/ansi.rs`, `src/terminal/screen.rs`, `src/terminal/input.rs` |
-| TUI agent | view projection, frontend-explicit grid composition/cursor, per-frontend dispatch, local events, scroll/selection/copy/resize | `src/terminal/view.rs`, `src/instance_render.rs`, `src/frontend.rs`, owned sections of `src/editor.rs`, focused TUI tests |
-| Protocol/GPU agent | Stage 2 contract review; Stage 3 v19 types/limits/gates, semantic producer, authenticated new-event routing, GPU state/render/hit-test | `pmacs-protocol`, `src/protocol.rs`, `src/semantic_render.rs`, Stage 3 sections of `src/daemon.rs`, `pmacs-gpu/src/{main,attach}.rs` |
+| Lead/integrator | contracts first; Stage 1/2 manager/Lua lifecycle; Stage 3 semantic producer, authenticated daemon routing, shared acceptance, gates, docs, branches/PRs | `src/terminal/session.rs`, `src/lua_bindings/mod.rs`, `builtin/runtime/terminal.lua`, `src/semantic_render.rs`, owned Stage 3 sections of `src/daemon.rs`, `tests/vterm_*_acceptance.rs`, docs |
+| VT core agent | encoder/screen seams; Stage 3 snapshot-to-wire conversion and shared terminal re-exports, no renderer ownership | `src/ansi.rs`, `src/terminal/{screen,input,session,view}.rs` in assigned non-overlapping sections |
+| TUI agent | landed TUI projection/input; Stage 3 exact active-window semantic adapters and parity tests, no GPU/protocol files | owned sections of `src/editor.rs`, focused TUI/adapter tests |
+| Protocol/GPU agent | protocol v19 types/limits/pins/gates and native GPU state/render/hit-test/attach sending | `pmacs-protocol`, `src/protocol.rs`, `pmacs-gpu/src/{main,attach}.rs` |
 
 Coordination rules:
 
-- Lead establishes types, invariants, and method signatures before another
-  lane edits callers.
-- Strict file ownership. `src/editor.rs` passes from lead to TUI only after
-  construction wiring; lead and TUI coordinate exact non-overlapping
-  `src/daemon.rs`/signal hunks. Stage 3 daemon work begins only after Stage 2
-  lands.
+- Lead establishes invariants and method signatures before another lane edits
+  callers; the protocol/GPU agent then implements the shared wire types.
+- Strict Stage 3 file ownership follows the table. VT-core and TUI edits in
+  `src/terminal/{session,view}.rs` / `src/editor.rs` are agreed as exact
+  non-overlapping symbols before work starts. Only the lead edits
+  `src/semantic_render.rs`, Stage 3 daemon routing, or shared acceptance.
+  Stage 3 begins only from landed Stage 2.
 - Workers do not update docs, ledgers, branches, or PRs and do not stash,
   checkout, rebase, or merge.
 - Workers add focused tests in owned modules. Lead alone owns shared
@@ -1021,25 +1433,33 @@ Per-stage utilization:
 - Stage 2: lead establishes manager/Lua contracts and authenticated adapters;
   TUI implements projection/input/rendering; VT core adds only required
   encoder/query corrections; protocol/GPU checks snapshot neutrality.
-- Stage 3: protocol/GPU implements; TUI and VT core add parity cases in their
-  existing surfaces; lead integrates and gates.
+- Stage 3: lead locks the protocol constants/types and editor method signatures,
+  then owns `src/semantic_render.rs`, authenticated `src/daemon.rs` routing,
+  shared acceptance, and integration. The protocol/GPU agent owns
+  `pmacs-protocol` plus `pmacs-gpu/src/{main,attach}.rs`; the VT-core agent owns
+  snapshot-to-wire conversion/shared terminal re-exports; the TUI agent owns
+  the exact semantic adapters in `src/editor.rs` and parity tests. All four run
+  in parallel only after the lead's contract checkpoint; no TUI rendering
+  behavior changes.
 
 ## 8. Branch and PR plan
 
-Stage 1 landed on `main` as PR #126 at merge `643d1e1`. Continue one clean PR
-at a time:
+Stage 1 landed as PR #126 at merge `643d1e1`. Stage 2 landed as PR #130 at
+merge `86fc1bc`. Revision 8 is preserved for approval on
+`vterm-stage3-framing`, based on the integrated current `main`.
 
-1. Revision 7 framing review is complete and the implementation contract is
-   approved; Stage 2 is implemented on `vterm-tui`, then gated and opened as
-   the second PR;
-2. merge Stage 2 only when the user says;
-3. create `pmacs-vterm-gpu`, branch `vterm-gpu`, from the then-current `main`;
-   implement, gate, and open the third PR.
+After explicit framing approval:
 
-The framing branch is `vterm-framing` in worktree `pmacs-vterm-framing`.
-Implementation branches are not stacked across an unmerged parent. This avoids
-base-branch deletion/auto-close risk and makes each PR's gate evidence honest.
+1. create worktree `pmacs-vterm-gpu` and branch `vterm-gpu` from the then-current
+   canonical `githubsucks/main`;
+2. implement only Stage 3 / criteria 28–37;
+3. run the complete sequential gate and bite suite;
+4. open the third and final vterm PR for user review; never merge it without
+   explicit authorization.
 
+The historical framing branch `vterm-framing` remains the Revision 7 record.
+The Stage 3 implementation is not stacked on a documentation branch or an
+unmerged feature parent.
 
 ## 9. Acceptance
 
@@ -1184,47 +1604,97 @@ coverage remains beside the owning implementation. The criteria map as follows:
 
 ### Stage 3 — GPU/protocol
 
-28. Protocol v19 appends all new variants after v18 pins; v18 grid traffic
-    round-trips unchanged and new outbound variants are version-gated.
-29. Terminal frame validation accepts exact shared boundaries and atomically
-    rejects over-area, bad area, out-of-bounds cursor, malformed cluster,
-    orphan continuation, invalid selection spans, attachment, overlong title,
-    and overlong process-state text while retaining the prior valid frame.
-30. Semantic terminal activation suppresses document-only messages; switching
-    back forces a complete document resync.
-31. Two frontends/splits on one terminal keep independent scroll/selection
-    snapshots; only the active controlling context resizes or writes input.
-32. Forged frontend/buffer IDs in terminal resize/pointer events cannot affect
-    another terminal or process.
-33. Headless GPU rendering pins background rectangles, indexed/truecolor,
-    reverse, wide/combining cells, clipping, cursor visibility, status-band
-    separation, and no frontend wrapping.
-34. Font/window resize emits cell dimensions, never pixels, and identical
-    resize requests are suppressed.
-35. Theme/font/terminal generation changes invalidate exactly the affected
-    caches; an unchanged terminal frame produces no redraw message.
-36. A real daemon + required-GPU smoke runs a full-screen alternate-screen
-    probe, handles input and resize, exits, and returns to the preserved main
-    screen.
+28. Protocol v19 appends all three new variants after the v18 pins; v18 grid
+    traffic round-trips byte-identically, v18 semantic document traffic still
+    works, and both outbound directions are independently version-gated.
+29. The measured maximum legal frame uses maximum dimensions, one maximum
+    selection span per row, maximum metadata, the exact aggregate glyph budget
+    present as one legal cluster per cell with lengths chosen to maximize
+    serialized length-prefix overhead, and the maximal-encoding legal style on
+    every cell. Its enclosing message encodes below the unchanged
+    16 MiB transport cap. Validation accepts exact shared boundaries and
+    atomically rejects one-byte-over aggregate, over-area, bad area,
+    out-of-bounds cursor, control/malformed/overlong clusters, orphan/missing
+    continuations, attachments, duplicate/out-of-order-row or otherwise
+    invalid selection spans, inconsistent bottom state, overlong title, and
+    overlong process text while retaining the prior valid frame.
+30. First terminal activation emits one authoritative complete frame after the
+    dual viewport declaration, then stays silent for a completely equal
+    payload. View-only and process-only changes emit despite an unchanged
+    screen generation. Terminal activation suppresses document projection,
+    cursor, presence, gutter, and completion; switching back forces one
+    complete document resync.
+31. Two semantic frontends over one terminal receive independent sizes,
+    scroll, selection, cursor visibility, and baselines while sharing one
+    process/screen. A passive declaration produces its clipped/padded frame but
+    does not resize; only the exact durable controller changes PTY geometry.
+32. Forged frontend/buffer IDs, stale buffers, undeclared viewports, and
+    out-of-bounds terminal pointer/resize events cannot affect another view,
+    controller, terminal selection, menu, PTY size, or child input.
+33. Headless GPU rendering pins default/indexed/truecolor foreground and
+    background, reverse, bold/italic, all supported underline forms, wide and
+    combining footprints, continuation inheritance, selection, cursor,
+    padding/clipping, status-band separation, and absence of frontend wrapping,
+    document gutter/minimap, and document overlays.
+34. GPU key, paste, focus, press/release/drag/move/wheel input reaches the same
+    Stage 2 terminal encoders and ownership paths. Pixel hit testing yields only
+    in-bounds cells, never source bytes or wire pixels, and unchanged move/drag
+    cells coalesce.
+35. Buffer/window/scale/font transitions emit exactly one changed cell
+    declaration and suppress identical sizes. Terminal, theme, font, and
+    statusline changes invalidate only their named caches; duplicate valid
+    frames request no redraw.
+36. Each new active BEL produces one GPU attention action. Terminal copy
+    publishes through `InstanceSignal::Clipboard` and the existing OS
+    clipboard path exactly once. Sanitized OSC title/process/scroll metadata
+    reaches the terminal provider/statusline without becoming a raw host-title
+    or control effect.
+37. A hermetic real daemon + required headless GPU smoke opens `/bin/sh`, runs
+    a full-screen alternate-screen probe, exercises key/paste/mouse/resize,
+    BEL/title metadata, scroll/select/copy through the clipboard signal, clean
+    exit, and buffer switch-back, then proves the preserved main screen and all
+    child/reader/session cleanup.
+
+#### Stage 3 verification map
+
+The cross-surface suite is `tests/vterm_stage3_acceptance.rs`; focused wire and
+GPU assertions remain in `pmacs-protocol` and `pmacs-gpu` respectively.
+
+- **28–29:** postcard discriminant/round-trip pins, common
+  `TerminalFrame::validate` boundary table, measured maximum legal payload, and
+  v18/v19 daemon/frontend send filters.
+- **30–32:** semantic producer baseline/reset tests, dual-declaration
+  bootstrap, real dispatcher source-forgery tests, and two-frontend
+  controller/passive-view acceptance.
+- **33:** pure fixed-cell paint-plan tests plus required headless offscreen
+  pixel probes for representative color/style/wide/selection/cursor/clipping
+  cases.
+- **34–36:** attach/event coalescing tests, authenticated daemon input tests,
+  and headless signal/statusline observations.
+- **37:** one real-daemon/real-PTY/headless-wgpu acceptance path; it is not
+  replaced by a decoded-message fixture.
 
 ## 10. Gates and bite verification
 
 Every PR runs the standing full gates from `AGENTS.md`, sequentially, plus its
-stage acceptance suite. Stage 2 includes a real hermetic TUI PTY smoke; stage 3
-includes `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` and the real-daemon GPU
-probe.
+stage acceptance suite. Stage 2 included a real hermetic TUI PTY smoke. Stage 3
+adds `cargo test --test vterm_stage3_acceptance`, its CRDT variant,
+`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`, the real-daemon/headless-GPU
+probe, and the ordinary workspace sweep.
 
 New behavioral acceptance must be bite-verified against the immediate
 pre-stage tree with `scripts/bite` where the swapped files compile. Protocol
-v19 tests additionally pin postcard bytes and verify the older-version daemon
-filter; a test that merely fails to decode on old code is not a useful bite.
+v19 tests additionally pin postcard bytes, prove the measured aggregate-bound
+maximum stays below the unchanged transport cap, and verify both
+older-version send filters; a test that merely fails to decode on old code is
+not a useful bite.
 
 ## 11. Explicit deferrals
 
 Not part of these three PRs:
 
 - terminal image protocols (sixel, kitty graphics, iTerm images);
-- OSC 52 host clipboard writes and OSC 8 hyperlink interaction;
+- OSC 8 hyperlink interaction;
 - faint, blink, conceal, and strikethrough additions to shared `Style`;
 - kitty keyboard protocol, key release events, media keys, and IME preedit;
 - cursor-shape/blink rendering and numeric-keypad distinction absent from the
@@ -1264,7 +1734,7 @@ panic, unbounded allocation, or child leak.
 
 ## 12. Resolved decisions
 
-The 2026-07-21 architecture, re-scout, and final framing review resolved every
+The 2026-07-22 architecture, re-scout, and final framing review resolved every
 current question:
 
 1. Fixed terminal editor escape: `C-c`; `C-c C-c` sends literal Ctrl-C.
@@ -1272,7 +1742,8 @@ current question:
 3. Exit: retain the buffer and append the process PID/outcome line from §4.1.
 4. Compatibility: additive v19; v18 grid remains supported, v18 semantic has
    no terminal surface.
-5. GPU wire: complete visible frames with complete-payload suppression.
+5. GPU wire: complete visible frames with complete-payload suppression under
+   one shared 8 MiB aggregate glyph-byte bound; the 16 MiB transport cap stays.
 6. Style: preserve the shared encoding and defer unsupported attributes.
 7. Identity: one process/screen per terminal `BufferId`.
 8. View state: logical-line/cell anchors per
@@ -1293,3 +1764,11 @@ current question:
     origin and otherwise error without mutation.
 14. Host effects: clipboard and BEL use explicit frontend signals; OSC title
     remains sanitized metadata.
+15. Bootstrap: after every semantic snapshot, v19 sends both byte viewport and
+    terminal cell size; the authenticated daemon accepts only the declaration
+    matching the active buffer kind.
+16. Semantic resize: the declaration records passive view geometry, but only
+    the exact durable controller changes the shared PTY/screen size.
+17. GPU layout: fixed cell rectangles own geometry and hit testing; shaped
+    glyph advances never determine subsequent columns, and OSC title remains
+    metadata rather than a host control effect.

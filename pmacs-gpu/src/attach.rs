@@ -23,10 +23,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use pmacs_protocol::{
-    AttachRequest, BufferId, ByteRange, CrdtOp, FrontendCapabilities, FrontendEvent, FrontendId,
-    Hello, InstanceMessage, Key, KeyEvent, Modifiers, PROTOCOL_VERSION, PointerKind,
-    SUPPORTED_PROTOCOL_VERSIONS, TransportError, is_supported_protocol_version, read_message,
-    write_message,
+    AttachRequest, BufferId, ByteRange, CellCoord, CellSize, CrdtOp, FrontendCapabilities,
+    FrontendEvent, FrontendId, Hello, InstanceMessage, Key, KeyEvent, Modifiers, MouseKind,
+    PROTOCOL_VERSION, PointerKind, SUPPORTED_PROTOCOL_VERSIONS, TransportError,
+    is_supported_protocol_version, read_message, write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -141,6 +141,19 @@ fn coalesce_kind(event: &FrontendEvent) -> Option<u8> {
             kind: PointerKind::Drag,
             ..
         } => Some(1),
+        // Vterm Stage 3 — terminal pointer MOVE and DRAG are the
+        // high-frequency terminal gestures and coalesce like their
+        // document twin. Press, release, and wheel stay lossless:
+        // collapsing a wheel run would silently lose scroll distance,
+        // and collapsing a press/release would break selection.
+        FrontendEvent::TerminalPointer {
+            kind: MouseKind::Move,
+            ..
+        } => Some(2),
+        FrontendEvent::TerminalPointer {
+            kind: MouseKind::Drag(_),
+            ..
+        } => Some(3),
         _ => None,
     }
 }
@@ -216,6 +229,24 @@ impl Outbox {
 pub fn connect(
     socket_path: &Path,
     proxy: EventLoopProxy<AppEvent>,
+) -> Result<AttachClient, AttachClientError> {
+    connect_with_sink(socket_path, move |event| {
+        proxy.send_event(AppEvent::Attach(event)).is_ok()
+    })
+}
+
+/// [`connect`], with the decoded-message destination left to the caller.
+///
+/// The winit path forwards to the event loop; the headless probe used by
+/// the Stage 3 acceptance forwards to a channel. Both drive the SAME
+/// handshake, capability gate, reader, writer, and outbox — a probe that
+/// reimplemented any of that would prove nothing about the real client.
+///
+/// `sink` returns `false` when its destination is gone, which stops the
+/// reader thread.
+pub fn connect_with_sink(
+    socket_path: &Path,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
 
@@ -300,17 +331,13 @@ pub fn connect(
             loop {
                 match read_message::<InstanceMessage>(&mut read_stream) {
                     Ok(msg) => {
-                        if proxy
-                            .send_event(AppEvent::Attach(AttachEvent::Message(Box::new(msg))))
-                            .is_err()
-                        {
-                            // Main loop torn down — quietly exit.
+                        if !sink(AttachEvent::Message(Box::new(msg))) {
+                            // Destination torn down — quietly exit.
                             return;
                         }
                     }
                     Err(e) => {
-                        let _ = proxy
-                            .send_event(AppEvent::Attach(AttachEvent::Disconnected(e.to_string())));
+                        sink(AttachEvent::Disconnected(e.to_string()));
                         return;
                     }
                 }
@@ -455,6 +482,44 @@ impl AttachClient {
         })
     }
 
+    /// Send a `FrontendEvent::TerminalResize` (Vterm Stage 3): the
+    /// terminal-cell geometry this frontend has on screen. Callers gate
+    /// on [`Self::server_protocol_version`] `>= 19`.
+    ///
+    /// Cells, never pixels — the frontend divides its own drawable
+    /// rectangle by its own metrics, keeping the no-pixels contract the
+    /// document `Viewport` established.
+    pub fn send_terminal_resize(
+        &self,
+        buffer_id: BufferId,
+        size: CellSize,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::TerminalResize {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            size,
+        })
+    }
+
+    /// Send a `FrontendEvent::TerminalPointer` (Vterm Stage 3): a
+    /// gesture hit-tested locally to a terminal cell. Callers gate on
+    /// [`Self::server_protocol_version`] `>= 19`.
+    pub fn send_terminal_pointer(
+        &self,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: MouseKind,
+        mods: Modifiers,
+    ) -> Result<(), TransportError> {
+        self.send_event(FrontendEvent::TerminalPointer {
+            frontend_id: self.frontend_id,
+            buffer_id,
+            coord,
+            kind,
+            mods,
+        })
+    }
+
     /// Send a `FrontendEvent::MenuPointer` (Q#CM1) — open-menu
     /// navigation hit-tested locally against the popup we drew. `index`
     /// is the row the pointer is over (`None` = off the menu); `invoke`
@@ -518,7 +583,7 @@ impl AttachClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pmacs_protocol::InstanceCapabilities;
+    use pmacs_protocol::{InstanceCapabilities, MouseButton};
 
     fn caps(
         multi_frontend: bool,
@@ -650,6 +715,70 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn fe_terminal_pointer(kind: MouseKind, row: u32, col: u32) -> FrontendEvent {
+        FrontendEvent::TerminalPointer {
+            frontend_id: FrontendId(1),
+            buffer_id: BufferId::from_raw(1),
+            coord: CellCoord::new(row, col),
+            kind,
+            mods: Modifiers::NONE,
+        }
+    }
+
+    /// Acceptance 34: terminal move/drag runs coalesce to the latest
+    /// cell, while press, release, and wheel stay lossless and ordered.
+    #[test]
+    fn terminal_motion_coalesces_but_presses_and_wheels_stay_lossless() {
+        let mut ob = Outbox::new();
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Down(MouseButton::Left),
+            0,
+            0,
+        ));
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Drag(MouseButton::Left),
+            0,
+            1,
+        ));
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Drag(MouseButton::Left),
+            0,
+            2,
+        ));
+        ob.enqueue(fe_terminal_pointer(
+            MouseKind::Drag(MouseButton::Left),
+            0,
+            3,
+        ));
+        ob.enqueue(fe_terminal_pointer(MouseKind::Up(MouseButton::Left), 0, 3));
+        assert_eq!(ob.queue.len(), 3, "the drag run collapsed to one");
+        assert!(matches!(
+            &ob.queue[1],
+            FrontendEvent::TerminalPointer {
+                kind: MouseKind::Drag(MouseButton::Left),
+                coord: CellCoord { row: 0, col: 3 },
+                ..
+            }
+        ));
+
+        // Wheel ticks carry scroll DISTANCE; collapsing a run would
+        // silently lose scrollback rows.
+        let mut wheel = Outbox::new();
+        wheel.enqueue(fe_terminal_pointer(MouseKind::ScrollUp, 1, 1));
+        wheel.enqueue(fe_terminal_pointer(MouseKind::ScrollUp, 1, 1));
+        wheel.enqueue(fe_terminal_pointer(MouseKind::ScrollUp, 1, 1));
+        assert_eq!(wheel.queue.len(), 3, "wheel ticks are lossless");
+
+        // Hover motion coalesces, but not across a different kind.
+        let mut moves = Outbox::new();
+        moves.enqueue(fe_terminal_pointer(MouseKind::Move, 2, 1));
+        moves.enqueue(fe_terminal_pointer(MouseKind::Move, 2, 2));
+        assert_eq!(moves.queue.len(), 1);
+        moves.enqueue(fe_terminal_pointer(MouseKind::ScrollDown, 2, 2));
+        moves.enqueue(fe_terminal_pointer(MouseKind::Move, 2, 3));
+        assert_eq!(moves.queue.len(), 3);
     }
 
     #[test]

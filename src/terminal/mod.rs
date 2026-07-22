@@ -12,24 +12,28 @@ pub mod session;
 pub mod view;
 
 pub use session::{
-    SharedTerminalManager, TerminalError, TerminalManager, TerminalProcessState,
-    TerminalSelectionSpan, TerminalSnapshot, TerminalSpec,
+    SharedTerminalManager, TerminalError, TerminalManager, TerminalSnapshot, TerminalSpec,
 };
 pub use view::{
     LogicalCellAnchor, TerminalController, TerminalSelection, TerminalViewKey, TerminalViewState,
 };
 
-/// Maximum terminal rows accepted at creation or resize.
-pub const MAX_TERMINAL_ROWS: u16 = 512;
-/// Maximum terminal columns accepted at creation or resize.
-pub const MAX_TERMINAL_COLS: u16 = 512;
-/// Maximum visible terminal cells accepted at creation or resize.
-pub const MAX_TERMINAL_VISIBLE_CELLS: usize = 262_144;
-/// Maximum UTF-8 bytes retained in one terminal grapheme cluster.
-pub const MAX_TERMINAL_GRAPHEME_BYTES: usize = 256;
+// Vterm Stage 3: the screen bounds and the process/selection payload
+// types moved to `pmacs-protocol` so the daemon's pre-emission check and
+// a frontend's post-decode check run the SAME policy. Re-exported here
+// so Stage 1/2 callers keep their `crate::terminal::…` paths and no
+// duplicate type appears in the tree.
+pub use pmacs_protocol::terminal::{
+    MAX_TERMINAL_COLS, MAX_TERMINAL_FRAME_GLYPH_BYTES, MAX_TERMINAL_GRAPHEME_BYTES,
+    MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame,
+    TerminalFrameError, TerminalProcessState, TerminalSelectionSpan,
+};
+
 /// Default retained main-screen scrollback rows.
+///
+/// Configuration-time, not a wire bound: history never crosses the
+/// protocol, so this stays core-owned.
 pub const DEFAULT_TERMINAL_SCROLLBACK_ROWS: usize = 10_000;
-/// Maximum retained main-screen history cells.
+/// Maximum retained main-screen history cells. Core-owned for the same
+/// reason as [`DEFAULT_TERMINAL_SCROLLBACK_ROWS`].
 pub const MAX_TERMINAL_HISTORY_CELLS: usize = 4_000_000;
-/// Shared cap for terminal title and process-outcome metadata.
-pub const MAX_TERMINAL_METADATA_BYTES: usize = 1_024;
