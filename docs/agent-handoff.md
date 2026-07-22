@@ -286,12 +286,16 @@ commands, read `docs/active-work.md` immediately after this file.
     removes owned cell snapshots from terminal mouse routing. The framing now
     records the transient v18 semantic-controller boundary and bracketed-paste
     injection deferral.
-  - Second-review final gate: `cargo fmt --check`; strict workspace Clippy;
-    1,744 default + 1,920 CRDT library tests (3 ignored each); Stage 1
-    acceptance 9 default + 10 CRDT; Stage 2 acceptance 4 default + 4 CRDT;
-    statusline acceptance 7 default + 8 CRDT; M4 114 passed (3 ignored,
-    1 filtered); required GPU 109; workspace 2,872 passed across 81 suites
-    (19 ignored, 1 filtered); `git diff --check` clean.
+  - Current-main integration (`3f0252f`) preserves per-frontend terminal
+    dispatch while applying the landed mode-scoped keymap, and exposes the
+    `mode`, `terminal`, and `lsp` statusline providers together.
+  - Post-integration gate: `cargo fmt --check`; strict workspace Clippy;
+    1,753 default + 1,929 CRDT library tests (3 ignored each); mode-system
+    acceptance 1 default + 1 CRDT; Stage 1 acceptance 9 default + 10 CRDT;
+    Stage 2 acceptance 4 default + 4 CRDT; statusline acceptance 7 default +
+    8 CRDT; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
+    workspace 2,882 passed across 82 suites (19 ignored, 1 filtered);
+    `git diff --check` clean.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
   and must be repeated before implementation. No PR or implementation is

@@ -55,7 +55,7 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Vterm Stage 2 implementation lane
 
 - Portable branch: `githubsucks/vterm-tui`
-- Feature head after review round 2: `b9a7e40`
+- Integrated feature head: `3f0252f` (review-fix head `b9a7e40`)
 - Base: originally canonical `main` @ `f1a2f75`; current canonical `main`
   @ `d5d9b9c` (mode system wiring #129 and handoff #131) is integrated before
   merge.
@@ -78,15 +78,18 @@ If it does not, stop and repair the remote/fetch configuration.
   v18 semantic-controller boundary and bracketed-paste injection deferral.
 - Implementation commits: `39e07cb`, `7c39535`, `0a846d9`, `0dacac7`,
   `dc92257`, merge `0ddff24`, integration hardening `da8f6ae`, first-review
-  fixes `8702791`, and second-review fixes `b9a7e40`.
-- Second-review final verification: `cargo fmt --check`; strict workspace
-  Clippy; 1,744 default + 1,920 CRDT library tests (3 ignored each);
-  Stage 1 acceptance 9 default + 10 CRDT; Stage 2 acceptance 4 default +
-  4 CRDT; statusline acceptance 7 default + 8 CRDT; M4 114 passed
-  (3 ignored, 1 filtered); required GPU 109; workspace 2,872 passed across
-  81 suites (19 ignored, 1 filtered); `git diff --check` clean.
-- Next: integrate canonical `main`, rerun gates, then merge PR #130 as
-  authorized.
+  fixes `8702791`, second-review fixes `b9a7e40`, and current-main integration
+  `3f0252f`.
+- Post-integration verification: `cargo fmt --check`; strict workspace
+  Clippy; 1,753 default + 1,929 CRDT library tests (3 ignored each);
+  mode-system acceptance 1 default + 1 CRDT; Stage 1 acceptance 9 default +
+  10 CRDT; Stage 2 acceptance 4 default + 4 CRDT; statusline acceptance
+  7 default + 8 CRDT; M4 114 passed (3 ignored, 1 filtered); required GPU
+  109; workspace 2,882 passed across 82 suites (19 ignored, 1 filtered);
+  `git diff --check` clean. The first parallel M4 attempt timed out after
+  partial progress; a serial isolation pass and the immediate exact parallel
+  rerun both passed, and the workspace sweep also passed.
+- Next: push the integrated head and merge PR #130 as authorized.
 
 Recovery worktree on a machine that does not already own the branch:
 
