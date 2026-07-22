@@ -771,6 +771,98 @@ fn m4_3_theming_via_lua_color_scheme() {
     );
 }
 
+/// Locals-query acceptance: the shipped JavaScript grammar must distinguish an
+/// unresolved builtin from a lexically-shadowed parameter, then replace the
+/// classification with the fresh parse bundle after an edit removes the
+/// shadow. The theme maps only `variable.builtin`, making the classification
+/// observable in rendered cells rather than through an internal scope map.
+#[test]
+fn m4_locals_query_shadowing_and_edit_freshness() {
+    use pmacs::cell::Color;
+
+    const COLS: usize = 40;
+    const BUILTIN: Color = Color::Indexed(6);
+    let initial = "console;\nfunction f(console) {\n  console;\n}\n";
+    let edited = "console;\nfunction f(logger) {\n  console;\n}\n";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("locals.js");
+    std::fs::write(&path, initial.as_bytes()).expect("write JavaScript fixture");
+
+    let mut state = open_and_wait_for_parse(path);
+    state
+        .lua_host
+        .lua()
+        .load(
+            r#"
+            pmacs.theme.set {
+                ["variable.builtin"] = { fg = 6, bold = true },
+            }
+        "#,
+        )
+        .exec()
+        .expect("apply builtin-only theme");
+
+    let before = render_active_window_to_grid(&mut state, 5, COLS as u32);
+    for (col, cell) in before.iter().take(7).enumerate() {
+        assert_eq!(
+            cell.style.fg, BUILTIN,
+            "unshadowed row-0 `console` byte {col} is builtin"
+        );
+        assert!(
+            cell.style.bold,
+            "builtin-only theme reaches row-0 `console` byte {col}"
+        );
+    }
+    for col in 11..18 {
+        assert_ne!(
+            before[COLS + col].style.fg,
+            BUILTIN,
+            "parameter `console` byte {col} is lexically local"
+        );
+    }
+    for col in 2..9 {
+        assert_ne!(
+            before[2 * COLS + col].style.fg,
+            BUILTIN,
+            "reference to shadowing parameter at row 2, col {col} is not builtin"
+        );
+    }
+
+    state
+        .lua_host
+        .lua()
+        .load(
+            r"
+            local buf = pmacs.window.buffer()
+            buf:replace(20, 27, 'logger')
+            pmacs.parse._dispatch(buf, 'javascript')
+        ",
+        )
+        .exec()
+        .expect("rename shadowing parameter");
+    pump_async(&mut state, |s| {
+        current_tree_text(s).as_deref() == Some(edited)
+    });
+    assert_eq!(
+        current_tree_text(&state).as_deref(),
+        Some(edited),
+        "the edited JavaScript parse settled"
+    );
+
+    let after = render_active_window_to_grid(&mut state, 5, COLS as u32);
+    for col in 2..9 {
+        assert_eq!(
+            after[2 * COLS + col].style.fg,
+            BUILTIN,
+            "fresh local facts restore builtin styling at row 2, col {col}"
+        );
+        assert!(
+            after[2 * COLS + col].style.bold,
+            "fresh builtin capture reaches the rendered cell at row 2, col {col}"
+        );
+    }
+}
+
 /// Sanity: the bundled `default_dark` theme produces a non-empty
 /// capture map and resolves common captures to non-default styles.
 /// Catches accidental regressions to a literally empty theme that

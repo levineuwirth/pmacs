@@ -374,7 +374,13 @@ impl SyntaxHighlightView {
             let Some(query) = layer.highlight_query.as_ref() else {
                 continue;
             };
-            let spans = compute_highlight_spans_for(query, &layer.tree, source, None);
+            let spans = compute_highlight_spans_for(
+                query,
+                &layer.tree,
+                source,
+                layer.local_facts.as_deref(),
+                None,
+            );
             if spans.is_empty() {
                 continue;
             }

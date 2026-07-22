@@ -1,9 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after modeline language detection (#132) and
-Vterm Stage 2 (#130) landed on `main`, atop mode system wiring (#129/#131),
-config registry (#127), Vterm Stage 1 terminal core (#126), and completed
-Themes Arc 4 (#120/#124/#125). Vterm Stage 3 is not implemented.**
+**Last updated: 2026-07-22, with locals-query processing (#134) implemented
+and awaiting review, after modeline language
+detection (#132), Vterm Stage 2 (#130), and mode system wiring (#129/#131)
+landed on `main`. Vterm Stage 3 is not implemented.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -17,7 +17,8 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-22)
 
-- `main` @ `1dd47fc` (modeline detection #132), protocol **v18**
+- `main` @ `8bd8298` (landed-state handoff #133; latest runtime merge
+  `1dd47fc`, modeline detection #132), protocol **v18**
   (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
   `StatuslineSegments`).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
@@ -117,12 +118,16 @@ commands, read `docs/active-work.md` immediately after this file.
     cmake (`cmake-language-server`, config via
     `init_options.buildDirectory="build"` — it does NOT pull
     `workspace/configuration`). Make has no server.
-  - **Substrate**: `LanguageEntry.highlights_query` is now
-    `&[&'static str]` — fragments joined base-first, for grammars whose
-    bundled highlights are a `; inherits:` delta (cuda over c/cpp; ts
-    over js/jsx). `compute_highlight_spans` FAILS CLOSED on the
-    `#is?`/`#is-not? local` property predicate (no locals processing) —
-    drops those captures so shadowed builtins aren't mis-styled.
+  - **Substrate**: `LanguageEntry.highlights_query` and `.locals_query` are
+    `&[&'static str]` fragments joined base-first (cuda over c/cpp; ts over
+    js/jsx). On `locals-query-processing` @ `47ffe5d`, settle compiles the
+    grammar's `LOCALS_QUERY`, resolves Tree-sitter's scope/definition/value/
+    reference conventions into sorted `LocalFacts`, and stores them beside
+    each layer's tree/query. Work runs once per fresh bundle and only when the
+    highlight query asks about `local`; viewport rendering remains bounded.
+    Both TUI and semantic/GPU producers evaluate `#is?`/`#is-not? local`
+    through the shared capture walk. Non-shadowed JS/TS builtins are restored;
+    shadowed definitions/references keep ordinary variable styling.
 - **Multi-language injections (#122) LANDED** — the direct continuation
   of the #114–#118 highlight arc; four review rounds, framing
   `docs/multi-language-injections-framing.md` (Q#IJ1–IJ11). A buffer can
@@ -142,7 +147,8 @@ commands, read `docs/active-work.md` immediately after this file.
   worker never touches the `Rc` registry or Lua);
   `ParseTreeBundle.injection_capped` (the 4096-layer backstop, surfaced
   once/buffer via `pmacs.error` at settle);
-  `compute_highlight_spans_for(query, tree, source, range)` (per-layer);
+  `compute_highlight_spans_for(query, tree, source, local_facts, range)`
+  (per-layer);
   the wire `flatten_layer_spans` event-sweep → DISJOINT effective spans
   (deeper / later-sibling / narrower wins, keyed by `(layer_index,
   capture_order)`); GPU `spans_from_segments` + `source_color_at` fold.
@@ -335,6 +341,10 @@ commands, read `docs/active-work.md` immediately after this file.
     editing/indent/comment items that were config-blocked.
   - **Mode system wiring COMPLETE (#129)** — major-mode keymaps,
     introspection, lifecycle initialization, and statusline display shipped.
+  - **Locals-query processing IN REVIEW — #134** — grammar locals metadata,
+    lexical resolution, settled per-layer facts, and shared TUI/GPU
+    local-predicate filtering are implemented on `locals-query-processing`
+    @ `47ffe5d`.
   - Remaining ranked arcs: 6 folding, 7 DAP, 8 GPU splits, plus the
     `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
