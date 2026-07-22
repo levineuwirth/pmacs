@@ -149,14 +149,16 @@ Emacs:
 Vim/Vi:
 
 - accept `vim:`, `vi:`, and `Vim:` at line start or preceded by ASCII space or
-  tab; `Vim:` requires the `set` form, matching Vim;
+  tab; uppercase `Vim:` requires literal `set` rather than abbreviated `se`,
+  matching Vim;
 - accept only exact `ft=NAME` and `filetype=NAME` assignments; `ft:NAME` and
   `filetype:NAME` are not modeline assignment forms and are rejected;
 - in the direct form, split option tokens on ASCII whitespace and `:`, so the
   common `vim:ft=python:sw=4:` form yields `ft=python`;
-- in the `set` / `se` form, end the option section at the first `:` and split
-  only the preceding text on ASCII whitespace; `vim: set sw=4: ft=python`
-  therefore contains no live filetype assignment;
+- in the `set` / `se` form (`se` is lowercase-marker-only), end the option
+  section at the first `:` and split only the preceding text on ASCII
+  whitespace; `vim: set sw=4: ft=python` therefore contains no live filetype
+  assignment;
 - ignore all other live option tokens rather than interpreting them;
 - require that terminating colon for the `set` / `se` form, so a comment suffix
   is never consumed as an option value;
