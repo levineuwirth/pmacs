@@ -159,6 +159,8 @@ pub struct Buffer {
     id: BufferId,
     rope: Rope,
     name: String,
+    /// The buffer's single active major mode, if one has been selected.
+    major_mode: Option<String>,
     is_modified: bool,
     /// When set, every content mutation is rejected before touching the
     /// rope, CRDT, history, revision, modified bit, marks, or views.
@@ -245,6 +247,7 @@ impl Buffer {
             id,
             rope,
             name: name.into(),
+            major_mode: None,
             is_modified: false,
             read_only: false,
             revision: 0,
@@ -449,6 +452,20 @@ impl Buffer {
     /// Set the buffer's name. Used by save-as and rename operations.
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
+    }
+
+    /// This buffer's active major mode, if any.
+    ///
+    /// The returned name borrows the buffer-owned mode string so key
+    /// dispatch can resolve mode bindings without cloning on its hot path.
+    #[must_use]
+    pub fn major_mode(&self) -> Option<&str> {
+        self.major_mode.as_deref()
+    }
+
+    /// Replace this buffer's active major mode, or clear it with `None`.
+    pub fn set_major_mode(&mut self, major_mode: Option<String>) {
+        self.major_mode = major_mode;
     }
 
     /// Whether the buffer has been modified since the last save / load.
@@ -1867,6 +1884,18 @@ mod tests {
             buf.snapshot_rope().slice(0, buf.len(), &mut out);
         }
         out
+    }
+
+    #[test]
+    fn major_mode_is_buffer_owned_and_replaceable() {
+        let mut buf = Buffer::new(BufferId::next(), "*mode-test*");
+        assert_eq!(buf.major_mode(), None);
+
+        buf.set_major_mode(Some("rust".to_owned()));
+        assert_eq!(buf.major_mode(), Some("rust"));
+
+        buf.set_major_mode(None);
+        assert_eq!(buf.major_mode(), None);
     }
 
     dual_mode_test!(

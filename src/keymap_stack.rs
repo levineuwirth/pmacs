@@ -6,9 +6,8 @@
 //!
 //! 1. **Buffer-local**: bindings that apply only when a specific
 //!    buffer is the active one. Most-specific scope.
-//! 2. **Mode**: bindings that apply when a mode is active. Modes
-//!    aren't a real concept until T M2.5+ but the stack accepts them
-//!    today so the resolver doesn't grow a dimension when we add them.
+//! 2. **Mode**: bindings that apply when the active buffer's major mode
+//!    matches the mode keymap.
 //! 3. **Global**: the universal fallback. Last-resort scope.
 //!
 //! [`KeymapStack::resolve`] walks them in order and returns the
@@ -38,7 +37,7 @@ use crate::keymap_tree::{Binding, Keymap, KeymapError, Resolution};
 pub enum Scope {
     /// Buffer-local --- specific to one [`BufferId`].
     Buffer(BufferId),
-    /// Mode-active --- one of the active mode keymaps.
+    /// Mode-active --- the active major mode's keymap.
     Mode(String),
     /// The global fallback.
     Global,
@@ -91,10 +90,8 @@ pub enum StackResolution {
 pub struct KeymapStack {
     /// The global keymap (always consulted last).
     pub global: Keymap,
-    /// Per-mode keymaps. Mode activation order is preserved by `Vec`;
-    /// the resolver consults them after buffer-local but before
-    /// global. The top of the vector is the most recently activated
-    /// mode and wins ties.
+    /// Per-mode keymaps. Registration order is preserved by `Vec`; resolution
+    /// follows the borrowed mode names supplied to [`Self::resolve`].
     pub modes: Vec<(String, Keymap)>,
     /// Per-buffer keymaps. Buffer-local always beats mode and global.
     pub buffers: HashMap<BufferId, Keymap>,
@@ -227,9 +224,8 @@ impl KeymapStack {
     /// Resolve `sequence` in scope priority order.
     ///
     /// `active_buffer` is the [`BufferId`] currently in focus (if any).
-    /// `active_modes` lists the active mode names in
-    /// most-recent-first order; the first match in that order wins
-    /// among modes.
+    /// `active_modes` borrows active mode names in priority order; the first
+    /// match in that order wins among modes.
     ///
     /// Resolution semantics: the resolver returns the *most-specific*
     /// complete binding it finds. If no scope has a complete match
@@ -240,7 +236,7 @@ impl KeymapStack {
         &self,
         sequence: &[Chord],
         active_buffer: Option<BufferId>,
-        active_modes: &[String],
+        active_modes: &[&str],
     ) -> StackResolution {
         let mut any_pending = false;
 
@@ -262,12 +258,12 @@ impl KeymapStack {
 
         // 2) Modes --- ordered by `active_modes`.
         for mode_name in active_modes {
-            if let Some((_, map)) = self.modes.iter().find(|(n, _)| n == mode_name) {
+            if let Some((_, map)) = self.modes.iter().find(|(n, _)| n == *mode_name) {
                 match map.lookup(sequence) {
                     Resolution::Bound(b) => {
                         return StackResolution::Bound(ResolvedBinding {
                             binding: b,
-                            scope: Scope::Mode(mode_name.clone()),
+                            scope: Scope::Mode((*mode_name).to_owned()),
                         });
                     }
                     Resolution::Pending => any_pending = true,
@@ -378,7 +374,7 @@ impl KeyDispatcher {
         chord: Chord,
         stack: &KeymapStack,
         active_buffer: Option<BufferId>,
-        active_modes: &[String],
+        active_modes: &[&str],
     ) -> Action {
         self.pending.push(chord);
         match stack.resolve(&self.pending, active_buffer, active_modes) {
@@ -474,12 +470,12 @@ mod tests {
         s.bind_buffer(id, &seq("C-s"), "buffer.save", src(3))
             .unwrap();
         // Buffer wins.
-        match s.resolve(&seq("C-s"), Some(id), &["normal".into()]) {
+        match s.resolve(&seq("C-s"), Some(id), &["normal"]) {
             StackResolution::Bound(rb) => assert_eq!(rb.binding.command, "buffer.save"),
             other => panic!("got {other:?}"),
         }
         // No buffer: mode wins.
-        match s.resolve(&seq("C-s"), None, &["normal".into()]) {
+        match s.resolve(&seq("C-s"), None, &["normal"]) {
             StackResolution::Bound(rb) => {
                 assert_eq!(rb.binding.command, "mode.save");
                 assert_eq!(rb.scope, Scope::Mode("normal".into()));

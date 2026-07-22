@@ -124,8 +124,9 @@ fn a01_04_registry_contract_limits_epochs_and_results() {
     assert!(baseline_mode.ends_with(" L1:C1 All "));
 
     let initial = state.statusline_registry.borrow().providers();
-    assert_eq!(initial.len(), 1, "builtin lsp provider is discoverable");
-    assert_eq!(initial[0].name, "lsp");
+    assert_eq!(initial.len(), 2, "builtin providers are discoverable");
+    assert!(initial.iter().any(|provider| provider.name == "mode"));
+    assert!(initial.iter().any(|provider| provider.name == "lsp"));
     let before_epochs = {
         let registry = state.statusline_registry.borrow();
         (registry.layout_epoch(), registry.face_set_epoch())
