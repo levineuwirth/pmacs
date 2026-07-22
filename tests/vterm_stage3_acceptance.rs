@@ -767,6 +767,278 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
     );
 }
 
+/// Review round 1, finding 1: a frontend that enters terminal mode must
+/// still tell its peers it left the document.
+///
+/// **This is a regression guard, not a bite-verified fix.** The review
+/// predicted that skipping the presence sweep in terminal mode freezes
+/// `last_broadcast` at the abandoned document position. It does not, and
+/// this test passes against the pre-fix tree: the buffer-follow clears
+/// the terminal declaration when it ships the snapshot, so
+/// `terminal_active` is false on the tick a window first shows a
+/// terminal, and the declaration cannot arrive until a later tick — one
+/// truthful sweep always lands first. The skip was load-bearing on that
+/// ordering and bought nothing, so it is gone; this test pins the
+/// resulting invariant against a future reordering that would make the
+/// predicted freeze real.
+///
+/// Real daemon, real wire, two real frontends: presence delivery is a
+/// property of the dispatcher loop, not of any function it calls.
+#[cfg(feature = "crdt")]
+#[test]
+fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
+    use pmacs::protocol::{
+        AttachRequest, FrontendCapabilities, Hello, Key, KeyEvent, PROTOCOL_VERSION, read_message,
+        write_message,
+    };
+    use std::os::unix::net::UnixStream;
+
+    fn attach(daemon: &common::daemon::TestDaemon, semantic: bool) -> (Hello, UnixStream) {
+        let mut stream = daemon.connect();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let hello: Hello = read_message(&mut stream).expect("read Hello");
+        let req = AttachRequest {
+            protocol_version: hello.protocol_version,
+            frontend_capabilities: FrontendCapabilities {
+                synchronized_output: false,
+                unicode_smp: true,
+                true_color: true,
+                mouse: false,
+                bracketed_paste: false,
+                terminal_kind: Some("acceptance".into()),
+                multi_frontend: true,
+                crdt_replica: true,
+                semantic_render: semantic,
+            },
+            initial_size: CellSize::new(24, 80),
+        };
+        write_message(&mut stream, &req).expect("write AttachRequest");
+        (hello, stream)
+    }
+
+    /// Pump one stream until `want` returns a value, or time out.
+    fn pump<T>(
+        stream: &mut UnixStream,
+        what: &str,
+        mut want: impl FnMut(&InstanceMessage) -> Option<T>,
+    ) -> T {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            match read_message::<InstanceMessage>(stream) {
+                Ok(msg) => {
+                    if let Some(found) = want(&msg) {
+                        return found;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    assert_eq!(PROTOCOL_VERSION, 19);
+    let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
+        &[
+            ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
+            ("PMACS_INSTANCE_MULTI_FRONTEND", "1"),
+        ],
+        PROBE_INIT_LUA,
+    );
+
+    // B attaches FIRST. The presence sweep is diff-keyed, so A's very
+    // first snapshot is its only guaranteed broadcast — if B were not
+    // yet a registered recipient, that broadcast would reach nobody and
+    // A's presence would sit unchanged (and unsent) forever after.
+    let (_hello_b, mut b) = attach(&daemon, false);
+    // A is the semantic frontend that will open a terminal; B is the
+    // peer whose document view would keep painting A's stale caret.
+    let (hello_a, mut a) = attach(&daemon, true);
+    let a_id = hello_a.assigned_frontend_id;
+
+    // A declares a byte viewport so it is a live semantic session.
+    let document = pump(&mut a, "A's first BufferSnapshot", |msg| match msg {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } => Some(*buffer_id),
+        _ => None,
+    });
+    write_message(
+        &mut a,
+        &pmacs::protocol::FrontendEvent::Viewport {
+            frontend_id: a_id,
+            buffer_id: document,
+            visible: pmacs::protocol::ByteRange { start: 0, end: 0 },
+            generation: 0,
+        },
+    )
+    .expect("A declares a viewport");
+
+    // B sees A in the document. Without this the later assertion could
+    // pass vacuously against a peer that never had presence at all.
+    let seen_in_document = pump(&mut b, "A's presence in the document", |msg| match msg {
+        InstanceMessage::PresenceUpdate {
+            frontend_id,
+            buffer_id,
+            ..
+        } if *frontend_id == a_id => Some(*buffer_id),
+        _ => None,
+    });
+    assert_eq!(seen_in_document, document);
+
+    // A opens a terminal through the bound chord and declares its cells.
+    write_message(
+        &mut a,
+        &pmacs::protocol::FrontendEvent::Key(KeyEvent {
+            frontend_id: a_id,
+            key: Key::Char('t'),
+            mods: Modifiers::CTRL | Modifiers::ALT,
+            timestamp_ns: 0,
+        }),
+    )
+    .expect("A opens a terminal");
+    let terminal = pump(&mut a, "A's terminal BufferSnapshot", |msg| match msg {
+        InstanceMessage::BufferSnapshot { buffer_id, .. } if *buffer_id != document => {
+            Some(*buffer_id)
+        }
+        _ => None,
+    });
+    write_message(
+        &mut a,
+        &pmacs::protocol::FrontendEvent::TerminalResize {
+            frontend_id: a_id,
+            buffer_id: terminal,
+            size: CellSize::new(12, 40),
+        },
+    )
+    .expect("A declares terminal cells");
+    // A really is in terminal mode once a frame arrives.
+    let framed = pump(&mut a, "A's first TerminalFrame", |msg| match msg {
+        InstanceMessage::TerminalFrame(frame) => Some(frame.buffer_id),
+        _ => None,
+    });
+    assert_eq!(framed, terminal);
+
+    // The finding: B must learn that A left the document.
+    let seen_after = pump(
+        &mut b,
+        "A's presence leaving the document",
+        |msg| match msg {
+            InstanceMessage::PresenceUpdate {
+                frontend_id,
+                buffer_id,
+                ..
+            } if *frontend_id == a_id && *buffer_id != document => Some(*buffer_id),
+            _ => None,
+        },
+    );
+    assert_eq!(
+        seen_after, terminal,
+        "A's presence must move into the terminal identity buffer, not freeze \
+         at the document position it abandoned"
+    );
+}
+
+/// Review round 1, finding 2: hover must not claim durable control.
+///
+/// A semantic frontend reports motion at pixel rate, so if bare `Move`
+/// claimed the controller, sweeping the mouse across a PASSIVE split's
+/// terminal would take it — and the next layout sync would resize the
+/// shared PTY to that background view's geometry. Every deliberate
+/// gesture still claims; only motion does not.
+#[test]
+fn hover_does_not_steal_terminal_control_from_the_active_frontend() {
+    let mut state = EditorState::new();
+    let owner = FrontendId(71);
+    let bystander = FrontendId(72);
+    let terminal_buffer = open_terminal(&mut state, "sleep 30", 6, 20);
+    tick_until(&mut state, Duration::from_secs(5), |state| {
+        state
+            .terminal_manager
+            .borrow()
+            .snapshot(terminal_buffer)
+            .is_some()
+    });
+    let owner_window = attach_view(&state, owner, terminal_buffer);
+    let bystander_window = attach_view(&state, bystander, terminal_buffer);
+
+    let owner_size = CellSize::new(6, 20);
+    let bystander_size = CellSize::new(4, 12);
+    let owner_key = TerminalViewKey::new(owner, owner_window, terminal_buffer);
+    let bystander_key = TerminalViewKey::new(bystander, bystander_window, terminal_buffer);
+    {
+        let mut manager = state.terminal_manager.borrow_mut();
+        assert!(manager.record_view_size(owner_key, owner_size));
+        assert!(manager.record_view_size(bystander_key, bystander_size));
+    }
+
+    // The owner takes control with a real press.
+    assert!(state.dispatch_semantic_terminal_pointer(
+        owner,
+        terminal_buffer,
+        CellCoord::new(0, 0),
+        MouseKind::Down(MouseButton::Left),
+        Modifiers::NONE,
+    ));
+    assert_eq!(
+        state.terminal_manager.borrow().controller(terminal_buffer),
+        Some(pmacs::terminal::TerminalController::from_view(owner_key)),
+        "a press claims control"
+    );
+
+    // The bystander merely hovers, repeatedly. Control must not move.
+    for col in 0..4 {
+        assert!(state.dispatch_semantic_terminal_pointer(
+            bystander,
+            terminal_buffer,
+            CellCoord::new(0, col),
+            MouseKind::Move,
+            Modifiers::NONE,
+        ));
+    }
+    assert_eq!(
+        state.terminal_manager.borrow().controller(terminal_buffer),
+        Some(pmacs::terminal::TerminalController::from_view(owner_key)),
+        "hovering a passive view must not take durable control"
+    );
+
+    // And the shared PTY keeps the controller's geometry: a stolen
+    // controller would resize it to the bystander's smaller view.
+    assert!(!state.sync_semantic_terminal_layout(bystander, terminal_buffer, bystander_size));
+    assert_eq!(
+        state
+            .terminal_manager
+            .borrow()
+            .snapshot(terminal_buffer)
+            .expect("snapshot")
+            .size,
+        owner_size,
+        "a hovered-over passive view must not resize the shared screen"
+    );
+
+    // A deliberate gesture from the bystander still claims, so the
+    // hover exemption is narrow rather than a dead controller path.
+    assert!(state.dispatch_semantic_terminal_pointer(
+        bystander,
+        terminal_buffer,
+        CellCoord::new(0, 1),
+        MouseKind::Down(MouseButton::Left),
+        Modifiers::NONE,
+    ));
+    assert_eq!(
+        state.terminal_manager.borrow().controller(terminal_buffer),
+        Some(pmacs::terminal::TerminalController::from_view(
+            bystander_key
+        )),
+        "a press still claims control"
+    );
+
+    state
+        .terminal_manager
+        .borrow_mut()
+        .terminate(terminal_buffer, &mut state.process_supervisor.borrow_mut())
+        .expect("terminate child");
+}
+
 /// Acceptance 30 (v18 half) and 28: a peer that negotiated v18 receives
 /// no terminal message at all and keeps the ordinary document path over
 /// the empty identity buffer.

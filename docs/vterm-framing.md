@@ -381,6 +381,54 @@ required GPU 127; one-invocation workspace sweep 2,919 passed across 83 suites
 required-GPU suite occurred once mid-session and did not reproduce across eight
 subsequent runs including the full sweep; its identity was not captured.
 
+### 0.10 Stage 3 review round 1
+
+PR #135's first review found no correctness blocker, confirmed the required-GPU
+suite clean across four runs (twelve total with the author's), and raised two
+design questions plus three minor notes. All five are addressed.
+
+- **Presence while in terminal mode (finding 1) — fix kept, prediction not
+  reproduced.** The review predicted that skipping the presence sweep freezes
+  `last_broadcast` at the abandoned document position, leaving peers painting a
+  stale caret. It does not: the buffer-follow clears the terminal declaration
+  when it ships the snapshot, so `terminal_active` is false on the tick a window
+  first shows a terminal, and the declaration cannot arrive until a later tick
+  (the frontend learns the buffer id FROM that snapshot). One truthful sweep
+  always lands first. A real-daemon two-frontend test written to catch the
+  freeze passes against the pre-fix tree — the bite is VACUOUS, and it is
+  labelled a regression guard rather than fix evidence. The skip is removed
+  anyway: it was load-bearing on tick ordering and bought nothing, and its
+  removal makes "presence follows the frontend" structural.
+- **Hover claimed durable control (finding 2) — real, fixed, bite-verified.**
+  `apply_terminal_gesture` claimed the controller before dispatching, including
+  for `Move`, which does nothing. A semantic frontend reports motion at pixel
+  rate, so sweeping the mouse across a PASSIVE split's terminal took durable
+  control and the next layout sync resized the shared PTY to that background
+  view's geometry — exactly the theft the controller rule exists to prevent.
+  Bare motion no longer claims; every deliberate gesture still does.
+  `scripts/bite HEAD src/editor.rs` on
+  `hover_does_not_steal_terminal_control_from_the_active_frontend` is a clean
+  behavioral bite (assertion failure, not a compile error).
+- **Terminal motion is deduplicated by cell (finding 3).** Sub-cell motion
+  resolved to the same coordinate and still crossed the wire, where each event
+  is a daemon-side gesture. `State::terminal_motion_is_new` now gates it, and
+  press/release re-arm the memo so the first drag after a press still reports.
+  Its unit test cannot bite — the seam did not exist pre-fix — and says so.
+- **Declarations record only once sent (finding 4).**
+  `terminal_declaration_if_changed` is now a pure query and
+  `note_terminal_declaration_sent` records, so a failed write is retried instead
+  of suppressed as already-declared. The existing `a35` test caught the contract
+  change and now pins both halves.
+- **Unchanged frames are no longer re-validated (finding 5).** The complete
+  payload comparison runs before `validate`; only validated frames are ever
+  stored, so a frame equal to the baseline has already passed. The chrome tail
+  is factored into `terminal_chrome` so both exits emit it identically.
+
+Post-review gates: `cargo fmt --check`; strict workspace Clippy; 1,757 default +
+1,933 CRDT library tests; Stage 1 acceptance 9/10, Stage 2 4/4, Stage 3 5/7,
+statusline 7/8 (default/CRDT); M4 120; required GPU 128; workspace sweep 2,921
+across 83 suites (19 ignored); `git diff --check` clean.
+
 ## 1. Problem and ownership boundary
 
 Pmacs can supervise a PTY and can parse enough ANSI to turn command output into

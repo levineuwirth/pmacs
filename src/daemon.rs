@@ -1087,10 +1087,9 @@ fn dispatcher_loop(
             };
 
             // Vterm Stage 3 — a semantic frontend showing a terminal has
-            // no document cursor: the identity buffer is empty, so both
-            // presence and `CursorByte` would describe byte 0 of a
-            // buffer with no text, painting a phantom peer caret over
-            // the cell grid.
+            // no document cursor: the identity buffer is empty, so a
+            // `CursorByte` would describe byte 0 of a buffer with no
+            // text and scroll the frontend's document view against it.
             let terminal_mode = semantic_states
                 .get(fid)
                 .is_some_and(crate::semantic_render::SemanticRenderState::in_terminal_mode);
@@ -1098,12 +1097,33 @@ fn dispatcher_loop(
             // T M10.6 per-frontend presence sweep. The snapshot is
             // computed from this frontend's view; the sweep then
             // produces broadcasts to OTHER multi-frontend recipients.
-            let broadcasts = if terminal_mode {
-                Vec::new()
-            } else {
-                let snapshot = build_presence_snapshot(editor, *fid);
-                session_registry.sweep(&[(*fid, snapshot)])
-            };
+            //
+            // Terminal mode does NOT skip this (PR #135 review finding 1).
+            // `sweep` is diff-keyed on `last_broadcast`, so a skip can
+            // only ever FREEZE a frontend's presence — it can never
+            // retract it. Sweeping truthfully moves the presence into
+            // the terminal identity buffer, which is what takes this
+            // frontend's caret off every peer showing the document.
+            //
+            // Honest note on why the skip was not a live bug: the
+            // buffer-follow above clears the terminal declaration when
+            // it ships the snapshot, so `render_frame` reports
+            // `terminal_active == false` on the tick a window first
+            // shows a terminal, and the declaration cannot arrive until
+            // a later tick (the frontend learns the buffer id FROM that
+            // snapshot). Every entry into terminal mode is therefore
+            // already preceded by one truthful sweep. The skip was
+            // load-bearing on that ordering and bought nothing; removing
+            // it makes "presence follows the frontend" structural
+            // instead of a property of tick sequencing.
+            //
+            // The framing's "suppress presence for the terminal identity
+            // buffer" is a RENDER rule — no peer overlay is painted
+            // inside a terminal — which the GPU honors by not preparing
+            // the decoration batch in terminal mode. It was never a
+            // reason to stop telling peers where this frontend went.
+            let snapshot = build_presence_snapshot(editor, *fid);
+            let broadcasts = session_registry.sweep(&[(*fid, snapshot)]);
 
             // T M11.6 — DispatchIdle signal. `crdt_replica` frontends
             // gate their optimistic-apply path on this; we ship it

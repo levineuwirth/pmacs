@@ -683,9 +683,11 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                             0,
                         );
                     }
-                    if let Some((buffer_id, size)) = state.terminal_declaration_if_changed() {
+                    if let Some((buffer_id, size)) = state.terminal_declaration_if_changed()
+                        && client.send_terminal_resize(buffer_id, size).is_ok()
+                    {
                         facts.declarations += 1;
-                        let _ = client.send_terminal_resize(buffer_id, size);
+                        state.note_terminal_declaration_sent(buffer_id, size);
                     }
                 }
                 if state.terminal.is_some() {
@@ -706,11 +708,13 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     if !sent_resize && facts.frames >= 2 {
                         sent_resize = true;
                         state.resize(700, 500);
-                        if let Some((buffer_id, size)) = state.terminal_declaration_if_changed() {
+                        if let Some((buffer_id, size)) = state.terminal_declaration_if_changed()
+                            && client.send_terminal_resize(buffer_id, size).is_ok()
+                        {
                             facts.declarations += 1;
                             facts.resized_cols = size.cols;
                             facts.resized_rows = size.rows;
-                            let _ = client.send_terminal_resize(buffer_id, size);
+                            state.note_terminal_declaration_sent(buffer_id, size);
                         }
                     }
                     if facts.resized_cols > 0 && facts.last_frame_cols == facts.resized_cols {
@@ -1217,6 +1221,12 @@ struct State {
     /// Whether an invalid terminal frame has already been reported.
     /// Bounds the log while a bad producer keeps sending.
     terminal_frame_error_latched: bool,
+    /// Last terminal cell a motion or drag was reported at. Pixel-rate
+    /// motion inside ONE cell is not new information for the daemon —
+    /// the document drag path dedupes by hit byte for the same reason.
+    /// Cleared on press, release, and every exit from terminal mode, so
+    /// a gesture that returns to the same cell still reports.
+    last_terminal_pointer_cell: Option<CellCoord>,
     /// One shaped buffer per planned text run. Rebuilt only when the
     /// plan changes, never per frame.
     terminal_text_buffers: Vec<Buffer>,
@@ -1496,8 +1506,9 @@ impl App {
         let Some((buffer_id, size)) = state.terminal_declaration_if_changed() else {
             return;
         };
-        if let Err(e) = client.send_terminal_resize(buffer_id, size) {
-            eprintln!("pmacs-gpu: send_terminal_resize failed: {e}");
+        match client.send_terminal_resize(buffer_id, size) {
+            Ok(()) => state.note_terminal_declaration_sent(buffer_id, size),
+            Err(e) => eprintln!("pmacs-gpu: send_terminal_resize failed: {e}"),
         }
     }
 
@@ -1818,13 +1829,22 @@ impl ApplicationHandler<AppEvent> for App {
                     if let Some((buffer_id, coord)) =
                         self.terminal_pointer_hit(position.x, position.y)
                     {
-                        let mods = translate_mods(self.modifiers);
-                        let kind = if dragging {
-                            ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
-                        } else {
-                            ProtocolMouseKind::Move
-                        };
-                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                        // Sub-cell motion resolves to the same cell and
+                        // carries nothing new. Report only on a cell
+                        // change, matching the document drag path's
+                        // hit-byte dedupe — otherwise pixel-rate motion
+                        // becomes pixel-rate wire traffic, and every one
+                        // of those is a daemon-side gesture.
+                        let state = self.state.as_mut().expect("checked above");
+                        if state.terminal_motion_is_new(coord) {
+                            let mods = translate_mods(self.modifiers);
+                            let kind = if dragging {
+                                ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
+                            } else {
+                                ProtocolMouseKind::Move
+                            };
+                            self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                        }
                     }
                     return;
                 }
@@ -1904,6 +1924,11 @@ impl ApplicationHandler<AppEvent> for App {
                             ProtocolMouseKind::Up(ProtocolMouseButton::Left)
                         }
                     };
+                    // A press or release always reports, and it re-arms
+                    // the motion dedupe: the first drag after a press
+                    // must reach the daemon even at the cell the press
+                    // landed on.
+                    state.last_terminal_pointer_cell = None;
                     if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
                         self.send_terminal_pointer(buffer_id, coord, kind, mods);
                     }
@@ -2813,6 +2838,7 @@ impl State {
             terminal: None,
             last_terminal_size_sent: None,
             terminal_frame_error_latched: false,
+            last_terminal_pointer_cell: None,
             terminal_text_buffers: Vec::new(),
             terminal_text_renderer,
         };
@@ -3884,6 +3910,7 @@ impl State {
         self.terminal_text_buffers.clear();
         self.terminal_frame_error_latched = false;
         self.last_terminal_size_sent = None;
+        self.last_terminal_pointer_cell = None;
     }
 
     /// Drop shaping and geometry caches without leaving terminal mode.
@@ -4159,8 +4186,30 @@ impl State {
         if self.last_terminal_size_sent == Some((buffer_id, size)) {
             return None;
         }
-        self.last_terminal_size_sent = Some((buffer_id, size));
         Some((buffer_id, size))
+    }
+
+    /// Whether terminal motion at `coord` is new information.
+    ///
+    /// Records the cell as reported either way, so a caller that skips
+    /// the send still advances the memo. Press and release reset it
+    /// (`last_terminal_pointer_cell = None`), which is what lets the
+    /// first drag after a press reach the daemon even at the cell the
+    /// press landed on.
+    fn terminal_motion_is_new(&mut self, coord: CellCoord) -> bool {
+        let changed = self.last_terminal_pointer_cell != Some(coord);
+        self.last_terminal_pointer_cell = Some(coord);
+        changed
+    }
+
+    /// Record a declaration the caller actually put on the wire.
+    ///
+    /// Separate from [`Self::terminal_declaration_if_changed`] so a
+    /// FAILED send does not leave a size believed-declared: the daemon
+    /// would still hold the old geometry while this frontend suppressed
+    /// every retry as unchanged.
+    fn note_terminal_declaration_sent(&mut self, buffer_id: BufferId, size: CellSize) {
+        self.last_terminal_size_sent = Some((buffer_id, size));
     }
 
     /// True while the completion popup is open **for the buffer this
@@ -13117,9 +13166,20 @@ mod tests {
             .expect("a 400x300 window admits a cell grid");
         assert_eq!(first.0, buffer_id);
         assert!(first.1.rows >= 1 && first.1.cols >= 1);
+
+        // Review round 1, finding 4: the query does not record. Until
+        // the caller confirms the send, the declaration stays PENDING,
+        // so a failed write is retried rather than suppressed as
+        // already-declared.
+        assert_eq!(
+            state.terminal_declaration_if_changed(),
+            Some(first),
+            "an unsent declaration must still be offered"
+        );
+        state.note_terminal_declaration_sent(first.0, first.1);
         assert!(
             state.terminal_declaration_if_changed().is_none(),
-            "an unchanged size must be silent"
+            "an unchanged size must be silent once it has been sent"
         );
 
         // A real geometry change re-declares exactly once.
@@ -13128,6 +13188,7 @@ mod tests {
             .terminal_declaration_if_changed()
             .expect("a wider window is a new size");
         assert!(widened.1.cols > first.1.cols);
+        state.note_terminal_declaration_sent(widened.0, widened.1);
         assert!(state.terminal_declaration_if_changed().is_none());
 
         // A buffer switch forces a fresh declaration even at the same size.
@@ -13370,6 +13431,50 @@ mod tests {
             plan.runs.iter().all(|run| run.col != 1),
             "the continuation contributes no run"
         );
+    }
+
+    /// Review round 1, finding 3: terminal motion reports only on a cell
+    /// change.
+    ///
+    /// A unit test on the memo rather than on the wire: the send site
+    /// lives in `window_event`, which needs a real winit event and a
+    /// live attach client. This cannot bite against the pre-fix tree —
+    /// the seam it calls did not exist there — so it is a contract pin,
+    /// not fix evidence.
+    #[test]
+    fn terminal_motion_reports_once_per_cell_and_rearms_on_press() {
+        let Some(mut state) = headless_or_skip(400, 300, "doc") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.apply_terminal_frame(plain_terminal_frame(buffer_id, "abcd", 8));
+
+        let cell = CellCoord::new(0, 2);
+        assert!(state.terminal_motion_is_new(cell), "first sight of a cell");
+        assert!(
+            !state.terminal_motion_is_new(cell),
+            "sub-cell motion inside one cell is not new information"
+        );
+        assert!(
+            state.terminal_motion_is_new(CellCoord::new(0, 3)),
+            "crossing into another cell reports"
+        );
+
+        // A press/release re-arms the memo, so the first drag after a
+        // press reaches the daemon even at the press cell.
+        let press_cell = CellCoord::new(1, 1);
+        assert!(state.terminal_motion_is_new(press_cell));
+        state.last_terminal_pointer_cell = None;
+        assert!(
+            state.terminal_motion_is_new(press_cell),
+            "a press re-arms the memo at its own cell"
+        );
+
+        // Leaving terminal mode drops it too: the next terminal's cells
+        // are a different grid entirely.
+        state.exit_terminal_mode();
+        assert!(state.last_terminal_pointer_cell.is_none());
     }
 
     /// Acceptance 36: the terminal statusline metadata reaches the band

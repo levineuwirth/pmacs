@@ -853,17 +853,26 @@ impl SemanticRenderState {
 
         let mut out = Vec::new();
         let frame = snapshot.into_terminal_frame();
+        // Complete-payload comparison FIRST, and not on
+        // `screen_generation`: a scroll, a selection change, or a
+        // process exit must reach the frontend even though the screen
+        // itself is byte-identical.
+        //
+        // Comparing before validating is also what keeps the steady
+        // state cheap. Only validated frames are ever stored, so a frame
+        // equal to the baseline has already passed — re-running the
+        // per-cell width and topology checks every tick would recompute
+        // a verdict we hold.
+        if self.last_terminal_frame.as_ref() == Some(&frame) {
+            self.terminal_error_latched = false;
+            out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+            return Some(out);
+        }
         match frame.validate() {
             Ok(()) => {
                 self.terminal_error_latched = false;
-                // Complete-payload comparison, not `screen_generation`:
-                // a scroll, a selection change, or a process exit must
-                // reach the frontend even though the screen itself is
-                // byte-identical.
-                if self.last_terminal_frame.as_ref() != Some(&frame) {
-                    self.last_terminal_frame = Some(frame.clone());
-                    out.push(InstanceMessage::TerminalFrame(frame));
-                }
+                self.last_terminal_frame = Some(frame.clone());
+                out.push(InstanceMessage::TerminalFrame(frame));
             }
             Err(error) => {
                 // Never emit a malformed or truncated frame. The peer
@@ -880,15 +889,33 @@ impl SemanticRenderState {
             }
         }
 
+        out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+        Some(out)
+    }
+
+    /// The buffer-independent chrome a terminal-mode frontend still
+    /// needs, in the order the document path emits it.
+    ///
+    /// Shared by both terminal-pass exits so an unchanged frame and a
+    /// changed one ship exactly the same chrome — the suppression is
+    /// about the FRAME, never about the status band going quiet.
+    fn terminal_chrome(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+        statusline_evaluation: Option<StatuslineEvaluation>,
+    ) -> Vec<InstanceMessage> {
+        let mut out = Vec::new();
         out.extend(self.status_facts_msg(state, buffer_id));
         out.extend(self.menu_prompt_msg(state, buffer_id));
         out.extend(self.minibuffer_prompt_msg(state, buffer_id));
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
+        // Q#SL6/Q#SL8: face inventory must precede segment text.
         if let Some(evaluation) = statusline_evaluation {
             self.emit_statusline_segments(evaluation, &mut out);
         }
-        Some(out)
+        out
     }
 
     /// Apply the lead evaluator's publication outcome to the v18 wire

@@ -1951,6 +1951,18 @@ impl EditorState {
             (status.at_bottom, modes, screen_size)
         };
 
+        // Hover is not an act of taking over a terminal (PR #135 review
+        // finding 2). Every other gesture is deliberate — a press, a
+        // release, a drag, a wheel tick, a right-click — but bare motion
+        // happens whenever a pointer crosses a window. A semantic
+        // frontend reports motion at pixel rate, so claiming on `Move`
+        // let merely sweeping the mouse across a PASSIVE split's
+        // terminal take durable control, and the next layout sync then
+        // resized the shared PTY to that background view's geometry.
+        // That is precisely the theft the controller rule exists to
+        // prevent.
+        let claims_control = !matches!(kind, TerminalMouseKind::Move);
+
         if !shift
             && at_bottom
             && modes.mouse_sgr
@@ -1958,12 +1970,16 @@ impl EditorState {
             && coord.col < screen_size.cols
             && let Some(bytes) = crate::terminal::input::encode_mouse(kind, coord, modifiers, modes)
         {
-            self.claim_terminal_controller(key);
+            if claims_control {
+                self.claim_terminal_controller(key);
+            }
             self.send_terminal_bytes(key.buffer_id, &bytes);
             return;
         }
 
-        self.claim_terminal_controller(key);
+        if claims_control {
+            self.claim_terminal_controller(key);
+        }
         let mut manager = self.terminal_manager.borrow_mut();
         match kind {
             TerminalMouseKind::ScrollUp => {

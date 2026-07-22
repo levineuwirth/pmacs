@@ -84,11 +84,19 @@ If it does not, stop and repair the remote/fetch configuration.
   - `cargo test --workspace -- --skip basedpyright`: 2,919 passed across
     83 suites (19 ignored), one invocation;
   - `git diff --check`.
-- Open caveat: the required-GPU suite failed ONCE mid-session and did not
-  reproduce across eight subsequent runs or the full sweep. The failing
-  test's identity was not captured. Re-run `PMACS_REQUIRE_GPU=1 cargo test
-  -p pmacs-gpu` a few times on review; if it recurs, capture the name.
-- Next: user review rounds on the PR.
+- Review round 1 addressed (framing §0.10): hover no longer claims durable
+  terminal control (real defect, bite-verified); terminal motion dedupes by
+  cell; declarations record only once sent; unchanged frames skip
+  revalidation; the terminal-mode presence-sweep skip is removed. The
+  review's predicted presence FREEZE did not reproduce — the buffer-follow
+  clears the declaration before `render_frame`, so a truthful sweep always
+  precedes terminal mode; that test is a labelled regression guard, not
+  fix evidence.
+- Post-review gates: required GPU 128; workspace sweep 2,921 across 83
+  suites; Stage 3 acceptance 5 default / 7 CRDT; everything else as above.
+- Closed caveat: the once-seen required-GPU failure did not reproduce in
+  eight author runs plus four reviewer runs. Treated as environmental.
+- Next: further user review rounds on the PR.
 
 Recovery worktree:
 
