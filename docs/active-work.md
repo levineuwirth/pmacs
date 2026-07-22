@@ -14,8 +14,8 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `b4b925d` (mode system wiring #129 merged;
-  protocol v18).
+  `githubsucks/main` @ `d5d9b9c` (#131 durable mode-system handoff merged;
+  runtime remains mode system wiring #129 at protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -49,10 +49,31 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `b4b925d` or a newer intentional main.
+The first command must expose `d5d9b9c` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 
+
+## Modeline detection lane
+
+- Portable branch: `githubsucks/modeline-detection`
+- Framing head: `47a7f4c`
+- Base: canonical `main` @ `d5d9b9c`.
+- State: `docs/modeline-detection-framing.md` Revision 1 is a review draft;
+  there is no implementation. It frames bounded Emacs/Vim parsing, explicit
+  precedence over inferred language, alias normalization, and one pinned
+  language decision shared by syntax, LSP, and initial major mode.
+- Next step: user review. Revise the framing until approved before
+  implementation.
+
+Recovery worktree on a machine that does not already own the branch:
+
+```sh
+git worktree add --track \
+  -b modeline-detection \
+  ../pmacs-modeline-detection \
+  githubsucks/modeline-detection
+```
 
 ## Vterm Stage 2 framing lane
 
