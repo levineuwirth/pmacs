@@ -221,7 +221,9 @@ cross-layer merge precedence remain unchanged after captures are selected.
 
 ### Q#LQ6 - Performance boundary
 
-Local analysis is linear in the locals-query captures for one settled layer.
+The locals-query capture walk is linear for one settled layer. Like upstream,
+resolving references scans visible definitions newest-first, so the worst case
+is $O(\text{captures} + \text{references} \times \text{definitions})$.
 It runs only for a language whose highlight query actually contains a `local`
 predicate, and only once when a fresh parse bundle settles.
 

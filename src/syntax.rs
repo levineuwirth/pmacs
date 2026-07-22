@@ -2667,6 +2667,32 @@ mod tests {
     }
 
     #[test]
+    fn local_sensitive_builtin_highlights_have_compilable_locals_queries() {
+        let registry = SyntaxRegistry::new();
+        for entry in BUILTIN_LANGUAGES {
+            let Some(highlights) = registry.highlights_query(entry.name) else {
+                continue;
+            };
+            if !query_uses_local_predicates(&highlights) {
+                continue;
+            }
+            assert!(
+                entry
+                    .locals_query
+                    .iter()
+                    .any(|fragment| !fragment.trim().is_empty()),
+                "`{}` highlights use a local predicate but ship no locals query",
+                entry.name
+            );
+            assert!(
+                registry.locals_query(entry.name).is_some(),
+                "`{}` highlights use a local predicate but its locals query does not compile",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
     fn javascript_local_predicates_distinguish_lexical_scope() {
         let registry = SyntaxRegistry::new();
         let source = b"console.log('outer');\n\
