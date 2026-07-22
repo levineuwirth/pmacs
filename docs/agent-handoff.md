@@ -1,10 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after Vterm Stage 2 PR #130 review round 2
-was addressed and approved for merge; mode system wiring (#129) and its
-handoff (#131), config registry (#127), Vterm Stage 1 terminal core (#126),
-and completed Themes Arc 4 (#120/#124/#125) are landed on `main`. Vterm
-Stage 3 is not implemented.**
+**Last updated: 2026-07-22, after modeline language detection (#132) and
+Vterm Stage 2 (#130) landed on `main`, atop mode system wiring (#129/#131),
+config registry (#127), Vterm Stage 1 terminal core (#126), and completed
+Themes Arc 4 (#120/#124/#125). Vterm Stage 3 is not implemented.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -18,7 +17,7 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-22)
 
-- `main` @ `d5d9b9c` (mode system handoff #131), protocol **v18**
+- `main` @ `1dd47fc` (modeline detection #132), protocol **v18**
   (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
   `StatuslineSegments`).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
@@ -81,6 +80,21 @@ commands, read `docs/active-work.md` immediately after this file.
   - The built-in `mode` statusline provider reads `ctx.buffer`, so passive
     splits render their own mode. Real-daemon acceptance covers all ten framing
     criteria across both Lua backends and Linux/macOS CI.
+- **Modeline language detection LANDED — #132**
+  (`docs/modeline-detection-framing.md` rev 2; merge `1dd47fc`). Fresh loads
+  scan bounded Emacs `-*- mode: ... -*-` and Vim/Vi `ft=` / `filetype=`
+  modelines without evaluating file content, normalize common editor aliases,
+  and give explicit modelines precedence over inferred language.
+  - `builtin/runtime/syntax.lua` owns one per-buffer fresh-load decision:
+    modeline → bundled grammar extension → LSP filetype extension → exact
+    filename → shebang. Syntax, initial major mode, pairing, comments, and LSP
+    all reuse that pin; LSP retains its independent backing-path guard.
+  - Editing a modeline or shebang does not switch an attached parser or make
+    language-aware consumers diverge. Close/reopen re-evaluates changed file
+    metadata. Explicit post-load major-mode overrides remain independent.
+  - Bounded valid unknown names remain passive major modes without starting an
+    unavailable parser or server. All thirteen framing criteria are covered on
+    LuaJIT and Lua 5.4. No Rust or protocol surface changed; protocol stays v18.
 - **Syntax-highlight / language-detection side-quest (#114–#118)
   LANDED** — a one-shot arc built in sibling worktrees off main while
   the user's themes lane (`theme-faces`) ran concurrently in the shared
@@ -90,15 +104,15 @@ commands, read `docs/active-work.md` immediately after this file.
     the ABI-current `tree-sitter-containerfile`, NOT the dead
     `tree-sitter-dockerfile` which pins `tree-sitter ^0.20`), make,
     cmake, python, go, javascript (+jsx), typescript (+tsx), toml, zig.
-  - **Detection chain** (`resolve_active_language` in syntax.lua /
-    `buffer_language` in lsp.lua): extension → LSP filetype map →
-    filename → shebang. New user-extensible Lua surfaces
-    `pmacs.parse.shebangs` / `.filenames` and
-    `pmacs.parse.language_from_shebang` / `language_from_filename`.
-    Grammar name MUST equal the `pmacs.lsp.config.<name>` key (grammar
-    detection wins over the filetype map, so it fixes the LSP id too).
-    A buffer keeps its first-attached grammar across edits/switches (no
-    re-sniff of a since-edited shebang).
+  - **Detection chain and pin** (`builtin/runtime/syntax.lua`): modeline →
+    grammar extension → LSP filetype map → filename → shebang. User-extensible
+    Lua surfaces include `pmacs.parse.modeline_aliases`, `.shebangs`,
+    `.filenames`, `language_from_modeline`, `language_from_shebang`,
+    `language_from_filename`, and the pinned `buffer_language`.
+    `builtin/runtime/lsp.lua` delegates to that shared decision after enforcing
+    its backing-path requirement. Grammar name MUST equal the
+    `pmacs.lsp.config.<name>` key. A buffer keeps its pinned language across
+    edits/switches; close/reopen performs a fresh bounded inference.
   - **LSP configs added**: dockerfile (`docker-langserver --stdio`),
     cmake (`cmake-language-server`, config via
     `init_options.buildDirectory="build"` — it does NOT pull
@@ -249,9 +263,10 @@ commands, read `docs/active-work.md` immediately after this file.
     protocol-owned wire types/limits, and a deliberate complete-frame limit
     decision: 16 MiB is insufficient; use a measured legal-worst cap or
     aggregate bound, never silent chunking.
-  - **Stage 2 TUI is implemented on `vterm-tui`** (`docs/vterm-framing.md`
-    Revision 7, criteria 15–27). `TerminalViewKey` keys per-frontend/window
-    projection state over one shared process/screen; logical row anchors retain
+  - **Stage 2 TUI LANDED ON `main` — #130** (merge `86fc1bc`;
+    `docs/vterm-framing.md` Revision 7, criteria 15–27). `TerminalViewKey` keys
+    per-frontend/window projection state over one shared process/screen; logical
+    row anchors retain
     scroll/selection through reflow. One authenticated frontend controls at
     most one session, with atomic replacement and release on
     focus/switch/kill/detach.
@@ -312,8 +327,8 @@ commands, read `docs/active-work.md` immediately after this file.
     fix (#101).
   - **Arc 4 (themes + extensibility) COMPLETE** — named UI faces (#120),
     live GPU font preferences (#124), statusline providers (#125).
-  - **Arc 5 terminal stage ACTIVE** — compile mode (#113) and Vterm terminal
-    core (#126) landed; Vterm TUI is the next formal stage.
+  - **Arc 5 terminal stage ACTIVE** — compile mode (#113), Vterm terminal core
+    (#126), and Vterm TUI (#130) landed; protocol/GPU Stage 3 is next.
   - **Config registry COMPLETE (#127)** — not a numbered arc; it was the
     cross-cutting substrate ranked first on
     `docs/side-quest-backlog.md`'s north star, and it unblocks the
@@ -551,8 +566,8 @@ currently accepted for `autosave.interval-ms`, where a per-buffer
 value is meaningless.
 **Tab width is NOT a config gap** — see §5.
 Mode system (SHIPPED #129): minor modes, `buffer.after-mode-change`,
-mode-scoped settings, modeline detection, `describe-mode`, and persistence of
-explicit major-mode overrides/clears across sessions.
+mode-scoped settings, `describe-mode`, and persistence of explicit
+major-mode overrides/clears across sessions. Modeline detection shipped in #132.
 Highlight/detection (from the #114–#118 side-quest + injections #122):
 locals-query processing (run each grammar's LOCALS_QUERY so
 `#is?`/`#is-not? local` is honored instead of the current fail-closed
@@ -564,8 +579,8 @@ comment schemes), child-tree incrementality + range-scoped layer rebuild
 runtime/Lua-registered languages (v1 resolves only against
 `BUILTIN_LANGUAGES`), and the next injection *consumers* gated on new
 grammars — HTML/CSS/GraphQL/SQL (`<script>`/`<style>`, JS/TS template
-literals, doc-comment code); modeline detection as a 5th layer
-  (`-*- mode: … -*-` / `# vim: ft=…`);
+~~modeline detection as a 5th layer (`-*- mode: … -*-` /
+`# vim: ft=…`)~~ **SHIPPED #132**;
 byte-accurate multibyte cursor placement in `move_active_cursor_to`
 (still steps one codepoint per LSP byte column). A full Jupyter `.ipynb`
 setup (reader → editable → kernel execution) now has its JSON grammar

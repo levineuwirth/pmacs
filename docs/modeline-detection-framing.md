@@ -1,7 +1,7 @@
 # Modeline language detection — side quest
 
-**Status:** Revision 2, approved for implementation by the user on 2026-07-22.
-No implementation was present at approval.
+**Status:** Revision 2 implemented and landed as PR #132 on 2026-07-22
+(`1dd47fc`). All thirteen acceptance criteria shipped without a protocol change.
 **Base:** `githubsucks/main` at `d5d9b9c`; protocol v18.
 
 ## Problem

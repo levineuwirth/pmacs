@@ -40,8 +40,8 @@ The direct continuation of the #114–#118 grammar/detection stack.
   languages (v1 resolves only against `BUILTIN_LANGUAGES`), and new
   injection *consumers* gated on grammars — HTML/CSS/GraphQL/SQL
   (`<script>`/`<style>`, template literals, doc-comment code).
-- **Modeline detection** — a 5th detection layer (`-*- mode: … -*-`,
-  `# vim: ft=…`) after extension → filetype → filename → shebang.
+- ~~**Modeline detection**~~ — **SHIPPED as #132.** Bounded Emacs/Vim
+  metadata now precedes extension → filetype → filename → shebang inference.
 - **JSON + YAML — PR #123 open.** Grammars and LSP configs exist on the
   feature line; review fixes are preserved on
   `json-yaml-handoff-2026-07-20`. A real YAML-through-pmacs smoke,
@@ -248,7 +248,7 @@ multi-language injections (#122), the config registry (#127), JSON + YAML
    main text path. Explicitly NOT a config-registry task; see the entry
    under "Cross-cutting substrate".
 
-Beyond those, the cleanest one-shots in the highlight family are
-**modeline detection** and the HTML/CSS grammars that light up more
-injection *consumers*; the most-missed editing table-stakes remain
-**word-kills + `C-SPC` set-mark**.
+Beyond those, the cleanest remaining one-shots in the highlight family are the
+HTML/CSS grammars that light up more injection *consumers*; modeline detection
+shipped in #132. The most-missed editing table-stakes remain **word-kills +
+`C-SPC` set-mark**.
