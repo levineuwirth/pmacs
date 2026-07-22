@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-21.** This file records volatile work that has not
+**Snapshot: 2026-07-22.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -55,7 +55,7 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Vterm Stage 2 implementation lane
 
 - Portable branch: `githubsucks/vterm-tui`
-- Feature head after review round 1: `8702791`
+- Feature head after review round 2: `b9a7e40`
 - Base: canonical `main` @ `f1a2f75` (handoff refresh #128 atop config
   registry #127 and Vterm Stage 1 #126).
 - PR: #130, <https://github.com/levineuwirth/pmacs/pull/130>, open against
@@ -70,16 +70,21 @@ If it does not, stop and repair the remote/fetch configuration.
   editor bindings; non-terminal context operations error; controller
   replacement is atomic per frontend; zero-area layouts retain view anchors;
   view projection borrows retained rows instead of deep-cloning scrollback.
+- Review round 2: addressed. Partial eviction clamps anchors to the first
+  surviving wrapped-line cell; `invoke_interactive` now inherits only an
+  authenticated dispatch origin; explicit context failures are named; terminal
+  mouse routing reads geometry without cloning cells; the framing records the
+  v18 semantic-controller boundary and bracketed-paste injection deferral.
 - Implementation commits: `39e07cb`, `7c39535`, `0a846d9`, `0dacac7`,
-  `dc92257`, merge `0ddff24`, integration hardening `da8f6ae`, and first-review
-  fixes `8702791`.
-- Review-round final verification: `cargo fmt --check`; strict workspace
-  Clippy; 1,743 default + 1,919 CRDT library tests (3 ignored each);
+  `dc92257`, merge `0ddff24`, integration hardening `da8f6ae`, first-review
+  fixes `8702791`, and second-review fixes `b9a7e40`.
+- Second-review final verification: `cargo fmt --check`; strict workspace
+  Clippy; 1,744 default + 1,920 CRDT library tests (3 ignored each);
   Stage 1 acceptance 9 default + 10 CRDT; Stage 2 acceptance 4 default +
   4 CRDT; statusline acceptance 7 default + 8 CRDT; M4 114 passed
-  (3 ignored, 1 filtered); required GPU 109; workspace 2,871 passed across
+  (3 ignored, 1 filtered); required GPU 109; workspace 2,872 passed across
   81 suites (19 ignored, 1 filtered); `git diff --check` clean.
-- Next: second user review. Do not merge without explicit authorization.
+- Next: user review. Do not merge without explicit authorization.
 
 Recovery worktree on a machine that does not already own the branch:
 

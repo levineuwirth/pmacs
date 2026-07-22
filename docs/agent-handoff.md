@@ -1,6 +1,6 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after Vterm Stage 2 PR #130 review round 1
+**Last updated: 2026-07-22, after Vterm Stage 2 PR #130 review round 2
 was addressed on `vterm-tui`; config registry (#127), Vterm Stage 1
 terminal core (#126), and handoff refresh (#128) are landed on `main`,
 atop completed Themes Arc 4 (#120/#124/#125). Vterm Stage 3 is not
@@ -261,11 +261,18 @@ commands, read `docs/active-work.md` immediately after this file.
     duplicate detach work, and replaced per-view deep scrollback clones with
     borrowed live/published row projections. Focused child-input coverage pins
     both unescaped bound-key passthrough and `C-c C-c`.
-  - Review-round final gate: `cargo fmt --check`; strict workspace Clippy;
-    1,743 default + 1,919 CRDT library tests (3 ignored each); Stage 1
+  - PR #130 review round 2 (`b9a7e40`) clamps anchors into the first
+    surviving cell when eviction cuts through a wrapped logical line, prevents
+    ambient `active_frontend` from minting interactive Lua authority, names
+    malformed explicit-context fields, restores dispatcher rationale, and
+    removes owned cell snapshots from terminal mouse routing. The framing now
+    records the transient v18 semantic-controller boundary and bracketed-paste
+    injection deferral.
+  - Second-review final gate: `cargo fmt --check`; strict workspace Clippy;
+    1,744 default + 1,920 CRDT library tests (3 ignored each); Stage 1
     acceptance 9 default + 10 CRDT; Stage 2 acceptance 4 default + 4 CRDT;
     statusline acceptance 7 default + 8 CRDT; M4 114 passed (3 ignored,
-    1 filtered); required GPU 109; workspace 2,871 passed across 81 suites
+    1 filtered); required GPU 109; workspace 2,872 passed across 81 suites
     (19 ignored, 1 filtered); `git diff --check` clean.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
