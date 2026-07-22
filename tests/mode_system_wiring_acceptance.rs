@@ -25,7 +25,8 @@ struct Client {
 }
 
 const ROWS: u32 = 30;
-const COLS: u32 = 160;
+// Each split must leave room for a macOS temp path plus the mode segment.
+const COLS: u32 = 320;
 
 struct Grid {
     cells: Vec<Cell>,
