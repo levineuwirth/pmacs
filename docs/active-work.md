@@ -59,8 +59,8 @@ If it does not, stop and repair the remote/fetch configuration.
 - Base: canonical `main` @ `1dd47fc` (modeline detection #132 atop Vterm
   Stage 2 #130). Cut from `main`, NOT stacked on `vterm-stage3-framing`,
   per the framing's §8.
-- PR: open against canonical `main`; never merge without explicit
-  authorization.
+- PR: #135, <https://github.com/levineuwirth/pmacs/pull/135>, open against
+  canonical `main`. Never merge without explicit authorization.
 - State: criteria 28-37 implemented. Protocol v19 (`SUPPORTED=[6..=19]`):
   `InstanceMessage::TerminalFrame` (discriminant 26, daemon-gated),
   `FrontendEvent::TerminalResize` (11) and `TerminalPointer` (12)
