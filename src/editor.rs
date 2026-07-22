@@ -825,17 +825,6 @@ impl EditorState {
             .dispatchers
             .get(&frontend_id)
             .is_some_and(|state| state.terminal_escape);
-        let terminal_local_binding = terminal_key.is_some_and(|view_key| {
-            chord.is_some_and(|chord| {
-                let stack = self.lua_host.keymaps().borrow();
-                stack.buffers.get(&view_key.buffer_id).is_some_and(|map| {
-                    !matches!(
-                        map.lookup(&[chord]),
-                        crate::keymap_tree::Resolution::Unbound
-                    )
-                })
-            })
-        });
         if let Some(view_key) = terminal_key {
             if escaped {
                 self.dispatchers
@@ -856,23 +845,21 @@ impl EditorState {
                     self.claim_terminal_controller(view_key);
                     return;
                 }
-                if !terminal_local_binding {
-                    let Some((terminal_key, modifiers)) = terminal_key_from_crossterm(key) else {
-                        return;
-                    };
-                    let modes = self
-                        .terminal_manager
-                        .borrow()
-                        .modes_for_view(view_key)
-                        .unwrap_or_default();
-                    if let Some(bytes) =
-                        crate::terminal::input::encode_key(terminal_key, modifiers, modes)
-                    {
-                        self.claim_terminal_controller(view_key);
-                        self.send_terminal_bytes(view_key.buffer_id, &bytes);
-                    }
+                let Some((terminal_key, modifiers)) = terminal_key_from_crossterm(key) else {
                     return;
+                };
+                let modes = self
+                    .terminal_manager
+                    .borrow()
+                    .modes_for_view(view_key)
+                    .unwrap_or_default();
+                if let Some(bytes) =
+                    crate::terminal::input::encode_key(terminal_key, modifiers, modes)
+                {
+                    self.claim_terminal_controller(view_key);
+                    self.send_terminal_bytes(view_key.buffer_id, &bytes);
                 }
+                return;
             }
         }
 
@@ -954,11 +941,6 @@ impl EditorState {
 
     fn claim_terminal_controller(&self, key: TerminalViewKey) {
         let mut manager = self.terminal_manager.borrow_mut();
-        if let Some(previous) = manager.controller_view_for_frontend(key.frontend_id)
-            && previous != key
-        {
-            let _ = manager.release_controller(previous);
-        }
         let _ = manager.register_view(key);
         let _ = manager.claim_controller(key);
     }
@@ -1070,6 +1052,7 @@ impl EditorState {
                 .get(&key.window_id)
                 .copied()
             else {
+                let _ = self.terminal_manager.borrow_mut().release_controller(key);
                 return false;
             };
             placement.content
@@ -1115,19 +1098,33 @@ impl EditorState {
             let core = self.core.borrow();
             let placements = window_placements(&core, frontend_id, term_size);
             let mut live = HashSet::new();
+            if let Some(view) = core.views.get(&frontend_id) {
+                for window_id in view.layout.iter_ids() {
+                    let Some(window) = core.windows.get(&window_id) else {
+                        continue;
+                    };
+                    if self.terminal_manager.borrow().is_terminal(window.buffer_id) {
+                        live.insert(TerminalViewKey::new(
+                            frontend_id,
+                            window_id,
+                            window.buffer_id,
+                        ));
+                    }
+                }
+            }
             let mut sizes = Vec::new();
             for (window_id, placement) in placements {
                 let Some(window) = core.windows.get(&window_id) else {
                     continue;
                 };
-                if placement.content.size.rows == 0 || placement.content.size.cols == 0 {
+                let key = TerminalViewKey::new(frontend_id, window_id, window.buffer_id);
+                if !live.contains(&key)
+                    || placement.content.size.rows == 0
+                    || placement.content.size.cols == 0
+                {
                     continue;
                 }
-                let key = TerminalViewKey::new(frontend_id, window_id, window.buffer_id);
-                if self.terminal_manager.borrow().is_terminal(window.buffer_id) {
-                    live.insert(key);
-                    sizes.push((key, placement.content.size));
-                }
+                sizes.push((key, placement.content.size));
             }
             (live, sizes)
         };
@@ -1155,10 +1152,14 @@ impl EditorState {
         {
             messages.push(InstanceMessage::Signal(InstanceSignal::Bell));
         }
-        if let Some((target, bytes)) = self.core.borrow_mut().take_pending_clipboard()
-            && target == frontend_id
-        {
-            messages.push(InstanceMessage::Signal(InstanceSignal::Clipboard(bytes)));
+        if let Some((target, bytes)) = self.core.borrow_mut().take_pending_clipboard() {
+            debug_assert_eq!(
+                target, frontend_id,
+                "local signal drain received a non-local clipboard target"
+            );
+            if target == frontend_id {
+                messages.push(InstanceMessage::Signal(InstanceSignal::Clipboard(bytes)));
+            }
         }
         messages
     }

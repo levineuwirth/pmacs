@@ -116,6 +116,39 @@ pub struct ScreenProjection {
     pub generation: u64,
 }
 
+/// Borrowed, publication-consistent row projection for in-process views.
+#[allow(missing_docs)]
+#[derive(Clone, Copy)]
+pub(crate) struct BorrowedScreenProjection<'a> {
+    pub alternate_active: bool,
+    pub history_head: &'a [TerminalRow],
+    pub history_tail: &'a [TerminalRow],
+    pub visible_rows: &'a [TerminalRow],
+    pub cursor: Option<CellCoord>,
+    pub title: Option<&'a str>,
+    pub generation: u64,
+}
+
+impl BorrowedScreenProjection<'_> {
+    pub(crate) fn history_len(self) -> usize {
+        self.history_head.len() + self.history_tail.len()
+    }
+}
+
+impl ScreenProjection {
+    pub(crate) fn as_borrowed(&self) -> BorrowedScreenProjection<'_> {
+        BorrowedScreenProjection {
+            alternate_active: self.alternate_active,
+            history_head: &self.history,
+            history_tail: &[],
+            visible_rows: &self.visible_rows,
+            cursor: self.cursor,
+            title: self.title.as_deref(),
+            generation: self.generation,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Cursor {
     row: usize,
@@ -535,6 +568,30 @@ impl TerminalScreen {
             self.published.clone()
         } else {
             self.current_projection()
+        }
+    }
+
+    /// Borrow one publication-consistent row projection without cloning cells.
+    pub(crate) fn projection_ref(&self) -> BorrowedScreenProjection<'_> {
+        if self.modes.synchronized_output {
+            return self.published.as_borrowed();
+        }
+        let (history_head, history_tail) = if self.alt_active {
+            (&[][..], &[][..])
+        } else {
+            self.main.history.as_slices()
+        };
+        BorrowedScreenProjection {
+            alternate_active: self.alt_active,
+            history_head,
+            history_tail,
+            visible_rows: &self.active().rows,
+            cursor: self
+                .modes
+                .cursor_visible
+                .then(|| CellCoord::new(self.cursor.row as u32, self.cursor.col as u32)),
+            title: self.title.as_deref(),
+            generation: self.generation,
         }
     }
 
@@ -1766,6 +1823,30 @@ mod tests {
         assert!(released.history.is_empty());
         assert_eq!(s.snapshot().cells, flatten(&released.visible_rows));
         assert!(s.alternate_active());
+    }
+
+    #[test]
+    fn borrowed_projection_reuses_live_and_published_row_storage() {
+        let mut s = screen(2, 4);
+        s.apply_event(AnsiEvent::Text("main".into()));
+        s.apply_event(AnsiEvent::LineFeed);
+        s.apply_event(AnsiEvent::LineFeed);
+        let (live_history, _) = s.main.history.as_slices();
+        let live_history_ptr = live_history.as_ptr();
+        let live_visible_ptr = s.main.rows.as_ptr();
+        let projection = s.projection_ref();
+        assert_eq!(projection.history_head.as_ptr(), live_history_ptr);
+        assert_eq!(projection.visible_rows.as_ptr(), live_visible_ptr);
+
+        s.apply_event(AnsiEvent::SetMode {
+            mode: TerminalMode::SynchronizedOutput,
+            enabled: true,
+        });
+        let published_history_ptr = s.published.history.as_ptr();
+        let published_visible_ptr = s.published.visible_rows.as_ptr();
+        let projection = s.projection_ref();
+        assert_eq!(projection.history_head.as_ptr(), published_history_ptr);
+        assert_eq!(projection.visible_rows.as_ptr(), published_visible_ptr);
     }
 
     #[test]

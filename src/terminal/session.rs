@@ -406,10 +406,16 @@ impl TerminalManager {
     }
 
     /// Give an exact registered view durable PTY control for its session.
+    ///
+    /// A frontend controls at most one session. Claiming another registered
+    /// view atomically releases that frontend's previous session first.
     pub fn claim_controller(&mut self, key: TerminalViewKey) -> bool {
         if !self.views.contains_key(&key) || !self.sessions.contains_key(&key.buffer_id) {
             return false;
         }
+        self.controllers.retain(|buffer_id, controller| {
+            controller.frontend_id != key.frontend_id || *buffer_id == key.buffer_id
+        });
         self.controllers
             .insert(key.buffer_id, TerminalController::from_view(key));
         true

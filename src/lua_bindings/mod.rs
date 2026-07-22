@@ -8162,6 +8162,7 @@ fn terminal_command_frontend(lua: &Lua, core: &SharedCore) -> crate::protocol::F
 fn active_terminal_view_key(
     lua: &Lua,
     core: &SharedCore,
+    manager: &crate::terminal::SharedTerminalManager,
     operation: &str,
 ) -> mlua::Result<crate::terminal::TerminalViewKey> {
     let frontend_id = lua
@@ -8178,6 +8179,11 @@ fn active_terminal_view_key(
             "pmacs.terminal.{operation}: invoking frontend has no active window"
         ))
     })?;
+    if !manager.borrow().is_terminal(window.buffer_id) {
+        return Err(mlua::Error::external(format!(
+            "pmacs.terminal.{operation}: invoking frontend's active window is not a terminal"
+        )));
+    }
     Ok(crate::terminal::TerminalViewKey::new(
         frontend_id,
         core.views
@@ -8417,7 +8423,7 @@ fn install_terminal(
                     }
                 });
                 let core = terminal_shared_core(lua, "scroll")?;
-                let key = active_terminal_view_key(lua, &core, "scroll")?;
+                let key = active_terminal_view_key(lua, &core, &manager, "scroll")?;
                 Ok(manager.borrow_mut().scroll_lines(key, lines))
             })?,
         )?;
@@ -8434,7 +8440,7 @@ fn install_terminal(
                     )
                 })?;
                 let core = terminal_shared_core(lua, "_scroll_page")?;
-                let key = active_terminal_view_key(lua, &core, "_scroll_page")?;
+                let key = active_terminal_view_key(lua, &core, &manager, "_scroll_page")?;
                 Ok(manager.borrow_mut().scroll_page(key, direction))
             })?,
         )?;
@@ -8446,7 +8452,7 @@ fn install_terminal(
             "scroll_to_bottom",
             lua.create_function(move |lua, ()| {
                 let core = terminal_shared_core(lua, "scroll_to_bottom")?;
-                let key = active_terminal_view_key(lua, &core, "scroll_to_bottom")?;
+                let key = active_terminal_view_key(lua, &core, &manager, "scroll_to_bottom")?;
                 Ok(manager.borrow_mut().scroll_to_bottom(key))
             })?,
         )?;
@@ -8458,7 +8464,7 @@ fn install_terminal(
             "copy_selection",
             lua.create_function(move |lua, ()| {
                 let core = terminal_shared_core(lua, "copy_selection")?;
-                let key = active_terminal_view_key(lua, &core, "copy_selection")?;
+                let key = active_terminal_view_key(lua, &core, &manager, "copy_selection")?;
                 let Some(bytes) = manager.borrow_mut().copy_selection(key) else {
                     return Ok(false);
                 };

@@ -61,6 +61,7 @@ fn snapshot_text(snapshot: &pmacs::terminal::TerminalSnapshot) -> String {
 fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
     let mut state = EditorState::new();
     let command_lua = lua_string("/bin/sh");
+    let baseline_buffer_id = state.core.borrow().active_buffer_id();
 
     let baseline_sessions = state.terminal_manager.borrow().len();
     let baseline_buffers = state.core.borrow().registry.borrow().ids().len();
@@ -170,6 +171,29 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
         assert!(manager.begin_selection(view_key, snapshot.size, CellCoord::new(row, col)));
         assert!(manager.finish_selection(view_key, snapshot.size, CellCoord::new(row, col + 7)));
     }
+    assert!(
+        state
+            .prepare_terminal_views(frontend_id, CellSize::new(1, 1))
+            .is_empty(),
+        "zero-area terminal placements paint no snapshot"
+    );
+    assert!(
+        state
+            .terminal_manager
+            .borrow()
+            .view_state(view_key)
+            .is_some_and(|view| view.selection.is_some()),
+        "a transient zero-area placement must retain existing view anchors"
+    );
+    assert!(
+        state
+            .prepare_terminal_views(frontend_id, CellSize::new(8, 30))
+            .contains_key(&window_id)
+    );
+    state.dispatch_key(
+        frontend_id,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
     state.dispatch_key(
         frontend_id,
         KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
@@ -217,6 +241,46 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
     }
 
     state
+        .lua_host
+        .lua()
+        .load(
+            r#"
+            pmacs.command.define {
+              name = "test.terminal-context",
+              description = "Exercise context-implicit terminal failure",
+              fn = function() pmacs.terminal.scroll(1) end,
+            }
+            pmacs.keymap.bind {
+              scope = "global", sequence = "<f12>", command = "test.terminal-context"
+            }
+            "#,
+        )
+        .exec()
+        .expect("install context failure probe");
+    state
+        .core
+        .borrow_mut()
+        .switch_active_buffer_for(frontend_id, baseline_buffer_id)
+        .expect("switch to document buffer");
+    state.dispatch_key(
+        frontend_id,
+        KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE),
+    );
+    assert!(
+        state
+            .core
+            .borrow()
+            .status
+            .contains("active window is not a terminal"),
+        "context-implicit terminal command must raise a named Lua error"
+    );
+    state
+        .core
+        .borrow_mut()
+        .switch_active_buffer_for(frontend_id, buffer_id)
+        .expect("restore terminal buffer");
+
+    state
         .terminal_manager
         .borrow_mut()
         .terminate(buffer_id, &mut state.process_supervisor.borrow_mut())
@@ -257,6 +321,7 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines, reason = "shared view and controller scenario")]
 fn shared_screen_keeps_view_scroll_selection_and_controller_independent() {
     let mut state = EditorState::new();
     let mut spec = TerminalSpec::new("/bin/sh");
@@ -283,10 +348,24 @@ fn shared_screen_keeps_view_scroll_selection_and_controller_independent() {
             .snapshot(buffer_id)
             .is_some_and(|snapshot| snapshot_text(&snapshot).contains("row29"))
     });
+    let mut replacement_spec = TerminalSpec::new("/bin/sh");
+    replacement_spec.args = vec!["-c".into(), "sleep 30".into()];
+    replacement_spec.rows = 4;
+    replacement_spec.cols = 24;
+    let replacement_buffer = state
+        .terminal_manager
+        .borrow_mut()
+        .open(
+            replacement_spec,
+            &mut state.core.borrow_mut(),
+            &mut state.process_supervisor.borrow_mut(),
+        )
+        .expect("open replacement terminal");
 
     let size = CellSize::new(4, 24);
     let first = TerminalViewKey::new(FrontendId(11), WindowId::next(), buffer_id);
     let second = TerminalViewKey::new(FrontendId(22), WindowId::next(), buffer_id);
+    let replacement = TerminalViewKey::new(FrontendId(11), WindowId::next(), replacement_buffer);
     {
         let mut manager = state.terminal_manager.borrow_mut();
         let first_tail = manager
@@ -295,6 +374,9 @@ fn shared_screen_keeps_view_scroll_selection_and_controller_independent() {
         let second_tail = manager
             .snapshot_for_view(second, size)
             .expect("second snapshot");
+        manager
+            .snapshot_for_view(replacement, size)
+            .expect("replacement snapshot");
         assert_eq!(first_tail.title, second_tail.title);
         assert_eq!(first_tail.process, second_tail.process);
 
@@ -327,12 +409,14 @@ fn shared_screen_keeps_view_scroll_selection_and_controller_independent() {
         assert!(manager.copy_selection(second).is_none());
 
         assert!(manager.claim_controller(first));
-        assert!(manager.claim_controller(second));
+        assert!(manager.claim_controller(replacement));
         assert_eq!(
             manager.controller_view_for_frontend(FrontendId(11)),
-            None,
-            "one terminal session has one most-recent controller"
+            Some(replacement),
+            "claiming another session atomically replaces a frontend's controller"
         );
+        assert!(manager.controller(buffer_id).is_none());
+        assert!(manager.claim_controller(second));
         assert_eq!(
             manager.controller_view_for_frontend(FrontendId(22)),
             Some(second)
@@ -356,6 +440,75 @@ fn shared_screen_keeps_view_scroll_selection_and_controller_independent() {
         .borrow_mut()
         .terminate(buffer_id, &mut state.process_supervisor.borrow_mut())
         .expect("terminate terminal child");
+    state
+        .terminal_manager
+        .borrow_mut()
+        .terminate(
+            replacement_buffer,
+            &mut state.process_supervisor.borrow_mut(),
+        )
+        .expect("terminate replacement terminal child");
+}
+
+#[test]
+fn terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let ready_path = temp.path().join("ready");
+    let input_path = temp.path().join("input");
+    let probe = format!(
+        concat!(
+            "import os, tty\n",
+            "tty.setraw(0)\n",
+            "open({:?}, 'wb').write(b'1')\n",
+            "data = b''\n",
+            "while len(data) < 5: data += os.read(0, 5 - len(data))\n",
+            "open({:?}, 'wb').write(data)\n",
+        ),
+        ready_path.to_str().expect("UTF-8 ready path"),
+        input_path.to_str().expect("UTF-8 input path")
+    );
+    let mut state = EditorState::new();
+    state
+        .lua_host
+        .lua()
+        .load(format!(
+            r#"
+            return pmacs.terminal.open {{
+              command = "/usr/bin/python3",
+              args = {{ "-c", {} }},
+              rows = 4,
+              cols = 20,
+            }}
+            "#,
+            lua_string(&probe)
+        ))
+        .eval::<AnyUserData>()
+        .expect("open raw input probe");
+    assert_eq!(wait_for_file(&ready_path, Duration::from_secs(5)), b"1");
+
+    let frontend_id = FrontendId::LOCAL;
+    state.dispatch_key(
+        frontend_id,
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
+    );
+    state.dispatch_key(
+        frontend_id,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    state.dispatch_key(
+        frontend_id,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+    );
+    state.dispatch_key(
+        frontend_id,
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+    );
+
+    assert_eq!(
+        wait_for_file(&input_path, Duration::from_secs(5)),
+        b"\x1bv\x03\x1bw",
+        "unescaped local bindings reach the child; C-c C-c sends one literal interrupt"
+    );
 }
 
 fn wait_for_output(pty: &PmacsPty, needle: &[u8], timeout: Duration) {
@@ -471,12 +624,14 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
 
     pty.resize(30, 90).expect("resize host PTY");
     thread::sleep(Duration::from_millis(150));
-    pty.write_input(b"\x1bv").expect("terminal page-up binding");
+    pty.write_input(b"\x03\x1bv")
+        .expect("escaped terminal page-up binding");
     // Inject editor-owned scrolling, selection, and copy gestures while the
     // real terminal child is active; focused tests pin their exact state.
     pty.write_input(b"\x1b[<4;2;2M\x1b[<36;8;2M\x1b[<4;8;2m")
         .expect("terminal selection drag");
-    pty.write_input(b"\x1bw").expect("copy selection binding");
+    pty.write_input(b"\x03\x1bw")
+        .expect("escaped copy selection binding");
     wait_for_output(&pty, b"\x1b]52;c;", Duration::from_secs(5));
     let input = wait_for_file(&input_path, Duration::from_secs(5));
     assert_eq!(input, b"VTERM_INPUT_SMOKE\n");

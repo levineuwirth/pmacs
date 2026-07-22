@@ -1302,7 +1302,6 @@ fn dispatcher_loop(
                 last_active_buffer_sent.remove(fid);
                 terminal_bell_baselines.remove(fid);
                 editor.detach_frontend_input(*fid);
-                editor.terminal_manager.borrow_mut().detach_frontend(*fid);
                 session_registry.unregister_session(*fid);
                 editor
                     .statusline_registry
@@ -1743,10 +1742,6 @@ fn handle_dispatcher_event(
             last_active_buffer_sent.remove(&frontend_id);
             terminal_bell_baselines.remove(&frontend_id);
             editor.detach_frontend_input(frontend_id);
-            editor
-                .terminal_manager
-                .borrow_mut()
-                .detach_frontend(frontend_id);
             session_registry.unregister_session(frontend_id);
             editor
                 .statusline_registry

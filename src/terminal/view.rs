@@ -6,7 +6,7 @@
 use crate::buffer::BufferId;
 use crate::cell::{Cell, CellCoord, CellSize, Glyph, Style};
 use crate::protocol::FrontendId;
-use crate::terminal::screen::{ScreenProjection, TerminalModes, TerminalRow};
+use crate::terminal::screen::{BorrowedScreenProjection, TerminalModes, TerminalRow};
 use crate::terminal::session::{TerminalManager, TerminalSelectionSpan, TerminalSnapshot};
 use crate::terminal::{MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS};
 use crate::window::WindowId;
@@ -119,7 +119,7 @@ impl TerminalManager {
             return None;
         }
         let session = self.sessions.get(&key.buffer_id)?;
-        let projection = session.screen.projection();
+        let projection = session.screen.projection_ref();
         let pid = session.pid;
         let process = session.process.clone();
         let bell_count = session.screen.bell_count();
@@ -129,12 +129,12 @@ impl TerminalManager {
             last_bell_count: bell_count,
             ..TerminalViewState::default()
         });
-        normalize_state(state, &projection);
+        normalize_state(state, projection);
         state.viewport_size = Some(viewport_size);
         Some(project_snapshot(
             key.buffer_id,
             viewport_size,
-            &projection,
+            projection,
             state,
             pid,
             process,
@@ -157,16 +157,16 @@ impl TerminalManager {
         let Some(session) = self.sessions.get(&key.buffer_id) else {
             return false;
         };
-        let projection = session.screen.projection();
+        let projection = session.screen.projection_ref();
         let bell_count = session.screen.bell_count();
         let state = self.views.entry(key).or_insert_with(|| TerminalViewState {
             alternate_active: Some(projection.alternate_active),
             last_bell_count: bell_count,
             ..TerminalViewState::default()
         });
-        normalize_state(state, &projection);
+        normalize_state(state, projection);
         state.viewport_size = Some(viewport_size);
-        let rows = retained_rows(&projection);
+        let rows = retained_rows(projection);
         if rows.is_empty() {
             return false;
         }
@@ -184,7 +184,7 @@ impl TerminalManager {
         state.top = if next == tail_start && state.selection.is_none() {
             None
         } else {
-            Some(row_lead(rows[next]))
+            Some(row_lead(rows.get(next).expect("bounded retained row")))
         };
         true
     }
@@ -215,10 +215,10 @@ impl TerminalManager {
     /// Return fresh geometric status for one registered view.
     #[must_use]
     pub fn view_status(&mut self, key: TerminalViewKey) -> Option<TerminalViewStatus> {
-        let projection = self.sessions.get(&key.buffer_id)?.screen.projection();
+        let projection = self.sessions.get(&key.buffer_id)?.screen.projection_ref();
         let state = self.views.get_mut(&key)?;
-        normalize_state(state, &projection);
-        let rows = retained_rows(&projection);
+        normalize_state(state, projection);
+        let rows = retained_rows(projection);
         let size = state.viewport_size?;
         let geometry = view_geometry(&rows, state, size.rows);
         Some(TerminalViewStatus {
@@ -245,11 +245,11 @@ impl TerminalManager {
     #[must_use]
     pub fn copy_selection(&mut self, key: TerminalViewKey) -> Option<Vec<u8>> {
         let session = self.sessions.get(&key.buffer_id)?;
-        let projection = session.screen.projection();
+        let projection = session.screen.projection_ref();
         let state = self.views.get_mut(&key)?;
-        normalize_state(state, &projection);
+        normalize_state(state, projection);
         let selection = state.selection?;
-        let rows = retained_rows(&projection);
+        let rows = retained_rows(projection);
         copy_selection_bytes(&rows, selection)
     }
 
@@ -263,15 +263,15 @@ impl TerminalManager {
         let Some(session) = self.sessions.get(&key.buffer_id) else {
             return false;
         };
-        let projection = session.screen.projection();
+        let projection = session.screen.projection_ref();
         let bell_count = session.screen.bell_count();
         let state = self.views.entry(key).or_insert_with(|| TerminalViewState {
             alternate_active: Some(projection.alternate_active),
             last_bell_count: bell_count,
             ..TerminalViewState::default()
         });
-        normalize_state(state, &projection);
-        let rows = retained_rows(&projection);
+        normalize_state(state, projection);
+        let rows = retained_rows(projection);
         let geometry = view_geometry(&rows, state, viewport_size.rows);
         let Some(anchor) = anchor_at(&rows, &geometry, viewport_size, coord) else {
             state.selection = None;
@@ -280,7 +280,7 @@ impl TerminalManager {
         };
         state.selection_froze_top = state.top.is_none();
         if state.top.is_none() {
-            state.top = rows.get(geometry.start).copied().map(row_lead);
+            state.top = rows.get(geometry.start).map(row_lead);
         }
         state.selection = Some(TerminalSelection {
             anchor,
@@ -300,15 +300,15 @@ impl TerminalManager {
         let Some(session) = self.sessions.get(&key.buffer_id) else {
             return false;
         };
-        let projection = session.screen.projection();
+        let projection = session.screen.projection_ref();
         let Some(state) = self.views.get_mut(&key) else {
             return false;
         };
-        normalize_state(state, &projection);
+        normalize_state(state, projection);
         if state.drag.is_none() {
             return false;
         }
-        let rows = retained_rows(&projection);
+        let rows = retained_rows(projection);
         let geometry = view_geometry(&rows, state, viewport_size.rows);
         let Some(head) = anchor_at(&rows, &geometry, viewport_size, coord) else {
             return false;
@@ -412,6 +412,46 @@ struct ViewGeometry {
     scroll_offset: u32,
 }
 
+#[derive(Clone, Copy)]
+struct RetainedRows<'a> {
+    projection: BorrowedScreenProjection<'a>,
+}
+
+impl<'a> RetainedRows<'a> {
+    fn len(self) -> usize {
+        self.projection.history_len() + self.projection.visible_rows.len()
+    }
+
+    fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    fn get(self, index: usize) -> Option<&'a TerminalRow> {
+        let head_len = self.projection.history_head.len();
+        if index < head_len {
+            return self.projection.history_head.get(index);
+        }
+        let index = index - head_len;
+        let tail_len = self.projection.history_tail.len();
+        if index < tail_len {
+            return self.projection.history_tail.get(index);
+        }
+        self.projection.visible_rows.get(index - tail_len)
+    }
+
+    fn first(self) -> Option<&'a TerminalRow> {
+        self.get(0)
+    }
+
+    fn iter(self) -> impl Iterator<Item = &'a TerminalRow> {
+        self.projection
+            .history_head
+            .iter()
+            .chain(self.projection.history_tail)
+            .chain(self.projection.visible_rows)
+    }
+}
+
 fn valid_viewport(size: CellSize) -> bool {
     size.rows > 0
         && size.cols > 0
@@ -420,12 +460,8 @@ fn valid_viewport(size: CellSize) -> bool {
         && size.area() as usize <= MAX_TERMINAL_VISIBLE_CELLS
 }
 
-fn retained_rows(projection: &ScreenProjection) -> Vec<&TerminalRow> {
-    projection
-        .history
-        .iter()
-        .chain(projection.visible_rows.iter())
-        .collect()
+fn retained_rows(projection: BorrowedScreenProjection<'_>) -> RetainedRows<'_> {
+    RetainedRows { projection }
 }
 
 fn row_lead(row: &TerminalRow) -> LogicalCellAnchor {
@@ -435,7 +471,7 @@ fn row_lead(row: &TerminalRow) -> LogicalCellAnchor {
     }
 }
 
-fn resolve_anchor(rows: &[&TerminalRow], anchor: LogicalCellAnchor) -> Option<ResolvedCell> {
+fn resolve_anchor(rows: &RetainedRows<'_>, anchor: LogicalCellAnchor) -> Option<ResolvedCell> {
     rows.iter().enumerate().find_map(|(row_index, row)| {
         if row.logical_line_id != anchor.logical_line_id {
             return None;
@@ -461,15 +497,15 @@ fn canonical_col(row: &TerminalRow, mut col: usize) -> usize {
     col
 }
 
-fn anchor_for(rows: &[&TerminalRow], resolved: ResolvedCell) -> LogicalCellAnchor {
-    let row = rows[resolved.row];
+fn anchor_for(rows: &RetainedRows<'_>, resolved: ResolvedCell) -> LogicalCellAnchor {
+    let row = rows.get(resolved.row).expect("resolved retained row");
     LogicalCellAnchor {
         logical_line_id: row.logical_line_id,
         cell_offset: row.cell_offset.saturating_add(resolved.col as u32),
     }
 }
 
-fn clamp_or_clear(rows: &[&TerminalRow], anchor: LogicalCellAnchor) -> Option<LogicalCellAnchor> {
+fn clamp_or_clear(rows: &RetainedRows<'_>, anchor: LogicalCellAnchor) -> Option<LogicalCellAnchor> {
     if let Some(resolved) = resolve_anchor(rows, anchor) {
         return Some(anchor_for(rows, resolved));
     }
@@ -477,7 +513,7 @@ fn clamp_or_clear(rows: &[&TerminalRow], anchor: LogicalCellAnchor) -> Option<Lo
     (anchor.logical_line_id < first.logical_line_id).then(|| row_lead(first))
 }
 
-fn normalize_state(state: &mut TerminalViewState, projection: &ScreenProjection) {
+fn normalize_state(state: &mut TerminalViewState, projection: BorrowedScreenProjection<'_>) {
     if state
         .alternate_active
         .is_some_and(|active| active != projection.alternate_active)
@@ -505,7 +541,7 @@ fn normalize_state(state: &mut TerminalViewState, projection: &ScreenProjection)
 }
 
 fn view_geometry(
-    rows: &[&TerminalRow],
+    rows: &RetainedRows<'_>,
     state: &TerminalViewState,
     viewport_rows: u32,
 ) -> ViewGeometry {
@@ -550,7 +586,7 @@ fn viewport_row(
 }
 
 fn anchor_at(
-    rows: &[&TerminalRow],
+    rows: &RetainedRows<'_>,
     geometry: &ViewGeometry,
     viewport_size: CellSize,
     coord: CellCoord,
@@ -565,7 +601,7 @@ fn anchor_at(
     let retained_row = geometry
         .start
         .saturating_add(viewport_row - geometry.top_padding);
-    let row = *rows.get(retained_row)?;
+    let row = rows.get(retained_row)?;
     if coord.col as usize >= row.cells.len() {
         return None;
     }
@@ -577,7 +613,7 @@ fn anchor_at(
 }
 
 fn normalized_selection(
-    rows: &[&TerminalRow],
+    rows: &RetainedRows<'_>,
     selection: TerminalSelection,
 ) -> Option<(ResolvedCell, ResolvedCell)> {
     let mut start = resolve_anchor(rows, selection.anchor)?;
@@ -599,7 +635,7 @@ fn glyph_width(row: &TerminalRow, col: usize) -> usize {
 fn project_snapshot(
     buffer_id: BufferId,
     viewport_size: CellSize,
-    projection: &ScreenProjection,
+    projection: BorrowedScreenProjection<'_>,
     state: &TerminalViewState,
     pid: u32,
     process: crate::terminal::session::TerminalProcessState,
@@ -607,7 +643,7 @@ fn project_snapshot(
     let rows = retained_rows(projection);
     let geometry = view_geometry(&rows, state, viewport_size.rows);
     let mut cells = vec![Cell::default(); viewport_size.area() as usize];
-    for (retained_row, &row) in rows.iter().enumerate().skip(geometry.start) {
+    for (retained_row, row) in rows.iter().enumerate().skip(geometry.start) {
         let Some(target_row) = viewport_row(&geometry, viewport_size.rows as usize, retained_row)
         else {
             continue;
@@ -622,7 +658,7 @@ fn project_snapshot(
         .and_then(|selection| normalized_selection(&rows, selection))
         .map_or_else(Vec::new, |(start, end)| {
             let mut spans = Vec::new();
-            for (retained_row, &row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
+            for (retained_row, row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
                 let Some(target_row) =
                     viewport_row(&geometry, viewport_size.rows as usize, retained_row)
                 else {
@@ -652,7 +688,7 @@ fn project_snapshot(
 
     let cursor = if geometry.scroll_offset == 0 {
         projection.cursor.and_then(|cursor| {
-            let retained_row = projection.history.len().saturating_add(cursor.row as usize);
+            let retained_row = projection.history_len().saturating_add(cursor.row as usize);
             let row = viewport_row(&geometry, viewport_size.rows as usize, retained_row)?;
             (cursor.col < viewport_size.cols).then(|| CellCoord::new(row as u32, cursor.col))
         })
@@ -665,7 +701,7 @@ fn project_snapshot(
         size: viewport_size,
         cells,
         cursor,
-        title: projection.title.clone(),
+        title: projection.title.map(str::to_owned),
         screen_generation: projection.generation,
         selection,
         scroll_offset: geometry.scroll_offset,
@@ -681,10 +717,10 @@ fn is_default_blank(cell: &Cell) -> bool {
         && cell.attachment.is_none()
 }
 
-fn copy_selection_bytes(rows: &[&TerminalRow], selection: TerminalSelection) -> Option<Vec<u8>> {
+fn copy_selection_bytes(rows: &RetainedRows<'_>, selection: TerminalSelection) -> Option<Vec<u8>> {
     let (start, end) = normalized_selection(rows, selection)?;
     let mut out = Vec::new();
-    for (row_index, &row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
+    for (row_index, row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
         let from = if row_index == start.row { start.col } else { 0 };
         let mut to = if row_index == end.row {
             end.col.saturating_add(glyph_width(row, end.col))
@@ -714,6 +750,7 @@ fn copy_selection_bytes(rows: &[&TerminalRow], selection: TerminalSelection) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::screen::ScreenProjection;
     use crate::terminal::session::TerminalProcessState;
 
     fn row(id: u64, offset: u32, text: &str, soft_wrapped: bool) -> TerminalRow {
@@ -755,7 +792,7 @@ mod tests {
         let snapshot = project_snapshot(
             BufferId::next(),
             CellSize::new(4, 5),
-            &source,
+            source.as_borrowed(),
             &TerminalViewState::default(),
             42,
             TerminalProcessState::Running,
@@ -800,7 +837,7 @@ mod tests {
         let snapshot = project_snapshot(
             BufferId::next(),
             CellSize::new(3, 3),
-            &source,
+            source.as_borrowed(),
             &state,
             1,
             TerminalProcessState::Running,
@@ -816,9 +853,10 @@ mod tests {
             row(1, 3, "cd ", false),
             row(2, 0, "e  ", false),
         ];
-        let refs: Vec<&TerminalRow> = rows.iter().collect();
+        let source = projection(Vec::new(), rows.into());
+        let retained = retained_rows(source.as_borrowed());
         let bytes = copy_selection_bytes(
-            &refs,
+            &retained,
             TerminalSelection {
                 anchor: LogicalCellAnchor {
                     logical_line_id: 1,
@@ -854,9 +892,10 @@ mod tests {
             cell_offset: 0,
             soft_wrapped: false,
         };
-        let refs = vec![&wide];
+        let source = projection(Vec::new(), vec![wide]);
+        let retained = retained_rows(source.as_borrowed());
         let continuation = resolve_anchor(
-            &refs,
+            &retained,
             LogicalCellAnchor {
                 logical_line_id: 9,
                 cell_offset: 1,
@@ -865,7 +904,7 @@ mod tests {
         .expect("continuation resolves");
         assert_eq!(continuation.col, 0);
         let bytes = copy_selection_bytes(
-            &refs,
+            &retained,
             TerminalSelection {
                 anchor: LogicalCellAnchor {
                     logical_line_id: 9,
@@ -910,7 +949,7 @@ mod tests {
             alternate_active: Some(false),
             ..TerminalViewState::default()
         };
-        normalize_state(&mut state, &source);
+        normalize_state(&mut state, source.as_borrowed());
         assert_eq!(state.top, None);
         assert_eq!(state.selection, None);
         assert_eq!(state.alternate_active, Some(true));
