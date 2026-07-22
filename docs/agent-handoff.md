@@ -1,8 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after locals-query processing (#134) landed on
-`main`, following modeline language detection (#132), Vterm Stage 2 (#130),
-and mode system wiring (#129/#131). Vterm Stage 3 is not implemented.**
+**Last updated: 2026-07-22, with tab-width rendering parity implemented and
+open as PR #137, after locals-query processing (#134) landed on `main`.
+Vterm Stage 3 remains in review as #135.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -16,9 +16,9 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-22)
 
-- `main` @ `8cbb9f4` (locals-query processing #134), protocol **v18**
-  (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
-  `StatuslineSegments`).
+- `main` @ `40111dc` (landed-state documentation after locals-query processing
+  #134), protocol **v18** (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 =
+  `FontFacts`, v18 = `StatuslineSegments`).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
   rev 3; merge `2e37c04`; two review rounds). `pmacs.config` is the
   typed, introspectable options registry the backlog ranked first, and
@@ -315,6 +315,24 @@ commands, read `docs/active-work.md` immediately after this file.
     8 CRDT; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
     workspace 2,882 passed across 82 suites (19 ignored, 1 filtered);
     `git diff --check` clean.
+- **Tab-width rendering parity IMPLEMENTED — PR #137 OPEN**
+  (`docs/tab-width-parity-framing.md` rev 2; branch `tab-width-parity`;
+  implementation `9f7bc77`; <https://github.com/levineuwirth/pmacs/pull/137>).
+  Source tabs remain one byte while every buffer
+  renderer follows the shared fixed `pmacs_protocol::TAB_STOP_COLUMNS = 8`.
+  - `src/display_width.rs` owns allocation-free Unicode/tab-aware byte-to-column
+    accounting for plain text, syntax, diagnostics, completion anchors,
+    buffer-style overlays, and search washes.
+  - The GPU rich-chunk projection expands source/adornment tabs before
+    cosmic-text shaping and retains first-class source-tab provenance.
+    Carets, hits, selections, peer washes, and diagnostic geometry share the
+    same source/projected boundary rules, including a soft wrap inside one
+    expanded tab.
+  - GPU minimap widths use the same tab/Unicode rule and refresh in the accepted
+    text-edit transaction. No config, wire shape, negotiation, or protocol
+    version changed. Local gates: 1,763 default + 1,939 CRDT + 1,763 Lua 5.4
+    library tests; 2 focused acceptance; M4 121; required GPU 119; workspace
+    2,911 across 83 suites; strict Clippy and diff check clean.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
   and must be repeated before implementation. No PR or implementation is
@@ -501,19 +519,14 @@ acceptance.
   in per-session baselines; and any daemon-side reset needs its
   frontend mirror audited in the same round (the GPU snapshot arm
   missed search/menu/status the first time).
-- **Tab width is a rendering-parity bug, NOT a config gap** (scouted at
-  `7bc0c61` while framing #127; still true). There are FIVE tab-width
-  sites across TWO crates with TWO different values: `TAB_WIDTH = 8` in
-  `src/text_view.rs`, `src/highlight.rs`, `src/diag.rs` and
-  `src/completion.rs`, versus `advance_minimap_col` in
-  `pmacs-gpu/src/main.rs` expanding to **4** — and the GPU's main text
-  path expands tabs *not at all* (buffer bytes reach the frontend raw,
-  so a literal `\t` is shaped by the font). `editor.tab-width` is
-  therefore the obvious-looking first config adopter and is not one:
-  defining the setting cannot make the GPU honor it. Doing it properly
-  needs frontend tab expansion plus a wire-or-frontend-local decision.
-  Deferred from #127 on exactly these grounds; don't re-plan it as a
-  config task.
+- **Tab width is a rendering semantic, NOT a config gap.** The implementation
+  on `tab-width-parity` fixes the width at the TUI's established 8 columns,
+  shares that constant through `pmacs-protocol`, and expands tabs only in each
+  display projection. Defining `editor.tab-width` could not have fixed the GPU:
+  source text and semantic spans stay byte-addressed while cosmic-text needs
+  projected spaces plus an inverse hit/caret map. A future configurable width
+  would require a buffer-effective frontend fact and cache invalidation; do not
+  re-plan it as a scalar config-only change.
 - **A test that never runs passes.** Two #127 review-round tests passed
   vacuously at first: `pmacs.editor.save()` is the RAW save, while
   `buffer.before-save` fires inside the `buffer.save` COMMAND

@@ -17,6 +17,8 @@
 //! - The full message envelopes: `InstanceMessage`, `FrontendEvent`,
 //!   `GoodbyeReason`, capability structs, `PresenceUpdate`, etc.
 //! - The optional `CrdtOp` wire variant (feature-gated on `crdt`).
+//! - [`TAB_STOP_COLUMNS`], the shared logical width used when frontends
+//!   project raw buffer tabs for display.
 //!
 //! What does NOT live here:
 //! - `crate::cell::CellGrid` and `crate::cell::diff()` (rendering
@@ -39,6 +41,12 @@ pub mod crdt;
 pub mod ids;
 pub mod message;
 pub mod transport;
+
+/// Logical display columns between fixed buffer-text tab stops.
+///
+/// Semantic frames keep tabs as source bytes; every frontend expands them
+/// only in its display projection so protocol byte ranges remain unchanged.
+pub const TAB_STOP_COLUMNS: u32 = 8;
 
 pub use cell::{
     Attachment, Cell, CellCoord, CellSize, Color, DiffSpan, Glyph, Style, UnderlineStyle,

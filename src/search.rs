@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use pmacs_protocol::ByteRange;
 
 use crate::buffer::BufferId;
+use crate::display_width::byte_range_to_columns;
 
 /// One buffer's search state: the resolved query, its matches (byte
 /// ranges, ascending and non-overlapping), and the active index.
@@ -516,7 +517,7 @@ impl View for SearchView {
                 let within_start = (paint_start - line_start) as usize;
                 let within_end = (paint_end - line_start) as usize;
                 let (start_col, end_col) =
-                    crate::diag::byte_range_to_display_cols(line_bytes, within_start, within_end);
+                    byte_range_to_columns(line_bytes, within_start, within_end);
                 if end_col <= start_col {
                     continue;
                 }

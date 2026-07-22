@@ -32,6 +32,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::{Buffer, BufferId};
 use crate::cell::{CellCoord, CellGrid, Color, Glyph, Style};
+use crate::display_width::byte_to_column;
 use crate::rope::Position;
 use crate::view::{View, Viewport};
 
@@ -589,10 +590,6 @@ pub(crate) const POPUP_MAX_ROWS: u32 = 10;
 /// Minimum popup width in cells (glyph column + a readable label).
 const POPUP_MIN_WIDTH: u32 = 12;
 
-/// Tab-stop width in display columns, matching [`crate::diag`] /
-/// [`crate::text_view`].
-const TAB_WIDTH: u32 = 8;
-
 /// Style for the currently-selected row (reverse video so it pops on
 /// any base palette).
 fn selected_style() -> Style {
@@ -663,21 +660,9 @@ impl CompletionView {
     }
 }
 
-/// Display column of `byte_end` within `line_bytes` (tab-aware,
-/// UTF-8-aware). The completion twin of the diagnostic underline's
-/// column resolution.
+/// Display column of `byte_end` within `line_bytes`.
 fn display_col_for_byte(line_bytes: &[u8], byte_end: u32) -> u32 {
-    let end = (byte_end as usize).min(line_bytes.len());
-    let text = String::from_utf8_lossy(&line_bytes[..end]);
-    let mut col = 0u32;
-    for ch in text.chars() {
-        if ch == '\t' {
-            col += TAB_WIDTH - (col % TAB_WIDTH);
-        } else {
-            col += char_display_width(ch);
-        }
-    }
-    col
+    byte_to_column(line_bytes, byte_end as usize)
 }
 
 /// Resolved popup rectangle, in window-relative cells.
@@ -811,7 +796,7 @@ fn paint_popup_row(
         if col >= width {
             break;
         }
-        let cw = char_display_width(ch);
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0) as u32;
         if cw == 0 {
             continue;
         }
@@ -877,10 +862,6 @@ impl View for CompletionView {
             );
         }
     }
-}
-
-fn char_display_width(ch: char) -> u32 {
-    UnicodeWidthChar::width(ch).unwrap_or(0) as u32
 }
 
 // ---------------------------------------------------------------------------

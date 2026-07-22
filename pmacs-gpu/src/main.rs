@@ -40,10 +40,11 @@ use pmacs_protocol::{
     InstanceSignal, Key as ProtocolKey, LineNumberMode, MAX_STATUSLINE_FACE_BYTES,
     MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES, MAX_STATUSLINE_TOTAL_TEXT_BYTES,
     MenuPromptRow, Modifiers, PointerKind, SelectionSnapshot, StatuslineSegment, StyleSegment,
-    StyleSpan,
+    StyleSpan, TAB_STOP_COLUMNS,
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
 };
+use unicode_width::UnicodeWidthChar;
 use wgpu::MultisampleState;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -679,9 +680,9 @@ struct State {
     current_line_char_starts: Vec<u64>,
     /// Code-shape data used to give the minimap horizontal structure
     /// even though `FileStyleSummary` carries only one dominant style
-    /// per line. Refreshed when a new summary lands, keeping this
-    /// cache in cadence with the debounced minimap data rather than
-    /// rebuilding it for every typed byte.
+    /// per line. Summary replacement rebuilds the table; accepted text
+    /// edits update the affected line immediately (or rebuild after
+    /// structural/batched edits).
     current_line_shapes: Vec<MinimapLineShape>,
     /// Local CRDT replica seeded by `BufferSnapshot`. `None` in
     /// hello-world mode or before the first snapshot arrives in
@@ -2606,6 +2607,7 @@ impl State {
         if edits.is_empty() {
             return Ok(edits);
         }
+        self.refresh_minimap_shapes_after_edits(&edits, line_count_before);
         self.translate_cached_anchors(&edits);
         // A newline edit can cross a gutter digit boundary (9 -> 10,
         // 99 -> 100). Synchronize the painter-derived code width
@@ -2634,6 +2636,36 @@ impl State {
             translate_decorations(&mut self.current_decorations, *edit);
             translate_inline_adornments(&mut self.current_adornments, *edit);
         }
+    }
+
+    /// Keep minimap horizontal geometry in lock-step with accepted text
+    /// edits instead of waiting for the next debounced style summary.
+    /// The common one-line edit updates one cached shape; line-structure
+    /// or batched edits rebuild the table because their intermediate
+    /// coordinates need not describe the final line partition.
+    fn refresh_minimap_shapes_after_edits(
+        &mut self,
+        edits: &[TextProjectionEdit],
+        line_count_before: usize,
+    ) {
+        if edits.len() == 1
+            && self.current_line_starts.len() == line_count_before
+            && self.current_line_shapes.len() == self.current_line_starts.len()
+        {
+            let line = self
+                .current_line_starts
+                .partition_point(|&start| start <= edits[0].start)
+                .saturating_sub(1);
+            let start = self.current_line_starts[line] as usize;
+            let end = self
+                .current_line_starts
+                .get(line + 1)
+                .map_or(self.current_text.len(), |next| *next as usize - 1);
+            self.current_line_shapes[line] = minimap_line_shape(&self.current_text[start..end]);
+        } else {
+            self.current_line_shapes = minimap_line_shapes(&self.current_text);
+        }
+        self.minimap_cache = None;
     }
 
     /// Drop journal entries already reflected in a producer frame
@@ -2705,6 +2737,8 @@ impl State {
         let (line_starts, line_char_starts) = line_offset_tables(text);
         self.current_line_starts = line_starts;
         self.current_line_char_starts = line_char_starts;
+        self.current_line_shapes = minimap_line_shapes(text);
+        self.minimap_cache = None;
         let geometry_changed = self.sync_buffer_dimensions();
         self.reshape();
         if geometry_changed && caret_was_painted {
@@ -6070,46 +6104,21 @@ impl State {
         })
     }
 
-    /// Map an absolute source `byte` to `(slice line index, projected
-    /// byte offset within that shaped line)` by inverting the line's
-    /// `line_chunk_cache` projection (framing Q#F6): source bytes are
-    /// not projected bytes once inline adornments inject text. An
-    /// adornment anchor maps to the EARLIEST projected boundary — the
-    /// current left-gravity caret placement, before the injected
-    /// text. `None` when the byte's source line is outside the shaped
-    /// slice.
+    /// Map an absolute source byte to `(slice line index, projected
+    /// byte offset within that shaped line)` through the same reusable
+    /// chunk mapping used by decoration geometry.
+    /// Adornments retain left gravity, while a source tab's two byte
+    /// boundaries map to the leading and trailing edges of all of its
+    /// projected spaces.
     fn code_byte_to_projected(&self, byte: u64) -> Option<(usize, usize)> {
         let line_idx = self
             .current_line_starts
             .partition_point(|&s| s <= byte)
             .saturating_sub(1);
         let slice_i = line_idx.checked_sub(self.shaped_top)?;
-        if slice_i >= self.line_chunk_cache.len() {
-            return None;
-        }
+        let chunks = self.line_chunk_cache.get(slice_i)?;
         let rel = byte - self.current_line_starts[line_idx];
-        let mut projected = 0usize;
-        for chunk in &self.line_chunk_cache[slice_i] {
-            match chunk.source {
-                ChunkSource::Source { start } => {
-                    let len = chunk.text.len() as u64;
-                    if rel >= start && rel < start + len {
-                        return Some((slice_i, projected + (rel - start) as usize));
-                    }
-                }
-                ChunkSource::Adornment { anchor } => {
-                    // Source chunks tile the line, so reaching an
-                    // adornment chunk unmatched means the byte sits at
-                    // its anchor boundary (or past line end).
-                    if rel <= anchor {
-                        return Some((slice_i, projected));
-                    }
-                }
-            }
-            projected += chunk.text.len();
-        }
-        // Line end (the `\n` position, or EOF).
-        Some((slice_i, projected))
+        source_to_projected(chunks, rel).map(|projected| (slice_i, projected as usize))
     }
 
     /// Convert an absolute source byte to a cursor cosmic-text can
@@ -6255,11 +6264,11 @@ impl State {
     }
 
     /// Push one rect per visual line whose glyphs overlap the
-    /// buffer-absolute byte range `[lo, hi)`, spanning the matching
-    /// glyphs' horizontal extent. A range crossing visual-line
-    /// boundaries (wrapped or multi-line) fans out into one rect per
-    /// run. `line_offsets[run.line_i]` rebases the run's line-relative
-    /// glyph offsets into buffer-absolute space for the comparison.
+    /// slice-relative source byte range `[lo, hi)`, spanning the
+    /// matching projected glyphs' horizontal extent. Each source-line
+    /// intersection is mapped through its cached chunks first, so a
+    /// source tab covers every expanded space even when a soft wrap
+    /// divides those spaces between visual runs.
     fn push_glyph_extent_rects(
         &self,
         rects: &mut Vec<MinimapRect>,
@@ -6276,12 +6285,30 @@ impl State {
         let text_left = self.text_left();
         for run in self.buffer.layout_runs() {
             let line_base = line_offsets.get(run.line_i).copied().unwrap_or(0);
+            let line_end = line_offsets
+                .get(run.line_i + 1)
+                .copied()
+                .unwrap_or(self.view_range.1 - self.view_range.0);
+            let source_lo = lo.max(line_base);
+            let source_hi = hi.min(line_end);
+            if source_hi <= source_lo {
+                continue;
+            }
+            let Some(chunks) = self.line_chunk_cache.get(run.line_i) else {
+                continue;
+            };
+            let Some(projected_lo) = source_to_projected(chunks, source_lo - line_base) else {
+                continue;
+            };
+            let Some(projected_hi) = source_to_projected(chunks, source_hi - line_base) else {
+                continue;
+            };
             let mut min_x: Option<f32> = None;
             let mut max_x: Option<f32> = None;
             for glyph in run.glyphs {
-                let g_start = line_base + glyph.start as u64;
-                let g_end = line_base + glyph.end as u64;
-                if g_end <= lo || g_start >= hi {
+                let g_start = glyph.start as u64;
+                let g_end = glyph.end as u64;
+                if g_end <= projected_lo || g_start >= projected_hi {
                     continue;
                 }
                 let x0 = glyph.x;
@@ -6343,6 +6370,8 @@ struct RichChunk {
 enum ChunkSource {
     /// Verbatim source text starting at this slice byte offset.
     Source { start: u64 },
+    /// One source tab byte expanded into one or more projected spaces.
+    SourceTab { start: u64 },
     /// Injected adornment text (inlay hint) anchored at this slice
     /// byte offset. Hits inside it snap to the anchor.
     Adornment { anchor: u64 },
@@ -6383,9 +6412,10 @@ fn build_hit_runs(chunks: &[RichChunk]) -> (Vec<ProjectedRun>, Vec<u64>) {
     (runs, line_starts)
 }
 
-/// Map a projected byte offset back to a slice-relative source byte
-/// (Q#M2). Hits inside an adornment run snap to its anchor; offsets
-/// past the last run clamp to its end.
+/// Map a projected byte offset back to a slice-relative source byte.
+/// A source tab's leading boundary maps before the byte; every
+/// boundary inside its expanded spaces (including the trailing edge)
+/// maps after it. Adornments snap to their left-gravity anchor.
 fn projected_to_source(runs: &[ProjectedRun], projected: u64) -> Option<u64> {
     if runs.is_empty() {
         return None;
@@ -6397,8 +6427,46 @@ fn projected_to_source(runs: &[ProjectedRun], projected: u64) -> Option<u64> {
     let within = projected.saturating_sub(run.projected_start).min(run.len);
     match run.source {
         ChunkSource::Source { start } => Some(start + within),
+        ChunkSource::SourceTab { start } => Some(start + u64::from(within > 0)),
         ChunkSource::Adornment { anchor } => Some(anchor),
     }
+}
+
+/// Map a slice-relative source boundary into projected byte space.
+/// This is the inverse boundary policy shared by caret placement and
+/// horizontal decoration geometry. At an adornment anchor the earliest
+/// projected boundary wins, preserving left gravity.
+fn source_to_projected(chunks: &[RichChunk], source: u64) -> Option<u64> {
+    let mut projected = 0u64;
+    for chunk in chunks {
+        let len = chunk.text.len() as u64;
+        match chunk.source {
+            ChunkSource::Source { start } => {
+                if source <= start {
+                    return Some(projected);
+                }
+                let end = start + len;
+                if source <= end {
+                    return Some(projected + source - start);
+                }
+            }
+            ChunkSource::SourceTab { start } => {
+                if source <= start {
+                    return Some(projected);
+                }
+                if source <= start + 1 {
+                    return Some(projected + len);
+                }
+            }
+            ChunkSource::Adornment { anchor } => {
+                if source <= anchor {
+                    return Some(projected);
+                }
+            }
+        }
+        projected += len;
+    }
+    (!chunks.is_empty()).then_some(projected)
 }
 
 fn minimap_left(surface_width: u32) -> Option<f32> {
@@ -6727,9 +6795,10 @@ fn minimap_line_shape(line: &str) -> MinimapLineShape {
 
 fn advance_minimap_col(col: usize, ch: char) -> usize {
     if ch == '\t' {
-        ((col / 4) + 1) * 4
+        let tab_stop = TAB_STOP_COLUMNS as usize;
+        col + tab_stop - col % tab_stop
     } else {
-        col + 1
+        col + UnicodeWidthChar::width(ch).unwrap_or(0)
     }
 }
 
@@ -7666,7 +7735,89 @@ fn projected_rich_chunks(
             source: ChunkSource::Source { start: 0 },
         });
     }
-    chunks
+    expand_chunk_tabs(chunks)
+}
+
+/// Expand display tabs after source styling and adornment insertion.
+/// Chunks without tabs are moved through unchanged. A chunk containing
+/// tabs is split only at those bytes; every emitted space keeps the
+/// original color, while source tabs gain explicit provenance.
+fn expand_chunk_tabs(chunks: Vec<RichChunk>) -> Vec<RichChunk> {
+    let mut expanded = Vec::with_capacity(chunks.len());
+    let mut column = 0usize;
+    for chunk in chunks {
+        if !chunk.text.contains('\t') {
+            advance_display_column(&mut column, &chunk.text);
+            expanded.push(chunk);
+            continue;
+        }
+
+        let RichChunk {
+            text,
+            color,
+            source,
+        } = chunk;
+        let mut segment_start = 0usize;
+        for (byte, ch) in text.char_indices() {
+            if ch != '\t' {
+                continue;
+            }
+            if segment_start < byte {
+                let segment = &text[segment_start..byte];
+                advance_display_column(&mut column, segment);
+                expanded.push(RichChunk {
+                    text: segment.to_owned(),
+                    color,
+                    source: offset_chunk_source(source, segment_start as u64),
+                });
+            }
+            let tab_stop = TAB_STOP_COLUMNS as usize;
+            let tab_width = tab_stop - column % tab_stop;
+            expanded.push(RichChunk {
+                text: " ".repeat(tab_width),
+                color,
+                source: match source {
+                    ChunkSource::Source { start } => ChunkSource::SourceTab {
+                        start: start + byte as u64,
+                    },
+                    ChunkSource::Adornment { anchor } => ChunkSource::Adornment { anchor },
+                    ChunkSource::SourceTab { start } => ChunkSource::SourceTab { start },
+                },
+            });
+            column += tab_width;
+            segment_start = byte + 1;
+        }
+        if segment_start < text.len() {
+            let segment = &text[segment_start..];
+            advance_display_column(&mut column, segment);
+            expanded.push(RichChunk {
+                text: segment.to_owned(),
+                color,
+                source: offset_chunk_source(source, segment_start as u64),
+            });
+        }
+    }
+    expanded
+}
+
+fn offset_chunk_source(source: ChunkSource, byte_offset: u64) -> ChunkSource {
+    match source {
+        ChunkSource::Source { start } => ChunkSource::Source {
+            start: start + byte_offset,
+        },
+        ChunkSource::SourceTab { start } => ChunkSource::SourceTab { start },
+        ChunkSource::Adornment { anchor } => ChunkSource::Adornment { anchor },
+    }
+}
+
+fn advance_display_column(column: &mut usize, text: &str) {
+    for ch in text.chars() {
+        if ch == '\n' {
+            *column = 0;
+        } else {
+            *column += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
 }
 
 fn renderable_adornment_anchor(adornment: &InlineAdornment, text_len: u64) -> Option<u64> {
@@ -8565,6 +8716,109 @@ mod tests {
     }
 
     #[test]
+    fn tab_projection_uses_shared_stops_and_unicode_columns() {
+        let projected = |text: &str| {
+            projected_rich_chunks(text, &[], &[])
+                .into_iter()
+                .map(|chunk| chunk.text)
+                .collect::<String>()
+        };
+
+        assert_eq!(projected("\t"), "        ", "column 0 advances to 8");
+        assert_eq!(projected("1234567\t"), "1234567 ", "column 7 advances to 8");
+        assert_eq!(
+            projected("12345678\t"),
+            "12345678        ",
+            "column 8 advances to 16"
+        );
+        assert_eq!(
+            projected("界\t\n\u{301}\t"),
+            "界      \n\u{301}        ",
+            "wide scalars count as two, zero-width scalars as zero, and newline resets"
+        );
+    }
+
+    #[test]
+    fn tab_projection_preserves_source_and_adornment_provenance_and_style() {
+        let red = CellColor::Rgb(255, 0, 0);
+        let chunks = projected_rich_chunks(
+            "1234567\tX",
+            &[span(7, 8, red)],
+            &[adornment(0, AdornmentPlacement::AtOffset, "\t")],
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<String>(),
+            "        1234567 X",
+            "the adornment tab participates in the same logical column stream"
+        );
+        let source_tab = chunks
+            .iter()
+            .find(|chunk| matches!(chunk.source, ChunkSource::SourceTab { start: 7 }))
+            .expect("source tab has a first-class projected run");
+        assert_eq!(source_tab.text, " ");
+        assert_eq!(source_tab.color, cell_color_to_glyphon(red));
+        assert!(
+            chunks.iter().any(
+                |chunk| matches!(chunk.source, ChunkSource::Adornment { anchor: 0 })
+                    && chunk.text == "        "
+            ),
+            "adornment tabs expand without pretending to be source bytes"
+        );
+    }
+
+    #[test]
+    fn tab_projection_moves_chunks_without_tabs_unchanged() {
+        let text = String::from("wide 界 and plain");
+        let allocation = text.as_ptr();
+        let chunks = expand_chunk_tabs(vec![RichChunk {
+            text,
+            color: None,
+            source: ChunkSource::Source { start: 0 },
+        }]);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text.as_ptr(), allocation);
+    }
+
+    #[test]
+    fn source_tab_projection_boundaries_are_bidirectional() {
+        let chunks = projected_rich_chunks("\tX", &[], &[]);
+        let (runs, _) = build_hit_runs(&chunks);
+
+        assert_eq!(source_to_projected(&chunks, 0), Some(0));
+        assert_eq!(source_to_projected(&chunks, 1), Some(8));
+        assert_eq!(source_to_projected(&chunks, 2), Some(9));
+        assert_eq!(projected_to_source(&runs, 0), Some(0));
+        for projected in 1..=8 {
+            assert_eq!(
+                projected_to_source(&runs, projected),
+                Some(1),
+                "projected boundary {projected} inside the tab maps after its source byte"
+            );
+        }
+        assert_eq!(projected_to_source(&runs, 9), Some(2));
+    }
+
+    #[test]
+    fn adornment_tab_keeps_left_gravity_in_source_mapping() {
+        let chunks = projected_rich_chunks(
+            "X",
+            &[],
+            &[adornment(0, AdornmentPlacement::AtOffset, "\t")],
+        );
+        let (runs, _) = build_hit_runs(&chunks);
+
+        assert_eq!(source_to_projected(&chunks, 0), Some(0));
+        assert_eq!(source_to_projected(&chunks, 1), Some(9));
+        for projected in 0..8 {
+            assert_eq!(projected_to_source(&runs, projected), Some(0));
+        }
+    }
+
+    #[test]
     fn optimistic_delete_range_covers_single_codepoints_only() {
         let none = Modifiers::NONE;
         let text = "aé😀b";
@@ -9121,6 +9375,27 @@ mod tests {
                     content_cols: 1,
                 },
                 MinimapLineShape::default(),
+            ]
+        );
+    }
+
+    #[test]
+    fn minimap_columns_match_code_tab_and_unicode_widths() {
+        assert_eq!(
+            minimap_line_shapes("\tX\n1234567\tX\n界\u{301}\tX"),
+            vec![
+                MinimapLineShape {
+                    indent_cols: 8,
+                    content_cols: 1,
+                },
+                MinimapLineShape {
+                    indent_cols: 0,
+                    content_cols: 9,
+                },
+                MinimapLineShape {
+                    indent_cols: 0,
+                    content_cols: 9,
+                },
             ]
         );
     }
@@ -11578,6 +11853,141 @@ mod tests {
             (x_anchor - x1_plain).abs() < 0.5,
             "an anchor byte keeps left gravity — before the adornment \
              ({x_anchor} vs {x1_plain})"
+        );
+    }
+
+    #[test]
+    fn source_tab_caret_uses_projected_leading_and_trailing_boundaries() {
+        let Some(mut state) = headless_or_skip(320, 240, "\tX") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.reshape();
+
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 0,
+        });
+        let before = state.caret_rect().expect("caret before tab").x;
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: bid,
+            byte: 1,
+        });
+        let after = state.caret_rect().expect("caret after tab").x;
+        assert!(
+            after - before > 7.0 * state.mono_advance(),
+            "one source byte must span all eight projected spaces"
+        );
+    }
+
+    #[test]
+    fn source_tab_hit_testing_uses_projected_space_boundaries() {
+        let Some(mut state) = headless_or_skip(320, 240, "\tX") else {
+            return;
+        };
+        state.current_buffer_id = Some(BufferId::next());
+        state.reshape();
+        let advance = state.mono_advance();
+        let y = f64::from(TEXT_TOP + state.fm.code_line_height() / 2.0);
+
+        assert_eq!(
+            state.hit_test_source_byte(f64::from(state.text_left()), y),
+            Some(0),
+            "the projected leading edge maps before the source tab"
+        );
+        assert_eq!(
+            state.hit_test_source_byte(f64::from(state.text_left() + advance * 2.5), y,),
+            Some(1),
+            "a hit inside the expanded spaces maps after the source tab"
+        );
+    }
+
+    #[test]
+    fn tab_decoration_geometry_covers_spaces_split_by_soft_wrap() {
+        let Some(mut state) = headless_or_skip(64, 240, "\tX") else {
+            return;
+        };
+        let bid = BufferId::next();
+        state.current_buffer_id = Some(bid);
+        state.current_decorations = vec![Decoration {
+            range: ByteRange { start: 0, end: 1 },
+            kind: DecorationKind::Selection,
+        }];
+        state.reshape();
+        assert!(
+            state
+                .buffer
+                .layout_runs()
+                .filter(|run| run.line_i == 0)
+                .count()
+                > 1,
+            "precondition: the eight projected spaces wrap"
+        );
+
+        let line_offsets = line_byte_offsets(&state.current_text);
+        let mut rects = Vec::new();
+        state.collect_own_decoration_rects(
+            &mut rects,
+            &line_offsets,
+            state.view_range.0,
+            state.view_range.1,
+        );
+        assert!(
+            rects.len() > 1,
+            "the source tab selection must fan out across wrapped visual runs"
+        );
+        assert!(
+            rects.iter().all(|rect| rect.w > 0.0),
+            "every wrapped piece must retain horizontal geometry"
+        );
+    }
+
+    #[test]
+    fn visible_line_tab_edit_refreshes_cached_projection() {
+        let Some(mut state) = headless_or_skip(320, 240, "aX") else {
+            return;
+        };
+        state.minimap_cache = Some(((0, 0, 0, 0), vec![1]));
+        let edits = state
+            .apply_loro_text_delta_batches(&[vec![
+                loro::TextDelta::Retain {
+                    retain: 1,
+                    attributes: None,
+                },
+                loro::TextDelta::Insert {
+                    insert: "\t".to_owned(),
+                    attributes: None,
+                },
+            ]])
+            .expect("visible edit applies");
+
+        assert_eq!(
+            edits,
+            vec![TextProjectionEdit {
+                start: 1,
+                old_end: 1,
+                inserted_len: 1,
+            }]
+        );
+        assert_eq!(state.buffer.lines[0].text(), "a       X");
+        assert_eq!(
+            state.current_line_shapes[0],
+            MinimapLineShape {
+                indent_cols: 0,
+                content_cols: 9,
+            },
+            "the minimap shape must refresh in the same edit transaction"
+        );
+        assert!(
+            state.minimap_cache.is_none(),
+            "text geometry changes must invalidate cached minimap vertices"
+        );
+        assert!(
+            state.line_chunk_cache[0]
+                .iter()
+                .any(|chunk| matches!(chunk.source, ChunkSource::SourceTab { start: 1 })),
+            "the incremental code-line cache must immediately carry tab provenance"
         );
     }
 
