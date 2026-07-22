@@ -57,7 +57,8 @@ If it does not, stop and repair the remote/fetch configuration.
 - Base: canonical `main` @ `8bd8298`.
 - Framing head: `42a28b9` (`docs/locals-query-processing-framing.md`).
 - Implementation head: `47ffe5d`.
-- State: implementation complete; PR not yet opened. Protocol remains v18.
+- PR: #134, <https://github.com/levineuwirth/pmacs/pull/134>, open for review.
+  Implementation is complete; protocol remains v18.
 - Scope: bundled Lua/JavaScript/TypeScript locals metadata, lexical
   scope/definition/value/reference resolution cached on each settled layer,
   and shared `#is?`/`#is-not? local` filtering in the TUI and semantic/GPU

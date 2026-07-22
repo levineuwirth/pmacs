@@ -1,7 +1,7 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, with locals-query processing implemented on
-`locals-query-processing` and awaiting review, after modeline language
+**Last updated: 2026-07-22, with locals-query processing (#134) implemented
+and awaiting review, after modeline language
 detection (#132), Vterm Stage 2 (#130), and mode system wiring (#129/#131)
 landed on `main`. Vterm Stage 3 is not implemented.**
 This file is the
@@ -341,9 +341,10 @@ commands, read `docs/active-work.md` immediately after this file.
     editing/indent/comment items that were config-blocked.
   - **Mode system wiring COMPLETE (#129)** — major-mode keymaps,
     introspection, lifecycle initialization, and statusline display shipped.
-  - **Locals-query processing IN REVIEW** — grammar locals metadata, lexical
-    resolution, settled per-layer facts, and shared TUI/GPU local-predicate
-    filtering are implemented on `locals-query-processing` @ `47ffe5d`.
+  - **Locals-query processing IN REVIEW — #134** — grammar locals metadata,
+    lexical resolution, settled per-layer facts, and shared TUI/GPU
+    local-predicate filtering are implemented on `locals-query-processing`
+    @ `47ffe5d`.
   - Remaining ranked arcs: 6 folding, 7 DAP, 8 GPU splits, plus the
     `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
