@@ -22,6 +22,10 @@ local inflight_parse_by_buffer = {}
 local parse_buffer_by_key = {}
 local parse_lang_by_buffer = {}
 local reparse_requested_by_buffer = {}
+-- Fresh-load language decision, including an explicit false sentinel for
+-- "resolved none". Syntax, LSP, pairing, comments, and initial major mode all
+-- consume this pin rather than re-sniffing mutable file content independently.
+local detected_language_by_buffer = {}
 -- Buffers already warned about hitting the injection layer cap (Q#IJ3);
 -- keyed like the others so we warn once, and re-arm if the file stops
 -- capping (an edit removed the excess regions).
@@ -200,21 +204,254 @@ function pmacs.parse.language_from_filename(name)
   return pmacs.parse.filenames[base]
 end
 
+-- Modeline → language detection ---------------------------------------------
+
+local MODELINE_WINDOW_BYTES = 8 * 1024
+local VIM_MODELINE_LINES = 5
+local MODELINE_NAME_BYTES = 128
+
+pmacs.parse.modeline_aliases = pmacs.parse.modeline_aliases or {}
+local default_modeline_aliases = {
+  ["c++"] = "cpp",
+  cxx = "cpp",
+  sh = "bash",
+  shell = "bash",
+  ["shell-script"] = "bash",
+  zsh = "bash",
+  py = "python",
+  js = "javascript",
+  js2 = "javascript",
+  jsx = "javascriptreact",
+  ts = "typescript",
+  tsx = "typescriptreact",
+  yml = "yaml",
+  makefile = "make",
+  docker = "dockerfile",
+}
+for name, language in pairs(default_modeline_aliases) do
+  if pmacs.parse.modeline_aliases[name] == nil then
+    pmacs.parse.modeline_aliases[name] = language
+  end
+end
+
+local function normalize_modeline_name(name)
+  if type(name) ~= "string" then return nil end
+  name = name:gsub("^[ \t]+", ""):gsub("[ \t]+$", ""):lower()
+  if #name == 0 or #name > MODELINE_NAME_BYTES then return nil end
+  if not name:match("^[a-z0-9][a-z0-9+_-]*$") then return nil end
+  local alias = pmacs.parse.modeline_aliases[name]
+  if alias == nil then return name end
+  if type(alias) ~= "string" or #alias == 0 or #alias > MODELINE_NAME_BYTES then
+    return nil
+  end
+  if not alias:match("^[a-z0-9][a-z0-9+_-]*$") then return nil end
+  return alias
+end
+
+local function without_trailing_cr(line)
+  if line:sub(-1) == "\r" then return line:sub(1, -2) end
+  return line
+end
+
+-- Return the first five and last five complete logical lines. Each entry is
+-- `{ text, offset }`, where offset is the zero-based buffer byte position.
+-- The suffix's leading partial line is discarded and does not consume a slot.
+local function modeline_edge_lines(buf)
+  local ok_len, length = pcall(function() return buf:len() end)
+  if not ok_len or not length or length <= 0 then return {}, {} end
+
+  local prefix_end = math.min(length, MODELINE_WINDOW_BYTES)
+  local ok_prefix, prefix = pcall(function() return buf:slice(0, prefix_end) end)
+  if not ok_prefix or type(prefix) ~= "string" then return {}, {} end
+
+  local front = {}
+  local pos = 1
+  while #front < VIM_MODELINE_LINES and pos <= #prefix do
+    local newline = prefix:find("\n", pos, true)
+    if not newline then
+      if prefix_end < length then break end
+      newline = #prefix + 1
+    end
+    front[#front + 1] = {
+      text = without_trailing_cr(prefix:sub(pos, newline - 1)),
+      offset = pos - 1,
+    }
+    if newline > #prefix then break end
+    pos = newline + 1
+  end
+
+  local tail_start = 0
+  local scan_start = 1
+  if length > MODELINE_WINDOW_BYTES then
+    -- Keep the one-byte line-boundary probe plus suffix content within the
+    -- same 8 KiB read budget.
+    tail_start = length - (MODELINE_WINDOW_BYTES - 1)
+    local ok_probe, probe =
+      pcall(function() return buf:slice(tail_start - 1, tail_start) end)
+    if not ok_probe or probe ~= "\n" then
+      scan_start = nil
+    end
+  end
+
+  local tail = prefix
+  if tail_start > 0 then
+    local ok_tail
+    ok_tail, tail = pcall(function() return buf:slice(tail_start, length) end)
+    if not ok_tail or type(tail) ~= "string" then return front, front end
+  end
+  if scan_start == nil then
+    local first_newline = tail:find("\n", 1, true)
+    if not first_newline then return front, front end
+    scan_start = first_newline + 1
+  end
+
+  local reverse_tail = {}
+  local line_end = #tail
+  if line_end >= scan_start and tail:byte(line_end) == 10 then
+    line_end = line_end - 1
+  end
+  while line_end >= scan_start and #reverse_tail < VIM_MODELINE_LINES do
+    local i = line_end
+    while i >= scan_start and tail:byte(i) ~= 10 do
+      i = i - 1
+    end
+    local line_start = i + 1
+    reverse_tail[#reverse_tail + 1] = {
+      text = without_trailing_cr(tail:sub(line_start, line_end)),
+      offset = tail_start + line_start - 1,
+    }
+    line_end = i - 1
+  end
+
+  local edges = {}
+  local seen = {}
+  for _, entry in ipairs(front) do
+    edges[#edges + 1] = entry
+    seen[entry.offset] = true
+  end
+  for i = #reverse_tail, 1, -1 do
+    local entry = reverse_tail[i]
+    if not seen[entry.offset] then
+      edges[#edges + 1] = entry
+      seen[entry.offset] = true
+    end
+  end
+  return front, edges
+end
+
+local function emacs_mode_on_line(entry, consider)
+  local line = entry.text
+  local search_from = 1
+  while true do
+    local open = line:find("-*-", search_from, true)
+    if not open then return end
+    local close = line:find("-*-", open + 3, true)
+    if not close then return end
+    local payload = line:sub(open + 3, close - 1)
+    if payload:find(":", 1, true) then
+      for part_at, part in payload:gmatch("()([^;]+)") do
+        local key, value =
+          part:match("^[ \t]*([%w_-]+)[ \t]*:[ \t]*(.-)[ \t]*$")
+        if key and key:lower() == "mode" then
+          local mode = normalize_modeline_name(value)
+          if mode then consider(mode, entry.offset + open + part_at) end
+        end
+      end
+    else
+      local mode = normalize_modeline_name(payload)
+      if mode then consider(mode, entry.offset + open) end
+    end
+    search_from = close + 3
+  end
+end
+
+local function vim_assignment(token)
+  return token:match("^ft=(.+)$") or token:match("^filetype=(.+)$")
+end
+
+local function vim_mode_at(entry, marker_at, marker, consider)
+  local line = entry.text
+  local rest_at = marker_at + #marker
+  local rest = line:sub(rest_at)
+  local full_set_at = rest:match("^[ \t]*set[ \t]+()")
+  local option_at = full_set_at
+  if not option_at and marker ~= "Vim:" then
+    option_at = rest:match("^[ \t]*se[ \t]+()")
+  end
+  if marker == "Vim:" and not full_set_at then return end
+
+  if option_at then
+    local terminator = rest:find(":", option_at, true)
+    if not terminator then return end
+    local options = rest:sub(option_at, terminator - 1)
+    for token_at, token in options:gmatch("()([^ \t]+)") do
+      local value = vim_assignment(token)
+      local mode = value and normalize_modeline_name(value)
+      if mode then
+        consider(mode, entry.offset + rest_at + option_at + token_at - 3)
+      end
+    end
+    return
+  end
+
+  for token_at, token in rest:gmatch("()([^ \t:]+)") do
+    local value = vim_assignment(token)
+    local mode = value and normalize_modeline_name(value)
+    if mode then consider(mode, entry.offset + rest_at + token_at - 2) end
+  end
+end
+
+local function vim_modes_on_line(entry, consider)
+  local line = entry.text
+  for _, marker in ipairs({ "vim:", "vi:", "Vim:" }) do
+    local search_from = 1
+    while true do
+      local marker_at = line:find(marker, search_from, true)
+      if not marker_at then break end
+      local previous = marker_at > 1 and line:sub(marker_at - 1, marker_at - 1)
+      if marker_at == 1 or previous == " " or previous == "\t" then
+        vim_mode_at(entry, marker_at, marker, consider)
+      end
+      search_from = marker_at + 1
+    end
+  end
+end
+
+function pmacs.parse.language_from_modeline(buf)
+  if not buf then return nil end
+  local front, edges = modeline_edge_lines(buf)
+  local mode
+  local mode_at = -1
+  local function consider(candidate, candidate_at)
+    if candidate_at >= mode_at then
+      mode = candidate
+      mode_at = candidate_at
+    end
+  end
+
+  if front[1] then emacs_mode_on_line(front[1], consider) end
+  if front[1] and front[1].text:sub(1, 2) == "#!" and front[2] then
+    emacs_mode_on_line(front[2], consider)
+  end
+  for _, entry in ipairs(edges) do
+    vim_modes_on_line(entry, consider)
+  end
+  return mode
+end
+
 -- Set of buffer ids that already have a highlight overlay
 -- attached, keyed by raw id (number). A buffer that opens, gets
 -- highlights, gets killed, and is reopened needs a fresh overlay
 -- attach; the kill path clears the entry below if/when it lands.
 local highlighted_buffers = {}
 
--- Filetype-aware language resolution for the active buffer, in precedence
--- order: grammar extension → LSP filetype map → filename → shebang. A
--- recognized extension is authoritative (a `.py` must not fall through to
--- a stray `#!/bin/sh` and be misparsed as bash); the basename map handles
--- extensionless `Dockerfile`/`Makefile`/rc-dotfiles, and only then does
--- the shebang (buffer content) get a look. Keyed on `buf:name()` for the
--- path parts (matching the historical behavior — path-less buffers that
--- resolve a grammar by name keep working).
-local function resolve_active_language(buf)
+-- Fresh language inference for a buffer, in precedence order: explicit
+-- modeline → grammar extension → LSP filetype map → filename → shebang.
+-- Path components intentionally come from `buf:name()` to preserve syntax's
+-- historical grammar-by-name behavior for pathless buffers.
+local function detect_buffer_language(buf)
+  local modeline = pmacs.parse.language_from_modeline(buf)
+  if modeline then return modeline end
   local name = buf:name()
   if name then
     local grammar = pmacs.parse.language_for_path(name)
@@ -228,31 +465,34 @@ local function resolve_active_language(buf)
   return pmacs.parse.language_from_shebang(buf)
 end
 
+local function refresh_buffer_language(buf)
+  local language = detect_buffer_language(buf)
+  detected_language_by_buffer[tostring(buf)] = language or false
+  return language
+end
+
+function pmacs.parse.buffer_language(buf)
+  if not buf then return nil end
+  local key = tostring(buf)
+  local language = detected_language_by_buffer[key]
+  if language ~= nil then return language or nil end
+  return refresh_buffer_language(buf)
+end
+
 local function attach_for_active_buffer(initialize_mode)
   local buf = pmacs.window.buffer()
   if not buf then return end
   local key = tostring(buf)
-  -- Reuse the language pinned at first attach if this buffer already has
-  -- a parse view. A switch-away/back re-runs this hook (via after-switch);
-  -- re-resolving there would re-sniff a shebang the user has since edited
-  -- and silently swap the grammar — and diverge from the LSP side, which
-  -- keeps its existing attachment across the switch. A first-seen buffer
-  -- (no view yet) resolves normally. Gate dispatch on `_has_language`: the
-  -- resolution chain can still yield a language with no grammar — a
-  -- shebang or filetype mapping to a server-only or unsupported language
-  -- (e.g. an init.lua `pmacs.parse.shebangs.ruby = "ruby"`) — and
-  -- dispatching one would raise "unknown language" (caught, but noise) and
-  -- never gives a wrong-grammar tree.
-  local lang = pmacs.parse._has_view(buf) and parse_lang_by_buffer[key]
-    or resolve_active_language(buf)
-  -- The detected language is also the initial major-mode name. Do this
-  -- before grammar gating: a language supplied only by an LSP filetype or
-  -- shebang mapping is still a valid mode even when no parser is bundled.
-  -- Only after-load initializes it; after-switch must preserve explicit
-  -- overrides and explicit nil clears.
-  if initialize_mode and lang and pmacs.buffer.major_mode(buf) == nil then
-    pmacs.buffer.set_major_mode(buf, lang)
-  end
+  -- A genuine load refreshes every detection signal and replaces the initial
+  -- major mode, including with nil. Switches consume the pin: editing a
+  -- shebang/modeline cannot silently swap parser/LSP language, while a
+  -- registry-only hidden buffer still resolves when first visited.
+  local lang = initialize_mode and refresh_buffer_language(buf)
+    or pmacs.parse.buffer_language(buf)
+  if initialize_mode then pmacs.buffer.set_major_mode(buf, lang) end
+  -- The resolution chain can yield a valid mode with no grammar. Gate dispatch
+  -- so custom/server-only modes stay quiet rather than raising "unknown
+  -- language" from the parse worker.
   if not lang or not pmacs.parse._has_language(lang) then return end
   pmacs.parse._dispatch(buf, lang)
   -- T M4.3: install the syntax-highlight overlay for this buffer.

@@ -471,33 +471,21 @@ end
 local function buffer_language(buf)
   local ok, path = pcall(function() return buf and buf:path() end)
   if not ok or not path then return nil end
-  -- Grammar-backed detection first (keeps rust/.rs etc. exactly as
-  -- before); fall back to the LSP-only filetype map so languages with a
-  -- server but no tree-sitter grammar (Python) still attach; then the
-  -- basename map for filename-identified files (`Dockerfile`,
-  -- `CMakeLists.txt`); finally, for an extensionless file, sniff a
-  -- `#!interp` shebang so e.g. `#!/bin/sh` still attaches its server.
-  local lang = pmacs.parse.language_for_path(path)
-  if lang then return lang end
-  local ext = path:match("%.([%w_]+)$")
-  local by_ext = ext and pmacs.lsp.filetypes[ext]
-  if by_ext then return by_ext end
-  local by_name = pmacs.parse.language_from_filename(path)
-  if by_name then return by_name end
-  return pmacs.parse.language_from_shebang(buf)
+  -- Syntax owns the fresh-load inference and pin. LSP retains only its
+  -- path-eligibility rule: without a backing path it cannot construct a URI or
+  -- project root, even when syntax can infer a grammar from a buffer name.
+  return pmacs.parse.buffer_language(buf)
 end
--- Public: the per-buffer language chain. Auto-pairing resolves
--- relevance against the buffer its typed-edit record names — which a
--- context-switching command may have left inactive by callback time —
--- so the parameterized form is the primitive and the active-buffer
--- form delegates.
+-- Public: the pinned per-buffer language. Auto-pairing resolves relevance
+-- against the buffer its typed-edit record names — which a context-switching
+-- command may have left inactive by callback time — so the parameterized form
+-- is the primitive and the active-buffer form delegates.
 pmacs.lsp.buffer_language = buffer_language
 
 local function active_buffer_language()
   return buffer_language(pmacs.window.buffer())
 end
--- Public: the comment-toggle module (and future language-aware Lua)
--- reuses this grammar+filetypes chain instead of replicating it.
+-- Public: comment-toggle and other language-aware Lua reuse the same pin.
 pmacs.lsp.active_buffer_language = active_buffer_language
 
 -- Directory component of a path, or nil if it has none.
@@ -714,7 +702,7 @@ local function attach_buffer(buf)
     -- carries the full current text, superseding them.
     pending_did_change[key] = nil
   end
-  local language = active_buffer_language()
+  local language = buffer_language(buf)
   if not language then return nil end
   -- Path resolved before spawn so the server's `rootUri` can be
   -- derived from the file's project (see `project_root_for`).

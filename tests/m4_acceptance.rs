@@ -6101,6 +6101,17 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         Some("bash"),
         "editing the shebang must not re-switch the pinned grammar"
     );
+    let lsp_language: Option<String> = s
+        .lua_host
+        .lua()
+        .load("return pmacs.lsp.buffer_language(pmacs.window.buffer())")
+        .eval()
+        .expect("pinned LSP language");
+    assert_eq!(
+        lsp_language.as_deref(),
+        Some("bash"),
+        "language-aware consumers must share the shebang pin"
+    );
 
     // Switch away to another buffer and back: the after-switch reattach
     // must reuse the pinned bash grammar rather than re-sniff the (now
@@ -6135,6 +6146,322 @@ fn m4_shebang_edit_keeps_pinned_grammar() {
         .eval()
         .expect("errs");
     assert_eq!(errs, 0, "reparse with the pinned grammar reports no error");
+}
+
+/// Modeline smoke: explicit file metadata overrides a misleading extension,
+/// and syntax, LSP language introspection, and initial major mode agree.
+#[test]
+fn m4_modeline_overrides_extension_end_to_end() {
+    use pmacs::editor::EditorState;
+    let mut s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("misleading.py");
+    std::fs::write(&file, b"-- -*- mode: lua -*-\nprint('ok')\n").expect("write");
+    let file_disp = file.display();
+
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             pmacs.buffer.find_or_open('{file_disp}')"
+        ))
+        .exec()
+        .expect("open modeline fixture");
+
+    let (parsed, lsp, mode): (Option<String>, Option<String>, Option<String>) = s
+        .lua_host
+        .lua()
+        .load(
+            "local b = pmacs.window.buffer()
+             return pmacs.parse.buffer_language(b),
+                    pmacs.lsp.active_buffer_language(),
+                    pmacs.buffer.major_mode(b)",
+        )
+        .eval()
+        .expect("modeline language surfaces");
+    assert_eq!(parsed.as_deref(), Some("lua"));
+    assert_eq!(lsp.as_deref(), Some("lua"));
+    assert_eq!(mode.as_deref(), Some("lua"));
+
+    pump_async(&mut s, |st| {
+        current_tree_language(st).as_deref() == Some("lua")
+    });
+}
+
+#[test]
+fn m4_modeline_parser_matches_supported_emacs_and_vim_forms() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let resolve = |text: &str| -> Option<String> {
+        s.lua_host
+            .lua()
+            .load(format!(
+                "local b = pmacs.window.buffer()
+                 if b:len() > 0 then b:delete(0, b:len()) end
+                 b:insert(0, {text:?})
+                 return pmacs.parse.language_from_modeline(b)"
+            ))
+            .eval()
+            .expect("resolve modeline")
+    };
+
+    for (text, want) in [
+        ("# -*- mode: Python; coding: utf-8 -*-\n", Some("python")),
+        ("-- -*- Lua -*-\n", Some("lua")),
+        ("#!/usr/bin/env python\n# -*- mode: Lua -*-\n", Some("lua")),
+        ("# -*- mode: python; mode: lua -*-\n", Some("lua")),
+        ("vim:ft=python:sw=4:\n", Some("python")),
+        ("# vim: set ft=lua sw=2:\n", Some("lua")),
+        ("# vi:filetype=yaml:et:\n", Some("yaml")),
+        ("# Vim: set filetype=toml:\n", Some("toml")),
+        ("one\ntwo\nthree\nfour\nfive\n# vim:ft=lua:\n", Some("lua")),
+        ("# vim: set ft=python:\r\n", Some("python")),
+    ] {
+        assert_eq!(resolve(text).as_deref(), want, "{text:?}");
+    }
+
+    for text in [
+        "plain\n# -*- mode: lua -*-\n", // line 2 needs a shebang
+        "# Vim:ft=lua:\n",              // uppercase marker requires `set`
+        "# Vim: se ft=lua:\n",          // uppercase marker requires literal `set`
+        "# vim: set sw=4: ft=python\n", // assignment follows the terminator
+        "# vim: set ft=python\n",       // set form needs a terminator
+        "# vim:ft:python:\n",           // colon is an option separator
+        "# vim: set ft:python :\n",     // colon terminates the option section
+    ] {
+        assert_eq!(resolve(text), None, "{text:?}");
+    }
+}
+
+#[test]
+fn m4_modeline_parser_enforces_boundaries_aliases_and_conflicts() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let resolve = |text: &str| -> Option<String> {
+        s.lua_host
+            .lua()
+            .load(format!(
+                "local b = pmacs.window.buffer()
+                 if b:len() > 0 then b:delete(0, b:len()) end
+                 b:insert(0, {text:?})
+                 return pmacs.parse.language_from_modeline(b)"
+            ))
+            .eval()
+            .expect("resolve modeline")
+    };
+
+    for (text, want) in [
+        ("# vim:ft=zsh:\n", "bash"),
+        ("# -*- mode: C++ -*-\n", "cpp"),
+        ("# -*- mode: js2 -*-\n", "javascript"),
+        ("# vim:ft=tsx:\n", "typescriptreact"),
+        ("# vim:ft=docker:\n", "dockerfile"),
+    ] {
+        assert_eq!(resolve(text).as_deref(), Some(want), "{text:?}");
+    }
+
+    let conflict = "# -*- mode: python; mode: yaml -*-\n2\n3\n4\n5\n# vim:ft=lua:\n";
+    assert_eq!(
+        resolve(conflict).as_deref(),
+        Some("lua"),
+        "last valid assignment in document order wins across overlapping edges"
+    );
+
+    let middle = "1\n2\n3\n4\n5\n# vim:ft=lua:\n7\n8\n9\n10\n11\n";
+    assert_eq!(
+        resolve(middle),
+        None,
+        "sixth line from both edges is outside the scan"
+    );
+
+    let partial_with_live_tail =
+        format!("{}\n# vim:ft=lua:\n1\n2\n3\n4", "x".repeat(8 * 1024 + 64));
+    assert_eq!(
+        resolve(&partial_with_live_tail).as_deref(),
+        Some("lua"),
+        "discarded suffix fragment does not consume a tail-line slot"
+    );
+
+    let marker_in_partial = format!("{} vim:ft=lua:\n1\n2\n3\n4\n5", "x".repeat(8 * 1024 + 64));
+    assert_eq!(
+        resolve(&marker_in_partial),
+        None,
+        "modeline in a truncated edge line is ignored"
+    );
+
+    let overlong = format!("# vim:ft={}:\n", "a".repeat(129));
+    for text in [
+        "prefixvim:ft=lua:\n".to_owned(),
+        "# vim:ft=lua!:\n".to_owned(),
+        overlong,
+    ] {
+        assert_eq!(resolve(&text), None, "{text:?}");
+    }
+
+    s.lua_host
+        .lua()
+        .load("pmacs.parse.modeline_aliases.sh = 'lua'")
+        .exec()
+        .expect("override modeline alias");
+    assert_eq!(resolve("# vim:ft=sh:\n").as_deref(), Some("lua"));
+    s.lua_host
+        .lua()
+        .load("pmacs.parse.modeline_aliases.sh = 'BAD VALUE'")
+        .exec()
+        .expect("install invalid modeline alias");
+    assert_eq!(resolve("# vim:ft=sh:\n"), None);
+    s.lua_host
+        .lua()
+        .load("pmacs.parse.modeline_aliases.sh = 'bash'")
+        .exec()
+        .expect("restore modeline alias");
+}
+
+#[test]
+fn m4_modeline_unknown_mode_is_quiet_and_parser_free() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, b"# vim:ft=prose:\nhello\n").expect("write");
+    let file_disp = file.display();
+
+    let (mode, language, has_view, errors): (Option<String>, Option<String>, bool, i64) = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             _G.__modeline_errors = {{}}
+             local real_error = pmacs.error
+             pmacs.error = function(message)
+               table.insert(_G.__modeline_errors, message)
+             end
+             local b = pmacs.buffer.find_or_open('{file_disp}')
+             local mode = pmacs.buffer.major_mode(b)
+             local language = pmacs.parse.buffer_language(b)
+             local has_view = pmacs.parse._has_view(b)
+             local errors = #_G.__modeline_errors
+             pmacs.error = real_error
+             return mode, language, has_view, errors"
+        ))
+        .eval()
+        .expect("open unknown modeline mode");
+
+    assert_eq!(mode.as_deref(), Some("prose"));
+    assert_eq!(language.as_deref(), Some("prose"));
+    assert!(!has_view, "unknown modeline must not dispatch a parser");
+    assert_eq!(errors, 0, "unknown modeline must not report an error");
+}
+
+#[test]
+fn m4_modeline_language_is_pinned_until_reopen() {
+    use pmacs::editor::EditorState;
+    let mut s = EditorState::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("mutable.txt");
+    let other = dir.path().join("other.txt");
+    std::fs::write(&file, b"-- -*- mode: lua -*-\nprint('one')\n").expect("write");
+    std::fs::write(&other, b"other\n").expect("write other");
+    let file_disp = file.display();
+    let other_disp = other.display();
+
+    s.lua_host
+        .lua()
+        .load(format!(
+            "pmacs.lsp.config = {{}}
+             _G.MODELINE_BUFFER = pmacs.buffer.find_or_open('{file_disp}')"
+        ))
+        .exec()
+        .expect("open mutable modeline fixture");
+    pump_async(&mut s, |st| {
+        current_tree_language(st).as_deref() == Some("lua")
+    });
+
+    let (language, mode): (Option<String>, Option<String>) = s
+        .lua_host
+        .lua()
+        .load(
+            "local b = MODELINE_BUFFER
+             local text = b:slice(0, b:len())
+             local start = assert(text:find('lua', 1, true)) - 1
+             b:replace(start, start + 3, 'python')
+             pmacs.hook.run('buffer.after-edit')
+             return pmacs.lsp.buffer_language(b), pmacs.buffer.major_mode(b)",
+        )
+        .eval()
+        .expect("edit loaded modeline");
+    assert_eq!(language.as_deref(), Some("lua"));
+    assert_eq!(mode.as_deref(), Some("lua"));
+    for _ in 0..64 {
+        s.tick_async();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(current_tree_language(&s).as_deref(), Some("lua"));
+
+    let (language, mode): (Option<String>, Option<String>) = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "pmacs.buffer.set_major_mode(MODELINE_BUFFER, 'markdown')
+             pmacs.buffer.find_or_open('{other_disp}')
+             pmacs.window.switch_buffer(MODELINE_BUFFER)
+             return pmacs.lsp.buffer_language(MODELINE_BUFFER),
+                    pmacs.buffer.major_mode(MODELINE_BUFFER)"
+        ))
+        .eval()
+        .expect("switch with explicit major-mode override");
+    assert_eq!(language.as_deref(), Some("lua"));
+    assert_eq!(mode.as_deref(), Some("markdown"));
+
+    s.lua_host
+        .lua()
+        .load(format!("pmacs.buffer.find_or_open('{other_disp}')"))
+        .exec()
+        .expect("switch away before removing old buffer");
+    std::fs::write(&file, b"# -*- mode: python -*-\nprint('two')\n").expect("rewrite");
+    let (new_id, language, mode): (String, Option<String>, Option<String>) = s
+        .lua_host
+        .lua()
+        .load(format!(
+            "local old = MODELINE_BUFFER
+             pmacs.buffer.remove(old)
+             local reopened = pmacs.buffer.find_or_open('{file_disp}')
+             return tostring(reopened), pmacs.lsp.buffer_language(reopened),
+                    pmacs.buffer.major_mode(reopened)"
+        ))
+        .eval()
+        .expect("reopen changed modeline fixture");
+    assert_ne!(
+        new_id,
+        s.lua_host
+            .lua()
+            .load("return tostring(MODELINE_BUFFER)")
+            .eval::<String>()
+            .unwrap(),
+        "reopen must allocate a fresh buffer id"
+    );
+    assert_eq!(language.as_deref(), Some("python"));
+    assert_eq!(mode.as_deref(), Some("python"));
+    pump_async(&mut s, |st| {
+        current_tree_language(st).as_deref() == Some("python")
+    });
+}
+
+#[test]
+fn m4_modeline_shared_resolver_preserves_pathless_lsp_guard() {
+    use pmacs::editor::EditorState;
+    let s = EditorState::new();
+    let (syntax, lsp): (Option<String>, Option<String>) = s
+        .lua_host
+        .lua()
+        .load(
+            "local b = pmacs.buffer.create('scratch.lua')
+             return pmacs.parse.buffer_language(b), pmacs.lsp.buffer_language(b)",
+        )
+        .eval()
+        .expect("resolve pathless language");
+    assert_eq!(syntax.as_deref(), Some("lua"));
+    assert_eq!(lsp, None, "LSP requires a backing path");
 }
 
 /// Filename detection: `pmacs.parse.language_from_filename` maps a
