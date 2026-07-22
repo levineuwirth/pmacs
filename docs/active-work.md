@@ -14,7 +14,8 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `86fc1bc` (Vterm Stage 2 #130 merged; protocol v18).
+  `githubsucks/main` @ `1dd47fc` (modeline detection #132 merged atop Vterm
+  Stage 2 #130; protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,44 +49,43 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `86fc1bc` or a newer intentional main.
+The first command must expose `1dd47fc` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Modeline detection implementation lane
+## Vterm Stage 3 framing lane
 
-- Portable branch: `githubsucks/modeline-detection`
-- Approved framing head: `6b4f3c3`
-- Implementation head: `f8d05d2`
-- Base: originally canonical `main` @ `d5d9b9c`; current canonical `main`
-  @ `86fc1bc` (Vterm Stage 2 #130) is integrated before merge.
-- PR: #132, <https://github.com/levineuwirth/pmacs/pull/132>, open against
-  canonical `main` and explicitly authorized for merge.
-- State: Revision 2's bounded Emacs/Vim parser, explicit-over-inferred
-  precedence, alias normalization, shared fresh-load language pin, LSP path
-  guard, and all thirteen acceptance criteria are implemented. Protocol
-  remains v18.
-- Verification:
-  - focused modeline + shebang-pin acceptance before integration: 7 passed on
-    default LuaJIT and 7 passed on non-default Lua 5.4;
-  - post-integration `cargo fmt --check`;
-  - post-integration `cargo clippy --workspace --all-targets -- -D warnings`;
-  - post-integration `cargo test --lib`: 1,753 passed;
-  - post-integration `cargo test --lib --features crdt`: 1,929 passed;
-  - post-integration `cargo test --test m4_acceptance -- --skip basedpyright`:
-    120 passed, 3 ignored, 1 filtered;
-  - post-integration `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 109 passed;
-  - post-integration `cargo test --workspace -- --skip basedpyright`: 2,888
-    passed across 82 suites, 19 ignored, 1 filtered;
-  - `git diff --check`.
-- Next: push the current-main integration and merge PR #132 as authorized.
+- Portable branch: `githubsucks/vterm-stage3-framing`
+- Framing contract commit: `d7bb831`; Revision 8 review fixes: `c72dfea`;
+  both follow canonical-main integration.
+- Base: canonical `main` @ `1dd47fc` (modeline detection #132 atop Vterm
+  Stage 2 #130), protocol v18.
+- PR: none. This is framing only; no Stage 3 implementation branch exists.
+- State: `docs/vterm-framing.md` Revision 8 maps criteria 28–37, has passed
+  one external review, and awaits explicit user approval. It locks additive
+  protocol v19 `TerminalFrame`, `TerminalResize`, and `TerminalPointer`; an
+  8 MiB aggregate glyph-byte bound under the unchanged 16 MiB transport cap;
+  dual viewport declaration for the first terminal frame; authenticated
+  per-view semantic routing; and a fixed-cell native GPU renderer/input/cache
+  contract.
+- Stage 2 is landed as PR #130 at merge `86fc1bc`. Stage 3 starts from that
+  integrated substrate and does not reopen its TUI/Lua/controller contracts.
+- Review: no architectural defect. `c72dfea` makes the measured-size fixture
+  maximize style and cluster-prefix overhead, names the GPU clipboard signal
+  path without implying child OSC 52 support, and aligns Arc 5/internal-stage
+  naming.
+- Verification: documentation-only `git diff --check`; framing consistency
+  search. No runtime gates apply before implementation.
+- Next: explicit user approval. After approval, create `vterm-gpu` from the
+  then-current canonical main and implement criteria 28–37; do not stack the
+  feature on this documentation branch.
 
 Recovery worktree on a machine that does not already own the branch:
 
 ```sh
 git worktree add --track \
-  -b modeline-detection \
-  ../pmacs-modeline-detection \
-  githubsucks/modeline-detection
+  -b vterm-stage3-framing \
+  ../pmacs-vterm-stage3-framing \
+  githubsucks/vterm-stage3-framing
 ```
 
 ## Parked lane: kill-ring browser + persistence
