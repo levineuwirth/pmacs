@@ -164,13 +164,6 @@ still uses the monospace advance and is not routed through
 expansion is a DOCUMENT projection concern. That is verified rather than
 assumed — see the integration gates on the lane above.
 
-## Vterm Stage 3 framing lane (superseded)
-
-- Portable branch: `githubsucks/vterm-stage3-framing`
-- Revision 8 framing, reviewed and approved. Its content is carried on
-  `vterm-gpu`; this branch is kept only as the approval record and has no
-  unmerged runtime work.
-
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
@@ -207,11 +200,22 @@ git worktree add --track \
 
 ## Closed since the last snapshot
 
+- **Branches deleted 2026-07-22 (authorized):** `vterm-stage3-framing`
+  (Revision 8 framing; its content is carried on `vterm-gpu`, verified as a
+  superset before deletion — the branch was NOT an ancestor of `vterm-gpu`
+  because the framing was copied rather than merged, so it needed a forced
+  local delete) and `tab-width-parity` (a clean ancestor of `main` via
+  #137). Both removed as worktree + local ref + `githubsucks` ref; the
+  `origin` tracking refs were pruned. The `-framing` branches for each are
+  deliberately kept.
+
 - **Tab-width rendering parity — MERGED as #137** (`main` @ `2625ec7`,
   2026-07-22). One fixed 8-column `TAB_STOP_COLUMNS` in `pmacs-protocol`
   now drives core/TUI columns, GPU code projection, and minimap width;
-  source bytes and protocol ranges are unchanged. Its lane and worktree
-  are done. This closes the long-standing "tab width is a rendering-parity
+  source bytes and protocol ranges are unchanged. Its lane, worktree, and
+  `tab-width-parity` branch (local + `githubsucks`) are deleted; the
+  `tab-width-parity-framing` branch is kept. This closes the long-standing
+  "tab width is a rendering-parity
   bug, NOT a config gap" deferral recorded in `docs/agent-handoff.md` §5.
 - **Locals-query processing — MERGED as #134** (with handoff #136), and
   **modeline detection handoff #133**. Both landed between this lane's
