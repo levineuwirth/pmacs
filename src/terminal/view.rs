@@ -353,8 +353,7 @@ impl TerminalManager {
         let Some(state) = self.views.get_mut(&key) else {
             return false;
         };
-        let changed = state.selection.take().is_some() || state.drag.take().is_some();
-        changed
+        state.selection.take().is_some() || state.drag.take().is_some()
     }
 
     /// Current child input modes for one session.
@@ -608,12 +607,11 @@ fn project_snapshot(
     let rows = retained_rows(projection);
     let geometry = view_geometry(&rows, state, viewport_size.rows);
     let mut cells = vec![Cell::default(); viewport_size.area() as usize];
-    for retained_row in geometry.start..rows.len() {
+    for (retained_row, &row) in rows.iter().enumerate().skip(geometry.start) {
         let Some(target_row) = viewport_row(&geometry, viewport_size.rows as usize, retained_row)
         else {
             continue;
         };
-        let row = rows[retained_row];
         let copy_cols = row.cells.len().min(viewport_size.cols as usize);
         let target = target_row * viewport_size.cols as usize;
         cells[target..target + copy_cols].clone_from_slice(&row.cells[..copy_cols]);
@@ -624,13 +622,12 @@ fn project_snapshot(
         .and_then(|selection| normalized_selection(&rows, selection))
         .map_or_else(Vec::new, |(start, end)| {
             let mut spans = Vec::new();
-            for retained_row in start.row..=end.row {
+            for (retained_row, &row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
                 let Some(target_row) =
                     viewport_row(&geometry, viewport_size.rows as usize, retained_row)
                 else {
                     continue;
                 };
-                let row = rows[retained_row];
                 let start_col = if retained_row == start.row {
                     start.col
                 } else {
@@ -687,8 +684,7 @@ fn is_default_blank(cell: &Cell) -> bool {
 fn copy_selection_bytes(rows: &[&TerminalRow], selection: TerminalSelection) -> Option<Vec<u8>> {
     let (start, end) = normalized_selection(rows, selection)?;
     let mut out = Vec::new();
-    for row_index in start.row..=end.row {
-        let row = rows[row_index];
+    for (row_index, &row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
         let from = if row_index == start.row { start.col } else { 0 };
         let mut to = if row_index == end.row {
             end.col.saturating_add(glyph_width(row, end.col))
@@ -815,7 +811,7 @@ mod tests {
 
     #[test]
     fn copy_joins_soft_wraps_trims_default_blanks_and_separates_hard_rows() {
-        let rows = vec![
+        let rows = [
             row(1, 0, "ab ", true),
             row(1, 3, "cd ", false),
             row(2, 0, "e  ", false),

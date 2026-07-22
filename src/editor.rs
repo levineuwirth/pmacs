@@ -301,7 +301,7 @@ impl EditorState {
         let process_supervisor = crate::lua_bindings::make_process_supervisor(lua_host.lua())
             .expect("install pmacs.process");
         let terminal_manager =
-            crate::lua_bindings::make_terminal_manager(lua_host.lua(), process_supervisor.clone())
+            crate::lua_bindings::make_terminal_manager(lua_host.lua(), &process_supervisor)
                 .expect("install pmacs.terminal");
         lua_host
             .eval(
@@ -759,6 +759,10 @@ impl EditorState {
     /// (`pmacs.frontend.id()`). Sets [`EditorCore::active_frontend`]
     /// before any command body runs, so observers always see a fresh
     /// value.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single input-precedence state machine"
+    )]
     pub fn dispatch_key(&mut self, frontend_id: FrontendId, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
@@ -1579,6 +1583,10 @@ impl EditorState {
     /// (the click neither activates the window nor positions the
     /// cursor; that gesture is reserved for future binding to
     /// "switch to this window" without disturbing buffer state).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "shared document/terminal mouse router"
+    )]
     pub fn dispatch_mouse(
         &mut self,
         frontend_id: FrontendId,
@@ -1722,9 +1730,7 @@ impl EditorState {
     ) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
-        let Some(kind) = terminal_mouse_kind(event.kind) else {
-            return;
-        };
+        let kind = terminal_mouse_kind(event.kind);
         let modifiers = terminal_modifiers(event.modifiers);
         let shift = modifiers.contains(TerminalModifiers::SHIFT);
         let (at_bottom, modes, screen_size) = {
@@ -2313,8 +2319,7 @@ fn process_event(state: &mut EditorState, ev: Event, term_size: crate::cell::Cel
         }
         Event::FocusGained => state.dispatch_focus(frontend_id, true),
         Event::FocusLost => state.dispatch_focus(frontend_id, false),
-        Event::Key(_) => {}
-        Event::Resize(_, _) => {}
+        Event::Key(_) | Event::Resize(_, _) => {}
     }
 }
 
@@ -2538,10 +2543,10 @@ impl CompletionPopupKey {
 /// Vec-backed [`crate::cell::CellGrid`] without going through a
 /// `RenderState`.
 #[allow(clippy::too_many_lines, reason = "linear paint pipeline")]
-pub fn paint_frame(
+pub fn paint_frame<S: std::hash::BuildHasher>(
     state: &EditorState,
     frontend_id: FrontendId,
-    terminal_snapshots: &HashMap<WindowId, TerminalSnapshot>,
+    terminal_snapshots: &HashMap<WindowId, TerminalSnapshot, S>,
     grid: &mut crate::cell::CellGrid<'_>,
     term_size: CellSize,
 ) -> Option<CellCoord> {
@@ -3602,14 +3607,14 @@ fn terminal_modifiers(modifiers: KeyModifiers) -> TerminalModifiers {
     crate::protocol::crossterm_translate::mods_from_crossterm(modifiers)
 }
 
-fn terminal_mouse_kind(kind: crossterm::event::MouseEventKind) -> Option<TerminalMouseKind> {
+fn terminal_mouse_kind(kind: crossterm::event::MouseEventKind) -> TerminalMouseKind {
     use crossterm::event::{MouseButton, MouseEventKind};
     let button = |button| match button {
         MouseButton::Left => TerminalMouseButton::Left,
         MouseButton::Right => TerminalMouseButton::Right,
         MouseButton::Middle => TerminalMouseButton::Middle,
     };
-    Some(match kind {
+    match kind {
         MouseEventKind::Down(value) => TerminalMouseKind::Down(button(value)),
         MouseEventKind::Up(value) => TerminalMouseKind::Up(button(value)),
         MouseEventKind::Drag(value) => TerminalMouseKind::Drag(button(value)),
@@ -3618,7 +3623,7 @@ fn terminal_mouse_kind(kind: crossterm::event::MouseEventKind) -> Option<Termina
         MouseEventKind::ScrollDown => TerminalMouseKind::ScrollDown,
         MouseEventKind::ScrollLeft => TerminalMouseKind::ScrollLeft,
         MouseEventKind::ScrollRight => TerminalMouseKind::ScrollRight,
-    })
+    }
 }
 
 fn key_event_to_chord(key: KeyEvent) -> Option<Chord> {

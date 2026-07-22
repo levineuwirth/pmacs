@@ -38,7 +38,7 @@ fn tick_until(
 }
 
 fn lua_string(value: &str) -> String {
-    format!("{:?}", value)
+    format!("{value:?}")
 }
 
 fn snapshot_text(snapshot: &pmacs::terminal::TerminalSnapshot) -> String {
@@ -54,6 +54,10 @@ fn snapshot_text(snapshot: &pmacs::terminal::TerminalSnapshot) -> String {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "cross-surface Lua transaction scenario"
+)]
 fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
     let mut state = EditorState::new();
     let command_lua = lua_string("/bin/sh");
@@ -181,7 +185,7 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
         let lua = state.lua_host.lua();
         let status: Table = lua
             .load(format!(
-                r#"
+                r"
                 local first = pmacs.terminal.view_state {{
                   frontend = 1, window = {}, buffer = TERM_BUFFER, active = true
                 }}
@@ -191,7 +195,7 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
                 }}
                 assert(second.injected == nil)
                 return second
-                "#,
+                ",
                 window_id.raw(),
                 window_id.raw()
             ))
@@ -201,10 +205,10 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
 
         let (ok, error): (bool, String) = lua
             .load(
-                r#"
+                r"
                 local ok, err = pcall(function() pmacs.terminal.scroll(1) end)
                 return ok, tostring(err)
-                "#,
+                ",
             )
             .eval()
             .expect("pcall implicit scroll");
@@ -393,6 +397,7 @@ fn wait_for_file(path: &Path, timeout: Duration) -> Vec<u8> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines, reason = "one real-host lifecycle scenario")]
 fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let config_root = temp.path().join("config");

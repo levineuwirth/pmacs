@@ -1406,7 +1406,6 @@ fn dispatcher_loop(
 /// initial-full-grid analogue — it emits nothing until the frontend
 /// declares a viewport); every other session keeps the M5.3
 /// force-full-grid grid path.
-#[allow(clippy::too_many_arguments)]
 fn take_pending_terminal_bell(
     editor: &EditorState,
     frontend_id: FrontendId,
@@ -1446,6 +1445,10 @@ fn take_pending_terminal_bell(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one session bootstrap transaction"
+)]
 fn handle_session_established(
     editor: &mut EditorState,
     render_states: &mut HashMap<FrontendId, RenderState>,

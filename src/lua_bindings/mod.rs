@@ -8136,10 +8136,10 @@ pub fn make_process_supervisor(lua: &Lua) -> mlua::Result<SharedProcessSuperviso
 /// Build the shared terminal registry and install strict raw Lua primitives.
 pub fn make_terminal_manager(
     lua: &Lua,
-    supervisor: SharedProcessSupervisor,
+    supervisor: &SharedProcessSupervisor,
 ) -> mlua::Result<crate::terminal::SharedTerminalManager> {
     let manager = Rc::new(RefCell::new(crate::terminal::TerminalManager::new()));
-    install_terminal(lua, &manager, &supervisor)?;
+    install_terminal(lua, &manager, supervisor)?;
     Ok(manager)
 }
 
@@ -8248,6 +8248,10 @@ fn terminal_view_key_from_context(
     )))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single strict Lua module installation"
+)]
 fn install_terminal(
     lua: &Lua,
     manager: &crate::terminal::SharedTerminalManager,
@@ -8262,7 +8266,7 @@ fn install_terminal(
         terminal.set(
             "_open",
             lua.create_function(move |lua, spec: Table| -> mlua::Result<BufferIdLua> {
-                let spec = parse_terminal_spec(spec)?;
+                let spec = parse_terminal_spec(&spec)?;
                 let core = lua
                     .app_data_ref::<SharedCore>()
                     .map(|core| core.clone())
@@ -8467,7 +8471,7 @@ fn install_terminal(
     pmacs.set("terminal", terminal)
 }
 
-fn parse_terminal_spec(table: Table) -> mlua::Result<crate::terminal::TerminalSpec> {
+fn parse_terminal_spec(table: &Table) -> mlua::Result<crate::terminal::TerminalSpec> {
     const FIELDS: &[&str] = &[
         "command",
         "args",
