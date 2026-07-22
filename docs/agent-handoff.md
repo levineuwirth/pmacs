@@ -1,9 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, with locals-query processing (#134) implemented
-and awaiting review, after modeline language
-detection (#132), Vterm Stage 2 (#130), and mode system wiring (#129/#131)
-landed on `main`. Vterm Stage 3 is not implemented.**
+**Last updated: 2026-07-22, after locals-query processing (#134) landed on
+`main`, following modeline language detection (#132), Vterm Stage 2 (#130),
+and mode system wiring (#129/#131). Vterm Stage 3 is not implemented.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -17,8 +16,7 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-22)
 
-- `main` @ `8bd8298` (landed-state handoff #133; latest runtime merge
-  `1dd47fc`, modeline detection #132), protocol **v18**
+- `main` @ `8cbb9f4` (locals-query processing #134), protocol **v18**
   (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
   `StatuslineSegments`).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
@@ -120,7 +118,7 @@ commands, read `docs/active-work.md` immediately after this file.
     `workspace/configuration`). Make has no server.
   - **Substrate**: `LanguageEntry.highlights_query` and `.locals_query` are
     `&[&'static str]` fragments joined base-first (cuda over c/cpp; ts over
-    js/jsx). On `locals-query-processing` @ `47ffe5d`, settle compiles the
+    js/jsx). Since locals-query processing #134, settle compiles the
     grammar's `LOCALS_QUERY`, resolves Tree-sitter's scope/definition/value/
     reference conventions into sorted `LocalFacts`, and stores them beside
     each layer's tree/query. Work runs once per fresh bundle and only when the
@@ -341,10 +339,10 @@ commands, read `docs/active-work.md` immediately after this file.
     editing/indent/comment items that were config-blocked.
   - **Mode system wiring COMPLETE (#129)** — major-mode keymaps,
     introspection, lifecycle initialization, and statusline display shipped.
-  - **Locals-query processing IN REVIEW — #134** — grammar locals metadata,
-    lexical resolution, settled per-layer facts, and shared TUI/GPU
-    local-predicate filtering are implemented on `locals-query-processing`
-    @ `47ffe5d`.
+  - **Locals-query processing COMPLETE — #134** — grammar locals metadata,
+    lexical resolution, settled per-layer facts, shared TUI/GPU
+    local-predicate filtering, and a registry-wide locals-query invariant
+    shipped without a protocol change.
   - Remaining ranked arcs: 6 folding, 7 DAP, 8 GPU splits, plus the
     `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
@@ -579,10 +577,8 @@ Mode system (SHIPPED #129): minor modes, `buffer.after-mode-change`,
 mode-scoped settings, `describe-mode`, and persistence of explicit
 major-mode overrides/clears across sessions. Modeline detection shipped in #132.
 Highlight/detection (from the #114–#118 side-quest + injections #122):
-locals-query processing (run each grammar's LOCALS_QUERY so
-`#is?`/`#is-not? local` is honored instead of the current fail-closed
-drop — restores `.builtin` styling for non-shadowed console/require
-etc.); **injection follow-ups now the engine landed (#122)** —
+~~locals-query processing~~ **SHIPPED #134**; remaining injection follow-ups
+now that the engine landed (#122) —
 `injection.combined` (many matches → one shared parse; PHP-in-HTML, some
 comment schemes), child-tree incrementality + range-scoped layer rebuild
 (child layers cold-reparse on every settle today), injectable

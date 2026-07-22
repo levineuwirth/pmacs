@@ -25,10 +25,10 @@ cross-cutting index. Keep it pruned as items ship.
 
 The direct continuation of the #114–#118 grammar/detection stack.
 
-- **Locals-query processing** — run each grammar's `LOCALS_QUERY` so
-  `#is?`/`#is-not? local` is honored (restores `.builtin` styling for
-  *non-shadowed* console/require etc.), replacing the current
-  fail-closed drop in `compute_highlight_spans`.
+- **Locals-query processing — SHIPPED (#134).** Bundled Lua/JavaScript/
+  TypeScript locals queries now drive settled per-layer lexical facts, and
+  both highlight producers honor `#is?`/`#is-not? local`. Non-shadowed
+  builtins regain `.builtin` styling while shadowed names stay ordinary.
 - **Multi-language injections — SHIPPED (#122).** The load-bearing
   engine landed: `ParseTreeBundle` holds `Vec<Layer>`, the worker builds
   child trees off the static grammar table, settle resolves per-layer
@@ -237,13 +237,12 @@ guides (visual, not color).
 
 ## North star (highest-leverage first)
 
-**The original north-star items and mode-system wiring have now shipped** —
-multi-language injections (#122), the config registry (#127), JSON + YAML
-(#123), and mode-system wiring (#129). The remaining board:
+**The original north-star items, mode-system wiring, and locals-query
+processing have now shipped** — multi-language injections (#122), the config
+registry (#127), JSON + YAML (#123), mode-system wiring (#129), and locals
+queries (#134). The remaining board:
 
-1. **Locals-query processing** — restores `.builtin` styling for
-   non-shadowed builtins, the last rough edge of the highlight stack.
-2. **Tab-width rendering parity** — five constants across two crates
+1. **Tab-width rendering parity** — five constants across two crates
    with two different values, and no tab expansion at all on the GPU
    main text path. Explicitly NOT a config-registry task; see the entry
    under "Cross-cutting substrate".
