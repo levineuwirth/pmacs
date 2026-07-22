@@ -57,14 +57,14 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Modeline detection lane
 
 - Portable branch: `githubsucks/modeline-detection`
-- Framing head: `47a7f4c`
+- Framing head: `6b4f3c3`
 - Base: canonical `main` @ `d5d9b9c`.
-- State: `docs/modeline-detection-framing.md` Revision 1 is a review draft;
-  there is no implementation. It frames bounded Emacs/Vim parsing, explicit
-  precedence over inferred language, alias normalization, and one pinned
-  language decision shared by syntax, LSP, and initial major mode.
-- Next step: user review. Revise the framing until approved before
-  implementation.
+- State: `docs/modeline-detection-framing.md` Revision 2 incorporates the
+  first user review; there is no implementation. It frames bounded Emacs/Vim
+  parsing, explicit precedence over inferred language, alias normalization,
+  and one pinned language decision shared by syntax, LSP, and initial major
+  mode.
+- Next step: user approval before implementation.
 
 Recovery worktree on a machine that does not already own the branch:
 
