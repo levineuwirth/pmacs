@@ -63,6 +63,17 @@ impl TestDaemon {
         Self::spawn_with_env_and_config(&[], Some(init_lua))
     }
 
+    /// Spawn with BOTH env overrides and a user `init.lua`.
+    ///
+    /// Vterm Stage 3 needs this pair together: `init.lua` opens the
+    /// terminal the frontend will attach to, and
+    /// `PMACS_INSTANCE_SEMANTIC_RENDER` is what makes the daemon
+    /// advertise the capability a semantic frontend requires.
+    #[allow(dead_code)] // consumed per-suite; not every test crate uses it
+    pub fn spawn_with_env_and_init(env_vars: &[(&str, &str)], init_lua: &str) -> Self {
+        Self::spawn_with_env_and_config(env_vars, Some(init_lua))
+    }
+
     fn spawn_with_env_and_config(env_vars: &[(&str, &str)], init_lua: Option<&str>) -> Self {
         let tempdir = TempDir::new().expect("tempdir");
         // tempfile::TempDir creates 0755-mode directories; the daemon

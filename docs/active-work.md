@@ -52,41 +52,59 @@ git status --short --branch
 The first command must expose `1dd47fc` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Vterm Stage 3 framing lane
+## Vterm Stage 3 implementation lane
 
-- Portable branch: `githubsucks/vterm-stage3-framing`
-- Framing contract commit: `d7bb831`; Revision 8 review fixes: `c72dfea`;
-  both follow canonical-main integration.
+- Portable branch: `githubsucks/vterm-gpu`
+- Framing carried as the first commit; implementation follows it.
 - Base: canonical `main` @ `1dd47fc` (modeline detection #132 atop Vterm
-  Stage 2 #130), protocol v18.
-- PR: none. This is framing only; no Stage 3 implementation branch exists.
-- State: `docs/vterm-framing.md` Revision 8 maps criteria 28–37, has passed
-  one external review, and awaits explicit user approval. It locks additive
-  protocol v19 `TerminalFrame`, `TerminalResize`, and `TerminalPointer`; an
-  8 MiB aggregate glyph-byte bound under the unchanged 16 MiB transport cap;
-  dual viewport declaration for the first terminal frame; authenticated
-  per-view semantic routing; and a fixed-cell native GPU renderer/input/cache
-  contract.
-- Stage 2 is landed as PR #130 at merge `86fc1bc`. Stage 3 starts from that
-  integrated substrate and does not reopen its TUI/Lua/controller contracts.
-- Review: no architectural defect. `c72dfea` makes the measured-size fixture
-  maximize style and cluster-prefix overhead, names the GPU clipboard signal
-  path without implying child OSC 52 support, and aligns Arc 5/internal-stage
-  naming.
-- Verification: documentation-only `git diff --check`; framing consistency
-  search. No runtime gates apply before implementation.
-- Next: explicit user approval. After approval, create `vterm-gpu` from the
-  then-current canonical main and implement criteria 28–37; do not stack the
-  feature on this documentation branch.
+  Stage 2 #130). Cut from `main`, NOT stacked on `vterm-stage3-framing`,
+  per the framing's §8.
+- PR: open against canonical `main`; never merge without explicit
+  authorization.
+- State: criteria 28-37 implemented. Protocol v19 (`SUPPORTED=[6..=19]`):
+  `InstanceMessage::TerminalFrame` (discriminant 26, daemon-gated),
+  `FrontendEvent::TerminalResize` (11) and `TerminalPointer` (12)
+  (frontend-gated). `pmacs-protocol/src/terminal.rs` owns the shared
+  bounds and `TerminalFrame::validate`; `pmacs-gpu/src/terminal.rs` is the
+  pure cell-space paint planner; `pmacs-gpu --headless-probe` drives the
+  real attach client without winit for criterion 37.
+- Verification (clean tree, this machine):
+  - `cargo fmt --check`;
+  - `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --lib`: 1,757 passed (3 ignored);
+  - `cargo test --lib --features crdt`: 1,933 passed (3 ignored);
+  - vterm Stage 1 acceptance: 9 default / 10 CRDT;
+  - vterm Stage 2 acceptance: 4 default / 4 CRDT;
+  - vterm Stage 3 acceptance: 4 default / 5 CRDT (the CRDT-only case is
+    the real-daemon + real-PTY + headless-GPU path);
+  - statusline acceptance: 7 default / 8 CRDT;
+  - `cargo test --test m4_acceptance -- --skip basedpyright`: 120 passed
+    (3 ignored, 1 filtered);
+  - `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 127 passed;
+  - `cargo test --workspace -- --skip basedpyright`: 2,919 passed across
+    83 suites (19 ignored), one invocation;
+  - `git diff --check`.
+- Open caveat: the required-GPU suite failed ONCE mid-session and did not
+  reproduce across eight subsequent runs or the full sweep. The failing
+  test's identity was not captured. Re-run `PMACS_REQUIRE_GPU=1 cargo test
+  -p pmacs-gpu` a few times on review; if it recurs, capture the name.
+- Next: user review rounds on the PR.
 
-Recovery worktree on a machine that does not already own the branch:
+Recovery worktree:
 
 ```sh
 git worktree add --track \
-  -b vterm-stage3-framing \
-  ../pmacs-vterm-stage3-framing \
-  githubsucks/vterm-stage3-framing
+  -b vterm-gpu \
+  ../pmacs-vterm-gpu \
+  githubsucks/vterm-gpu
 ```
+
+## Vterm Stage 3 framing lane (superseded)
+
+- Portable branch: `githubsucks/vterm-stage3-framing`
+- Revision 8 framing, reviewed and approved. Its content is carried on
+  `vterm-gpu`; this branch is kept only as the approval record and has no
+  unmerged runtime work.
 
 ## Parked lane: kill-ring browser + persistence
 

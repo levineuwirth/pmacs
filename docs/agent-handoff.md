@@ -1,10 +1,11 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after Vterm Stage 2 landed as PR #130 and
+**Last updated: 2026-07-22, after Vterm Stage 3 (protocol v19, GPU
+terminal) was implemented on `vterm-gpu`. Vterm Stage 2 landed as PR #130 and
 modeline detection landed as #132. Mode system wiring (#129), config registry
 (#127), Vterm Stage 1 terminal core (#126), and completed Themes Arc 4
-(#120/#124/#125) are also on `main`. Vterm Stage 3 framing Revision 8 has
-passed one external review and is not implemented.**
+(#120/#124/#125) are also on `main`. Stage 3 is implemented on `vterm-gpu`
+and awaits review; see `docs/active-work.md`.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -19,7 +20,8 @@ commands, read `docs/active-work.md` immediately after this file.
 ## 1. Where the project stands (2026-07-22)
 
 - `main` @ `1dd47fc` (modeline detection #132 atop Vterm Stage 2 #130),
-  protocol **v18** (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 =
+  protocol **v18** on `main`, **v19** on `vterm-gpu`
+  (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 =
   `FontFacts`, v18 = `StatuslineSegments`).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
   rev 3; merge `2e37c04`; two review rounds). `pmacs.config` is the
@@ -245,11 +247,38 @@ commands, read `docs/active-work.md` immediately after this file.
     is a clean behavioral bite. The parser dispatch has its independent clean
     behavioral bite; the original `main`/crate-root bite remains explicitly
     weaker compile-time API evidence.
-  - Stage 3 owns `pmacs-gpu/src/attach.rs`, authenticated source routing,
-    protocol-owned wire types/limits, and complete-frame semantic projection.
-    Revision 8 chooses a shared 8 MiB aggregate glyph-byte bound whose measured
-    legal maximum stays below the unchanged 16 MiB transport cap; over-bound
-    snapshots are rejected, never truncated or silently chunked.
+  - **Stage 3 GPU/protocol is IMPLEMENTED on `vterm-gpu`** (framing
+    `docs/vterm-framing.md` Revision 9, criteria 28-37; awaiting review).
+    Protocol **v19**: `InstanceMessage::TerminalFrame` (discriminant 26,
+    daemon-gated) plus `FrontendEvent::TerminalResize` (11) and
+    `TerminalPointer` (12), both frontend-gated - the first bump gating in
+    BOTH directions. `SUPPORTED=[6..=19]`.
+  - `pmacs-protocol/src/terminal.rs` now owns the shared terminal bounds,
+    `TerminalProcessState`, `TerminalSelectionSpan`, and the single
+    structural policy `TerminalFrame::validate`; `src/terminal/*`
+    re-exports them so no duplicate type exists. `unicode-width` is a
+    workspace dependency so the screen and the validator measure glyph
+    columns identically. `MAX_TERMINAL_FRAME_GLYPH_BYTES = 8 MiB` bounds
+    the payload instead of widening the transport cap; the measured
+    maximum legal frame encodes to 13,437,863 bytes under the unchanged
+    16 MiB `MAX_FRAME_BYTES`. Over-bound snapshots are rejected, never
+    truncated or silently chunked.
+  - **The `Viewport` gate keys on the AUTHENTICATED SOURCE'S ACTIVE
+    BUFFER, not the buffer the message names.** `Viewport` also aligns the
+    window to the buffer it declares, so a stale document viewport in
+    flight when a command opens a terminal drags the frontend back off it
+    - the terminal then never paints, with no error anywhere. The weaker
+    "is the declared buffer a terminal" reading looks right and fails
+    exactly this way.
+  - Suppression compares the COMPLETE ordered payload, never
+    `screen_generation`: scroll, selection, viewport, and process state all
+    change without advancing it.
+  - GPU: `pmacs-gpu/src/terminal.rs` is a pure cell-space paint planner
+    (testable without a GPU); the renderer builds one shaped buffer per
+    text run so a wide/cluster advance can never choose the next column's
+    origin. `pmacs-gpu --headless-probe` drives the real attach client
+    without winit (`attach::connect_with_sink`), which is how criterion 37
+    gets one real daemon + real PTY + real wgpu path.
   - **Stage 2 TUI LANDED ON `main` — #130** (`docs/vterm-framing.md`
     Revision 7, criteria 15–27). `TerminalViewKey` keys per-frontend/window
     projection state over one shared process/screen; logical row anchors retain
@@ -443,10 +472,12 @@ buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
 **Protocol** — encoding-breaking bumps are deliberate and versioned
-(`SUPPORTED=[6..18]`). v15 = `CompletionPopup` +
+(`SUPPORTED=[6..=19]`). v15 = `CompletionPopup` +
 `StatusFacts.message`; v16 = `ThemeFacts`; v17 = `FontFacts`; v18 =
-`StatuslineSegments`. New wire surface ⇒ bump + both-frontends support +
-acceptance.
+`StatuslineSegments`; v19 = the vterm terminal family. New wire surface ⇒
+bump + both-frontends support + acceptance. An APPENDED variant must be
+guarded by a byte pin on the PREVIOUS final variant — its own round-trip
+cannot detect a discriminant shift.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),
@@ -512,6 +543,31 @@ acceptance.
   and go through `pmacs.command.invoke("buffer.save")`. Caught only
   because the *other* case failed and the cause was chased instead of
   the assertion adjusted.
+- **A message that ALIGNS state cannot be gated on the state it names.**
+  `FrontendEvent::Viewport` both declares a byte range and switches the
+  frontend's window to the buffer it names. Gating the vterm v19 dual
+  declaration on "is the DECLARED buffer a terminal" therefore left a
+  stale in-flight document viewport free to drag a frontend straight back
+  off a terminal a command had just opened — the window oscillated, the
+  terminal declaration was refused every time, and no frame ever arrived.
+  Nothing errored. The gate has to key on the authenticated source's
+  ACTIVE buffer. Generalizes: when two messages declare competing views of
+  "what am I showing", the arbiter is the daemon's own state, never the
+  claim inside either message.
+- **A pass that sets a mode flag must clear it on EVERY exit.** The
+  semantic producer's terminal pass returned early via `?` when no
+  declaration existed, leaving `terminal_active` set — and the daemon uses
+  that flag to suppress `CursorByte` and the presence sweep, so a frontend
+  that went back to a document silently lost both. Caught by an acceptance
+  assertion, not by any type.
+- **Sub-crate acceptance needs a real seam, not a fixture.** `pmacs-gpu`
+  depends only on `pmacs-protocol`, so "real daemon + real PTY + real
+  wgpu in one path" could not be an in-crate test. Generalizing
+  `attach::connect`'s reader sink (`connect_with_sink`) and adding
+  `--headless-probe` gave the acceptance the REAL handshake, outbox,
+  writer, and `render_to_view` — which is the whole point; a
+  decoded-message fixture would have proved none of the three fit
+  together. The probe found two real defects the in-process tests did not.
 - **Real-grid acceptance must budget for macOS startup and path width.**
   A 100 ms first-Hello timeout failed under loaded macOS CI; use the normal
   five-second handshake window, then short polling reads. An 80-column split

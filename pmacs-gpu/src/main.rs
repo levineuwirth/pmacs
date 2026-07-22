@@ -23,9 +23,10 @@
 //! the SIL Open Font License 1.1 (see `fonts/OFL.txt`).
 
 mod attach;
+mod terminal;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use glyphon::cosmic_text::{Affinity, Cursor, Scroll, Wrap};
@@ -35,12 +36,13 @@ use glyphon::{
 };
 use loro::{ContainerTrait, ExportMode};
 use pmacs_protocol::{
-    AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CompletionPopupRow, CrdtOp,
-    Decoration, DecorationKind, DecorationSegment, FrontendId, InlineAdornment, InstanceMessage,
-    InstanceSignal, Key as ProtocolKey, LineNumberMode, MAX_STATUSLINE_FACE_BYTES,
-    MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES, MAX_STATUSLINE_TOTAL_TEXT_BYTES,
-    MenuPromptRow, Modifiers, PointerKind, SelectionSnapshot, StatuslineSegment, StyleSegment,
-    StyleSpan,
+    AdornmentContent, AdornmentPlacement, BufferId, ByteRange, CellCoord, CellSize,
+    CompletionPopupRow, CrdtOp, Decoration, DecorationKind, DecorationSegment, FrontendId,
+    InlineAdornment, InstanceMessage, InstanceSignal, Key as ProtocolKey, LineNumberMode,
+    MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES,
+    MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, Modifiers, MouseButton as ProtocolMouseButton,
+    MouseKind as ProtocolMouseKind, PointerKind, SelectionSnapshot, StatuslineSegment,
+    StyleSegment, StyleSpan, TerminalFrame, UnderlineStyle,
     cell::{Color as CellColor, Style as CellStyle},
     is_builtin_pair_char, is_modeline_face_name,
 };
@@ -52,6 +54,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::attach::{AttachClient, AttachEvent};
+use crate::terminal::{TerminalPaintPlan, TerminalPalette};
 
 /// Bundled font (SIL Open Font License 1.1 — see `fonts/OFL.txt`).
 const JETBRAINS_MONO: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
@@ -71,6 +74,20 @@ const TEST_FONT_SOURCES: &[&[u8]] = &[
     TEST_FAMILY_REGULAR,
     TEST_FAMILY_BOLD,
 ];
+
+/// Extra font sources a headless `State` assembles with. Test builds add
+/// the fixture families the font-preference tests rely on; the Vterm
+/// Stage 3 attach probe, which is a release-mode binary, gets none.
+fn headless_extra_font_sources() -> &'static [&'static [u8]] {
+    #[cfg(test)]
+    {
+        TEST_FONT_SOURCES
+    }
+    #[cfg(not(test))]
+    {
+        &[]
+    }
+}
 
 /// The default font family — the query `family: None` (and every
 /// rejected requested family) resolves through (framing Q#F6). The
@@ -305,6 +322,17 @@ const BG: wgpu::Color = wgpu::Color {
 
 const TEXT_LEFT: f32 = 16.0;
 const TEXT_TOP: f32 = 16.0;
+
+/// Stroke thickness for terminal straight-underline forms, in pixels.
+const TERMINAL_UNDERLINE_PX: f32 = 1.0;
+
+/// Fallback terminal selection wash when no `ui.selection` face is set.
+const TERMINAL_SELECTION_RGBA: [f32; 4] = [0.35, 0.45, 0.75, 0.35];
+
+/// The terminal cursor block. Translucent so the glyph beneath stays
+/// readable — a terminal cursor sits ON a character, unlike the
+/// document caret, which sits between two.
+const TERMINAL_CURSOR_RGBA: [f32; 4] = [0.85, 0.85, 0.9, 0.55];
 /// Caret bar width in px, and its color (bright, near-opaque — drawn
 /// over the text so it reads as the active insertion point). Session
 /// B1.
@@ -524,6 +552,16 @@ enum Mode {
     /// `pmacs-gpu --attach <socket>`: connect + render the daemon's
     /// rope.
     Attach { socket: PathBuf },
+    /// `pmacs-gpu --headless-probe <socket> <report>`: attach through
+    /// the real client, render real frames offscreen, and write a
+    /// machine-readable report.
+    ///
+    /// This exists for the Vterm Stage 3 acceptance, which must exercise
+    /// a real daemon, a real PTY, and real wgpu rendering in ONE path.
+    /// It drives the same `attach` handshake, the same
+    /// `apply_attach_message`, and the same `render_to_view` the windowed
+    /// mode does — only winit is absent, because CI has no display.
+    HeadlessProbe { socket: PathBuf, report: PathBuf },
 }
 
 /// Number of decimal digits in `n` (for `n >= 1`); allocation-free. Sizes
@@ -542,6 +580,9 @@ fn decimal_digits(mut n: usize) -> u32 {
 fn main() {
     env_logger::init();
     let mode = parse_args(std::env::args().skip(1).collect());
+    if let Mode::HeadlessProbe { socket, report } = &mode {
+        std::process::exit(run_headless_probe(socket, report));
+    }
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .expect("create winit event loop");
@@ -556,6 +597,201 @@ fn main() {
     event_loop
         .run_app(&mut app)
         .expect("winit event loop run_app");
+}
+
+/// Drive a real attach session headlessly and write a probe report.
+///
+/// The Vterm Stage 3 acceptance needs one path that exercises a real
+/// daemon, a real PTY child, and real wgpu rendering together — a
+/// decoded-message fixture would prove none of the three fit. This is
+/// that path minus winit, which CI has no display for.
+///
+/// The report is one `key=value` line per fact so the acceptance test
+/// asserts on named observations rather than parsing prose. Exit code 0
+/// means the report was written; anything else means the probe could not
+/// run and the acceptance fails loudly rather than reading a stale file.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear attach-render-observe probe session"
+)]
+fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
+    use std::fmt::Write as _;
+    use std::sync::mpsc;
+
+    let Some(mut state) = State::new_headless(900, 600, "(connecting...)") else {
+        eprintln!("pmacs-gpu probe: no wgpu adapter available");
+        return 3;
+    };
+
+    let (tx, rx) = mpsc::channel::<AttachEvent>();
+    let client = match attach::connect_with_sink(socket, move |event| tx.send(event).is_ok()) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("pmacs-gpu probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    state.set_frontend_id(client.frontend_id());
+
+    let mut facts = ProbeFacts {
+        server_protocol_version: client.server_protocol_version(),
+        ..ProbeFacts::default()
+    };
+
+    // Ask the daemon to open the acceptance terminal in THIS frontend's
+    // window. Going through a real key press is the point: the daemon's
+    // `terminal.open` targets the invoking frontend, so this is what
+    // puts the attached window on a terminal buffer.
+    if let Some(chord) = std::env::var_os("PMACS_GPU_PROBE_OPEN_KEY")
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.chars().next())
+    {
+        let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL | Modifiers::ALT);
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut sent_input = false;
+    let mut sent_resize = false;
+    while std::time::Instant::now() < deadline {
+        let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(200)) else {
+            continue;
+        };
+        match event {
+            AttachEvent::Disconnected(reason) => {
+                facts.disconnect = Some(reason);
+                break;
+            }
+            AttachEvent::Message(msg) => {
+                let is_snapshot = matches!(*msg, InstanceMessage::BufferSnapshot { .. });
+                if let InstanceMessage::TerminalFrame(frame) = msg.as_ref() {
+                    facts.frames += 1;
+                    facts.last_frame_cols = frame.size.cols;
+                    facts.last_frame_rows = frame.size.rows;
+                    facts.last_frame_text = frame_probe_text(frame);
+                    facts.last_title.clone_from(&frame.title);
+                }
+                state.apply_attach_message(*msg);
+                if is_snapshot {
+                    // The dual declaration: a byte viewport for a
+                    // document, a cell size for a terminal. The daemon
+                    // keeps whichever matches.
+                    if let Some(buffer_id) = state.current_buffer_id {
+                        let (start, end) = state.view_range;
+                        let _ = client.send_viewport(
+                            buffer_id,
+                            pmacs_protocol::ByteRange { start, end },
+                            0,
+                        );
+                    }
+                    if let Some((buffer_id, size)) = state.terminal_declaration_if_changed() {
+                        facts.declarations += 1;
+                        let _ = client.send_terminal_resize(buffer_id, size);
+                    }
+                }
+                if state.terminal.is_some() {
+                    facts.entered_terminal_mode = true;
+                    // Render a REAL frame through the real composition
+                    // path, then record that it composited.
+                    let pixels = state.render_offscreen();
+                    let first = pixels.first().copied().unwrap_or_default();
+                    if pixels.iter().any(|&b| b != first) {
+                        facts.rendered_nonuniform_frames += 1;
+                    }
+                    if !sent_input && facts.frames >= 1 {
+                        sent_input = true;
+                        // Real child input over the real wire.
+                        let _ = client.send_key(ProtocolKey::Char('x'), Modifiers::NONE);
+                        let _ = client.send_key(ProtocolKey::Enter, Modifiers::NONE);
+                    }
+                    if !sent_resize && facts.frames >= 2 {
+                        sent_resize = true;
+                        state.resize(700, 500);
+                        if let Some((buffer_id, size)) = state.terminal_declaration_if_changed() {
+                            facts.declarations += 1;
+                            facts.resized_cols = size.cols;
+                            facts.resized_rows = size.rows;
+                            let _ = client.send_terminal_resize(buffer_id, size);
+                        }
+                    }
+                    if facts.resized_cols > 0 && facts.last_frame_cols == facts.resized_cols {
+                        facts.observed_resized_frame = true;
+                    }
+                }
+                if facts.observed_resized_frame && facts.rendered_nonuniform_frames >= 2 {
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "server_protocol_version={}",
+        facts.server_protocol_version
+    );
+    let _ = writeln!(out, "declarations={}", facts.declarations);
+    let _ = writeln!(out, "frames={}", facts.frames);
+    let _ = writeln!(
+        out,
+        "rendered_nonuniform_frames={}",
+        facts.rendered_nonuniform_frames
+    );
+    let _ = writeln!(out, "entered_terminal_mode={}", facts.entered_terminal_mode);
+    let _ = writeln!(
+        out,
+        "observed_resized_frame={}",
+        facts.observed_resized_frame
+    );
+    let _ = writeln!(out, "last_frame_rows={}", facts.last_frame_rows);
+    let _ = writeln!(out, "last_frame_cols={}", facts.last_frame_cols);
+    let _ = writeln!(out, "resized_rows={}", facts.resized_rows);
+    let _ = writeln!(out, "resized_cols={}", facts.resized_cols);
+    let _ = writeln!(out, "last_title={}", facts.last_title.unwrap_or_default());
+    let _ = writeln!(out, "last_frame_text={}", facts.last_frame_text);
+    let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
+    if let Err(error) = std::fs::write(report, out) {
+        eprintln!(
+            "pmacs-gpu probe: writing {} failed: {error}",
+            report.display()
+        );
+        return 5;
+    }
+    0
+}
+
+/// Named observations the headless probe reports back to the acceptance.
+#[derive(Default)]
+struct ProbeFacts {
+    server_protocol_version: u32,
+    declarations: u32,
+    frames: u32,
+    rendered_nonuniform_frames: u32,
+    entered_terminal_mode: bool,
+    observed_resized_frame: bool,
+    last_frame_rows: u32,
+    last_frame_cols: u32,
+    resized_rows: u32,
+    resized_cols: u32,
+    last_title: Option<String>,
+    last_frame_text: String,
+    disconnect: Option<String>,
+}
+
+/// One-line printable text of a terminal frame, for probe reporting.
+fn frame_probe_text(frame: &TerminalFrame) -> String {
+    let mut text = String::new();
+    for cell in &frame.cells {
+        match &cell.glyph {
+            pmacs_protocol::Glyph::Char(ch) => text.push(*ch),
+            pmacs_protocol::Glyph::Cluster(bytes) => {
+                text.push_str(&String::from_utf8_lossy(bytes));
+            }
+            pmacs_protocol::Glyph::Continuation => {}
+        }
+    }
+    text.retain(|ch| !ch.is_control());
+    text
 }
 
 /// Tiny argv parser. No `clap` because the surface is genuinely two
@@ -575,6 +811,20 @@ fn parse_args(args: Vec<String>) -> Mode {
             });
             Mode::Attach {
                 socket: PathBuf::from(socket),
+            }
+        }
+        "--headless-probe" => {
+            let socket = iter.next().unwrap_or_else(|| {
+                eprintln!("pmacs-gpu: --headless-probe requires a socket path");
+                std::process::exit(2);
+            });
+            let report = iter.next().unwrap_or_else(|| {
+                eprintln!("pmacs-gpu: --headless-probe requires a report path");
+                std::process::exit(2);
+            });
+            Mode::HeadlessProbe {
+                socket: PathBuf::from(socket),
+                report: PathBuf::from(report),
             }
         }
         "--help" | "-h" => {
@@ -955,6 +1205,36 @@ struct State {
     /// `face_fg_or` / `face_wash_or` / `modeline_face_colors` /
     /// `diag_face_rgba` resolvers (Q#TH5 mask + `Default` mapping).
     faces: HashMap<String, CellStyle>,
+    /// Vterm Stage 3 — the installed terminal frame and its derived
+    /// paint plan, or `None` in document mode. The two-state machine is
+    /// explicit: `BufferSnapshot` always leaves terminal mode, a valid
+    /// matching `TerminalFrame` always enters it.
+    terminal: Option<TerminalLocal>,
+    /// The terminal geometry last declared to the daemon, with the
+    /// buffer it described. Suppresses an unchanged re-declaration and
+    /// forces a fresh one after a buffer switch.
+    last_terminal_size_sent: Option<(BufferId, CellSize)>,
+    /// Whether an invalid terminal frame has already been reported.
+    /// Bounds the log while a bad producer keeps sending.
+    terminal_frame_error_latched: bool,
+    /// One shaped buffer per planned text run. Rebuilt only when the
+    /// plan changes, never per frame.
+    terminal_text_buffers: Vec<Buffer>,
+    /// Dedicated renderer for terminal glyphs, so they draw in their own
+    /// layer with terminal clipping rather than through the document
+    /// text pass.
+    terminal_text_renderer: TextRenderer,
+}
+
+/// Vterm Stage 3 — the GPU's terminal mode.
+struct TerminalLocal {
+    /// The terminal identity buffer this frame describes.
+    buffer_id: BufferId,
+    /// The last valid frame. Retained verbatim so an identical
+    /// re-send can be recognized and skipped without a rebuild.
+    frame: TerminalFrame,
+    /// Cell-space paint data derived from `frame`.
+    plan: TerminalPaintPlan,
 }
 
 /// Kind-glyph column for a completion row: the LSP
@@ -1176,6 +1456,71 @@ impl App {
         }
     }
 
+    /// Ship a terminal-cell gesture if the daemon speaks v19+.
+    ///
+    /// The terminal twin of [`Self::send_pointer`]: same frontend-side
+    /// version gate, cells instead of source bytes.
+    fn send_terminal_pointer(
+        &self,
+        buffer_id: BufferId,
+        coord: CellCoord,
+        kind: ProtocolMouseKind,
+        mods: Modifiers,
+    ) {
+        let Some(client) = self.attach_client.as_ref() else {
+            return;
+        };
+        if client.server_protocol_version() < 19 {
+            return;
+        }
+        if let Err(e) = client.send_terminal_pointer(buffer_id, coord, kind, mods) {
+            eprintln!("pmacs-gpu: send_terminal_pointer failed: {e}");
+        }
+    }
+
+    /// Declare the current terminal cell geometry when it has changed.
+    ///
+    /// Called after every applied message and after any real geometry
+    /// change. An unchanged size sends nothing, so a redraw storm
+    /// produces no wire traffic; a changed one sends exactly once.
+    fn flush_terminal_declaration(&mut self) {
+        let Some(client) = self.attach_client.as_ref() else {
+            return;
+        };
+        if client.server_protocol_version() < 19 {
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some((buffer_id, size)) = state.terminal_declaration_if_changed() else {
+            return;
+        };
+        if let Err(e) = client.send_terminal_resize(buffer_id, size) {
+            eprintln!("pmacs-gpu: send_terminal_resize failed: {e}");
+        }
+    }
+
+    /// Resolve a pixel to a terminal cell, or `None` when this window is
+    /// not in terminal mode or the pixel is outside the grid.
+    ///
+    /// The status band and the padding past the last whole column are
+    /// deliberately not terminal hits: a gesture there belongs to the
+    /// chrome, not the child.
+    fn terminal_pointer_hit(&self, x: f64, y: f64) -> Option<(BufferId, CellCoord)> {
+        let state = self.state.as_ref()?;
+        let terminal = state.terminal.as_ref()?;
+        let coord = crate::terminal::hit_test_cell(
+            x as f32,
+            y as f32,
+            (TEXT_LEFT, TEXT_TOP),
+            state.mono_advance(),
+            state.fm.code_line_height(),
+            terminal.plan.size,
+        )?;
+        Some((terminal.buffer_id, coord))
+    }
+
     /// Ship a [`pmacs_protocol::FrontendEvent::MenuPointer`] if the
     /// daemon speaks v11+ (Q#CM1). Navigates the open menu the daemon
     /// owns; pixels stay local, only the resolved row index crosses.
@@ -1199,7 +1544,7 @@ impl ApplicationHandler<AppEvent> for App {
         }
         let initial_text = match &self.mode {
             Mode::HelloWorld => HELLO_TEXT,
-            Mode::Attach { .. } => "(connecting...)",
+            Mode::Attach { .. } | Mode::HeadlessProbe { .. } => "(connecting...)",
         };
         self.state = Some(State::new(event_loop, initial_text));
 
@@ -1439,6 +1784,11 @@ impl ApplicationHandler<AppEvent> for App {
                 {
                     eprintln!("pmacs-gpu: resize send_viewport failed: {e}");
                 }
+                // Vterm Stage 3 — a resize is a real geometry change, so
+                // the cell grid is re-derived and declared here. The
+                // daemon resizes the shared PTY only if this frontend is
+                // the durable controller.
+                self.flush_terminal_declaration();
             }
             // Session M-2 — pointer input (docs/pmacs-gpu-mouse-framing.md).
             WindowEvent::CursorMoved { position, .. } => {
@@ -1456,6 +1806,25 @@ impl ApplicationHandler<AppEvent> for App {
                         && active != Some(row)
                     {
                         self.send_menu_pointer(Some(row), false);
+                    }
+                    return;
+                }
+                // Vterm Stage 3 — inside the terminal clip, motion is a
+                // terminal gesture. Consumed before minimap scrubbing
+                // and document hit testing: terminal mode paints no
+                // minimap and has no source bytes to resolve.
+                if state.terminal.is_some() {
+                    let dragging = state.pointer_drag_active;
+                    if let Some((buffer_id, coord)) =
+                        self.terminal_pointer_hit(position.x, position.y)
+                    {
+                        let mods = translate_mods(self.modifiers);
+                        let kind = if dragging {
+                            ProtocolMouseKind::Drag(ProtocolMouseButton::Left)
+                        } else {
+                            ProtocolMouseKind::Move
+                        };
+                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
                     }
                     return;
                 }
@@ -1524,6 +1893,22 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
                 let mods = translate_mods(self.modifiers);
+                if state.terminal.is_some() {
+                    let kind = match button_state {
+                        ElementState::Pressed => {
+                            state.pointer_drag_active = true;
+                            ProtocolMouseKind::Down(ProtocolMouseButton::Left)
+                        }
+                        ElementState::Released => {
+                            state.pointer_drag_active = false;
+                            ProtocolMouseKind::Up(ProtocolMouseButton::Left)
+                        }
+                    };
+                    if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
+                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                    }
+                    return;
+                }
                 match button_state {
                     ElementState::Pressed => {
                         if state.in_minimap_band(x, y) {
@@ -1594,6 +1979,23 @@ impl ApplicationHandler<AppEvent> for App {
                     self.send_menu_pointer(None, true);
                     return;
                 }
+                // Vterm Stage 3 — a right-click in the terminal clip is
+                // a terminal gesture; the daemon decides between child
+                // reporting and the editor context menu, so the anchor
+                // is remembered here exactly as for a document click.
+                if state.terminal.is_some() {
+                    state.menu_anchor_px = (x, y);
+                    if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
+                        let mods = translate_mods(self.modifiers);
+                        self.send_terminal_pointer(
+                            buffer_id,
+                            coord,
+                            ProtocolMouseKind::Down(ProtocolMouseButton::Right),
+                            mods,
+                        );
+                    }
+                    return;
+                }
                 let Some(byte) = state.hit_test_source_byte(x, y) else {
                     return;
                 };
@@ -1620,6 +2022,24 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 };
                 if lines == 0 {
+                    return;
+                }
+                // Vterm Stage 3 — the terminal's scrollback belongs to
+                // the daemon-side view, not to this frontend's local
+                // scroll, so a wheel tick crosses the wire as a
+                // terminal gesture instead of moving `scroll_top`.
+                if state.terminal.is_some() {
+                    if let Some((x, y)) = state.pointer_pos
+                        && let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y)
+                    {
+                        let mods = translate_mods(self.modifiers);
+                        let kind = if lines < 0 {
+                            ProtocolMouseKind::ScrollUp
+                        } else {
+                            ProtocolMouseKind::ScrollDown
+                        };
+                        self.send_terminal_pointer(buffer_id, coord, kind, mods);
+                    }
                     return;
                 }
                 let vp = state.scroll_by_lines(lines);
@@ -1747,6 +2167,18 @@ impl ApplicationHandler<AppEvent> for App {
                 {
                     eprintln!("pmacs-gpu: send Viewport failed: {e}");
                 }
+                // Vterm Stage 3 — the dual declaration. After every
+                // snapshot the frontend re-declares BOTH its byte
+                // viewport (above) and its terminal cell size, because
+                // an empty terminal identity snapshot does not announce
+                // itself as a terminal. The daemon keeps whichever one
+                // matches the buffer's kind, which is what breaks the
+                // otherwise circular "need a frame to know to ask for
+                // one" dependency.
+                self.flush_terminal_declaration();
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
                 state.release_timed_out_floor();
                 let ready_keys = state.take_ready_round_trip_keys();
                 if let Some(client) = self.attach_client.as_ref() {
@@ -2106,10 +2538,10 @@ impl State {
     }
 
     /// Build a windowless `State` that renders to an offscreen texture, for
-    /// the headless render tests (F-014). Returns `None` when no GPU
-    /// adapter is available (a dev box with no working Vulkan, or CI
-    /// without lavapipe), so the caller skips rather than fails.
-    #[cfg(test)]
+    /// the headless render tests (F-014) and the Vterm Stage 3 headless
+    /// attach probe. Returns `None` when no GPU adapter is available (a
+    /// dev box with no working Vulkan, or CI without lavapipe), so the
+    /// caller skips rather than fails.
     fn new_headless(width: u32, height: u32, initial_text: &str) -> Option<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -2143,7 +2575,9 @@ impl State {
             queue,
             config,
             initial_text,
-            TEST_FONT_SOURCES,
+            // Font fixtures exist only in test builds; the release-mode
+            // attach probe runs on the bundled face alone.
+            headless_extra_font_sources(),
         ))
     }
 
@@ -2197,6 +2631,11 @@ impl State {
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         // UX gutter — a renderer for the line-number layer.
         let gutter_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        // Vterm Stage 3 — terminal glyphs draw in their own layer with
+        // their own clip; interleaving them with document text would
+        // subject them to the document's gutter offset and wrapping.
+        let terminal_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let quad_renderer = QuadRenderer::new(&device, format);
         let squiggle_renderer = SquiggleRenderer::new(&device, format);
@@ -2371,6 +2810,11 @@ impl State {
             faces: HashMap::new(),
             gutter_buffer,
             gutter_text_renderer,
+            terminal: None,
+            last_terminal_size_sent: None,
+            terminal_frame_error_latched: false,
+            terminal_text_buffers: Vec::new(),
+            terminal_text_renderer,
         };
         // Real drawable dimensions from construction (framing Q#F6):
         // wrapping and `shape_until_cursor` must use the same clip the
@@ -2862,6 +3306,13 @@ impl State {
                 self.scroll_top = 0;
                 self.code_scroll_residual = 0.0;
                 self.last_viewport_sent = None;
+                // Vterm Stage 3 — a snapshot ALWAYS leaves terminal
+                // mode, including a terminal→terminal switch. The prior
+                // frame describes another session's screen, and the
+                // daemon has already dropped its own baseline, so the
+                // next valid frame is authoritative for whatever this
+                // buffer turns out to be.
+                self.exit_terminal_mode();
                 if !self.set_text(&text) {
                     // Even byte-identical A -> B snapshots can clear a
                     // prior minimap, so the new buffer's shaping clip
@@ -3354,11 +3805,362 @@ impl State {
                 size_centi_px,
             } => {
                 self.apply_font_facts(family.as_deref(), size_centi_px);
+                // Q#F6 + Vterm Stage 3: new metrics mean a new cell
+                // grid. The terminal shape/geometry caches are dropped
+                // here and stay dropped until an authoritative frame at
+                // the matching size arrives, so nothing paints at the
+                // old advance under the new font.
+                self.invalidate_terminal_shaping();
                 self.current_buffer_id
                     .and_then(|bid| self.viewport_send_if_changed(bid))
             }
+            InstanceMessage::TerminalFrame(frame) => {
+                self.apply_terminal_frame(frame);
+                None
+            }
             _ => None,
         }
+    }
+
+    /// Install a decoded terminal frame, or reject it whole.
+    ///
+    /// Rejection is total by design: a partially applied frame would mix
+    /// cells from two screens. An invalid frame therefore keeps the
+    /// previous valid one, requests no redraw, and reports one latched
+    /// diagnostic instead of painting something the daemon never
+    /// authorized.
+    fn apply_terminal_frame(&mut self, frame: TerminalFrame) {
+        if self.current_buffer_id != Some(frame.buffer_id) {
+            // A frame for a buffer this window is no longer showing.
+            // The daemon clears its baseline on every snapshot, so the
+            // authoritative frame for the buffer we DO show is already
+            // on its way.
+            return;
+        }
+        if let Err(error) = frame.validate() {
+            if !self.terminal_frame_error_latched {
+                self.terminal_frame_error_latched = true;
+                eprintln!("pmacs-gpu: rejecting invalid TerminalFrame: {error}");
+            }
+            return;
+        }
+        self.terminal_frame_error_latched = false;
+        if self
+            .terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.frame == frame)
+        {
+            // A duplicate valid frame does no work at all: no plan
+            // rebuild, no reshape, no redraw.
+            return;
+        }
+        let plan = TerminalPaintPlan::build(&frame, Self::terminal_palette());
+        let buffer_id = frame.buffer_id;
+        self.terminal = Some(TerminalLocal {
+            buffer_id,
+            frame,
+            plan,
+        });
+        self.rebuild_terminal_text_buffers();
+        self.request_redraw();
+    }
+
+    /// The frontend defaults `Color::Default` resolves against.
+    fn terminal_palette() -> TerminalPalette {
+        let fg = plain_text_color();
+        TerminalPalette {
+            default_fg: [fg.r(), fg.g(), fg.b()],
+            default_bg: [
+                (WINDOW_BG_RGBA[0] * 255.0) as u8,
+                (WINDOW_BG_RGBA[1] * 255.0) as u8,
+                (WINDOW_BG_RGBA[2] * 255.0) as u8,
+            ],
+        }
+    }
+
+    /// Leave terminal mode and drop every terminal-only cache.
+    fn exit_terminal_mode(&mut self) {
+        self.terminal = None;
+        self.terminal_text_buffers.clear();
+        self.terminal_frame_error_latched = false;
+        self.last_terminal_size_sent = None;
+    }
+
+    /// Drop shaping and geometry caches without leaving terminal mode.
+    ///
+    /// Used when the font changes: the installed frame is still the
+    /// child's authoritative screen, but every cached shape was measured
+    /// at the old advance.
+    fn invalidate_terminal_shaping(&mut self) {
+        if self.terminal.is_some() {
+            self.rebuild_terminal_text_buffers();
+        }
+        self.last_terminal_size_sent = None;
+    }
+
+    /// Reshape one cosmic-text buffer per planned run.
+    ///
+    /// One buffer per RUN, not per row: a row-wide buffer would let a
+    /// wide or cluster glyph's shaped advance decide where the following
+    /// column starts, and terminal columns belong to the child.
+    fn rebuild_terminal_text_buffers(&mut self) {
+        let Some(terminal) = self.terminal.as_ref() else {
+            self.terminal_text_buffers.clear();
+            return;
+        };
+        let metrics = Metrics::new(self.fm.code_font_size(), self.fm.code_line_height());
+        let advance = self.mono_advance();
+        let family = self.resolved_family.clone();
+        let runs: Vec<_> = terminal
+            .plan
+            .runs
+            .iter()
+            .map(|run| {
+                (
+                    run.text.clone(),
+                    run.cells as f32 * advance,
+                    run.bold,
+                    run.italic,
+                )
+            })
+            .collect();
+        let mut buffers = Vec::with_capacity(runs.len());
+        for (text, width, bold, italic) in runs {
+            let mut buffer = Buffer::new(&mut self.font_system, metrics);
+            // No wrapping: a run occupies exactly the cells the child
+            // gave it, and overflow is a clip, never a second row.
+            buffer.set_wrap(&mut self.font_system, Wrap::None);
+            buffer.set_size(
+                &mut self.font_system,
+                Some(width.max(1.0)),
+                Some(metrics.line_height),
+            );
+            let attrs = Attrs::new()
+                .family(Family::Name(&family))
+                .weight(if bold {
+                    glyphon::cosmic_text::Weight::BOLD
+                } else {
+                    glyphon::cosmic_text::Weight::NORMAL
+                })
+                .style(if italic {
+                    glyphon::cosmic_text::Style::Italic
+                } else {
+                    glyphon::cosmic_text::Style::Normal
+                });
+            buffer.set_text(
+                &mut self.font_system,
+                &text,
+                &attrs,
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut self.font_system, false);
+            buffers.push(buffer);
+        }
+        self.terminal_text_buffers = buffers;
+    }
+
+    /// The terminal content rectangle's pixel origin.
+    ///
+    /// Deliberately not `text_left()`: terminal mode draws no document
+    /// gutter, so the grid starts at the plain text inset.
+    fn terminal_origin() -> (f32, f32) {
+        (TEXT_LEFT, TEXT_TOP)
+    }
+
+    /// The cell grid this window's drawable rectangle admits, or `None`
+    /// when it cannot fit one whole cell.
+    fn terminal_cell_viewport(&self) -> Option<CellSize> {
+        let (origin_x, origin_y) = Self::terminal_origin();
+        let width = self.config.width as f32 - origin_x;
+        let height = text_area_bottom(self.config.height, self.fm) - origin_y;
+        crate::terminal::cell_viewport(
+            width,
+            height,
+            self.mono_advance(),
+            self.fm.code_line_height(),
+        )
+    }
+
+    /// Pixel rectangle of a cell run in the terminal grid.
+    fn terminal_run_rect(&self, run: crate::terminal::CellRun) -> (f32, f32, f32, f32) {
+        let (ox, oy) = Self::terminal_origin();
+        let advance = self.mono_advance();
+        let line = self.fm.code_line_height();
+        (
+            ox + run.start_col as f32 * advance,
+            oy + run.row as f32 * line,
+            (run.end_col - run.start_col) as f32 * advance,
+            line,
+        )
+    }
+
+    /// Backgrounds, straight underlines, the selection wash, and the
+    /// terminal clip, as one quad batch drawn under the glyphs.
+    ///
+    /// Runs whose resolved background equals the window clear color are
+    /// dropped: the clear already painted them, and emitting a
+    /// full-screen quad per frame for the common case is pure waste.
+    fn terminal_quad_vertex_bytes(&self) -> Vec<u8> {
+        let Some(terminal) = self.terminal.as_ref() else {
+            return Vec::new();
+        };
+        let window_bg = Self::terminal_palette().default_bg;
+        let mut rects = Vec::new();
+        for bg in &terminal.plan.backgrounds {
+            if bg.color == window_bg {
+                continue;
+            }
+            let (x, y, w, h) = self.terminal_run_rect(bg.run);
+            rects.push(MinimapRect {
+                x,
+                y,
+                w,
+                h,
+                color: rgb_to_quad(bg.color, 1.0),
+            });
+        }
+        // Straight underline forms as fixed-cell quads; curly rides the
+        // squiggle pipeline, which owns the sine wave.
+        for underline in &terminal.plan.underlines {
+            if underline.style == UnderlineStyle::Curly {
+                continue;
+            }
+            let (x, y, w, h) = self.terminal_run_rect(underline.run);
+            let color = rgb_to_quad(underline.color, 1.0);
+            let thickness = TERMINAL_UNDERLINE_PX;
+            let baseline = y + h - thickness * 2.0;
+            match underline.style {
+                UnderlineStyle::Double => {
+                    rects.push(MinimapRect {
+                        x,
+                        y: baseline,
+                        w,
+                        h: thickness,
+                        color,
+                    });
+                    rects.push(MinimapRect {
+                        x,
+                        y: baseline + thickness * 2.0,
+                        w,
+                        h: thickness,
+                        color,
+                    });
+                }
+                UnderlineStyle::Dotted | UnderlineStyle::Dashed => {
+                    // Dotted and dashed differ only in duty cycle; both
+                    // are stepped along the run so a one-cell run still
+                    // shows at least one mark.
+                    let period = if underline.style == UnderlineStyle::Dotted {
+                        TERMINAL_UNDERLINE_PX * 3.0
+                    } else {
+                        TERMINAL_UNDERLINE_PX * 8.0
+                    };
+                    let duty = if underline.style == UnderlineStyle::Dotted {
+                        0.5
+                    } else {
+                        0.625
+                    };
+                    let mut at = x;
+                    while at < x + w {
+                        let seg = (period * duty).min(x + w - at);
+                        rects.push(MinimapRect {
+                            x: at,
+                            y: baseline,
+                            w: seg,
+                            h: thickness,
+                            color,
+                        });
+                        at += period;
+                    }
+                }
+                _ => rects.push(MinimapRect {
+                    x,
+                    y: baseline,
+                    w,
+                    h: thickness,
+                    color,
+                }),
+            }
+        }
+        // Terminal selection is the editor's, not the child's: it draws
+        // as a separate wash through the existing `ui.selection` site
+        // and never rewrites a cell's own style.
+        let selection_color = self.face_wash_or("ui.selection", TERMINAL_SELECTION_RGBA);
+        for run in &terminal.plan.selection {
+            let (x, y, w, h) = self.terminal_run_rect(*run);
+            rects.push(MinimapRect {
+                x,
+                y,
+                w,
+                h,
+                color: selection_color,
+            });
+        }
+        rects_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
+    /// Curly terminal underlines through the existing squiggle pipeline.
+    fn terminal_squiggle_vertex_bytes(&self) -> Vec<u8> {
+        let Some(terminal) = self.terminal.as_ref() else {
+            return Vec::new();
+        };
+        let rects: Vec<MinimapRect> = terminal
+            .plan
+            .underlines
+            .iter()
+            .filter(|underline| underline.style == UnderlineStyle::Curly)
+            .map(|underline| {
+                let (x, y, w, h) = self.terminal_run_rect(underline.run);
+                MinimapRect {
+                    x,
+                    y: y + h - DIAG_SQUIGGLE_PX,
+                    w,
+                    h: DIAG_SQUIGGLE_PX,
+                    color: rgb_to_quad(underline.color, 1.0),
+                }
+            })
+            .collect();
+        squiggles_to_vertex_bytes(&rects, self.config.width, self.config.height)
+    }
+
+    /// The child cursor's quad, painted through the caret primitive so
+    /// it lands over the glyph it sits on.
+    fn terminal_cursor_vertex_bytes(&self) -> Vec<u8> {
+        let Some(terminal) = self.terminal.as_ref() else {
+            return Vec::new();
+        };
+        let Some(cursor) = terminal.plan.cursor else {
+            return Vec::new();
+        };
+        let (x, y, w, h) = self.terminal_run_rect(cursor);
+        rects_to_vertex_bytes(
+            &[MinimapRect {
+                x,
+                y,
+                w,
+                h,
+                color: TERMINAL_CURSOR_RGBA,
+            }],
+            self.config.width,
+            self.config.height,
+        )
+    }
+
+    /// A geometry declaration for the current buffer if it
+    /// changed, else `None`.
+    ///
+    /// Called after a snapshot and after any real geometry change
+    /// (window resize, scale, font). An equal size is silent, so a
+    /// redraw storm produces no wire traffic.
+    fn terminal_declaration_if_changed(&mut self) -> Option<(BufferId, CellSize)> {
+        let buffer_id = self.current_buffer_id?;
+        let size = self.terminal_cell_viewport()?;
+        if self.last_terminal_size_sent == Some((buffer_id, size)) {
+            return None;
+        }
+        self.last_terminal_size_sent = Some((buffer_id, size));
+        Some((buffer_id, size))
     }
 
     /// True while the completion popup is open **for the buffer this
@@ -5240,9 +6042,10 @@ impl State {
     }
 
     /// Render one frame to an offscreen texture and read it back as packed
-    /// RGBA8 (`width * height * 4` bytes, row padding removed). Test-only,
-    /// the entry point for the headless render harness (F-014).
-    #[cfg(test)]
+    /// RGBA8 (`width * height * 4` bytes, row padding removed). The entry
+    /// point for the headless render harness (F-014) and for the Vterm
+    /// Stage 3 attach probe, which needs real composited pixels rather
+    /// than a claim that it rendered.
     fn render_offscreen(&mut self) -> Vec<u8> {
         let width = self.config.width;
         let height = self.config.height;
@@ -5379,9 +6182,19 @@ impl State {
                 &completion_vertices,
             )
             .cloned();
+        // Vterm Stage 3 — terminal mode replaces every document paint
+        // batch. Document decoration washes, squiggles, caret, minimap,
+        // and gutter describe a rope this window is not showing; the
+        // status band and the popup layers above it stay, because they
+        // are buffer-independent chrome the daemon still drives.
+        let terminal_mode = self.terminal.is_some();
         // The band's strip rides the bg quad batch so it draws under
         // the band text (text renders after the first quad draw).
-        let mut bg_vertices = self.decoration_background_vertex_bytes();
+        let mut bg_vertices = if terminal_mode {
+            self.terminal_quad_vertex_bytes()
+        } else {
+            self.decoration_background_vertex_bytes()
+        };
         bg_vertices.extend(self.status_band_vertex_bytes());
         let bg_vertex_count = (bg_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let bg_buffer = self
@@ -5396,7 +6209,11 @@ impl State {
         // Diagnostic squiggles (Q#W1): own pipeline + buffer, drawn
         // between the wash quads and the text (under the glyphs, the
         // z-slot the straight bar held).
-        let squiggle_vertices = self.squiggle_vertex_bytes();
+        let squiggle_vertices = if terminal_mode {
+            self.terminal_squiggle_vertex_bytes()
+        } else {
+            self.squiggle_vertex_bytes()
+        };
         let squiggle_vertex_count =
             (squiggle_vertices.len() / SQUIGGLE_VERTEX_STRIDE as usize) as u32;
         let squiggle_buffer = self
@@ -5408,7 +6225,11 @@ impl State {
                 &squiggle_vertices,
             )
             .cloned();
-        let caret_vertices = self.caret_vertex_bytes();
+        let caret_vertices = if terminal_mode {
+            self.terminal_cursor_vertex_bytes()
+        } else {
+            self.caret_vertex_bytes()
+        };
         let caret_vertex_count = (caret_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let caret_buffer = self
             .caret_vertex_buffer
@@ -5436,7 +6257,12 @@ impl State {
         {
             self.minimap_cache = Some((minimap_key, self.minimap_vertex_bytes()));
         }
-        let minimap_vertices = &self.minimap_cache.as_ref().expect("just filled").1;
+        let empty_minimap: Vec<u8> = Vec::new();
+        let minimap_vertices = if terminal_mode {
+            &empty_minimap
+        } else {
+            &self.minimap_cache.as_ref().expect("just filled").1
+        };
         let minimap_vertex_count = (minimap_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let minimap_buffer = self
             .minimap_vertex_buffer
@@ -5465,6 +6291,9 @@ impl State {
         // main-text clip-left. Computed here as locals — calling `self.*`
         // inside the `prepare` args would conflict with its `&mut` borrows.
         let text_left = self.text_left();
+        // Hoisted for the same borrow reason as the colors below: the
+        // terminal areas are built inside a `&mut self.*` argument list.
+        let mono_advance = self.mono_advance();
         let gutter_clip_left = if self.line_numbers.is_on() {
             text_left.floor() as i32
         } else {
@@ -5478,6 +6307,30 @@ impl State {
             .map_or(Color::rgb(168, 168, 180), |(_, text)| text);
         let left_color = self.status_left_color();
         let gutter_color = self.face_fg_or("ui.gutter", Color::rgb(120, 120, 135));
+        // Vterm Stage 3 — the document code layer is dropped entirely
+        // in terminal mode; terminal glyphs draw from their own
+        // per-run layer below, positioned at cell origins.
+        let code_areas: Vec<TextArea> = if terminal_mode {
+            Vec::new()
+        } else {
+            vec![TextArea {
+                buffer: &self.buffer,
+                left: text_left,
+                top: TEXT_TOP,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: gutter_clip_left,
+                    top: 0,
+                    right: text_bounds_right,
+                    // Clip at the status band (Q#S3): a final
+                    // partially-visible line must not bleed
+                    // into the band.
+                    bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
+                },
+                default_color: Color::rgb(230, 230, 235),
+                custom_glyphs: &[],
+            }]
+        };
         self.text_renderer
             .prepare(
                 &self.device,
@@ -5485,24 +6338,7 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [
-                    TextArea {
-                        buffer: &self.buffer,
-                        left: text_left,
-                        top: TEXT_TOP,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: gutter_clip_left,
-                            top: 0,
-                            right: text_bounds_right,
-                            // Clip at the status band (Q#S3): a final
-                            // partially-visible line must not bleed
-                            // into the band.
-                            bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
-                        },
-                        default_color: Color::rgb(230, 230, 235),
-                        custom_glyphs: &[],
-                    },
+                code_areas.into_iter().chain([
                     TextArea {
                         buffer: &self.status_buffer,
                         left: status_left,
@@ -5539,7 +6375,7 @@ impl State {
                         default_color: left_color,
                         custom_glyphs: &[],
                     },
-                ],
+                ]),
                 &mut self.swash_cache,
             )
             .expect("text_renderer prepare");
@@ -5547,7 +6383,7 @@ impl State {
         // UX gutter: prepare the line-number layer in the reserved left
         // strip (empty when off → renders nothing). Same `top` + line
         // height as the code, so numbers align row-for-row.
-        let gutter_areas: Vec<TextArea> = if self.line_numbers.is_on() {
+        let gutter_areas: Vec<TextArea> = if self.line_numbers.is_on() && !terminal_mode {
             vec![TextArea {
                 buffer: &self.gutter_buffer,
                 left: TEXT_LEFT,
@@ -5694,6 +6530,58 @@ impl State {
             )
             .expect("completion text_renderer prepare");
 
+        // Vterm Stage 3 — one TextArea per planned run, each pinned to
+        // its own cell origin and clipped to its declared footprint.
+        // Per-run areas are the point: a row-wide area would let one
+        // wide glyph's shaped advance shift every column after it.
+        let terminal_areas: Vec<TextArea> = self
+            .terminal
+            .as_ref()
+            .map(|terminal| {
+                let (ox, oy) = (TEXT_LEFT, TEXT_TOP);
+                let advance = mono_advance;
+                let line = self.fm.code_line_height();
+                let clip_bottom = text_area_bottom(self.config.height, self.fm).round() as i32;
+                let clip_right = self.config.width.cast_signed();
+                terminal
+                    .plan
+                    .runs
+                    .iter()
+                    .zip(self.terminal_text_buffers.iter())
+                    .map(|(run, buffer)| {
+                        let left = ox + run.col as f32 * advance;
+                        let top = oy + run.row as f32 * line;
+                        let right = (left + run.cells as f32 * advance).round() as i32;
+                        TextArea {
+                            buffer,
+                            left,
+                            top,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: left.floor() as i32,
+                                top: top.floor().max(0.0) as i32,
+                                right: right.min(clip_right),
+                                bottom: (top + line).round().min(clip_bottom as f32) as i32,
+                            },
+                            default_color: Color::rgb(230, 230, 235),
+                            custom_glyphs: &[],
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.terminal_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                terminal_areas,
+                &mut self.swash_cache,
+            )
+            .expect("terminal text_renderer prepare");
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -5733,6 +6621,12 @@ impl State {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text_renderer render");
+            // Vterm Stage 3 — terminal glyphs sit in the code layer's
+            // z-slot: over the cell backgrounds and underlines, under
+            // the cursor block.
+            self.terminal_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("terminal text_renderer render");
             // UX gutter: line numbers in the reserved left strip (empty
             // layer when off).
             self.gutter_text_renderer
@@ -6815,6 +7709,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::ThemeFacts { .. } => "ThemeFacts",
         InstanceMessage::FontFacts { .. } => "FontFacts",
         InstanceMessage::StatuslineSegments { .. } => "StatuslineSegments",
+        InstanceMessage::TerminalFrame(_) => "TerminalFrame",
     }
 }
 
@@ -7771,6 +8666,16 @@ fn plain_text_color() -> glyphon::Color {
 /// for a set face's `Default` bg (an untinted surface). Must equal
 /// [`BG`].
 const WINDOW_BG_RGBA: [f32; 4] = [0.05, 0.05, 0.07, 1.0];
+
+/// Resolved terminal RGB → quad color, carrying `alpha`.
+fn rgb_to_quad(rgb: crate::terminal::Rgb, alpha: f32) -> [f32; 4] {
+    [
+        f32::from(rgb[0]) / 255.0,
+        f32::from(rgb[1]) / 255.0,
+        f32::from(rgb[2]) / 255.0,
+        alpha,
+    ]
+}
 
 /// glyphon (u8) → quad (f32) color, carrying `alpha`. Divides by 255
 /// — the same space every existing float constant uses (e.g. the
@@ -12059,5 +12964,443 @@ mod tests {
             db.face(unrelated_id).is_some(),
             "an unrelated proportional family is untouched"
         );
+    }
+
+    // --- Vterm Stage 3: terminal mode -----------------------------------
+
+    fn terminal_cell(glyph: pmacs_protocol::Glyph, style: CellStyle) -> pmacs_protocol::Cell {
+        pmacs_protocol::Cell {
+            glyph,
+            style,
+            attachment: None,
+        }
+    }
+
+    fn terminal_frame_of(
+        buffer_id: BufferId,
+        rows: u32,
+        cols: u32,
+        cells: Vec<pmacs_protocol::Cell>,
+    ) -> TerminalFrame {
+        TerminalFrame {
+            buffer_id,
+            size: CellSize::new(rows, cols),
+            cells,
+            cursor: None,
+            title: Some("sh".into()),
+            screen_generation: 1,
+            selection: Vec::new(),
+            scroll_offset: 0,
+            at_bottom: true,
+            pid: 4242,
+            process: pmacs_protocol::TerminalProcessState::Running,
+        }
+    }
+
+    fn plain_terminal_frame(buffer_id: BufferId, text: &str, cols: u32) -> TerminalFrame {
+        let mut cells: Vec<pmacs_protocol::Cell> = text
+            .chars()
+            .map(|ch| terminal_cell(pmacs_protocol::Glyph::Char(ch), CellStyle::default()))
+            .collect();
+        while cells.len() < cols as usize {
+            cells.push(terminal_cell(
+                pmacs_protocol::Glyph::Char(' '),
+                CellStyle::default(),
+            ));
+        }
+        cells.truncate(cols as usize);
+        terminal_frame_of(buffer_id, 1, cols, cells)
+    }
+
+    /// Acceptance 35: a snapshot leaves terminal mode; a valid matching
+    /// frame enters it; a stale-buffer frame is ignored; a duplicate
+    /// valid frame rebuilds nothing.
+    #[test]
+    fn a35_terminal_mode_transitions_are_explicit_and_duplicates_do_no_work() {
+        let Some(mut state) = headless_or_skip(400, 300, "document text") else {
+            return;
+        };
+        let terminal_buffer = BufferId::next();
+        let other_buffer = BufferId::next();
+        state.current_buffer_id = Some(terminal_buffer);
+
+        // A frame for a buffer this window is not showing changes nothing.
+        state.apply_terminal_frame(plain_terminal_frame(other_buffer, "nope", 8));
+        assert!(
+            state.terminal.is_none(),
+            "a stale-buffer frame must not enter terminal mode"
+        );
+
+        let frame = plain_terminal_frame(terminal_buffer, "hello", 8);
+        state.apply_terminal_frame(frame.clone());
+        let terminal = state.terminal.as_ref().expect("terminal mode entered");
+        assert_eq!(terminal.buffer_id, terminal_buffer);
+        assert_eq!(terminal.plan.size, CellSize::new(1, 8));
+        let buffers_after_first = state.terminal_text_buffers.len();
+        assert!(buffers_after_first > 0, "runs were shaped");
+
+        // A byte-identical frame is retained without a rebuild.
+        state.terminal_text_buffers.clear();
+        state.apply_terminal_frame(frame);
+        assert!(
+            state.terminal_text_buffers.is_empty(),
+            "a duplicate valid frame must not rebuild shaping"
+        );
+
+        // A changed frame does rebuild.
+        state.apply_terminal_frame(plain_terminal_frame(terminal_buffer, "world", 8));
+        assert!(!state.terminal_text_buffers.is_empty());
+
+        // Leaving terminal mode drops every terminal-only cache.
+        state.exit_terminal_mode();
+        assert!(state.terminal.is_none());
+        assert!(state.terminal_text_buffers.is_empty());
+        assert!(state.last_terminal_size_sent.is_none());
+    }
+
+    /// Acceptance 29 (frontend half): an invalid frame is rejected whole
+    /// and the previous valid frame survives.
+    #[test]
+    fn a29_invalid_terminal_frame_retains_the_previous_valid_one() {
+        let Some(mut state) = headless_or_skip(400, 300, "document text") else {
+            return;
+        };
+        let terminal_buffer = BufferId::next();
+        state.current_buffer_id = Some(terminal_buffer);
+        let good = plain_terminal_frame(terminal_buffer, "good", 8);
+        state.apply_terminal_frame(good.clone());
+
+        // Cell count disagreeing with the declared area.
+        let mut short = plain_terminal_frame(terminal_buffer, "bad", 8);
+        short.cells.pop();
+        state.apply_terminal_frame(short);
+        assert_eq!(
+            state.terminal.as_ref().expect("still terminal").frame,
+            good,
+            "an invalid frame must not partially apply"
+        );
+
+        // An orphan continuation.
+        let mut orphan = plain_terminal_frame(terminal_buffer, "bad", 8);
+        orphan.cells[0] = terminal_cell(pmacs_protocol::Glyph::Continuation, CellStyle::default());
+        state.apply_terminal_frame(orphan);
+        assert_eq!(state.terminal.as_ref().expect("still terminal").frame, good);
+
+        // An attachment in a terminal cell.
+        let mut attached = plain_terminal_frame(terminal_buffer, "bad", 8);
+        attached.cells[1].attachment = Some(pmacs_protocol::Attachment::ImageCell {
+            image_id: 1,
+            sub_x: 0,
+            sub_y: 0,
+        });
+        state.apply_terminal_frame(attached);
+        assert_eq!(state.terminal.as_ref().expect("still terminal").frame, good);
+
+        // A later valid frame still lands, so the latch is not a wedge.
+        let next = plain_terminal_frame(terminal_buffer, "next", 8);
+        state.apply_terminal_frame(next.clone());
+        assert_eq!(state.terminal.as_ref().expect("terminal").frame, next);
+    }
+
+    /// Acceptance 35: geometry declaration emits exactly one changed
+    /// size and suppresses identical ones.
+    #[test]
+    fn a35_cell_declaration_emits_once_per_change() {
+        let Some(mut state) = headless_or_skip(400, 300, "document text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+
+        let first = state
+            .terminal_declaration_if_changed()
+            .expect("a 400x300 window admits a cell grid");
+        assert_eq!(first.0, buffer_id);
+        assert!(first.1.rows >= 1 && first.1.cols >= 1);
+        assert!(
+            state.terminal_declaration_if_changed().is_none(),
+            "an unchanged size must be silent"
+        );
+
+        // A real geometry change re-declares exactly once.
+        state.resize(600, 300);
+        let widened = state
+            .terminal_declaration_if_changed()
+            .expect("a wider window is a new size");
+        assert!(widened.1.cols > first.1.cols);
+        assert!(state.terminal_declaration_if_changed().is_none());
+
+        // A buffer switch forces a fresh declaration even at the same size.
+        state.exit_terminal_mode();
+        let after_switch = state
+            .terminal_declaration_if_changed()
+            .expect("a snapshot forces re-declaration");
+        assert_eq!(after_switch.1, widened.1);
+    }
+
+    /// Acceptance 34: pixel hit testing yields only in-bounds cells and
+    /// never leaves the terminal rectangle.
+    #[test]
+    fn a34_terminal_hit_testing_stays_inside_the_declared_grid() {
+        let Some(mut state) = headless_or_skip(400, 300, "document text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.apply_terminal_frame(plain_terminal_frame(buffer_id, "abcd", 4));
+        let advance = f64::from(state.mono_advance());
+        let line = f64::from(state.fm.code_line_height());
+        let size = state.terminal.as_ref().expect("terminal").plan.size;
+
+        let origin = (f64::from(TEXT_LEFT), f64::from(TEXT_TOP));
+        let hit = |x: f64, y: f64| {
+            crate::terminal::hit_test_cell(
+                x as f32,
+                y as f32,
+                (TEXT_LEFT, TEXT_TOP),
+                state.mono_advance(),
+                state.fm.code_line_height(),
+                size,
+            )
+        };
+        assert_eq!(hit(origin.0, origin.1), Some(CellCoord::new(0, 0)));
+        assert_eq!(
+            hit(origin.0 + advance * 2.5, origin.1 + line * 0.5),
+            Some(CellCoord::new(0, 2))
+        );
+        // Past the last declared column, and above the grid origin (the
+        // window chrome), are not terminal hits.
+        assert_eq!(
+            hit(origin.0 + advance * f64::from(size.cols), origin.1),
+            None
+        );
+        assert_eq!(hit(origin.0, origin.1 - 1.0), None);
+        // The status band is below the grid and never hits.
+        assert_eq!(
+            hit(
+                origin.0,
+                f64::from(text_area_bottom(state.config.height, state.fm)) + 2.0
+            ),
+            None
+        );
+    }
+
+    /// Acceptance 33: a real headless frame paints terminal cells and
+    /// drops every document layer.
+    #[test]
+    fn a33_headless_terminal_frame_paints_cells_without_document_layers() {
+        let text = "alpha\nbeta\ngamma\ndelta\n";
+        let Some(mut document) = headless_or_skip(400, 300, text) else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        document.current_buffer_id = Some(buffer_id);
+        document.view_range = (0, text.len() as u64);
+        document.line_numbers = LineNumberMode::Absolute;
+        let document_px = document.render_offscreen();
+
+        let mut terminal = State::new_headless(400, 300, text).expect("adapter was just available");
+        terminal.current_buffer_id = Some(buffer_id);
+        terminal.view_range = (0, text.len() as u64);
+        terminal.line_numbers = LineNumberMode::Absolute;
+        // A red-on-blue row: both colors are far from the defaults, so
+        // their presence is unambiguous evidence the cells painted.
+        let styled = CellStyle {
+            fg: CellColor::Rgb(255, 0, 0),
+            bg: CellColor::Rgb(0, 0, 255),
+            ..CellStyle::default()
+        };
+        let cells: Vec<pmacs_protocol::Cell> = "TERMINAL"
+            .chars()
+            .map(|ch| terminal_cell(pmacs_protocol::Glyph::Char(ch), styled))
+            .collect();
+        let mut frame = terminal_frame_of(buffer_id, 1, cells.len() as u32, cells);
+        frame.cursor = Some(CellCoord::new(0, 0));
+        assert_eq!(frame.validate(), Ok(()));
+        terminal.apply_terminal_frame(frame);
+        let terminal_px = terminal.render_offscreen();
+
+        assert_eq!(document_px.len(), terminal_px.len());
+        let differing = document_px
+            .iter()
+            .zip(&terminal_px)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 1000,
+            "terminal mode must repaint the code area ({differing} bytes differ)"
+        );
+
+        // The blue cell background must actually be on screen.
+        let blue = terminal_px
+            .chunks_exact(4)
+            .filter(|px| px[2] > 100 && px[0] < 90 && px[1] < 90)
+            .count();
+        assert!(
+            blue > 100,
+            "the terminal cell background did not paint ({blue} blue pixels)"
+        );
+
+        // Document overlays are suppressed. The minimap is the
+        // unambiguous probe: it occupies a band no terminal cell can
+        // reach, and it paints only when a file summary is present.
+        // The comparison is DIFFERENTIAL rather than a brightness
+        // threshold — the window background is itself a nonzero sRGB
+        // value, so "is there ink here" is not a question absolute
+        // pixel levels can answer.
+        let summary = FileStyleSummaryState {
+            generation: 1,
+            lines: vec![
+                CellStyle {
+                    fg: CellColor::Rgb(255, 255, 255),
+                    ..CellStyle::default()
+                };
+                40
+            ],
+        };
+        let band_left = minimap_left(400).expect("a 400px window has a minimap band") as u32;
+        let code_bottom = text_area_bottom(300, document.fm) as u32;
+        let band_differs = |a: &[u8], b: &[u8]| {
+            let mut count = 0usize;
+            for row in 0..code_bottom {
+                for col in band_left..400 {
+                    let i = ((row * 400 + col) * 4) as usize;
+                    if a[i..i + 4] != b[i..i + 4] {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+
+        document.current_summary = Some(summary.clone());
+        document.current_line_shapes = minimap_line_shapes(text);
+        document.minimap_cache = None;
+        let document_minimap_px = document.render_offscreen();
+        assert!(
+            band_differs(&document_px, &document_minimap_px) > 0,
+            "the probe is vacuous unless a summary makes the document frame's \
+             minimap band change"
+        );
+
+        terminal.current_summary = Some(summary);
+        terminal.current_line_shapes = minimap_line_shapes(text);
+        terminal.minimap_cache = None;
+        let terminal_minimap_px = terminal.render_offscreen();
+        assert_eq!(
+            band_differs(&terminal_px, &terminal_minimap_px),
+            0,
+            "terminal mode must not paint the document minimap"
+        );
+    }
+
+    /// Acceptance 33: reverse video, selection, and the cursor each
+    /// change the rendered frame, and a continuation paints no glyph of
+    /// its own.
+    #[test]
+    fn a33_reverse_selection_and_cursor_each_change_the_frame() {
+        let Some(mut base) = headless_or_skip(400, 300, "x") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        let build = |state: &mut State, mutate: &dyn Fn(&mut TerminalFrame)| -> Vec<u8> {
+            state.current_buffer_id = Some(buffer_id);
+            state.exit_terminal_mode();
+            state.current_buffer_id = Some(buffer_id);
+            let mut frame = plain_terminal_frame(buffer_id, "SAMPLE", 12);
+            mutate(&mut frame);
+            assert_eq!(frame.validate(), Ok(()));
+            state.apply_terminal_frame(frame);
+            state.render_offscreen()
+        };
+
+        let plain = build(&mut base, &|_| {});
+        let reversed = build(&mut base, &|frame| {
+            for cell in &mut frame.cells {
+                cell.style.reverse = true;
+            }
+        });
+        let selected = build(&mut base, &|frame| {
+            frame.selection = vec![pmacs_protocol::TerminalSelectionSpan {
+                row: 0,
+                start_col: 0,
+                end_col: 6,
+            }];
+        });
+        let with_cursor = build(&mut base, &|frame| {
+            frame.cursor = Some(CellCoord::new(0, 3));
+        });
+
+        let differs = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+        assert!(
+            differs(&plain, &reversed) > 500,
+            "reverse video must repaint the run"
+        );
+        assert!(
+            differs(&plain, &selected) > 200,
+            "a selection wash must reach the frame"
+        );
+        assert!(
+            differs(&plain, &with_cursor) > 50,
+            "the cursor block must reach the frame"
+        );
+
+        // A wide lead plus its continuation paints one glyph across two
+        // cells — the continuation contributes no run of its own.
+        base.exit_terminal_mode();
+        base.current_buffer_id = Some(buffer_id);
+        let mut cells = vec![
+            terminal_cell(
+                pmacs_protocol::Glyph::Char('\u{4e00}'),
+                CellStyle::default(),
+            ),
+            terminal_cell(pmacs_protocol::Glyph::Continuation, CellStyle::default()),
+        ];
+        cells.resize(
+            4,
+            terminal_cell(pmacs_protocol::Glyph::Char(' '), CellStyle::default()),
+        );
+        let frame = terminal_frame_of(buffer_id, 1, 4, cells);
+        assert_eq!(frame.validate(), Ok(()));
+        base.apply_terminal_frame(frame);
+        let plan = &base.terminal.as_ref().expect("terminal").plan;
+        let wide = plan.runs.first().expect("a wide run");
+        assert_eq!(wide.cells, 2, "the wide lead owns both columns");
+        assert!(
+            plan.runs.iter().all(|run| run.col != 1),
+            "the continuation contributes no run"
+        );
+    }
+
+    /// Acceptance 36: the terminal statusline metadata reaches the band
+    /// as text, never as a host-title or control effect.
+    #[test]
+    fn a36_terminal_title_stays_sanitized_statusline_metadata() {
+        let Some(mut state) = headless_or_skip(400, 300, "doc") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        let mut frame = plain_terminal_frame(buffer_id, "sh", 8);
+        frame.title = Some("build: cargo test".into());
+        state.apply_terminal_frame(frame);
+        // The frame retains the title verbatim for the provider to
+        // render; nothing in the GPU turns it into a window-title or a
+        // terminal control sequence.
+        assert_eq!(
+            state
+                .terminal
+                .as_ref()
+                .expect("terminal")
+                .frame
+                .title
+                .as_deref(),
+            Some("build: cargo test")
+        );
+        // Control characters can never arrive here: validation rejects
+        // them before the frame is installed.
+        let mut hostile = plain_terminal_frame(buffer_id, "sh", 8);
+        hostile.title = Some("\u{1b}]0;pwned\u{7}".into());
+        assert!(hostile.validate().is_err());
     }
 }

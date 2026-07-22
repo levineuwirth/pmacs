@@ -1122,6 +1122,155 @@ impl EditorState {
         }
     }
 
+    /// Resolve the exact terminal view a semantic frontend is showing.
+    ///
+    /// The window identity is DERIVED from the authenticated frontend,
+    /// never accepted from the wire: a semantic peer names only a
+    /// buffer, so a forged or stale `buffer_id` fails this check and
+    /// reaches no view, controller, or PTY. A window that has since
+    /// switched away also fails, which is what makes a pointer racing a
+    /// buffer switch a no-op instead of a gesture on the wrong buffer.
+    fn semantic_terminal_key(
+        &self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+    ) -> Option<TerminalViewKey> {
+        let core = self.core.borrow();
+        let view = core.views.get(&frontend_id)?;
+        let window = core.windows.get(&view.active)?;
+        if window.buffer_id != buffer_id {
+            return None;
+        }
+        let key = TerminalViewKey::new(frontend_id, window.id, buffer_id);
+        self.terminal_manager
+            .borrow()
+            .is_terminal(buffer_id)
+            .then_some(key)
+    }
+
+    /// Whether `buffer_id` is the terminal an authenticated semantic
+    /// frontend is currently displaying.
+    ///
+    /// The daemon calls this before recording a terminal declaration so
+    /// a stale or forged buffer never becomes a frontend's projection
+    /// target — a declaration is only meaningful for the window the
+    /// sender actually has on screen.
+    #[must_use]
+    pub fn semantic_terminal_declaration_is_active(
+        &self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+    ) -> bool {
+        self.semantic_terminal_key(frontend_id, buffer_id).is_some()
+    }
+
+    /// Project one semantic frontend's active terminal view.
+    ///
+    /// Called from the render pass, after `sync_semantic_terminal_layout`
+    /// has already applied any geometry change, so the snapshot comes
+    /// from an already-published screen rather than one mid-resize.
+    pub fn prepare_semantic_terminal_view(
+        &self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+        size: CellSize,
+    ) -> Option<TerminalSnapshot> {
+        let key = self.semantic_terminal_key(frontend_id, buffer_id)?;
+        self.terminal_manager
+            .borrow_mut()
+            .snapshot_for_view(key, size)
+    }
+
+    /// Record a semantic frontend's declared terminal geometry.
+    ///
+    /// Recording is unconditional for a valid declaration — that is what
+    /// gives a passive split its own clipped/padded projection — but the
+    /// PTY resizes only when this exact view is the durable controller.
+    /// Declaring geometry never CLAIMS control: a background frontend
+    /// repainting at a different size must not steal the shared screen
+    /// out from under the frontend the user is typing into.
+    ///
+    /// Returns whether the shared screen geometry actually changed.
+    pub fn sync_semantic_terminal_layout(
+        &mut self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+        size: CellSize,
+    ) -> bool {
+        let Some(key) = self.semantic_terminal_key(frontend_id, buffer_id) else {
+            return false;
+        };
+        if !self
+            .terminal_manager
+            .borrow_mut()
+            .record_view_size(key, size)
+        {
+            return false;
+        }
+        let controls = self
+            .terminal_manager
+            .borrow()
+            .controller(buffer_id)
+            .is_some_and(|controller| controller.matches(key));
+        if !controls {
+            return false;
+        }
+        let old_size = self
+            .terminal_manager
+            .borrow()
+            .snapshot(buffer_id)
+            .map(|snapshot| snapshot.size);
+        if old_size == Some(size) {
+            return false;
+        }
+        let (Ok(rows), Ok(cols)) = (u16::try_from(size.rows), u16::try_from(size.cols)) else {
+            return false;
+        };
+        let result = self.terminal_manager.borrow_mut().resize(
+            buffer_id,
+            rows,
+            cols,
+            &mut self.process_supervisor.borrow_mut(),
+        );
+        if let Err(error) = result {
+            self.core.borrow_mut().status = error.to_string();
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Apply a semantic frontend's terminal-cell pointer gesture.
+    ///
+    /// The gesture must name the authenticated frontend's active
+    /// terminal buffer, match the viewport that frontend last declared,
+    /// and land inside it. Anything else is dropped before any view,
+    /// controller, selection, menu, or PTY mutation — a coordinate is
+    /// only meaningful relative to the geometry the sender declared, so
+    /// accepting one against a stale or undeclared viewport would let a
+    /// peer select cells it never saw.
+    pub fn dispatch_semantic_terminal_pointer(
+        &mut self,
+        frontend_id: FrontendId,
+        buffer_id: crate::buffer::BufferId,
+        coord: CellCoord,
+        kind: TerminalMouseKind,
+        mods: TerminalModifiers,
+    ) -> bool {
+        let Some(key) = self.semantic_terminal_key(frontend_id, buffer_id) else {
+            return false;
+        };
+        let Some(size) = self.terminal_manager.borrow().declared_view_size(key) else {
+            return false;
+        };
+        if coord.row >= size.rows || coord.col >= size.cols {
+            return false;
+        }
+        self.core.borrow_mut().active_frontend = frontend_id;
+        self.apply_terminal_gesture(key, size, coord, kind, mods, (coord.row, coord.col));
+        true
+    }
+
     /// Precompute owned terminal view snapshots before entering paint borrows.
     pub fn prepare_terminal_views(
         &mut self,
@@ -1763,10 +1912,34 @@ impl EditorState {
         event: MouseEvent,
         global: (u32, u32),
     ) {
-        use crossterm::event::{MouseButton, MouseEventKind};
+        self.apply_terminal_gesture(
+            key,
+            viewport_size,
+            coord,
+            terminal_mouse_kind(event.kind),
+            terminal_modifiers(event.modifiers),
+            global,
+        );
+    }
 
-        let kind = terminal_mouse_kind(event.kind);
-        let modifiers = terminal_modifiers(event.modifiers);
+    /// The one terminal pointer path, shared by both frontend kinds.
+    ///
+    /// The TUI reaches it through crossterm translation and the semantic
+    /// frontend through `FrontendEvent::TerminalPointer`; both arrive as
+    /// the protocol-native kind/modifier pair, so child mouse reporting,
+    /// scroll, selection, and the context menu stay single-sourced.
+    /// A second copy of this precedence in the GPU lane is exactly how
+    /// Shift-drag or scrolled-back selection would silently diverge
+    /// between frontends.
+    fn apply_terminal_gesture(
+        &mut self,
+        key: TerminalViewKey,
+        viewport_size: CellSize,
+        coord: CellCoord,
+        kind: TerminalMouseKind,
+        modifiers: TerminalModifiers,
+        global: (u32, u32),
+    ) {
         let shift = modifiers.contains(TerminalModifiers::SHIFT);
         let (at_bottom, modes, screen_size) = {
             let mut manager = self.terminal_manager.borrow_mut();
@@ -1792,23 +1965,23 @@ impl EditorState {
 
         self.claim_terminal_controller(key);
         let mut manager = self.terminal_manager.borrow_mut();
-        match event.kind {
-            MouseEventKind::ScrollUp => {
+        match kind {
+            TerminalMouseKind::ScrollUp => {
                 let _ = manager.scroll_view(key, viewport_size, SCROLL_LINES);
             }
-            MouseEventKind::ScrollDown => {
+            TerminalMouseKind::ScrollDown => {
                 let _ = manager.scroll_view(key, viewport_size, -SCROLL_LINES);
             }
-            MouseEventKind::Down(MouseButton::Left) => {
+            TerminalMouseKind::Down(TerminalMouseButton::Left) => {
                 let _ = manager.begin_selection(key, viewport_size, coord);
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            TerminalMouseKind::Drag(TerminalMouseButton::Left) => {
                 let _ = manager.update_selection(key, viewport_size, coord);
             }
-            MouseEventKind::Up(MouseButton::Left) => {
+            TerminalMouseKind::Up(TerminalMouseButton::Left) => {
                 let _ = manager.finish_selection(key, viewport_size, coord);
             }
-            MouseEventKind::Down(MouseButton::Right) => {
+            TerminalMouseKind::Down(TerminalMouseButton::Right) => {
                 drop(manager);
                 self.core.borrow_mut().break_command_chain(key.frontend_id);
                 let rows = self.build_menu_rows();

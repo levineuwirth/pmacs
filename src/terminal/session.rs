@@ -20,7 +20,7 @@ use crate::terminal::screen::TerminalScreen;
 use crate::terminal::view::{TerminalController, TerminalViewKey, TerminalViewState};
 use crate::terminal::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_HISTORY_CELLS, MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS,
-    MAX_TERMINAL_VISIBLE_CELLS,
+    MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame, TerminalProcessState, TerminalSelectionSpan,
 };
 
 /// Shared single-owner terminal registry used by editor and future Lua bindings.
@@ -133,30 +133,6 @@ impl TerminalSpec {
     }
 }
 
-/// Process outcome published with an owned terminal snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TerminalProcessState {
-    /// Child is running or termination has only been requested.
-    Running,
-    /// Child exited with a status code.
-    Exited(i32),
-    /// Child was terminated by a sanitized symbolic signal.
-    Signaled(String),
-    /// Supervision failed after the session was published.
-    Crashed(String),
-}
-
-/// One selected terminal-row span. Stage 1 snapshots leave selection empty.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerminalSelectionSpan {
-    /// Visible row.
-    pub row: u32,
-    /// Inclusive starting column.
-    pub start_col: u32,
-    /// Exclusive ending column.
-    pub end_col: u32,
-}
-
 /// Owned, renderer-safe terminal state captured after a manager tick.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerminalSnapshot {
@@ -182,6 +158,35 @@ pub struct TerminalSnapshot {
     pub pid: u32,
     /// Latest observed process state.
     pub process: TerminalProcessState,
+}
+
+impl TerminalSnapshot {
+    /// Convert an owned snapshot into its protocol-v19 wire form.
+    ///
+    /// The two shapes are deliberately distinct types even though their
+    /// fields line up: the snapshot is core-owned state the TUI also
+    /// consumes, while [`TerminalFrame`] is wire input a peer may forge.
+    /// The conversion is total, but the CALLER must still
+    /// [`TerminalFrame::validate`] before emitting — the aggregate glyph
+    /// bound is a wire limit the screen does not enforce, so a child
+    /// that builds a legal-but-huge internal snapshot must be caught
+    /// here rather than sent truncated.
+    #[must_use]
+    pub fn into_terminal_frame(self) -> TerminalFrame {
+        TerminalFrame {
+            buffer_id: self.buffer_id,
+            size: self.size,
+            cells: self.cells,
+            cursor: self.cursor,
+            title: self.title,
+            screen_generation: self.screen_generation,
+            selection: self.selection,
+            scroll_offset: self.scroll_offset,
+            at_bottom: self.at_bottom,
+            pid: self.pid,
+            process: self.process,
+        }
+    }
 }
 
 /// Terminal session/registry failures.

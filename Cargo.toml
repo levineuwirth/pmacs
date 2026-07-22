@@ -13,6 +13,10 @@ members = [".", "pmacs-protocol", "pmacs-gpu"]
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 thiserror = "2"
+# Shared between `pmacs` (terminal screen) and `pmacs-protocol`
+# (`TerminalFrame::validate`). Pinned here so the producer and the
+# validator agree on every glyph's column width.
+unicode-width = "0.2"
 
 [package]
 name = "pmacs"
@@ -85,7 +89,7 @@ crdt = ["dep:loro", "pmacs-protocol/crdt"]
 [dependencies]
 crossterm = "0.28"
 thiserror = { workspace = true }
-unicode-width = "0.2"
+unicode-width = { workspace = true }
 unicode-segmentation = "1"
 # Regex engine for in-buffer regex search (Q#RX1). `regex::bytes::Regex`
 # matches over rope-snapshot bytes and yields byte offsets directly.

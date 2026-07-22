@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_eighteen_for_statusline_segments() {
+    fn protocol_version_is_nineteen_for_the_terminal_family() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1714,8 +1714,13 @@ mod tests {
         // variant — see the ThemeFacts placement pin).
         // Statusline segments Q#SL7 bumped 17→18 (`InstanceMessage::
         // StatuslineSegments`, additive + daemon-gated, appended after
-        // FontFacts — see the v17 placement pin).
-        assert_eq!(PROTOCOL_VERSION, 18);
+        // FontFacts — see the v17 placement pin). Vterm Stage 3 bumped
+        // 18→19 (`InstanceMessage::TerminalFrame`, daemon-gated, plus
+        // `FrontendEvent::TerminalResize` / `TerminalPointer`,
+        // frontend-gated — the first bump that gates in BOTH
+        // directions; all three appended after their enum's final v18
+        // variant, see the placement pins).
+        assert_eq!(PROTOCOL_VERSION, 19);
     }
 
     #[test]
@@ -1790,17 +1795,18 @@ mod tests {
         // regex/invalid), v11 (the context menu), v12 (the GUI
         // minibuffer), v13 (`LineNumbers`), v14 (`LineNumberMode`), v15
         // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`),
-        // and v18 (`StatuslineSegments`) all interoperate.
-        for accepted in 6..=18 {
+        // v18 (`StatuslineSegments`), and v19 (the vterm terminal
+        // family) all interoperate.
+        for accepted in 6..=19 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 19, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 20, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v18 binary"
+                "v{rejected} must be rejected by a v19 binary"
             );
         }
     }
@@ -1888,6 +1894,124 @@ mod tests {
             let bytes = postcard::to_allocvec(&msg).expect("encode");
             let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(msg, decoded);
+        }
+    }
+
+    #[test]
+    fn statusline_segments_encoding_is_unchanged_by_the_v19_build() {
+        // Vterm Stage 3 placement pin: `TerminalFrame` must be APPENDED
+        // after `StatuslineSegments` — the final v18 variant, whose
+        // ordinal moves if anything is inserted before any v18 variant.
+        // These are the exact bytes a v18 binary produced for this
+        // value (discriminant 25 as a postcard varint, then the buffer
+        // id and two empty vectors); the new variant's own round-trip
+        // cannot detect a shift.
+        let msg = InstanceMessage::StatuslineSegments {
+            buffer_id: pmacs_protocol::BufferId::from_raw(4),
+            left: Vec::new(),
+            right: Vec::new(),
+        };
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        assert_eq!(
+            bytes,
+            [25, 4, 0, 0],
+            "StatuslineSegments' v18 wire bytes changed — a variant was \
+             inserted before it; append new InstanceMessage variants \
+             at the end"
+        );
+    }
+
+    #[test]
+    fn menu_pointer_encoding_is_unchanged_by_the_v19_build() {
+        // The same placement pin for the frontend→instance enum:
+        // `TerminalResize` / `TerminalPointer` are appended after
+        // `MenuPointer`, the final v18 `FrontendEvent` variant. A
+        // frontend-gated variant inserted earlier would shift the
+        // discriminants of `Viewport` and `Pointer`, which older
+        // daemons decode on every session.
+        let ev = FrontendEvent::MenuPointer {
+            frontend_id: FrontendId(2),
+            index: Some(1),
+            invoke: true,
+        };
+        let bytes = postcard::to_allocvec(&ev).expect("encode");
+        assert_eq!(
+            bytes,
+            [10, 2, 1, 1, 1],
+            "MenuPointer's v18 wire bytes changed — a variant was \
+             inserted before it; append new FrontendEvent variants \
+             at the end"
+        );
+    }
+
+    #[test]
+    fn terminal_family_round_trips_and_pins_its_discriminants() {
+        let bid = pmacs_protocol::BufferId::from_raw(9);
+        let frame = pmacs_protocol::TerminalFrame {
+            buffer_id: bid,
+            size: CellSize::new(1, 2),
+            cells: vec![
+                Cell {
+                    glyph: pmacs_protocol::Glyph::Char('h'),
+                    style: Style::default(),
+                    attachment: None,
+                },
+                Cell {
+                    glyph: pmacs_protocol::Glyph::Char('i'),
+                    style: Style::default(),
+                    attachment: None,
+                },
+            ],
+            cursor: Some(CellCoord::new(0, 1)),
+            title: None,
+            screen_generation: 2,
+            selection: Vec::new(),
+            scroll_offset: 0,
+            at_bottom: true,
+            pid: 77,
+            process: pmacs_protocol::TerminalProcessState::Running,
+        };
+        assert_eq!(frame.validate(), Ok(()));
+
+        let msg = InstanceMessage::TerminalFrame(frame);
+        let bytes = postcard::to_allocvec(&msg).expect("encode");
+        assert_eq!(
+            bytes.first(),
+            Some(&26),
+            "TerminalFrame must be the 27th InstanceMessage variant \
+             (appended after StatuslineSegments)"
+        );
+        let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded, msg);
+
+        for (ev, discriminant) in [
+            (
+                FrontendEvent::TerminalResize {
+                    frontend_id: FrontendId(3),
+                    buffer_id: bid,
+                    size: CellSize::new(24, 80),
+                },
+                11u8,
+            ),
+            (
+                FrontendEvent::TerminalPointer {
+                    frontend_id: FrontendId(3),
+                    buffer_id: bid,
+                    coord: CellCoord::new(4, 5),
+                    kind: MouseKind::Down(MouseButton::Left),
+                    mods: Modifiers::SHIFT,
+                },
+                12,
+            ),
+        ] {
+            let bytes = postcard::to_allocvec(&ev).expect("encode");
+            assert_eq!(
+                bytes.first(),
+                Some(&discriminant),
+                "terminal FrontendEvent variants must be appended after MenuPointer"
+            );
+            let decoded: FrontendEvent = postcard::from_bytes(&bytes).expect("decode");
+            assert_eq!(decoded, ev);
         }
     }
 

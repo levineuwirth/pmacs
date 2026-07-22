@@ -429,6 +429,13 @@ impl Frontend {
             // the grid TUI paints provider output directly from the
             // registry and silently drops an unexpected wire copy.
             | InstanceMessage::StatuslineSegments { .. }
+            // Vterm Stage 3 — TerminalFrame is the semantic frontend's
+            // terminal surface. A grid TUI composes terminal windows
+            // into its own CellDelta (Stage 2) and advertises no
+            // semantic render, so the daemon never sends it here; an
+            // unexpected copy drops silently like the rest of the
+            // family rather than being re-interpreted as cells.
+            | InstanceMessage::TerminalFrame(_)
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

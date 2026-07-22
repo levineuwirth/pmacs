@@ -1,8 +1,11 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 8 — 2026-07-22. Status: Stage 1 landed on `main` as PR #126
+**Revision 9 — 2026-07-22. Status: Stage 1 landed on `main` as PR #126
 at merge `643d1e1`; Stage 2 landed as PR #130 at merge `86fc1bc`; Stage 3
-is framed here and is not implemented.**
+is IMPLEMENTED on `vterm-gpu` and awaits review. Revision 8's framing text
+below is preserved verbatim as the approved contract; §0.9 records what the
+implementation actually did, including the two places it had to go beyond
+the letter of the framing.**
 
 Revision 8 re-scouts the final stage against the integrated protocol-v18 tree
 and closes its remaining producer/frontend boundary decisions. Protocol v19
@@ -302,6 +305,81 @@ architectural defect. This round closes its three precision findings:
   honored.
 - Arc 5 stage 2 is the vterm delivery; capitalized Stages 1–3 are its three
   internal PR stages.
+
+### 0.9 Stage 3 as built
+
+Stage 3 is implemented on `vterm-gpu`, cut from canonical `main` @ `1dd47fc`
+rather than stacked on the documentation branch, with the approved Revision 8
+framing as its first commit. Criteria 28–37 are implemented.
+
+**Protocol.** `pmacs-protocol` gained `src/terminal.rs`, which now owns the
+shared row/column/visible-cell/grapheme/metadata bounds (re-exported from
+`crate::terminal::*` so every Stage 1/2 caller keeps its path and no duplicate
+type exists), `TerminalProcessState`, `TerminalSelectionSpan`, `TerminalFrame`,
+and `TerminalFrame::validate`. `unicode-width` was promoted to a workspace
+dependency so the terminal screen and the wire validator measure glyph columns
+with one table. Discriminants: `InstanceMessage::TerminalFrame` is 26,
+`FrontendEvent::TerminalResize` 11, `TerminalPointer` 12 — each appended after
+its enum's final v18 variant, with placement pins on `StatuslineSegments` and
+`MenuPointer` guarding them. `SUPPORTED_PROTOCOL_VERSIONS` is `[6..=19]`.
+
+The measured maximum legal frame — 512x512, one maximal selection span per row,
+maximum title and process metadata, the maximal-encoding `Style` on every cell,
+and the exact 8 MiB aggregate glyph budget distributed to maximize serialized
+length-prefix overhead — encodes to **13,437,863 bytes**, against the unchanged
+16,777,216-byte transport cap. A one-byte-over aggregate is rejected before
+serialization.
+
+**Two decisions the implementation had to make.**
+
+1. *The `Viewport` gate keys on the ACTIVE buffer, not the declared one.*
+   §6.2 says "a document buffer accepts only `Viewport`; an active terminal
+   buffer accepts only `TerminalResize`", and the first implementation read
+   that as a test on the buffer the message names. That is not sufficient:
+   `Viewport` also ALIGNS the frontend's window to the buffer it names, so a
+   stale document viewport still in flight when a command opened a terminal
+   dragged the frontend straight back off it — the real-daemon acceptance
+   showed the window oscillating and no frame ever arriving. The daemon now
+   drops `Viewport` when the authenticated source's active window shows a
+   terminal (and, defensively, when the declared buffer is itself a terminal).
+   This is the framing's own wording taken literally; it is recorded here
+   because the weaker reading looks correct and silently produces a terminal
+   that never paints.
+2. *The producer clears terminal mode on every exit path.* `in_terminal_mode`
+   is used daemon-side to suppress `CursorByte` and the presence sweep. An
+   early return from the terminal pass that left the flag set kept those
+   suppressed after the frontend went back to a document. Every path out of
+   the pass now clears it explicitly.
+
+**Renderer.** `pmacs-gpu/src/terminal.rs` is a pure, cell-space paint planner:
+it resolves a validated frame into background/underline/selection/cursor runs
+and explicitly positioned text runs, taking the frontend's two default colors
+as parameters so every paint rule is unit-testable without a GPU. `main.rs`
+holds a two-state machine (`Document` / `Terminal`), builds one shaped buffer
+per text run so a wide or cluster glyph's advance can never choose the next
+column's origin, and swaps the document quad/squiggle/caret/minimap/gutter
+batches for terminal ones while leaving the status band and popup layers alone.
+
+**Criterion 37.** The GPU is a separate binary that depends only on
+`pmacs-protocol`, so the single real path is driven as a process:
+`pmacs-gpu --headless-probe <socket> <report>` attaches through the REAL
+`attach` client (the reader sink was generalized so the winit path and the probe
+share one handshake, outbox, and writer), presses a real key that opens a real
+`/bin/sh` child, applies real `TerminalFrame`s, composites real pixels through
+`render_to_view`, sends real input and a real geometry change, and writes named
+observations the acceptance asserts on. `tests/vterm_stage3_acceptance.rs`
+`a37_…` is that test; it is CRDT-gated because the daemon advertises
+`crdt_replica` / `semantic_render` only on CRDT builds.
+
+**Verification (from a clean tree).** `cargo fmt --check`; strict workspace
+Clippy; 1,757 default + 1,933 CRDT library tests (3 ignored each); Stage 1
+acceptance 9 default + 10 CRDT; Stage 2 acceptance 4 default + 4 CRDT; Stage 3
+acceptance 4 default + 5 CRDT (the fifth is the CRDT-gated real-daemon path);
+statusline acceptance 7 default + 8 CRDT; M4 120 passed (3 ignored, 1 filtered);
+required GPU 127; one-invocation workspace sweep 2,919 passed across 83 suites
+(19 ignored); `git diff --check` clean. One unexplained single failure of the
+required-GPU suite occurred once mid-session and did not reproduce across eight
+subsequent runs including the full sweep; its identity was not captured.
 
 ## 1. Problem and ownership boundary
 
