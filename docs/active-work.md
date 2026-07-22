@@ -59,12 +59,12 @@ If it does not, stop and repair the remote/fetch configuration.
 - Portable branch: `githubsucks/modeline-detection`
 - Framing head: `6b4f3c3`
 - Base: canonical `main` @ `d5d9b9c`.
-- State: `docs/modeline-detection-framing.md` Revision 2 incorporates the
-  first user review; there is no implementation. It frames bounded Emacs/Vim
+- State: `docs/modeline-detection-framing.md` Revision 2 was approved for
+  implementation by the user on 2026-07-22. It frames bounded Emacs/Vim
   parsing, explicit precedence over inferred language, alias normalization,
   and one pinned language decision shared by syntax, LSP, and initial major
-  mode.
-- Next step: user approval before implementation.
+  mode. Implementation is active in the isolated worktree.
+- Next step: implement and verify all thirteen acceptance criteria.
 
 Recovery worktree on a machine that does not already own the branch:
 
