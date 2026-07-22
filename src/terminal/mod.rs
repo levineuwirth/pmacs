@@ -8,10 +8,15 @@ pub mod input;
 /// Stateful terminal screen model.
 pub mod screen;
 pub mod session;
+/// Per-context terminal viewport, selection, and controller identities.
+pub mod view;
 
 pub use session::{
     SharedTerminalManager, TerminalError, TerminalManager, TerminalProcessState,
     TerminalSelectionSpan, TerminalSnapshot, TerminalSpec,
+};
+pub use view::{
+    LogicalCellAnchor, TerminalController, TerminalSelection, TerminalViewKey, TerminalViewState,
 };
 
 /// Maximum terminal rows accepted at creation or resize.

@@ -57,7 +57,13 @@ fn paint(state: &EditorState, rows: u32, cols: u32) -> Vec<Cell> {
         stride: cols,
         size: CellSize::new(rows, cols),
     };
-    let _ = pmacs::editor::paint_frame(state, &mut grid, CellSize::new(rows, cols));
+    let _ = pmacs::editor::paint_frame(
+        state,
+        FrontendId::LOCAL,
+        &std::collections::HashMap::new(),
+        &mut grid,
+        CellSize::new(rows, cols),
+    );
     cells
 }
 
@@ -124,9 +130,14 @@ fn a01_04_registry_contract_limits_epochs_and_results() {
     assert!(baseline_mode.ends_with(" L1:C1 All "));
 
     let initial = state.statusline_registry.borrow().providers();
-    assert_eq!(initial.len(), 2, "builtin providers are discoverable");
-    assert!(initial.iter().any(|provider| provider.name == "mode"));
-    assert!(initial.iter().any(|provider| provider.name == "lsp"));
+    assert_eq!(
+        initial
+            .iter()
+            .map(|provider| provider.name.as_str())
+            .collect::<Vec<_>>(),
+        ["mode", "terminal", "lsp"],
+        "built-in providers are discoverable in registration order"
+    );
     let before_epochs = {
         let registry = state.statusline_registry.borrow();
         (registry.layout_epoch(), registry.face_set_epoch())

@@ -17,6 +17,7 @@ use crate::process::{
     RestartPolicy, StdinMode, TerminalMode,
 };
 use crate::terminal::screen::TerminalScreen;
+use crate::terminal::view::{TerminalController, TerminalViewKey, TerminalViewState};
 use crate::terminal::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_HISTORY_CELLS, MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS,
     MAX_TERMINAL_VISIBLE_CELLS,
@@ -206,22 +207,26 @@ pub enum TerminalError {
     Process(String),
 }
 
-struct TerminalSession {
-    process_id: ProcessId,
-    pid: u32,
-    screen: TerminalScreen,
-    process: TerminalProcessState,
-    annotated: bool,
+pub(super) struct TerminalSession {
+    pub(super) process_id: ProcessId,
+    pub(super) pid: u32,
+    pub(super) screen: TerminalScreen,
+    pub(super) process: TerminalProcessState,
+    pub(super) annotated: bool,
 }
 
 /// Owns the one-buffer/one-process/one-screen terminal registry.
 #[derive(Default)]
 pub struct TerminalManager {
-    sessions: HashMap<BufferId, TerminalSession>,
+    pub(super) sessions: HashMap<BufferId, TerminalSession>,
     process_to_buffer: HashMap<ProcessId, BufferId>,
     /// Removed buffers whose children are still being reaped. Their events
     /// remain manager-owned so Lua/LSP/MCP consumers cannot steal a batch.
     closing: HashSet<ProcessId>,
+    /// Per-frontend/window projections over the one session screen.
+    pub(super) views: HashMap<TerminalViewKey, TerminalViewState>,
+    /// At most one authenticated frontend/window controls each session PTY.
+    pub(super) controllers: HashMap<BufferId, TerminalController>,
 }
 
 impl TerminalManager {
@@ -255,7 +260,12 @@ impl TerminalManager {
         let screen = TerminalScreen::new(size, spec.scrollback_rows)
             .map_err(|error| TerminalError::Screen(error.to_string()))?;
 
-        let buffer_name = spec.buffer_name();
+        let base_name = spec.buffer_name();
+        let buffer_name = if spec.name.is_some() {
+            base_name
+        } else {
+            unique_terminal_name(core, &base_name)
+        };
         let buffer_id = BufferId::next();
         let mut buffer = Buffer::new(buffer_id, buffer_name.clone());
         buffer.set_read_only(true);
@@ -336,6 +346,99 @@ impl TerminalManager {
         self.sessions
             .get(&buffer_id)
             .map(|session| session.process_id)
+    }
+
+    /// Monotonic terminal BEL count used for per-frontend delivery baselines.
+    #[must_use]
+    pub fn bell_count(&self, buffer_id: BufferId) -> Option<u64> {
+        self.sessions
+            .get(&buffer_id)
+            .map(|session| session.screen.bell_count())
+    }
+
+    /// Ensure an exact terminal view exists without changing its controller.
+    ///
+    /// Returns `false` when the key's buffer is not a published terminal.
+    pub fn register_view(&mut self, key: TerminalViewKey) -> bool {
+        if !self.sessions.contains_key(&key.buffer_id) {
+            return false;
+        }
+        self.views.entry(key).or_default();
+        true
+    }
+
+    /// Borrow fresh mutable state for an already registered exact view.
+    pub fn view_state_mut(&mut self, key: TerminalViewKey) -> Option<&mut TerminalViewState> {
+        self.views.get_mut(&key)
+    }
+
+    /// Borrow fresh state for an already registered exact view.
+    #[must_use]
+    pub fn view_state(&self, key: TerminalViewKey) -> Option<&TerminalViewState> {
+        self.views.get(&key)
+    }
+
+    /// Retain only `live` views belonging to one authenticated frontend.
+    pub fn retain_frontend_views(
+        &mut self,
+        frontend_id: crate::protocol::FrontendId,
+        live: &HashSet<TerminalViewKey>,
+    ) {
+        self.views.retain(|key, _| {
+            key.frontend_id != frontend_id
+                || (live.contains(key) && self.sessions.contains_key(&key.buffer_id))
+        });
+        self.controllers.retain(|buffer_id, controller| {
+            controller.frontend_id != frontend_id
+                || live.contains(&TerminalViewKey::new(
+                    frontend_id,
+                    controller.window_id,
+                    *buffer_id,
+                ))
+        });
+    }
+
+    /// Drop all view and controller state owned by a detached frontend.
+    pub fn detach_frontend(&mut self, frontend_id: crate::protocol::FrontendId) {
+        self.views.retain(|key, _| key.frontend_id != frontend_id);
+        self.controllers
+            .retain(|_, controller| controller.frontend_id != frontend_id);
+    }
+
+    /// Give an exact registered view durable PTY control for its session.
+    ///
+    /// A frontend controls at most one session. Claiming another registered
+    /// view atomically releases that frontend's previous session first.
+    pub fn claim_controller(&mut self, key: TerminalViewKey) -> bool {
+        if !self.views.contains_key(&key) || !self.sessions.contains_key(&key.buffer_id) {
+            return false;
+        }
+        self.controllers.retain(|buffer_id, controller| {
+            controller.frontend_id != key.frontend_id || *buffer_id == key.buffer_id
+        });
+        self.controllers
+            .insert(key.buffer_id, TerminalController::from_view(key));
+        true
+    }
+
+    /// Release control only when `key` is the current controller.
+    pub fn release_controller(&mut self, key: TerminalViewKey) -> bool {
+        if self
+            .controllers
+            .get(&key.buffer_id)
+            .is_some_and(|controller| controller.matches(key))
+        {
+            self.controllers.remove(&key.buffer_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Current durable controller for one terminal session.
+    #[must_use]
+    pub fn controller(&self, buffer_id: BufferId) -> Option<TerminalController> {
+        self.controllers.get(&buffer_id).copied()
     }
 
     /// Capture context-free owned visible state after the latest tick.
@@ -488,6 +591,8 @@ impl TerminalManager {
                 continue;
             };
             self.process_to_buffer.remove(&session.process_id);
+            self.views.retain(|key, _| key.buffer_id != buffer_id);
+            self.controllers.remove(&buffer_id);
             match supervisor.state(session.process_id) {
                 Some(
                     ProcessState::Starting
@@ -528,7 +633,23 @@ impl TerminalManager {
         }
         self.sessions.clear();
         self.process_to_buffer.clear();
+        self.views.clear();
+        self.controllers.clear();
     }
+}
+
+fn unique_terminal_name(core: &EditorCore, base: &str) -> String {
+    let registry = core.registry.borrow();
+    if registry.find_by_name(base).is_none() {
+        return base.to_owned();
+    }
+    for suffix in 2usize.. {
+        let candidate = format!("{base}<{suffix}>");
+        if registry.find_by_name(&candidate).is_none() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded terminal suffix search must find a free name")
 }
 
 fn finish_session(session: &mut TerminalSession, outcome: TerminalProcessState) {

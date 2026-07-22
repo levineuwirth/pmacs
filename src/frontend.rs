@@ -348,8 +348,11 @@ impl Frontend {
                 let payload = format!("\x1b]52;c;{}\x07", osc52_base64(data));
                 queue!(self.out, Print(payload))?;
             }
+            InstanceMessage::Signal(InstanceSignal::Bell) => {
+                queue!(self.out, Print("\x07"))?;
+            }
             InstanceMessage::ModeLine(_)
-            // Bell / window-title Signals stay reserved for v0.3.
+            // Window-title requests remain metadata-only.
             | InstanceMessage::Signal(_)
             | InstanceMessage::Goodbye(_)
             // T M10.5: CrdtOp's wire shape exists; the v1.0 TUI doesn't

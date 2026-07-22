@@ -18,7 +18,10 @@
 
 use crate::cell::{Cell, CellGrid, CellSize, diff};
 use crate::editor::{EditorState, paint_frame};
-use crate::protocol::{CursorState, InstanceMessage};
+use crate::protocol::{CursorState, FrontendId, InstanceMessage};
+use crate::terminal::TerminalSnapshot;
+use crate::window::WindowId;
+use std::collections::HashMap;
 
 /// Owns the cell buffers and runs the paint-and-diff cycle.
 pub struct RenderState {
@@ -95,6 +98,8 @@ impl RenderState {
     pub fn render_frame(
         &mut self,
         state: &EditorState,
+        frontend_id: FrontendId,
+        terminal_snapshots: &HashMap<WindowId, TerminalSnapshot>,
         other_presences: &[crate::overlay_paint::OtherPresence],
     ) -> Vec<InstanceMessage> {
         if self.size.rows < 2 || self.size.cols == 0 {
@@ -107,7 +112,7 @@ impl RenderState {
                 stride: self.size.cols,
                 size: self.size,
             };
-            let coord = paint_frame(state, &mut grid, self.size);
+            let coord = paint_frame(state, frontend_id, terminal_snapshots, &mut grid, self.size);
             // T M10.9 — overlay paint after main paint, before diff.
             // Modifies cells in `next`; diff captures the changes
             // as ordinary style updates.
@@ -186,7 +191,7 @@ mod tests {
     #[test]
     fn render_returns_cell_delta_and_cursor() {
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let msgs = r.render_frame(&empty_state(), &[]);
+        let msgs = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0], InstanceMessage::CellDelta { .. }));
         assert!(matches!(msgs[1], InstanceMessage::Cursor(_)));
@@ -195,7 +200,7 @@ mod tests {
     #[test]
     fn first_frame_is_full_grid_sync() {
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let msgs = r.render_frame(&empty_state(), &[]);
+        let msgs = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         match &msgs[0] {
             InstanceMessage::CellDelta { full_grid, .. } => assert!(*full_grid),
             _ => panic!("expected CellDelta first"),
@@ -205,8 +210,8 @@ mod tests {
     #[test]
     fn second_frame_is_differential() {
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let _ = r.render_frame(&empty_state(), &[]);
-        let msgs = r.render_frame(&empty_state(), &[]);
+        let _ = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
+        let msgs = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         match &msgs[0] {
             InstanceMessage::CellDelta { full_grid, .. } => assert!(!*full_grid),
             _ => panic!("expected CellDelta first"),
@@ -217,8 +222,8 @@ mod tests {
     fn unchanged_state_produces_empty_spans_after_first_frame() {
         let state = empty_state();
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let _ = r.render_frame(&state, &[]);
-        let msgs = r.render_frame(&state, &[]);
+        let _ = r.render_frame(&state, FrontendId::LOCAL, &HashMap::new(), &[]);
+        let msgs = r.render_frame(&state, FrontendId::LOCAL, &HashMap::new(), &[]);
         match &msgs[0] {
             InstanceMessage::CellDelta { spans, .. } => assert!(
                 spans.is_empty(),
@@ -231,7 +236,7 @@ mod tests {
     #[test]
     fn resize_reallocates_and_flags_full_grid() {
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let _ = r.render_frame(&empty_state(), &[]);
+        let _ = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         assert!(!r.needs_full_grid);
 
         r.resize(CellSize::new(40, 120));
@@ -240,7 +245,7 @@ mod tests {
         assert_eq!(r.next.len(), 40 * 120);
         assert!(r.needs_full_grid);
 
-        let msgs = r.render_frame(&empty_state(), &[]);
+        let msgs = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         match &msgs[0] {
             InstanceMessage::CellDelta { full_grid, .. } => assert!(*full_grid),
             _ => unreachable!(),
@@ -250,7 +255,7 @@ mod tests {
     #[test]
     fn resize_to_same_size_is_noop() {
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let _ = r.render_frame(&empty_state(), &[]);
+        let _ = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         assert!(!r.needs_full_grid);
         r.resize(CellSize::new(24, 80));
         // No reallocation, no full-grid flip.
@@ -260,7 +265,7 @@ mod tests {
     #[test]
     fn force_full_grid_resync_flips_flag() {
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let _ = r.render_frame(&empty_state(), &[]);
+        let _ = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         assert!(!r.needs_full_grid);
         r.force_full_grid_resync();
         assert!(r.needs_full_grid);
@@ -270,16 +275,22 @@ mod tests {
     fn too_small_grid_returns_empty_messages() {
         // rows < 2 means we can't paint a text-area + status row.
         let mut r = RenderState::new(CellSize::new(1, 80));
-        assert!(r.render_frame(&empty_state(), &[]).is_empty());
+        assert!(
+            r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[])
+                .is_empty()
+        );
 
         let mut r = RenderState::new(CellSize::new(24, 0));
-        assert!(r.render_frame(&empty_state(), &[]).is_empty());
+        assert!(
+            r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[])
+                .is_empty()
+        );
     }
 
     #[test]
     fn cursor_message_carries_coord_when_paint_returns_one() {
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let msgs = r.render_frame(&empty_state(), &[]);
+        let msgs = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         match &msgs[1] {
             InstanceMessage::Cursor(Some(cs)) => {
                 assert!(cs.visible);
@@ -309,7 +320,7 @@ mod tests {
         // Criterion 1: the first frame after construction is a full-grid
         // CellDelta carrying every non-default cell.
         let mut r = RenderState::new(CellSize::new(24, 80));
-        let msgs = r.render_frame(&empty_state(), &[]);
+        let msgs = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         match &msgs[0] {
             InstanceMessage::CellDelta { full_grid, spans } => {
                 assert!(*full_grid, "first frame must be flagged full_grid=true");
@@ -335,7 +346,7 @@ mod tests {
         let mut state = EditorState::new();
         let mut r = RenderState::new(size);
         // Seat the prev buffer.
-        let _ = r.render_frame(&state, &[]);
+        let _ = r.render_frame(&state, FrontendId::LOCAL, &HashMap::new(), &[]);
 
         // Single character insert.
         state.dispatch_key(
@@ -347,7 +358,7 @@ mod tests {
                 state: KeyEventState::empty(),
             },
         );
-        let msgs = r.render_frame(&state, &[]);
+        let msgs = r.render_frame(&state, FrontendId::LOCAL, &HashMap::new(), &[]);
         match &msgs[0] {
             InstanceMessage::CellDelta { full_grid, spans } => {
                 assert!(!*full_grid, "differential frame must not flag full_grid");
@@ -374,7 +385,7 @@ mod tests {
         let mut r = RenderState::new(size);
 
         // First render: seats prev with the painted frame.
-        let first = r.render_frame(&empty_state(), &[]);
+        let first = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         let baseline_changed: usize = match &first[0] {
             InstanceMessage::CellDelta { spans, .. } => spans.iter().map(|s| s.cells.len()).sum(),
             _ => unreachable!(),
@@ -383,7 +394,7 @@ mod tests {
 
         // A second render with no state change normally produces zero
         // spans (the state matches prev exactly).
-        let unchanged = r.render_frame(&empty_state(), &[]);
+        let unchanged = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         match &unchanged[0] {
             InstanceMessage::CellDelta { full_grid, spans } => {
                 assert!(!*full_grid);
@@ -396,7 +407,7 @@ mod tests {
         // what's on screen. force_full_grid_resync flags the next frame
         // for full sync.
         r.force_full_grid_resync();
-        let resync = r.render_frame(&empty_state(), &[]);
+        let resync = r.render_frame(&empty_state(), FrontendId::LOCAL, &HashMap::new(), &[]);
         match &resync[0] {
             InstanceMessage::CellDelta { full_grid, spans } => {
                 assert!(*full_grid, "post-resync frame must be full_grid=true");

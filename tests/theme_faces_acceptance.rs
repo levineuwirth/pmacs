@@ -92,7 +92,13 @@ fn paint_full_frame(state: &EditorState, rows: u32, cols: u32) -> Vec<Cell> {
         stride: cols,
         size: CellSize::new(rows, cols),
     };
-    let _cursor = pmacs::editor::paint_frame(state, &mut grid, CellSize::new(rows, cols));
+    let _cursor = pmacs::editor::paint_frame(
+        state,
+        FrontendId::LOCAL,
+        &std::collections::HashMap::new(),
+        &mut grid,
+        CellSize::new(rows, cols),
+    );
     backing
 }
 
