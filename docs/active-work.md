@@ -55,9 +55,11 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Vterm Stage 2 implementation lane
 
 - Portable branch: `githubsucks/vterm-tui`
-- Current local head: `da8f6ae`
+- Feature head: `da8f6ae`; first published ledger checkpoint: `d2fca0c`
 - Base: canonical `main` @ `f1a2f75` (handoff refresh #128 atop config
   registry #127 and Vterm Stage 1 #126).
+- PR: #130, <https://github.com/levineuwirth/pmacs/pull/130>, open against
+  canonical `main`.
 - State: `docs/vterm-framing.md` Revision 7 criteria 15–27 are implemented.
   The lane composes per-frontend/window terminal views in the TUI, installs
   the strict `pmacs.terminal` API and terminal-local bindings, drains
@@ -72,7 +74,7 @@ If it does not, stop and repair the remote/fetch configuration.
   3 CRDT; statusline acceptance 7 default + 8 CRDT; M4 114 passed
   (3 ignored, 1 filtered); required GPU 109; workspace 2,869 passed across
   81 suites (19 ignored, 1 filtered); `git diff --check` clean.
-- Next: push the branch and open the Stage 2 PR against canonical `main`.
+- Next: user review rounds. Do not merge without explicit authorization.
 
 Recovery worktree on a machine that does not already own the branch:
 
