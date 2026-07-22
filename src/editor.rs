@@ -797,16 +797,21 @@ impl EditorState {
             return;
         }
 
-        // Buffer-scope keybindings need the active buffer id passed
-        // through the dispatcher (otherwise `keymap_stack::resolve`
-        // skips the buffer-local map entirely and every "scope =
-        // buffer" binding falls through to global). The id is read
-        // outside the keymap borrow so a single-buffer focus check
-        // doesn't collide with the stack lookup below.
-        let active_buffer = Some(self.core.borrow().active_buffer_id());
+        // Buffer- and mode-scope keybindings resolve against the active
+        // buffer. Keep its mode borrowed from the registry only while the
+        // pure keymap lookup runs: `Option::as_slice` provides the required
+        // zero-or-one borrowed slice without allocating or cloning. Both
+        // RefCell borrows end with this block, before any Lua command runs.
+        let active_buffer = self.core.borrow().active_buffer_id();
         let action = {
+            let registry = self.lua_host.registry().borrow();
+            let active_mode = registry
+                .get(active_buffer)
+                .ok()
+                .and_then(|buffer| buffer.major_mode());
             let stack = self.lua_host.keymaps().borrow();
-            self.dispatcher.dispatch(chord, &stack, active_buffer, &[])
+            self.dispatcher
+                .dispatch(chord, &stack, Some(active_buffer), active_mode.as_slice())
         };
 
         // Snapshot the active buffer's edit revision before the command
@@ -3720,6 +3725,34 @@ mod tests {
             }
             other => panic!("expected Bound editor.list-buffers; got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dispatch_uses_active_buffer_major_mode_and_releases_borrows() {
+        let mut s = fresh_with(b"");
+        let buffer_id = s.core.borrow().active_buffer_id();
+        s.lua_host
+            .registry()
+            .borrow_mut()
+            .get_mut(buffer_id)
+            .unwrap()
+            .set_major_mode(Some("dispatch-test".to_owned()));
+        s.lua_host
+            .keymaps()
+            .borrow_mut()
+            .bind_mode(
+                "dispatch-test",
+                &crate::key::parse_sequence("C-b").unwrap(),
+                "editor.list-buffers",
+                crate::command::SourceLocation::default(),
+            )
+            .unwrap();
+
+        // `editor.list-buffers` mutably borrows the buffer registry. Reaching
+        // the resulting buffer therefore proves dispatch released both its
+        // registry and keymap borrows before invoking the mode-bound command.
+        s.dispatch_key(FrontendId::LOCAL, ctrl('b'));
+        assert_eq!(s.core.borrow().active_buffer_name(), "*buffer-list*");
     }
 
     #[test]

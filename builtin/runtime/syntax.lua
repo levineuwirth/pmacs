@@ -228,7 +228,7 @@ local function resolve_active_language(buf)
   return pmacs.parse.language_from_shebang(buf)
 end
 
-local function attach_for_active_buffer()
+local function attach_for_active_buffer(initialize_mode)
   local buf = pmacs.window.buffer()
   if not buf then return end
   local key = tostring(buf)
@@ -245,6 +245,14 @@ local function attach_for_active_buffer()
   -- never gives a wrong-grammar tree.
   local lang = pmacs.parse._has_view(buf) and parse_lang_by_buffer[key]
     or resolve_active_language(buf)
+  -- The detected language is also the initial major-mode name. Do this
+  -- before grammar gating: a language supplied only by an LSP filetype or
+  -- shebang mapping is still a valid mode even when no parser is bundled.
+  -- Only after-load initializes it; after-switch must preserve explicit
+  -- overrides and explicit nil clears.
+  if initialize_mode and lang and pmacs.buffer.major_mode(buf) == nil then
+    pmacs.buffer.set_major_mode(buf, lang)
+  end
   if not lang or not pmacs.parse._has_language(lang) then return end
   pmacs.parse._dispatch(buf, lang)
   -- T M4.3: install the syntax-highlight overlay for this buffer.
@@ -266,7 +274,7 @@ end
 pmacs.hook.add("buffer.after-load", function()
   -- Best-effort: a missing grammar / re-entry / stale buffer
   -- mustn't poison the rest of the after-load chain.
-  local ok, err = pcall(attach_for_active_buffer)
+  local ok, err = pcall(function() attach_for_active_buffer(true) end)
   if not ok and pmacs.error then
     pmacs.error("syntax.after-load: " .. tostring(err))
   end
@@ -284,12 +292,28 @@ pmacs.hook.add("buffer.after-switch", function()
     local buf = pmacs.window.buffer()
     if not buf then return end
     highlighted_buffers[tostring(buf)] = nil
-    attach_for_active_buffer()
+    attach_for_active_buffer(false)
   end)
   if not ok and pmacs.error then
     pmacs.error("syntax.after-switch: " .. tostring(err))
   end
 end)
+
+-- Major mode is window-local presentation state because each split may show
+-- a different buffer. The provider therefore reads ctx.buffer rather than
+-- the focused buffer. Empty text omits the segment without tripping the
+-- statusline failure latch.
+pmacs.statusline.register {
+  name = "mode",
+  side = "left",
+  priority = 0,
+  face = "ui.modeline",
+  fn = function(ctx)
+    local mode = pmacs.buffer.major_mode(ctx.buffer)
+    if mode == nil then return "" end
+    return "(" .. mode .. ")"
+  end,
+}
 
 local function reparse_active_buffer_after_edit()
   local buf = pmacs.window.buffer()
