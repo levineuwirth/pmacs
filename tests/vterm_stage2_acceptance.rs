@@ -238,6 +238,46 @@ fn lua_surface_is_strict_fresh_transactional_and_context_safe() {
             .expect("pcall implicit scroll");
         assert!(!ok);
         assert!(error.contains("interactive frontend context"));
+
+        let (ok, error): (bool, String) = lua
+            .load(
+                r"
+                local ok, err = pcall(function()
+                  pmacs.command.invoke_interactive('terminal.scroll-up')
+                end)
+                return ok, tostring(err)
+                ",
+            )
+            .eval()
+            .expect("pcall ambient interactive invoke");
+        assert!(!ok);
+        assert!(error.contains("active interactive frontend context"));
+
+        for (field, source) in [
+            (
+                "frontend",
+                "pmacs.terminal.view_state { window = 1, buffer = TERM_BUFFER, active = true }",
+            ),
+            (
+                "window",
+                "pmacs.terminal.view_state { frontend = 1, buffer = TERM_BUFFER, active = true }",
+            ),
+            (
+                "buffer",
+                "pmacs.terminal.view_state { frontend = 1, window = 1, active = true }",
+            ),
+        ] {
+            let (_, error): (bool, String) = lua
+                .load(format!(
+                    "local ok, err = pcall(function() {source} end); return ok, tostring(err)"
+                ))
+                .eval()
+                .expect("pcall incomplete explicit context");
+            assert!(
+                error.contains(&format!("missing field `{field}`")),
+                "missing `{field}` surfaced as {error:?}"
+            );
+        }
     }
 
     state

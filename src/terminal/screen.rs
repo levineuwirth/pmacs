@@ -120,6 +120,7 @@ pub struct ScreenProjection {
 #[allow(missing_docs)]
 #[derive(Clone, Copy)]
 pub(crate) struct BorrowedScreenProjection<'a> {
+    pub size: CellSize,
     pub alternate_active: bool,
     pub history_head: &'a [TerminalRow],
     pub history_tail: &'a [TerminalRow],
@@ -138,6 +139,7 @@ impl BorrowedScreenProjection<'_> {
 impl ScreenProjection {
     pub(crate) fn as_borrowed(&self) -> BorrowedScreenProjection<'_> {
         BorrowedScreenProjection {
+            size: self.size,
             alternate_active: self.alternate_active,
             history_head: &self.history,
             history_tail: &[],
@@ -582,6 +584,7 @@ impl TerminalScreen {
             self.main.history.as_slices()
         };
         BorrowedScreenProjection {
+            size: self.size,
             alternate_active: self.alt_active,
             history_head,
             history_tail,

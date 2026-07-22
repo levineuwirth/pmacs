@@ -719,6 +719,12 @@ impl EditorState {
     }
 
     /// Whether `frontend_id` may optimistically self-insert its next key.
+    ///
+    /// `false` while a prefix, terminal escape, modal surface, or round-trip
+    /// buffer owns input. The daemon publishes this as `DispatchIdle`; returning
+    /// `true` while one of those surfaces is active would let a CRDT frontend
+    /// edit the document locally while the daemon routes the same key elsewhere
+    /// (M10.10, Q#SR5, Q#CM1, Q#QR1, Arc 1b Q#P6).
     #[must_use]
     pub fn dispatch_idle_for(&self, frontend_id: FrontendId) -> bool {
         if self
@@ -735,7 +741,7 @@ impl EditorState {
             && !core.menu_is_open()
             && core
                 .active_window_for(frontend_id)
-                .is_some_and(|window| !core.active_buffer_round_trips_for(window.buffer_id))
+                .is_some_and(|window| !core.buffer_round_trips(window.buffer_id))
     }
 
     /// Local-frontend compatibility wrapper.
@@ -767,6 +773,9 @@ impl EditorState {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
         }
+        // Authenticate every path through this input event, including modal
+        // callbacks such as M-x minibuffer acceptance.
+        let _origin = self.interactive_origin.enter(frontend_id);
         let chord = key_event_to_chord(key);
         {
             let mut core = self.core.borrow_mut();
@@ -782,6 +791,11 @@ impl EditorState {
             }
         }
 
+        // Modal surfaces beat both terminal transport and the completion popup.
+        // Menu/search/query-replace/minibuffer are full keymap shadows shared by
+        // grid and semantic input; each returns before the ordinary post-command
+        // edit check, so shadow handlers own any required hook fan-out (Q#CM1,
+        // Q#SR5, Q#QR1).
         // Global modal surfaces own input before terminal transport.
         if self.core.borrow().menu_is_open() {
             if let Some(chord) = chord {
@@ -808,6 +822,9 @@ impl EditorState {
             return;
         }
 
+        // Completion is the one partial modal shadow (Q#C3): only its control
+        // chords are intercepted. A pending per-frontend prefix owns those
+        // chords instead, and ordinary keys continue to terminal/keymap dispatch.
         let dispatcher_pending = self
             .dispatchers
             .get(&frontend_id)
@@ -820,6 +837,8 @@ impl EditorState {
             return;
         }
 
+        // Terminal transport precedes ordinary buffer/global bindings. `C-c`
+        // opens a fixed one-key editor escape; all unescaped keys go to the child.
         let terminal_key = self.active_terminal_key(frontend_id);
         let escaped = self
             .dispatchers
@@ -878,9 +897,10 @@ impl EditorState {
         let pre_revision = self.active_buffer_revision();
 
         match action {
+            // Kill ring Q#KR2: stamp the authenticated frontend before the
+            // body so nested interactive calls inherit the same origin.
             Action::Run { command, .. } => {
                 self.core.borrow_mut().rotate_command(frontend_id, &command);
-                let _origin = self.interactive_origin.enter(frontend_id);
                 if let Err(e) = self
                     .lua_host
                     .invoke_command(&command, mlua::MultiValue::new())
@@ -889,10 +909,14 @@ impl EditorState {
                         format!("error in {command}: {}", first_line(&e.to_string()));
                 }
             }
+            // A prefix is rendered from dispatcher state; dismissing the
+            // popup prevents its partial shadow from stealing continuation.
             Action::Pending { .. } => {
                 self.core.borrow_mut().completion_popup_close();
             }
             Action::Unbound { sequence } => {
+                // Self-insert is an interactive command boundary (Q#KR2).
+                // Arm Q#AP9 typed-edit metadata only across this dispatch.
                 if let Some(ch) = printable_char(&sequence) {
                     self.core
                         .borrow_mut()
@@ -900,12 +924,12 @@ impl EditorState {
                     self.core.borrow_mut().typed_edit_arm(frontend_id, ch);
                     let mut args = mlua::MultiValue::new();
                     args.push_back(mlua::Value::Integer(ch as i64));
-                    let _origin = self.interactive_origin.enter(frontend_id);
                     if let Err(e) = self.lua_host.invoke_command("buffer.self-insert", args) {
                         self.core.borrow_mut().status =
                             format!("self-insert failed: {}", first_line(&e.to_string()));
                     }
                 } else {
+                    // Emacs `undefined` is still a command boundary (Q#KR2).
                     self.core.borrow_mut().break_command_chain(frontend_id);
                     self.core.borrow_mut().status =
                         format!("{}: not bound", display_sequence(&sequence));
@@ -1736,14 +1760,12 @@ impl EditorState {
         let shift = modifiers.contains(TerminalModifiers::SHIFT);
         let (at_bottom, modes, screen_size) = {
             let mut manager = self.terminal_manager.borrow_mut();
-            let Some(snapshot) = manager.snapshot_for_view(key, viewport_size) else {
+            let Some(status) = manager.view_status_for_size(key, viewport_size) else {
                 return;
             };
             let modes = manager.modes_for_view(key).unwrap_or_default();
-            let screen_size = manager
-                .snapshot(key.buffer_id)
-                .map_or(viewport_size, |snapshot| snapshot.size);
-            (snapshot.at_bottom, modes, screen_size)
+            let screen_size = manager.screen_size_for_view(key).unwrap_or(viewport_size);
+            (status.at_bottom, modes, screen_size)
         };
 
         if !shift
@@ -2543,11 +2565,15 @@ impl CompletionPopupKey {
 /// future non-crossterm frontend) can drive it directly against a
 /// Vec-backed [`crate::cell::CellGrid`] without going through a
 /// `RenderState`.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "the public renderer contract uses the canonical snapshot HashMap"
+)]
 #[allow(clippy::too_many_lines, reason = "linear paint pipeline")]
-pub fn paint_frame<S: std::hash::BuildHasher>(
+pub fn paint_frame(
     state: &EditorState,
     frontend_id: FrontendId,
-    terminal_snapshots: &HashMap<WindowId, TerminalSnapshot, S>,
+    terminal_snapshots: &HashMap<WindowId, TerminalSnapshot>,
     grid: &mut crate::cell::CellGrid<'_>,
     term_size: CellSize,
 ) -> Option<CellCoord> {

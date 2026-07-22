@@ -212,20 +212,49 @@ impl TerminalManager {
         self.scroll_view(key, size, rows.saturating_mul(direction.signum()))
     }
 
-    /// Return fresh geometric status for one registered view.
+    /// Register or refresh one view at `viewport_size` and return its geometry
+    /// without allocating an owned cell snapshot.
     #[must_use]
-    pub fn view_status(&mut self, key: TerminalViewKey) -> Option<TerminalViewStatus> {
-        let projection = self.sessions.get(&key.buffer_id)?.screen.projection_ref();
-        let state = self.views.get_mut(&key)?;
+    pub(crate) fn view_status_for_size(
+        &mut self,
+        key: TerminalViewKey,
+        viewport_size: CellSize,
+    ) -> Option<TerminalViewStatus> {
+        if !valid_viewport(viewport_size) {
+            return None;
+        }
+        let session = self.sessions.get(&key.buffer_id)?;
+        let projection = session.screen.projection_ref();
+        let bell_count = session.screen.bell_count();
+        let state = self.views.entry(key).or_insert_with(|| TerminalViewState {
+            alternate_active: Some(projection.alternate_active),
+            last_bell_count: bell_count,
+            ..TerminalViewState::default()
+        });
         normalize_state(state, projection);
+        state.viewport_size = Some(viewport_size);
         let rows = retained_rows(projection);
-        let size = state.viewport_size?;
-        let geometry = view_geometry(&rows, state, size.rows);
+        let geometry = view_geometry(&rows, state, viewport_size.rows);
         Some(TerminalViewStatus {
             at_bottom: geometry.scroll_offset == 0,
             scroll_offset: geometry.scroll_offset,
             selection: state.selection.is_some(),
         })
+    }
+
+    /// Return the publication-consistent child grid size for one view.
+    #[must_use]
+    pub(crate) fn screen_size_for_view(&self, key: TerminalViewKey) -> Option<CellSize> {
+        self.sessions
+            .get(&key.buffer_id)
+            .map(|session| session.screen.projection_ref().size)
+    }
+
+    /// Return fresh geometric status for one registered view.
+    #[must_use]
+    pub fn view_status(&mut self, key: TerminalViewKey) -> Option<TerminalViewStatus> {
+        let size = self.views.get(&key)?.viewport_size?;
+        self.view_status_for_size(key, size)
     }
 
     /// Clear selection and resume live-tail following for one view.
@@ -510,7 +539,10 @@ fn clamp_or_clear(rows: &RetainedRows<'_>, anchor: LogicalCellAnchor) -> Option<
         return Some(anchor_for(rows, resolved));
     }
     let first = rows.first()?;
-    (anchor.logical_line_id < first.logical_line_id).then(|| row_lead(first))
+    (anchor.logical_line_id < first.logical_line_id
+        || (anchor.logical_line_id == first.logical_line_id
+            && anchor.cell_offset < first.cell_offset))
+        .then(|| row_lead(first))
 }
 
 fn normalize_state(state: &mut TerminalViewState, projection: BorrowedScreenProjection<'_>) {
@@ -918,6 +950,49 @@ mod tests {
         )
         .expect("wide selection resolves");
         assert_eq!(bytes, "界".as_bytes());
+    }
+
+    #[test]
+    fn partially_evicted_wrapped_anchor_clamps_to_first_surviving_cell() {
+        let source = projection(
+            vec![row(7, 4, "tail", true)],
+            vec![row(8, 0, "next", false)],
+        );
+        let first_survivor = LogicalCellAnchor {
+            logical_line_id: 7,
+            cell_offset: 4,
+        };
+        let mut state = TerminalViewState {
+            top: Some(LogicalCellAnchor {
+                logical_line_id: 7,
+                cell_offset: 1,
+            }),
+            selection: Some(TerminalSelection {
+                anchor: LogicalCellAnchor {
+                    logical_line_id: 7,
+                    cell_offset: 2,
+                },
+                head: LogicalCellAnchor {
+                    logical_line_id: 8,
+                    cell_offset: 1,
+                },
+            }),
+            ..TerminalViewState::default()
+        };
+
+        normalize_state(&mut state, source.as_borrowed());
+
+        assert_eq!(state.top, Some(first_survivor));
+        assert_eq!(
+            state.selection,
+            Some(TerminalSelection {
+                anchor: first_survivor,
+                head: LogicalCellAnchor {
+                    logical_line_id: 8,
+                    cell_offset: 1,
+                },
+            })
+        );
     }
 
     #[test]

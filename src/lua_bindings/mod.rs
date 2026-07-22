@@ -5176,6 +5176,26 @@ fn install_buffer_kill(lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     Ok(())
 }
 
+fn rotate_interactive_command(lua: &Lua, name: &str) -> mlua::Result<()> {
+    let origin = lua
+        .app_data_ref::<crate::editor::InteractiveCommandOrigin>()
+        .ok_or_else(|| {
+            mlua::Error::external(
+                "pmacs.command.invoke_interactive: interactive frontend context is unavailable",
+            )
+        })?;
+    let frontend_id = origin.current().ok_or_else(|| {
+        mlua::Error::external(
+            "pmacs.command.invoke_interactive: requires an active interactive frontend context",
+        )
+    })?;
+    let core = lua.app_data_ref::<SharedCore>().ok_or_else(|| {
+        mlua::Error::external("pmacs.command.invoke_interactive: editor core is unavailable")
+    })?;
+    core.borrow_mut().rotate_command(frontend_id, name);
+    Ok(())
+}
+
 fn install_command_module(lua: &Lua, commands: &SharedCommandRegistry) -> mlua::Result<Table> {
     let command = lua.create_table()?;
 
@@ -5248,18 +5268,7 @@ fn install_command_module(lua: &Lua, commands: &SharedCommandRegistry) -> mlua::
         command.set(
             "invoke_interactive",
             lua.create_function(move |lua, (name, args): (String, Variadic<Value>)| {
-                let frontend_id = lua.app_data_ref::<SharedCore>().map(|core| {
-                    let mut core = core.borrow_mut();
-                    let frontend_id = core.active_frontend;
-                    core.rotate_command(frontend_id, &name);
-                    frontend_id
-                });
-                let origin = lua
-                    .app_data_ref::<crate::editor::InteractiveCommandOrigin>()
-                    .map(|origin| origin.clone());
-                let _origin_guard = frontend_id
-                    .zip(origin.as_ref())
-                    .map(|(frontend_id, origin)| origin.enter(frontend_id));
+                rotate_interactive_command(lua, &name)?;
                 let body = {
                     let r = cmds.borrow();
                     r.get(&name)
@@ -8194,6 +8203,41 @@ fn active_terminal_view_key(
     ))
 }
 
+fn terminal_context_integer(context: &Table, field: &str) -> mlua::Result<u64> {
+    match context.raw_get::<Value>(field)? {
+        Value::Integer(value) => u64::try_from(value).map_err(|_| {
+            mlua::Error::external(format!(
+                "pmacs.terminal.view_state: `{field}` must be nonnegative"
+            ))
+        }),
+        Value::Nil => Err(mlua::Error::external(format!(
+            "pmacs.terminal.view_state: missing field `{field}`"
+        ))),
+        other => Err(mlua::Error::external(format!(
+            "pmacs.terminal.view_state: `{field}` must be an integer, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn terminal_context_buffer(context: &Table) -> mlua::Result<crate::buffer::BufferId> {
+    match context.raw_get::<Value>("buffer")? {
+        Value::UserData(buffer) => buffer
+            .borrow::<BufferIdLua>()
+            .map(|buffer| buffer.0)
+            .map_err(|_| {
+                mlua::Error::external("pmacs.terminal.view_state: `buffer` must be a buffer id")
+            }),
+        Value::Nil => Err(mlua::Error::external(
+            "pmacs.terminal.view_state: missing field `buffer`",
+        )),
+        other => Err(mlua::Error::external(format!(
+            "pmacs.terminal.view_state: `buffer` must be a buffer id, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 fn terminal_view_key_from_context(
     core: &SharedCore,
     context: &Table,
@@ -8219,14 +8263,9 @@ fn terminal_view_key_from_context(
             "pmacs.terminal.view_state: unknown field `{field}`"
         )));
     }
-    let frontend_raw = context.get::<i64>("frontend")?;
-    let frontend_id = crate::protocol::FrontendId(u64::try_from(frontend_raw).map_err(|_| {
-        mlua::Error::external("pmacs.terminal.view_state: `frontend` must be nonnegative")
-    })?);
-    let window_raw = u64::try_from(context.get::<i64>("window")?).map_err(|_| {
-        mlua::Error::external("pmacs.terminal.view_state: `window` must be nonnegative")
-    })?;
-    let buffer_id = context.get::<BufferIdLua>("buffer")?.0;
+    let frontend_id = crate::protocol::FrontendId(terminal_context_integer(context, "frontend")?);
+    let window_raw = terminal_context_integer(context, "window")?;
+    let buffer_id = terminal_context_buffer(context)?;
 
     let core = core.borrow();
     let Some(view) = core.views.get(&frontend_id) else {

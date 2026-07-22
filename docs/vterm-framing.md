@@ -873,6 +873,12 @@ that frontend's dispatcher, terminal views, controller claims, and bell
 baseline. These are Stage 2 changes to existing v18 grid behavior; no protocol
 bump or semantic/GPU terminal surface is added in this PR.
 
+One intentional Stage 2 boundary remains until Stage 3: an authenticated v18
+semantic frontend can send a key while its active buffer is a terminal, claim
+that terminal's controller, and feed the PTY, but cannot display the screen.
+The next accepted TUI terminal input reclaims control; v19 removes the invisible
+interval by adding the semantic terminal surface.
+
 ## 6. Stage 3 — protocol v19 and GPU integration
 
 ### 6.1 Wire additions
@@ -1234,6 +1240,9 @@ Not part of these three PRs:
   alternate-screen switches;
 - legacy X10 mouse byte encoding when a child enables mouse tracking without
   SGR mode; Stage 2 sends no report for that unsupported combination;
+- bracketed-paste payload filtering: Stage 2 forwards exact paste bytes as
+  framed, so embedded `ESC[201~` can terminate the wrapper early; xterm-style
+  filtering/escaping requires a separate input-policy decision;
 - nonstandard `CSI 3 K` ignore semantics (the current core clears the line);
 - the ASCII fast path that avoids grapheme-candidate allocation and
   segmentation for every printable character after another ASCII character,

@@ -2828,7 +2828,7 @@ impl EditorCore {
 
     /// Whether an explicit buffer requires daemon-owned round-trip input.
     #[must_use]
-    pub fn active_buffer_round_trips_for(&self, buffer_id: BufferId) -> bool {
+    pub fn buffer_round_trips(&self, buffer_id: BufferId) -> bool {
         self.round_trip_buffers.contains(&buffer_id)
     }
 
