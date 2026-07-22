@@ -1,9 +1,10 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-21, after the config registry (#127), Vterm
-Stage 1 terminal core (#126), and handoff refresh (#128) landed on
-`main`, atop completed Themes Arc 4 (#120/#124/#125). Vterm Stage 2 is
-implemented on `vterm-tui`; Stage 3 is not implemented.**
+**Last updated: 2026-07-22, after Vterm Stage 2 PR #130 review round 1
+was addressed on `vterm-tui`; config registry (#127), Vterm Stage 1
+terminal core (#126), and handoff refresh (#128) are landed on `main`,
+atop completed Themes Arc 4 (#120/#124/#125). Vterm Stage 3 is not
+implemented.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -233,12 +234,15 @@ commands, read `docs/active-work.md` immediately after this file.
   - **Stage 2 TUI is implemented on `vterm-tui`** (`docs/vterm-framing.md`
     Revision 7, criteria 15–27). `TerminalViewKey` keys per-frontend/window
     projection state over one shared process/screen; logical row anchors retain
-    scroll/selection through reflow. A most-recent authenticated controller
-    owns input and cell resize, with release on focus/switch/kill/detach.
+    scroll/selection through reflow. One authenticated frontend controls at
+    most one session, with atomic replacement and release on
+    focus/switch/kill/detach.
   - The strict `pmacs.terminal` Lua surface owns open/state/view/send/terminate
-    and context-implicit scroll/copy commands. Buffer-local terminal keymaps
-    resolve before raw child transport; fixed `C-c` remains the terminal escape
-    and owns its continuation per frontend. Copy drains through the acting
+    and context-implicit scroll/copy commands; the latter error unless the
+    invoking frontend's active window is a terminal. Fixed `C-c` is the
+    per-frontend terminal escape: only its next key reaches terminal-local
+    editor bindings, while unescaped bound keys pass through to the child.
+    `C-c C-c` sends one literal interrupt. Copy drains through the acting
     frontend's clipboard path; active BELs drain once locally and per daemon
     frontend, while historical/passive bells are baseline-suppressed.
   - TUI composition paints owned terminal cells/styles only inside each
@@ -251,12 +255,18 @@ commands, read `docs/active-work.md` immediately after this file.
     isolation, clipboard/modeline behavior, and a hermetic real `/bin/sh` TUI
     PTY smoke. Stage 2 changes no wire schema or GPU renderer; protocol remains
     v18 until Stage 3.
-  - Integrated Stage 2 final gate: `cargo fmt --check`; strict workspace
-    Clippy; 1,742 default + 1,918 CRDT library tests (3 ignored each);
-    Stage 1 acceptance 9 default + 10 CRDT; Stage 2 acceptance 3 default +
-    3 CRDT; statusline acceptance 7 default + 8 CRDT; M4 114 passed
-    (3 ignored, 1 filtered); required GPU 109; workspace 2,869 passed
-    across 81 suites (19 ignored, 1 filtered); `git diff --check` clean.
+  - PR #130 review round 1 (`8702791`) aligned dispatch with the approved
+    escape-prefix contract, closed the non-terminal Lua error path, made
+    controller replacement atomic, retained zero-area view anchors, removed
+    duplicate detach work, and replaced per-view deep scrollback clones with
+    borrowed live/published row projections. Focused child-input coverage pins
+    both unescaped bound-key passthrough and `C-c C-c`.
+  - Review-round final gate: `cargo fmt --check`; strict workspace Clippy;
+    1,743 default + 1,919 CRDT library tests (3 ignored each); Stage 1
+    acceptance 9 default + 10 CRDT; Stage 2 acceptance 4 default + 4 CRDT;
+    statusline acceptance 7 default + 8 CRDT; M4 114 passed (3 ignored,
+    1 filtered); required GPU 109; workspace 2,871 passed across 81 suites
+    (19 ignored, 1 filtered); `git diff --check` clean.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
   and must be repeated before implementation. No PR or implementation is

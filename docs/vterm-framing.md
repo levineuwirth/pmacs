@@ -1150,8 +1150,9 @@ coverage remains beside the owning implementation. The criteria map as follows:
   paste_and_focus_are_exact, unsupported_keys_are_invisible}` and the real-TUI
   input/paste path.
 - **19:** `editor::tests::dispatch_prefix_state_is_independent_per_frontend`,
+  `terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt`,
   `lua_surface_is_strict_fresh_transactional_and_context_safe`, and the
-  real-TUI terminal-escape/quit path.
+  real-TUI escaped editor-binding/quit path.
 - **20:** `terminal::input::tests::sgr_mouse_modes_modifiers_and_coordinates`
   plus the real-TUI editor-owned scroll/drag/copy path.
 - **21:** `terminal::view::tests::{copy_joins_soft_wraps_trims_default_blanks_and_separates_hard_rows,
