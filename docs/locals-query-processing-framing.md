@@ -1,6 +1,7 @@
 # Locals-query processing - syntax-highlight completion
 
-**Status:** Revision 1, implementation active by user direction, 2026-07-22.
+**Status:** Revision 1 implemented and landed as PR #134 on 2026-07-22
+(`8cbb9f4`). Protocol remains v18.
 
 **Base:** `githubsucks/main` at `8bd8298` (mode system #129, Vterm Stage 2
 #130, modeline detection #132, and landed-state handoff #133). Protocol remains

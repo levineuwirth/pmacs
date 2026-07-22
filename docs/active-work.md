@@ -14,7 +14,7 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `8bd8298` (landed-state handoff #133; protocol v18).
+  `githubsucks/main` @ `8cbb9f4` (locals-query processing #134; protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,42 +48,8 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `8bd8298` or a newer intentional main.
+The first command must expose `8cbb9f4` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
-
-## Locals-query processing lane
-
-- Portable branch: `githubsucks/locals-query-processing`
-- Base: canonical `main` @ `8bd8298`.
-- Framing head: `42a28b9` (`docs/locals-query-processing-framing.md`).
-- Implementation head: `47ffe5d`.
-- PR: #134, <https://github.com/levineuwirth/pmacs/pull/134>, open for review.
-  Implementation is complete; protocol remains v18.
-- Scope: bundled Lua/JavaScript/TypeScript locals metadata, lexical
-  scope/definition/value/reference resolution cached on each settled layer,
-  and shared `#is?`/`#is-not? local` filtering in the TUI and semantic/GPU
-  highlight producers.
-- Focused verification:
-  - default and Lua 5.4 lexical suites: 35 passed each;
-  - default and Lua 5.4 end-to-end render/edit acceptance: 1 passed each.
-- Full pre-PR verification:
-  - `cargo fmt --check`: clean;
-  - strict workspace Clippy: clean;
-  - default library: 1,757 passed (3 ignored);
-  - CRDT library: 1,933 passed (3 ignored);
-  - M4 acceptance excluding basedpyright: 121 passed, 3 ignored, 1 filtered;
-  - required GPU: 109 passed;
-  - workspace: 2,893 passed across 82 suites, 19 ignored, 1 filtered;
-  - `git diff --check`: clean.
-
-Recovery worktree on a machine that does not already own the branch:
-
-```sh
-git worktree add --track \
-  -b locals-query-processing \
-  ../pmacs-locals-query \
-  githubsucks/locals-query-processing
-```
 
 ## Parked lane: kill-ring browser + persistence
 
