@@ -8552,9 +8552,9 @@ mod tests {
 
     /// T M5.6f: `M-x editor.describe-instance-buffer` switches the
     /// active window to *pmacs-instance* and binds buffer-local `q`
-    /// to `buffer.kill-this`. The buffer-local binding is verified by
-    /// resolving directly against the keymap stack — `pmacs.describe.key`
-    /// only consults global scope.
+    /// to `buffer.kill-this`. Resolve directly against the keymap stack
+    /// to pin the exact buffer-local scope independently of the Lua
+    /// describe-key rendering surface.
     #[test]
     fn editor_describe_instance_buffer_switches_and_binds_q() {
         let mut state = EditorState::new();

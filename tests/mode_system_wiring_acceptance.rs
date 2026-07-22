@@ -71,8 +71,8 @@ impl Grid {
 fn attach(daemon: &TestDaemon) -> (Client, Grid) {
     let mut stream = daemon.connect();
     stream
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .expect("set daemon read timeout");
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set daemon handshake timeout");
     let hello: Hello = read_message(&mut stream).expect("read daemon Hello");
     assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
     write_message(
@@ -84,6 +84,9 @@ fn attach(daemon: &TestDaemon) -> (Client, Grid) {
         },
     )
     .expect("attach grid frontend");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set daemon frame timeout");
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut grid = Grid::new();

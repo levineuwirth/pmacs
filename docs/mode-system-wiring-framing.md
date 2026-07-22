@@ -316,6 +316,9 @@ silently change an existing API unrelated to describe-key.
    views. The hidden-buffer (registry-only) gap is pre-existing: those
    buffers receive neither language detection nor syntax attachment and
    need their own fix.
+   An explicit nil clear is persistent across switches, not across a future
+   reload path that deliberately fires `buffer.after-load`; reload re-detects
+   the language just like a fresh open.
 4. **GPU optimistic-edit bypass is a non-issue for mode-scoped
    bindings** — the GPU frontend optimistically inserts plain printable
    characters (outside `BUILTIN_PAIR_CHARS`) and Tab without round-tripping
@@ -342,6 +345,10 @@ silently change an existing API unrelated to describe-key.
   side-quest (`side-quest-backlog.md:43`). This framing just wires the
   mechanism; modeline detection can override the initialized mode via
   `pmacs.buffer.set_major_mode` when it lands.
+- **Explicit-mode session persistence** — desktop restore reopens files and
+  recovers detected modes through `buffer.after-load`, but explicit overrides
+  and clears are not serialized. Design that with session/settings persistence,
+  not as hidden state in this wiring layer.
 - **Mode help display** (`describe-mode`) — straightforward once the mode
   is stored, but not table-stakes for wiring.
 
