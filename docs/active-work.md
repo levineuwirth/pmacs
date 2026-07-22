@@ -57,14 +57,27 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Modeline detection lane
 
 - Portable branch: `githubsucks/modeline-detection`
-- Framing head: `6b4f3c3`
+- Approved framing head: `6b4f3c3`
+- Implementation head: `f8d05d2`
 - Base: canonical `main` @ `d5d9b9c`.
-- State: `docs/modeline-detection-framing.md` Revision 2 was approved for
-  implementation by the user on 2026-07-22. It frames bounded Emacs/Vim
-  parsing, explicit precedence over inferred language, alias normalization,
-  and one pinned language decision shared by syntax, LSP, and initial major
-  mode. Implementation is active in the isolated worktree.
-- Next step: implement and verify all thirteen acceptance criteria.
+- State: implementation complete; PR pending. Revision 2's bounded Emacs/Vim
+  parser, explicit-over-inferred precedence, alias normalization, shared
+  fresh-load language pin, LSP path guard, and all thirteen acceptance criteria
+  are implemented. Protocol remains v18.
+- Verification:
+  - focused modeline + shebang-pin acceptance: 7 passed on default LuaJIT and
+    7 passed on non-default Lua 5.4;
+  - `cargo fmt --check`;
+  - `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --lib`: 1,742 passed;
+  - `cargo test --lib --features crdt`: 1,918 passed;
+  - `cargo test --test m4_acceptance -- --skip basedpyright`: 120 passed,
+    3 ignored, 1 filtered;
+  - `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 109 passed;
+  - `cargo test --workspace -- --skip basedpyright`: 2,873 passed across
+    81 suites, 19 ignored, 1 filtered;
+  - `git diff --check`.
+- Next step: publish the implementation commit and open the review PR.
 
 Recovery worktree on a machine that does not already own the branch:
 
