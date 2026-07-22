@@ -13,6 +13,7 @@
 //! * `[command: cursor.left]` --- navigate to that command's help.
 //! * `[key: C-x C-s]` --- describe the chord.
 //! * `[key: s @buffer:3]` --- describe a buffer-local chord.
+//! * `[key: g @mode:rust]` --- describe a mode-scoped chord.
 //! * `[buffer: *errors*]` --- describe a buffer by name.
 //! * `[mode: normal]`, `[hook: buffer.before-save]`, `[view: *help*]`.
 //!
@@ -84,21 +85,20 @@ pub fn render_command(
 /// Render help for a chord sequence. Returns the help buffer id if
 /// the sequence resolves to a binding, [`None`] otherwise.
 ///
-/// `active_buffer` is the buffer scope to consult when resolving
-/// the chord sequence. Pass `Some(id)` to surface buffer-local
-/// bindings (matching what `dispatch_key` would see) and `None`
-/// for global-only resolution. Buffer-scope keys (e.g.,
-/// `pmacs-magit.stage` bound to `s` on the magit buffer) are
-/// invisible without this, which is the M8.7 describe-key gap.
+/// `active_buffer` and `active_modes` are the exact scope context to
+/// consult when resolving the chord sequence. Pass the active buffer
+/// and its zero-or-one major-mode slice to match dispatch, or no
+/// context for global-only resolution.
 pub fn render_key(
     registry: &mut BufferRegistry,
     commands: &CommandRegistry,
     keymaps: &KeymapStack,
     active_buffer: Option<BufferId>,
+    active_modes: &[&str],
     sequence: &str,
 ) -> RenderResult {
     let chords = parse_sequence(sequence).ok()?;
-    let resolution = keymaps.resolve(&chords, active_buffer, &[]);
+    let resolution = keymaps.resolve(&chords, active_buffer, active_modes);
     let StackResolution::Bound(rb) = resolution else {
         return None;
     };
@@ -150,7 +150,7 @@ pub fn render_mode(
     let mut text = String::new();
     let _ = writeln!(text, "Mode: {name}");
     let _ = writeln!(text);
-    write_mode_bindings(&mut text, map);
+    write_mode_bindings(&mut text, name, map);
     Some(replace_help_buffer(registry, &text))
 }
 
@@ -245,6 +245,16 @@ fn write_command_bindings(
                         scope.render()
                     );
                 }
+                Scope::Mode(name) => {
+                    let encoded_name = encode_mode_target(name);
+                    let _ = writeln!(
+                        out,
+                        "  [key: {} @mode:{}]   ({})",
+                        display_sequence(seq),
+                        encoded_name,
+                        scope.render()
+                    );
+                }
                 _ => {
                     let _ = writeln!(
                         out,
@@ -258,33 +268,84 @@ fn write_command_bindings(
     }
 }
 
-fn parse_key_target(registry: &BufferRegistry, target: &str) -> Option<(String, Option<BufferId>)> {
-    let Some((sequence, raw)) = target.rsplit_once(" @buffer:") else {
-        return Some((target.to_owned(), None));
-    };
-    let Ok(raw) = raw.trim().parse::<u64>() else {
-        return None;
-    };
-    let id = BufferId::from_raw(raw);
-    if registry.contains(id) {
-        Some((sequence.trim().to_owned(), Some(id)))
-    } else {
-        None
-    }
+fn is_mode_target_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
 }
 
-fn write_mode_bindings(out: &mut String, map: &Keymap) {
+fn encode_mode_target(mode: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(mode.len());
+    for byte in mode.bytes() {
+        if is_mode_target_unreserved(byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        }
+    }
+    encoded
+}
+
+fn decode_mode_target(encoded: &str) -> Option<String> {
+    let encoded = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        let byte = encoded[index];
+        if byte == b'%' {
+            let high = *encoded.get(index + 1)?;
+            let low = *encoded.get(index + 2)?;
+            let high = char::from(high).to_digit(16)?;
+            let low = char::from(low).to_digit(16)?;
+            decoded.push(u8::try_from((high << 4) | low).ok()?);
+            index += 3;
+        } else {
+            if !is_mode_target_unreserved(byte) {
+                return None;
+            }
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn parse_key_target(
+    registry: &BufferRegistry,
+    target: &str,
+) -> Option<(String, Option<BufferId>, Option<String>)> {
+    if let Some((sequence, raw)) = target.rsplit_once(" @buffer:") {
+        let raw = raw.trim().parse::<u64>().ok()?;
+        let id = BufferId::from_raw(raw);
+        return registry
+            .contains(id)
+            .then(|| (sequence.trim().to_owned(), Some(id), None));
+    }
+
+    if let Some((sequence, encoded_mode)) = target.rsplit_once(" @mode:") {
+        let mode = decode_mode_target(encoded_mode)?;
+        return Some((sequence.trim().to_owned(), None, Some(mode)));
+    }
+
+    Some((target.to_owned(), None, None))
+}
+
+fn write_mode_bindings(out: &mut String, mode: &str, map: &Keymap) {
     let entries: Vec<_> = map.iter().collect();
     if entries.is_empty() {
         let _ = writeln!(out, "(empty mode keymap)");
         return;
     }
     let _ = writeln!(out, "Bindings:");
+    let encoded_mode = encode_mode_target(mode);
     for (seq, binding) in entries {
         let _ = writeln!(
             out,
-            "  [key: {}]   -> [command: {}]",
+            "  [key: {} @mode:{}]   -> [command: {}]",
             display_sequence(&seq),
+            encoded_mode,
             binding.command
         );
     }
@@ -430,8 +491,17 @@ pub fn follow_link_at(
     match link.kind.as_str() {
         "command" => render_command(registry, commands, keymaps, &link.target),
         "key" => {
-            let (sequence, active_buffer) = parse_key_target(registry, &link.target)?;
-            render_key(registry, commands, keymaps, active_buffer, &sequence)
+            let (sequence, active_buffer, mode) = parse_key_target(registry, &link.target)?;
+            let mode = mode.as_deref();
+            let active_modes = mode.as_slice();
+            render_key(
+                registry,
+                commands,
+                keymaps,
+                active_buffer,
+                active_modes,
+                &sequence,
+            )
         }
         "buffer" => {
             let id = registry.find_by_name(&link.target)?;
@@ -542,7 +612,7 @@ mod tests {
             },
         )
         .unwrap();
-        let (id, _) = render_key(&mut reg, &cmds, &kms, None, "C-x C-s").unwrap();
+        let (id, _) = render_key(&mut reg, &cmds, &kms, None, &[], "C-x C-s").unwrap();
         let body = read_buffer_text(reg.get(id).unwrap());
         assert!(body.contains("Key: C-x C-s"));
         assert!(body.contains("[command: save]"));
@@ -554,7 +624,38 @@ mod tests {
         let mut reg = BufferRegistry::new();
         let cmds = CommandRegistry::new();
         let kms = KeymapStack::new();
-        assert!(render_key(&mut reg, &cmds, &kms, None, "C-q").is_none());
+        assert!(render_key(&mut reg, &cmds, &kms, None, &[], "C-q").is_none());
+    }
+
+    #[test]
+    fn render_key_uses_explicit_mode_context_before_global() {
+        let lua = Lua::new();
+        let mut reg = BufferRegistry::new();
+        let mut cmds = CommandRegistry::new();
+        let mut kms = KeymapStack::new();
+        cmds.define(make_command(&lua, "rust.save", "Rust save."))
+            .unwrap();
+        cmds.define(make_command(&lua, "global.save", "Global save."))
+            .unwrap();
+        kms.bind_global(
+            &parse_sequence("C-s").unwrap(),
+            "global.save",
+            SourceLocation::default(),
+        )
+        .unwrap();
+        kms.bind_mode(
+            "rust",
+            &parse_sequence("C-s").unwrap(),
+            "rust.save",
+            SourceLocation::default(),
+        )
+        .unwrap();
+
+        render_key(&mut reg, &cmds, &kms, None, &["rust"], "C-s").unwrap();
+        let body = read_help(&reg);
+        assert!(body.contains("Scope: mode:rust"), "{body}");
+        assert!(body.contains("[command: rust.save]"), "{body}");
+        assert!(!body.contains("[command: global.save]"), "{body}");
     }
 
     #[test]
@@ -643,7 +744,7 @@ mod tests {
         let _ = render_mode(&mut reg, &kms, "demo").unwrap();
         let body = read_help(&reg);
         assert!(body.contains("Mode: demo"));
-        assert!(body.contains("[key: C-x]"));
+        assert!(body.contains("[key: C-x @mode:demo]"));
         assert!(body.contains("[command: x]"));
     }
 
@@ -676,6 +777,26 @@ mod tests {
         let span = link_at(text, cursor).unwrap();
         assert_eq!(span.kind, "key");
         assert_eq!(span.target, "C-x C-s");
+    }
+
+    #[test]
+    fn mode_key_target_codec_is_strict_and_round_trips_utf8() {
+        for mode in ["rust", "", " rust ", "]", "%", "雪", "x @buffer:1"] {
+            let encoded = encode_mode_target(mode);
+            assert_eq!(decode_mode_target(&encoded).as_deref(), Some(mode));
+        }
+        assert_eq!(encode_mode_target("rust"), "rust");
+        for malformed in ["%", "%0", "%GG", "%FF", "raw space", "雪"] {
+            assert!(
+                decode_mode_target(malformed).is_none(),
+                "accepted malformed mode target {malformed:?}"
+            );
+        }
+
+        let reg = BufferRegistry::new();
+        let (_, _, mode) = parse_key_target(&reg, "s @mode:").unwrap();
+        assert_eq!(mode.as_deref(), Some(""));
+        assert!(parse_key_target(&reg, "s @mode:%FF").is_none());
     }
 
     #[test]
@@ -751,5 +872,83 @@ mod tests {
         assert!(body.contains("Key: s"), "{body}");
         assert!(body.contains("Scope: buffer"), "{body}");
         assert!(body.contains("[command: pmacs-magit.stage]"), "{body}");
+    }
+
+    #[test]
+    fn follow_mode_key_link_preserves_mode_after_help_buffer_activation() {
+        let lua = Lua::new();
+        let mut reg = BufferRegistry::new();
+        let mut cmds = CommandRegistry::new();
+        let mut kms = KeymapStack::new();
+        let hooks = HookRegistry::new();
+        cmds.define(make_command(&lua, "rust.action", "Mode action."))
+            .unwrap();
+        cmds.define(make_command(&lua, "global.action", "Global fallback."))
+            .unwrap();
+        kms.bind_mode(
+            "rust",
+            &parse_sequence("s").unwrap(),
+            "rust.action",
+            SourceLocation::default(),
+        )
+        .unwrap();
+        kms.bind_global(
+            &parse_sequence("s").unwrap(),
+            "global.action",
+            SourceLocation::default(),
+        )
+        .unwrap();
+
+        render_command(&mut reg, &cmds, &kms, "rust.action").unwrap();
+        let body = read_help(&reg);
+        assert!(
+            body.contains("[key: s @mode:rust]"),
+            "mode key link must carry its mode scope: {body}"
+        );
+        let cursor = body.find("s @mode").unwrap() as u64;
+        follow_link_at(&mut reg, &cmds, &kms, &hooks, cursor).unwrap();
+        let body = read_help(&reg);
+        assert!(body.contains("Scope: mode:rust"), "{body}");
+        assert!(body.contains("[command: rust.action]"), "{body}");
+        assert!(!body.contains("[command: global.action]"), "{body}");
+    }
+
+    #[test]
+    fn follow_mode_key_link_round_trips_reserved_utf8_mode_exactly() {
+        let lua = Lua::new();
+        let mut reg = BufferRegistry::new();
+        let mut cmds = CommandRegistry::new();
+        let mut kms = KeymapStack::new();
+        let hooks = HookRegistry::new();
+        let mode = " rust]雪% @buffer:7 ";
+        cmds.define(make_command(&lua, "exact.mode", "Exact mode action."))
+            .unwrap();
+        cmds.define(make_command(&lua, "global.fallback", "Global fallback."))
+            .unwrap();
+        kms.bind_mode(
+            mode,
+            &parse_sequence("x").unwrap(),
+            "exact.mode",
+            SourceLocation::default(),
+        )
+        .unwrap();
+        kms.bind_global(
+            &parse_sequence("x").unwrap(),
+            "global.fallback",
+            SourceLocation::default(),
+        )
+        .unwrap();
+
+        render_command(&mut reg, &cmds, &kms, "exact.mode").unwrap();
+        let body = read_help(&reg);
+        let encoded = encode_mode_target(mode);
+        let link = format!("[key: x @mode:{encoded}]");
+        assert!(body.contains(&link), "encoded mode link missing: {body}");
+        let cursor = body.find("@mode:").unwrap() as u64;
+        follow_link_at(&mut reg, &cmds, &kms, &hooks, cursor).unwrap();
+        let body = read_help(&reg);
+        assert!(body.contains(&format!("Scope: mode:{mode}")), "{body}");
+        assert!(body.contains("[command: exact.mode]"), "{body}");
+        assert!(!body.contains("[command: global.fallback]"), "{body}");
     }
 }

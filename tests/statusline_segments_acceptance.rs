@@ -135,8 +135,8 @@ fn a01_04_registry_contract_limits_epochs_and_results() {
             .iter()
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>(),
-        ["terminal", "lsp"],
-        "built-in providers are discoverable"
+        ["mode", "terminal", "lsp"],
+        "built-in providers are discoverable in registration order"
     );
     let before_epochs = {
         let registry = state.statusline_registry.borrow();

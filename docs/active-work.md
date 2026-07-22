@@ -14,7 +14,8 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `f1a2f75` (#128 merged; protocol v18).
+  `githubsucks/main` @ `d5d9b9c` (mode system handoff #131 merged;
+  protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,18 +49,18 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `f1a2f75` or a newer intentional main.
+The first command must expose `d5d9b9c` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
-
 
 ## Vterm Stage 2 implementation lane
 
 - Portable branch: `githubsucks/vterm-tui`
 - Feature head after review round 2: `b9a7e40`
-- Base: canonical `main` @ `f1a2f75` (handoff refresh #128 atop config
-  registry #127 and Vterm Stage 1 #126).
+- Base: originally canonical `main` @ `f1a2f75`; current canonical `main`
+  @ `d5d9b9c` (mode system wiring #129 and handoff #131) is integrated before
+  merge.
 - PR: #130, <https://github.com/levineuwirth/pmacs/pull/130>, open against
-  canonical `main`.
+  canonical `main` and explicitly authorized for merge.
 - State: `docs/vterm-framing.md` Revision 7 criteria 15–27 are implemented.
   The lane composes per-frontend/window terminal views in the TUI, installs
   the strict `pmacs.terminal` API and terminal-local bindings, drains
@@ -84,7 +85,8 @@ If it does not, stop and repair the remote/fetch configuration.
   4 CRDT; statusline acceptance 7 default + 8 CRDT; M4 114 passed
   (3 ignored, 1 filtered); required GPU 109; workspace 2,872 passed across
   81 suites (19 ignored, 1 filtered); `git diff --check` clean.
-- Next: user review. Do not merge without explicit authorization.
+- Next: integrate canonical `main`, rerun gates, then merge PR #130 as
+  authorized.
 
 Recovery worktree on a machine that does not already own the branch:
 

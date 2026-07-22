@@ -3037,6 +3037,39 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     {
         let reg = registry.clone();
         buffer.set(
+            "major_mode",
+            lua.create_function(move |_, id: BufferIdLua| {
+                let r = reg.borrow();
+                Ok(resolve(&r, id.0)?.major_mode().map(str::to_owned))
+            })?,
+        )?;
+    }
+
+    {
+        let reg = registry.clone();
+        buffer.set(
+            "set_major_mode",
+            lua.create_function(move |_, (id, mode): (BufferIdLua, Value)| {
+                let mode = match mode {
+                    Value::Nil => None,
+                    Value::String(mode) => Some(mode.to_str()?.to_owned()),
+                    other => {
+                        return Err(mlua::Error::external(format!(
+                            "pmacs.buffer.set_major_mode: mode must be a string or nil, got {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let mut r = reg.borrow_mut();
+                resolve_mut(&mut r, id.0)?.set_major_mode(mode);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let reg = registry.clone();
+        buffer.set(
             "remove",
             lua.create_function(move |lua, id: BufferIdLua| {
                 remove_buffer_and_fire(lua, &reg, id.0)
@@ -5482,18 +5515,26 @@ fn install_help_module(
         help_t.set(
             "show_key",
             lua.create_function(move |lua, sequence: String| {
-                // Resolve against the active window's buffer so
-                // help.show_key surfaces buffer-local bindings ---
-                // mirrors the same fix as pmacs.describe.key (M8.8
-                // audit finding 1).
                 let active_buffer = lua
                     .app_data_ref::<SharedCore>()
                     .map(|core| core.borrow().active_buffer_id());
+                // Copy the mode name before taking the mutable registry
+                // borrow used to replace *help*. The borrowed slice below
+                // then cannot outlive or conflict with help-buffer mutation.
+                let active_mode = {
+                    let r = reg.borrow();
+                    active_buffer
+                        .and_then(|id| r.get(id).ok())
+                        .and_then(crate::buffer::Buffer::major_mode)
+                        .map(str::to_owned)
+                };
+                let active_mode = active_mode.as_deref();
+                let active_modes = active_mode.as_slice();
                 let result = {
                     let mut r = reg.borrow_mut();
                     let c = cmds.borrow();
                     let k = kms.borrow();
-                    help::render_key(&mut r, &c, &k, active_buffer, &sequence)
+                    help::render_key(&mut r, &c, &k, active_buffer, active_modes, &sequence)
                 };
                 if let Some((id, edits)) = result.as_ref() {
                     queue_generated_buffer_edits(lua, *id, edits);
@@ -5876,6 +5917,10 @@ fn log_buffer_removed_error(lua: &Lua, source: &SourceLocation, err: &mlua::Erro
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "six describe bindings share one coherent registry surface; splitting them adds ceremony without clarifying borrow lifetimes"
+)]
 fn install_describe_module(
     lua: &Lua,
     registry: &SharedRegistry,
@@ -5902,27 +5947,30 @@ fn install_describe_module(
     }
 
     {
+        let reg = registry.clone();
         let cmds = commands.clone();
         let kms = keymaps.clone();
         describe.set(
             "key",
             lua.create_function(move |lua, sequence: String| {
                 let chords = parse_sequence(&sequence).map_err(mlua::Error::external)?;
-                // Resolve against the active window's buffer scope so
-                // buffer-local bindings (`scope = "buffer"`) actually
-                // surface --- without this, a `pmacs-magit.stage`
-                // binding on the magit buffer is invisible to
-                // describe-key, even when the user is sitting on
-                // that buffer with their cursor. `&[]` for the
-                // mode list mirrors what `dispatch_key` passes
-                // today (no mode system yet); when modes land, both
-                // call sites update together.
                 let active_buffer = lua
                     .app_data_ref::<SharedCore>()
                     .map(|core| core.borrow().active_buffer_id());
-                let km = kms.borrow();
-                let r = km.resolve(&chords, active_buffer, &[]);
-                match r {
+                // Keep the registry borrow only across pure resolution.
+                // `ResolvedBinding` owns its scope, so creating the Lua
+                // result table cannot retain a Buffer borrow or re-enter
+                // Lua while one is live.
+                let resolution = {
+                    let r = reg.borrow();
+                    let active_mode = active_buffer
+                        .and_then(|id| r.get(id).ok())
+                        .and_then(crate::buffer::Buffer::major_mode);
+                    let active_modes = active_mode.as_slice();
+                    let km = kms.borrow();
+                    km.resolve(&chords, active_buffer, active_modes)
+                };
+                match resolution {
                     crate::keymap_stack::StackResolution::Bound(rb) => {
                         let cmds = cmds.borrow();
                         Ok(Value::Table(key_info_table(
@@ -6185,6 +6233,26 @@ pub fn install_editor(lua: &Lua, core: &SharedCore) -> mlua::Result<()> {
     lua.set_app_data(core.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
     let editor = lua.create_table()?;
+
+    {
+        let cc = core.clone();
+        let registry = core.borrow().registry.clone();
+        editor.set(
+            "active_modes",
+            lua.create_function(move |lua, ()| {
+                let active_buffer = cc.borrow().active_buffer_id();
+                let mode = {
+                    let r = registry.borrow();
+                    resolve(&r, active_buffer)?.major_mode().map(str::to_owned)
+                };
+                let modes = lua.create_table()?;
+                if let Some(mode) = mode {
+                    modes.set(1, mode)?;
+                }
+                Ok(modes)
+            })?,
+        )?;
+    }
 
     install_motion(&editor, lua, core)?;
     install_editing(&editor, lua, core)?;
@@ -13412,6 +13480,112 @@ mod tests {
         let hks: SharedHookRegistry = Rc::new(RefCell::new(HookRegistry::new()));
         install(&lua, &reg, &cmds, &kms, &mns, &hks).expect("install");
         (lua, reg, cmds, kms, hks)
+    }
+
+    fn attach_test_editor(lua: &Lua, registry: &SharedRegistry) -> SharedCore {
+        let core = Rc::new(RefCell::new(EditorCore::new(registry.clone())));
+        install_editor(lua, &core).expect("install editor");
+        core
+    }
+
+    #[test]
+    fn buffer_major_mode_is_strict_and_rejects_stale_ids() {
+        let (lua, _reg, _cmds, _kms, _hks) = fresh();
+        let (wrong_mode, wrong_id, stale_get, stale_set): (String, String, String, String) = lua
+            .load(
+                r#"
+                local id = pmacs.buffer.create("mode-test")
+                assert(pmacs.buffer.major_mode(id) == nil)
+                pmacs.buffer.set_major_mode(id, "rust")
+                assert(pmacs.buffer.major_mode(id) == "rust")
+                pmacs.buffer.set_major_mode(id, nil)
+                assert(pmacs.buffer.major_mode(id) == nil)
+
+                local ok_type, err_type =
+                    pcall(pmacs.buffer.set_major_mode, id, 42)
+                assert(not ok_type)
+                local ok_id, err_id = pcall(pmacs.buffer.major_mode, 1)
+                assert(not ok_id)
+                pmacs.buffer.remove(id)
+                local ok_get, err_get = pcall(pmacs.buffer.major_mode, id)
+                local ok_set, err_set =
+                    pcall(pmacs.buffer.set_major_mode, id, "rust")
+                assert(not ok_get and not ok_set)
+                return tostring(err_type), tostring(err_id),
+                    tostring(err_get), tostring(err_set)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(wrong_mode.contains("string"), "{wrong_mode}");
+        assert!(wrong_id.contains("buffer handle"), "{wrong_id}");
+        assert!(stale_get.contains("stale buffer handle"), "{stale_get}");
+        assert!(stale_set.contains("stale buffer handle"), "{stale_set}");
+    }
+
+    #[test]
+    fn editor_active_modes_tracks_the_active_buffers_major_mode() {
+        let (lua, reg, _cmds, _kms, _hks) = fresh();
+        let core = attach_test_editor(&lua, &reg);
+        let active = core.borrow().active_buffer_id();
+        lua.globals()
+            .set("active_buffer", BufferIdLua(active))
+            .unwrap();
+
+        lua.load(
+            r#"
+            local modes = pmacs.editor.active_modes()
+            assert(type(modes) == "table" and #modes == 0)
+            pmacs.buffer.set_major_mode(active_buffer, "rust")
+            modes = pmacs.editor.active_modes()
+            assert(#modes == 1 and modes[1] == "rust")
+            pmacs.buffer.set_major_mode(active_buffer, nil)
+            assert(#pmacs.editor.active_modes() == 0)
+            "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn describe_key_uses_the_active_buffers_major_mode() {
+        let (lua, reg, _cmds, kms, _hks) = fresh();
+        let core = attach_test_editor(&lua, &reg);
+        let active = core.borrow().active_buffer_id();
+        reg.borrow_mut()
+            .get_mut(active)
+            .unwrap()
+            .set_major_mode(Some("rust".to_owned()));
+        {
+            let mut keymaps = kms.borrow_mut();
+            keymaps
+                .bind_global(
+                    &parse_sequence("C-s").unwrap(),
+                    "global.save",
+                    SourceLocation::default(),
+                )
+                .unwrap();
+            keymaps
+                .bind_mode(
+                    "rust",
+                    &parse_sequence("C-s").unwrap(),
+                    "rust.save",
+                    SourceLocation::default(),
+                )
+                .unwrap();
+        }
+
+        let (command, scope): (String, String) = lua
+            .load(
+                r#"
+                local info = pmacs.describe.key("C-s")
+                return info.command, info.scope
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(command, "rust.save");
+        assert_eq!(scope, "mode:rust");
     }
 
     /// A theme handle with one syntax entry and nonzero counters, for
