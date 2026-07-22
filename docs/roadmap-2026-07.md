@@ -80,7 +80,7 @@ preference at protocol v17; and composable per-window
 `pmacs.statusline` providers transported to semantic/GPU frontends by
 protocol-v18 `StatuslineSegments`.
 
-### Arc 5 — Terminal, staged — VTERM STAGE 2 ON FEATURE BRANCH
+### Arc 5 — Terminal, staged — VTERM STAGES 1–2 LANDED
 
 - **Compile mode landed in #113**: line-oriented PTY/ANSI output,
   error-regex navigation, and `M-x compile`.
@@ -89,10 +89,10 @@ protocol-v18 `StatuslineSegments`.
   encoders, internal `TerminalManager`, read-only identity buffers, process
   lifecycle, control-free renderer-boundary cells, and headless real-PTY
   acceptance.
-- **Vterm Stage 2 TUI is implemented on `vterm-tui`**: terminal-window
-  composition, input/resize, per-context scroll/selection/copy, authenticated
-  frontend ownership, BEL/clipboard drainage, and the strict Lua surface.
-- **Vterm Stage 3 protocol/GPU follows Stage 2**: additive protocol v19
+- **Vterm Stage 2 TUI landed in #130**: terminal-window composition,
+  input/resize, per-context scroll/selection/copy, authenticated frontend
+  ownership, BEL/clipboard drainage, and the strict Lua surface.
+- **Vterm Stage 3 protocol/GPU is next**: additive protocol v19
   complete frames, authenticated daemon routing, and native GPU terminal
   rendering. Its framing must resolve the 16 MiB transport cap's incompatibility
   with the legal worst complete terminal frame; never silently chunk.

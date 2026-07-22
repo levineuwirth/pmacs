@@ -14,7 +14,7 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `86fc1bc` (Vterm Stage 2 #130 merged; protocol v18).
+  `githubsucks/main` @ `1dd47fc` (modeline detection #132 merged; protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -48,45 +48,8 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `86fc1bc` or a newer intentional main.
+The first command must expose `1dd47fc` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
-
-## Modeline detection implementation lane
-
-- Portable branch: `githubsucks/modeline-detection`
-- Approved framing head: `6b4f3c3`
-- Implementation head: `f8d05d2`
-- Base: originally canonical `main` @ `d5d9b9c`; current canonical `main`
-  @ `86fc1bc` (Vterm Stage 2 #130) is integrated before merge.
-- PR: #132, <https://github.com/levineuwirth/pmacs/pull/132>, open against
-  canonical `main` and explicitly authorized for merge.
-- State: Revision 2's bounded Emacs/Vim parser, explicit-over-inferred
-  precedence, alias normalization, shared fresh-load language pin, LSP path
-  guard, and all thirteen acceptance criteria are implemented. Protocol
-  remains v18.
-- Verification:
-  - focused modeline + shebang-pin acceptance before integration: 7 passed on
-    default LuaJIT and 7 passed on non-default Lua 5.4;
-  - post-integration `cargo fmt --check`;
-  - post-integration `cargo clippy --workspace --all-targets -- -D warnings`;
-  - post-integration `cargo test --lib`: 1,753 passed;
-  - post-integration `cargo test --lib --features crdt`: 1,929 passed;
-  - post-integration `cargo test --test m4_acceptance -- --skip basedpyright`:
-    120 passed, 3 ignored, 1 filtered;
-  - post-integration `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 109 passed;
-  - post-integration `cargo test --workspace -- --skip basedpyright`: 2,888
-    passed across 82 suites, 19 ignored, 1 filtered;
-  - `git diff --check`.
-- Next: push the current-main integration and merge PR #132 as authorized.
-
-Recovery worktree on a machine that does not already own the branch:
-
-```sh
-git worktree add --track \
-  -b modeline-detection \
-  ../pmacs-modeline-detection \
-  githubsucks/modeline-detection
-```
 
 ## Parked lane: kill-ring browser + persistence
 
