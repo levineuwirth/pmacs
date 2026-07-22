@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-21.** This file records volatile work that has not
+**Snapshot: 2026-07-22.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -14,8 +14,8 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `f1a2f75` (#128 documentation merge; runtime remains
-  config registry #127 at protocol v18).
+  `githubsucks/main` @ `b4b925d` (mode system wiring #129 merged;
+  protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -49,44 +49,19 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `f1a2f75` or a newer intentional main.
+The first command must expose `b4b925d` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 
-## Mode system wiring lane
-
-- Portable branch: `githubsucks/mode-system-wiring`
-- PR: #129, <https://github.com/levineuwirth/pmacs/pull/129>
-- Base: canonical `main` @ `f1a2f75` (protocol v18).
-- Approved framing commit: `424f82b`
-- Implementation checkpoint: `99cd7ec`
-- State: implementation complete and awaiting user review. One detected major
-  mode is stored per buffer; dispatch, describe-key, show-key, and encoded
-  help links resolve it; after-load initializes it once; explicit overrides
-  and clears survive switches; the existing statusline provider path renders
-  it per window. No protocol change.
-- Verification at `99cd7ec`: formatting and Clippy clean; 1,742 default +
-  1,918 CRDT library tests; 8 default + 9 CRDT touched acceptance tests; 114
-  M4 tests; 109 required-GPU tests; workspace sweep 2,867 passed across 81
-  suites (19 ignored, 1 filtered); diff check clean.
-
-Recovery worktree on a machine that does not already own the branch:
-
-```sh
-git worktree add --track \
-  -b mode-system-wiring \
-  ../pmacs-mode-system \
-  githubsucks/mode-system-wiring
-```
 
 ## Vterm Stage 2 framing lane
 
 - Portable branch: `githubsucks/vterm-framing`
 - Approved framing head: `fb4f8f0`
 - Base: canonical `main` @ `643d1e1` (Vterm Stage 1 / PR #126 merged).
-  `main` has since advanced to `f1a2f75` (config registry #127 plus the #128
-  documentation merge, with no runtime overlap with vterm); cut the Stage 2
-  lane from current `main`, not from `643d1e1`.
+  `main` has since advanced to `b4b925d` (config registry #127, the #128
+  documentation merge, and mode system wiring #129); cut the Stage 2 lane
+  from current `main`, not from `643d1e1`.
 - State: `docs/vterm-framing.md` Revision 7 is framing-only, reviewed, and
   approved for implementation. It closes the final `at_bottom`, terminal
   `C-c` binding-reachability, and context-implicit Lua failure-mode findings.
