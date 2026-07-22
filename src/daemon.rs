@@ -869,6 +869,10 @@ fn dispatcher_loop(
     // Declared for both flavors (the follow path is crdt-gated; the
     // detach cleanup isn't).
     let mut last_active_buffer_sent: HashMap<FrontendId, crate::buffer::BufferId> = HashMap::new();
+    // Active-terminal BEL delivery baseline. Switching away forgets the
+    // terminal so historical bells are never replayed on later activation.
+    let mut terminal_bell_baselines: HashMap<FrontendId, (crate::buffer::BufferId, u64)> =
+        HashMap::new();
     let mut session_registry = SessionRegistry::new();
     // T M10.11 Q8 — jitter PRNG, seeded once so the
     // convergence-under-jitter scenario is deterministically
@@ -1063,10 +1067,15 @@ fn dispatcher_loop(
                 // the sweep below); other-frontend snapshots lag by
                 // at most one tick. Imperceptible at frame cadence.
                 let other_presences = session_registry.other_presences_for(*fid);
+                let render_size = render_states
+                    .get(fid)
+                    .expect("render_state present for attached grid fid")
+                    .size();
+                let terminal_snapshots = editor.prepare_terminal_views(*fid, render_size);
                 let render_state = render_states
                     .get_mut(fid)
                     .expect("render_state present for attached grid fid");
-                render_state.render_frame(editor, &other_presences)
+                render_state.render_frame(editor, *fid, &terminal_snapshots, &other_presences)
             };
 
             // T M10.6 per-frontend presence sweep. The snapshot is
@@ -1082,6 +1091,14 @@ fn dispatcher_loop(
             // — initial-after-attach (`last_dispatch_idle_sent` absent)
             // and value-change emissions only.
             let mut write_failed = false;
+            if take_pending_terminal_bell(editor, *fid, &mut terminal_bell_baselines)
+                && let Some(stream) = streams.get_mut(fid)
+                && let Err(error) =
+                    write_message(stream, &InstanceMessage::Signal(InstanceSignal::Bell))
+            {
+                eprintln!("pmacs: write terminal Bell for {fid:?} failed: {error}");
+                write_failed = true;
+            }
             if session_registry.session_state(*fid).is_some_and(|s| {
                 // Filter on both the `crdt_replica` capability (only
                 // optimistic-apply frontends care) and the negotiated
@@ -1089,7 +1106,7 @@ fn dispatcher_loop(
                 s.negotiated_capabilities.crdt_replica && s.negotiated_protocol_version >= 4
             }) && let Some(stream) = streams.get_mut(fid)
             {
-                let idle_now = editor.dispatch_idle();
+                let idle_now = editor.dispatch_idle_for(*fid);
                 if last_dispatch_idle_sent.get(fid) != Some(&idle_now) {
                     if let Err(e) =
                         write_message(stream, &InstanceMessage::DispatchIdle { idle: idle_now })
@@ -1283,6 +1300,8 @@ fn dispatcher_loop(
                 term_sizes.remove(fid);
                 last_dispatch_idle_sent.remove(fid);
                 last_active_buffer_sent.remove(fid);
+                terminal_bell_baselines.remove(fid);
+                editor.detach_frontend_input(*fid);
                 session_registry.unregister_session(*fid);
                 editor
                     .statusline_registry
@@ -1328,6 +1347,7 @@ fn dispatcher_loop(
                     &mut term_sizes,
                     &mut last_dispatch_idle_sent,
                     &mut last_active_buffer_sent,
+                    &mut terminal_bell_baselines,
                     &mut session_registry,
                 );
                 // Drain a burst of immediately-available events to
@@ -1344,12 +1364,22 @@ fn dispatcher_loop(
                         &mut term_sizes,
                         &mut last_dispatch_idle_sent,
                         &mut last_active_buffer_sent,
+                        &mut terminal_bell_baselines,
                         &mut session_registry,
                     );
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // Accepted terminal context controls PTY size. Apply any focus,
+        // window, or resize changes before consuming another child-output
+        // batch so screen reflow and subsequent bytes share one geometry.
+        for frontend_id in &attached_fids {
+            if let Some(size) = term_sizes.get(frontend_id).copied() {
+                editor.sync_terminal_layout(*frontend_id, size);
+            }
         }
 
         // `tick_async` last: the M4.5 async bridge settles awaiters
@@ -1375,7 +1405,49 @@ fn dispatcher_loop(
 /// initial-full-grid analogue — it emits nothing until the frontend
 /// declares a viewport); every other session keeps the M5.3
 /// force-full-grid grid path.
-#[allow(clippy::too_many_arguments)]
+fn take_pending_terminal_bell(
+    editor: &EditorState,
+    frontend_id: FrontendId,
+    baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
+) -> bool {
+    let buffer_id = editor
+        .core
+        .borrow()
+        .active_window_for(frontend_id)
+        .map(|window| window.buffer_id);
+    let Some((buffer_id, count)) = buffer_id.and_then(|buffer_id| {
+        editor
+            .terminal_manager
+            .borrow()
+            .bell_count(buffer_id)
+            .map(|count| (buffer_id, count))
+    }) else {
+        baselines.remove(&frontend_id);
+        return false;
+    };
+
+    match baselines.get_mut(&frontend_id) {
+        Some((baseline_buffer, delivered))
+            if *baseline_buffer == buffer_id && count > *delivered =>
+        {
+            *delivered += 1;
+            true
+        }
+        Some((baseline_buffer, delivered)) if *baseline_buffer == buffer_id => {
+            *delivered = count;
+            false
+        }
+        _ => {
+            baselines.insert(frontend_id, (buffer_id, count));
+            false
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one session bootstrap transaction"
+)]
 fn handle_session_established(
     editor: &mut EditorState,
     render_states: &mut HashMap<FrontendId, RenderState>,
@@ -1460,6 +1532,7 @@ fn handle_dispatcher_event(
     term_sizes: &mut HashMap<FrontendId, CellSize>,
     last_dispatch_idle_sent: &mut HashMap<FrontendId, bool>,
     last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
+    terminal_bell_baselines: &mut HashMap<FrontendId, (crate::buffer::BufferId, u64)>,
     session_registry: &mut SessionRegistry,
 ) {
     match event {
@@ -1597,6 +1670,12 @@ fn handle_dispatcher_event(
                         editor.dispatch_menu_pointer(source, index, invoke);
                     }
                 }
+                FrontendEvent::FocusGained(_) => {
+                    editor.dispatch_focus(source, true);
+                }
+                FrontendEvent::FocusLost(_) => {
+                    editor.dispatch_focus(source, false);
+                }
                 FrontendEvent::Paste {
                     frontend_id: claimed_fid,
                     data,
@@ -1619,7 +1698,9 @@ fn handle_dispatcher_event(
                     // source's command chain (Q#KR2), and it fires
                     // `buffer.after-edit` like any other edit (Q#KR10b)
                     // — previously it never did, so LSP missed pastes.
-                    handle_inbound_paste(editor, source, claimed_fid, &data);
+                    if !editor.dispatch_paste(source, &data) {
+                        handle_inbound_paste(editor, source, claimed_fid, &data);
+                    }
                 }
                 _ => {
                     let term_size = *term_sizes
@@ -1627,7 +1708,7 @@ fn handle_dispatcher_event(
                         .expect("term_size present for source");
                     let mut term_size = term_size;
                     if let Some(render_state) = render_states.get_mut(&source) {
-                        apply_event(editor, event, &mut term_size, render_state);
+                        apply_event(editor, source, event, &mut term_size, render_state);
                         term_sizes.insert(source, term_size);
                     } else if semantic_states.contains_key(&source) {
                         // Phase B (session B1) — a semantic (grid-less)
@@ -1641,7 +1722,7 @@ fn handle_dispatcher_event(
                         // arm dropped these events — the "M11.5 scope"
                         // posture — which is why typing in pmacs-gpu did
                         // nothing before B1.)
-                        apply_semantic_input_event(editor, event, term_size);
+                        apply_semantic_input_event(editor, source, event, term_size);
                     } else {
                         debug_assert!(
                             false,
@@ -1659,6 +1740,8 @@ fn handle_dispatcher_event(
             term_sizes.remove(&frontend_id);
             last_dispatch_idle_sent.remove(&frontend_id);
             last_active_buffer_sent.remove(&frontend_id);
+            terminal_bell_baselines.remove(&frontend_id);
+            editor.detach_frontend_input(frontend_id);
             session_registry.unregister_session(frontend_id);
             editor
                 .statusline_registry
@@ -2461,16 +2544,21 @@ fn build_presence_snapshot(editor: &EditorState, frontend_id: FrontendId) -> Pre
 /// `Paste` (Q#KR10a) are handled in their own dispatcher arms and
 /// never reach here.
 #[allow(clippy::needless_pass_by_value)] // consumes the event, mirroring `apply_event`.
-fn apply_semantic_input_event(editor: &mut EditorState, ev: FrontendEvent, term_size: CellSize) {
+fn apply_semantic_input_event(
+    editor: &mut EditorState,
+    source: FrontendId,
+    ev: FrontendEvent,
+    term_size: CellSize,
+) {
     match ev {
         FrontendEvent::Key(pmacs_key) => {
             if let Some(ct_key) = key_to_crossterm(&pmacs_key) {
-                editor.dispatch_key(pmacs_key.frontend_id, ct_key);
+                editor.dispatch_key(source, ct_key);
             }
         }
         FrontendEvent::Mouse(pmacs_mouse) => {
             let ct_mouse = mouse_to_crossterm(&pmacs_mouse);
-            editor.dispatch_mouse(pmacs_mouse.frontend_id, ct_mouse, term_size);
+            editor.dispatch_mouse(source, ct_mouse, term_size);
         }
         _ => {}
     }
@@ -2482,6 +2570,7 @@ fn apply_semantic_input_event(editor: &mut EditorState, ev: FrontendEvent, term_
 #[allow(clippy::needless_pass_by_value)]
 fn apply_event(
     editor: &mut EditorState,
+    source: FrontendId,
     ev: FrontendEvent,
     term_size: &mut CellSize,
     render_state: &mut RenderState,
@@ -2489,14 +2578,14 @@ fn apply_event(
     match ev {
         FrontendEvent::Key(pmacs_key) => {
             if let Some(ct_key) = key_to_crossterm(&pmacs_key) {
-                editor.dispatch_key(pmacs_key.frontend_id, ct_key);
+                editor.dispatch_key(source, ct_key);
             }
             // `Key::Unknown` keys (media buttons etc.) have no
             // crossterm equivalent and do not actuate commands; drop.
         }
         FrontendEvent::Mouse(pmacs_mouse) => {
             let ct_mouse = mouse_to_crossterm(&pmacs_mouse);
-            editor.dispatch_mouse(pmacs_mouse.frontend_id, ct_mouse, *term_size);
+            editor.dispatch_mouse(source, ct_mouse, *term_size);
         }
         FrontendEvent::Resize { size, .. } => {
             render_state.resize(size);
@@ -2970,6 +3059,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn forged_resize_mutates_only_the_authenticated_frontend() {
+        let source = FrontendId(41);
+        let forged = FrontendId(42);
+        let old_size = CellSize::new(24, 80);
+        let new_size = CellSize::new(31, 97);
+        let mut editor = EditorState::new();
+        let mut render_states = HashMap::from([
+            (source, RenderState::new(old_size)),
+            (forged, RenderState::new(old_size)),
+        ]);
+        let mut semantic_states: HashMap<FrontendId, crate::semantic_render::SemanticRenderState> =
+            HashMap::new();
+        let mut streams: HashMap<FrontendId, UnixStream> = HashMap::new();
+        let mut term_sizes = HashMap::from([(source, old_size), (forged, old_size)]);
+        let mut last_dispatch_idle_sent = HashMap::new();
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+
+        handle_dispatcher_event(
+            DispatcherEvent::FrontendEvent {
+                source,
+                event: FrontendEvent::Resize {
+                    frontend_id: forged,
+                    size: new_size,
+                },
+            },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_dispatch_idle_sent,
+            &mut last_active_buffer_sent,
+            &mut terminal_bell_baselines,
+            &mut session_registry,
+        );
+
+        assert_eq!(render_states[&source].size(), new_size);
+        assert_eq!(term_sizes[&source], new_size);
+        assert_eq!(render_states[&forged].size(), old_size);
+        assert_eq!(term_sizes[&forged], old_size);
+    }
+    #[test]
+    fn terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once() {
+        let mut editor = EditorState::new();
+        let mut spec = crate::terminal::TerminalSpec::new("/bin/sh");
+        spec.args = vec![
+            "-c".into(),
+            "printf '\\a'; IFS= read -r _; printf '\\a'; sleep 30".into(),
+        ];
+        let buffer_id = editor
+            .terminal_manager
+            .borrow_mut()
+            .open(
+                spec,
+                &mut editor.core.borrow_mut(),
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("open bell probe");
+        editor
+            .core
+            .borrow_mut()
+            .switch_active_buffer_for(FrontendId::LOCAL, buffer_id)
+            .expect("display bell probe");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.terminal_manager.borrow().bell_count(buffer_id) != Some(1) {
+            editor.tick_processes();
+            assert!(Instant::now() < deadline, "initial terminal bell timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut baselines = HashMap::new();
+        assert!(!take_pending_terminal_bell(
+            &editor,
+            FrontendId::LOCAL,
+            &mut baselines
+        ));
+
+        editor
+            .terminal_manager
+            .borrow()
+            .send(
+                buffer_id,
+                b"\n",
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("advance bell probe");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while editor.terminal_manager.borrow().bell_count(buffer_id) != Some(2) {
+            editor.tick_processes();
+            assert!(Instant::now() < deadline, "second terminal bell timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(take_pending_terminal_bell(
+            &editor,
+            FrontendId::LOCAL,
+            &mut baselines
+        ));
+        assert!(!take_pending_terminal_bell(
+            &editor,
+            FrontendId::LOCAL,
+            &mut baselines
+        ));
+
+        editor
+            .terminal_manager
+            .borrow_mut()
+            .terminate(buffer_id, &mut editor.process_supervisor.borrow_mut())
+            .expect("terminate bell probe");
+    }
+
     /// Kill ring Q#KR10a — the unified paste route trusts only the
     /// dispatcher's authenticated source. A forged payload id must not
     /// paste into another frontend's active window, and the paste
@@ -3160,6 +3362,7 @@ mod tests {
 
         apply_semantic_input_event(
             &mut editor,
+            fid,
             FrontendEvent::Key(KeyEvent {
                 frontend_id: fid,
                 key: Key::Char('X'),
@@ -3236,6 +3439,7 @@ mod tests {
         // A key now edits the *displayed* buffer, advancing its cursor.
         apply_semantic_input_event(
             &mut editor,
+            fid,
             FrontendEvent::Key(KeyEvent {
                 frontend_id: fid,
                 key: Key::Char('Z'),

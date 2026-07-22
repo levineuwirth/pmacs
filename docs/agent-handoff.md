@@ -1,9 +1,10 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after mode system wiring (#129) landed on
-`main`, atop the config registry (#127), Vterm Stage 1 terminal core
-(#126), and completed Themes Arc 4 (#120/#124/#125). Vterm Stages 2 and 3
-are not implemented.**
+**Last updated: 2026-07-22, after Vterm Stage 2 PR #130 review round 2
+was addressed and approved for merge; mode system wiring (#129) and its
+handoff (#131), config registry (#127), Vterm Stage 1 terminal core (#126),
+and completed Themes Arc 4 (#120/#124/#125) are landed on `main`. Vterm
+Stage 3 is not implemented.**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -17,7 +18,7 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-22)
 
-- `main` @ `b4b925d` (mode system wiring #129), protocol **v18**
+- `main` @ `d5d9b9c` (mode system handoff #131), protocol **v18**
   (`SUPPORTED=[6..18]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
   `StatuslineSegments`).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
@@ -230,7 +231,7 @@ commands, read `docs/active-work.md` immediately after this file.
     resize. Review round 2 rejects C0/C1 controls before they enter screen
     cells, preserves the released button code in SGR mouse reports, removes
     dead screen paths, and clears stale round-trip state during prune. Stage 2
-    must uniquify default terminal buffer names.
+    now uniquifies default terminal buffer names transactionally.
   - Exact CUU/CUD and out-of-range DECSTBM clamping, combining across controls,
     xterm alternate-screen details, legacy non-SGR mouse, printable ASCII and
     CSI-dispatch allocation fast paths, and scrollback-cap naming are explicit
@@ -244,12 +245,57 @@ commands, read `docs/active-work.md` immediately after this file.
     is a clean behavioral bite. The parser dispatch has its independent clean
     behavioral bite; the original `main`/crate-root bite remains explicitly
     weaker compile-time API evidence.
-  - Stage 2 reviews require a durable focus/input resize owner, owning
-    `FrontendId` for the global `C-c` continuation, and local clipboard/BEL
-    signal drainage. Stage 3 additionally owns `pmacs-gpu/src/attach.rs`,
-    authenticated source routing, protocol-owned wire types/limits, and a
-    deliberate complete-frame limit decision: 16 MiB is insufficient; use a
-    measured legal-worst cap or aggregate bound, never silent chunking.
+  - Stage 3 owns `pmacs-gpu/src/attach.rs`, authenticated source routing,
+    protocol-owned wire types/limits, and a deliberate complete-frame limit
+    decision: 16 MiB is insufficient; use a measured legal-worst cap or
+    aggregate bound, never silent chunking.
+  - **Stage 2 TUI is implemented on `vterm-tui`** (`docs/vterm-framing.md`
+    Revision 7, criteria 15–27). `TerminalViewKey` keys per-frontend/window
+    projection state over one shared process/screen; logical row anchors retain
+    scroll/selection through reflow. One authenticated frontend controls at
+    most one session, with atomic replacement and release on
+    focus/switch/kill/detach.
+  - The strict `pmacs.terminal` Lua surface owns open/state/view/send/terminate
+    and context-implicit scroll/copy commands; the latter error unless the
+    invoking frontend's active window is a terminal. Fixed `C-c` is the
+    per-frontend terminal escape: only its next key reaches terminal-local
+    editor bindings, while unescaped bound keys pass through to the child.
+    `C-c C-c` sends one literal interrupt. Copy drains through the acting
+    frontend's clipboard path; active BELs drain once locally and per daemon
+    frontend, while historical/passive bells are baseline-suppressed.
+  - TUI composition paints owned terminal cells/styles only inside each
+    window's content rectangle, suppresses document overlays, and keeps sibling
+    splits independent. Daemon key/mouse/paste/focus/resize/detach routing uses
+    the authenticated connection source rather than client-claimed IDs.
+    `builtin/runtime/terminal.lua` provides the terminal command, view commands,
+    and pure `ui.modeline.terminal` process/scroll segment.
+  - `tests/vterm_stage2_acceptance.rs` maps Lua transactionality, shared-view
+    isolation, clipboard/modeline behavior, and a hermetic real `/bin/sh` TUI
+    PTY smoke. Stage 2 changes no wire schema or GPU renderer; protocol remains
+    v18 until Stage 3.
+  - PR #130 review round 1 (`8702791`) aligned dispatch with the approved
+    escape-prefix contract, closed the non-terminal Lua error path, made
+    controller replacement atomic, retained zero-area view anchors, removed
+    duplicate detach work, and replaced per-view deep scrollback clones with
+    borrowed live/published row projections. Focused child-input coverage pins
+    both unescaped bound-key passthrough and `C-c C-c`.
+  - PR #130 review round 2 (`b9a7e40`) clamps anchors into the first
+    surviving cell when eviction cuts through a wrapped logical line, prevents
+    ambient `active_frontend` from minting interactive Lua authority, names
+    malformed explicit-context fields, restores dispatcher rationale, and
+    removes owned cell snapshots from terminal mouse routing. The framing now
+    records the transient v18 semantic-controller boundary and bracketed-paste
+    injection deferral.
+  - Current-main integration (`3f0252f`) preserves per-frontend terminal
+    dispatch while applying the landed mode-scoped keymap, and exposes the
+    `mode`, `terminal`, and `lsp` statusline providers together.
+  - Post-integration gate: `cargo fmt --check`; strict workspace Clippy;
+    1,753 default + 1,929 CRDT library tests (3 ignored each); mode-system
+    acceptance 1 default + 1 CRDT; Stage 1 acceptance 9 default + 10 CRDT;
+    Stage 2 acceptance 4 default + 4 CRDT; statusline acceptance 7 default +
+    8 CRDT; M4 114 passed (3 ignored, 1 filtered); required GPU 109;
+    workspace 2,882 passed across 82 suites (19 ignored, 1 filtered);
+    `git diff --check` clean.
 - **PARKED: kill-ring browser + persistence.** Revision 2 framing is
   preserved on branch `kill-ring-browser`, but its `0efb5cd` scout is stale
   and must be repeated before implementation. No PR or implementation is

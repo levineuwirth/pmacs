@@ -14,8 +14,7 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `d5d9b9c` (#131 durable mode-system handoff merged;
-  runtime remains mode system wiring #129 at protocol v18).
+  `githubsucks/main` @ `86fc1bc` (Vterm Stage 2 #130 merged; protocol v18).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -49,35 +48,36 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `d5d9b9c` or a newer intentional main.
+The first command must expose `86fc1bc` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-
-
-## Modeline detection lane
+## Modeline detection implementation lane
 
 - Portable branch: `githubsucks/modeline-detection`
 - Approved framing head: `6b4f3c3`
 - Implementation head: `f8d05d2`
-- Base: canonical `main` @ `d5d9b9c`.
-- State: implementation complete; PR pending. Revision 2's bounded Emacs/Vim
-  parser, explicit-over-inferred precedence, alias normalization, shared
-  fresh-load language pin, LSP path guard, and all thirteen acceptance criteria
-  are implemented. Protocol remains v18.
+- Base: originally canonical `main` @ `d5d9b9c`; current canonical `main`
+  @ `86fc1bc` (Vterm Stage 2 #130) is integrated before merge.
+- PR: #132, <https://github.com/levineuwirth/pmacs/pull/132>, open against
+  canonical `main` and explicitly authorized for merge.
+- State: Revision 2's bounded Emacs/Vim parser, explicit-over-inferred
+  precedence, alias normalization, shared fresh-load language pin, LSP path
+  guard, and all thirteen acceptance criteria are implemented. Protocol
+  remains v18.
 - Verification:
-  - focused modeline + shebang-pin acceptance: 7 passed on default LuaJIT and
-    7 passed on non-default Lua 5.4;
-  - `cargo fmt --check`;
-  - `cargo clippy --workspace --all-targets -- -D warnings`;
-  - `cargo test --lib`: 1,742 passed;
-  - `cargo test --lib --features crdt`: 1,918 passed;
-  - `cargo test --test m4_acceptance -- --skip basedpyright`: 120 passed,
-    3 ignored, 1 filtered;
-  - `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 109 passed;
-  - `cargo test --workspace -- --skip basedpyright`: 2,873 passed across
-    81 suites, 19 ignored, 1 filtered;
+  - focused modeline + shebang-pin acceptance before integration: 7 passed on
+    default LuaJIT and 7 passed on non-default Lua 5.4;
+  - post-integration `cargo fmt --check`;
+  - post-integration `cargo clippy --workspace --all-targets -- -D warnings`;
+  - post-integration `cargo test --lib`: 1,753 passed;
+  - post-integration `cargo test --lib --features crdt`: 1,929 passed;
+  - post-integration `cargo test --test m4_acceptance -- --skip basedpyright`:
+    120 passed, 3 ignored, 1 filtered;
+  - post-integration `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`: 109 passed;
+  - post-integration `cargo test --workspace -- --skip basedpyright`: 2,888
+    passed across 82 suites, 19 ignored, 1 filtered;
   - `git diff --check`.
-- Next step: publish the implementation commit and open the review PR.
+- Next: push the current-main integration and merge PR #132 as authorized.
 
 Recovery worktree on a machine that does not already own the branch:
 
@@ -86,31 +86,6 @@ git worktree add --track \
   -b modeline-detection \
   ../pmacs-modeline-detection \
   githubsucks/modeline-detection
-```
-
-## Vterm Stage 2 framing lane
-
-- Portable branch: `githubsucks/vterm-framing`
-- Approved framing head: `fb4f8f0`
-- Base: canonical `main` @ `643d1e1` (Vterm Stage 1 / PR #126 merged).
-  `main` has since advanced to `b4b925d` (config registry #127, the #128
-  documentation merge, and mode system wiring #129); cut the Stage 2 lane
-  from current `main`, not from `643d1e1`.
-- State: `docs/vterm-framing.md` Revision 7 is framing-only, reviewed, and
-  approved for implementation. It closes the final `at_bottom`, terminal
-  `C-c` binding-reachability, and context-implicit Lua failure-mode findings.
-  There is no Stage 2 runtime implementation or PR yet.
-- Next lane: create `pmacs-vterm-tui` / `vterm-tui` from current canonical
-  `main`, carry the approved framing as its first commit, then implement and
-  gate Stage 2. Do not implement on `vterm-framing`.
-
-Recovery worktree on a machine that does not already own the branch:
-
-```sh
-git worktree add --track \
-  -b vterm-framing \
-  ../pmacs-vterm-framing \
-  githubsucks/vterm-framing
 ```
 
 ## Parked lane: kill-ring browser + persistence

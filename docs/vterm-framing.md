@@ -1,18 +1,22 @@
 # Vterm — framing (Arc 5 stage 2, three-PR delivery)
 
-**Revision 5 — 2026-07-21. Status: Stage 1 landed on `main` through PR #126
-at merge `643d1e1`. Stages 2 and 3 are not implemented.**
+**Revision 7 — 2026-07-21. Status: Stage 1 landed on `main` as PR #126
+at merge `643d1e1`; Stage 2 is implemented on branch `vterm-tui` and Stage 3
+is not implemented.**
 
-Revision 5 establishes the renderer-facing cell invariant before Stage 2:
-terminal text discards C0/C1 controls rather than storing host-terminal control
-bytes in grapheme cells. SGR mouse release preserves the released button code;
-review cleanups remove dead screen paths and stale round-trip state; and the
-remaining VT-fidelity and allocation nits are explicit deferrals. Architecture
-is unchanged: `C-c` is the terminal editor escape (`C-c C-c` sends interrupt);
-main-screen resize reflows while alternate screen clips/pads; exited buffers
-remain with an Emacs-style process message; protocol v19 is additive with
-complete frames; shared `Style` stays unchanged; and one `BufferId` owns one
-shared process/screen whose most recently active frontend controls size.
+Revision 7 closes the final three precision findings: `at_bottom` is geometric
+and distinct from live-tail following; the fixed `C-c` transport escape
+deliberately makes ordinary `C-c`-leading bindings unreachable in terminal
+windows; and context-implicit Lua view operations require an authenticated
+interactive origin with exact boolean/error results. Revision 6's durable
+controller and per-view identities, logical-cell anchors, frontend-explicit
+grid rendering, per-frontend dispatch, authenticated v18 input, local
+clipboard/BEL drainage, default-name uniquification, mouse override, and
+resize ordering remain unchanged. Main-screen resize reflows while alternate
+screen clips/pads; exited buffers remain with an Emacs-style process message;
+protocol v19 is additive with complete frames; shared `Style` stays unchanged;
+and one `BufferId` owns one shared process/screen whose most recently accepted
+frontend/window context controls size.
 
 This framing follows the compile-mode terminal substrate that landed in PR
 #113. `src/process.rs` already owns PTY creation, process groups, bounded
@@ -34,14 +38,14 @@ Arc 5 stage 2 ships as three separately reviewed PRs:
 There is no single mega-PR. Each stage is useful and testable by itself, and a
 later stage starts only after the preceding stage lands on `main`.
 
-## 0. Revision 5 — Stage 1 implementation and review record
+## 0. Revision 7 — landed Stage 1 and reviewed Stage 2 contract
 
-The first of the three vterm PRs is implemented, reviewed, fully gated, and
-landed on `main` as merge `643d1e1`. Initial feature commit `bbc1f33`,
-first-review fixes through `bf972a7`, and second-review hardening `9797ada`
-shipped through PR #126, <https://github.com/levineuwirth/pmacs/pull/126>.
-It is deliberately headless: there is no `pmacs.terminal` Lua module,
-interactive terminal command, TUI paint branch, or GPU/protocol surface yet.
+The first of the three vterm PRs landed on `main` at merge `643d1e1`.
+Implementation commits `bbc1f33` and `962944b`, first-review fixes through
+`bf972a7`, and second-review hardening through `9797ada` shipped in PR #126,
+<https://github.com/levineuwirth/pmacs/pull/126>. That landed stage is
+deliberately headless; this Stage 2 branch adds the Lua and TUI surfaces while
+leaving GPU/protocol integration for Stage 3.
 
 ### 0.1 Public seam and ownership
 
@@ -145,26 +149,54 @@ terminal_cells_reject_child_control_characters` returned `bite: OK` with a
 clean behavioral failure: the pre-hardening screen stored control bytes in a
 grapheme cluster rather than preserving the blank snapshot.
 
-### 0.4 Downstream review findings (not implemented)
+### 0.4 Stage 2 re-scout resolutions
 
-Stage 2 must derive PTY resize ownership from a durable accepted-input/focus
-owner before render fan-out, never transient `EditorCore::active_frontend`.
-Because `KeyDispatcher` pending state is global, a terminal `C-c` continuation
-must carry its owning `FrontendId`. Terminal copy should use the existing core
-kill-ring/clipboard setter, while the local run loop must drain/present
-clipboard signals; active-terminal BEL likewise uses the out-of-band frontend
-signal path.
+The post-Stage 1 review and a fresh read of landed `main` found six
+load-bearing Stage 2 seams. This revision resolves them before code:
+
+- PTY resize ownership is stored durably per terminal session as an
+  authenticated `(FrontendId, WindowId)` controller. Render-time
+  `EditorCore::active_frontend` is not an ownership signal.
+- The single global `KeyDispatcher` cannot safely carry a terminal `C-c`
+  continuation in a multi-frontend daemon. Pending dispatch and terminal
+  escape state become per-`FrontendId`; dispatch-idle publication becomes
+  frontend-specific too.
+- Terminal copy reuses the existing kill-ring/clipboard setter. The
+  in-process run loop must drain that signal and feed it through
+  `Frontend::present_messages`; the TUI must implement `InstanceSignal::Bell`
+  rather than drop it.
+- `RenderState::render_frame` and `paint_frame` need the target
+  `FrontendId` explicitly. A transient mutable active frontend may still
+  attribute commands, but it may not select another frontend's layout,
+  terminal view state, statusline context, or resize owner during fan-out.
+- Current v18 daemon key/mouse payload IDs are client supplied. Stage 2 routes
+  key, mouse, paste, focus, and resize through the authenticated connection
+  source before any terminal ownership or PTY effect.
+- The Stage 1 screen already preserves logical-line IDs and row cell offsets
+  through main-screen reflow. Stage 2 selection and scroll anchors use those
+  coordinates; numeric distance from the moving tail is derived metadata,
+  never stored ownership state.
+
+The final framing review pinned three precision contracts:
+
+- `at_bottom` reports whether the live tail is currently visible; it is not
+  the separate internal “follow future output” predicate.
+- `C-c` is a consumed transport escape, not an ordinary dispatcher prefix
+  map; `C-c`-leading user bindings are deliberately unavailable in terminal
+  windows for Stage 2.
+- Context-implicit Lua view operations require an authenticated interactive
+  command origin and fail closed rather than borrowing a stale
+  `active_frontend`.
 
 Stage 3 additionally owns `pmacs-gpu/src/attach.rs` for gated terminal
-resize/pointer sending and coalescing. Daemon handlers must authenticate source
-frontend/buffer ownership before input, resize, or pointer routing. Wire-facing
-terminal state, selection, and limits must live in or be re-exported from
-`pmacs-protocol`. The current 16 MiB transport frame cap cannot hold the legal
-worst complete terminal frame (up to roughly 64 MiB of cluster bytes before
-encoding overhead): Stage 3 must either raise and test a measured cap at least
-as large as the legal worst case (review estimate at least 80 MiB), or add a
-shared aggregate payload bound. It must never silently chunk the locked
-complete-frame protocol.
+resize/pointer sending and coalescing. New daemon event variants must apply the
+same authenticated-source rule. Wire-facing terminal state, selection, and
+limits live in or are re-exported from `pmacs-protocol`. The current 16 MiB
+transport frame cap cannot hold the legal worst complete terminal frame (up to
+roughly 64 MiB of cluster bytes before encoding overhead): Stage 3 must either
+raise and test a measured cap at least as large as the legal worst case
+(review estimate at least 80 MiB), or add a shared aggregate payload bound. It
+must never silently chunk the locked complete-frame protocol.
 
 ### 0.5 Stage 1 review round 1
 
@@ -540,8 +572,11 @@ cursor rewrites, erase operations, alternate-screen swaps, and resize.
 
 ### 4.3 Lua API
 
-Stage 2 installs `pmacs.terminal` before user config, loads
-`builtin/runtime/terminal.lua`, and registers the interactive command:
+Stage 2 constructs the shared `TerminalManager` immediately after the process
+supervisor, installs strict Rust primitives, then loads
+`builtin/runtime/terminal.lua`; all happen before LSP/MCP builtins and before
+user config. The Lua chunk owns friendly wrappers, the interactive command,
+buffer-local bindings, and the built-in statusline provider.
 
 ```lua
 local buffer = pmacs.terminal.open {
@@ -556,138 +591,293 @@ local buffer = pmacs.terminal.open {
 }
 
 pmacs.terminal.is_terminal(buffer)       -- boolean
-pmacs.terminal.state(buffer)             -- fresh plain metadata table
-pmacs.terminal.send(buffer, bytes)       -- explicit raw bytes
-pmacs.terminal.resize(buffer, rows, cols)
+pmacs.terminal.state(buffer)             -- fresh global metadata
+pmacs.terminal.view_state(ctx)           -- fresh per-window metadata
+pmacs.terminal.send(buffer, bytes)       -- explicit trusted raw bytes
 pmacs.terminal.terminate(buffer)         -- SIGTERM; buffer remains
-pmacs.terminal.scroll(lines)             -- active terminal window
-pmacs.terminal.scroll_to_bottom()
-pmacs.terminal.copy_selection()          -- active terminal window
+pmacs.terminal.scroll(lines)             -- boolean; interactive origin required
+pmacs.terminal.scroll_to_bottom()        -- boolean; interactive origin required
+pmacs.terminal.copy_selection()          -- boolean; interactive origin required
 ```
 
-`open` validates exact raw table fields before side effects. Unknown fields,
-metatable-provided fields, holes in `args`, non-string env keys/values,
-embedded NUL, non-integer dimensions, and out-of-range scrollback reject with
-the field named. The copied spec is immune to caller mutation. Returned and
-accepted identity is `BufferIdLua`, following the rest of the editor API.
+`open` accepts exactly the fields shown. It validates raw table fields before
+side effects: unknown fields, metatable-provided fields, holes in `args`,
+non-string environment keys/values, embedded NUL, non-integer dimensions, and
+out-of-range scrollback reject with the field named. The copied specification
+is immune to caller mutation. Returned and accepted identity is `BufferIdLua`,
+following the rest of the editor API.
 
-The built-in chunk registers `terminal` as an interactive command. It opens
-`$SHELL` without a shell-command interpolation layer. There is no command
-string split and no implicit `sh -c`.
-It also installs terminal-buffer-local commands used after the escape prefix:
-`M-w` copies the terminal selection, `M-v`/`C-v` page scrollback up/down, and
-`M-<`/`M->` move to the oldest retained row/bottom. These shadow ordinary
-document commands only during the one-key editor escape; normal terminal input
-still sends those keys to the child.
+Generated names are reserved against the live buffer registry before insert:
+`*terminal:sh*`, `*terminal:sh*<2>`, `*terminal:sh*<3>`, and so on. The lowest
+available suffix wins; failed creation consumes no suffix. An explicit `name`
+is preserved exactly after ordinary `TerminalSpec` validation.
+
+`state(buffer)` returns a fresh plain table:
+
+```lua
+{
+  buffer = buffer, pid = 123, rows = 24, cols = 80,
+  title = nil, screen_generation = 7,
+  process = { kind = "running" },
+  -- or { kind="exited", code=0 },
+  -- or { kind="signaled", signal="TERM" },
+  -- or { kind="crashed", message="..." }
+}
+```
+
+`view_state(ctx)` accepts the raw statusline context fields
+`{frontend, window, buffer}` and returns
+`{at_bottom=boolean, scroll_offset=integer, selection=boolean}`, or `nil` when
+that exact context is not a live terminal view. `state`/`view_state` expose no
+stored Lua tables, callbacks, or mutable manager state.
+
+The three context-implicit view operations require a live authenticated
+interactive command origin. A plain programmatic `pmacs.command.invoke`
+outside such a dispatch does not synthesize one and raises a Lua error; so does
+an origin whose active window is not the addressed terminal context. Errors
+name the operation and leave view, selection, clipboard, and controller state
+unchanged. `scroll(lines)` requires an integer: positive moves toward older
+rows, negative toward the live tail, and zero returns `false`; otherwise it
+returns whether `top` changed. `scroll_to_bottom()` returns whether selection
+or `top` was cleared. `copy_selection()` returns `true` only when bytes were
+published and `false` for a valid terminal context with no selection.
+
+There is deliberately no public Lua `resize`: the active controller's computed
+window content rectangle is the only geometry authority. `send` remains an
+explicit trusted escape hatch for packages and tests; ordinary user paste and
+keys use the mode-aware input path.
+
+The built-in `terminal` command calls the public wrapper with `$SHELL` or
+`/bin/sh`, no shell-command interpolation, no string split, and no implicit
+`sh -c`. The wrapper installs terminal-buffer-local one-key commands:
+`M-w` copies, `M-v`/`C-v` page up/down, and `M-<`/`M->` move to the oldest
+retained row/bottom. They run only after the terminal escape prefix; normal
+terminal input sends those keys to the child.
+
+### 4.4 Stage 2 view and controller contracts
+
+Stage 2 adds `src/terminal/view.rs`. It is a projection over the one
+`TerminalScreen`, not another screen:
+
+```rust
+TerminalViewKey { frontend_id, window_id, buffer_id }
+LogicalCellAnchor { logical_line_id, cell_offset }
+TerminalSelection { anchor, head }          // inclusive display cells
+TerminalViewState { top, selection, drag }  // keyed by TerminalViewKey
+TerminalController { frontend_id, window_id }
+```
+
+`cell_offset` is the leading display-cell offset within one logical line.
+Clicks on a wide continuation canonicalize to its lead. Ordering is resolved
+against the current retained row sequence, not by comparing IDs. A top anchor
+resolves to the physical row containing that logical offset after reflow.
+
+`TerminalManager` gains owned operations to register/retain/detach view keys,
+claim or release a session controller, create a
+`snapshot_for_view(key, viewport_size)`, scroll/select/copy one view, and query
+fresh global/view metadata. `detach_frontend` and live-layout retention remove
+stale view/controller state; buffer prune removes every context for that
+session. The context-free Stage 1 `snapshot(buffer)` remains available for
+headless/core callers.
+
+`snapshot_for_view` returns exactly `viewport_size.area()` cells for a nonzero
+valid viewport. At bottom it tail-aligns rows, padding above and to the right
+with default cells; a smaller view clips top/rows and right/columns. A
+scrolled view starts at its resolved top anchor and pads only after retained
+content is exhausted. Cursor and selection spans are translated into this
+returned coordinate space. `scroll_offset` is a saturating derived count of
+display rows between the viewport and live tail.
+
+`at_bottom` is purely geometric: it is `true` exactly when
+`scroll_offset == 0`, meaning the live tail is currently visible. It is
+independent of the follow predicate (`top == None && selection == None`).
+Therefore a Shift-selection frozen at the tail has `top != None`,
+`scroll_offset == 0`, and `at_bottom == true`: the active cursor remains
+visible, unshifted supported child mouse reporting remains eligible, and the
+statusline emits no `↑0`. The first later output retained behind that anchor
+makes `scroll_offset > 0` and `at_bottom == false`.
+
+Main-screen reflow keeps logical anchors stable. Beginning a selection freezes
+the current first visible row as `top`, even when it was the live tail, so
+later output has an anchor to preserve. Oldest-row eviction clamps a missing
+anchor once to the first surviving leading cell; a selection whose two ends
+collapse is cleared. Alternate-screen entry/exit or a reset that removes the
+referenced logical IDs clears affected selection/top state and returns the view
+to bottom. Child output follows only views with `top=None` and no selection.
 
 ## 5. Stage 2 — TUI integration
 
-### 5.1 Composition and cursor
+### 5.1 Composition, cursor, and status
 
-For every window whose `buffer_id` belongs to `TerminalManager`, the window
-content rectangle is painted from a terminal snapshot instead of
-`TextView::render`. Modeline/statusline composition remains unchanged. Normal
-text overlays, line-number gutters, syntax, diagnostics, and wrapping are not
-run over terminal cells.
+`RenderState::render_frame` and `paint_frame` take an explicit target
+`FrontendId`. Layout lookup, statusline evaluation, active-window choice, and
+terminal view keys use that ID. A shared placement helper computes each
+window's outer rectangle, one-row modeline reservation, and content rectangle;
+both resize synchronization and painting consume the same result.
 
-Each `(frontend_id, window_id, buffer_id)` owns a `TerminalViewState`. At
-bottom, the last screen row aligns with the content rectangle's last row.
-Scrolling records a stable logical-line top anchor rather than a numeric
-distance from a moving tail. New child output therefore does not move a
-scrolled-back viewport or selection. If retention evicts that anchor, it
-clamps once to the oldest retained row. A “not at bottom” marker is available
-to the built-in terminal statusline provider.
+For every terminal buffer, the content rectangle is painted from
+`snapshot_for_view` instead of `TextView::render`. Cell glyph/style values are
+copied directly; no ANSI is reinterpreted. Line-number gutters, document
+wrapping, syntax, diagnostics, inlays, ordinary selections, and local/peer
+document overlays are suppressed for that window. Modeline/statusline,
+sibling splits, and cells outside the rectangle retain the existing pipeline.
 
-The active terminal cursor is translated from terminal-local coordinates into
-the window rectangle. It is hidden when the child hid it, the window is not
-active, the viewport is scrolled away from bottom, or the coordinate is
-clipped. Other terminal windows do not paint a cursor.
+Each `(frontend_id, window_id, buffer_id)` view follows §4.4. Merely rendering
+a passive view never resizes the PTY. Zero-area content is skipped without
+creating a view or changing the prior valid size.
 
-A smaller window clips; a larger window pads with default cells. Merely
-rendering a passive view never resizes the PTY.
+The active terminal cursor is translated from snapshot-local coordinates into
+the content rectangle. It is hidden when the child hid it, the window is not
+the target frontend's active window, the viewport is scrolled from bottom, or
+the coordinate is clipped. Other terminal windows do not paint a cursor.
 
-BEL is forwarded only from the active terminal through the existing frontend
-signal path. OSC title is sanitized and exposed in terminal metadata/frame and
-the terminal statusline; it does not rename the identity buffer or directly
-set the host window title.
+BEL is an out-of-band `InstanceSignal::Bell` only when a new bell occurs in
+the target frontend's active terminal. Historical bells are never replayed on
+later activation, and one bell count is delivered at most once per frontend.
+The in-process loop drains both clipboard and terminal signals and feeds them
+through `Frontend::present_messages`; the TUI Bell arm emits one host BEL.
+OSC title remains sanitized metadata (and a Stage 3 frame field). It never
+renames the identity buffer, injects host control bytes, or sets the host title.
 
-### 5.2 Input precedence
+`terminal.lua` registers a right-side provider named `terminal`, priority 10,
+face `ui.modeline.terminal`. It emits `TERM` while running, `TERM:<code>` on
+normal exit, `TERM:<signal>` on signal, or `TERM:ERR` on crash, and appends
+` ↑<scroll_offset>` only when `scroll_offset > 0`. An unset child face
+inherits the existing modeline foreground through the Arc 4 contract.
 
-Modal editor surfaces remain authoritative. Input precedence is:
+### 5.2 Input precedence and per-frontend dispatch
+
+Stage 2 replaces the one pending `KeyDispatcher` with dispatch state keyed by
+`FrontendId`; keymaps and command registries remain shared. Terminal escape
+state is stored beside that dispatcher. `dispatch_idle_for(frontend_id)` uses
+the same frontend's pending prefix and active window; global modal surfaces
+still make every frontend non-idle while they own input.
+
+`EditorState` carries an ephemeral authenticated command origin around
+key/menu/M-x interactive invocation and clears it with the invocation guard.
+Nested calls inherit that origin. Plain `pmacs.command.invoke` outside the
+guard neither stamps command history nor creates terminal view authority.
+
+Input precedence is:
 
 1. minibuffer, incremental search, completion/menu, query-replace, and other
    existing modal shadows;
-2. terminal escape-prefix state;
-3. terminal key/mouse/paste handling when the active buffer is terminal;
-4. ordinary buffer-local/global keymaps and self-insert.
+2. that frontend's terminal escape-prefix state;
+3. terminal key/mouse/paste handling when that frontend's active buffer is a
+   terminal;
+4. that frontend's ordinary buffer-local/global dispatcher and self-insert.
 
-All terminal buffers remain in `round_trip_buffers`, so GPU/TUI input reaches
-this daemon-owned decision before any optimistic edit.
-Escape-prefix state is per frontend, so one attached user's pending escape
-never captures another user's next key.
+All terminal buffers stay in `round_trip_buffers`, so attached frontends reach
+this daemon-owned decision before optimistic edit. One user's pending escape
+or longer ordinary prefix cannot consume, cancel, or display as another
+user's pending sequence.
 
-When terminal input owns a normalized key, `terminal/input.rs` encodes:
+When terminal input owns a normalized key, `terminal/input.rs` encodes UTF-8
+printable characters; Ctrl mappings and Alt ESC-prefixing; Enter, Tab,
+Backspace, Escape; arrows/Home/End according to application-cursor mode;
+Insert/Delete/Page, F1–F12, Shift-Tab, and supported modifier parameters.
+Unknown/lock/media keys are ignored. Press is actionable; local repeat is
+treated as another press and release is not forwarded. The normalized
+protocol cannot distinguish number-row from numeric-keypad characters, so
+application-keypad mode remains tracked but cannot transform them.
 
-- UTF-8 printable characters;
-- Ctrl-character mappings, Alt ESC-prefixing, Enter/Tab/Backspace/Escape;
-- arrows/Home/End according to application-cursor mode;
-- Insert/Delete/Page and F1–F12 xterm sequences;
-- Shift-Tab and supported modifier parameters.
+`C-c` is the fixed terminal escape prefix. It is consumed and makes the next
+key run through the same frontend's ordinary dispatcher; a resulting longer
+prefix stays in that frontend's dispatcher. `C-c C-c` instead sends literal
+Ctrl-C. Modal shadows consume their keys before either rule.
 
-Unknown/lock/media keys are ignored, never converted into text. Press is the
-only actionable event in the current normalized protocol; repeat arrives as
-repeated press and release is not forwarded.
-The normalized protocol does not distinguish number-row digits from numeric
-keypad digits, so application-keypad mode is tracked but cannot transform
-those ambiguous `Key::Char` events.
-
-`C-c` is the fixed stage-2 terminal escape prefix. It is consumed and makes the
-next key run through the ordinary editor dispatcher, allowing `C-c C-x ...`
-for editor commands. `C-c C-c` sends the literal Ctrl-C byte required to
-interrupt the child. This is an intentional fixed stage-2 policy.
+This is deliberately a consumed transport escape, not an Emacs-style
+`C-c` prefix map: the dispatcher receives the post-escape key as a fresh
+sequence, while `C-c C-c` is reserved for literal interrupt. Consequently a
+global or buffer-local binding whose first chord is `C-c` cannot fire in a
+terminal window. Packages may bind a post-escape one-key sequence, as the
+built-in terminal-local commands do. A configurable escape/prefix-map policy
+remains the named §11 deferral.
 
 Paste sends exact bytes, wrapped in `ESC[200~` / `ESC[201~` only while the
-child enabled bracketed paste. It never passes through a command shell or Lua.
-When the child enabled focus reporting, authenticated frontend focus gain/loss
-sends `ESC[I` / `ESC[O` for the controlling terminal. With the mode off,
-focus changes send no PTY bytes.
+child enabled bracketed paste. It never passes through a shell or Lua.
+Authenticated focus gain claims the active terminal context and emits
+`ESC[I` when enabled. Focus loss emits `ESC[O` only when that source currently
+controls the session, then releases that controller; mode-off focus is silent.
 
 ### 5.3 Mouse, selection, copy, and scrollback
 
-If the child enabled a supported mouse mode, pointer events inside the terminal
-content rectangle are encoded as SGR mouse reports, with coordinates translated
-to terminal-local 1-based cells. The active mode determines whether press,
-release, drag, move, and wheel are reported.
+Child mouse reporting owns a pointer only when the exact terminal view is at
+bottom, the child enabled a supported tracking mode plus SGR encoding, and
+Shift is not held. Events inside the content rectangle translate to
+terminal-local 1-based cells; the active mode filters press, release, drag,
+move, and wheel.
 
 Otherwise the editor owns the gesture:
 
-- wheel changes the per-window scrollback offset;
-- primary drag creates a terminal-cell selection across history and screen;
-- copy serializes selected rows as UTF-8, trims only trailing default blank
-  cells, joins soft-wrapped rows without `\n`, and separates hard rows with
-  `\n`;
-- wide-cell continuations are never emitted twice;
-- a new plain click clears the old selection;
-- child output does not move a scrolled-back viewport or selection anchor.
+- wheel scrolls that `TerminalViewKey`;
+- primary drag stores inclusive logical-cell endpoints across history/screen;
+- Shift is the explicit editor-selection override while child mouse reporting
+  is active;
+- an editor-owned right press follows the existing context-menu path;
+- a new plain primary click clears the old selection before setting its anchor;
+- child output does not move a scrolled viewport or selection.
 
-`pmacs.terminal.copy_selection()` publishes through the existing kill-ring /
-clipboard path. Ordinary document selection fields remain untouched.
+Copy resolves anchors against retained logical rows, emits each leading glyph
+once, trims only trailing default blank cells, joins soft wraps without `\n`,
+and separates hard rows with `\n`. Wide continuations are never duplicated;
+combining clusters remain one UTF-8 sequence. Reversed drags normalize by
+retained row order. `pmacs.terminal.copy_selection()` writes through the
+existing kill-ring/clipboard setter for the acting frontend; ordinary document
+selection state is untouched.
 
-### 5.4 Resize ownership
+Scrolling uses physical retained display rows and clamps at oldest/bottom.
+Reaching bottom clears `top` only when no selection is active. The explicit
+`scroll_to_bottom`/`M->` action clears both selection and `top` so live-tail
+following resumes; ordinary copy leaves selection intact. Page commands use
+the current nonzero content-row count. Selection and scroll are available in
+the alternate screen only over its visible rows; no alternate output enters
+main history.
 
-One PTY has one kernel window size even when displayed in several views. The
-controlling view is the active window of `core.active_frontend` — the frontend
-that most recently supplied accepted input/focus. Only that view may resize the
-PTY. Passive views clip/pad.
+### 5.4 Durable control and resize
 
-For grid frontends, the daemon derives the terminal content `rows × cols` from
-the computed split rectangle and modeline reservation. Focus/split/frontend
-resize changes trigger one checked `resize_pty`; unchanged dimensions are
-suppressed. The screen model resizes before the child receives `SIGWINCH`, so
-its repaint lands into the new geometry.
-If the computed content rectangle has zero rows or columns, rendering skips it
-and the prior valid PTY size remains unchanged; zero is never sent to
-`resize_pty`.
+Each terminal session stores at most one `TerminalController`. Successful
+`open` claims the newly active `(frontend, window)`. Later authenticated
+terminal key, paste, editor-owned/child-owned pointer, or focus gain claims the
+source's currently active terminal window. A render pass never claims control.
+Switching that controller away, killing its window/buffer, focus loss, or
+frontend detach releases it; size stays unchanged until another accepted
+context claims it.
+
+Before the next terminal process drain and before paint, the instance
+synchronizes live terminal layouts. Only a controller whose exact window still
+shows that session may resize. Unchanged dimensions are suppressed before any
+PTY syscall. The manager validates once, performs `resize_pty`, then applies
+the same prevalidated `TerminalScreen::resize` in the same main-thread call;
+no supervisor output drain can interleave between them. A PTY failure leaves
+the prior screen geometry intact. The child may emit after `SIGWINCH` only on a
+later drain, when the screen already has the new geometry.
+
+Content rows/columns come from the shared placement helper after modeline
+reservation and with no document gutter. A zero row/column result performs no
+resize and preserves the prior valid geometry. Passive splits/frontends only
+clip or pad their own snapshots.
+
+### 5.5 Local and v18-daemon adapters
+
+The in-process event adapter handles key press/repeat, mouse, paste,
+focus-gained/lost, and resize through the same `EditorState` terminal methods.
+It synchronizes layout before `tick_processes`, then presents pending
+clipboard/BEL messages. Host restoration remains the existing `Frontend`
+drop/error contract.
+
+The daemon passes the authenticated connection `source` explicitly to grid
+render and input. Client-supplied IDs in v18 Key, Mouse, Paste, Focus, Resize,
+and Detach payloads never choose a view or controller. Session detach removes
+that frontend's dispatcher, terminal views, controller claims, and bell
+baseline. These are Stage 2 changes to existing v18 grid behavior; no protocol
+bump or semantic/GPU terminal surface is added in this PR.
+
+One intentional Stage 2 boundary remains until Stage 3: an authenticated v18
+semantic frontend can send a key while its active buffer is a terminal, claim
+that terminal's controller, and feed the PTY, but cannot display the screen.
+The next accepted TUI terminal input reclaims control; v19 removes the invisible
+interval by adding the semantic terminal surface.
 
 ## 6. Stage 3 — protocol v19 and GPU integration
 
@@ -803,21 +993,22 @@ coherent.
 
 | Owner | Stable scope | Primary files |
 | --- | --- | --- |
-| Lead/integrator | contracts first; `TerminalManager`, buffer/Lua/builtin wiring, cross-surface acceptance, gates, docs, branches/PRs | `src/terminal/session.rs`, `src/lua_bindings/mod.rs`, `builtin/runtime/terminal.lua`, `tests/vterm_*_acceptance.rs`, docs |
-| VT core agent | streaming parser operations, screen state machine, input encoder, model units | `src/ansi.rs`, `src/terminal/screen.rs`, `src/terminal/input.rs` |
-| TUI agent | terminal window composition, cursor, per-view scroll/selection/copy, grid input and resize | `src/terminal/view.rs`, owned sections of `src/editor.rs`, focused TUI tests |
-| Protocol/GPU agent | v19 types/limits/gates, semantic terminal producer, authenticated daemon routing, GPU state/render/hit-test | `pmacs-protocol`, `src/protocol.rs`, `src/semantic_render.rs`, owned sections of `src/daemon.rs`, `pmacs-gpu/src/main.rs` |
+| Lead/integrator | contracts first; `TerminalManager`, Lua/builtin wiring, lifecycle/signal integration, shared acceptance, gates, docs, branches/PRs | `src/terminal/session.rs`, `src/lua_bindings/mod.rs`, `builtin/runtime/terminal.lua`, narrow Stage 2 authenticated-dispatch sections of `src/daemon.rs`, `tests/vterm_*_acceptance.rs`, docs |
+| VT core agent | encoder corrections and screen query seams needed by view projection; no renderer ownership | `src/ansi.rs`, `src/terminal/screen.rs`, `src/terminal/input.rs` |
+| TUI agent | view projection, frontend-explicit grid composition/cursor, per-frontend dispatch, local events, scroll/selection/copy/resize | `src/terminal/view.rs`, `src/instance_render.rs`, `src/frontend.rs`, owned sections of `src/editor.rs`, focused TUI tests |
+| Protocol/GPU agent | Stage 2 contract review; Stage 3 v19 types/limits/gates, semantic producer, authenticated new-event routing, GPU state/render/hit-test | `pmacs-protocol`, `src/protocol.rs`, `src/semantic_render.rs`, Stage 3 sections of `src/daemon.rs`, `pmacs-gpu/src/{main,attach}.rs` |
 
 Coordination rules:
 
-- Lead establishes types and method signatures before another lane edits a
-  caller.
+- Lead establishes types, invariants, and method signatures before another
+  lane edits callers.
 - Strict file ownership. `src/editor.rs` passes from lead to TUI only after
-  stage-1 construction wiring is settled; `src/daemon.rs` belongs only to the
-  protocol/GPU lane in stage 3.
+  construction wiring; lead and TUI coordinate exact non-overlapping
+  `src/daemon.rs`/signal hunks. Stage 3 daemon work begins only after Stage 2
+  lands.
 - Workers do not update docs, ledgers, branches, or PRs and do not stash,
   checkout, rebase, or merge.
-- Workers add focused tests in their owned modules. Lead alone owns shared
+- Workers add focused tests in owned modules. Lead alone owns shared
   acceptance files.
 - Exact-path staging only; never `git add .`.
 - Four agents are the total vterm team, not four implementation workers plus a
@@ -825,23 +1016,25 @@ Coordination rules:
 
 Per-stage utilization:
 
-- Stage 1: lead + VT core implement; TUI and protocol/GPU owners review the
-  snapshot/input contracts against their future consumers.
-- Stage 2: TUI implements; VT core owns encoder corrections; lead integrates
-  lifecycle/acceptance; protocol/GPU owner checks that no TUI-only assumption
-  enters the snapshot contract.
-- Stage 3: protocol/GPU implements; TUI and VT core owners add parity cases in
-  their existing surfaces; lead integrates and gates.
+- Stage 1: completed by lead + VT core; TUI and protocol/GPU reviewed future
+  consumer contracts.
+- Stage 2: lead establishes manager/Lua contracts and authenticated adapters;
+  TUI implements projection/input/rendering; VT core adds only required
+  encoder/query corrections; protocol/GPU checks snapshot neutrality.
+- Stage 3: protocol/GPU implements; TUI and VT core add parity cases in their
+  existing surfaces; lead integrates and gates.
 
 ## 8. Branch and PR plan
 
-Stage 1 landed on `main` through PR #126 at merge `643d1e1`. Continue the
-approved sequential plan:
+Stage 1 landed on `main` as PR #126 at merge `643d1e1`. Continue one clean PR
+at a time:
 
-1. create `pmacs-vterm-tui`, branch `vterm-tui`, from post-#126 `main`;
-   implement, gate, and open the second PR;
-2. after Stage 2 merges, create `pmacs-vterm-gpu`, branch `vterm-gpu`, from
-   the new `main`; implement, gate, and open the third PR.
+1. Revision 7 framing review is complete and the implementation contract is
+   approved; Stage 2 is implemented on `vterm-tui`, then gated and opened as
+   the second PR;
+2. merge Stage 2 only when the user says;
+3. create `pmacs-vterm-gpu`, branch `vterm-gpu`, from the then-current `main`;
+   implement, gate, and open the third PR.
 
 The framing branch is `vterm-framing` in worktree `pmacs-vterm-framing`.
 Implementation branches are not stacked across an unmerged parent. This avoids
@@ -891,49 +1084,126 @@ base-branch deletion/auto-close risk and makes each PR's gate evidence honest.
 
 ### Stage 2 — TUI
 
-15. Lua `open` performs the same strict raw-field validation, publishes no
-    partial state on error, and switches the active window only after success.
+15. Lua `open` enforces the strict owned table contract, uniquifies generated
+    names without consuming failed suffixes, publishes no partial state on
+    error, and switches/claims the active window only after success.
+    `state` and `view_state` return exact fresh plain tables; no public Lua
+    resize bypass exists. Context-implicit view operations error without an
+    authenticated interactive terminal origin and otherwise return the exact
+    changed/copied booleans without partial mutation.
 16. A terminal window paints exact cells/styles inside its content rectangle;
-    statusline, sibling splits, and outside cells are untouched.
-17. Active cursor translation, child-hidden cursor, passive window, clipping,
-    and scrolled-back hiding are exact.
-18. Printable, Ctrl, Alt, arrows, Home/End, function keys, application cursor,
-    focus reporting, and unknown keys produce the specified PTY bytes.
-19. `C-c` dispatches one editor key; `C-c C-c` sends Ctrl-C; modal minibuffer,
-    search, menu, and query-replace remain authoritative.
-20. Paste is byte-exact with bracketed wrappers only when enabled.
-21. Mouse-reporting modes receive translated SGR reports. With reporting off,
-    the same gestures scroll/select/copy and write no PTY bytes.
-22. Copy handles soft/hard wraps, trailing blanks, wide/combining glyphs,
-    resize/reflow, eviction-clamped anchors, and selections crossing
-    history/screen exactly once.
-23. The controlling active view alone resizes the PTY; passive split/frontend
-    renders never cause resize thrash.
-24. A hermetic real TUI smoke opens `/bin/sh`, runs a cursor-addressed probe,
-    resizes, scrolls/copies, exits, and restores the host terminal cleanly.
+    top/right padding, clipping, modeline, sibling splits, outside cells, and
+    suppression of document/peer overlays are exact and control-free.
+17. Per-context snapshots preserve logical top/selection anchors through
+    main-screen reflow, derive the correct scroll offset, clamp oldest-row
+    eviction once, and clear invalid alternate/reset anchors. A selection
+    frozen at the live tail pins `top != None`, `scroll_offset == 0`, and
+    `at_bottom == true`; cursor, child-mouse eligibility, status suffix, and
+    the first subsequent output transition follow that definition exactly.
+18. Printable, Ctrl, Alt, navigation/function keys, application cursor, focus,
+    unknown keys, and paste produce exact PTY bytes; bracketed wrappers appear
+    only when enabled.
+19. `C-c` dispatches one fresh editor key and retains the owning frontend
+    through a longer prefix; `C-c C-c` sends Ctrl-C. Ordinary bindings whose
+    first chord is `C-c` are deliberately unreachable in terminal windows.
+    Two frontends cannot consume one another's escape/pending state or
+    dispatch-idle value, and existing modal shadows remain authoritative.
+20. Supported SGR mouse modes receive translated reports only at bottom without
+    Shift. Mode-off, scrolled, unsupported-legacy, and Shift gestures remain
+    editor-owned; wheel, drag, clear, and right-context behavior write no PTY
+    bytes.
+21. Copy handles soft/hard wraps, trailing blanks, wide/combining glyphs,
+    reversed drags, resize/reflow, eviction, alternate screen, and
+    history/screen crossings exactly once, then publishes to the acting
+    frontend's kill-ring/clipboard path without touching document selection.
+22. The durable authenticated controller alone resizes. Open/input/focus
+    claims and focus/switch/kill/detach releases are exact; unchanged, zero,
+    passive, and failed resize cases preserve prior geometry without thrash,
+    and screen resize precedes the next child-output drain.
+23. Forged v18 grid payload frontend IDs for key, mouse, paste, focus, resize,
+    or detach cannot select or affect another frontend's terminal context.
+    Detach and layout retention remove only the matching views, dispatcher,
+    controller, and bell baseline.
+24. Local and daemon-grid paths deliver clipboard and each new active-terminal
+    BEL exactly once. Historical/passive bells and OSC titles do not become
+    host control effects. The built-in terminal provider reports exact
+    process/scroll state for each split.
+25. Two frontends and sibling splits over one terminal retain independent
+    bottom/scroll/selection snapshots while sharing one process, screen, title,
+    process outcome, and controller.
+26. Killing the identity buffer terminates/reaps the child and removes all
+    views; switching away leaves it running; editor/drop and error paths
+    restore the host terminal and leak no child, reader, or stale round-trip
+    state.
+27. A hermetic real TUI smoke opens `/bin/sh`, runs a cursor-addressed probe,
+    exercises key/paste, resize, scroll/select/copy, BEL, and clean exit, then
+    proves host raw/alternate-screen state is restored.
+
+#### Stage 2 verification map
+
+The cross-surface suite is `tests/vterm_stage2_acceptance.rs`; focused unit
+coverage remains beside the owning implementation. The criteria map as follows:
+
+- **15:** `lua_surface_is_strict_fresh_transactional_and_context_safe`.
+- **16:** `editor::tests::terminal_snapshot_composes_only_content_and_translates_cursor`
+  plus the real-TUI smoke.
+- **17:** `terminal::view::tests::{tail_projection_pads_above_and_right_and_translates_cursor,
+  frozen_top_is_geometrically_at_bottom_when_view_still_reaches_tail,
+  alternate_switch_clears_view_anchors_and_selection}` and
+  `shared_screen_keeps_view_scroll_selection_and_controller_independent`.
+- **18:** `terminal::input::tests::{utf8_ctrl_and_alt_boundaries,
+  application_cursor_and_xterm_modifiers, ambiguous_digits_ignore_application_keypad,
+  paste_and_focus_are_exact, unsupported_keys_are_invisible}` and the real-TUI
+  input/paste path.
+- **19:** `editor::tests::dispatch_prefix_state_is_independent_per_frontend`,
+  `terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt`,
+  `lua_surface_is_strict_fresh_transactional_and_context_safe`, and the
+  real-TUI escaped editor-binding/quit path.
+- **20:** `terminal::input::tests::sgr_mouse_modes_modifiers_and_coordinates`
+  plus the real-TUI editor-owned scroll/drag/copy path.
+- **21:** `terminal::view::tests::{copy_joins_soft_wraps_trims_default_blanks_and_separates_hard_rows,
+  wide_continuation_canonicalizes_to_lead_and_copies_once}`,
+  `lua_surface_is_strict_fresh_transactional_and_context_safe`, and the real
+  OSC 52 clipboard assertion.
+- **22:** `lua_surface_is_strict_fresh_transactional_and_context_safe`,
+  `shared_screen_keeps_view_scroll_selection_and_controller_independent`, and
+  the real child-PTY resize assertion.
+- **23:** `daemon::tests::forged_resize_mutates_only_the_authenticated_frontend`,
+  `daemon::tests::inbound_paste_uses_authenticated_source_not_the_claimed_id`,
+  the existing `m5_4_dispatch_{key,mouse}_threads_frontend_id_to_lua_surface`
+  tests, and the multi-frontend detach assertions in
+  `shared_screen_keeps_view_scroll_selection_and_controller_independent`.
+- **24:** the built-in-provider and clipboard assertions in
+  `lua_surface_is_strict_fresh_transactional_and_context_safe`,
+  `daemon::tests::terminal_bell_baseline_suppresses_history_and_delivers_each_new_bell_once`,
+  and the real-TUI BEL/OSC 52 assertions.
+- **25:** `shared_screen_keeps_view_scroll_selection_and_controller_independent`.
+- **26:** both in-process acceptance tests' termination/cleanup assertions and
+  the real-TUI clean-exit/host-restoration assertions.
+- **27:** `real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell`.
 
 ### Stage 3 — GPU/protocol
 
-25. Protocol v19 appends all new variants after v18 pins; v18 grid traffic
+28. Protocol v19 appends all new variants after v18 pins; v18 grid traffic
     round-trips unchanged and new outbound variants are version-gated.
-26. Terminal frame validation accepts exact shared boundaries and atomically
+29. Terminal frame validation accepts exact shared boundaries and atomically
     rejects over-area, bad area, out-of-bounds cursor, malformed cluster,
     orphan continuation, invalid selection spans, attachment, overlong title,
     and overlong process-state text while retaining the prior valid frame.
-27. Semantic terminal activation suppresses document-only messages; switching
+30. Semantic terminal activation suppresses document-only messages; switching
     back forces a complete document resync.
-28. Two frontends/splits on one terminal keep independent scroll/selection
+31. Two frontends/splits on one terminal keep independent scroll/selection
     snapshots; only the active controlling context resizes or writes input.
-29. Forged frontend/buffer IDs in terminal resize/pointer events cannot affect
+32. Forged frontend/buffer IDs in terminal resize/pointer events cannot affect
     another terminal or process.
-30. Headless GPU rendering pins background rectangles, indexed/truecolor,
+33. Headless GPU rendering pins background rectangles, indexed/truecolor,
     reverse, wide/combining cells, clipping, cursor visibility, status-band
     separation, and no frontend wrapping.
-31. Font/window resize emits cell dimensions, never pixels, and identical
+34. Font/window resize emits cell dimensions, never pixels, and identical
     resize requests are suppressed.
-32. Theme/font/terminal generation changes invalidate exactly the affected
+35. Theme/font/terminal generation changes invalidate exactly the affected
     caches; an unchanged terminal frame produces no redraw message.
-33. A real daemon + required-GPU smoke runs a full-screen alternate-screen
+36. A real daemon + required-GPU smoke runs a full-screen alternate-screen
     probe, handles input and resize, exits, and returns to the preserved main
     screen.
 
@@ -970,6 +1240,9 @@ Not part of these three PRs:
   alternate-screen switches;
 - legacy X10 mouse byte encoding when a child enables mouse tracking without
   SGR mode; Stage 2 sends no report for that unsupported combination;
+- bracketed-paste payload filtering: Stage 2 forwards exact paste bytes as
+  framed, so embedded `ESC[201~` can terminate the wrapper early; xterm-style
+  filtering/escaping requires a separate input-policy decision;
 - nonstandard `CSI 3 K` ignore semantics (the current core clears the line);
 - the ASCII fast path that avoids grapheme-candidate allocation and
   segmentation for every printable character after another ASCII character,
@@ -991,7 +1264,8 @@ panic, unbounded allocation, or child leak.
 
 ## 12. Resolved decisions
 
-The 2026-07-21 architecture discussion resolved every Revision 1 question:
+The 2026-07-21 architecture, re-scout, and final framing review resolved every
+current question:
 
 1. Fixed terminal editor escape: `C-c`; `C-c C-c` sends literal Ctrl-C.
 2. Resize: reflow main-screen soft wraps; clip/pad alternate screen.
@@ -1000,5 +1274,22 @@ The 2026-07-21 architecture discussion resolved every Revision 1 question:
    no terminal surface.
 5. GPU wire: complete visible frames with complete-payload suppression.
 6. Style: preserve the shared encoding and defer unsupported attributes.
-7. Identity: one process/screen per terminal `BufferId`; the most recently
-   active frontend's active view controls PTY size.
+7. Identity: one process/screen per terminal `BufferId`.
+8. View state: logical-line/cell anchors per
+   `(FrontendId, WindowId, BufferId)`; `at_bottom` means
+   `scroll_offset == 0`, while following additionally requires no top anchor
+   and no selection; no second screen.
+9. Control: the most recently authenticated accepted terminal context owns
+   resize until focus/switch/kill/detach releases it; render never claims.
+10. Dispatch: terminal escape and ordinary pending prefixes are per frontend;
+    the consumed `C-c` escape deliberately hides ordinary `C-c`-leading
+    bindings in terminal windows.
+11. Mouse: Shift or scrollback forces editor selection; supported SGR child
+    reporting owns unshifted at-bottom gestures.
+12. Resize order: validate, suppress unchanged, resize PTY, resize the screen
+    before any subsequent child-output drain; failure preserves old geometry.
+13. Lua: strict open/state/view/send/terminate/scroll/copy surface; no public
+    geometry bypass; implicit view operations require authenticated interactive
+    origin and otherwise error without mutation.
+14. Host effects: clipboard and BEL use explicit frontend signals; OSC title
+    remains sanitized metadata.

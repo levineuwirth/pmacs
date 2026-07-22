@@ -26,8 +26,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyModifiers};
 use pmacs::editor::EditorState;
+use pmacs::frontend::KeyEvent;
 use pmacs::lua_bindings::PackageInstallOverride;
+use pmacs::protocol::FrontendId;
 use tempfile::TempDir;
 
 fn fake_mcp_path() -> String {
@@ -813,17 +816,19 @@ fn m9_6_mx_palette_invokes_mcp_tool_through_minibuffer_reentry() {
         .lua_host
         .eval(
             Some("type-cmd-name"),
-            r#"
-            pmacs.minibuffer.set_contents("m9_6-echo")
-            pmacs.minibuffer.accept()
-            "#,
+            r#"pmacs.minibuffer.set_contents("m9_6-echo")"#,
         )
         .expect("accept command name");
+
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
 
     // Step 3: the tool's argument prompt must now be active. This is
     // the re-entrant minibuffer behavior: outer session was taken,
     // inner session was begun, and the begin happened from inside
-    // the outer accept's on_accept callback.
+    // the outer accept's authenticated dispatch callback.
     let inner_active: bool = state
         .lua_host
         .lua()
@@ -841,12 +846,13 @@ fn m9_6_mx_palette_invokes_mcp_tool_through_minibuffer_reentry() {
         .lua_host
         .eval(
             Some("type-arg"),
-            r#"
-            pmacs.minibuffer.set_contents("through M-x")
-            pmacs.minibuffer.accept()
-            "#,
+            r#"pmacs.minibuffer.set_contents("through M-x")"#,
         )
         .expect("accept arg");
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+    );
     assert!(
         pump_until_status_contains(&mut state, "through M-x", Duration::from_secs(2)),
         "M-x → arg-prompt → dispatch must reach status; status={:?}",

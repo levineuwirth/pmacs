@@ -3824,7 +3824,7 @@ mod tests {
         let buffer_id = active_buffer(&state);
         sem.set_viewport(buffer_id, ByteRange { start: 0, end: 80 }, 0);
 
-        let grid_msgs = grid.render_frame(&state, &[]);
+        let grid_msgs = grid.render_frame(&state, FrontendId::LOCAL, &HashMap::new(), &[]);
         let sem_msgs = sem.render_frame(&state);
         assert!(
             matches!(grid_msgs[0], InstanceMessage::CellDelta { .. }),

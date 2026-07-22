@@ -104,16 +104,6 @@ fn strict_owned_spec_rejects_before_spawn_and_is_mutation_independent() {
         lua_processes, 0,
         "terminal-owned ProcessId must not be exposed through pmacs.process"
     );
-    let terminal_module_absent: bool = state
-        .lua_host
-        .lua()
-        .load("return pmacs.terminal == nil")
-        .eval()
-        .expect("terminal module absence");
-    assert!(
-        terminal_module_absent,
-        "Stage 1 must not publish an unrenderable interactive Lua terminal API"
-    );
 
     let process_id = state
         .terminal_manager

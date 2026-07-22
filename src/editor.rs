@@ -12,8 +12,8 @@
 //! them through the dispatcher, and invokes the resulting Lua commands
 //! until the user quits.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -24,7 +24,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::async_runtime::SharedAsyncRuntime;
-use crate::cell::CellCoord;
+use crate::cell::{CellCoord, CellSize};
 use crate::editor_core::EditorCore;
 use crate::file_io::load_file;
 use crate::frontend::{Event, Frontend, KeyEvent, KeyEventKind, MouseEvent, install_panic_hook};
@@ -33,9 +33,52 @@ use crate::keymap_stack::{Action, KeyDispatcher};
 use crate::lua::LuaHost;
 use crate::lua_bindings::SharedCore;
 use crate::minibuffer::Minibuffer;
-use crate::protocol::FrontendId;
+use crate::protocol::{
+    FrontendId, InstanceMessage, InstanceSignal, Key as TerminalKey,
+    Modifiers as TerminalModifiers, MouseButton as TerminalMouseButton,
+    MouseKind as TerminalMouseKind,
+};
+use crate::terminal::TerminalSnapshot;
+use crate::terminal::view::TerminalViewKey;
 use crate::view::{View, Viewport};
 use crate::window::{Rect, WindowId};
+
+/// Ephemeral authenticated origin for one interactive command invocation.
+///
+/// The shared slot is installed as Lua app data so Rust dispatch and nested
+/// `pmacs.command.invoke_interactive` calls use the same authority. Guards
+/// restore the prior value, which makes nesting safe and clears the outermost
+/// origin even when a Lua command errors.
+#[derive(Clone, Default)]
+pub(crate) struct InteractiveCommandOrigin(Rc<Cell<Option<FrontendId>>>);
+
+impl InteractiveCommandOrigin {
+    /// Current authenticated frontend while an interactive command runs.
+    #[must_use]
+    pub(crate) fn current(&self) -> Option<FrontendId> {
+        self.0.get()
+    }
+
+    /// Enter an interactive command scope for `frontend_id`.
+    pub(crate) fn enter(&self, frontend_id: FrontendId) -> InteractiveCommandOriginGuard {
+        let previous = self.0.replace(Some(frontend_id));
+        InteractiveCommandOriginGuard {
+            origin: self.clone(),
+            previous,
+        }
+    }
+}
+
+pub(crate) struct InteractiveCommandOriginGuard {
+    origin: InteractiveCommandOrigin,
+    previous: Option<FrontendId>,
+}
+
+impl Drop for InteractiveCommandOriginGuard {
+    fn drop(&mut self) {
+        self.origin.0.set(self.previous);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // EditorState
@@ -48,8 +91,10 @@ pub struct EditorState {
     pub core: SharedCore,
     /// The embedded Lua VM and its command/keymap registries.
     pub lua_host: LuaHost,
-    /// Multi-key prefix state machine. Driven by the run loop.
-    pub dispatcher: KeyDispatcher,
+    /// Independent key-prefix and terminal-escape state per authenticated frontend.
+    dispatchers: HashMap<FrontendId, FrontendDispatchState>,
+    /// Authenticated frontend scoped to the current interactive invocation.
+    pub(crate) interactive_origin: InteractiveCommandOrigin,
     /// Main-thread async runtime (T M3.3). Owns the worker pool and
     /// the message bus pair; [`Self::tick_async`] drives one
     /// drain-and-resume pass per run-loop iteration.
@@ -112,6 +157,12 @@ pub struct EditorState {
     /// Last left-button down event, used to synthesize terminal double
     /// clicks from crossterm's plain Down/Up mouse event stream.
     mouse_click: Option<MouseClickState>,
+}
+
+#[derive(Default)]
+struct FrontendDispatchState {
+    dispatcher: KeyDispatcher,
+    terminal_escape: bool,
 }
 
 impl Drop for EditorState {
@@ -177,6 +228,8 @@ impl EditorState {
             Rc::new(RefCell::new(crate::buffer_registry::BufferRegistry::new()));
         let core = Rc::new(RefCell::new(EditorCore::new(registry.clone())));
         let mut lua_host = LuaHost::with_registry(registry).expect("Lua runtime initialization");
+        let interactive_origin = InteractiveCommandOrigin::default();
+        lua_host.lua().set_app_data(interactive_origin.clone());
         lua_host
             .attach_editor(&core)
             .expect("editor bindings + builtin chunks");
@@ -247,7 +300,15 @@ impl EditorState {
         // shutdown enforces no-zombie cleanup at editor exit.
         let process_supervisor = crate::lua_bindings::make_process_supervisor(lua_host.lua())
             .expect("install pmacs.process");
-        let terminal_manager = Rc::new(RefCell::new(crate::terminal::TerminalManager::new()));
+        let terminal_manager =
+            crate::lua_bindings::make_terminal_manager(lua_host.lua(), &process_supervisor)
+                .expect("install pmacs.terminal");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/terminal.lua"),
+                include_str!("../builtin/runtime/terminal.lua"),
+            )
+            .expect("load terminal builtin chunk");
         // T M4.5 LSP manager. Wires onto the same supervisor so its
         // spawn/restart/I/O machinery is shared with `pmacs.process.*`.
         // The manager itself is reachable from Lua as `pmacs.lsp.*`.
@@ -486,7 +547,8 @@ impl EditorState {
         Self {
             core,
             lua_host,
-            dispatcher: KeyDispatcher::new(),
+            dispatchers: HashMap::new(),
+            interactive_origin,
             async_runtime,
             syntax_registry,
             process_supervisor,
@@ -656,51 +718,44 @@ impl EditorState {
         let _ = core.switch_active_buffer(buffer_id);
     }
 
-    /// Translate a key event into a chord, run it through the
-    /// dispatcher, and invoke the resolved command (or the
-    /// self-insert fallback for an unbound printable chord).
+    /// Whether `frontend_id` may optimistically self-insert its next key.
     ///
-    /// Whether the daemon's key-dispatch path is currently "idle" in
-    /// the sense that the *next* key event would self-insert into the
-    /// active buffer rather than being intercepted.
-    ///
-    /// `false` when either:
-    ///
-    /// - the dispatcher holds a pending multi-key prefix (e.g. the
-    ///   user has typed `C-x` and the daemon is waiting for the next
-    ///   chord), or
-    /// - a minibuffer prompt is active and absorbing keys, or
-    /// - an incremental search is running and absorbing keys (Q#SR5).
-    ///
-    /// Used by the daemon to drive the `InstanceMessage::DispatchIdle`
-    /// wire signal that gates `crdt_replica` frontends' optimistic-apply
-    /// path. Without this signal the optimistic layer would Insert a
-    /// plain-char keystroke into the active document while the
-    /// daemon's actual intent is to route the keystroke into the
-    /// minibuffer prompt — the M10.10 "documented limitation" that
-    /// surfaced during session-5 manual validation. Isearch reuses the
-    /// exact same gate: while a search runs every keystroke must
-    /// round-trip so the daemon's `dispatch_search_key` receives it
-    /// (extend the query / step) instead of the frontend self-inserting
-    /// it into the buffer.
+    /// `false` while a prefix, terminal escape, modal surface, or round-trip
+    /// buffer owns input. The daemon publishes this as `DispatchIdle`; returning
+    /// `true` while one of those surfaces is active would let a CRDT frontend
+    /// edit the document locally while the daemon routes the same key elsewhere
+    /// (M10.10, Q#SR5, Q#CM1, Q#QR1, Arc 1b Q#P6).
     #[must_use]
-    pub fn dispatch_idle(&self) -> bool {
-        if !self.dispatcher.pending().is_empty() {
+    pub fn dispatch_idle_for(&self, frontend_id: FrontendId) -> bool {
+        if self
+            .dispatchers
+            .get(&frontend_id)
+            .is_some_and(|state| state.terminal_escape || !state.dispatcher.pending().is_empty())
+        {
             return false;
         }
         let core = self.core.borrow();
-        // A live context menu shadows the keymap too (Q#CM1): keys must
-        // round-trip so the daemon's `dispatch_menu_key` drives the menu
-        // rather than the frontend self-inserting. A round-trip buffer
-        // (Arc 1b Q#P6 — a focused panel) is the buffer-shaped member of
-        // the same family: RET must reach its buffer-local bindings and
-        // typing must reach its read-only intercept, neither of which an
-        // optimistic local edit would do.
         !core.minibuffer.is_active()
             && !core.search_active()
             && !core.query_replace_active()
             && !core.menu_is_open()
-            && !core.active_buffer_round_trips()
+            && core
+                .active_window_for(frontend_id)
+                .is_some_and(|window| !core.buffer_round_trips(window.buffer_id))
+    }
+
+    /// Local-frontend compatibility wrapper.
+    #[must_use]
+    pub fn dispatch_idle(&self) -> bool {
+        self.dispatch_idle_for(FrontendId::LOCAL)
+    }
+
+    /// Drop one detached frontend's pending key and terminal escape state.
+    pub fn detach_frontend_input(&mut self, frontend_id: FrontendId) {
+        self.dispatchers.remove(&frontend_id);
+        self.terminal_manager
+            .borrow_mut()
+            .detach_frontend(frontend_id);
     }
 
     /// `frontend_id` records which frontend produced the event. v0.1
@@ -710,22 +765,22 @@ impl EditorState {
     /// (`pmacs.frontend.id()`). Sets [`EditorCore::active_frontend`]
     /// before any command body runs, so observers always see a fresh
     /// value.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single input-precedence state machine"
+    )]
     pub fn dispatch_key(&mut self, frontend_id: FrontendId, key: KeyEvent) {
-        let Some(chord) = key_event_to_chord(key) else {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
-        };
+        }
+        // Authenticate every path through this input event, including modal
+        // callbacks such as M-x minibuffer acceptance.
+        let _origin = self.interactive_origin.enter(frontend_id);
+        let chord = key_event_to_chord(key);
         {
             let mut core = self.core.borrow_mut();
             core.status.clear();
             core.active_frontend = frontend_id;
-        }
-
-        // Modal surfaces beat the completion popup (Q#C3): if a menu /
-        // search / minibuffer opened while the popup was up, close the
-        // popup before the modal shadow swallows this key --- otherwise
-        // it would linger, rendered but unreachable.
-        {
-            let mut core = self.core.borrow_mut();
             if core.completion_popup_is_open()
                 && (core.menu_is_open()
                     || core.search_active()
@@ -736,67 +791,100 @@ impl EditorState {
             }
         }
 
-        // Context-menu interception (Q#CM1): while a menu is open every
-        // key drives it (navigate / invoke / dismiss), shadowing the
-        // global keymap like search and the minibuffer. Same shared path
-        // both frontends reach via the `FrontendEvent::Key` round-trip.
+        // Modal surfaces beat both terminal transport and the completion popup.
+        // Menu/search/query-replace/minibuffer are full keymap shadows shared by
+        // grid and semantic input; each returns before the ordinary post-command
+        // edit check, so shadow handlers own any required hook fan-out (Q#CM1,
+        // Q#SR5, Q#QR1).
+        // Global modal surfaces own input before terminal transport.
         if self.core.borrow().menu_is_open() {
-            self.dispatch_menu_key(chord);
+            if let Some(chord) = chord {
+                self.dispatch_menu_key(frontend_id, chord);
+            }
             return;
         }
-
-        // Incremental-search interception: while an isearch is running,
-        // every key routes through the search handler (the global keymap
-        // is shadowed, like the minibuffer). Printable chars extend the
-        // query; C-s / C-r step; RET accepts; C-g / Esc cancel. This is
-        // the shared input path for both frontends — the daemon's
-        // `FrontendEvent::Key` round-trip lands here too.
         if self.core.borrow().search_active() {
-            self.dispatch_search_key(chord);
+            if let Some(chord) = chord {
+                self.dispatch_search_key(chord);
+            }
             return;
         }
-
-        // Query-replace interception (Arc 2): the fifth modal shadow.
-        // While the interactive phase runs, every key drives it
-        // (y/n/!/./q), shadowing the global keymap like search. Both
-        // frontends reach this via the `FrontendEvent::Key` round-trip
-        // (`dispatch_idle` is false while it runs). The handler fires
-        // `buffer.after-edit` itself — a modal shadow returns before the
-        // normal post-command edit check below (Q#QR1).
         if self.core.borrow().query_replace_active() {
-            self.dispatch_query_replace_key(chord);
+            if let Some(chord) = chord {
+                self.dispatch_query_replace_key(chord);
+            }
             return;
         }
-
-        // Minibuffer interception: when a prompt is active, every key
-        // routes through the minibuffer's hardcoded handler. The main
-        // editor's keymap is bypassed; the user can still cancel with
-        // C-g and resume normal dispatch.
         if self.core.borrow().minibuffer.is_active() {
-            self.dispatch_minibuffer_key(chord);
+            if let Some(chord) = chord {
+                self.dispatch_minibuffer_key(frontend_id, chord);
+            }
             return;
         }
 
-        // In-buffer completion popup (Q#C3): a PARTIAL shadow, the
-        // fourth member of the family above. Only the popup-control
-        // chords (TAB / RET / C-n / C-p / Up / Down / Esc / C-g) are
-        // intercepted; every other key falls through to normal dispatch
-        // below, so typing keeps self-inserting and motion keys keep
-        // moving. The post-dispatch validation at the bottom of this
-        // function closes the session when a fallen-through key breaks
-        // the anchor/prefix invariant. A pending multi-key prefix owns
-        // the keyboard: while one is in flight (`C-x ...`) the popup
-        // must not steal its continuation or its `C-g` abort --- and
-        // the Pending arm below closes the popup anyway, so this guard
-        // only covers the same-dispatch race.
+        // Completion is the one partial modal shadow (Q#C3): only its control
+        // chords are intercepted. A pending per-frontend prefix owns those
+        // chords instead, and ordinary keys continue to terminal/keymap dispatch.
+        let dispatcher_pending = self
+            .dispatchers
+            .get(&frontend_id)
+            .is_some_and(|state| !state.dispatcher.pending().is_empty());
         if self.core.borrow().completion_popup_is_open()
-            && self.dispatcher.pending().is_empty()
-            && let Some(key) = CompletionPopupKey::from_chord(chord)
+            && !dispatcher_pending
+            && let Some(popup_key) = chord.and_then(CompletionPopupKey::from_chord)
         {
-            self.dispatch_completion_key(key);
+            self.dispatch_completion_key(popup_key);
             return;
         }
 
+        // Terminal transport precedes ordinary buffer/global bindings. `C-c`
+        // opens a fixed one-key editor escape; all unescaped keys go to the child.
+        let terminal_key = self.active_terminal_key(frontend_id);
+        let escaped = self
+            .dispatchers
+            .get(&frontend_id)
+            .is_some_and(|state| state.terminal_escape);
+        if let Some(view_key) = terminal_key {
+            if escaped {
+                self.dispatchers
+                    .entry(frontend_id)
+                    .or_default()
+                    .terminal_escape = false;
+                if chord.is_some_and(is_terminal_escape_chord) {
+                    self.claim_terminal_controller(view_key);
+                    self.send_terminal_bytes(view_key.buffer_id, &[0x03]);
+                    return;
+                }
+                // The post-escape key starts a fresh ordinary sequence below.
+            } else if !dispatcher_pending {
+                if chord.is_some_and(is_terminal_escape_chord) {
+                    let state = self.dispatchers.entry(frontend_id).or_default();
+                    state.terminal_escape = true;
+                    state.dispatcher = KeyDispatcher::new();
+                    self.claim_terminal_controller(view_key);
+                    return;
+                }
+                let Some((terminal_key, modifiers)) = terminal_key_from_crossterm(key) else {
+                    return;
+                };
+                let modes = self
+                    .terminal_manager
+                    .borrow()
+                    .modes_for_view(view_key)
+                    .unwrap_or_default();
+                if let Some(bytes) =
+                    crate::terminal::input::encode_key(terminal_key, modifiers, modes)
+                {
+                    self.claim_terminal_controller(view_key);
+                    self.send_terminal_bytes(view_key.buffer_id, &bytes);
+                }
+                return;
+            }
+        }
+
+        let Some(chord) = chord else {
+            return;
+        };
         // Buffer- and mode-scope keybindings resolve against the active
         // buffer. Keep its mode borrowed from the registry only while the
         // pure keymap lookup runs: `Option::as_slice` provides the required
@@ -810,21 +898,18 @@ impl EditorState {
                 .ok()
                 .and_then(|buffer| buffer.major_mode());
             let stack = self.lua_host.keymaps().borrow();
-            self.dispatcher
+            self.dispatchers
+                .entry(frontend_id)
+                .or_default()
+                .dispatcher
                 .dispatch(chord, &stack, Some(active_buffer), active_mode.as_slice())
         };
-
-        // Snapshot the active buffer's edit revision before the command
-        // runs so we can fire `buffer.after-edit` only when it changes.
-        // Stale-id paths (active buffer killed mid-dispatch) fall back
-        // to "no edit observed", which is the correct conservative call.
         let pre_revision = self.active_buffer_revision();
 
         match action {
+            // Kill ring Q#KR2: stamp the authenticated frontend before the
+            // body so nested interactive calls inherit the same origin.
             Action::Run { command, .. } => {
-                // Kill ring Q#KR2: record the command boundary before the
-                // body runs, so the body's own `ed.last_command()` reads
-                // its *predecessor* (Emacs `last-command` semantics).
                 self.core.borrow_mut().rotate_command(frontend_id, &command);
                 if let Err(e) = self
                     .lua_host
@@ -834,30 +919,18 @@ impl EditorState {
                         format!("error in {command}: {}", first_line(&e.to_string()));
                 }
             }
+            // A prefix is rendered from dispatcher state; dismissing the
+            // popup prevents its partial shadow from stealing continuation.
             Action::Pending { .. } => {
-                // The pending prefix is rendered from
-                // `dispatcher.pending()`; no command runs yet. Starting
-                // a command sequence dismisses the completion popup:
-                // leaving it open would route the sequence's `C-g`
-                // abort (and its continuation chords) into the popup's
-                // shadow instead of the dispatcher.
                 self.core.borrow_mut().completion_popup_close();
             }
             Action::Unbound { sequence } => {
+                // Self-insert is an interactive command boundary (Q#KR2).
+                // Arm Q#AP9 typed-edit metadata only across this dispatch.
                 if let Some(ch) = printable_char(&sequence) {
-                    // Typing a character is a command too (Q#KR2): it
-                    // must break a kill chain — `C-k x C-k` is two ring
-                    // entries, not an append.
                     self.core
                         .borrow_mut()
                         .rotate_command(frontend_id, "buffer.self-insert");
-                    // Auto-pairing Q#AP9: this dispatch is the typed
-                    // self-insert producer — arm the exact typed-edit
-                    // record so the after-edit fan-out below can
-                    // expose it. The insert primitive completes the
-                    // record with the effective (post-intercept) edit;
-                    // `typed_edit_finish` takes it back on every path
-                    // out of this dispatch.
                     self.core.borrow_mut().typed_edit_arm(frontend_id, ch);
                     let mut args = mlua::MultiValue::new();
                     args.push_back(mlua::Value::Integer(ch as i64));
@@ -866,8 +939,7 @@ impl EditorState {
                             format!("self-insert failed: {}", first_line(&e.to_string()));
                     }
                 } else {
-                    // An unbound key still breaks the chain (Q#KR2) —
-                    // Emacs's `undefined` runs as a command.
+                    // Emacs `undefined` is still a command boundary (Q#KR2).
                     self.core.borrow_mut().break_command_chain(frontend_id);
                     self.core.borrow_mut().status =
                         format!("{}: not bound", display_sequence(&sequence));
@@ -875,15 +947,7 @@ impl EditorState {
             }
         }
 
-        // Auto-pairing Q#AP9: take back the typed-edit arm on every
-        // path out of this dispatch — command error, rejected insert,
-        // and the no-revision-change case all land here with either a
-        // completed record or nothing. The record is armed for Lua
-        // only across the one after-edit fan-out below and cleared
-        // the moment it returns, so paste, later dispatches, and
-        // manual hook runs can never observe a stale record.
         let typed_edit = self.core.borrow_mut().typed_edit_finish(frontend_id);
-
         let post_revision = self.active_buffer_revision();
         if pre_revision != post_revision {
             if let Some(record) = typed_edit {
@@ -895,13 +959,243 @@ impl EditorState {
                 .run_hook("buffer.after-edit", mlua::MultiValue::new());
             self.core.borrow_mut().typed_edit_clear_armed();
         }
-
-        // Q#C3 post-dispatch validation, deliberately AFTER the
-        // after-edit hook: the Lua driver may have just refreshed (or
-        // re-anchored) the popup for this very edit, and validation
-        // must judge the fresh session, not the stale one. A closed
-        // popup makes this a single mutex peek.
         self.core.borrow_mut().completion_popup_validate();
+    }
+
+    fn active_terminal_key(&self, frontend_id: FrontendId) -> Option<TerminalViewKey> {
+        let core = self.core.borrow();
+        let view = core.views.get(&frontend_id)?;
+        let window = core.windows.get(&view.active)?;
+        let key = TerminalViewKey::new(frontend_id, window.id, window.buffer_id);
+        self.terminal_manager
+            .borrow()
+            .is_terminal(window.buffer_id)
+            .then_some(key)
+    }
+
+    fn claim_terminal_controller(&self, key: TerminalViewKey) {
+        let mut manager = self.terminal_manager.borrow_mut();
+        let _ = manager.register_view(key);
+        let _ = manager.claim_controller(key);
+    }
+
+    fn send_terminal_bytes(&self, buffer_id: crate::buffer::BufferId, bytes: &[u8]) {
+        let result = self.terminal_manager.borrow().send(
+            buffer_id,
+            bytes,
+            &mut self.process_supervisor.borrow_mut(),
+        );
+        if let Err(error) = result {
+            self.core.borrow_mut().status = error.to_string();
+        }
+    }
+
+    /// Consume a paste as terminal input for one authenticated frontend.
+    ///
+    /// Returns `false` when modal/document paste handling must run instead.
+    pub fn dispatch_paste(&mut self, frontend_id: FrontendId, bytes: &[u8]) -> bool {
+        {
+            let mut core = self.core.borrow_mut();
+            core.active_frontend = frontend_id;
+            if core.menu_is_open()
+                || core.search_active()
+                || core.query_replace_active()
+                || core.minibuffer.is_active()
+            {
+                return false;
+            }
+        }
+        let Some(key) = self.active_terminal_key(frontend_id) else {
+            return false;
+        };
+        let modes = self
+            .terminal_manager
+            .borrow()
+            .modes_for_view(key)
+            .unwrap_or_default();
+        let encoded = crate::terminal::input::encode_paste(bytes, modes.bracketed_paste);
+        self.claim_terminal_controller(key);
+        self.send_terminal_bytes(key.buffer_id, &encoded);
+        true
+    }
+
+    /// Apply authenticated frontend focus to terminal control/reporting.
+    pub fn dispatch_focus(&mut self, frontend_id: FrontendId, gained: bool) {
+        self.core.borrow_mut().active_frontend = frontend_id;
+        if gained {
+            let Some(key) = self.active_terminal_key(frontend_id) else {
+                return;
+            };
+            let modes = self
+                .terminal_manager
+                .borrow()
+                .modes_for_view(key)
+                .unwrap_or_default();
+            self.claim_terminal_controller(key);
+            if let Some(bytes) = crate::terminal::input::encode_focus(true, modes.focus_reporting) {
+                self.send_terminal_bytes(key.buffer_id, &bytes);
+            }
+            return;
+        }
+
+        let controlled = self
+            .terminal_manager
+            .borrow()
+            .controller_view_for_frontend(frontend_id);
+        let Some(key) = controlled else {
+            return;
+        };
+        let modes = self
+            .terminal_manager
+            .borrow()
+            .modes_for_view(key)
+            .unwrap_or_default();
+        if let Some(bytes) = crate::terminal::input::encode_focus(false, modes.focus_reporting) {
+            self.send_terminal_bytes(key.buffer_id, &bytes);
+        }
+        let _ = self.terminal_manager.borrow_mut().release_controller(key);
+    }
+
+    /// Resize the one session durably controlled by `frontend_id`.
+    ///
+    /// This is called before process drain and paint, never from rendering.
+    pub fn sync_terminal_layout(&mut self, frontend_id: FrontendId, term_size: CellSize) -> bool {
+        let Some(key) = self
+            .terminal_manager
+            .borrow()
+            .controller_view_for_frontend(frontend_id)
+        else {
+            return false;
+        };
+        let content = {
+            let core = self.core.borrow();
+            let Some(view) = core.views.get(&frontend_id) else {
+                let _ = self.terminal_manager.borrow_mut().release_controller(key);
+                return false;
+            };
+            if view.active != key.window_id
+                || core
+                    .windows
+                    .get(&key.window_id)
+                    .is_none_or(|window| window.buffer_id != key.buffer_id)
+            {
+                let _ = self.terminal_manager.borrow_mut().release_controller(key);
+                return false;
+            }
+            let Some(placement) = window_placements(&core, frontend_id, term_size)
+                .get(&key.window_id)
+                .copied()
+            else {
+                let _ = self.terminal_manager.borrow_mut().release_controller(key);
+                return false;
+            };
+            placement.content
+        };
+        if content.size.rows == 0 || content.size.cols == 0 {
+            return false;
+        }
+        let old_size = self
+            .terminal_manager
+            .borrow()
+            .snapshot(key.buffer_id)
+            .map(|snapshot| snapshot.size);
+        if old_size == Some(content.size) {
+            return false;
+        }
+        let Ok(rows) = u16::try_from(content.size.rows) else {
+            return false;
+        };
+        let Ok(cols) = u16::try_from(content.size.cols) else {
+            return false;
+        };
+        let result = self.terminal_manager.borrow_mut().resize(
+            key.buffer_id,
+            rows,
+            cols,
+            &mut self.process_supervisor.borrow_mut(),
+        );
+        if let Err(error) = result {
+            self.core.borrow_mut().status = error.to_string();
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Precompute owned terminal view snapshots before entering paint borrows.
+    pub fn prepare_terminal_views(
+        &mut self,
+        frontend_id: FrontendId,
+        term_size: CellSize,
+    ) -> HashMap<WindowId, TerminalSnapshot> {
+        let (live, sizes) = {
+            let core = self.core.borrow();
+            let placements = window_placements(&core, frontend_id, term_size);
+            let mut live = HashSet::new();
+            if let Some(view) = core.views.get(&frontend_id) {
+                for window_id in view.layout.iter_ids() {
+                    let Some(window) = core.windows.get(&window_id) else {
+                        continue;
+                    };
+                    if self.terminal_manager.borrow().is_terminal(window.buffer_id) {
+                        live.insert(TerminalViewKey::new(
+                            frontend_id,
+                            window_id,
+                            window.buffer_id,
+                        ));
+                    }
+                }
+            }
+            let mut sizes = Vec::new();
+            for (window_id, placement) in placements {
+                let Some(window) = core.windows.get(&window_id) else {
+                    continue;
+                };
+                let key = TerminalViewKey::new(frontend_id, window_id, window.buffer_id);
+                if !live.contains(&key)
+                    || placement.content.size.rows == 0
+                    || placement.content.size.cols == 0
+                {
+                    continue;
+                }
+                sizes.push((key, placement.content.size));
+            }
+            (live, sizes)
+        };
+        let mut manager = self.terminal_manager.borrow_mut();
+        manager.retain_frontend_views(frontend_id, &live);
+        sizes
+            .into_iter()
+            .filter_map(|(key, size)| {
+                manager
+                    .snapshot_for_view(key, size)
+                    .map(|snapshot| (key.window_id, snapshot))
+            })
+            .collect()
+    }
+
+    /// Drain local-only terminal/clipboard output signals after a frame.
+    pub fn take_local_signals(&mut self) -> Vec<InstanceMessage> {
+        let frontend_id = FrontendId::LOCAL;
+        let active = self.active_terminal_key(frontend_id);
+        let mut messages = Vec::new();
+        if self
+            .terminal_manager
+            .borrow_mut()
+            .take_bell_for_frontend(frontend_id, active)
+        {
+            messages.push(InstanceMessage::Signal(InstanceSignal::Bell));
+        }
+        if let Some((target, bytes)) = self.core.borrow_mut().take_pending_clipboard() {
+            debug_assert_eq!(
+                target, frontend_id,
+                "local signal drain received a non-local clipboard target"
+            );
+            if target == frontend_id {
+                messages.push(InstanceMessage::Signal(InstanceSignal::Clipboard(bytes)));
+            }
+        }
+        messages
     }
 
     /// Active buffer's edit revision, or `None` if the registry no
@@ -969,13 +1263,13 @@ impl EditorState {
     /// Keys without a handler are silently ignored --- this matches
     /// Emacs's behaviour, where minibuffer mode shadows the global
     /// keymap.
-    fn dispatch_minibuffer_key(&mut self, chord: Chord) {
+    fn dispatch_minibuffer_key(&mut self, frontend_id: FrontendId, chord: Chord) {
         use crate::minibuffer::MinibufferAction;
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let action = MinibufferAction::from_chord(chord);
         match action {
-            MinibufferAction::Accept => self.minibuffer_accept(),
+            MinibufferAction::Accept => self.minibuffer_accept(frontend_id),
             MinibufferAction::Cancel => self.minibuffer_cancel(),
             MinibufferAction::Complete => self.minibuffer_complete(),
             MinibufferAction::HistoryPrev => self.with_minibuffer(Minibuffer::history_prev),
@@ -1118,11 +1412,11 @@ impl EditorState {
     }
 
     /// Drive an open context menu from a keystroke (Q#CM1).
-    fn dispatch_menu_key(&mut self, chord: Chord) {
+    fn dispatch_menu_key(&mut self, frontend_id: FrontendId, chord: Chord) {
         match MenuKey::from_chord(chord) {
             MenuKey::Next => self.core.borrow_mut().menu_step(1),
             MenuKey::Prev => self.core.borrow_mut().menu_step(-1),
-            MenuKey::Invoke => self.menu_invoke_active(),
+            MenuKey::Invoke => self.menu_invoke_active(frontend_id),
             MenuKey::Cancel | MenuKey::Dismiss => self.core.borrow_mut().menu_close(),
         }
     }
@@ -1131,7 +1425,7 @@ impl EditorState {
     /// menu closes *first* so the command runs against a clean state
     /// (and a command that itself opens a menu isn't immediately torn
     /// down).
-    fn menu_invoke_active(&mut self) {
+    fn menu_invoke_active(&mut self, frontend_id: FrontendId) {
         let command = self.core.borrow().menu_active_command();
         self.core.borrow_mut().menu_close();
         if let Some(command) = command {
@@ -1139,14 +1433,11 @@ impl EditorState {
             // rotate the boundary so a menu Cut chains like a keybound
             // one. The invoke below bypasses dispatch_key, which would
             // otherwise leave the boundary stale.
-            {
-                let mut core = self.core.borrow_mut();
-                let fid = core.active_frontend;
-                core.rotate_command(fid, &command);
-            }
+            self.core.borrow_mut().rotate_command(frontend_id, &command);
             // Q#KR10b: menu invocation bypasses dispatch_key's
             // revision check — a menu Cut's edit must still fire
             // `buffer.after-edit`.
+            let _origin = self.interactive_origin.enter(frontend_id);
             self.with_after_edit_check(|state| {
                 if let Err(e) = state
                     .lua_host
@@ -1214,7 +1505,13 @@ impl EditorState {
 
     /// Drive an open menu from a mouse event (Q#CM1): hover highlights,
     /// left-click invokes, a click outside (or right-click) dismisses.
-    fn dispatch_menu_mouse(&mut self, ev: MouseEvent, cell_row: u32, cell_col: u32) {
+    fn dispatch_menu_mouse(
+        &mut self,
+        frontend_id: FrontendId,
+        ev: MouseEvent,
+        cell_row: u32,
+        cell_col: u32,
+    ) {
         use crossterm::event::{MouseButton, MouseEventKind};
         let hit = self.core.borrow().menu_hit(cell_row, cell_col);
         match ev.kind {
@@ -1226,7 +1523,7 @@ impl EditorState {
             MouseEventKind::Down(MouseButton::Left) => match hit {
                 Some(row) => {
                     self.core.borrow_mut().menu_set_active_row(row);
-                    self.menu_invoke_active();
+                    self.menu_invoke_active(frontend_id);
                 }
                 None => self.core.borrow_mut().menu_close(),
             },
@@ -1250,7 +1547,7 @@ impl EditorState {
         }
     }
 
-    fn minibuffer_accept(&mut self) {
+    fn minibuffer_accept(&mut self, frontend_id: FrontendId) {
         let outcome = self.core.borrow_mut().minibuffer.accept();
         let Some((on_accept, contents)) = outcome else {
             return;
@@ -1269,6 +1566,7 @@ impl EditorState {
         // post-command revision check (the minibuffer interception
         // returns before it), so an M-x'd editing command would never
         // fire `buffer.after-edit` without this wrapper.
+        let _origin = self.interactive_origin.enter(frontend_id);
         self.with_after_edit_check(|state| {
             if let Err(e) = on_accept.call::<mlua::MultiValue>(args) {
                 state.core.borrow_mut().status = format!(
@@ -1320,6 +1618,10 @@ impl EditorState {
     /// (the click neither activates the window nor positions the
     /// cursor; that gesture is reserved for future binding to
     /// "switch to this window" without disturbing buffer state).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "shared document/terminal mouse router"
+    )]
     pub fn dispatch_mouse(
         &mut self,
         frontend_id: FrontendId,
@@ -1336,17 +1638,38 @@ impl EditorState {
         // outside dismisses) — handled before window hit-testing so an
         // outside click anywhere closes it.
         if self.core.borrow().menu_is_open() {
-            self.dispatch_menu_mouse(ev, cell_row, cell_col);
+            self.dispatch_menu_mouse(frontend_id, ev, cell_row, cell_col);
             return;
         }
 
-        let Some((win_id, rect)) =
-            window_at_cell(&self.core.borrow(), term_size, cell_row, cell_col)
-        else {
+        let Some((win_id, rect)) = window_at_cell(
+            &self.core.borrow(),
+            frontend_id,
+            term_size,
+            cell_row,
+            cell_col,
+        ) else {
             return;
         };
         let inner_rows = rect.size.rows.saturating_sub(1);
         let local_row = cell_row.saturating_sub(rect.origin.row);
+        let buffer_id = self.core.borrow().windows[&win_id].buffer_id;
+        if self.terminal_manager.borrow().is_terminal(buffer_id) {
+            let content_size = CellSize::new(inner_rows, rect.size.cols);
+            if local_row >= inner_rows || content_size.rows == 0 || content_size.cols == 0 {
+                self.mouse_click = None;
+                return;
+            }
+            let local = CellCoord::new(local_row, cell_col.saturating_sub(rect.origin.col));
+            self.dispatch_terminal_mouse(
+                TerminalViewKey::new(frontend_id, win_id, buffer_id),
+                content_size,
+                local,
+                ev,
+                (cell_row, cell_col),
+            );
+            return;
+        }
         // UX gutter (Q#UX6): subtract the reserved gutter width so the
         // hit-test lands on the right text byte. A click inside the gutter
         // strip (raw < gutter_w) saturates to column 0 → the start of that
@@ -1429,6 +1752,69 @@ impl EditorState {
             _ => {
                 self.mouse_click = None;
             }
+        }
+    }
+
+    fn dispatch_terminal_mouse(
+        &mut self,
+        key: TerminalViewKey,
+        viewport_size: CellSize,
+        coord: CellCoord,
+        event: MouseEvent,
+        global: (u32, u32),
+    ) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let kind = terminal_mouse_kind(event.kind);
+        let modifiers = terminal_modifiers(event.modifiers);
+        let shift = modifiers.contains(TerminalModifiers::SHIFT);
+        let (at_bottom, modes, screen_size) = {
+            let mut manager = self.terminal_manager.borrow_mut();
+            let Some(status) = manager.view_status_for_size(key, viewport_size) else {
+                return;
+            };
+            let modes = manager.modes_for_view(key).unwrap_or_default();
+            let screen_size = manager.screen_size_for_view(key).unwrap_or(viewport_size);
+            (status.at_bottom, modes, screen_size)
+        };
+
+        if !shift
+            && at_bottom
+            && modes.mouse_sgr
+            && coord.row < screen_size.rows
+            && coord.col < screen_size.cols
+            && let Some(bytes) = crate::terminal::input::encode_mouse(kind, coord, modifiers, modes)
+        {
+            self.claim_terminal_controller(key);
+            self.send_terminal_bytes(key.buffer_id, &bytes);
+            return;
+        }
+
+        self.claim_terminal_controller(key);
+        let mut manager = self.terminal_manager.borrow_mut();
+        match event.kind {
+            MouseEventKind::ScrollUp => {
+                let _ = manager.scroll_view(key, viewport_size, SCROLL_LINES);
+            }
+            MouseEventKind::ScrollDown => {
+                let _ = manager.scroll_view(key, viewport_size, -SCROLL_LINES);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let _ = manager.begin_selection(key, viewport_size, coord);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let _ = manager.update_selection(key, viewport_size, coord);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let _ = manager.finish_selection(key, viewport_size, coord);
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                drop(manager);
+                self.core.borrow_mut().break_command_chain(key.frontend_id);
+                let rows = self.build_menu_rows();
+                self.core.borrow_mut().menu_open(rows, global);
+            }
+            _ => {}
         }
     }
 
@@ -1615,7 +2001,7 @@ impl EditorState {
             (Some(i), false) => self.core.borrow_mut().menu_set_active_row(i as usize),
             (Some(i), true) => {
                 self.core.borrow_mut().menu_set_active_row(i as usize);
-                self.menu_invoke_active();
+                self.menu_invoke_active(frontend_id);
             }
             (None, true) => self.core.borrow_mut().menu_close(),
             (None, false) => {}
@@ -1717,6 +2103,42 @@ impl EditorState {
 /// readline / Emacs default and is what most terminal users expect.
 const SCROLL_LINES: i32 = 3;
 
+/// Shared outer/content geometry consumed by terminal paint and PTY resize.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowPlacement {
+    pub(crate) outer: Rect,
+    pub(crate) content: Rect,
+}
+
+/// Compute one explicit frontend's split geometry.
+#[must_use]
+pub(crate) fn window_placements(
+    core: &EditorCore,
+    frontend_id: FrontendId,
+    term_size: CellSize,
+) -> HashMap<WindowId, WindowPlacement> {
+    if term_size.rows < 2 || term_size.cols == 0 {
+        return HashMap::new();
+    }
+    let Some(view) = core.views.get(&frontend_id) else {
+        return HashMap::new();
+    };
+    let area = Rect::new(0, 0, term_size.rows - 1, term_size.cols);
+    view.layout
+        .compute(area)
+        .into_iter()
+        .map(|(window_id, outer)| {
+            let content = Rect::new(
+                outer.origin.row,
+                outer.origin.col,
+                outer.size.rows.saturating_sub(1),
+                outer.size.cols,
+            );
+            (window_id, WindowPlacement { outer, content })
+        })
+        .collect()
+}
+
 /// Find the leaf window whose viewport rectangle contains
 /// `(cell_row, cell_col)` in the global cell grid. Used by the mouse
 /// dispatcher to route clicks. The bottom row of the terminal (status
@@ -1724,26 +2146,23 @@ const SCROLL_LINES: i32 = 3;
 /// `None`.
 fn window_at_cell(
     core: &EditorCore,
-    term_size: crate::cell::CellSize,
+    frontend_id: FrontendId,
+    term_size: CellSize,
     cell_row: u32,
     cell_col: u32,
 ) -> Option<(WindowId, Rect)> {
-    if term_size.rows < 2 {
+    if cell_row >= term_size.rows.saturating_sub(1) {
         return None;
     }
-    let text_rows = term_size.rows - 1;
-    if cell_row >= text_rows {
-        return None;
-    }
-    let area = Rect::new(0, 0, text_rows, term_size.cols);
-    let placements = core.active_layout().compute(area);
-    placements.iter().find_map(|(id, rect)| {
+    let placements = window_placements(core, frontend_id, term_size);
+    placements.iter().find_map(|(id, placement)| {
+        let rect = placement.outer;
         if cell_row >= rect.origin.row
             && cell_row < rect.origin.row + rect.size.rows
             && cell_col >= rect.origin.col
             && cell_col < rect.origin.col + rect.size.cols
         {
-            Some((*id, *rect))
+            Some((*id, rect))
         } else {
             None
         }
@@ -1834,8 +2253,12 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
     let mut render_state = crate::instance_render::RenderState::new(frontend.size());
 
     loop {
-        // In-process TUI never has remote frontends; no overlays.
-        let messages = render_state.render_frame(&state, &[]);
+        let size = frontend.size();
+        let _ = state.sync_terminal_layout(FrontendId::LOCAL, size);
+        let terminal_snapshots = state.prepare_terminal_views(FrontendId::LOCAL, size);
+        let mut messages =
+            render_state.render_frame(&state, FrontendId::LOCAL, &terminal_snapshots, &[]);
+        messages.extend(state.take_local_signals());
         frontend.present_messages(&messages)?;
         if state.core.borrow().quit {
             break;
@@ -1877,6 +2300,7 @@ pub fn run(file: Option<PathBuf>) -> io::Result<()> {
         // resumption by a full frame. The documented invariant is
         // only `tick_processes → tick_lsp → tick_mcp` (same-batch
         // supervisor I/O ordering), which is preserved.
+        let _ = state.sync_terminal_layout(FrontendId::LOCAL, frontend.size());
         state.tick_processes();
         state.tick_lsp();
         state.tick_mcp();
@@ -1916,7 +2340,19 @@ fn process_event(state: &mut EditorState, ev: Event, term_size: crate::cell::Cel
         Event::Mouse(m) => {
             state.dispatch_mouse(frontend_id, m, term_size);
         }
-        _ => {}
+        Event::Paste(bytes) => {
+            if !state.dispatch_paste(frontend_id, bytes.as_bytes()) {
+                state.core.borrow_mut().active_frontend = frontend_id;
+                state.with_after_edit_check(|state| {
+                    if let Err(error) = state.core.borrow_mut().paste_inbound(bytes.as_bytes()) {
+                        state.core.borrow_mut().status = error;
+                    }
+                });
+            }
+        }
+        Event::FocusGained => state.dispatch_focus(frontend_id, true),
+        Event::FocusLost => state.dispatch_focus(frontend_id, false),
+        Event::Key(_) | Event::Resize(_, _) => {}
     }
 }
 
@@ -2139,20 +2575,24 @@ impl CompletionPopupKey {
 /// future non-crossterm frontend) can drive it directly against a
 /// Vec-backed [`crate::cell::CellGrid`] without going through a
 /// `RenderState`.
+#[allow(
+    clippy::implicit_hasher,
+    reason = "the public renderer contract uses the canonical snapshot HashMap"
+)]
 #[allow(clippy::too_many_lines, reason = "linear paint pipeline")]
 pub fn paint_frame(
     state: &EditorState,
+    frontend_id: FrontendId,
+    terminal_snapshots: &HashMap<WindowId, TerminalSnapshot>,
     grid: &mut crate::cell::CellGrid<'_>,
-    term_size: crate::cell::CellSize,
+    term_size: CellSize,
 ) -> Option<CellCoord> {
     if term_size.rows < 2 || term_size.cols == 0 {
         return None;
     }
-    let text_rows = term_size.rows - 1;
     // Statusline callbacks may call arbitrary editor APIs. Evaluate the
     // complete visible-window fan-out before the long mutable core borrow
     // below, then paint only the transactionally validated owned results.
-    let frontend_id = state.core.borrow().active_frontend;
     let statusline_evaluation = crate::statusline::evaluate_statusline(
         state.lua_host.lua(),
         &state.core,
@@ -2176,15 +2616,17 @@ pub fn paint_frame(
         let t = handle.lock().expect("theme mutex poisoned");
         t.clone()
     };
+    let empty_dispatcher = KeyDispatcher::new();
+    let dispatcher = state
+        .dispatchers
+        .get(&frontend_id)
+        .map_or(&empty_dispatcher, |state| &state.dispatcher);
 
     let mut core_ref = state.core.borrow_mut();
     let core: &mut EditorCore = &mut core_ref;
 
-    // Compute per-window rectangles. The text area is the term size
-    // minus the bottom row (status / minibuffer).
-    let text_area = crate::window::Rect::new(0, 0, text_rows, term_size.cols);
-    let placements = core.active_layout().compute(text_area);
-    let active = core.active_window_id();
+    let placements = window_placements(core, frontend_id, term_size);
+    let active = core.views.get(&frontend_id)?.active;
 
     // Clear the whole grid first so windows that shrink on resize
     // don't leak the old contents.
@@ -2196,12 +2638,15 @@ pub fn paint_frame(
 
     // Scroll the active window so its cursor stays visible. Inactive
     // windows keep their existing scroll.
-    if let Some(active_rect) = placements.get(&active) {
-        let inner_rows = inner_rows(active_rect);
+    if let Some(active_placement) = placements.get(&active) {
+        let inner_rows = active_placement.content.size.rows;
         let registry = core.registry.clone();
         let reg = registry.borrow();
-        let buf_id = core.active_buffer_id();
-        if let Ok(buf) = reg.get(buf_id) {
+        let buf_id = core.windows.get(&active).map(|window| window.buffer_id);
+        if !terminal_snapshots.contains_key(&active)
+            && let Some(buf_id) = buf_id
+            && let Ok(buf) = reg.get(buf_id)
+        {
             let aw = core.windows.get_mut(&active).expect(
                 "invariant: active_window_id always references a live window in core.windows",
             );
@@ -2222,14 +2667,44 @@ pub fn paint_frame(
     let reg = registry.borrow();
     let diag_store = state.lsp_manager.borrow().diag_store();
     for (id, window) in &mut core.windows {
-        let Some(rect) = placements.get(id).copied() else {
+        let Some(placement) = placements.get(id).copied() else {
             continue;
         };
-        let inner_rows = inner_rows(&rect);
+        let rect = placement.outer;
+        let inner_rows = placement.content.size.rows;
         // Record viewport height for page motion (cursor.page-down /
         // cursor.page-up consume this).
         window.last_visible_rows = inner_rows;
         if inner_rows == 0 || rect.size.cols == 0 {
+            continue;
+        }
+        if let Some(snapshot) = terminal_snapshots.get(id) {
+            paint_terminal_snapshot(grid, placement.content, snapshot, &theme);
+            let Ok(buf) = reg.get(window.buffer_id) else {
+                continue;
+            };
+            let cursor = snapshot.cursor.unwrap_or_default();
+            let scroll = if snapshot.scroll_offset == 0 {
+                String::new()
+            } else {
+                format!("↑{}", snapshot.scroll_offset)
+            };
+            let custom = statusline_by_window.get(id);
+            paint_mode_line(
+                grid,
+                &rect,
+                buf.name(),
+                false,
+                *id == active,
+                cursor.row,
+                cursor.col,
+                &scroll,
+                "",
+                mode_line_style(&theme),
+                custom.map_or(&[], |segments| segments.left.as_slice()),
+                custom.map_or(&[], |segments| segments.right.as_slice()),
+                &theme,
+            );
             continue;
         }
         let Ok(buf) = reg.get(window.buffer_id) else {
@@ -2305,14 +2780,7 @@ pub fn paint_frame(
     }
     drop(reg);
 
-    paint_status_line(
-        grid,
-        core,
-        &state.lua_host,
-        &state.dispatcher,
-        term_size,
-        &theme,
-    );
+    paint_status_line(grid, core, &state.lua_host, dispatcher, term_size, &theme);
 
     // An active isearch owns the bottom row (its prompt + match
     // readout), but the terminal cursor stays in the buffer at the
@@ -2330,7 +2798,20 @@ pub fn paint_frame(
     if let Some(col) = mb_cursor_col {
         return Some(CellCoord::new(term_size.rows - 1, col));
     }
-    let active_rect = placements.get(&active).copied()?;
+    let active_placement = placements.get(&active).copied()?;
+    if let Some(snapshot) = terminal_snapshots.get(&active) {
+        let cursor = snapshot.cursor?;
+        if cursor.row >= active_placement.content.size.rows
+            || cursor.col >= active_placement.content.size.cols
+        {
+            return None;
+        }
+        return Some(CellCoord::new(
+            active_placement.content.origin.row + cursor.row,
+            active_placement.content.origin.col + cursor.col,
+        ));
+    }
+    let active_rect = active_placement.outer;
     let registry = core.registry.clone();
     let reg = registry.borrow();
     let aw = &core.windows[&active];
@@ -2351,6 +2832,47 @@ pub fn paint_frame(
     let max_col = active_rect.origin.col + active_rect.size.cols.saturating_sub(1);
     let grid_col = (active_rect.origin.col + gutter_w + disp.col).min(max_col);
     Some(CellCoord::new(grid_row, grid_col))
+}
+
+fn paint_terminal_snapshot(
+    grid: &mut crate::cell::CellGrid<'_>,
+    content: Rect,
+    snapshot: &TerminalSnapshot,
+    theme: &crate::highlight::Theme,
+) {
+    let rows = content.size.rows.min(snapshot.size.rows);
+    let cols = content.size.cols.min(snapshot.size.cols);
+    for row in 0..rows {
+        for col in 0..cols {
+            let source = row as usize * snapshot.size.cols as usize + col as usize;
+            *grid.at(CellCoord::new(
+                content.origin.row + row,
+                content.origin.col + col,
+            )) = snapshot.cells[source].clone();
+        }
+    }
+    let overlay = theme.face("ui.selection").map_or(
+        crate::cell::Style {
+            reverse: true,
+            ..crate::cell::Style::default()
+        },
+        |face| crate::cell::Style {
+            bg: face.bg,
+            ..crate::cell::Style::default()
+        },
+    );
+    for span in &snapshot.selection {
+        if span.row >= rows {
+            continue;
+        }
+        for col in span.start_col.min(cols)..span.end_col.min(cols) {
+            let cell = grid.at(CellCoord::new(
+                content.origin.row + span.row,
+                content.origin.col + col,
+            ));
+            cell.style = crate::overlay::merge_styles(cell.style, overlay);
+        }
+    }
 }
 
 /// The mode-line row style (themes arc Q#TH5): a set `ui.modeline`
@@ -3105,6 +3627,42 @@ fn sanitize_single_line(s: &str) -> String {
         .collect()
 }
 
+fn is_terminal_escape_chord(chord: Chord) -> bool {
+    chord.code == KeyCode::Char('c') && chord.modifiers == KeyModifiers::CONTROL
+}
+
+fn terminal_key_from_crossterm(key: KeyEvent) -> Option<(TerminalKey, TerminalModifiers)> {
+    let modifiers = crate::protocol::crossterm_translate::mods_from_crossterm(key.modifiers);
+    let key = crate::protocol::crossterm_translate::keycode_from_crossterm(key.code);
+    if matches!(key, TerminalKey::Unknown(_)) {
+        return None;
+    }
+    Some((key, modifiers))
+}
+
+fn terminal_modifiers(modifiers: KeyModifiers) -> TerminalModifiers {
+    crate::protocol::crossterm_translate::mods_from_crossterm(modifiers)
+}
+
+fn terminal_mouse_kind(kind: crossterm::event::MouseEventKind) -> TerminalMouseKind {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let button = |button| match button {
+        MouseButton::Left => TerminalMouseButton::Left,
+        MouseButton::Right => TerminalMouseButton::Right,
+        MouseButton::Middle => TerminalMouseButton::Middle,
+    };
+    match kind {
+        MouseEventKind::Down(value) => TerminalMouseKind::Down(button(value)),
+        MouseEventKind::Up(value) => TerminalMouseKind::Up(button(value)),
+        MouseEventKind::Drag(value) => TerminalMouseKind::Drag(button(value)),
+        MouseEventKind::Moved => TerminalMouseKind::Move,
+        MouseEventKind::ScrollUp => TerminalMouseKind::ScrollUp,
+        MouseEventKind::ScrollDown => TerminalMouseKind::ScrollDown,
+        MouseEventKind::ScrollLeft => TerminalMouseKind::ScrollLeft,
+        MouseEventKind::ScrollRight => TerminalMouseKind::ScrollRight,
+    }
+}
+
 fn key_event_to_chord(key: KeyEvent) -> Option<Chord> {
     // Accept Press and Repeat. Some terminals (notably ones speaking
     // the kitty keyboard protocol with auto-repeat) deliver held-key
@@ -3155,6 +3713,77 @@ mod tests {
 
     use super::*;
     use crate::frontend::KeyEventKind;
+
+    fn local_dispatcher(state: &EditorState) -> &KeyDispatcher {
+        &state
+            .dispatchers
+            .get(&FrontendId::LOCAL)
+            .expect("local dispatcher registered by dispatch")
+            .dispatcher
+    }
+
+    #[test]
+    fn dispatch_prefix_state_is_independent_per_frontend() {
+        let mut state = fresh_with(b"");
+        let other = FrontendId(77);
+        state.dispatch_key(FrontendId::LOCAL, ctrl('x'));
+        state.dispatch_key(other, plain(KeyCode::Char('a')));
+        assert_eq!(local_dispatcher(&state).pending().len(), 1);
+        assert!(
+            state
+                .dispatchers
+                .get(&other)
+                .expect("other dispatcher registered")
+                .dispatcher
+                .pending()
+                .is_empty()
+        );
+        assert_eq!(state.core.borrow().active_buffer_len(), 1);
+    }
+
+    #[test]
+    fn terminal_snapshot_composes_only_content_and_translates_cursor() {
+        let state = fresh_with(b"");
+        let window_id = state.core.borrow().active_window_id();
+        let buffer_id = state.core.borrow().active_buffer_id();
+        let size = CellSize::new(4, 5);
+        let viewport = CellSize::new(2, 5);
+        let mut cells = vec![crate::cell::Cell::default(); viewport.area() as usize];
+        cells[0].glyph = crate::cell::Glyph::Char('T');
+        cells[7].glyph = crate::cell::Glyph::Char('X');
+        let snapshot = TerminalSnapshot {
+            buffer_id,
+            size: viewport,
+            cells,
+            cursor: Some(CellCoord::new(1, 2)),
+            title: Some("shell".into()),
+            screen_generation: 1,
+            selection: vec![crate::terminal::TerminalSelectionSpan {
+                row: 0,
+                start_col: 0,
+                end_col: 1,
+            }],
+            scroll_offset: 0,
+            at_bottom: true,
+            pid: 1,
+            process: crate::terminal::TerminalProcessState::Running,
+        };
+        let snapshots = HashMap::from([(window_id, snapshot)]);
+        let mut backing = vec![crate::cell::Cell::default(); size.area() as usize];
+        let cursor = {
+            let mut grid = crate::cell::CellGrid {
+                cells: &mut backing,
+                stride: size.cols,
+                size,
+            };
+            paint_frame(&state, FrontendId::LOCAL, &snapshots, &mut grid, size)
+        };
+        assert_eq!(backing[0].glyph, crate::cell::Glyph::Char('T'));
+        assert!(backing[0].style.reverse);
+        assert_eq!(backing[7].glyph, crate::cell::Glyph::Char('X'));
+        assert_ne!(backing[10].glyph, crate::cell::Glyph::Char('X'));
+        assert_eq!(cursor, Some(CellCoord::new(1, 2)));
+    }
 
     #[test]
     fn line_number_gutter_renders_right_aligned_digits() {
@@ -3380,10 +4009,10 @@ mod tests {
     fn cx_cc_quits() {
         let mut s = fresh_with(b"");
         s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
-        assert_eq!(s.dispatcher.pending().len(), 1);
+        assert_eq!(local_dispatcher(&s).pending().len(), 1);
         s.dispatch_key(FrontendId::LOCAL, ctrl('c'));
         assert!(s.core.borrow().quit);
-        assert!(s.dispatcher.pending().is_empty());
+        assert!(local_dispatcher(&s).pending().is_empty());
     }
 
     #[test]
@@ -3505,10 +4134,10 @@ mod tests {
         let size = crate::cell::CellSize::new(24, 80);
         let mut rs = crate::instance_render::RenderState::new(size);
 
-        let _ = rs.render_frame(&s, &[]);
+        let _ = rs.render_frame(&s, FrontendId::LOCAL, &HashMap::new(), &[]);
         process_event(&mut s, Event::Key(ctrl('s')), size);
         assert!(s.core.borrow().search_active(), "C-s starts the search");
-        let _ = rs.render_frame(&s, &[]);
+        let _ = rs.render_frame(&s, FrontendId::LOCAL, &HashMap::new(), &[]);
 
         for c in "foo".chars() {
             process_event(
@@ -3516,7 +4145,7 @@ mod tests {
                 Event::Key(key(KeyCode::Char(c), KeyModifiers::NONE)),
                 size,
             );
-            let _ = rs.render_frame(&s, &[]);
+            let _ = rs.render_frame(&s, FrontendId::LOCAL, &HashMap::new(), &[]);
         }
         assert_eq!(
             s.core.borrow().search_query(),
@@ -3544,7 +4173,7 @@ mod tests {
             stride: size.cols,
             size,
         };
-        let _ = paint_frame(&s, &mut grid, size);
+        let _ = paint_frame(&s, FrontendId::LOCAL, &HashMap::new(), &mut grid, size);
 
         // The active match [0,3) washes row 0's first cells (bright
         // Indexed(11); lazy matches would be Indexed(3)).
@@ -3670,10 +4299,10 @@ mod tests {
             state: crossterm::event::KeyEventState::NONE,
         };
         s.dispatch_key(FrontendId::LOCAL, cx_press);
-        assert_eq!(s.dispatcher.pending().len(), 1);
+        assert_eq!(local_dispatcher(&s).pending().len(), 1);
         s.dispatch_key(FrontendId::LOCAL, cb_repeat);
         assert!(
-            s.dispatcher.pending().is_empty(),
+            local_dispatcher(&s).pending().is_empty(),
             "Repeat-kind C-b did not resolve the pending C-x prefix"
         );
         assert_eq!(s.core.borrow().active_buffer_name(), "*buffer-list*");
@@ -3700,7 +4329,7 @@ mod tests {
         s.dispatch_key(FrontendId::LOCAL, cx_press);
         s.dispatch_key(FrontendId::LOCAL, cx_release);
         assert_eq!(
-            s.dispatcher.pending().len(),
+            local_dispatcher(&s).pending().len(),
             1,
             "Release events should be ignored, but the prefix was disturbed"
         );
@@ -3763,10 +4392,14 @@ mod tests {
         // window to the *buffer-list* buffer).
         let mut s = fresh_with(b"");
         s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
-        assert_eq!(s.dispatcher.pending().len(), 1, "C-x should start prefix");
+        assert_eq!(
+            local_dispatcher(&s).pending().len(),
+            1,
+            "C-x should start prefix"
+        );
         s.dispatch_key(FrontendId::LOCAL, ctrl('b'));
         assert!(
-            s.dispatcher.pending().is_empty(),
+            local_dispatcher(&s).pending().is_empty(),
             "C-x C-b should resolve, leaving no pending prefix; status: {}",
             s.core.borrow().status
         );
@@ -3824,9 +4457,9 @@ mod tests {
     fn unknown_chord_continuation_clears_prefix_with_message() {
         let mut s = fresh_with(b"");
         s.dispatch_key(FrontendId::LOCAL, ctrl('x'));
-        assert_eq!(s.dispatcher.pending().len(), 1);
+        assert_eq!(local_dispatcher(&s).pending().len(), 1);
         s.dispatch_key(FrontendId::LOCAL, ctrl('q'));
-        assert!(s.dispatcher.pending().is_empty());
+        assert!(local_dispatcher(&s).pending().is_empty());
         assert!(s.core.borrow().status.contains("not bound"));
     }
 
@@ -3867,7 +4500,7 @@ mod tests {
             key(KeyCode::Char('u'), KeyModifiers::NONE),
         );
         assert_eq!(s.core.borrow().active_buffer_len(), 0);
-        assert!(s.dispatcher.pending().is_empty());
+        assert!(local_dispatcher(&s).pending().is_empty());
     }
 
     #[test]
@@ -4210,7 +4843,7 @@ mod tests {
     #[test]
     fn empty_status_row_is_blank() {
         let s = fresh_with(b"hello\n");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &s.dispatcher, 80);
+        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 80);
         assert_eq!(line, "", "status row should be empty when nothing to say");
     }
 
@@ -4218,7 +4851,7 @@ mod tests {
     fn captured_lua_error_appears_in_status_line() {
         let mut s = fresh_with(b"");
         let _ = s.lua_host.eval(Some("usercfg"), "error('kapow')");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &s.dispatcher, 200);
+        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
         assert!(line.contains("lua: "), "status line: {line}");
         assert!(line.contains("kapow"), "status line: {line}");
     }
@@ -4233,7 +4866,7 @@ mod tests {
         let s = fresh_with(b"");
         s.core.borrow_mut().status =
             "M-x error: command \"foo\" not found\nstack traceback:\n\t[C]: in ?".into();
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &s.dispatcher, 200);
+        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
         assert!(!line.contains('\n'), "status line leaked newline: {line:?}");
         assert!(!line.contains('\r'), "status line leaked CR: {line:?}");
         assert!(
@@ -4252,7 +4885,7 @@ mod tests {
         let _ = s
             .lua_host
             .eval(Some("usercfg"), "error('boom\\nlots\\nof\\nlines')");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &s.dispatcher, 200);
+        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
         assert!(!line.contains('\n'), "status line leaked newline: {line:?}");
         assert!(line.contains("lua: "), "status line: {line}");
     }
@@ -4262,7 +4895,7 @@ mod tests {
         let mut s = fresh_with(b"");
         let _ = s.lua_host.eval(None, "error('latent')");
         s.core.borrow_mut().status = "saved foo".into();
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &s.dispatcher, 200);
+        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
         assert!(line.contains("saved foo"));
         assert!(!line.contains("lua: "));
     }
@@ -5087,7 +5720,7 @@ mod tests {
             "raw status leaked newline: {raw:?} (default.lua should take first line)"
         );
         assert!(raw.starts_with("M-x error: "), "raw status: {raw}");
-        let line = build_status_line(&s.core.borrow(), &s.lua_host, &s.dispatcher, 200);
+        let line = build_status_line(&s.core.borrow(), &s.lua_host, &KeyDispatcher::new(), 200);
         assert!(
             !line.contains('\n'),
             "rendered status line leaked newline: {line:?} (raw: {raw:?})"
@@ -7076,7 +7709,13 @@ mod tests {
             stride: cols,
             size: crate::cell::CellSize::new(rows, cols),
         };
-        let cursor = paint_frame(s, &mut grid, crate::cell::CellSize::new(rows, cols));
+        let cursor = paint_frame(
+            s,
+            FrontendId::LOCAL,
+            &HashMap::new(),
+            &mut grid,
+            crate::cell::CellSize::new(rows, cols),
+        );
         (backing, cols, cursor)
     }
 
