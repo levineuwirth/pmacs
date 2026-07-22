@@ -1,12 +1,10 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after tab-width rendering parity (#137) and
-locals-query processing (#134) landed on `main`, and canonical `main` was
-merged into the Vterm Stage 3 lane. Vterm Stage 3 (protocol v19, GPU
-terminal) is implemented on `vterm-gpu` and in review as PR #135; see
-`docs/active-work.md`. Vterm Stage 2 (#130), modeline detection (#132),
-mode system wiring (#129), config registry (#127), Vterm Stage 1 (#126),
-and completed Themes Arc 4 (#120/#124/#125) are on `main`.**
+**Last updated: 2026-07-22, after Vterm Stage 3 (#135, protocol v19 and
+native GPU terminal) landed on `main`, following tab-width rendering parity
+(#137), locals-query processing (#134), modeline detection (#132), mode system
+wiring (#129), config registry (#127), Vterm Stages 1–2 (#126/#130), and
+completed Themes Arc 4 (#120/#124/#125).**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -20,10 +18,9 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-22)
 
-- `main` @ `2625ec7` (tab-width parity #137 atop locals-query #134),
-  protocol **v18** on `main`, **v19** on `vterm-gpu`
-  (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 =
-  `FontFacts`, v18 = `StatuslineSegments`).
+- `main` @ `cac4961` (Vterm Stage 3 #135 atop tab-width parity #137),
+  protocol **v19** (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 =
+  `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events).
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
   rev 3; merge `2e37c04`; two review rounds). `pmacs.config` is the
   typed, introspectable options registry the backlog ranked first, and
@@ -268,11 +265,11 @@ commands, read `docs/active-work.md` immediately after this file.
     is a clean behavioral bite. The parser dispatch has its independent clean
     behavioral bite; the original `main`/crate-root bite remains explicitly
     weaker compile-time API evidence.
-  - **Stage 3 GPU/protocol is IMPLEMENTED on `vterm-gpu`** (framing
-    `docs/vterm-framing.md` Revision 9, criteria 28-37; awaiting review).
+  - **Stage 3 GPU/protocol LANDED ON `main` — #135** (merge `cac4961`;
+    `docs/vterm-framing.md` Revision 9, criteria 28–37).
     Protocol **v19**: `InstanceMessage::TerminalFrame` (discriminant 26,
     daemon-gated) plus `FrontendEvent::TerminalResize` (11) and
-    `TerminalPointer` (12), both frontend-gated - the first bump gating in
+    `TerminalPointer` (12), both frontend-gated — the first bump gating in
     BOTH directions. `SUPPORTED=[6..=19]`.
   - `pmacs-protocol/src/terminal.rs` now owns the shared terminal bounds,
     `TerminalProcessState`, `TerminalSelectionSpan`, and the single
@@ -300,6 +297,16 @@ commands, read `docs/active-work.md` immediately after this file.
     origin. `pmacs-gpu --headless-probe` drives the real attach client
     without winit (`attach::connect_with_sink`), which is how criterion 37
     gets one real daemon + real PTY + real wgpu path.
+  - #135 integrated canonical `main` after #137 landed. The one code conflict
+    joined `TAB_STOP_COLUMNS` with the terminal imports in
+    `pmacs-gpu/src/main.rs`; terminal geometry remains fixed-cell and never
+    consumes the document tab-stop projection.
+  - Final post-integration gates: strict Clippy; 1,768 default + 1,944 CRDT
+    library tests; Vterm Stages 1/2/3 at 9/10, 4/4, and 5/7 default/CRDT;
+    statusline 7/8; tab-width 2/2; M4 121; required GPU 139; workspace 2,946
+    passed across 84 suites; formatting and diff check clean. The first
+    macOS/LuaJIT CI run timed out waiting for `VTERM_ALT_READY` in the Stage 2
+    real-TUI smoke; the complete failed-job rerun passed all 12 checks.
   - **Stage 2 TUI LANDED ON `main` — #130** (merge `86fc1bc`;
     `docs/vterm-framing.md` Revision 7, criteria 15–27). `TerminalViewKey` keys
     per-frontend/window projection state over one shared process/screen; logical
@@ -324,8 +331,8 @@ commands, read `docs/active-work.md` immediately after this file.
     and pure `ui.modeline.terminal` process/scroll segment.
   - `tests/vterm_stage2_acceptance.rs` maps Lua transactionality, shared-view
     isolation, clipboard/modeline behavior, and a hermetic real `/bin/sh` TUI
-    PTY smoke. Stage 2 changes no wire schema or GPU renderer; protocol remains
-    v18 until Stage 3.
+    PTY smoke. Stage 2 changed no wire schema or GPU renderer; protocol
+    remained v18 until Stage 3.
   - PR #130 review round 1 (`8702791`) aligned dispatch with the approved
     escape-prefix contract, closed the non-terminal Lua error path, made
     controller replacement atomic, retained zero-area view anchors, removed
@@ -388,9 +395,8 @@ commands, read `docs/active-work.md` immediately after this file.
     fix (#101).
   - **Arc 4 (themes + extensibility) COMPLETE** — named UI faces (#120),
     live GPU font preferences (#124), statusline providers (#125).
-  - **Arc 5 terminal stage ACTIVE** — compile mode (#113), Vterm terminal
-    core (#126), and Vterm TUI (#130) landed; protocol/GPU Stage 3 is
-    implemented and in review as PR #135.
+  - **Arc 5 terminal stage COMPLETE** — compile mode (#113), Vterm terminal
+    core (#126), TUI frontend (#130), and protocol/GPU Stage 3 (#135) landed.
   - **Config registry COMPLETE (#127)** — not a numbered arc; it was the
     cross-cutting substrate ranked first on
     `docs/side-quest-backlog.md`'s north star, and it unblocks the
@@ -459,11 +465,16 @@ before trusting them:
   `m6_8_supervisor_reaps_all_children_across_cycles`) are timing-based;
   `editor::composition_overhead_under_ten_percent` is a render-ratio
   microbenchmark that fails ~1/3 even isolated single-threaded (already
-  `cfg!(macos)`-disabled). A lone failure of one of these → rerun that
-  test alone (`-- --test-threads=1`) before investigating. Also: run the
-  workspace sweep as ONE `cargo test` invocation piped to a full log — a
-  double invocation + `grep -c "test result: ok"` can mask real
-  failures with a misleading `0`.
+  `cfg!(macos)`-disabled). Vterm Stage 3's merge CI saw one macOS timeout in
+  `real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_and_bell`;
+  the complete failed-job rerun passed. The required-GPU gate also failed once
+  in `headless_diag_face_recolors_band_counter_despite_unchanged_text`, then
+  passed both an isolated single-thread rerun and the full 139-test rerun. A
+  lone timing failure → rerun the test alone (`-- --test-threads=1`) before
+  investigating. Run the workspace
+  sweep as ONE `cargo test` invocation piped to a full log — a double
+  invocation + `grep -c "test result: ok"` can mask real failures with a
+  misleading `0`.
 - **GPU tests** need a Vulkan device. `PMACS_REQUIRE_GPU=1` makes
   absence a hard failure instead of a silent skip. Headless option:
   lavapipe (see `docs/repository-audit-2026-07-03.md` for the CI
@@ -543,6 +554,12 @@ cannot detect a discriminant shift.
 - **Stacked PRs**: retarget the child to main BEFORE merging the
   parent — GitHub auto-closes a PR whose base branch is deleted and
   cannot reopen it (#104 → re-opened as #105).
+- **Frozen reviewed PRs do not absorb moving overlapping work.** For #135 and
+  #137, the approved/frozen #137 landed first; the larger #135 lane then
+  merged canonical `main`, retained its review anchors, and reran every gate.
+  Derive that integration surface from `git diff <base>..main`, not the other
+  PR's file list — concurrent landed work added an overlap the original
+  two-PR comparison missed.
 - **Scripted edits (sed/python) in files with repeated similar blocks**
   (`src/lsp.rs` JSON builders): anchor on a unique line or you will
   silently edit the wrong block. This produced a vacuously-passing test
