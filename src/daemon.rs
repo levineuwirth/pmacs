@@ -799,6 +799,26 @@ fn peer_accepts_statusline_message(protocol_version: u32, message: &InstanceMess
     protocol_version >= 18 || !matches!(message, InstanceMessage::StatuslineSegments { .. })
 }
 
+/// Whether a session negotiated the v19 wire, and may therefore drive
+/// terminal state inbound.
+///
+/// The outbound `TerminalFrame` is gated twice — in the producer and in
+/// the write loop — and the inbound direction is now symmetric. A
+/// pre-v19 peer cannot construct these variants at all (its enum lacks
+/// them), so this only ever refuses a hand-rolled client; the a32
+/// forgery tests already prove such an event can reach nothing but the
+/// sender's own authenticated active view. It is defense in depth, and
+/// it makes "gated in both directions" true of the code rather than
+/// only of the frontends we ship.
+fn peer_declared_terminal_support(
+    session_registry: &SessionRegistry,
+    frontend_id: FrontendId,
+) -> bool {
+    session_registry
+        .session_state(frontend_id)
+        .is_some_and(|state| state.negotiated_protocol_version >= 19)
+}
+
 /// The same belt-and-braces write-loop gate for the additive
 /// protocol-v19 terminal frame. The semantic producer skips construction
 /// for an older peer; this filter independently prevents an unknown
@@ -1735,6 +1755,7 @@ fn handle_dispatcher_event(
                     // the durable controller's declaration reaches the
                     // shared PTY — a declaration never claims control.
                     if semantic_states.contains_key(&source)
+                        && peer_declared_terminal_support(session_registry, source)
                         && editor.semantic_terminal_declaration_is_active(source, buffer_id)
                     {
                         if let Some(sem) = semantic_states.get_mut(&source) {
@@ -1757,7 +1778,9 @@ fn handle_dispatcher_event(
                     // forged id, a stale buffer, a missing declaration,
                     // or an out-of-bounds cell all drop before any view,
                     // controller, selection, menu, or PTY mutation.
-                    if semantic_states.contains_key(&source) {
+                    if semantic_states.contains_key(&source)
+                        && peer_declared_terminal_support(session_registry, source)
+                    {
                         editor.dispatch_semantic_terminal_pointer(
                             source, buffer_id, coord, kind, mods,
                         );
@@ -2852,6 +2875,38 @@ mod tests {
                 right: Vec::new(),
             }
         ));
+    }
+
+    #[test]
+    fn inbound_terminal_events_require_a_negotiated_v19_session() {
+        // Review round 2, finding 5: the outbound `TerminalFrame` was
+        // gated twice (producer + write loop) while the inbound
+        // declarations relied on the frontend's send gate alone. A
+        // pre-v19 peer cannot construct these variants, so this only
+        // refuses a hand-rolled client — but it makes "gated in both
+        // directions" true of the code, not just of the frontends we
+        // ship.
+        let mut registry = SessionRegistry::new();
+        let semantic = crate::protocol::NegotiatedCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        };
+        let old_peer = FrontendId(2);
+        let new_peer = FrontendId(3);
+        registry.register_session(
+            old_peer,
+            crate::presence::SessionState::new(18, semantic, 0),
+        );
+        registry.register_session(
+            new_peer,
+            crate::presence::SessionState::new(19, semantic, 1),
+        );
+
+        assert!(!peer_declared_terminal_support(&registry, old_peer));
+        assert!(peer_declared_terminal_support(&registry, new_peer));
+        // An unknown session is refused rather than defaulted open.
+        assert!(!peer_declared_terminal_support(&registry, FrontendId(99)));
     }
 
     #[test]

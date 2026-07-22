@@ -353,8 +353,8 @@ commands, read `docs/active-work.md` immediately after this file.
   - **Arc 4 (themes + extensibility) COMPLETE** — named UI faces (#120),
     live GPU font preferences (#124), statusline providers (#125).
   - **Arc 5 terminal stage ACTIVE** — compile mode (#113), Vterm terminal
-    core (#126), and Vterm TUI (#130) landed; protocol/GPU Stage 3 is framed
-    and awaiting approval.
+    core (#126), and Vterm TUI (#130) landed; protocol/GPU Stage 3 is
+    implemented and in review as PR #135.
   - **Config registry COMPLETE (#127)** — not a numbered arc; it was the
     cross-cutting substrate ranked first on
     `docs/side-quest-backlog.md`'s north star, and it unblocks the

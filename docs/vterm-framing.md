@@ -429,6 +429,57 @@ Post-review gates: `cargo fmt --check`; strict workspace Clippy; 1,757 default +
 statusline 7/8 (default/CRDT); M4 120; required GPU 128; workspace sweep 2,921
 across 83 suites (19 ignored); `git diff --check` clean.
 
+### 0.11 Stage 3 review round 2
+
+The second review verified all five round-1 fixes in code, re-ran the
+required-GPU suite clean (a thirteenth consecutive pass, closing the flake
+caveat), and found one new low-severity defect plus minor items.
+
+- **A disconnect in terminal mode hid the notice (finding 1) — real, fixed,
+  hand-verified.** `AttachEvent::Disconnected` set the placeholder text but
+  never left terminal mode, where the document code layer is not prepared at
+  all and the terminal glyph layer keeps painting its last frame. The user was
+  left looking at a frozen, live-looking terminal that silently ignored input —
+  and with GPU auto-reconnect a named deferral, until relaunch.
+  `State::on_daemon_disconnected` now leaves terminal mode, forces a repaint
+  even when the notice text is byte-identical, and requests a redraw. Its test
+  lives in the same file as the fix, so `scripts/bite`'s file granularity
+  cannot bite it; the equivalent was done by hand — neutralizing only the
+  `exit_terminal_mode()` call makes the test fail, restoring it makes it pass.
+- **Per-tick full-grid clone removed (finding 2).**
+  `sync_semantic_terminal_layout` compared geometry via `snapshot(..).size`,
+  cloning the whole visible cell grid every dispatcher tick to answer one
+  comparison. `TerminalManager::screen_size` reads it from the borrowed
+  projection instead.
+- **Roadmap and handoff Arc 5 lines corrected (finding 3).** Both still said
+  Stage 3 was framed and awaiting approval, contradicting this PR's own ledger.
+- **A press that misses the grid no longer arms a drag (nit).** It set
+  `pointer_drag_active` unconditionally, so a later in-grid motion sent a
+  `Drag` with no preceding `Down`. Daemon-side impact was nil
+  (`update_selection` bails without a drag anchor), but the state is now
+  honest. A release still always ends the drag, including one that wandered
+  outside the grid.
+- **Inbound terminal events now require a negotiated v19 session (finding 5).**
+  The outbound `TerminalFrame` was gated twice while the inbound declarations
+  relied on the frontend's send gate alone. A pre-v19 peer cannot construct
+  these variants, so this only refuses a hand-rolled client — and the a32
+  forgery tests already prove such an event reaches nothing but the sender's
+  own authenticated active view — but the asymmetry was not deliberate, and
+  "gated in both directions" should be true of the code rather than only of the
+  frontends we ship.
+
+Deferred from this round, named: **terminal wheel gestures discard scroll
+magnitude.** One winit wheel event becomes one terminal gesture regardless of
+the lines it accumulated, so a two-tick event scrolls the same distance as a
+one-tick event, while the document path scrolls by `lines`. Closing it means
+either sending N gestures (chattier) or widening the terminal pointer event
+with a magnitude — a protocol change. Not worth either inside this stage.
+
+Post-round-2 gates: `cargo fmt --check`; strict workspace Clippy; 1,758 default
++ 1,934 CRDT library tests; Stage 1 acceptance 9/10, Stage 2 4/4, Stage 3 5/7,
+statusline 7/8 (default/CRDT); M4 120; required GPU 129; workspace sweep 2,923
+across 83 suites (19 ignored); `git diff --check` clean.
+
 ## 1. Problem and ownership boundary
 
 Pmacs can supervise a PTY and can parse enough ANSI to turn command output into

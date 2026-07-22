@@ -1914,12 +1914,21 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 let mods = translate_mods(self.modifiers);
                 if state.terminal.is_some() {
+                    let hit = self.terminal_pointer_hit(x, y);
+                    let state = self.state.as_mut().expect("checked above");
                     let kind = match button_state {
                         ElementState::Pressed => {
-                            state.pointer_drag_active = true;
+                            // A press that MISSES the grid (the status
+                            // band, the trailing padding) starts no
+                            // drag: arming the flag there would make a
+                            // later in-grid motion send a `Drag` with no
+                            // preceding `Down`.
+                            state.pointer_drag_active = hit.is_some();
                             ProtocolMouseKind::Down(ProtocolMouseButton::Left)
                         }
                         ElementState::Released => {
+                            // A release always ends the drag, including
+                            // one that wandered outside the grid.
                             state.pointer_drag_active = false;
                             ProtocolMouseKind::Up(ProtocolMouseButton::Left)
                         }
@@ -1929,7 +1938,7 @@ impl ApplicationHandler<AppEvent> for App {
                     // must reach the daemon even at the cell the press
                     // landed on.
                     state.last_terminal_pointer_cell = None;
-                    if let Some((buffer_id, coord)) = self.terminal_pointer_hit(x, y) {
+                    if let Some((buffer_id, coord)) = hit {
                         self.send_terminal_pointer(buffer_id, coord, kind, mods);
                     }
                     return;
@@ -2219,7 +2228,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
                 eprintln!("pmacs-gpu: daemon disconnected ({reason})");
-                state.set_text("(daemon disconnected)");
+                state.on_daemon_disconnected("(daemon disconnected)");
             }
         }
     }
@@ -3902,6 +3911,26 @@ impl State {
                 (WINDOW_BG_RGBA[2] * 255.0) as u8,
             ],
         }
+    }
+
+    /// Show a disconnect notice, leaving terminal mode first.
+    ///
+    /// Terminal mode prepares NO document code layer, and the terminal
+    /// glyph layer keeps painting the last frame it was given. Setting
+    /// the text without leaving terminal mode therefore writes into a
+    /// layer nothing draws, and the user is left looking at a frozen,
+    /// live-looking terminal that silently ignores input — with GPU
+    /// auto-reconnect a named deferral, until relaunch. The F-008
+    /// "make the teardown visible" contract applies to terminal mode
+    /// too.
+    fn on_daemon_disconnected(&mut self, notice: &str) {
+        self.exit_terminal_mode();
+        if !self.set_text(notice) {
+            // Byte-identical text still needs a repaint: the frame that
+            // is on screen is the terminal's, not this notice.
+            self.reshape();
+        }
+        self.request_redraw();
     }
 
     /// Leave terminal mode and drop every terminal-only cache.
@@ -13475,6 +13504,54 @@ mod tests {
         // are a different grid entirely.
         state.exit_terminal_mode();
         assert!(state.last_terminal_pointer_cell.is_none());
+    }
+
+    /// Review round 2, finding 1: a disconnect must leave terminal mode,
+    /// or the notice is invisible.
+    ///
+    /// Terminal mode prepares no document code layer while the terminal
+    /// glyph layer keeps painting its last frame, so a notice written
+    /// without leaving terminal mode never reaches the screen and the
+    /// user sees a frozen terminal that ignores input.
+    #[test]
+    fn a_disconnect_leaves_terminal_mode_so_the_notice_is_visible() {
+        let Some(mut state) = headless_or_skip(400, 300, "document text") else {
+            return;
+        };
+        let buffer_id = BufferId::next();
+        state.current_buffer_id = Some(buffer_id);
+        state.apply_terminal_frame(plain_terminal_frame(buffer_id, "live", 8));
+        assert!(
+            state.terminal.is_some(),
+            "the probe starts in terminal mode"
+        );
+        let terminal_px = state.render_offscreen();
+
+        state.on_daemon_disconnected("(daemon disconnected)");
+        assert!(
+            state.terminal.is_none(),
+            "a disconnect must leave terminal mode"
+        );
+        assert!(
+            state.terminal_text_buffers.is_empty(),
+            "terminal-only caches go with it"
+        );
+        assert_eq!(state.current_text, "(daemon disconnected)");
+
+        // The notice actually reaches the screen: the frame differs from
+        // the terminal frame it replaced, which is the whole point of
+        // the fix.
+        let notice_px = state.render_offscreen();
+        let differing = terminal_px
+            .iter()
+            .zip(&notice_px)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            differing > 500,
+            "the disconnect notice must repaint over the frozen terminal \
+             ({differing} bytes differ)"
+        );
     }
 
     /// Acceptance 36: the terminal statusline metadata reaches the band

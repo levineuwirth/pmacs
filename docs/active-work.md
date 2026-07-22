@@ -92,10 +92,18 @@ If it does not, stop and repair the remote/fetch configuration.
   clears the declaration before `render_frame`, so a truthful sweep always
   precedes terminal mode; that test is a labelled regression guard, not
   fix evidence.
-- Post-review gates: required GPU 128; workspace sweep 2,921 across 83
-  suites; Stage 3 acceptance 5 default / 7 CRDT; everything else as above.
+- Review round 2 addressed (framing §0.11): a daemon disconnect now leaves
+  terminal mode so the notice is visible (real defect, hand-verified
+  because fix and test share a file); the per-tick full-grid clone is
+  gone; inbound terminal events require a negotiated v19 session; a
+  grid-missing press no longer arms a drag; roadmap/handoff Arc 5 lines
+  corrected. Named deferral: terminal wheel gestures discard scroll
+  magnitude.
+- Post-round-2 gates: 1,758 default + 1,934 CRDT library tests; required
+  GPU 129; workspace sweep 2,923 across 83 suites; Stage 3 acceptance 5
+  default / 7 CRDT; M4 120; fmt, clippy, diff check clean.
 - Closed caveat: the once-seen required-GPU failure did not reproduce in
-  eight author runs plus four reviewer runs. Treated as environmental.
+  eight author runs plus five reviewer runs. Treated as environmental.
 - Next: further user review rounds on the PR.
 
 Recovery worktree:

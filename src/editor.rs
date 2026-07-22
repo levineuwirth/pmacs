@@ -1215,11 +1215,11 @@ impl EditorState {
         if !controls {
             return false;
         }
-        let old_size = self
-            .terminal_manager
-            .borrow()
-            .snapshot(buffer_id)
-            .map(|snapshot| snapshot.size);
+        // Read the size from the borrowed projection rather than a
+        // snapshot: this runs every dispatcher tick, and
+        // `snapshot(..).size` would clone the whole visible grid to
+        // answer one comparison.
+        let old_size = self.terminal_manager.borrow().screen_size(buffer_id);
         if old_size == Some(size) {
             return false;
         }

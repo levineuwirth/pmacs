@@ -248,8 +248,19 @@ impl TerminalManager {
     /// Return the publication-consistent child grid size for one view.
     #[must_use]
     pub(crate) fn screen_size_for_view(&self, key: TerminalViewKey) -> Option<CellSize> {
+        self.screen_size(key.buffer_id)
+    }
+
+    /// The shared screen's current size, read from the borrowed
+    /// projection.
+    ///
+    /// Deliberately not `snapshot(..).size`: that clones the whole
+    /// visible cell grid, and geometry comparison runs on every
+    /// dispatcher tick for every frontend with a declared terminal.
+    #[must_use]
+    pub fn screen_size(&self, buffer_id: BufferId) -> Option<CellSize> {
         self.sessions
-            .get(&key.buffer_id)
+            .get(&buffer_id)
             .map(|session| session.screen.projection_ref().size)
     }
 
