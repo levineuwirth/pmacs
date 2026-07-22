@@ -11,7 +11,7 @@ coroutine-based async surface are core primitives, not bolt-ons.
 
 The editor is partitioned into a long-lived **instance** (the daemon
 that owns buffers, processes, and language services) and thin
-**frontends** that attach over a typed protocol (currently v14). Two
+**frontends** that attach over a typed protocol (currently v19). Two
 frontends ship today:
 
 - a **TUI** (crossterm cell grid), attachable locally over a Unix
@@ -30,64 +30,66 @@ the same buffers concurrently with live cursor/selection presence.
 ## Status
 
 **v1.0.0 --- stable core, active development.** The v1.0 gate (the
-instance/frontend partition, the Lua surface, and a REPL package
-audited to use zero direct Rust core access) shipped some time ago;
-development since has landed the GPU frontend at near input/render
-parity with the TUI, the semantic-frontend protocol (v6 → v14), the
-LSP feature arc, in-buffer search, the context menu + OS clipboard,
-the line-number gutter with diagnostic signs, and the package-manager
-hardening pass. Current direction lives in `docs/roadmap-2026-07.md`.
-Public contributions are open: use, evaluate, file issues, send pull
-requests.
+instance/frontend partition, the Lua surface, and a REPL package audited
+to use zero direct Rust core access) shipped some time ago. Development
+since has expanded the semantic frontend protocol from v6 through v19,
+brought the GPU frontend near input/render parity with the TUI, and
+completed the LSP, editing, persistence, themes, and terminal arcs. Recent
+work added major modes and modeline detection, a typed configuration
+registry, composable statuslines, multi-language syntax processing, and
+cross-frontend tab-width parity. Current direction lives in
+`docs/roadmap-2026-07.md`. Public contributions are open: use, evaluate,
+file issues, and send pull requests.
 
 ## Highlights
 
-**Editing & UI.** CUA-style region editing plus Emacs kill/yank
-bindings; linear undo/redo; incremental search, substring and regex
-(`C-s` / `C-r` / `C-M-s`); line-number gutter with absolute, relative,
-and hybrid modes; diagnostic gutter signs; right-click context menu;
-OS clipboard integration (OSC 52 in the TUI, native in the GPU);
-minibuffer with completion dropdown and per-bucket persisted history;
-buffer-list mode (`C-x C-b`); self-navigable help system
-(`describe-command`, `describe-key`); atomic saves (temp + rename +
-parent fsync, mode-preserving).
+**Editing & UI.** CUA-style region editing plus Emacs kill/yank and kill-ring
+bindings; linear undo/redo; query-replace; incremental substring and regex
+search (`C-s` / `C-r` / `C-M-s`); comment, auto-indent, auto-pair, transpose,
+case, line, and region operations; line-number gutter with absolute, relative,
+and hybrid modes; diagnostic signs; context menu; OS clipboard integration
+(OSC 52 in the TUI, native in the GPU); minibuffer completion with persisted
+history; buffer-list and compilation modes; self-navigable help. Named `ui.*`
+theme faces, live GPU font selection, and composable per-window statusline
+providers keep chrome and modelines runtime-configurable. Saves are atomic
+(temp + rename + parent fsync, mode-preserving).
 
-**Language intelligence.** LSP client with async, never-blocking
-requests: diagnostics (severity-colored underlines/squiggles, gutter
-signs, statusline counts, `M-g n`/`M-g p` navigation), rename with
-`prepareRename`, go-to-definition including cross-file navigation,
-hover, signature help, references, document symbols, code actions,
-buffer formatting, semantic tokens, and inlay hints (rendered inline
-in the GPU frontend). Servers are preconfigured for rust-analyzer,
-clangd (C/C++), basedpyright, gopls, typescript-language-server
-(TS/TSX/JS/JSX), lua-language-server, bash-language-server, taplo
-(TOML), and zls (Zig). Syntax highlighting is dual-authority:
-bundled tree-sitter grammars (Rust, Lua, Markdown, C, C++) paint
-lexical structure and LSP semantic tokens refine it --- languages
-without a bundled grammar still get full semantic coloring. A
-persistent project symbol index (`.pmacs/index.json`) rides the same
-worker infrastructure.
+**Language intelligence.** The async LSP client provides diagnostics,
+rename with `prepareRename`, cross-file definitions, hover, signature help,
+references, document symbols, code actions, formatting, semantic tokens, and
+inline inlay hints. Preconfigured servers cover Rust, C/C++, Python, Go,
+JavaScript/TypeScript, Lua, Bash, TOML, Zig, Dockerfile, CMake, JSON, and YAML.
+Bundled tree-sitter grammars include those languages plus Markdown, Make, and
+CUDA; nested Markdown fences and frontmatter use multi-language injections,
+and locals-query processing distinguishes shadowed builtins. Bounded Emacs
+and Vim modelines join extensions, exact filenames, and shebangs in one
+fresh-load language decision. That decision initializes the buffer's major
+mode, drives syntax/LSP/pairing/comment behavior, and enables mode-scoped
+keymaps. A persistent project-symbol index (`.pmacs/index.json`) rides the
+same worker infrastructure.
 
-**Collaboration & frontends.** With `--features crdt`, buffers are
-CRDT-backed and any number of frontends attach to one daemon and edit
-concurrently; peers see each other's cursors and selections as
-translucent washes. The GPU frontend adds a live minimap (click to
-jump, drag to scrub), wavy diagnostic squiggles, a status band with
-live diagnostic counts, and optimistic local editing that rebases
-in-flight edits through authoritative frames.
+**Collaboration & frontends.** With `--features crdt`, buffers are CRDT-backed
+and any number of frontends attach to one daemon and edit concurrently; peers
+see each other's cursors and selections as translucent washes. The TUI and GPU
+frontends both host owned full-screen terminal sessions; protocol-v19 terminal
+frames preserve the fixed-cell VT screen while each frontend owns its
+scroll/selection/input context. The GPU frontend also provides a live minimap,
+wavy diagnostic squiggles, a status band, and optimistic local editing that
+rebases in-flight edits through authoritative frames. Buffer text, syntax,
+diagnostics, carets, hits, and minimap geometry now share one eight-column tab
+projection without mutating source bytes.
 
-**Extensibility.** ~37 `pmacs.*` Lua namespaces cover buffers,
-windows, commands, keymaps (global/mode/buffer scope), hooks, themes
-(truecolor-capable syntax palette), tree-sitter, LSP stores, async
-workers, and a PTY-aware process supervisor with an ECMA-48 ANSI
-parser. A package manager installs from git (`github:owner/repo`,
-version/branch/commit pins) with transitive dependency resolution and
-a SHA-256 lockfile. Pmacs is also an **MCP client**: packages can
-spawn MCP servers and consume their tools, resources, and prompts ---
-AI integrations are packages over a transport, not a built-in
-feature. The bundled REPL package (PTY shells, ANSI rendering,
-multi-REPL, scrollback retention) is written entirely against the
-public Lua API.
+**Extensibility.** The `pmacs.*` Lua namespaces cover buffers, windows,
+commands, global/mode/buffer keymaps, hooks, themes, statusline providers,
+tree-sitter, LSP stores, async workers, and a PTY-aware process supervisor.
+The typed, introspectable `pmacs.config` registry supports global and
+buffer-local values, listeners, startup-only settings, and `describe-setting`.
+A package manager installs from git (`github:owner/repo`,
+version/branch/commit pins) with transitive dependency resolution and a
+SHA-256 lockfile. Pmacs is also an **MCP client**: packages can spawn MCP
+servers and consume their tools, resources, and prompts --- AI integrations
+are packages over a transport, not a built-in feature. The bundled REPL
+package is written entirely against the public Lua API.
 
 ## Running
 
