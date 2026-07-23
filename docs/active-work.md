@@ -55,15 +55,17 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Active lane: GPU initial target framing
 
 - Portable branch: `githubsucks/gpu-initial-target-framing`
-- Framing checkpoint: `60ac7fa` (Revision 1; 2026-07-23).
+- Framing checkpoint: `71039d1` (Revision 2; 2026-07-23).
 - Base: `githubsucks/main` @ `4daa1b8`; protocol v19.
-- State: framing only, proposed for user review; no implementation and no PR.
+- State: framing only; user review completed and all four non-structural
+  findings resolved; no implementation and no PR.
 - Scope: one session-scoped `pmacs --gpu [--socket …] FILE` target,
-  protocol-v20 semantic bootstrap, exact Unix path + launcher-cwd transport,
-  pre-window target readiness, replica coherence, and behavioral acceptance.
-- Next: user review/approval. Only then create the implementation branch from
-  this checkpoint; automatic GUI selection, multiple files, general live-open
-  commands, packaging, and remote GPU paths remain explicitly deferred.
+  protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
+  Unix path transport, pre-window target readiness, replica coherence, and
+  behavioral acceptance.
+- Next: explicit user approval. Only then create the implementation branch
+  from this checkpoint; automatic GUI selection, multiple files, general
+  live-open commands, packaging, and remote GPU paths remain deferred.
 
 Recovery worktree:
 
