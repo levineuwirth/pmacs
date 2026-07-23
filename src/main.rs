@@ -301,7 +301,7 @@ fn gpu_binary(current_exe: &Path, override_bin: Option<PathBuf>) -> (PathBuf, Pa
     if let Some(override_bin) = override_bin {
         return (override_bin, sibling);
     }
-    if sibling.exists() {
+    if sibling.is_file() {
         return (sibling.clone(), sibling);
     }
     (PathBuf::from("pmacs-gpu"), sibling)
@@ -858,6 +858,11 @@ mod tests {
         let (selected, reported_sibling) = gpu_binary(&root, Some(override_bin.clone()));
         assert_eq!(selected, override_bin);
         assert_eq!(reported_sibling, sibling);
+
+        std::fs::create_dir(&sibling).expect("create sibling directory");
+        let (selected, _) = gpu_binary(&root, None);
+        assert_eq!(selected, PathBuf::from("pmacs-gpu"));
+        std::fs::remove_dir(&sibling).expect("remove sibling directory");
 
         std::fs::write(&sibling, b"gpu").expect("create sibling");
         let (selected, _) = gpu_binary(&root, None);

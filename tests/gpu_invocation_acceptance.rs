@@ -173,11 +173,22 @@ mod crdt {
 
     impl ManagedProbe {
         fn spawn(socket: &Path, report: &Path, daemon_executable: &Path, home: &Path) -> Self {
+            Self::spawn_with_env(socket, report, daemon_executable, home, &[])
+        }
+
+        fn spawn_with_env(
+            socket: &Path,
+            report: &Path,
+            daemon_executable: &Path,
+            home: &Path,
+            envs: &[(&str, &Path)],
+        ) -> Self {
             assert!(
                 gpu_binary().is_file(),
                 "build pmacs-gpu before this acceptance suite"
             );
-            let mut child = Command::new(gpu_binary())
+            let mut command = Command::new(gpu_binary());
+            command
                 .args(["--headless-managed-probe"])
                 .arg(socket)
                 .arg(report)
@@ -186,9 +197,11 @@ mod crdt {
                 .env("XDG_CONFIG_HOME", home)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("spawn managed probe");
+                .stderr(Stdio::null());
+            for (key, value) in envs {
+                command.env(key, value);
+            }
+            let mut child = command.spawn().expect("spawn managed probe");
             let stdin = child.stdin.take().expect("probe stdin");
             Self {
                 child,
@@ -325,37 +338,78 @@ mod crdt {
     }
 
     #[test]
-    fn concurrent_managed_launches_converge_on_one_socket_owner() {
+    fn concurrent_managed_launches_converge_and_reap_the_lock_loser() {
         let temp = secure_tempdir();
         let socket = temp.path().join("race.sock");
-        let mut first = ManagedProbe::spawn(
+        let first_ready = temp.path().join("first-ready");
+        let second_ready = temp.path().join("second-ready");
+        let first_wrapper = temp.path().join("first-daemon");
+        let second_wrapper = temp.path().join("second-daemon");
+        let wrapper = "touch \"$PMACS_BARRIER_SELF\"\n\
+                       while [ ! -e \"$PMACS_BARRIER_PEER\" ]; do sleep 0.01; done\n\
+                       exec \"$PMACS_REAL_DAEMON\" \"$@\"";
+        write_script(&first_wrapper, wrapper);
+        write_script(&second_wrapper, wrapper);
+        let real_daemon = pmacs_binary();
+
+        let mut first = ManagedProbe::spawn_with_env(
             &socket,
             &temp.path().join("first-report"),
-            &pmacs_binary(),
+            &first_wrapper,
             temp.path(),
+            &[
+                ("PMACS_BARRIER_SELF", &first_ready),
+                ("PMACS_BARRIER_PEER", &second_ready),
+                ("PMACS_REAL_DAEMON", &real_daemon),
+            ],
         );
-        let mut second = ManagedProbe::spawn(
+        let mut second = ManagedProbe::spawn_with_env(
             &socket,
             &temp.path().join("second-report"),
-            &pmacs_binary(),
+            &second_wrapper,
             temp.path(),
+            &[
+                ("PMACS_BARRIER_SELF", &second_ready),
+                ("PMACS_BARRIER_PEER", &first_ready),
+                ("PMACS_REAL_DAEMON", &real_daemon),
+            ],
         );
         let first_facts = first.wait_ready();
         let second_facts = second.wait_ready();
         assert_eq!(
-            first_facts.get("buffer_snapshot").map(String::as_str),
+            first_facts.get("spawned_daemon").map(String::as_str),
             Some("true")
         );
         assert_eq!(
-            second_facts.get("buffer_snapshot").map(String::as_str),
+            second_facts.get("spawned_daemon").map(String::as_str),
             Some("true")
         );
         assert!(UnixStream::connect(&socket).is_ok());
-        let pids = [first.daemon_pid, second.daemon_pid];
-        assert!(first.close().success());
-        assert!(second.close().success());
-        for pid in pids.into_iter().flatten() {
-            signal_pid(pid, Signal::SIGTERM);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let first_lost = loop {
+            let first_reaped = parse_report(&first.report)
+                .get("daemon_reaped")
+                .is_some_and(|value| value == "true");
+            let second_reaped = parse_report(&second.report)
+                .get("daemon_reaped")
+                .is_some_and(|value| value == "true");
+            if first_reaped ^ second_reaped {
+                break first_reaped;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "exactly one losing daemon child was not reaped"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+
+        if first_lost {
+            assert!(first.close().success());
+            assert!(second.close().success());
+        } else {
+            assert!(second.close().success());
+            assert!(first.close().success());
         }
     }
 
@@ -527,7 +581,9 @@ mod crdt {
             .output()
             .expect("GPU help");
         assert!(help.status.success());
-        assert!(String::from_utf8_lossy(&help.stdout).contains("--attach <socket>"));
+        let help_text = String::from_utf8_lossy(&help.stdout);
+        assert!(help_text.contains("pmacs --gpu"));
+        assert!(help_text.contains("ADVANCED DIRECT ATTACH"));
 
         let version = Command::new(gpu_binary())
             .arg("--version")
@@ -536,8 +592,20 @@ mod crdt {
         assert!(version.status.success());
         assert!(String::from_utf8_lossy(&version.stdout).contains("protocol v"));
 
+        let bare = Command::new(gpu_binary())
+            .output()
+            .expect("bare GPU invocation");
+        assert_eq!(bare.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&bare.stderr).contains("pmacs --gpu"));
+
+        let help_extra = Command::new(gpu_binary())
+            .args(["--help", "extra"])
+            .output()
+            .expect("GPU help with extra operand");
+        assert_eq!(help_extra.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&help_extra.stderr).contains("does not accept operands"));
+
         for argv in [
-            vec![],
             vec!["--attach"],
             vec!["--attach", "/tmp/x.sock", "ignored"],
             vec!["unexpected"],

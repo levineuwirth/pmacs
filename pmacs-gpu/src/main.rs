@@ -651,6 +651,7 @@ fn main() {
         proxy: Some(proxy),
         state: None,
         attach_client,
+        pending_events: Vec::new(),
         modifiers: winit::keyboard::ModifiersState::empty(),
     };
     event_loop
@@ -1016,10 +1017,15 @@ fn frame_probe_text(frame: &TerminalFrame) -> String {
 const GPU_USAGE: &str = "\
 pmacs-gpu — GPU frontend for pmacs
 
-USAGE:
-  pmacs-gpu --attach <socket>              attach to an existing daemon
-  pmacs-gpu --help                         print this help
-  pmacs-gpu --version                      print package and protocol versions";
+NORMAL STARTUP:
+  pmacs --gpu [--socket NAME|PATH]          start or reuse a managed daemon
+
+ADVANCED DIRECT ATTACH:
+  pmacs-gpu --attach <socket>               attach to an existing daemon only
+
+OPTIONS:
+  pmacs-gpu --help                          print this help
+  pmacs-gpu --version                       print package and protocol versions";
 
 /// Strict parser for direct, managed, and headless GPU entry points.
 fn parse_args(args: &[String]) -> Result<Mode, String> {
@@ -1046,7 +1052,13 @@ fn parse_args(args: &[String]) -> Result<Mode, String> {
                 daemon_executable: PathBuf::from(daemon_executable),
             })
         }
-        [] => Err("an explicit mode is required; use --attach <socket>".to_owned()),
+        [] => Err(
+            "managed startup is provided by `pmacs --gpu`; direct use requires --attach <socket>"
+                .to_owned(),
+        ),
+        [flag, ..] if matches!(flag.as_str(), "--help" | "-h" | "--version" | "-V") => {
+            Err(format!("{flag} does not accept operands"))
+        }
         [flag, ..]
             if matches!(
                 flag.as_str(),
@@ -1070,6 +1082,10 @@ struct App {
     /// a non-Option in a borrow.
     proxy: Option<winit::event_loop::EventLoopProxy<AppEvent>>,
     state: Option<State>,
+    /// User events received before winit creates `state`. Managed attach
+    /// starts its reader before `run_app`, so the initial snapshot may arrive
+    /// before `resumed` on backends with a different callback order.
+    pending_events: Vec<AppEvent>,
     /// Held both for stream lifetime and for the main loop's
     /// `send_viewport` / `send_key` write-back path.
     attach_client: Option<AttachClient>,
@@ -1077,6 +1093,19 @@ struct App {
     /// delivers modifiers separately from key presses, so we track the
     /// current set and apply it when a key is sent (session B1).
     modifiers: winit::keyboard::ModifiersState,
+}
+
+fn defer_app_event(
+    state_ready: bool,
+    pending: &mut Vec<AppEvent>,
+    event: AppEvent,
+) -> Option<AppEvent> {
+    if state_ready {
+        Some(event)
+    } else {
+        pending.push(event);
+        None
+    }
 }
 
 type LoroTextDeltaBatches = Arc<Mutex<Vec<Vec<loro::TextDelta>>>>;
@@ -1759,6 +1788,69 @@ impl App {
             eprintln!("pmacs-gpu: send_menu_pointer failed: {e}");
         }
     }
+
+    fn dispatch_app_event(&mut self, event: AppEvent) {
+        let state = self
+            .state
+            .as_mut()
+            .expect("app events dispatch only after state initialization");
+        match event {
+            AppEvent::Attach(AttachEvent::Message(msg)) => {
+                let debug_apply = debug_apply();
+                let apply_start = debug_apply.then(std::time::Instant::now);
+                let label = debug_apply.then(|| instance_message_label(msg.as_ref()));
+                let follow_up = state.apply_attach_message(*msg);
+                if let (Some(start), Some(label)) = (apply_start, label) {
+                    eprintln!(
+                        "pmacs-gpu apply: {label}={}us",
+                        std::time::Instant::now().duration_since(start).as_micros()
+                    );
+                }
+                // If the message triggered a follow-up Viewport
+                // (currently: every BufferSnapshot does), emit it back
+                // to the daemon. The daemon's `SemanticRenderState`
+                // produces no styling until a viewport is declared.
+                if let Some(ViewportSend {
+                    buffer_id,
+                    visible,
+                    generation,
+                }) = follow_up
+                    && let Some(client) = self.attach_client.as_ref()
+                    && let Err(e) = client.send_viewport(buffer_id, visible, generation)
+                {
+                    eprintln!("pmacs-gpu: send Viewport failed: {e}");
+                }
+                // Vterm Stage 3 — the dual declaration. After every
+                // snapshot the frontend re-declares BOTH its byte
+                // viewport (above) and its terminal cell size, because
+                // an empty terminal identity snapshot does not announce
+                // itself as a terminal. The daemon keeps whichever one
+                // matches the buffer's kind, which is what breaks the
+                // otherwise circular "need a frame to know to ask for
+                // one" dependency.
+                self.flush_terminal_declaration();
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
+                state.release_timed_out_floor();
+                let ready_keys = state.take_ready_round_trip_keys();
+                if let Some(client) = self.attach_client.as_ref() {
+                    for (key, mods) in ready_keys {
+                        if debug_input() {
+                            eprintln!("pmacs-gpu flush_key: {key:?} mods={mods:?}");
+                        }
+                        if let Err(e) = client.send_key(key, mods) {
+                            eprintln!("pmacs-gpu: flush send_key failed: {e}");
+                        }
+                    }
+                }
+            }
+            AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
+                eprintln!("pmacs-gpu: daemon disconnected ({reason})");
+                state.on_daemon_disconnected("(daemon disconnected)");
+            }
+        }
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -1796,6 +1888,9 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
             }
+        }
+        for event in std::mem::take(&mut self.pending_events) {
+            self.dispatch_app_event(event);
         }
     }
 
@@ -2386,64 +2481,9 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        match event {
-            AppEvent::Attach(AttachEvent::Message(msg)) => {
-                let debug_apply = debug_apply();
-                let apply_start = debug_apply.then(std::time::Instant::now);
-                let label = debug_apply.then(|| instance_message_label(msg.as_ref()));
-                let follow_up = state.apply_attach_message(*msg);
-                if let (Some(start), Some(label)) = (apply_start, label) {
-                    eprintln!(
-                        "pmacs-gpu apply: {label}={}us",
-                        std::time::Instant::now().duration_since(start).as_micros()
-                    );
-                }
-                // If the message triggered a follow-up Viewport
-                // (currently: every BufferSnapshot does), emit it back
-                // to the daemon. The daemon's `SemanticRenderState`
-                // produces no styling until a viewport is declared.
-                if let Some(ViewportSend {
-                    buffer_id,
-                    visible,
-                    generation,
-                }) = follow_up
-                    && let Some(client) = self.attach_client.as_ref()
-                    && let Err(e) = client.send_viewport(buffer_id, visible, generation)
-                {
-                    eprintln!("pmacs-gpu: send Viewport failed: {e}");
-                }
-                // Vterm Stage 3 — the dual declaration. After every
-                // snapshot the frontend re-declares BOTH its byte
-                // viewport (above) and its terminal cell size, because
-                // an empty terminal identity snapshot does not announce
-                // itself as a terminal. The daemon keeps whichever one
-                // matches the buffer's kind, which is what breaks the
-                // otherwise circular "need a frame to know to ask for
-                // one" dependency.
-                self.flush_terminal_declaration();
-                let Some(state) = self.state.as_mut() else {
-                    return;
-                };
-                state.release_timed_out_floor();
-                let ready_keys = state.take_ready_round_trip_keys();
-                if let Some(client) = self.attach_client.as_ref() {
-                    for (key, mods) in ready_keys {
-                        if debug_input() {
-                            eprintln!("pmacs-gpu flush_key: {key:?} mods={mods:?}");
-                        }
-                        if let Err(e) = client.send_key(key, mods) {
-                            eprintln!("pmacs-gpu: flush send_key failed: {e}");
-                        }
-                    }
-                }
-            }
-            AppEvent::Attach(AttachEvent::Disconnected(reason)) => {
-                eprintln!("pmacs-gpu: daemon disconnected ({reason})");
-                state.on_daemon_disconnected("(daemon disconnected)");
-            }
+        if let Some(event) = defer_app_event(self.state.is_some(), &mut self.pending_events, event)
+        {
+            self.dispatch_app_event(event);
         }
     }
 }
@@ -14286,5 +14326,41 @@ mod tests {
                 "accepted invalid argv: {values:?}"
             );
         }
+    }
+
+    #[test]
+    fn pre_state_app_events_are_buffered_in_arrival_order() {
+        let mut pending = Vec::new();
+        for reason in ["snapshot-predecessor", "snapshot-successor"] {
+            let event = AppEvent::Attach(AttachEvent::Disconnected(reason.to_owned()));
+            assert!(defer_app_event(false, &mut pending, event).is_none());
+        }
+        assert_eq!(pending.len(), 2);
+        let reasons = pending
+            .into_iter()
+            .map(|event| match event {
+                AppEvent::Attach(AttachEvent::Disconnected(reason)) => reason,
+                AppEvent::Attach(AttachEvent::Message(_)) => panic!("unexpected message"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasons, ["snapshot-predecessor", "snapshot-successor"]);
+
+        let immediate = AppEvent::Attach(AttachEvent::Disconnected("ready".to_owned()));
+        assert!(defer_app_event(true, &mut Vec::new(), immediate).is_some());
+    }
+
+    #[test]
+    fn gpu_cli_points_bare_invocation_to_broker_and_labels_direct_attach() {
+        let bare = parse_args(&[]).expect_err("bare GPU invocation must fail");
+        assert!(
+            bare.contains("pmacs --gpu"),
+            "unexpected bare error: {bare}"
+        );
+        assert!(GPU_USAGE.contains("NORMAL STARTUP"));
+        assert!(GPU_USAGE.contains("ADVANCED DIRECT ATTACH"));
+
+        let extra = ["--help", "extra"].map(str::to_owned);
+        let error = parse_args(&extra).expect_err("help operands must fail");
+        assert_eq!(error, "--help does not accept operands");
     }
 }
