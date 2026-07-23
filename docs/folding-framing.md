@@ -1,393 +1,386 @@
 # Folding — framing (Arc 6)
 
-**Revision 2 — 2026-07-22. Status: framing only, on branch `folding`
-(off canonical `main` @ `cac4961`); no implementation.** Revision 1 passed
-a ground-truth review (every scouted claim verified against the tree) but the
-reviewer found one architectural mis-framing and six spec gaps. Revision 2
-fixes all of them; see §0 for the changelog.
+**Revision 3 — 2026-07-22. Status: framing only, on branch `folding`
+(off canonical `main` @ `cac4961`); no implementation.** Rev 1 passed a
+ground-truth review; rev 2 fixed round 1's seven findings; rev 3 fixes round
+2's five majors and four minors. See §0 for the per-round changelog.
 
-## 0. Revision 2 — review round 1 resolutions
+## 0. Revision history
 
-- **F1 (architectural).** R1's Stage 2 said "the TUI consumes `FoldState`."
-  It cannot: the grid TUI advertises `semantic_render: false`
-  (`src/frontend.rs:385`), so the per-session outgoing filter never sends the
-  `FoldState` family to it, and the TUI has no layout of its own — the daemon
-  renders its cell grid (`render_states` vs `semantic_states`,
-  `src/daemon.rs:875`/`881`; the grid path is `render_state.render_frame(...)`
-  at `:1106`). **The TUI collapse is instance-side rendering in the daemon
-  grid renderer, reading the fold store directly — no wire.** `FoldState` on
-  the wire serves ONLY semantic (GPU) sessions. Staging reworked accordingly
-  (§8): Stage 2 is grid/daemon rendering; Stage 3 is the wire-fed GPU.
-- **F2.** Stored range semantics pinned: the store holds **line-aligned
-  interior** ranges (Q#FD3, §5); the head line stays visible, the interior
-  including the closing-delimiter line is hidden. §7 rewritten to match.
-- **F3.** The fold store's edit-translation is the **instance-side
-  buffer-attached `View`** (`BufferStyleSpanTranslator` pattern,
-  `src/overlay.rs:235`), which sees every real edit regardless of source — not
-  the frontend-side `translate_byte_range`. The two "resets" are split:
-  per-session producer baseline vs per-buffer store lifecycle (Q#FD8, §5).
-- **F4.** Stale-tree fold creation pinned: read `ParseViewHandle::current()`
-  (`src/syntax.rs:696`); if it is `None` or `pending_edit_count() > 0`
-  (`:706`), **refuse with a status message** in v1 (Q#FD10, §3).
-- **F5.** Multi-frontend point + edit-vs-fold rules pinned (Q#FD3, Q#FD5, §5):
-  the invoking frontend's point moves to the head; interactive-point-inside
-  edits unfold, programmatic/remote edits translate; the invariant is
-  creation-time-only in Stage 1.
-- **F6.** Lua surface takes an **explicit buffer** (no ambient resolution,
-  per #127), with full range **validation** (Q#FD4, Q#FD11, §6) — which is
-  also what makes Q#FD9 (terminals never fold) hold.
-- **F7.** `FoldState` follows the authoritative-empty discipline; the
-  non-empty→empty transition (open-all) emits exactly one empty frame
-  (Q#FD8, acceptance 4).
-- **Minors.** "≥2 source lines" not display rows; `close-all` folds
-  top-level only (Emacs `hs-hide-all` parity, feeds B2); an injected-layer
-  fold acceptance added; and an explicit note that `FoldState` needs **no
-  protocol bump**.
+### Round 1 (rev 1 → rev 2)
+
+- **F1** the grid TUI is daemon-rendered and never receives `FoldState`; its
+  collapse is instance-side in the daemon grid renderer. Staging reworked.
+- **F2** stored range pinned to a line-aligned interior.
+- **F3** the store's translation is the instance-side buffer-attached `View`
+  (`BufferStyleSpanTranslator` pattern), not the frontend `translate_byte_range`.
+- **F4** stale-tree fold creation refuses.
+- **F5** multi-frontend point / edit-vs-fold pinned.
+- **F6** explicit-buffer Lua API + validation.
+- **F7** authoritative-empty `FoldState`.
+
+### Round 2 (rev 2 → rev 3)
+
+- **R2-1 (major).** The block-kind heuristic picked a **body line** as the
+  fold head on indentation grammars — tree-sitter-python's `block` starts on
+  the first statement line, so `def foo():` was left above a headless fold
+  (verified in review; brace languages escaped only because `{` shares the
+  introducer line). Fixed with a **head-selection ascend rule** (Q#FD1, §3),
+  a no-op for brace languages. Acceptance 1 now tests both languages.
+- **R2-2 (major).** The interactive-vs-programmatic split cannot live in the
+  store's `View`: `View::on_edit(&Buffer, &Edit)` (`src/overlay.rs:248`) and
+  `Edit` (`src/rope.rs`) carry no source frontend and no "point was inside"
+  signal — only optional `crdt_op`. The `View` does **translate + drop only**;
+  the **unfold is a pre-edit step at the dispatch/command layer** that knows
+  the authenticated frontend and its point (Q#FD5, §5). This is the
+  handoff's deferred "origin-pinned `buffer.after-edit` fan-out" gap.
+- **R2-3 (major).** "CRDT op = remote = translate" misclassifies GPU typing
+  (a GPU user types via CRDT ops but is editing at their own point inside a
+  rendered fold). The classifier is the **authenticated source frontend's
+  point, not the transport**. Stage 1 implements the unfold for the command
+  path; **CRDT-origin unfold is a named Stage 3 obligation** (that is when a
+  GPU user can type into a rendered fold). Q#FD5, §5, §8.
+- **R2-4 (major).** Q#FD8 recreated the #120 stale-mirror trap: revert drops
+  the store, emits `BufferSnapshot`, and resets the producer baseline, so the
+  now-empty store is suppressed as "initial empty" and a GPU keeps rendering
+  pre-revert folds unless its snapshot arm **clears the fold mirror**. That
+  frontend clear is load-bearing; named as a Stage 3 obligation and pinned in
+  acceptance 7 (Q#FD8, §5). Same class as [[message-gating-on-active-state]].
+- **R2-5 (major).** A line-aligned tail hid non-member text on shared-closer
+  lines (`} else {`, `}, [deps])`). Fixed by **keeping a closing-delimiter
+  line visible** (Q#FD3, §5); delimiter-less (indentation) nodes still hide
+  through their last body line. Decided, not bet.
+- **Minors.** (a) unfold is **plural** — every fold containing the point.
+  (b) a shared head line (`foo(() => {`) toggles **innermost-first**.
+  (c) Q#FD9's rejection reason corrected: `(0,0)` is in-bounds; the reject
+  comes from the ≥1-hidden-line rule. (d) Stage 2/3 re-framings must address
+  three named interactions (§8): fold-aware `LineNumbers`, visible-line
+  viewport/scroll accounting, and hidden-line signs/presence clamp-or-drop.
 
 ## 1. Problem and what ships
 
-Pmacs cannot fold. The `FoldState` wire family was declared in the M11.1
-semantic-frontend design but has never been produced — the producer says in
-so many words that "pmacs has no instance-side fold source yet," and a test
-pins that `FoldState` is never emitted.
+Pmacs cannot fold. `FoldState` was declared in the M11.1 semantic-frontend
+design but has never been produced — the producer says "pmacs has no
+instance-side fold source yet," and a test pins it is never emitted.
 
-Arc 6 gives pmacs a fold engine (instance-side fold model + a fold source +
+Arc 6 gives pmacs a fold engine (instance-side fold store + a fold source +
 Lua commands), renders collapsed regions with a gutter fold marker in both
 frontends, and produces `FoldState` for semantic (GPU) sessions. It is the
-roadmap's "keystone gutter rider": it lights up an already-declared wire
-family, adds the fold-marker rider beside the existing diagnostic signs, and
-is a visible feature.
+roadmap's "keystone gutter rider."
 
-**`FoldState` needs no protocol bump.** The variant has been in the wire
-encoding since M11.1 and both frontends already decode it (the TUI drops it,
-the GPU has a decode arm); Arc 6 only starts *producing* it. No
-`PROTOCOL_VERSION` change, no `SUPPORTED` change.
+**`FoldState` needs no protocol bump** — the variant has been in the encoding
+since M11.1 and both frontends already decode it (the TUI drops it, the GPU
+has a decode arm); Arc 6 only starts *producing* it.
 
-**Git gutter markers are a SIBLING rider, not this arc.** They ride the same
-gutter but need a diff source, unrelated to folding. Named as a deferral
-(§11), framed separately.
+**Git gutter markers are a SIBLING rider, not this arc** (§11).
 
-## 2. Ground truth (scouted 2026-07-22, `main` @ `cac4961`; verified in review)
+## 2. Ground truth (scouted 2026-07-22, `main` @ `cac4961`; verified across two review rounds)
 
-- **`FoldState { buffer_id, folds: Vec<ByteRange> }`** exists in
+- **`FoldState { buffer_id, folds: Vec<ByteRange> }`** —
   `pmacs-protocol/src/message.rs:886`, gated on `semantic_render`,
-  DECLARED-BUT-UNPRODUCED. Doc: *"the instance's authoritative fold set as
-  document facts. Folding is an instance command-semantics concern (Lua can
-  fold); the visual collapse is a frontend layout concern."*
-- `semantic_render.rs:4002`
-  (`block_adornments_and_fold_state_still_never_emitted`) asserts
-  `FoldState`/`BlockAdornments` are never sent. Stage 1 flips this to assert
-  `FoldState` IS produced while `BlockAdornments` stays unemitted (F7).
+  DECLARED-BUT-UNPRODUCED. `semantic_render.rs:4002` pins it is never emitted.
 - **`BlockAdornments`** (also unproduced) is the declared home for
-  "folded-region placeholders." Arc 6 does **not** produce it — the fold
-  placeholder is frontend-local (Q#FD7).
-- **No fold source exists.** The bundled grammars export
-  `HIGHLIGHTS`/`INJECTIONS`/`LOCALS`/`TAGS` queries only — no fold query and
-  no `folds.scm` (`LanguageEntry` has exactly those fields). The roadmap's
-  "tree-sitter fold ranges" is not free; the fold source is Q#FD1.
-- **Two frontend render paths, not one (F1).** The grid TUI is daemon-rendered
-  (`render_states` → `render_state.render_frame`, `src/daemon.rs:1106`) and
-  advertises `semantic_render: false` (`src/frontend.rs:385`), so it never
-  receives `FoldState`. The GPU is a semantic session (`semantic_states` →
-  `sem.render_frame`, `:1091`) and does receive it. Fold collapse is therefore
-  daemon-side for the TUI and wire-fed for the GPU.
-- **Gutter signs are frontend-derived, not a wire channel.** The GPU's
-  `collect_gutter_sign_rects` computes diagnostic sign bars locally; the TUI's
-  are painted daemon-side. Fold markers follow the same model per path — no new
-  wire type.
-- **Instance-side edit translation is a solved pattern (F3).** Compile-mode's
-  `BufferStyleSpanTranslator` (`src/overlay.rs:235`) is a buffer-attached
-  `View` that sees every real edit — commands, CRDT ops, LSP workspace edits,
-  Lua — once per edit, fragment-preserving. The fold store attaches the same
-  kind of `View`. The frontend-side `translate_byte_range`
-  (`pmacs-gpu/src/main.rs`) is a *different* thing (the GPU translating its own
-  received copies across optimistic edits) and is not the store's mechanism.
-- **Staleness is detectable (F4).** `ParseViewHandle::current()`
-  (`src/syntax.rs:696`) returns `None` before the first settle and the latest
-  settled bundle otherwise; `pending_edit_count()` (`:706`) is nonzero while
-  edits await settle.
-- **Greenfield Lua/commands.** No existing fold surface or commands.
+  folded-region placeholders. Arc 6 does not produce it (Q#FD7).
+- **No fold source exists** — the bundled grammars export
+  `HIGHLIGHTS`/`INJECTIONS`/`LOCALS`/`TAGS` only, no fold query, no
+  `folds.scm`. Fold source is Q#FD1. **tree-sitter-python's `block` node
+  starts on the first statement line, not the `def` line** (R2-1) — the reason
+  the head-selection rule is required.
+- **Two frontend render paths (F1).** Grid TUI: daemon-rendered
+  (`render_states` → `render_state.render_frame`, `src/daemon.rs:1106`),
+  advertises `semantic_render: false` (`src/frontend.rs:385`), never receives
+  `FoldState`. GPU: semantic session (`semantic_states` → `sem.render_frame`,
+  `:1091`), does. Collapse is daemon-side for the TUI, wire-fed for the GPU.
+- **Gutter signs are frontend-derived, not a wire channel** — fold markers
+  follow suit per path; no new wire type.
+- **Instance-side edit translation** is the buffer-attached `View`
+  (`BufferStyleSpanTranslator`, `src/overlay.rs:235`; hook
+  `on_edit(&Buffer, &Edit)` at `:248`), which sees every edit once,
+  provenance-blind (R2-2): `Edit` carries only `crdt_op`, no source frontend.
+- **Staleness is detectable** — `ParseViewHandle::current()`
+  (`src/syntax.rs:696`) is `None` before first settle; `pending_edit_count()`
+  (`:706`) is nonzero while edits await settle.
+- **Greenfield** Lua/commands.
 
-## 3. Fold source (Q#FD1) — the load-bearing decision
+## 3. Fold source (Q#FD1) — structural node folding with head selection and closer-aware tail
 
-The grammars ship no fold queries, so "what is foldable" must be defined by
-pmacs. Three options:
+The grammars ship no fold queries, so pmacs defines "what is foldable." v1 is
+**structural node folding for grammar-backed buffers** (reuses the parse trees
+for every bundled grammar and injection layer, zero per-language authoring).
+Indentation folding (grammarless fallback) and curated per-language queries
+(quality pass) are DEFERRED (§11).
 
-- **(A) Curated per-language fold queries** (nvim-treesitter's `@fold`-capture
-  model). Highest quality — but per-language authoring plus ongoing
-  maintenance, exactly the work the grammars declined to ship.
-- **(B) Structural node folding.** At a point, fold the nearest enclosing
-  NAMED node that spans **≥2 source lines** (F-minor: source lines, not
-  display rows — soft wrap is frontend layout and unknowable instance-side),
-  biased to block-like kinds by a small shared heuristic on node-kind names
-  (`block`, `body`, `*_list`, `declaration_list`, `statement_block`,
-  brace/bracket-delimited nodes). Reuses the parse trees already present for
-  every bundled grammar AND every injection layer. Zero per-language authoring.
-- **(C) Indentation folding.** Language-agnostic, works with no grammar,
-  predictable, but ignores syntax.
+The source, at a point:
 
-**Recommendation: (B) structural node folding for grammar-backed buffers as
-the v1 engine.** Reuses tree-sitter, no per-language work, covers all bundled
-grammars and injection layers day one. (C) is the grammarless fallback,
-DEFERRED so Stage 1 stays scoped to grammar buffers; (A) is a later quality
-pass, DEFERRED.
+1. **Match** the nearest enclosing NAMED node `B` spanning **≥2 source lines**
+   (source lines, not display rows — soft wrap is frontend-only and unknowable
+   instance-side), biased to block-like kinds (`block`, `body`, `*_list`,
+   `declaration_list`, `statement_block`, brace/bracket-delimited nodes).
+2. **Head selection (R2-1).** Ascend: while `B`'s parent introduces `B` (a
+   `function_definition` / `if_statement` / … whose block child is `B`) **and**
+   `parent.start_line < B.start_line`, take the parent as the head node. This
+   makes the **introducer line the head** — `def foo():` on Python, where the
+   `block` starts a line lower. It is a **no-op for brace languages**, where
+   `{` shares the introducer's line (`parent.start_line == B.start_line`), so
+   the head node stays `B` and the result is identical.
+3. **Tail selection (R2-5).** The hidden interior is a whole-line range. Its
+   first hidden line is `head_line + 1`. Its last hidden line is:
+   - if `B`'s last line begins with `B`'s **closing-delimiter token**
+     (`}`/`)`/`]`, and `end`-style closers later) — a brace/bracket node —
+     then `B.last_line - 1`, **keeping the closer line visible**. This is what
+     keeps `} else {` and `}, [deps])` on screen with their trailing siblings.
+   - else (a delimiter-less node, e.g. a Python `block`) — `B.last_line`,
+     hiding through the last body line.
+
+The stored range is the byte range `[end of head_line, end of last-hidden
+line]` (§5). A node that yields **zero** hidden lines (e.g. `fn f() {}` on two
+lines, empty body) is **not foldable**.
 
 **Stale-tree rule (Q#FD10, F4).** The source reads
-`ParseViewHandle::current()`. If it is `None` (no settle yet) or
-`pending_edit_count() > 0` (the settled tree's coordinates are stale relative
-to the current buffer), a fold command **refuses with a status message and
-stores nothing** — a fold is durable state and must not be computed against
-stale coordinates. Settle is sub-frame, so the refuse window is tiny.
-Translate-the-node-range-through-pending-edits is a named refinement (§11).
+`ParseViewHandle::current()`; if it is `None` (no settle yet) or
+`pending_edit_count() > 0` (settled coordinates are stale), the fold command
+**refuses with a status message and stores nothing** — a fold is durable state
+and must not be computed against stale coordinates. Settle is a main-thread
+pump, so the window is sub-frame. Translate-through-pending is a §11
+refinement.
 
-The block-kind heuristic (B) is the part most likely to feel wrong ("it folded
-the tiny inner block, not the function"); Bet B1 (§10) states it and names the
-fallback (curated Tier-1 queries).
+The block-kind heuristic (step 1) remains a taste bet (Bet B1); step 2 fixed
+the *determinable* Python defect, which was not taste.
 
 ## 4. Where fold state lives (Q#FD2)
 
 Instance-side, per the wire contract. A **per-buffer fold store** (a set of
 byte ranges) lives beside the buffer, attached as a `View` (F3). Commands
-mutate it; the daemon grid renderer reads it directly to collapse the TUI
-(Stage 2); the semantic producer ships it as `FoldState` to GPU sessions
-(Stage 3). Nested folds are allowed — the store is a set, consumers collapse
-the union.
+mutate it; the daemon grid renderer reads it directly (Stage 2); the semantic
+producer ships it as `FoldState` to GPU sessions (Stage 3). Nested folds are
+allowed; the store is **shared by every attached frontend** (Emacs parity).
 
-The store is **shared by every attached frontend** (Emacs parity): folds are a
-document-level view fact, not per-window. Per-cursor consequences of that
-sharing are pinned in §5 (F5).
+## 5. Fold model semantics (Q#FD3, Q#FD5, Q#FD6, Q#FD8)
 
-## 5. Fold model semantics (Q#FD3, Q#FD5, Q#FD6)
-
-**Stored range = line-aligned interior (Q#FD3, F2).** A fold is identified by
-its **head line** H. The stored/shipped byte range is the **hidden interior**:
-from the newline that terminates H through the end of the last source line the
-folded region spans. So:
-
-- H (with its opener, e.g. `fn foo() {`) **stays visible**, with a
-  frontend-drawn ellipsis at its end.
-- The interior lines **and the closing-delimiter line** (`}`) are **hidden**
-  — the range ends at the end of the line containing the region's last byte.
-- The structural source yields a raw node span `[node.start, node.end)`; the
-  store **normalizes** it to this line-aligned interior before anything else
-  (renderer, wire, `folds()`) sees it. One normalized form, one meaning,
-  everywhere — resolving the R1 §5/§7 contradiction.
+**Stored range = line-aligned hidden interior (Q#FD3).** A fold is identified
+by its **head line** (the introducer, §3 step 2), which stays visible with a
+frontend-drawn ellipsis. The stored byte range is `[end of head line, end of
+the last hidden line]`, where the last hidden line is chosen by §3 step 3 —
+so a **closing-delimiter line stays visible** (fixing `} else {`), while a
+delimiter-less node hides through its last body line. One normalized form is
+computed by the source and seen identically by the store, the grid renderer,
+the wire, and `folds()`.
 
 **Point and folds (Q#FD3, F5).**
-- Folding a range that contains the **invoking frontend's** point moves that
-  point to the head line H (Emacs `hs-minor-mode`).
-- The store is shared, so **another** frontend's cursor may already sit inside
-  a newly folded range. "A cursor cannot sit inside a fold" is a **per-cursor,
-  render-time** invariant: on that frontend's next frame the caret clamps to H
-  (a Stage 2/3 rendering concern). In **Stage 1** there is no motion-awareness
-  (deferred to Stage 2/3), so the invariant is **creation-time-only**: folding
-  moves the invoking point out, but later motion re-entering a fold is not yet
-  prevented. Acceptance is written to that scope so it cannot self-contradict.
+- Folding a range containing the **invoking frontend's** point moves that
+  point to the head line.
+- The store is shared, so another frontend's cursor may sit inside a newly
+  folded range. "No cursor inside a fold" is a **per-cursor, render-time**
+  invariant (its caret clamps to the head on that frontend's next frame — a
+  Stage 2/3 concern). In **Stage 1** there is no motion-awareness, so the
+  invariant is **creation-time-only**; acceptance is scoped to that so it
+  cannot self-contradict.
 
-**Edits and folds (Q#FD5, Q#FD6, F5).** The store's buffer-attached `View`
-(F3) sees every edit:
-- An **interactive edit at the invoking frontend whose point is inside a
-  fold** unfolds that fold first — you cannot type into hidden text you cannot
-  see.
-- A **programmatic or remote edit** (a peer CRDT op, an LSP workspace edit, a
-  Lua buffer edit) **translates** the fold through the `View`, keeping it
-  folded — it is not a person typing into the hidden region.
-- A fold whose head or tail an edit **destroys** (e.g. the head line deleted,
-  or the range collapses below one hidden line) is **dropped**, not
-  re-anchored — a fold is view state, never data.
+**Edits and folds — two separated mechanisms (Q#FD5, Q#FD6, R2-2, R2-3).**
+- The store's buffer-attached `View` does **translation and drop only**, and
+  is **provenance-blind**: on every edit it translates each fold's range, and
+  **drops** any fold whose head/tail the edit destroys or whose interior
+  collapses below one line. It cannot unfold-on-typing because `Edit` carries
+  no frontend and no point (R2-2).
+- **Unfolding on an interactive edit is a pre-edit step at the dispatch layer**
+  (which holds the authenticated frontend and its point): before applying an
+  edit that a frontend is making at its point, unfold **every** fold
+  containing that point (plural — minor a). The classifier is the
+  **authenticated source frontend's point, not the transport** (R2-3): a GPU
+  user's CRDT-op insert at a point inside a fold is interactive and must
+  unfold, even though it arrives as a CRDT op. **Stage 1 implements this for
+  the command path** (daemon `dispatch_key` self-insert/delete, which has the
+  frontend + point); **CRDT-origin unfold is a Stage 3 obligation**, wired
+  when the GPU renders folds and a GPU user can type into one.
 
-**Store lifecycle vs producer baseline (Q#FD8, F3).** Two distinct resets,
-previously conflated:
+**Store lifecycle vs producer baseline (Q#FD8, F3, R2-4).** Three coupled
+resets, kept distinct:
 - The **per-session producer suppression baseline** resets on `BufferSnapshot`
-  so the fold set is re-shipped to a (re)joining semantic session — the
-  established producer discipline.
-- The **per-buffer fold store** is dropped or revalidated on buffer **content
-  replacement** (revert/reload): the ranges describe bytes that no longer
-  exist, so revert clears the store (revalidation against the new content is a
-  §11 refinement).
+  so the fold set is re-shipped to a (re)joining semantic session.
+- The **per-buffer store** is dropped on buffer **content replacement**
+  (revert/reload) — its ranges name bytes that no longer exist (revalidation
+  is a §11 refinement).
+- **The frontend fold mirror must clear on `BufferSnapshot` (R2-4, Stage 3
+  obligation).** Revert simultaneously drops the store, emits a snapshot, and
+  resets the baseline, so the producer sees an empty store with a fresh
+  baseline and correctly suppresses it as "initial empty" — which means the
+  GPU keeps rendering pre-revert folds **unless its snapshot arm clears fold
+  state**, exactly as it already clears spans/decorations. The
+  empty-after-snapshot suppression is correct **only because** the snapshot
+  clears the frontend mirror; this pairing is load-bearing and is pinned in
+  acceptance 7.
 
 ## 6. Lua command surface and validation (Q#FD4, Q#FD11)
 
 **Interactive commands** (resolve to the invoking frontend's active-window
-buffer — command context, not ambient resolution):
+buffer — command context, not ambient resolution). On a head line shared by
+more than one fold, they act **innermost-first** (minor b):
 
-- `fold.toggle` — fold the enclosing foldable region at point, or unfold if
-  point's line is a fold head.
-- `fold.close` / `fold.open` — explicit fold/unfold at point.
-- `fold.close-all` / `fold.open-all` — fold every **top-level** foldable
-  region (Emacs `hs-hide-all` parity — nested regions are not auto-folded;
-  see B2) / clear the fold set.
+- `fold.toggle`, `fold.close`, `fold.open`, `fold.close-all`, `fold.open-all`.
+- `close-all` folds **top-level** foldable regions only (Emacs `hs-hide-all`
+  parity — nested regions are not auto-folded; feeds B2). `open-all` clears.
 
 **Data API (Q#FD4, F6): explicit buffer, no ambient resolution** (matching
-#127's deliberate refusal of ambient-buffer lookup):
+#127): `pmacs.fold.fold(buffer, range)`, `unfold(buffer, range)`,
+`folds(buffer)`, `toggle(buffer, pos)`.
 
-- `pmacs.fold.fold(buffer, range)`, `unfold(buffer, range)`,
-  `folds(buffer) -> {range,...}`, `toggle(buffer, pos)`.
+**Validation (Q#FD11, F6).** `fold(buffer, range)` rejects unless: the buffer
+is a normal document buffer; both endpoints are UTF-8 boundaries; and the
+range normalizes to **≥1 hidden line**. Q#FD9 (terminals never fold) follows
+from the last clause (minor c): `(0,0)` on an empty terminal identity buffer
+is technically in-bounds, but it normalizes to zero hidden lines and is
+rejected — no special case.
 
-**Validation (Q#FD11, F6).** `fold(buffer, range)` validates and rejects
-otherwise: the buffer exists and is a normal document buffer; the range is
-in-bounds; both endpoints are UTF-8 char boundaries; the range normalizes
-(§5) to **at least one hidden line**. This validation is what makes Q#FD9
-hold: a terminal identity buffer is empty, so every range is out-of-bounds and
-rejected — no fold can be stored on a terminal even from Lua, with no special
-case.
-
-Bindings are left for this review round — Emacs uses `C-x C-z` / `hs-*` /
-outline `C-c @`; pmacs has no precedent, so the binding is the user's call.
+Bindings remain the user's call (Emacs has no single convention).
 
 ## 7. Frontend collapse + gutter marker (Q#FD7)
 
-Two paths (F1):
-
-- **Grid TUI — daemon-rendered.** The daemon grid renderer reads the fold
-  store directly and omits each fold's hidden interior from the cells it
-  paints, showing H with an ellipsis; it draws the gutter fold glyph on H.
-  No wire, same shape as vterm Stage 2's daemon-painted terminal cells.
+- **Grid TUI — daemon-rendered.** The daemon grid renderer reads the store and
+  omits each fold's hidden lines, showing the head line with an ellipsis and a
+  gutter fold glyph. No wire (the vterm Stage 2 shape).
 - **Semantic GPU — wire-fed.** The GPU receives `FoldState`, excludes the
-  hidden bytes from its shaped code slice, shows H with an ellipsis, and draws
-  the fold glyph on H. Caret/hit-test gain a fold-aware step (the largest
-  per-frontend cost, and why the GPU is its own stage).
+  hidden bytes from its shaped slice, shows the head + ellipsis + fold glyph,
+  and makes caret/hit-test fold-aware. It also clears its fold mirror on
+  `BufferSnapshot` (R2-4).
 
-In both paths the placeholder is **frontend-local** (an ellipsis / ` ⋯ N
-lines `), **not** a `BlockAdornment` — Q#FD7 keeps `BlockAdornments`
-unproduced. The gutter marker is derived from the fold set per path, like the
-diagnostic sign bars — no new wire type.
+The placeholder is frontend-local (not a `BlockAdornment`); the gutter marker
+is derived per path like the diagnostic sign bars — no new wire type.
 
 ## 8. Staging and scope
 
-Mirrors vterm; reworked for F1 (the TUI path is daemon-side, not a wire
-consumer).
-
-- **Stage 1 — fold engine (instance), headless.** The per-buffer fold store +
-  its buffer-attached translating `View`; the structural fold source with the
-  stale-tree rule; the Lua data API + interactive commands + validation;
-  `FoldState` production for semantic sessions (authoritative-empty,
-  diff-suppressed); and headless acceptance. No rendering — folds are asserted
-  in the store and on the wire, not on screen. **Approval-critical.**
+- **Stage 1 — fold engine (instance), headless.** The per-buffer store + its
+  translating/dropping `View`; the structural source with head selection,
+  closer-aware tail, and the stale-tree rule; the Lua data API + interactive
+  commands + validation; the **command-path pre-edit unfold**; `FoldState`
+  production (authoritative-empty, diff-suppressed); headless acceptance. No
+  rendering. **Approval-critical.**
 - **Stage 2 — grid (daemon-rendered) collapse + gutter marker.** The daemon
-  grid renderer collapses folded interiors and draws the TUI gutter fold glyph
-  + head placeholder; caret handling clamps to H. Instance-side rendering
-  work; no wire change.
+  grid renderer collapses folded interiors and draws the TUI gutter glyph +
+  head placeholder; caret clamps to the head. **Must also make the
+  daemon-computed `LineNumbers` family fold-aware** (skipped lines; relative
+  distance measured across a fold), **count visible lines in viewport/scroll
+  accounting**, and **clamp-to-head-or-drop diagnostic signs on hidden lines**
+  (minor d).
 - **Stage 3 — GPU collapse + gutter marker.** The GPU consumes `FoldState`,
-  excludes folded bytes from its shaped slice, draws the fold glyph and makes
-  caret/hit-test fold-aware, at TUI parity.
+  excludes folded bytes, draws the glyph, makes caret/hit-test fold-aware at
+  TUI parity, **clears the fold mirror on `BufferSnapshot`** (R2-4), wires
+  **CRDT-origin interactive unfold** (R2-3), and applies the same
+  hidden-line rules to **peer-presence rects and line numbers** (minor d).
 
-Stages 2–3 are sketched here and re-framed in detail after Stage 1 lands.
-This framing asks approval for the architecture and Stage 1's full detail.
+Stages 2–3 are sketched; each is re-framed in detail after the prior stage
+lands. This framing asks approval for the architecture and Stage 1's detail.
 
 ## 9. Numbered decisions
 
-- **Q#FD1** Fold source: structural tree-sitter node folding (v1);
-  indentation fallback and curated queries deferred. (§3)
+- **Q#FD1** Structural node folding: match block-like node ≥2 source lines →
+  **ascend to the introducer head** → **closer-aware tail** (closing-delimiter
+  line kept visible; delimiter-less nodes hide through the last body line);
+  stale/absent tree refuses. Indentation and curated queries deferred. (§3)
 - **Q#FD2** Fold state is instance-side, per-buffer, a set of ranges, shared
-  by all frontends; nested folds allowed. (§4)
-- **Q#FD3** Stored range is the line-aligned hidden interior (head line
-  visible, closing-delimiter line hidden); the invoking point moves to the
-  head; "no cursor inside a fold" is a per-cursor render-time invariant,
-  creation-time-only in Stage 1. (§5)
-- **Q#FD4** Interactive commands `fold.toggle/close/open/close-all/open-all`
-  (invoking frontend's active buffer); data API `pmacs.fold.*` takes an
-  explicit buffer, no ambient resolution; bindings decided in review. (§6)
-- **Q#FD5** Interactive edit with point inside a fold unfolds it first;
-  programmatic/remote edits translate the fold. (§5)
+  by all frontends; nested allowed. (§4)
+- **Q#FD3** Stored range = line-aligned hidden interior; head line visible;
+  closer line visible for closer-terminated nodes; invoking point moves to the
+  head; no-cursor-inside is per-cursor render-time, creation-time-only in
+  Stage 1. (§5)
+- **Q#FD4** Interactive commands (invoking frontend's buffer, innermost-first
+  on shared heads); data API takes an explicit buffer, no ambient resolution;
+  bindings decided by the user. (§6)
+- **Q#FD5** The store `View` translates + drops only (provenance-blind); the
+  **pre-edit interactive unfold** lives at the dispatch layer, keyed on the
+  authenticated source frontend's point (not transport), unfolding **every**
+  fold containing it; Stage 1 = command path, CRDT-origin = Stage 3. (§5)
 - **Q#FD6** A fold whose head/tail an edit destroys is dropped, not
   re-anchored. (§5)
-- **Q#FD7** Placeholder + gutter marker are frontend-local per path; the TUI
-  path is daemon-rendered, the GPU path wire-fed; `BlockAdornments` stays
-  unproduced; no new wire type. (§7)
-- **Q#FD8** `FoldState` (to semantic sessions only) is whole-buffer,
+- **Q#FD7** Placeholder + gutter marker are frontend-local per path (TUI
+  daemon-rendered, GPU wire-fed); `BlockAdornments` stays unproduced; no new
+  wire type. (§7)
+- **Q#FD8** `FoldState` (semantic sessions only) is whole-buffer,
   authoritative-empty (initial empty suppressed until a fold exists; unchanged
-  suppressed; non-empty→empty emits exactly one empty frame), and its
-  per-session baseline resets on `BufferSnapshot`. The per-buffer STORE is a
-  separate lifecycle, dropped on buffer content replacement. (§5, §8)
-- **Q#FD9** Terminal identity buffers never fold — guaranteed by validation
-  (empty buffer ⇒ out-of-bounds ⇒ rejected), not a special case. (§6)
-- **Q#FD10** Fold creation against a `None` or stale
-  (`pending_edit_count() > 0`) parse tree refuses with a message; no fold is
-  stored. (§3)
-- **Q#FD11** Explicit-`fold(buffer, range)` validates buffer kind, bounds,
-  UTF-8 boundaries, and ≥1 hidden line; rejects otherwise. (§6)
+  suppressed; non-empty→empty emits exactly one empty frame); its per-session
+  baseline resets on `BufferSnapshot`; the STORE drops on content replacement;
+  **the GPU fold mirror must clear on `BufferSnapshot`** or empty-after-revert
+  suppression leaves stale folds (#120 class). (§5, §8)
+- **Q#FD9** Terminals never fold — from the ≥1-hidden-line validation, not
+  from bounds. (§6)
+- **Q#FD10** Fold creation against a `None`/stale parse tree refuses. (§3)
+- **Q#FD11** `fold(buffer, range)` validates buffer kind, UTF-8 boundaries,
+  ≥1 hidden line; rejects otherwise. (§6)
 
 ## 10. Bets
 
-- **B1** "Nearest enclosing block-like node spanning ≥2 source lines" is
-  predictable enough for a v1 fold without curated queries. FALSIFIABLE: if the
-  review finds the fold target surprising on real Rust/Python, fall back to
-  curated queries for Tier-1 languages.
-- **B2** Whole-buffer `FoldState` is cheap: folds are a handful, and
-  `close-all` folds **top-level only** (Q#FD4), so the set is O(top-level
-  blocks), far below the style-span volume the producer already ships. No
-  viewport scoping.
-- **B3** The two collapse paths reuse existing machinery: the daemon grid
-  renderer already paints cells from instance state (vterm Stage 2), and the
-  GPU already has a projected↔source map for adornments — neither needs a new
-  layout engine.
+- **B1** The block-kind heuristic (§3 step 1) picks a fold *target* users find
+  natural. FALSIFIABLE on real Rust/Python; fallback is curated Tier-1
+  queries. (Head selection and closer-aware tail are now decided, not bet.)
+- **B2** Whole-buffer `FoldState` is cheap: folds are a handful, `close-all`
+  is top-level only, so the set is O(top-level blocks). No viewport scoping.
+- **B3** Both collapse paths reuse existing machinery (daemon cell painting;
+  the GPU's projected↔source map) — no new layout engine.
 
 ## 11. Deferred (named)
 
 - Indentation folding for grammarless buffers (Q#FD1 (C)).
 - Curated per-language fold queries (Q#FD1 (A)).
-- Translate-a-node-range-through-pending-edits so fold creation need not refuse
-  on a stale tree (Q#FD10 refinement).
-- Fold-store revalidation against new content on revert/reload (Q#FD8: v1
-  drops the store).
-- Persisted folds across sessions (saveplace-style).
-- `fold.hide-level N` / outline-style folding by depth; auto-fold-on-open.
+- Translate-a-node-range-through-pending-edits so creation need not refuse on a
+  stale tree (Q#FD10 refinement).
+- Fold-store revalidation against new content on revert/reload (v1 drops it).
+- Persisted folds across sessions; `fold.hide-level N`; auto-fold-on-open.
 - `BlockAdornments` production (rich placeholders, diff zones, blame bands).
-- **Git gutter markers** — the sibling gutter rider; separate diff source,
-  separate framing.
+- **Git gutter markers** — the sibling gutter rider; separate diff source.
 - Search revealing folds (a match inside a fold auto-unfolds) — Stage 2+.
 
 ## 12. Acceptance — Stage 1 (engine)
 
-1. **Structural source.** At a point inside a multi-line block, the source
-   returns the enclosing block-like node normalized to its line-aligned
-   interior; at top level it returns the enclosing item; in a grammarless
-   buffer it returns nothing (fallback deferred).
+1. **Head selection, both grammar shapes (R2-1).** In Rust `fn foo() { … }`,
+   a point in the body folds with head line `fn foo() {`. In Python
+   `def foo(): / body`, a point in the body folds with head line `def foo():`
+   — **not** a body line. `close-all` on each yields the introducer as head.
 2. **Stale/absent tree (Q#FD10).** With `current() == None`, and with
    `pending_edit_count() > 0` after an edit before settle, `fold.toggle`
    refuses and stores nothing; after settle it succeeds.
 3. **Commands.** `fold.toggle` folds the enclosing region and unfolds on a
-   fold head; `close-all` folds every top-level block-like region (nested not
-   auto-folded); `open-all` clears.
-4. **Range semantics (Q#FD3).** The stored/shipped range is the line-aligned
-   interior: the head line's bytes are outside it, the closing-delimiter line
-   is inside it; `folds(buffer)` returns exactly the normalized ranges.
+   head; `close-all` folds top-level regions only (a nested inner region is
+   not auto-folded); `open-all` clears.
+4. **Range semantics (Q#FD3, R2-5).** For a brace node the closing-delimiter
+   line is **outside** the stored range (stays visible) and a `} else {` case
+   keeps `else {` visible; for a Python node the last body line is **inside**
+   the range (hidden). `folds(buffer)` returns exactly the normalized ranges.
 5. **Point (Q#FD3).** Folding a range containing the invoking point moves it
-   to the head; the creation-time-only scope holds (Stage 1 does not prevent
-   later motion into a fold).
-6. **Edits (Q#FD5/Q#FD6).** An interactive edit at a point inside a fold
-   unfolds it; a programmatic edit inside a fold translates it; an edit
-   deleting the head drops it; each leaves a consistent set.
-7. **`FoldState` production (Q#FD8, F7).** The flipped pin test asserts all
-   three transitions to a semantic session — nothing until a fold exists,
+   to the head; Stage 1 does not prevent later motion into a fold.
+6. **Edits — separated mechanisms (Q#FD5/Q#FD6, R2-2/3).** The store `View`
+   translates a fold across a programmatic edit inside it and drops a fold
+   whose head an edit deletes — with no knowledge of source. A command-path
+   self-insert at a point inside a fold (or inside **nested** folds) unfolds
+   **all** of them before the edit applies. (CRDT-origin unfold is asserted in
+   Stage 3.)
+7. **`FoldState` production (Q#FD8, F7, R2-4).** The flipped pin test asserts
+   all three transitions to a semantic session — nothing until a fold exists,
    nothing when unchanged, exactly one empty frame after `open-all` — while
    `BlockAdornments` is still never emitted; the per-session baseline resets on
-   `BufferSnapshot`.
+   `BufferSnapshot`. The test documents that empty-after-snapshot suppression
+   is correct only paired with the Stage 3 frontend-mirror clear.
 8. **Store lifecycle.** Buffer content replacement (revert) drops the store.
 9. **Nested folds.** Folding an inner then an outer region yields two ranges;
-   `open-all` clears both.
-10. **Injected layer (§3 injection-coverage claim).** A fold sourced inside an
-    injected layer — a fenced code block in a markdown buffer — returns the
-    inner block's range, proving the source walks injection layers, not just
-    the root tree.
-11. **Lua data API (Q#FD4/Q#FD11).** `pmacs.fold.fold/unfold/folds/toggle`
-    with an explicit buffer drive all of the above and round-trip `folds()`;
-    an out-of-bounds, non-boundary, or sub-one-line range is rejected; a fold
-    on a terminal identity buffer is rejected (Q#FD9).
+   `open-all` clears both; a shared head line toggles innermost-first.
+10. **Injected layer.** A fold sourced inside an injected layer — a fenced
+    code block in a markdown buffer — returns the inner block's range, proving
+    the source walks injection layers, not just the root tree.
+11. **Lua data API (Q#FD4/Q#FD11).** `pmacs.fold.*` with an explicit buffer
+    drives the above and round-trips `folds()`; an out-of-bounds,
+    non-boundary, or sub-one-line range is rejected; a fold on a terminal
+    identity buffer is rejected via the ≥1-hidden-line rule (Q#FD9).
 
 ## 13. Gates (Stage 1)
 
-The standing suite: `cargo fmt --check`; strict workspace Clippy; `cargo test
---lib` and `--features crdt`; the new `tests/folding_acceptance.rs` (default +
-CRDT); `cargo test --test m4_acceptance -- --skip basedpyright`;
-`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`; the workspace sweep; `git diff
---check`. New behavioral acceptance is bite-verified with `scripts/bite`.
+`cargo fmt --check`; strict workspace Clippy; `cargo test --lib` and
+`--features crdt`; `tests/folding_acceptance.rs` (default + CRDT); `cargo test
+--test m4_acceptance -- --skip basedpyright`; `PMACS_REQUIRE_GPU=1 cargo test
+-p pmacs-gpu`; the workspace sweep; `git diff --check`. New behavioral
+acceptance is bite-verified with `scripts/bite`.
 
 ## 14. Branch and PR plan
 
-Branch `folding`, worktree `../pmacs-folding`, cut from canonical `main` @
-`cac4961`. This framing (rev 1 → rev 2) is its opening commits. After approval,
-Stage 1 implements on this same branch and opens as the first folding PR.
-Stages 2 and 3 are separate branches/PRs off the main resulting from the prior
-stage, each with its own detailed framing.
+Branch `folding`, worktree `../pmacs-folding`, off canonical `main` @
+`cac4961`. This framing (rev 1 → rev 3) is its opening commits. After
+approval, Stage 1 implements on this same branch and opens as the first
+folding PR. Stages 2 and 3 are separate branches/PRs off the main resulting
+from the prior stage, each with its own detailed framing.
