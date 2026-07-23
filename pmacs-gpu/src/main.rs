@@ -896,6 +896,7 @@ fn run_headless_managed_probe(socket: &Path, report: &Path, daemon_executable: &
                 if disconnect.is_empty() {
                     "attach event channel closed".clone_into(&mut disconnect);
                 }
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
 
@@ -1029,6 +1030,18 @@ OPTIONS:
 
 /// Strict parser for direct, managed, and headless GPU entry points.
 fn parse_args(args: &[String]) -> Result<Mode, String> {
+    if let [flag, operands @ ..] = args
+        && matches!(
+            flag.as_str(),
+            "--attach" | "--managed-attach" | "--headless-probe" | "--headless-managed-probe"
+        )
+        && let Some(operand) = operands.iter().find(|operand| operand.starts_with('-'))
+    {
+        return Err(format!(
+            "{flag} received option-like path operand {operand}; prefix it with ./ if it is a path"
+        ));
+    }
+
     match args {
         [flag] if flag == "--help" || flag == "-h" => Ok(Mode::Help),
         [flag] if flag == "--version" || flag == "-V" => Ok(Mode::Version),
@@ -14314,6 +14327,15 @@ mod tests {
             ],
             vec!["--managed-attach", "/tmp/pmacs.sock"],
             vec!["--headless-managed-probe", "/tmp/pmacs.sock", "/tmp/report"],
+            vec!["--attach", "--help"],
+            vec!["--managed-attach", "/tmp/pmacs.sock", "--version"],
+            vec!["--headless-probe", "/tmp/pmacs.sock", "--help"],
+            vec![
+                "--headless-managed-probe",
+                "/tmp/pmacs.sock",
+                "/tmp/report",
+                "--version",
+            ],
             vec!["research"],
         ];
         for values in invalid {
@@ -14326,6 +14348,9 @@ mod tests {
                 "accepted invalid argv: {values:?}"
             );
         }
+        let error = parse_args(&["--attach".to_owned(), "--help".to_owned()])
+            .expect_err("option-like socket operand must fail");
+        assert!(error.contains("option-like path operand --help"));
     }
 
     #[test]

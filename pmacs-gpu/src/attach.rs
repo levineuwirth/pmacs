@@ -649,7 +649,10 @@ fn start_daemon_reaper(mut child: Child, facts: ManagedDaemonFacts) {
         .expect("spawn managed daemon reaper thread");
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "connector, spawner, timing, and sink stay injectable for deterministic lifecycle tests"
+)]
 fn connect_managed_inner<C, S, F>(
     socket_path: &Path,
     daemon_executable: &Path,

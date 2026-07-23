@@ -25,8 +25,11 @@ fn write_script(path: &Path, body: &str) {
 
 #[cfg(not(feature = "crdt"))]
 #[test]
-fn non_crdt_root_rejects_gpu_before_discovery_or_spawn() {
+fn non_crdt_root_rejects_gpu_before_socket_io_discovery_or_spawn() {
     let temp = secure_tempdir();
+    let runtime = temp.path().join("runtime");
+    fs::create_dir(&runtime).expect("create runtime");
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).expect("chmod runtime 0700");
     let fake_gpu = temp.path().join("fake-gpu");
     let marker = temp.path().join("spawned");
     write_script(&fake_gpu, "touch \"$PMACS_TEST_MARKER\"");
@@ -35,18 +38,41 @@ fn non_crdt_root_rejects_gpu_before_discovery_or_spawn() {
         .arg("--gpu")
         .env(TEST_GPU_OVERRIDE, &fake_gpu)
         .env("PMACS_TEST_MARKER", &marker)
+        .env("XDG_RUNTIME_DIR", &runtime)
         .output()
         .expect("run non-CRDT pmacs --gpu");
     assert!(!output.status.success());
+    assert!(!marker.exists(), "GPU executable must not be spawned");
     assert!(
-        !marker.exists(),
-        "GPU executable must not be discovered or spawned"
+        !runtime.join("pmacs/default.sock").exists(),
+        "the CRDT gate must run before default-socket creation"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--features crdt"),
         "unexpected stderr: {stderr}"
     );
+
+    let occupied_socket = temp.path().join("occupied.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&occupied_socket).expect("bind occupied socket");
+    let occupied = Command::new(env!("CARGO_BIN_EXE_pmacs"))
+        .args(["--gpu", "--socket"])
+        .arg(&occupied_socket)
+        .env(TEST_GPU_OVERRIDE, &fake_gpu)
+        .env("PMACS_TEST_MARKER", &marker)
+        .output()
+        .expect("run non-CRDT pmacs --gpu against occupied socket");
+    assert!(!occupied.status.success());
+    assert!(
+        !marker.exists(),
+        "live socket must not weaken the CRDT gate"
+    );
+    assert!(
+        occupied_socket.exists(),
+        "live socket must remain untouched"
+    );
+    drop(listener);
 }
 
 #[cfg(feature = "crdt")]
@@ -62,8 +88,10 @@ mod crdt {
 
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
+    use pmacs::cell::CellSize;
     use pmacs::protocol::{
-        FrontendId, Hello, InstanceCapabilities, InstanceIdentity, PROTOCOL_VERSION,
+        AttachRequest, FrontendCapabilities, FrontendEvent, FrontendId, Hello,
+        InstanceCapabilities, InstanceIdentity, InstanceMessage, PROTOCOL_VERSION,
     };
     use pmacs::transport::{read_message, write_message};
 
@@ -143,6 +171,45 @@ mod crdt {
             thread::sleep(Duration::from_millis(20));
         }
         panic!("daemon did not listen on {}", socket.display());
+    }
+
+    fn attach_surviving_frontend(socket: &Path) -> (FrontendId, UnixStream) {
+        let mut stream = UnixStream::connect(socket).expect("connect surviving frontend");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set surviving frontend timeout");
+        let hello: Hello = read_message(&mut stream).expect("surviving frontend Hello");
+        write_message(
+            &mut stream,
+            &AttachRequest {
+                protocol_version: PROTOCOL_VERSION,
+                frontend_capabilities: FrontendCapabilities {
+                    multi_frontend: true,
+                    crdt_replica: true,
+                    ..FrontendCapabilities::default()
+                },
+                initial_size: CellSize::new(24, 80),
+            },
+        )
+        .expect("attach surviving frontend");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_snapshot = false;
+        let mut saw_full_grid = false;
+        while !(saw_snapshot && saw_full_grid) {
+            assert!(
+                Instant::now() < deadline,
+                "surviving frontend did not initialize"
+            );
+            match read_message::<InstanceMessage>(&mut stream).expect("initialize survivor") {
+                InstanceMessage::BufferSnapshot { .. } => saw_snapshot = true,
+                InstanceMessage::CellDelta {
+                    full_grid: true, ..
+                } => saw_full_grid = true,
+                _ => {}
+            }
+        }
+        (hello.assigned_frontend_id, stream)
     }
 
     fn spawn_daemon(socket: &Path, envs: &[(&str, &str)]) -> Child {
@@ -234,7 +301,10 @@ mod crdt {
             self.stdin.take();
             let _ = self.child.kill();
             let _ = self.child.wait();
-            if let Some(pid) = self.daemon_pid {
+            let daemon_reaped = fs::read_to_string(&self.report)
+                .ok()
+                .is_some_and(|report| report.lines().any(|line| line == "daemon_reaped=true"));
+            if !daemon_reaped && let Some(pid) = self.daemon_pid {
                 signal_pid(pid, Signal::SIGTERM);
             }
         }
@@ -440,13 +510,37 @@ mod crdt {
         let mut launcher = command.spawn().expect("spawn launcher process group");
         let facts = wait_for_fact(&report, "phase", "ready", Duration::from_secs(10));
         let daemon_pid = facts["daemon_pid"].parse::<u32>().expect("daemon pid");
+        let (survivor_id, mut survivor) = attach_surviving_frontend(&socket);
 
         kill(Pid::from_raw(-launcher.id().cast_signed()), Signal::SIGINT)
             .expect("signal launcher group");
         let _ = wait_for_exit(&mut launcher, Duration::from_secs(5));
-        let mut stream = UnixStream::connect(&socket).expect("daemon survived launcher Ctrl-C");
-        let hello: Hello = read_message(&mut stream).expect("surviving daemon Hello");
-        assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+
+        write_message(
+            &mut survivor,
+            &FrontendEvent::Resize {
+                frontend_id: survivor_id,
+                size: CellSize::new(31, 91),
+            },
+        )
+        .expect("resize surviving frontend after launcher Ctrl-C");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "pre-signal frontend did not render after launcher Ctrl-C"
+            );
+            if matches!(
+                read_message::<InstanceMessage>(&mut survivor)
+                    .expect("read surviving frontend after launcher Ctrl-C"),
+                InstanceMessage::CellDelta {
+                    full_grid: true,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
         signal_pid(daemon_pid, Signal::SIGTERM);
     }
 
@@ -608,6 +702,7 @@ mod crdt {
         for argv in [
             vec!["--attach"],
             vec!["--attach", "/tmp/x.sock", "ignored"],
+            vec!["--attach", "--help"],
             vec!["unexpected"],
         ] {
             let output = Command::new(gpu_binary())
