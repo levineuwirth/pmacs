@@ -3589,7 +3589,9 @@ mod tests {
 
         let mut editor = EditorState::new();
         let fid = FrontendId(99);
-        let view = build_fresh_frontend_view(&mut editor);
+        // Both these fixtures model a SEMANTIC session (Q#FD21: no fold
+        // projection until Stage 3).
+        let view = build_fresh_frontend_view(&mut editor, false);
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         let before = editor
@@ -3650,7 +3652,9 @@ mod tests {
 
         // Attach: window shares LOCAL's active (scratch).
         let fid = FrontendId(99);
-        let view = build_fresh_frontend_view(&mut editor);
+        // Both these fixtures model a SEMANTIC session (Q#FD21: no fold
+        // projection until Stage 3).
+        let view = build_fresh_frontend_view(&mut editor, false);
         editor.core.borrow_mut().register_frontend_view(fid, view);
         assert_eq!(
             editor
