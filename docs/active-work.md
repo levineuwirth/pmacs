@@ -14,8 +14,8 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `96d0bae` (documentation refresh #140 atop Vterm
-  Stage 3 #135 and tab-width parity #137; protocol v19).
+  `githubsucks/main` @ `63fbc66` (one-command GPU invocation #141 atop
+  documentation refresh #140; protocol v19).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -49,52 +49,8 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `96d0bae` or a newer intentional main.
+The first command must expose `63fbc66` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
-
-## Active lane: one-command GPU invocation
-
-- Portable branch: `githubsucks/gpu-invocation`
-- Pull request: **#141 OPEN — do not merge without explicit user approval.**
-- Base: `githubsucks/main` @ `96d0bae`; protocol remains v19.
-- Implementation checkpoints: `154cb9f` (second implementation-review fixes)
-  atop `69825d0` (exception-safe immediate reaper ownership), `82355ca`
-  (first implementation-review fixes), and `6fd5834`; approved framing began
-  at `821835b` and is now Revision 6.
-- State: both implementation reviews are resolved, all 18 acceptance criteria
-  complete, and the PR awaits user review. Public path is additive
-  `pmacs --gpu [--socket NAME|PATH]`; bare `pmacs [FILE]` remains TUI and
-  `pmacs --gpu FILE` remains rejected.
-- Review fixes: pre-state GPU events are buffered until winit state exists;
-  daemon stdio is detached; spawned-child ownership is handed off without a
-  leak window; direct CLI guidance, help/path operands, and sibling-file
-  discovery are strict; transient retry, timeout reporting, hermetic socket
-  paths, deterministic concurrent-loser reaping, pre-I/O non-CRDT gating, and
-  post-SIGINT use of a pre-attached frontend have behavioral coverage. Probe
-  disconnect polling remains bounded and cleanup skips already-reaped PIDs.
-- Verification: strict workspace and CRDT acceptance Clippy; 1,768 default +
-  1,944 CRDT library tests; root CLI 33; GPU 149 required; GPU invocation
-  acceptance 1 default + 9 CRDT; Vterm Stage 3 7; M4 121 with 3 ignored and
-  the requested `basedpyright` skip; full workspace 2,961 across 85 suites
-  with 19 ignored and 1 requested skip; formatting and diff check clean.
-  Unified release build passed. Two real Wayland/Vulkan launches attached at
-  protocol v19; the second reused the daemon retained after the first GPU
-  process exited.
-- Distribution remains source-checkout/workspace oriented: `pmacs-gpu` is
-  still unpublished. No install/service packaging claim was added.
-
-Recovery:
-
-```sh
-git fetch githubsucks --prune
-git worktree add --track \
-  -b gpu-invocation \
-  ../pmacs-gpu-invocation \
-  githubsucks/gpu-invocation
-cd ../pmacs-gpu-invocation
-cargo build -p pmacs-gpu
-cargo test --features crdt --test gpu_invocation_acceptance
-```
 
 ## Parked lane: kill-ring browser + persistence
 
