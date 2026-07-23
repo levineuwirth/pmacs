@@ -231,8 +231,12 @@ impl FoldStore {
                     start: shift(s),
                     end: shift(e),
                 })
-            } else if os >= e {
-                // Strictly after the fold (an insert at exactly `e` too).
+            } else if os > e || (os == e && old_len == 0) {
+                // Strictly after the fold, OR a pure insert at exactly `e`
+                // (left outside). A *delete* starting at `e` removes the
+                // `\n` that `e` names — the terminator of the last hidden
+                // line — so it destroys the tail and falls through to the
+                // drop arm below, symmetric with the head side.
                 Some(ByteRange { start: s, end: e })
             } else if os > s && oe < e {
                 // Strictly inside the interior — the fold still hides a
@@ -348,12 +352,22 @@ impl FoldRegistry {
     }
 
     /// Drop the buffer's store and detach its translator view — the
-    /// content-replacement (revert/reload) and buffer-close reset. Named
-    /// bytes no longer exist, so revalidation is not attempted (Q#FD8).
+    /// content-replacement (revert/reload) reset, where the buffer survives
+    /// but its bytes are replaced wholesale, so the view must come off too
+    /// (a later fold re-attaches a fresh one). Named bytes no longer exist,
+    /// so revalidation is not attempted (Q#FD8, framing acceptance 8).
     pub fn forget(&self, buffer: &mut Buffer) {
         if let Some(entry) = self.stores.borrow_mut().remove(&buffer.id()) {
             buffer.detach_view(entry.view);
         }
+    }
+
+    /// Drop the store for a buffer that has already been removed (the
+    /// `pmacs.buffer.kill` path). The buffer — and its attached translator
+    /// view — is gone, so only the map entry needs clearing; there is no
+    /// view to detach.
+    pub fn forget_buffer(&self, buf: BufferId) {
+        self.stores.borrow_mut().remove(&buf);
     }
 
     /// Unfold every fold in `buf` containing `p`. The pre-edit hook the
@@ -729,6 +743,24 @@ mod tests {
         let mut store = FoldStore::new();
         store.insert(r(10, 30));
         store.translate(&edit(Range::new(25, 40), 0));
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn delete_starting_at_tail_boundary_drops_fold() {
+        // A delete beginning exactly at `end` removes the `\n` that `end`
+        // names (the last hidden line's terminator), destroying the tail —
+        // it must drop, not survive with a mid-line end. Mirror of
+        // `insert_at_tail_boundary_leaves_fold_untouched` for a delete.
+        let mut store = FoldStore::new();
+        store.insert(r(10, 30));
+        store.translate(&edit(Range::new(30, 31), 0)); // delete one byte at `end`
+        assert!(store.is_empty());
+
+        // Same class: a delete starting at the boundary and extending past.
+        let mut store = FoldStore::new();
+        store.insert(r(10, 30));
+        store.translate(&edit(Range::new(30, 45), 0));
         assert!(store.is_empty());
     }
 

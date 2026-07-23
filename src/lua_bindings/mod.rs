@@ -1466,6 +1466,9 @@ fn after_buffer_removed(lua: &Lua, id: BufferId) {
     if let Some(config) = lua.app_data_ref::<config::SharedConfigRegistry>() {
         config.borrow_mut().remove_buffer(id);
     }
+    if let Some(folds) = lua.app_data_ref::<crate::fold::SharedFoldRegistry>() {
+        folds.forget_buffer(id);
+    }
     let callbacks = match lua.app_data_ref::<BufferRemoveCallbacks>() {
         Some(callbacks) => callbacks.take(id),
         None => Vec::new(),

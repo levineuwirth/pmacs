@@ -1434,9 +1434,9 @@ impl SemanticRenderState {
         let should_emit = match self.last_folds.get(&buffer_id) {
             // First sight: speak only if there is a fold to show.
             None => !folds.is_empty(),
-            // A real change; `empty → empty` conveys nothing and is
-            // suppressed, `non-empty → empty` is a change worth sending.
-            Some(prev) => *prev != folds && !(folds.is_empty() && prev.is_empty()),
+            // Any change: `empty → empty` is byte-identical and suppressed,
+            // `non-empty → empty` differs and emits one clearing frame.
+            Some(prev) => *prev != folds,
         };
         if !should_emit {
             return None;

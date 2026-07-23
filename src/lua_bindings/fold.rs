@@ -23,8 +23,11 @@
 //! Fold *creation* refuses against an absent or stale parse tree (Q#FD10)
 //! and validates the buffer kind / UTF-8 boundaries / >= 1-hidden-line
 //! rule (Q#FD11); a rejection reports on the status line and returns
-//! `false`. Folding a range containing the invoking frontend's point moves
-//! that point to the head line (Q#FD3).
+//! `false`. The **interactive** commands (`toggle`/`close`/`cycle`/
+//! `close_all`) move the invoking frontend's point to the head line when
+//! they fold a range around it (Q#FD3); the **data-API** `fold` is
+//! deliberately exempt — a programmatic caller names an explicit buffer
+//! and range with no invoking point to relocate.
 
 use std::sync::{Arc, Mutex};
 
@@ -45,6 +48,10 @@ use crate::syntax::{ParseTreeBundle, SharedSyntaxRegistry};
               mirroring install_config; splitting fragments the wiring"
 )]
 pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Result<()> {
+    // Also stash the registry as app-data so the buffer-remove cleanup
+    // (`after_buffer_removed`) can drop a killed buffer's store, mirroring
+    // the keymap/config registries.
+    lua.set_app_data(fold_registry.clone());
     let fold_mod = lua.create_table()?;
 
     // ---- data API ---------------------------------------------------------
@@ -99,8 +106,7 @@ pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Resu
                         return Ok(true);
                     }
                     if let Ok(Some(bytes)) = document_bytes(lua, id)
-                        && let Some(normalized) =
-                            fold::normalize_arbitrary_range(&bytes, requested)
+                        && let Some(normalized) = fold::normalize_arbitrary_range(&bytes, requested)
                     {
                         return Ok(lock(&store).remove(normalized));
                     }
@@ -242,14 +248,17 @@ pub fn install_fold(lua: &Lua, fold_registry: &SharedFoldRegistry) -> mlua::Resu
                 };
                 let targets = fold::top_level_fold_targets(&bundle);
                 let store = store_for(lua, &reg, id)?;
-                let mut s = lock(&store);
-                let mut n = 0i64;
-                for t in targets {
-                    if s.insert(t) {
-                        n += 1;
-                    }
+                let inserted: Vec<ByteRange> = {
+                    let mut s = lock(&store);
+                    targets.into_iter().filter(|t| s.insert(*t)).collect()
+                };
+                // close-all is interactive: if a newly-closed top-level
+                // fold contains the invoking point, move it to the head
+                // (Q#FD3). At most one top-level fold can contain it.
+                for r in &inserted {
+                    maybe_move_point(lua, id, *r);
                 }
-                Ok(n)
+                Ok(i64::try_from(inserted.len()).unwrap_or(i64::MAX))
             })?,
         )?;
     }

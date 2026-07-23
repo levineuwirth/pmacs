@@ -13,8 +13,7 @@ use std::sync::Arc;
 use pmacs::buffer::{Buffer, BufferId, EditOp};
 use pmacs::editor::EditorState;
 use pmacs::fold::{
-    self, CycleOutcome, FoldStore, close_at, cycle_at, fold_target_at, open_at,
-    top_level_fold_targets,
+    CycleOutcome, FoldStore, close_at, cycle_at, fold_target_at, open_at, top_level_fold_targets,
 };
 use pmacs::protocol::ByteRange;
 use pmacs::syntax::{ParseTreeBundle, ParseView, SyntaxRegistry, run_parse};
@@ -487,5 +486,89 @@ fn forget_drops_store_and_detaches_view() {
         s.fold_registry.forget(reg.get_mut(id).unwrap());
     }
     assert!(s.fold_registry.store(id).is_none(), "the store is dropped");
-    assert!(fold::make_shared_fold_registry().folds(id).is_empty());
+    assert!(
+        s.fold_registry.folds(id).is_empty(),
+        "no folds survive the drop"
+    );
+}
+
+#[test]
+fn forget_buffer_drops_store_on_kill() {
+    // The id-keyed reset the pmacs.buffer.kill path uses: the buffer (and
+    // its attached view) is gone, so only the map entry is cleared.
+    let s = EditorState::new();
+    let id = active_id(&s);
+    insert_into(&s, id, "line0\nline1\nline2\n");
+    {
+        let core = s.core.borrow();
+        let mut reg = core.registry.borrow_mut();
+        s.fold_registry
+            .store_or_attach(reg.get_mut(id).unwrap())
+            .lock()
+            .unwrap()
+            .insert(ByteRange { start: 5, end: 11 });
+    }
+    assert!(s.fold_registry.store(id).is_some());
+    s.fold_registry.forget_buffer(id);
+    assert!(s.fold_registry.store(id).is_none());
+}
+
+#[test]
+fn stale_parse_tree_refuses_fold() {
+    // Q#FD10: an edit after the parse leaves `pending_edit_count() > 0`,
+    // so a fold command refuses (the settled coordinates are stale).
+    let s = EditorState::new();
+    let id = active_id(&s);
+    let src = "fn foo() {\n    let x = 1;\n    let y = 2;\n}\n";
+    insert_into(&s, id, src);
+    install_rust_parse(&s, id);
+    // A further edit accumulates a pending edit on the attached parse view.
+    insert_into(&s, id, "// stale\n");
+    s.core.borrow_mut().set_cursor_byte(20);
+
+    exec(&s, "pmacs.command.invoke('fold.close')");
+    let n: i64 = eval(&s, "return #pmacs.fold.folds(pmacs.window.buffer())");
+    assert_eq!(n, 0, "a stale parse tree refuses fold creation");
+}
+
+#[test]
+fn read_only_buffer_is_rejected() {
+    // Q#FD11's "normal document buffer" guard: terminals are read-only, so
+    // a read-only buffer is not foldable.
+    let s = EditorState::new();
+    exec(
+        &s,
+        "b = pmacs.buffer.from_bytes('ro.rs', 'aaa\\nbbb\\nccc\\n')",
+    );
+    let id = {
+        let core = s.core.borrow();
+        let reg = core.registry.borrow();
+        reg.find_by_name("ro.rs").expect("buffer")
+    };
+    {
+        let core = s.core.borrow();
+        let mut reg = core.registry.borrow_mut();
+        reg.get_mut(id).unwrap().set_read_only(true);
+    }
+    let ok: bool = eval(&s, "return pmacs.fold.fold(b, { start = 3, ['end'] = 7 })");
+    assert!(!ok, "a read-only buffer is rejected (Q#FD11)");
+}
+
+#[test]
+fn unfold_normalizes_an_arbitrary_range_to_a_stored_fold() {
+    let s = EditorState::new();
+    exec(
+        &s,
+        "b = pmacs.buffer.from_bytes('doc.rs', 'aaa\\nbbb\\nccc\\nddd\\n')",
+    );
+    let folded: bool = eval(&s, "return pmacs.fold.fold(b, { start = 3, ['end'] = 11 })");
+    assert!(folded);
+    // A *different* input range that normalizes to the same stored fold.
+    let unfolded: bool = eval(
+        &s,
+        "return pmacs.fold.unfold(b, { start = 1, ['end'] = 10 })",
+    );
+    assert!(unfolded, "unfold normalizes an arbitrary range");
+    let n: i64 = eval(&s, "return #pmacs.fold.folds(b)");
+    assert_eq!(n, 0);
 }
