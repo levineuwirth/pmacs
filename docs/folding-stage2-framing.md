@@ -1,6 +1,6 @@
 # Folding Stage 2 — grid (daemon-rendered) collapse — framing (Arc 6)
 
-**Revision 2 — 2026-07-23. Status: DRAFT for review (rev 1's five findings
+**Revision 3 — 2026-07-23. Status: DRAFT for review (rounds 1–2 findings
 addressed).** Parent architecture (`docs/folding-framing.md`, rev 5) is APPROVED
 and Stage 1 (the headless fold engine) is MERGED as **#142** (canonical `main` @
 `c49a8c7`). This doc reframes **Stage 2** in detail off that base, per the
@@ -48,7 +48,7 @@ parent's §8/§14. Numbering continues the parent's `Q#FD…` scheme from `Q#FD1
   (`src/view.rs:130`). Rev 2 reframes the map as **one shared derivation/query
   primitive** with **separate short-lived instances** for rendering vs
   command/event handling (Q#FD12); the render instance is threaded as
-  `Option<&'a VisibleLineMap>` on a **lifetime-bearing `Viewport<'a>>`** (a shared
+  `Option<&'a VisibleLineMap>` on a **lifetime-bearing `Viewport<'a>`** (a shared
   ref is `Copy`, so `Viewport` stays `Copy`); the primitive's home is usable from
   `EditorCore`, not render-only.
 - **F5 (moderate) — tighter unfold seam + settled undo decision.** Rev 2 keys the
@@ -68,7 +68,45 @@ parent's §8/§14. Numbering continues the parent's `Q#FD…` scheme from `Q#FD1
   normalizes to the visible head**, then steps to the preceding/following visible
   line (§7).
 - **#142 housekeeping** (retire the active-work.md folding lane + refresh handoff
-  §1) is a **separate docs PR**, kept out of `folding-tui`.
+  §1) is a **separate docs PR**, kept out of `folding-tui` (landed as PR #147).
+
+### Round 2 (rev 2 → rev 3)
+
+- **F1 (major) — fold-aware motion must be frontend-projection scoped.** Q#FD17/18
+  changed shared `EditorCore::move_up/down/page_*`, but Stage 2 leaves the GPU
+  visually unfolded (Stage 3). With a TUI and a semantic/GPU session on the shared
+  fold store simultaneously (`src/daemon.rs:876` — a frontend holds exactly one of
+  a grid `RenderState` or a semantic `SemanticRenderState`, both may attach to one
+  buffer), visible-line motion would make the **GPU cursor skip source lines it
+  still displays**. Rev 3 adds a **per-frontend `fold_projection_active`** decision
+  on `FrontendView` (`src/editor_core.rs:240`), set at attach
+  (`register_frontend_view`, `:540`) / cleared at detach (`:549`): grid/TUI ⇒ true
+  (Stage 2), semantic/GPU ⇒ false until Stage 3. **All command/event-time
+  visible-line reckoning** (motion, paging, wheel, click inverse, auto-scroll) is
+  gated on the acting frontend's flag; render-time clamps are already grid-path-only
+  (a semantic session never enters `paint_frame`). New simultaneous TUI+semantic
+  Down/Up/paging acceptance (Q#FD21, §7, §11).
+- **F2 (major) — render maps must be per window, not per frame.** `paint_frame`
+  renders several windows that may show **different buffers**
+  (`src/editor.rs:2922`, `reg.get(window.buffer_id)`), and the presence pass
+  iterates recipient windows by `buffer_id` (`src/overlay_paint.rs:124`). Rev 2's
+  "builds one instance" was wrong. Rev 3 specifies **one map per nonterminal
+  rendered window**, keyed on that window's `buffer_id` + its `TextView`
+  line-offsets + `view_top`; peer presence derives/receives the **recipient
+  window's** map (§3.2). New acceptance: a split with two **different** buffers,
+  only one folded — no active-buffer/map leakage (§11 acceptance 13).
+- **F3 (moderate) — hidden positions need column projection, not only row
+  clamping.** Rev 2 clamped a hidden caret/peer cursor to `visible_head_of`'s row
+  but left the column unspecified, which could paint a hidden point at an arbitrary
+  column on the head. Stage 1's precedent is exact: folding moves point to the
+  fold's `ByteRange.start` (the end of the visible head line). Rev 3 adds
+  **`visible_position_of(pos) -> Position`** mapping a hidden byte to the
+  **outermost** enclosing fold's `range.start`, used for local/peer carets and
+  selection **endpoints** (hidden selection interiors stay dropped). New acceptance
+  with a hidden cursor whose column differs materially from the head's end (§3.1,
+  §7, §11 acceptance 6).
+- **Nits.** Fixed the `Viewport<'a>` typo; stated the map build cost honestly as
+  O(folds) with a byte→line lookup per fold (B4).
 
 ## 1. What Stage 2 ships
 
@@ -92,9 +130,10 @@ Stage 2 makes the **daemon grid renderer fold-aware**:
 5. **Fold-aware caret, local selection, and peer presence** — no caret, no
    selection cell, and no peer cursor renders on a hidden line; each clamps to the
    visible head or is projected/dropped.
-6. **Fold-aware viewport/scroll/motion** — `view_top`, paging, wheel scroll,
-   clicks, auto-scroll, vertical line-motion, and the mode-line scroll indicator
-   all reckon in **visible** lines.
+6. **Fold-aware viewport/scroll/motion** — on **fold-projecting (grid) frontends**,
+   `view_top`, paging, wheel scroll, clicks, auto-scroll, vertical line-motion, and
+   the mode-line scroll indicator all reckon in **visible** lines; a semantic/GPU
+   session on the same buffer keeps raw-line motion until Stage 3 (Q#FD21).
 7. **Interactive-Lua-command unfold widening** — yank, query-replace, and
    comment-toggle unfold a fold at their edit point before the edit is visible.
 
@@ -216,6 +255,27 @@ work in **raw source-line** space. There is no `beginning/end-of-buffer` command
 and **no recenter** (deferred, blocked on viewport facts; handoff §6). Stage 2
 inherits the recenter deferral.
 
+### 2.7 Windows and cursors are per-frontend; a frame renders several (F1, F2)
+
+Each attached frontend has its own `FrontendView`
+(`EditorCore.views: HashMap<FrontendId, FrontendView>`, `src/editor_core.rs:240`),
+registered at attach (`register_frontend_view`, `:540`) and cleared at detach
+(`unregister_frontend_view`, `:549`); windows/cursors are per-frontend instances a
+`FrontendView` references. Shared `EditorCore` motion (`move_up/down/page_*`) acts
+on `active_view()`/`active_window()` — **the acting frontend's own cursor**. The
+daemon holds the projection kind per frontend: exactly one of a grid `RenderState`
+or a semantic `SemanticRenderState` (`src/daemon.rs:875-881`), and **a grid and a
+semantic frontend can attach to the same buffer at once** — the fact that makes
+shared visible-line motion unsafe for a still-unfolded GPU session (F1).
+
+`paint_frame` (`src/editor.rs:2796`) renders **every** window in the acting
+frontend's layout; distinct windows carry distinct `window.buffer_id` /
+`view_top` / `text_view` (`:2922`, `reg.get(window.buffer_id)`), so a split can
+show two different buffers with only one folded. The after-frame presence pass
+likewise iterates recipient windows by `buffer_id` (`src/overlay_paint.rs:124`).
+Any per-frame-singleton fold map therefore leaks; the map must be **per rendered
+window** (F2). Terminal windows never fold (Q#FD9) and are skipped.
+
 ## 3. The shared visible-line map primitive (Q#FD12)
 
 Stage 2's spine is **one derivation/query primitive** — a `VisibleLineMap` type
@@ -236,42 +296,63 @@ non-overlapping hidden-line set `H` (a line is hidden regardless of which fold o
 it). The map answers, in **line space**:
 
 - `is_hidden(line) -> bool` — `line ∈ H`.
-- **`visible_head_of(line) -> line`** — for a hidden `line`, the head of the
-  **outermost** enclosing fold (resolve to the enclosing fold's head; if that head
-  is itself hidden, recurse; heads strictly decrease, so it terminates on the one
-  visible head). For a visible `line`, itself. **Every clamp uses this** — caret,
-  diagnostics, peer cursor, relative-number cursor anchor, and the `view_top`
-  backward clamp. (Rev 1's innermost `head_of` is removed — F1.)
+- **`visible_head_of(line) -> line`** — for a hidden `line`, the head **line** of
+  the **outermost** enclosing fold (resolve to the enclosing fold's head; if that
+  head is itself hidden, recurse; heads strictly decrease, so it terminates on the
+  one visible head). For a visible `line`, itself. **Row-only** clamps use this:
+  diagnostic signs, the relative-number cursor anchor, and the `view_top` backward
+  clamp. (Rev 1's innermost `head_of` is removed — F1.)
+- **`visible_position_of(pos) -> Position` (F3)** — for a byte `pos` on a hidden
+  line, the **outermost** enclosing fold's `range.start` (the end of the visible
+  head line — exactly where Stage 1 moves point on fold-at-cursor). For a visible
+  `pos`, itself. **Position** clamps — which carry a column, not just a row — use
+  this: the local caret, peer cursors, and selection **endpoints**. It resolves to
+  `visible_head_of(line(pos))`'s line at the head's end-of-content column, so a
+  hidden point never paints at an arbitrary column on the head.
 - `next_visible(line)` / `prev_visible(line)` — the next/previous visible line,
   skipping whole folds (for the render walk and vertical motion).
 - `visible_between(a, b) -> isize` — signed count of visible lines from `a` to `b`
   (relative/hybrid distance; paging).
 - **`clamp_view_top(line) -> line`** — if `line ∈ H`, `visible_head_of(line)`
-  (**backward**, so a fold at the top shows its head — acceptance 6); else `line`.
+  (**backward**, so a fold at the top shows its head — acceptance 8); else `line`.
   This replaces rev 1's forward `first_visible_at_or_after`, which skipped past the
   fold and hid the head.
 
-Build cost is O(folds) (folds are O(top-level blocks), parent B2), reusing the
-render path's existing line-offset table — **Bet B4**.
+Build cost is O(folds) with a byte→line lookup per fold — folds are O(top-level
+blocks) (parent B2), each needs a binary search into the render path's existing
+line-offset table, so O(folds · log lines); a linear merge with the table would be
+O(folds + lines) but is unnecessary given how few folds there are (**Bet B4**).
 
-### 3.2 Instances per phase (F4)
+### 3.2 Instances per phase and per window (F2, F4)
 
-- **Render frame.** `paint_frame` (`src/editor.rs:2796`) builds one instance and
+The map is a **derivation/query primitive**, instantiated as short-lived instances
+— **never one singleton per frame** (F2, F4). Each instance is keyed on a specific
+window's `buffer_id`, its `TextView` line-offsets, and (for the render walk) its
+`view_top`:
+
+- **Render frame — one instance per rendered nonterminal window (F2).**
+  `paint_frame` (`src/editor.rs:2796`) iterates the acting frontend's windows; for
+  each **document** window it builds that window's map from
+  `state.fold_registry.folds(window.buffer_id)` and the window's line-offsets, then
   (a) threads it to the overlay painters (1,3,4,5,6) as `Option<&'a
-  VisibleLineMap>` on a **lifetime-bearing `Viewport<'a>>`** — a shared ref is
-  `Copy`, so `Viewport` stays `Copy` (F4); (b) passes the **same** instance
-  directly to the in-`paint_frame` sites (2,7,8,9). The `View::render` signature
+  VisibleLineMap>` on a **lifetime-bearing `Viewport<'a>`** — a shared ref is
+  `Copy`, so `Viewport` stays `Copy` (F4); (b) passes the **same** per-window
+  instance to the in-`paint_frame` sites (2,7,8,9). The `View::render` signature
   becomes `Viewport<'_>`; every construction site gains the field (non-fold callers
-  pass `None`). This is a settled compile-time change across the `View` impls and
-  `Viewport` constructions.
-- **After the frame.** The peer-presence pass (`src/overlay_paint.rs`, site 10)
-  runs after `paint_frame` and takes its own arguments; it receives (or builds) a
-  fresh instance for the same buffer and clamps peer cursors / projects peer
-  selection through it.
-- **Command / event.** Click inverse, auto-scroll, paging, wheel, and vertical
-  motion (sites 11–13, in `EditorCore` / `EditorState`) each build a short-lived
-  instance from `state.fold_registry` + the buffer at call time. "The map is
-  already built" (rev 1) was false for these — they run outside any frame.
+  pass `None`). Terminal windows are skipped (Q#FD9). A split of two different
+  buffers gets two independent maps — no leakage. This is a settled compile-time
+  change across the `View` impls and `Viewport` constructions.
+- **After the frame — per recipient window (F2).** The peer-presence pass
+  (`src/overlay_paint.rs`, site 10) iterates recipient windows by `buffer_id`; for
+  each it derives/receives **that recipient window's** map and clamps peer cursors
+  (`visible_position_of`) / projects peer selection endpoints through it.
+- **Command / event — per acting window, gated on the frontend (F1).** Click
+  inverse, auto-scroll, paging, wheel, and vertical motion (sites 11–13, in
+  `EditorCore` / `EditorState`) build a short-lived instance from
+  `state.fold_registry` + the **active window's** buffer at call time — **only when
+  the acting frontend's `fold_projection_active` is set** (Q#FD21); otherwise they
+  keep raw source-line behavior. "The map is already built" (rev 1) was false — these
+  run outside any frame.
 
 `view_top` **stays a source-line index** (Q#FD12, **Bet B5**), only ever set via
 `clamp_view_top` so it never rests on a hidden line — preserving the saveplace
@@ -325,45 +406,58 @@ preserves the "there is a problem inside this collapsed region" signal.
 `DiagnosticView` reaches the map through `Viewport` (§3.2), needing no separate
 handle.
 
-## 7. Caret, selection, peer presence, viewport, and motion (Q#FD16, Q#FD17, Q#FD18)
+## 7. Caret, selection, peer presence, viewport, and motion (Q#FD16, Q#FD17, Q#FD18, Q#FD21)
 
-**Caret clamp (Q#FD16).** Caret grid-row (`src/editor.rs:3033-3044`): if the
-logical cursor's line `is_hidden`, render at `visible_head_of(line)`'s row —
-satisfying the parent's per-cursor render-time invariant (Q#FD3), including the
-shared-store case.
+**Frontend scoping (Q#FD21, F1).** Render-time clamps (this section's caret,
+selection, peer, gutter) live in the grid `paint_frame`/presence path, which a
+semantic/GPU session never enters, so they are **already grid-only**. The
+**command/event-time** reckoning below (motion, paging, wheel, click, auto-scroll)
+runs in **shared** `EditorCore`/`EditorState` code, so each such site is **gated on
+the acting frontend's `fold_projection_active`** (a `FrontendView` flag,
+`src/editor_core.rs:240`, set at attach from the frontend's advertised render kind:
+grid ⇒ true in Stage 2; semantic/GPU ⇒ false until Stage 3, cleared at detach).
+When the flag is false the site keeps its current raw-line behavior — so a GPU
+session on the same shared-fold buffer never skips a source line it still displays.
 
-**Local selection (Q#FD16, F2).** `paint_local_selection` (`src/editor.rs:3241`):
-selection cells on hidden lines are dropped; the visible portion projects through
-the map (a selection spanning a fold paints on the visible head row and the visible
-tail rows, contiguous on screen).
+**Caret clamp (Q#FD16, F3).** Caret grid position (`src/editor.rs:3033-3044`): if
+the logical cursor's line `is_hidden`, render at **`visible_position_of(cursor)`**
+— the outermost fold's `range.start`, i.e. the visible head row at the head's
+end-of-content column (not an arbitrary column, F3). Satisfies the parent's
+per-cursor render-time invariant (Q#FD3), including the shared-store case.
 
-**Peer presence (Q#FD16, F2).** `src/overlay_paint.rs:159`: a peer cursor on a
-hidden line clamps to `visible_head_of`; peer selection cells on hidden lines are
-dropped/projected exactly like local selection. Folds are per-buffer/shared, so the
-peer's map is the same buffer's map.
+**Local selection (Q#FD16, F2/F3).** `paint_local_selection` (`src/editor.rs:3241`):
+each selection **endpoint** on a hidden line projects via `visible_position_of`;
+hidden interior cells are dropped; the visible portion paints on the visible head
+row and the visible tail rows, contiguous on screen.
 
-**Click inverse (Q#FD16).** `activate_and_position` (`src/editor.rs:2233`): grid
-row `k` maps to the `k`-th visible line, so a click never lands on a hidden line.
+**Peer presence (Q#FD16, F2/F3).** `src/overlay_paint.rs:159`: a peer cursor on a
+hidden line clamps via `visible_position_of`; peer selection endpoints project the
+same way and hidden interiors drop. The map is the **recipient window's** map
+(§3.2), built for that window's buffer.
 
-**Viewport / scroll (Q#FD18).** `view_top` is set only via `clamp_view_top`
-(backward to the head for a hidden candidate, F1). Paging
-(`move_page_down/up`), wheel (`scroll_window`), and the auto-scroll-to-cursor clamp
-(`src/editor.rs:2866`) advance and bound by **visible** lines
-(`next_visible`/`prev_visible`, `visible_between`). `move_to_line`/goto-line targets
-a raw line; if hidden, `view_top` clamps so the target's **head** is visible (no
-auto-unfold — that is the deferred search-reveal, §9). The **mode-line scroll
-indicator** (`format_scroll_indicator`, `src/editor.rs:3803`) computes All/Top/Bot/%
-in **visible-line** space (visible total, `view_top`'s visible ordinal, cursor's
+**Click inverse (Q#FD16, Q#FD21).** `activate_and_position` (`src/editor.rs:2233`):
+on a fold-projecting frontend, grid row `k` maps to the `k`-th visible line, so a
+click never lands on a hidden line.
+
+**Viewport / scroll (Q#FD18, Q#FD21).** On a fold-projecting frontend: `view_top`
+is set only via `clamp_view_top` (backward to the head for a hidden candidate, F1);
+paging (`move_page_down/up`), wheel (`scroll_window`), and the auto-scroll-to-cursor
+clamp (`src/editor.rs:2866`) advance and bound by **visible** lines
+(`next_visible`/`prev_visible`, `visible_between`); `move_to_line`/goto-line targets
+a raw line and, if hidden, clamps `view_top` so the target's **head** is visible (no
+auto-unfold — deferred search-reveal, §9); the **mode-line scroll indicator**
+(`format_scroll_indicator`, `src/editor.rs:3803`) computes All/Top/Bot/% in
+**visible-line** space (visible total, `view_top`'s visible ordinal, cursor's
 visible ordinal). Recenter stays deferred (§2.6).
 
-**Vertical line-motion (Q#FD17 — RULED: include).** `next-line`/`prev-line` (and
-arrows) step to the adjacent **visible** line (`next_visible`/`prev_visible`), so a
-collapsed region is one motion step and the cursor never rests hidden. **If motion
-begins from a hidden logical cursor** (after a shared fold or a goto-line into a
-fold), it **first normalizes to `visible_head_of(cursor)`**, then steps to the
-preceding/following visible line. The render-time caret clamp (Q#FD16) remains the
-backstop for the pre-motion shared-fold frame. These reuse the command-time map
-instance (§3.2).
+**Vertical line-motion (Q#FD17 — RULED: include; Q#FD21-scoped).** On a
+fold-projecting frontend, `next-line`/`prev-line` (and arrows) step to the adjacent
+**visible** line (`next_visible`/`prev_visible`), so a collapsed region is one
+motion step and the cursor never rests hidden. **If motion begins from a hidden
+logical cursor** (a shared fold or a goto-line into a fold), it **first normalizes
+to `visible_head_of(cursor)`**, then steps. The render-time caret clamp (Q#FD16)
+backstops the pre-motion shared-fold frame. On a non-fold-projecting frontend these
+retain raw-line motion. All reuse the command-time per-window map (§3.2).
 
 ## 8. Interactive-Lua-command unfold widening (Q#FD19)
 
@@ -416,19 +510,25 @@ Each widened behavior is **bite-verified** (a test failing without the widening)
 
 ## 10. Bets
 
-- **B4** The per-instance visible-line map (from `folds()` + line offsets) is cheap:
-  O(folds) build, reusing the render path's line table. Multiple short-lived
-  instances per interaction are still O(folds) each. FALSIFIABLE on a pathological
-  many-fold buffer (mitigation: derivation is O(folds), not O(lines)).
+- **B4** The per-instance visible-line map is cheap: O(folds) build, one byte→line
+  binary search per fold into the render path's existing line-offset table
+  (O(folds · log lines)); folds are few, so per-window and command-time
+  re-derivation is negligible. FALSIFIABLE on a pathological many-fold buffer
+  (mitigation: cost scales with folds, not lines).
 - **B5** `view_top` stays a source-line index (clamped via `clamp_view_top`) —
   less churn than a visible-ordinal coordinate space, and preserves saveplace /
   `set_view_top`.
 - **B6** No wire/protocol change: `FoldState` (Stage 1) untouched; the TUI collapse
   is daemon-side; a semantic GPU session still gets `FoldState` and renders nothing
   new until Stage 3.
-- **B7** Threading `Option<&'a VisibleLineMap>` on a lifetime-bearing `Viewport<'a>>`
+- **B7** Threading `Option<&'a VisibleLineMap>` on a lifetime-bearing `Viewport<'a>`
   keeps `Viewport: Copy`. FALSIFIABLE if a `View` impl or construction site cannot
   satisfy the lifetime; fallback is to settle `Viewport` as non-`Copy` explicitly.
+- **B8** A `fold_projection_active` flag on `FrontendView`, set from the frontend's
+  advertised render kind at attach, cleanly scopes command-time visible-line
+  reckoning to grid frontends. FALSIFIABLE if the render kind is not known at
+  `register_frontend_view` time; fallback is to derive it from the daemon's
+  grid-vs-semantic session map at dispatch.
 
 ## 11. Acceptance — Stage 2
 
@@ -454,11 +554,13 @@ the precedents), sized for macOS startup + long temp-path width (handoff §5).
    second frontend), the caret renders on the **outermost** visible head; relative
    numbers anchor there; a `view_top` set into the nest clamps **backward** to that
    head.
-6. **Caret, local selection, peer presence (F2).** Caret on a hidden line → head
-   row. A local selection spanning a fold paints on the visible head + visible tail
-   rows, nothing on hidden rows. A peer cursor on a hidden line clamps to the head;
-   peer selection cells on hidden lines drop/project. A click never selects a hidden
-   line.
+6. **Caret/selection/peer column projection (F2/F3).** A caret whose hidden line's
+   column **differs materially from the head's end-of-content** renders at the head
+   row **and the head's end-of-content column** (`visible_position_of` →
+   `range.start`), never at the raw hidden column. A local selection spanning a fold
+   projects its endpoints and paints on the visible head + visible tail rows,
+   nothing on hidden rows. A peer cursor on a hidden line clamps the same way; peer
+   selection endpoints project, interiors drop. A click never selects a hidden line.
 7. **Ordinary overlays across a fold (F2).** A style/syntax span and a search wash
    on lines straddling a fold paint only on the visible rows, correctly aligned;
    the completion popup anchored below a fold lands on the right visible row.
@@ -483,6 +585,16 @@ the precedents), sized for macOS startup + long temp-path width (handoff §5).
 12. **Shared store, independent viewports.** Two TUI windows on one buffer both
     render the same fold collapsed, each with its own correct `view_top`, gutter, and
     caret.
+13. **Frontend-scoped motion (F1, Q#FD21).** A **grid TUI** and a **semantic**
+    session attach to one buffer with a fold in the store. Down/Up and page-down on
+    the TUI move its cursor by **visible** lines (skipping the fold); the same
+    commands issued by the semantic session move its cursor by **raw** source lines
+    (it still displays them). Attach then detach the semantic session and re-check
+    the TUI is unaffected — the flag is per-`FrontendView`.
+14. **Split of different buffers, one folded (F2).** A vertical split shows buffer A
+    (with a fold) and buffer B (no fold). A's window collapses; **B's window is
+    byte-for-byte identical to the no-fold baseline** (no active-buffer/map leakage);
+    peer presence painted into B's window uses B's map.
 
 ## 12. Gates (Stage 2)
 
@@ -499,11 +611,12 @@ failure as a regression (handoff §3).
 ## 13. Numbered decisions (continuing the parent's Q#FD scheme)
 
 - **Q#FD12** One shared visible-line map **primitive** (derivation + queries from
-  `folds()` + line offsets), instantiated as short-lived instances per phase
-  (render via `Option<&'a VisibleLineMap>` on `Viewport<'a>>` preserving `Copy`;
-  after-frame direct; command-time fresh), home usable from `EditorCore`. `view_top`
-  stays a source-line index, set only via `clamp_view_top`. Every consumer in the
-  §2.2 census routes through it. (§3)
+  `folds()` + line offsets), instantiated as short-lived instances **per rendered
+  window and per phase** (render via `Option<&'a VisibleLineMap>` on `Viewport<'a>`
+  preserving `Copy`; after-frame per recipient window; command-time per active
+  window), never a per-frame singleton (F2), home usable from `EditorCore`.
+  `view_top` stays a source-line index, set only via `clamp_view_top`. Every
+  consumer in the §2.2 census routes through it. (§3)
 - **Q#FD13** Collapse in `TextView::render` (row `r` → `r`-th visible line); head
   renders content + trailing ellipsis; folding is not an overlay. (§4)
 - **Q#FD14** Line numbers walk visible lines; Absolute uses raw `line+1`,
@@ -511,14 +624,16 @@ failure as a regression (handoff §3).
   of the cursor; gutter width unchanged. (§5)
 - **Q#FD15** A diagnostic on a hidden line clamps to `visible_head_of` (outermost
   visible head), most-severe merge; not dropped. (§6)
-- **Q#FD16** Render-time clamp to `visible_head_of` for caret, local selection, and
-  peer cursor on hidden lines; hidden selection cells drop/project; click inverse
-  maps grid rows to visible lines. (§7)
+- **Q#FD16** Render-time **position** clamp via `visible_position_of` (the outermost
+  fold's `range.start` — head row **and** head end-of-content column, F3) for the
+  caret, peer cursors, and selection endpoints; hidden selection interiors drop;
+  diagnostics and the relative-number anchor use the row-only `visible_head_of`;
+  click inverse maps grid rows to visible lines. (§7)
 - **Q#FD17** *(ruled: include)* Vertical line-motion steps by visible lines; motion
-  from a hidden cursor first normalizes to the visible head. (§7)
+  from a hidden cursor first normalizes to the visible head. Scoped by Q#FD21. (§7)
 - **Q#FD18** Viewport/paging/auto-scroll/indicator reckon in visible lines;
   `view_top` set via `clamp_view_top` (backward to the head); goto-line leaves a
-  hidden target's head visible; recenter deferred. (§7)
+  hidden target's head visible; recenter deferred. Scoped by Q#FD21. (§7)
 - **Q#FD19** Interactive-unfold widening hooks **local** funnels only:
   `apply_active_edit` (top; subsumes the six; covers yank + query-replace) and the
   common `run_buffer_edit` gated on `InteractiveCommandOrigin.current()` **and**
@@ -528,15 +643,22 @@ failure as a regression (handoff §3).
 - **Q#FD20** Fold gutter glyph is **conditional on a gutter existing**: off ⇒
   ellipsis only; on ⇒ col-0 sign cell on the head row with diagnostic priority. A
   dedicated fold column (unconditional marker + layout change) is deferred. (§5)
+- **Q#FD21** Fold projection is **per-frontend**: a `fold_projection_active` flag on
+  `FrontendView`, set at attach from the advertised render kind (grid ⇒ true in
+  Stage 2; semantic/GPU ⇒ false until Stage 3), cleared at detach. All
+  command/event-time visible-line reckoning (motion, paging, wheel, click,
+  auto-scroll) is gated on the acting frontend's flag; render-time clamps are
+  already grid-path-only. Keeps a simultaneous unfolded GPU session's cursor from
+  skipping lines it still displays. (§7, §2.7)
 
 ## 14. Branch and PR plan
 
 Branch **`folding-tui`**, worktree `../pmacs-folding-tui`, off canonical `main` @
 `c49a8c7` (folding Stage 1 / #142 merged). This framing is the opening commits (rev
-1 → rev 2); Stage 2 implements on this same branch and opens as the second folding
+1 → rev 3); Stage 2 implements on this same branch and opens as the second folding
 PR. One feature, one branch, one PR — Stage 3 (GPU) is a separate branch/PR off the
 resulting main.
 
 Housekeeping from #142 (retire the `docs/active-work.md` folding lane + refresh
-`docs/agent-handoff.md` §1) is a **separate docs PR**, kept out of `folding-tui`
-(ruled).
+`docs/agent-handoff.md` §1) **landed as the separate docs PR #147**, kept out of
+`folding-tui` (ruled).
