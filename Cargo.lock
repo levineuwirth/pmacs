@@ -424,6 +424,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codebook-tree-sitter-latex"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ab764ede0961a43ee3121cd8a71dd01d355f836181ebf2ede04f4c24636ca0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2528,6 +2538,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 name = "pmacs"
 version = "1.0.0"
 dependencies = [
+ "codebook-tree-sitter-latex",
  "crossbeam",
  "crossterm",
  "loro",

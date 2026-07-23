@@ -1344,4 +1344,70 @@ mod tests {
             "the injected rust `fn` keyword is painted (bold) inside the fence"
         );
     }
+
+    #[test]
+    fn latex_grid_paints_section_and_command() {
+        // Acceptance 3, paint half. The compile gate in `syntax.rs`
+        // (`latex_highlights_resolve`) proves the vendored overlay COMPILES
+        // against the grammar, but tree-sitter also compiles a pattern that
+        // uses a valid field on the wrong node and then silently never
+        // matches. This test parses a real document and asserts painted
+        // output, so a *compilable* structural drift in the sectioning or
+        // command patterns (the same class as the caught `curly_group_label`
+        // rename, but one the compile gate cannot see) fails here.
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("latex").expect("latex grammar");
+        // Line 0: \section{Intro} ; line 1: \foo{bar}
+        let src = b"\\section{Intro}\n\\foo{bar}\n";
+        let mut buf = Buffer::new(BufferId::next(), "paper.tex");
+        buf.apply_edit(EditOp::Insert { pos: 0, bytes: src })
+            .unwrap();
+        let view = ParseView::new(&buf, language, "latex".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("latex parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let cols = 40usize;
+        let rows = 2usize;
+        let mut backing: Vec<Cell> = vec![Cell::default(); rows * cols];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols as u32,
+            size: CellSize::new(rows as u32, cols as u32),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows as u32, cols as u32),
+            gutter_w: 0,
+        };
+        let registry = buf; // keep buf alive
+        hv.render(&registry, viewport, &mut grid);
+
+        // `\foo` command_name (line 1, col 0) paints @function via the general
+        // command rule — a non-default fg, proving the reconciled query
+        // actually MATCHES, not merely compiles.
+        assert_ne!(
+            grid.get(CellCoord::new(1, 0)).style,
+            Cell::default().style,
+            "the \\foo command_name is painted (@function), not default"
+        );
+        // `Intro` section-title text (line 0, col 9) paints @keyword.control,
+        // which `default_dark` renders bold — proving the sectioning pattern
+        // structurally matches this grammar cut (would fail on a silent
+        // never-match drift).
+        assert!(
+            grid.get(CellCoord::new(0, 9)).style.bold,
+            "the \\section title text is painted @keyword.control (bold)"
+        );
+    }
 }
