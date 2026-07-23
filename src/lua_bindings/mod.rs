@@ -1308,11 +1308,60 @@ fn run_buffer_edit(
     op: EditOp<'_>,
     bypass_intercept: bool,
 ) -> mlua::Result<crate::rope::Edit> {
+    // Arc 6 Stage 2 (Q#FD19): the interactive-Lua-command unfold seam.
+    // Hooked HERE — above both `run_managed_edit` and `run_bypass_edit` —
+    // so an interactive command that passes `bypass_intercept` does not
+    // escape the widening.
+    unfold_before_interactive_lua_edit(lua, id);
     if bypass_intercept {
         run_bypass_edit(lua, id, op)
     } else {
         run_managed_edit(lua, id, op)
     }
+}
+
+/// Unfold at the point before an **interactive** Lua-mutator edit
+/// (comment-toggle, yank-pop, and any other `pmacs.buffer.X` mutation a
+/// command body performs on the buffer the user is looking at).
+///
+/// Unfolds only when **all** of:
+///
+/// 1. [`InteractiveCommandOrigin::current`] is `Some(f)` — an
+///    interactive command is running, and `f` is the authenticated
+///    frontend that invoked it. This is the scoped authority that
+///    distinguishes a user command's edit from a plugin's or the data
+///    API's programmatic one; no command-history inference is involved,
+///    and the guard clears even when the Lua command errors.
+/// 2. The edited buffer **is `f`'s active-window buffer**. An explicit
+///    mutation of some *other*, inactive buffer stays programmatic — it
+///    is not an edit at the user's point.
+/// 3. A fold actually contains that point (handled by
+///    [`crate::fold::FoldRegistry::unfold_containing`], which is a no-op
+///    otherwise).
+///
+/// Matches Stage 1's data-API exemption: `pmacs.buffer.insert` called
+/// from a plugin, a hook, or a bare Lua chunk unfolds nothing.
+fn unfold_before_interactive_lua_edit(lua: &Lua, id: BufferId) {
+    let Some(origin) = lua
+        .app_data_ref::<InteractiveCommandOrigin>()
+        .and_then(|origin| origin.current())
+    else {
+        return; // programmatic: no interactive command in scope
+    };
+    let Some(folds) = lua.app_data_ref::<crate::fold::SharedFoldRegistry>() else {
+        return;
+    };
+    let Some(core) = lua.app_data_ref::<SharedCore>() else {
+        return;
+    };
+    let core = core.borrow();
+    let Some(window) = core.active_window_for(origin) else {
+        return; // the invoking frontend has no view (nothing to anchor on)
+    };
+    if window.buffer_id != id {
+        return; // an inactive-buffer mutation stays programmatic
+    }
+    folds.unfold_containing(id, window.cursor);
 }
 
 fn run_bypass_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<crate::rope::Edit> {

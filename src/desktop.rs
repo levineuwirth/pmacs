@@ -435,6 +435,8 @@ pub fn restore_into(
             FrontendView {
                 layout: Layout { root },
                 active,
+                // Desktop restore rebuilds LOCAL's grid view (Q#FD21).
+                fold_projection: true,
             },
         );
         active

@@ -33,6 +33,10 @@ use crate::view::{DisplayCoord, View, Viewport};
 /// [`TextView::pos_to_display`]; longer prefixes fall back to a heap buffer.
 const STACK_CAP: usize = 256;
 
+/// Trailing marker painted after a collapsed region's head line (Arc 6
+/// Stage 2, Q#FD13). One column wide, so it never disturbs layout.
+pub const FOLD_ELLIPSIS: char = '…';
+
 // ---------------------------------------------------------------------------
 // TextView
 // ---------------------------------------------------------------------------
@@ -204,14 +208,26 @@ impl View for TextView {
         Some(line_start + walked_bytes as u64)
     }
 
-    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
-        let start_line = self.line_at_offset(viewport.buffer_start);
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
+        // Arc 6 Stage 2 (Q#FD13): row `r` shows the `r`-th VISIBLE source
+        // line at or after `view_top`; a collapsed region's lines are
+        // skipped entirely and the rows below shift up. Without a fold
+        // map this walk is the pre-folding `start_line + row_offset`
+        // identity. Folding is deliberately not an overlay — overlays
+        // repaint cells, they cannot delete rows.
+        let folds = viewport.folds.filter(|m| !m.is_identity());
+        // `view_top` is clamped backward before the frame, but a caller
+        // that hands us a hidden start still gets its head.
+        let start_line = {
+            let raw = self.line_at_offset(viewport.buffer_start);
+            folds.map_or(raw, |m| m.visible_head_of(raw))
+        };
         let max_rows = viewport.cell_size.rows;
         let max_cols = viewport.cell_size.cols;
         let origin = viewport.cell_origin;
 
+        let mut line = start_line;
         for row_offset in 0..max_rows {
-            let line = start_line + row_offset as usize;
             let cell_row = origin.row + row_offset;
 
             // Always clear the visible row first so previous content does
@@ -222,8 +238,10 @@ impl View for TextView {
             if line >= self.line_count() {
                 continue;
             }
+            let this_line = line;
+            line = folds.map_or(this_line + 1, |m| m.next_visible(this_line));
 
-            let line_bytes = self.read_line_bytes(buf, line);
+            let line_bytes = self.read_line_bytes(buf, this_line);
             let Ok(s) = std::str::from_utf8(&line_bytes) else {
                 continue;
             };
@@ -266,6 +284,23 @@ impl View for TextView {
                     cont.attachment = None;
                 }
                 col += width;
+            }
+
+            // The head of a collapsed region carries a trailing ellipsis
+            // in the CONTENT area (Q#FD13/FD20): the authoritative,
+            // layout-neutral fold indicator, present in every gutter
+            // state, clipped like any long line.
+            if folds.is_some_and(|m| m.is_head(this_line)) {
+                for marker in [' ', FOLD_ELLIPSIS] {
+                    if col >= max_cols {
+                        break;
+                    }
+                    let cell = cells.at(CellCoord::new(cell_row, origin.col + col));
+                    cell.glyph = Glyph::Char(marker);
+                    cell.style = Style::default();
+                    cell.attachment = None;
+                    col += 1;
+                }
             }
         }
     }
@@ -534,6 +569,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 16),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );
@@ -562,6 +598,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 16),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );
@@ -593,6 +630,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(5, 5),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );
@@ -625,6 +663,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 5),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );

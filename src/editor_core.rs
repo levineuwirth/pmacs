@@ -386,6 +386,8 @@ impl EditorCore {
             FrontendView {
                 layout: Layout::single(id),
                 active: id,
+                // LOCAL is the in-process grid editor (Q#FD21).
+                fold_projection: true,
             },
         );
         Self {
@@ -532,6 +534,51 @@ impl EditorCore {
     pub fn active_window_mut_for(&mut self, fid: FrontendId) -> Option<&mut Window> {
         let win_id = self.views.get(&fid)?.active;
         self.windows.get_mut(&win_id)
+    }
+
+    /// Whether the **acting** frontend's display collapses folds (Arc 6
+    /// Stage 2, Q#FD21).
+    ///
+    /// The gate on every command/event-time visible-line reckoning —
+    /// motion, paging, wheel, the click inverse, the auto-scroll clamp.
+    /// A `semantic_render` (GPU) session still displays every source
+    /// line until Stage 3, so with this `false` those sites keep their
+    /// raw-line behavior and its cursor never skips a line it is showing
+    /// (even while a grid session folds the same shared buffer).
+    #[must_use]
+    pub fn fold_projection_active(&self) -> bool {
+        self.active_view().fold_projection
+    }
+
+    /// The visible-line map for `win_id`'s buffer, or `None` when the
+    /// acting frontend does not project folds, `win_id` is unknown, or
+    /// that buffer has no folds (Q#FD12).
+    ///
+    /// The two axes are deliberately separate (round-3 F1): the **acting
+    /// frontend** supplies the projection policy, while the
+    /// **operation's target window** supplies the buffer and line
+    /// offsets. Motion, paging, and auto-scroll target the active
+    /// window; the click inverse and wheel scrolling name an explicit
+    /// `win_id` — a wheel event over an inactive pane does not activate
+    /// it, so deriving the active window's map there would project one
+    /// buffer's folds onto another.
+    #[must_use]
+    pub fn fold_map_for_window(
+        &self,
+        win_id: WindowId,
+    ) -> Option<crate::fold_view::VisibleLineMap> {
+        if !self.fold_projection_active() {
+            return None;
+        }
+        let window = self.windows.get(&win_id)?;
+        crate::fold_view::map_for_window(&self.fold_registry, window)
+    }
+
+    /// [`Self::fold_map_for_window`] for the active window — the target
+    /// of motion, paging, and the auto-scroll clamp.
+    #[must_use]
+    pub fn fold_map_active(&self) -> Option<crate::fold_view::VisibleLineMap> {
+        self.fold_map_for_window(self.active_window_id())
     }
 
     /// T M10.8 — register a `FrontendView` for `fid`. Called by the
@@ -1264,6 +1311,16 @@ impl EditorCore {
     ///
     /// Returns a stringified error on buffer or view failure.
     pub fn apply_active_edit(&mut self, op: EditOp<'_>) -> Result<Edit, String> {
+        // Arc 6 Stage 2 (Q#FD19): ONE pre-edit unfold funnel for every
+        // local point-anchored edit. This subsumes the six `dispatch_key`
+        // primitives' individual calls (retired) and widens the behavior
+        // to **yank** and **query-replace**, which reach the buffer
+        // through here rather than through those primitives — both place
+        // point at the edit site first, so keying on the active point
+        // covers them exactly. `apply_active_edit` is never the
+        // remote-apply path, so this funnel is inherently local: a remote
+        // peer's edit inside my fold must not unfold it (Stage 3).
+        self.unfold_before_point_edit();
         let buffer_id = self.active_buffer_id();
         // Scope the registry borrow: the origin translation below needs
         // `&mut self` after the views have been notified.
@@ -1541,27 +1598,42 @@ impl EditorCore {
     }
 
     /// Move the cursor up one line, preserving display column.
+    ///
+    /// Arc 6 Stage 2 (Q#FD17, ruled: include): on a fold-projecting
+    /// frontend this steps to the previous **visible** line, so a
+    /// collapsed region is one motion step and the cursor never comes to
+    /// rest hidden. Motion that *begins* from a hidden logical cursor (a
+    /// shared fold, or goto-line into one) first normalizes to the
+    /// visible head. Scoped by Q#FD21 — a semantic frontend keeps
+    /// raw-line motion until Stage 3.
     pub fn move_up(&mut self) {
+        let folds = self.fold_map_active();
         let id = self.active_buffer_id();
         let cursor = self.active_window().cursor;
         let goal_col = self.active_window().goal_col;
         let result = {
             let reg = self.registry.borrow();
             let Ok(buffer) = reg.get(id) else { return };
-            let coord = self
-                .active_window()
+            let aw = self.active_window();
+            let coord = aw
                 .text_view
                 .pos_to_display(buffer, cursor)
                 .unwrap_or_default();
-            if coord.row == 0 {
+            let from_row = folds.as_ref().map_or(coord.row as usize, |map| {
+                map.visible_head_of(coord.row as usize)
+            });
+            if from_row == 0 {
                 return;
             }
+            let target_row = folds
+                .as_ref()
+                .map_or(from_row - 1, |map| map.prev_visible(from_row));
             let goal = goal_col.unwrap_or(coord.col);
-            let target = DisplayCoord::new(coord.row - 1, goal);
-            let new_pos = self
-                .active_window()
-                .text_view
-                .display_to_pos(buffer, target);
+            let Ok(target_row) = u32::try_from(target_row) else {
+                return;
+            };
+            let target = DisplayCoord::new(target_row, goal);
+            let new_pos = aw.text_view.display_to_pos(buffer, target);
             (goal, new_pos)
         };
         let (goal, new_pos) = result;
@@ -1573,28 +1645,35 @@ impl EditorCore {
     }
 
     /// Move the cursor down one line, preserving display column.
+    /// Visible-line stepping mirrors [`Self::move_up`] (Q#FD17/FD21).
     pub fn move_down(&mut self) {
+        let folds = self.fold_map_active();
         let id = self.active_buffer_id();
         let cursor = self.active_window().cursor;
         let goal_col = self.active_window().goal_col;
         let result = {
             let reg = self.registry.borrow();
             let Ok(buffer) = reg.get(id) else { return };
-            let coord = self
-                .active_window()
+            let aw = self.active_window();
+            let coord = aw
                 .text_view
                 .pos_to_display(buffer, cursor)
                 .unwrap_or_default();
-            let next_row = coord.row + 1;
-            if (next_row as usize) >= self.active_window().text_view.line_count() {
+            let from_row = folds.as_ref().map_or(coord.row as usize, |map| {
+                map.visible_head_of(coord.row as usize)
+            });
+            let next_row = folds
+                .as_ref()
+                .map_or(from_row + 1, |map| map.next_visible(from_row));
+            if next_row >= aw.text_view.line_count() {
                 return;
             }
             let goal = goal_col.unwrap_or(coord.col);
+            let Ok(next_row) = u32::try_from(next_row) else {
+                return;
+            };
             let target = DisplayCoord::new(next_row, goal);
-            let new_pos = self
-                .active_window()
-                .text_view
-                .display_to_pos(buffer, target);
+            let new_pos = aw.text_view.display_to_pos(buffer, target);
             (goal, new_pos)
         };
         let (goal, new_pos) = result;
@@ -1743,6 +1822,9 @@ impl EditorCore {
     /// of context); falls back to a sane default before the first
     /// frame has rendered.
     pub fn move_page_down(&mut self) {
+        // Arc 6 Stage 2 (Q#FD18/FD21): a screenful is a screenful of
+        // VISIBLE lines, and `view_top` never lands hidden.
+        let folds = self.fold_map_active();
         let step = self.page_step();
         let cursor = self.active_window().cursor;
         let view_top = self.active_window().view_top;
@@ -1755,12 +1837,25 @@ impl EditorCore {
                 .text_view
                 .pos_to_display(buffer, cursor)
                 .unwrap_or_default();
-            let max_line = aw.text_view.line_count().saturating_sub(1) as u32;
+            let max_line = aw.text_view.line_count().saturating_sub(1);
             let goal_col = aw.goal_col.unwrap_or(coord.col);
-            let target_row = (coord.row + step).min(max_line);
+            let (target_row, new_top) = match folds.as_ref() {
+                Some(map) => (
+                    map.nth_visible_from(coord.row as usize, step as usize)
+                        .min(map.visible_head_of(max_line)),
+                    map.nth_visible_from(view_top, step as usize),
+                ),
+                None => (
+                    (coord.row as usize + step as usize).min(max_line),
+                    view_top.saturating_add(step as usize),
+                ),
+            };
+            let Ok(target_row) = u32::try_from(target_row) else {
+                return;
+            };
             let target = DisplayCoord::new(target_row, goal_col);
             let new_pos = aw.text_view.display_to_pos(buffer, target);
-            (goal_col, new_pos, view_top.saturating_add(step as usize))
+            (goal_col, new_pos, new_top)
         };
         let (goal, new_pos, new_top) = result;
         let aw = self.active_window_mut();
@@ -1771,12 +1866,16 @@ impl EditorCore {
         // Also nudge view_top; render's scroll-into-view will clamp
         // and align further if needed.
         let max_top = aw.text_view.line_count().saturating_sub(1);
-        aw.view_top = new_top.min(max_top);
+        let clamped = new_top.min(max_top);
+        aw.view_top = folds
+            .as_ref()
+            .map_or(clamped, |map| map.clamp_view_top(clamped));
     }
 
     /// Move the cursor up by approximately one screenful. Mirror of
     /// [`Self::move_page_down`].
     pub fn move_page_up(&mut self) {
+        let folds = self.fold_map_active();
         let step = self.page_step();
         let cursor = self.active_window().cursor;
         let view_top = self.active_window().view_top;
@@ -1790,10 +1889,22 @@ impl EditorCore {
                 .pos_to_display(buffer, cursor)
                 .unwrap_or_default();
             let goal_col = aw.goal_col.unwrap_or(coord.col);
-            let target_row = coord.row.saturating_sub(step);
+            let (target_row, new_top) = match folds.as_ref() {
+                Some(map) => (
+                    map.nth_visible_back(coord.row as usize, step as usize),
+                    map.nth_visible_back(view_top, step as usize),
+                ),
+                None => (
+                    (coord.row as usize).saturating_sub(step as usize),
+                    view_top.saturating_sub(step as usize),
+                ),
+            };
+            let Ok(target_row) = u32::try_from(target_row) else {
+                return;
+            };
             let target = DisplayCoord::new(target_row, goal_col);
             let new_pos = aw.text_view.display_to_pos(buffer, target);
-            (goal_col, new_pos, view_top.saturating_sub(step as usize))
+            (goal_col, new_pos, new_top)
         };
         let (goal, new_pos, new_top) = result;
         let aw = self.active_window_mut();
@@ -1835,15 +1946,21 @@ impl EditorCore {
         aw.goal_col = None;
     }
 
-    /// Dispatch-layer pre-edit unfold (Arc 6, Q#FD5). Before a
-    /// command-path point-anchored edit (the six primitives below),
-    /// unfold every fold containing the active point so a self-insert or
-    /// delete inside a collapsed region reveals it rather than landing
-    /// invisibly. Keyed on the authenticated source frontend's active
-    /// point (this is `active_window().cursor`), not the transport. A
-    /// no-op when the buffer has no folds. Interactive Lua-command edits
-    /// (yank/query-replace/comment) reach the buffer through a different
-    /// path and are a named Stage 2 widening; CRDT-origin is Stage 3.
+    /// Pre-edit unfold (Arc 6, Q#FD5 / Stage 2 Q#FD19). Before a local
+    /// point-anchored edit, unfold every fold containing the active point
+    /// so an edit inside a collapsed region reveals it rather than
+    /// landing invisibly. Keyed on the authenticated source frontend's
+    /// active point (`active_window().cursor`), not the transport. A
+    /// no-op when the buffer has no folds.
+    ///
+    /// **Stage 2 widening:** Stage 1 called this from each of the six
+    /// `dispatch_key` edit primitives. It now runs once at the top of
+    /// [`Self::apply_active_edit`] — the single funnel those primitives
+    /// (and yank, and query-replace) all pass through. Interactive
+    /// Lua-mutator edits (comment-toggle, yank-pop) take a *different*
+    /// path and are hooked at `run_buffer_edit` in the Lua bindings; the
+    /// remote/optimistic-CRDT apply path is deliberately excluded
+    /// (Stage 3), as is undo/redo (deferred).
     fn unfold_before_point_edit(&self) {
         let id = self.active_buffer_id();
         let point = self.active_window().cursor;
@@ -1855,7 +1972,6 @@ impl EditorCore {
     /// line and returns `false`, and callers must not mutate dependent
     /// state (e.g. selection anchors) on a failed insert (Q#AI9).
     pub fn insert_char(&mut self, ch: char) -> bool {
-        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf);
@@ -1891,7 +2007,6 @@ impl EditorCore {
     /// delegates to [`Self::insert_char`] (a plain insert). The cursor
     /// lands just past the inserted bytes and any selection is cleared.
     pub fn insert_char_over_region(&mut self, ch: char) {
-        self.unfold_before_point_edit();
         let Some((lo, hi)) = self.active_region() else {
             // Q#AI9: an empty selection (anchor == cursor) reports no
             // region yet stays armed — the insert moves the cursor off
@@ -1933,7 +2048,6 @@ impl EditorCore {
 
     /// Delete the codepoint immediately before the cursor.
     pub fn backspace(&mut self) {
-        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         if cursor == 0 {
@@ -1955,7 +2069,6 @@ impl EditorCore {
 
     /// Delete the codepoint at the cursor (forward delete).
     pub fn delete_forward(&mut self) {
-        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         let id = self.active_buffer_id();
@@ -1979,7 +2092,6 @@ impl EditorCore {
     /// between the cursor and where [`Self::move_word_left`] would
     /// land.
     pub fn delete_word_backward(&mut self) {
-        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         if cursor == 0 {
@@ -2007,7 +2119,6 @@ impl EditorCore {
     /// [`Self::delete_forward`] over the gap from the cursor to where
     /// [`Self::move_word_right`] would land.
     pub fn delete_word_forward(&mut self) {
-        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         let id = self.active_buffer_id();
@@ -3345,6 +3456,7 @@ mod tests {
             FrontendView {
                 layout: Layout::single(win_id),
                 active: win_id,
+                fold_projection: true,
             },
         );
         win_id

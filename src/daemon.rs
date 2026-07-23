@@ -1545,7 +1545,16 @@ fn handle_session_established(
     // Register the frontend's view (M10.8 Day 3: fresh scratch
     // buffer view; future milestones may clone LOCAL's view or
     // take an explicit initial-buffer argument).
-    let scratch_view = build_fresh_frontend_view(editor);
+    //
+    // Arc 6 Stage 2 (Q#FD21): the projection is decided in this same
+    // attach transaction and from the same bit that selects a grid
+    // `RenderState` vs a `SemanticRenderState` below — a grid session
+    // collapses folds, a semantic one keeps raw-line reckoning until
+    // Stage 3.
+    let scratch_view = build_fresh_frontend_view(
+        editor,
+        !session_state.negotiated_capabilities.semantic_render,
+    );
     editor
         .core
         .borrow_mut()
@@ -2622,7 +2631,13 @@ fn align_semantic_window_to_buffer(
     }
 }
 
-fn build_fresh_frontend_view(editor: &mut EditorState) -> crate::window::FrontendView {
+fn build_fresh_frontend_view(
+    editor: &mut EditorState,
+    // Arc 6 Stage 2 (Q#FD21, Bet B8): whether this session's display
+    // collapses folds. Passed explicitly from the negotiated
+    // selected-render bit at the call site — never inferred here.
+    fold_projection: bool,
+) -> crate::window::FrontendView {
     use crate::text_view::TextView;
     use crate::window::{FrontendView, Layout, Window, WindowId};
     let mut core = editor.core.borrow_mut();
@@ -2651,6 +2666,7 @@ fn build_fresh_frontend_view(editor: &mut EditorState) -> crate::window::Fronten
     FrontendView {
         layout: Layout::single(id),
         active: id,
+        fold_projection,
     }
 }
 
@@ -3442,6 +3458,7 @@ mod tests {
                 FrontendView {
                     layout: Layout::single(wid),
                     active: wid,
+                    fold_projection: true,
                 },
             );
         }

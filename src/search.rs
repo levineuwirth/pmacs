@@ -411,7 +411,7 @@ impl View for SearchView {
         "search"
     }
 
-    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         let buffer_id = buf.id();
         // Snapshot the matches under the lock, release immediately
         // (same discipline as DiagnosticView).
@@ -439,6 +439,9 @@ impl View for SearchView {
         let line_offsets = crate::diag::compute_line_offsets(&source);
         let start_line_buf =
             crate::diag::line_at_offset(&line_offsets, viewport.buffer_start as u32);
+        // Arc 6 Stage 2: source line → this viewport's row, `None` when
+        // the line is collapsed away (the wash then paints nothing).
+        let row_of = |line: u32| viewport.row_offset_of(start_line_buf as usize, line as usize);
         let max_rows = viewport.cell_size.rows;
         let max_cols = viewport.cell_size.cols;
         let cell_origin = viewport.cell_origin;
@@ -479,17 +482,19 @@ impl View for SearchView {
             // Single-line matches (every literal match) touch one row.
             let first_line = crate::diag::line_at_offset(&line_offsets, m.start as u32);
             // Matches are sorted ascending, so once one starts below the
-            // viewport every later one does too — stop.
-            if first_line >= start_line_buf.saturating_add(max_rows) {
+            // viewport every later one does too — stop. Arc 6 Stage 2:
+            // measured in VISIBLE rows, since a collapse puts a far-away
+            // raw line back on screen; a hidden start yields no offset
+            // and falls through to the per-line skip below.
+            if row_of(first_line).is_some_and(|row| row >= max_rows) {
                 break;
             }
             let last_byte = m.end.saturating_sub(1).max(m.start) as u32;
             let last_line = crate::diag::line_at_offset(&line_offsets, last_byte);
             for line in first_line..=last_line {
-                if line < start_line_buf {
+                let Some(row_offset) = row_of(line) else {
                     continue;
-                }
-                let row_offset = line - start_line_buf;
+                };
                 if row_offset >= max_rows {
                     break;
                 }
@@ -753,6 +758,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 10),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );
@@ -781,6 +787,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 10),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid2,
         );
@@ -822,6 +829,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(rows, cols),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );

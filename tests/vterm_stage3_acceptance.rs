@@ -81,6 +81,7 @@ fn attach_view(
         FrontendView {
             layout: Layout::single(window_id),
             active: window_id,
+            fold_projection: true,
         },
     );
     window_id

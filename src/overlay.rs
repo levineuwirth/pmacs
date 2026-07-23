@@ -101,7 +101,7 @@ impl StyleSpanOverlay {
 }
 
 impl View for StyleSpanOverlay {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         for span in &self.spans {
             if span.row >= viewport.cell_size.rows {
                 continue;
@@ -312,7 +312,7 @@ impl View for BufferStyleOverlay {
         Some(Box::new(self.clone()))
     }
 
-    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         let spans = self
             .spans
             .lock()
@@ -369,7 +369,7 @@ fn render_buffer_style_span(
     buf: &Buffer,
     line_offsets: &[u64],
     start_line: usize,
-    viewport: Viewport,
+    viewport: Viewport<'_>,
     cells: &mut CellGrid<'_>,
     span: BufferStyleSpan,
 ) {
@@ -379,10 +379,11 @@ fn render_buffer_style_span(
     let first_line = line_at_offset(line_offsets, span.start);
     let last_line = line_at_offset(line_offsets, span.end.saturating_sub(1));
     for line in first_line..=last_line {
-        if line < start_line {
+        // Arc 6 Stage 2: a span on a collapsed line paints nothing (that
+        // line has no row); one below a fold lands on its shifted-up row.
+        let Some(row_offset) = viewport.row_offset_of(start_line, line) else {
             continue;
-        }
-        let row_offset = (line - start_line) as u32;
+        };
         if row_offset >= viewport.cell_size.rows {
             break;
         }
@@ -457,7 +458,7 @@ impl VirtualCellOverlay {
 }
 
 impl View for VirtualCellOverlay {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         for vc in &self.cells {
             if vc.row >= viewport.cell_size.rows || vc.col >= viewport.cell_size.cols {
                 continue;
@@ -487,13 +488,14 @@ mod tests {
         vec![Cell::default(); (rows * cols) as usize]
     }
 
-    fn viewport(rows: u32, cols: u32) -> Viewport {
+    fn viewport(rows: u32, cols: u32) -> Viewport<'static> {
         Viewport {
             buffer_start: 0,
             buffer_end: u64::MAX,
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(rows, cols),
             gutter_w: 0,
+            folds: None,
         }
     }
 

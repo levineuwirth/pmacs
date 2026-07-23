@@ -684,7 +684,7 @@ struct PopupRect {
 /// the viewport or nothing fits.
 fn resolve_popup_rect(
     buf: &Buffer,
-    viewport: Viewport,
+    viewport: Viewport<'_>,
     anchor: Position,
     rows: &[PopupCandidate],
 ) -> Option<PopupRect> {
@@ -700,10 +700,12 @@ fn resolve_popup_rect(
     let line_offsets = crate::diag::compute_line_offsets(&source);
     let start_line = crate::diag::line_at_offset(&line_offsets, viewport.buffer_start as u32);
     let anchor_line = crate::diag::line_at_offset(&line_offsets, anchor);
-    if anchor_line < start_line {
-        return None; // anchor scrolled above the viewport
-    }
-    let anchor_row = anchor_line - start_line;
+    // Arc 6 Stage 2: the popup anchors on the anchor byte's VISIBLE row,
+    // so a completion below a collapsed region lands on the right row;
+    // an anchor inside a collapse has no row and paints nothing.
+    let Some(anchor_row) = viewport.row_offset_of(start_line as usize, anchor_line as usize) else {
+        return None; // anchor scrolled above the viewport, or collapsed
+    };
     let max_rows = viewport.cell_size.rows;
     let max_cols = viewport.cell_size.cols;
     if anchor_row >= max_rows || max_cols == 0 {
@@ -820,7 +822,7 @@ impl View for CompletionView {
         "completion-popup"
     }
 
-    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         // Snapshot under the lock, then drop it before touching the rope.
         let (anchor, rows_data, selected_in_window): (Position, Vec<PopupCandidate>, usize) = {
             let guard = self.popup.lock().expect("completion popup poisoned");

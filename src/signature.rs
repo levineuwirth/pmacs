@@ -318,7 +318,7 @@ impl SignatureView {
 }
 
 impl View for SignatureView {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         let snap = self.snapshot();
         let max_rows = viewport.cell_size.rows;
         let max_cols = viewport.cell_size.cols;

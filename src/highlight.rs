@@ -413,7 +413,7 @@ impl View for SyntaxHighlightView {
         "syntax-highlight"
     }
 
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         self.refresh_cache_if_stale();
         let Some(bundle) = self.cache.bundle.clone() else {
             return;
@@ -436,7 +436,11 @@ impl View for SyntaxHighlightView {
         // `compute_highlight_spans_for`) lets narrower captures override.
         for layer in &self.cache.layers {
             for row_offset in 0..max_rows {
-                let line_idx = start_line + row_offset;
+                // Arc 6 Stage 2: row `r` shows the `r`-th VISIBLE line,
+                // matching `TextView::render`'s walk (Q#FD13).
+                let line_idx =
+                    u32::try_from(viewport.line_at_row_offset(start_line as usize, row_offset))
+                        .unwrap_or(u32::MAX);
                 if line_idx >= total_lines {
                     break;
                 }
@@ -593,7 +597,7 @@ impl View for LspStyleView {
         "lsp-style"
     }
 
-    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         let Some(path) = buf.file_path() else {
             return; // No path ⇒ no URI ⇒ nothing to look up.
         };
@@ -644,7 +648,10 @@ impl View for LspStyleView {
         let total_lines = line_offsets.len() as u32;
 
         for row_offset in 0..max_rows {
-            let line_idx = start_line + row_offset;
+            // Arc 6 Stage 2: row `r` shows the `r`-th VISIBLE line.
+            let line_idx =
+                u32::try_from(viewport.line_at_row_offset(start_line as usize, row_offset))
+                    .unwrap_or(u32::MAX);
             if line_idx >= total_lines {
                 break;
             }
@@ -1058,6 +1065,7 @@ mod tests {
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(1, 20),
             gutter_w: 0,
+            folds: None,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1155,6 +1163,7 @@ mod tests {
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(1, 20),
             gutter_w: 0,
+            folds: None,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1274,6 +1283,7 @@ mod tests {
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(1, 20),
             gutter_w: 0,
+            folds: None,
         };
         let registry = state.core.borrow().registry.clone();
         let reg = registry.borrow();
@@ -1333,6 +1343,7 @@ mod tests {
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
+            folds: None,
         };
         let registry = buf; // keep buf alive
         hv.render(&registry, viewport, &mut grid);
@@ -1389,6 +1400,7 @@ mod tests {
             cell_origin: CellCoord::new(0, 0),
             cell_size: CellSize::new(rows as u32, cols as u32),
             gutter_w: 0,
+            folds: None,
         };
         let registry = buf; // keep buf alive
         hv.render(&registry, viewport, &mut grid);

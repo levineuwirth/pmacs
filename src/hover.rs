@@ -208,7 +208,7 @@ impl HoverView {
 }
 
 impl View for HoverView {
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         let lines: Vec<String> = {
             let guard = self.store.lock().expect("hover store poisoned");
             guard
