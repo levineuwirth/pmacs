@@ -116,8 +116,6 @@ pub enum ManagedAttachError {
         /// Process-spawn failure.
         source: io::Error,
     },
-    /// The daemon process could not be queried for an early exit.
-    ObserveDaemon(io::Error),
     /// No attachable daemon appeared before the bounded deadline.
     StartupTimeout {
         /// Socket path that remained unreachable.
@@ -150,9 +148,6 @@ impl std::fmt::Display for ManagedAttachError {
                 "could not start daemon executable {}: {source}",
                 executable.display()
             ),
-            Self::ObserveDaemon(source) => {
-                write!(f, "could not inspect the managed daemon process: {source}")
-            }
             Self::StartupTimeout {
                 socket,
                 connect,
@@ -179,7 +174,6 @@ impl std::error::Error for ManagedAttachError {
             Self::Attach(error) => Some(error),
             Self::InspectSocket { source, .. }
             | Self::SpawnDaemon { source, .. }
-            | Self::ObserveDaemon(source)
             | Self::StartupTimeout {
                 connect: source, ..
             } => Some(source),
@@ -655,12 +649,6 @@ fn start_daemon_reaper(mut child: Child, facts: ManagedDaemonFacts) {
         .expect("spawn managed daemon reaper thread");
 }
 
-fn hand_off_daemon_child(child: &mut Option<Child>, facts: &ManagedDaemonFacts) {
-    if let Some(child) = child.take() {
-        start_daemon_reaper(child, facts.clone());
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn connect_managed_inner<C, S, F>(
     socket_path: &Path,
@@ -698,48 +686,22 @@ where
         }
     })?;
     let daemon = ManagedDaemonFacts::spawned(child.id());
-    let mut child = Some(child);
+    start_daemon_reaper(child, daemon.clone());
     let deadline = Instant::now() + timeout;
 
     loop {
         match connector(socket_path) {
             Ok(stream) => {
-                let attached = connect_stream_with_sink(stream, sink);
-                hand_off_daemon_child(&mut child, &daemon);
-                return Ok(ManagedAttach {
-                    client: attached?,
-                    daemon,
-                });
+                let client = connect_stream_with_sink(stream, sink)?;
+                return Ok(ManagedAttach { client, daemon });
             }
             Err(error) => {
-                let retryable = match post_spawn_retryable(socket_path, &error) {
-                    Ok(retryable) => retryable,
-                    Err(classification_error) => {
-                        hand_off_daemon_child(&mut child, &daemon);
-                        return Err(classification_error);
-                    }
-                };
+                let retryable = post_spawn_retryable(socket_path, &error)?;
                 if !retryable {
-                    hand_off_daemon_child(&mut child, &daemon);
                     return Err(AttachClientError::Connect(error).into());
-                }
-                let wait_status = match child
-                    .as_mut()
-                    .expect("managed daemon child handed off only on return")
-                    .try_wait()
-                {
-                    Ok(status) => status,
-                    Err(observe_error) => {
-                        hand_off_daemon_child(&mut child, &daemon);
-                        return Err(ManagedAttachError::ObserveDaemon(observe_error));
-                    }
-                };
-                if let Some(status) = wait_status {
-                    daemon.record_wait(status.to_string());
                 }
                 if Instant::now() >= deadline {
                     let daemon_status = daemon.daemon_wait_result();
-                    hand_off_daemon_child(&mut child, &daemon);
                     return Err(ManagedAttachError::StartupTimeout {
                         socket: socket_path.to_owned(),
                         connect: error,
