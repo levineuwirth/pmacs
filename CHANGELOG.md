@@ -194,9 +194,8 @@ release.
 
 #### Pulled-forward v0.2-prerequisite APIs
 
-Planned promotions from `V0.2-PREREQUISITES.md`, implemented and
-shipped in 1.0 (the public-API ceiling was raised by operator
-decision to absorb them):
+These planned v0.2 promotions were implemented and shipped in 1.0
+after the public-API ceiling was raised by operator decision:
 
 - `pmacs.buffer.from_file`, `pmacs.buffer.on_removed` (with an
   idempotent `:remove()` handle; buffer-local keymaps pruned on
@@ -243,9 +242,8 @@ decision to absorb them):
   converged document (CRDT state is fully restored) but are no longer
   reachable by that frontend's undo command — undo only reaches
   edits made since reconnecting. Workaround: remove unwanted
-  pre-disconnect content by editing it out. Preserving undo history
-  across reconnect is tracked for v0.2
-  (`V0.2-PREREQUISITES.md`, Finding 4).
+  pre-disconnect content by editing it out. Preserving undo history across
+  reconnect remains a v0.2 follow-up.
 - **macOS REPL ctrl-c / exit-marker timing.** Two M6.5 REPL
   acceptance tests (`m6_5_ctrl_c_sends_sigint`,
   `m6_5_exit_marker_uses_basename_with_leading_newline`) time out on
