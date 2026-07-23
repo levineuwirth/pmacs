@@ -57,18 +57,21 @@ If it does not, stop and repair the remote/fetch configuration.
 - Portable branch: `githubsucks/gpu-invocation`
 - Pull request: **#141 OPEN — do not merge without explicit user approval.**
 - Base: `githubsucks/main` @ `96d0bae`; protocol remains v19.
-- Implementation checkpoints: `69825d0` (exception-safe immediate reaper
-  ownership) atop `82355ca` (first implementation-review fixes) and
-  `6fd5834`; approved framing began at `821835b` and is now Revision 5.
-- State: all six implementation-review findings are resolved, all 18
-  acceptance criteria complete, and the PR awaits another user review. Public
-  path is additive `pmacs --gpu [--socket NAME|PATH]`; bare `pmacs [FILE]`
-  remains TUI and `pmacs --gpu FILE` remains rejected.
+- Implementation checkpoints: `154cb9f` (second implementation-review fixes)
+  atop `69825d0` (exception-safe immediate reaper ownership), `82355ca`
+  (first implementation-review fixes), and `6fd5834`; approved framing began
+  at `821835b` and is now Revision 6.
+- State: both implementation reviews are resolved, all 18 acceptance criteria
+  complete, and the PR awaits user review. Public path is additive
+  `pmacs --gpu [--socket NAME|PATH]`; bare `pmacs [FILE]` remains TUI and
+  `pmacs --gpu FILE` remains rejected.
 - Review fixes: pre-state GPU events are buffered until winit state exists;
-  daemon stderr is detached; spawned-child ownership is handed off without a
-  leak window; direct CLI guidance, help operands, and sibling-file discovery
-  are strict; transient retry, timeout reporting, hermetic socket paths, and
-  deterministic concurrent-loser reaping have behavioral coverage.
+  daemon stdio is detached; spawned-child ownership is handed off without a
+  leak window; direct CLI guidance, help/path operands, and sibling-file
+  discovery are strict; transient retry, timeout reporting, hermetic socket
+  paths, deterministic concurrent-loser reaping, pre-I/O non-CRDT gating, and
+  post-SIGINT use of a pre-attached frontend have behavioral coverage. Probe
+  disconnect polling remains bounded and cleanup skips already-reaped PIDs.
 - Verification: strict workspace and CRDT acceptance Clippy; 1,768 default +
   1,944 CRDT library tests; root CLI 33; GPU 149 required; GPU invocation
   acceptance 1 default + 9 CRDT; Vterm Stage 3 7; M4 121 with 3 ignored and

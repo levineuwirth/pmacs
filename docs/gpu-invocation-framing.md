@@ -1,7 +1,7 @@
 # GPU invocation — one-command broker framing
 
-**Revision 5 — implementation review complete on `gpu-invocation`. Ground
-truth: canonical `main` @ `96d0bae`, protocol v19, 2026-07-23.**
+**Revision 6 — second implementation review complete on `gpu-invocation`.
+Ground truth: canonical `main` @ `96d0bae`, protocol v19, 2026-07-23.**
 
 The GPU editor works, but reaching it is still a development-session ritual:
 build two packages with different feature requirements, keep a foreground
@@ -41,6 +41,12 @@ ownership remains local until the named reaper accepts it, and the daemon
 inherits no launcher stdio. Direct GPU help points normal users to the root
 broker and labels raw socket attach as advanced. The retry, timeout, socket
 type, and concurrent-loser contracts now have deterministic behavioral tests.
+
+Revision 6 closes the remaining non-blocking review findings. The managed
+probe throttles after its event channel disconnects; option-like path operands
+are rejected; cleanup never signals an already-reaped daemon PID; and the
+acceptance suite now proves both pre-I/O non-CRDT gating and post-SIGINT use of
+a frontend attached before the launcher exits.
 
 ## Ground truth
 
@@ -550,9 +556,10 @@ Vterm probe continues to cover offscreen wgpu.
    argument named. Bare `pmacs --socket research` (with or without a local
    file / `-nw`) exits 2 and says which owning mode is required.
 2. **Non-CRDT build fails before socket or spawn:** a default-feature
-   `pmacs --gpu` names `--features crdt`; a capable daemon already listening
-   does not weaken the gate, and fake GPU/daemon executables record zero
-   invocations. The default socket remains unowned.
+   `pmacs --gpu` names `--features crdt`, invokes no GPU executable, and leaves
+   the default socket absent under a private runtime directory. Repeating the
+   command against an already-listening Unix socket neither invokes the GPU
+   nor disturbs that socket, proving the gate precedes socket I/O.
 3. **Sibling discovery wins:** with executable fixtures at the current-exe
    sibling and on PATH, the sibling regular file receives the managed
    arguments. A directory at the sibling pathname is ignored in favor of
@@ -566,12 +573,14 @@ Vterm probe continues to cover offscreen wgpu.
    handshake, receives the first `BufferSnapshot`, and leaves the daemon
    connectable after the probe exits.
 6. **Ctrl-C does not kill the daemon:** spawn the managed probe/broker in its
-   own process group, wait for the probe's `phase=ready`, attach a second real
-   frontend, then simulate terminal Ctrl-C with `kill(-pgid, SIGINT)`. Assert
-   the launcher/frontend exit while the separately grouped daemon and second
-   session remain usable. This does not require a controlling terminal or a
-   foreground-process-group claim in CI. Direct foreground `pmacs --daemon`
-   still exits cleanly on SIGINT.
+   own process group, wait for the probe's `phase=ready`, and complete a second
+   real frontend's handshake and initial snapshot/grid sync before simulating
+   terminal Ctrl-C with `kill(-pgid, SIGINT)`. After the launcher/frontend
+   exits, resize the pre-existing second frontend and require its full-grid
+   response; the separately grouped daemon and existing session remain usable.
+   This does not require a controlling terminal or a foreground-process-group
+   claim in CI. Direct foreground `pmacs --daemon` still exits cleanly on
+   SIGINT.
 7. **Concurrent launchers converge:** hold two daemon wrappers behind a shared
    barrier so both managed probes authorize and spawn before either daemon
    binds the absent named socket. Exactly one daemon owns the lock; both
@@ -615,9 +624,10 @@ Vterm probe continues to cover offscreen wgpu.
     direct `--attach PATH` as advanced. Existing `--headless-probe SOCKET
     REPORT` and hidden `--headless-managed-probe SOCKET REPORT DAEMON_EXE`
     accept exactly their operands. Missing/trailing/unknown/incomplete args
-    exit 2; trailing help/version operands say those flags accept no operands.
-    `--version` prints package and protocol versions without initializing
-    winit/wgpu.
+    exit 2; trailing help/version operands say those flags accept no operands;
+    option-like path operands are rejected and require an explicit `./`
+    prefix when they name a real relative path. `--version` prints package and
+    protocol versions without initializing winit/wgpu.
 16. **Existing direct and Vterm paths remain intact:** rebuilt
     `pmacs-gpu --attach RAW_PATH` still renders an existing CRDT daemon, and
     `tests/vterm_stage3_acceptance.rs` still invokes its unchanged
@@ -652,13 +662,16 @@ Vterm probe continues to cover offscreen wgpu.
   protocol/capability failures never authorize replacement.
 - `--headless-managed-probe SOCKET REPORT DAEMON_EXE` drives the production
   managed connector, writes atomic `phase=ready` / `phase=complete` reports,
-  holds on stdin, and exposes disconnect plus daemon-reaper observations.
-- `tests/gpu_invocation_acceptance.rs` covers the root broker, non-CRDT gate,
-  existing/missing/stale/racing daemon paths, process-group SIGINT isolation,
-  capability and protocol mismatches, bounded startup failure, deterministic
-  losing-child reaping, outcome propagation, and strict headless CLI behavior.
+  holds on stdin, exposes disconnect plus daemon-reaper observations, and
+  retains its 50-ms cadence after the event channel closes.
+- `tests/gpu_invocation_acceptance.rs` covers the root broker, pre-I/O
+  non-CRDT gate, existing/missing/stale/racing daemon paths, process-group
+  SIGINT isolation with a pre-attached surviving frontend, capability and
+  protocol mismatches, bounded startup failure, deterministic losing-child
+  reaping without signaling freed PIDs, outcome propagation, and strict
+  headless CLI behavior.
 
-Verification on 2026-07-23 after the implementation review:
+Verification on 2026-07-23 after the second implementation review:
 
 - root CLI unit suite: 33 passed;
 - required GPU suite: 149 passed;
