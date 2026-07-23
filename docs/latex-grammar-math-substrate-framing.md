@@ -9,8 +9,11 @@ in-flight-lane snapshot; rev 3 folds in two provenance-wording corrections —
 the fork-vs-upstream attribution and the now-discharged provenance diff — and
 relaxes the `Cargo.toml` sequencing note. See §0.1 for the changelog.
 
-Parent arc: `docs/inline-math-framing.md`. That note frames the full
-four-tier inline-math renderer; its Tier 4 (GPU render) lands on
+Parent arc: `docs/inline-math-framing.md` — currently an **untracked,
+desktop-only framing** not yet committed to the repo, so this path will not
+resolve on a fresh clone; committing it as its own docs PR (or listing it in
+the handoff's machine-local doc inventory) is a tracked follow-up. That note
+frames the full four-tier inline-math renderer; its Tier 4 (GPU render) lands on
 `pmacs-gpu/src/main.rs`, the render path that folding and any future math
 draw pass also contend for. **This lane deliberately carves out only the
 frontend-agnostic, conflict-free substrate** — the parts that can land now,
