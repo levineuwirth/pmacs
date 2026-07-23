@@ -214,6 +214,13 @@ pub struct EditorCore {
     /// Shared buffer registry. The registry is the canonical owner
     /// of every buffer; windows reference buffers by [`BufferId`].
     pub registry: SharedRegistry,
+    /// Per-buffer fold stores (Arc 6). Shared with `EditorState`, the
+    /// semantic `FoldState` producer, and the `pmacs.fold` Lua surface
+    /// — the same `Rc`. The core reaches it so the six point-anchored
+    /// edit primitives can run the dispatch-layer pre-edit unfold
+    /// (Q#FD5): a command-path self-insert/delete at a point inside a
+    /// fold unfolds it before the edit applies.
+    pub fold_registry: crate::fold::SharedFoldRegistry,
     /// All windows, keyed by id for stable iteration. `WindowId`s
     /// are globally unique across all frontends; each
     /// [`FrontendView`] in `views` references a subset via its
@@ -383,6 +390,7 @@ impl EditorCore {
         );
         Self {
             registry,
+            fold_registry: crate::fold::make_shared_fold_registry(),
             windows,
             views,
             status: String::new(),
@@ -1827,11 +1835,27 @@ impl EditorCore {
         aw.goal_col = None;
     }
 
+    /// Dispatch-layer pre-edit unfold (Arc 6, Q#FD5). Before a
+    /// command-path point-anchored edit (the six primitives below),
+    /// unfold every fold containing the active point so a self-insert or
+    /// delete inside a collapsed region reveals it rather than landing
+    /// invisibly. Keyed on the authenticated source frontend's active
+    /// point (this is `active_window().cursor`), not the transport. A
+    /// no-op when the buffer has no folds. Interactive Lua-command edits
+    /// (yank/query-replace/comment) reach the buffer through a different
+    /// path and are a named Stage 2 widening; CRDT-origin is Stage 3.
+    fn unfold_before_point_edit(&self) {
+        let id = self.active_buffer_id();
+        let point = self.active_window().cursor;
+        self.fold_registry.unfold_containing(id, point);
+    }
+
     /// Insert a single character at the cursor. Returns `true` iff the
     /// edit landed: a rejecting buffer intercept reports via the status
     /// line and returns `false`, and callers must not mutate dependent
     /// state (e.g. selection anchors) on a failed insert (Q#AI9).
     pub fn insert_char(&mut self, ch: char) -> bool {
+        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf);
@@ -1867,6 +1891,7 @@ impl EditorCore {
     /// delegates to [`Self::insert_char`] (a plain insert). The cursor
     /// lands just past the inserted bytes and any selection is cleared.
     pub fn insert_char_over_region(&mut self, ch: char) {
+        self.unfold_before_point_edit();
         let Some((lo, hi)) = self.active_region() else {
             // Q#AI9: an empty selection (anchor == cursor) reports no
             // region yet stays armed — the insert moves the cursor off
@@ -1908,6 +1933,7 @@ impl EditorCore {
 
     /// Delete the codepoint immediately before the cursor.
     pub fn backspace(&mut self) {
+        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         if cursor == 0 {
@@ -1929,6 +1955,7 @@ impl EditorCore {
 
     /// Delete the codepoint at the cursor (forward delete).
     pub fn delete_forward(&mut self) {
+        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         let id = self.active_buffer_id();
@@ -1952,6 +1979,7 @@ impl EditorCore {
     /// between the cursor and where [`Self::move_word_left`] would
     /// land.
     pub fn delete_word_backward(&mut self) {
+        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         if cursor == 0 {
@@ -1979,6 +2007,7 @@ impl EditorCore {
     /// [`Self::delete_forward`] over the gap from the cursor to where
     /// [`Self::move_word_right`] would land.
     pub fn delete_word_forward(&mut self) {
+        self.unfold_before_point_edit();
         self.active_window_mut().goal_col = None;
         let cursor = self.active_window().cursor;
         let id = self.active_buffer_id();

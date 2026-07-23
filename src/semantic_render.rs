@@ -26,9 +26,10 @@
 //! and `Decorations` (M11.3), both span-granularity diffed (M11.4);
 //! `InlineAdornments` (Step 3, from the LSP inlay-hint store,
 //! M11.2-level suppression); `FileStyleSummary` (resolving Open Q#2 —
-//! per-line dominant style for a minimap, generation-keyed).
-//! `BlockAdornments` / `FoldState` / `ResourceOffer` remain wire-
-//! declared but unproduced.
+//! per-line dominant style for a minimap, generation-keyed); `FoldState`
+//! (Arc 6 — the instance's authoritative fold set, authoritative-empty).
+//! `BlockAdornments` / `ResourceOffer` remain wire-declared but
+//! unproduced.
 
 use std::collections::HashMap;
 
@@ -163,6 +164,16 @@ pub struct SemanticRenderState {
     /// byte-identical. `LastFrame::items` reuse keeps the shape
     /// uniform even though no segment diffing applies.
     last_adornments: HashMap<BufferId, LastFrame<InlineAdornment>>,
+    /// `FoldState` baseline (Arc 6). Whole-buffer, not viewport-clipped,
+    /// so a plain `Vec<ByteRange>` per buffer suffices. Authoritative-
+    /// empty and diff-suppressed: the first sight of a buffer emits only
+    /// if a fold exists (no empty-frame spam), an unchanged set emits
+    /// nothing, and a `non-empty → empty` transition emits exactly one
+    /// empty frame so the frontend clears its fold mirror. Resets on
+    /// `BufferSnapshot` — the snapshot's own frontend-side fold-mirror
+    /// clear is what makes the empty-after-revert suppression correct
+    /// (Q#FD8, #120 class).
+    last_folds: HashMap<BufferId, Vec<ByteRange>>,
     /// `FileStyleSummary` baseline (post-M11 minimap producer,
     /// resolving design-note Open Q#2). The whole-file dominant-style
     /// summary is expensive to compute on a 100k-line file, so the
@@ -417,6 +428,7 @@ impl SemanticRenderState {
             last_sent: HashMap::new(),
             last_decorations: HashMap::new(),
             last_adornments: HashMap::new(),
+            last_folds: HashMap::new(),
             last_search_prompt: HashMap::new(),
             last_menu_prompt: HashMap::new(),
             last_minibuffer: None,
@@ -565,6 +577,7 @@ impl SemanticRenderState {
         self.last_style_gate.remove(&buffer_id);
         self.last_decorations.remove(&buffer_id);
         self.last_adornments.remove(&buffer_id);
+        self.last_folds.remove(&buffer_id);
         self.last_summary.remove(&buffer_id);
         self.last_status.remove(&buffer_id);
         self.last_search_prompt.remove(&buffer_id);
@@ -583,11 +596,12 @@ impl SemanticRenderState {
     /// send. Returns an empty vec before the frontend declares a
     /// viewport.
     ///
-    /// `BlockAdornments` / `FoldState` are still deliberately *not*
-    /// produced: pmacs has no instance-side blame / lens / fold / diff
-    /// source yet. Their wire variants exist (T M11.1); their
-    /// producers wire in when those features land — the same
-    /// "declared, not yet wired" discipline. Emitting an empty message
+    /// `BlockAdornments` is still deliberately *not* produced: pmacs has
+    /// no instance-side blame / lens / diff source yet. (`FoldState` IS
+    /// produced now — Arc 6 — authoritative-empty via `fold_state_msg`.)
+    /// Its wire variant exists (T M11.1); its producer wires in when that
+    /// feature lands — the same "declared, not yet wired" discipline.
+    /// Emitting an empty message
     /// every frame would be waste, not honesty, so `InlineAdornments` is
     /// suppressed both when unchanged and when there is simply nothing
     /// to say (no hints, no prior non-empty send).
@@ -775,6 +789,8 @@ impl SemanticRenderState {
 
         // --- InlineAdornments (Step 3 producer) ---
         out.extend(self.inline_adornments_msg(state, &vp));
+        // --- FoldState (Arc 6 producer; authoritative-empty) ---
+        out.extend(self.fold_state_msg(state, vp.buffer_id));
         // --- FileStyleSummary (minimap producer; Open Q#2) ---
         out.extend(self.file_style_summary_msg(state, vp.buffer_id, generation));
         // --- StatusFacts (status band; Q#S1, protocol v8) ---
@@ -1398,6 +1414,35 @@ impl SemanticRenderState {
             buffer_id: vp.buffer_id,
             items: adornments,
         })
+    }
+
+    /// The `FoldState` message for this frame, or `None` (Arc 6). The
+    /// instance's authoritative fold set for `buffer_id`, whole-buffer
+    /// (folds are a handful; `close-all` is top-level only, so the set is
+    /// O(top-level blocks) — no viewport scoping). Authoritative-empty and
+    /// diff-suppressed exactly like `inline_adornments_msg`: the first
+    /// sight of a buffer speaks only if a fold exists, an unchanged set is
+    /// silent, and a `non-empty → empty` transition emits one empty frame
+    /// so the frontend clears its mirror. Its baseline resets on
+    /// `BufferSnapshot`; see `on_buffer_snapshot_sent`.
+    fn fold_state_msg(
+        &mut self,
+        state: &EditorState,
+        buffer_id: BufferId,
+    ) -> Option<InstanceMessage> {
+        let folds = state.fold_registry.folds(buffer_id);
+        let should_emit = match self.last_folds.get(&buffer_id) {
+            // First sight: speak only if there is a fold to show.
+            None => !folds.is_empty(),
+            // Any change: `empty → empty` is byte-identical and suppressed,
+            // `non-empty → empty` differs and emits one clearing frame.
+            Some(prev) => *prev != folds,
+        };
+        if !should_emit {
+            return None;
+        }
+        self.last_folds.insert(buffer_id, folds.clone());
+        Some(InstanceMessage::FoldState { buffer_id, folds })
     }
 
     /// The `FileStyleSummary` message for this frame, or `None`. The
@@ -3238,11 +3283,11 @@ mod tests {
 
     /// All `InstanceMessage` variants the semantic projection may
     /// emit are `StyleSpans`, `Decorations`, `InlineAdornments`,
-    /// `FileStyleSummary`, `StatusFacts` (Q#S1), `SearchPrompt`
-    /// (Q#SR5), `LineNumbers`, `ThemeFacts` (Q#TH7), `FontFacts`
-    /// (Q#F5), or `StatuslineSegments` (Q#SL7) — never `CellDelta`,
-    /// grid `Cursor`, or the still-unwired `BlockAdornments` /
-    /// `FoldState` families.
+    /// `FoldState` (Q#FD8), `FileStyleSummary`, `StatusFacts` (Q#S1),
+    /// `SearchPrompt` (Q#SR5), `LineNumbers`, `ThemeFacts` (Q#TH7),
+    /// `FontFacts` (Q#F5), or `StatuslineSegments` (Q#SL7) — never
+    /// `CellDelta`, grid `Cursor`, or the still-unwired `BlockAdornments`
+    /// family.
     fn assert_semantic_only(msgs: &[InstanceMessage]) {
         for m in msgs {
             assert!(
@@ -3251,6 +3296,7 @@ mod tests {
                     InstanceMessage::StyleSpans { .. }
                         | InstanceMessage::Decorations { .. }
                         | InstanceMessage::InlineAdornments { .. }
+                        | InstanceMessage::FoldState { .. }
                         | InstanceMessage::FileStyleSummary { .. }
                         | InstanceMessage::StatusFacts { .. }
                         | InstanceMessage::SearchPrompt { .. }
@@ -3999,9 +4045,11 @@ mod tests {
     }
 
     #[test]
-    fn block_adornments_and_fold_state_still_never_emitted() {
-        // BlockAdornments / FoldState have no instance-side source
-        // yet, so the projection never produces them (not even empty).
+    fn block_adornments_still_never_emitted() {
+        // BlockAdornments has no instance-side source yet, so the
+        // projection never produces it (not even empty). FoldState is now
+        // wired (Arc 6) but stays authoritative-empty — see
+        // `fold_state_not_emitted_without_folds`.
         let state = empty_state();
         let buffer_id = active_buffer(&state);
         let mut s = local();
@@ -4009,14 +4057,99 @@ mod tests {
         for _ in 0..3 {
             for m in s.render_frame(&state) {
                 assert!(
-                    !matches!(
-                        m,
-                        InstanceMessage::BlockAdornments { .. } | InstanceMessage::FoldState { .. }
-                    ),
-                    "a still-unwired block/fold family was emitted: {m:?}"
+                    !matches!(m, InstanceMessage::BlockAdornments { .. }),
+                    "a still-unwired block-adornment family was emitted: {m:?}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn fold_state_not_emitted_without_folds() {
+        // FoldState IS wired but authoritative-empty: a buffer with no
+        // folds must never emit an (empty) FoldState frame — no empty-
+        // frame spam. (Its positive transitions are pinned in the
+        // folding acceptance suite.)
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+        for _ in 0..3 {
+            assert!(
+                !s.render_frame(&state)
+                    .iter()
+                    .any(|m| matches!(m, InstanceMessage::FoldState { .. })),
+                "no folds ⇒ no FoldState message"
+            );
+        }
+    }
+
+    #[test]
+    fn fold_state_producer_transitions() {
+        // Arc 6 Q#FD8 / acceptance 7: the three authoritative-empty
+        // transitions to a semantic session — nothing until a fold exists,
+        // nothing when unchanged, exactly one empty frame on
+        // non-empty→empty — plus the per-session baseline reset on
+        // BufferSnapshot, while BlockAdornments stays never-emitted.
+        let state = empty_state();
+        let buffer_id = active_buffer(&state);
+        let mut s = local();
+        s.set_viewport(buffer_id, ByteRange { start: 0, end: 64 }, 0);
+
+        let fold_frames = |s: &mut SemanticRenderState, st: &EditorState| -> Vec<Vec<ByteRange>> {
+            s.render_frame(st)
+                .into_iter()
+                .filter_map(|m| match m {
+                    InstanceMessage::FoldState { folds, .. } => Some(folds),
+                    InstanceMessage::BlockAdornments { .. } => {
+                        panic!("BlockAdornments must stay unproduced")
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Nothing until a fold exists.
+        assert!(fold_frames(&mut s, &state).is_empty());
+
+        // Add a fold → exactly one FoldState frame carrying it.
+        let range = ByteRange { start: 3, end: 7 };
+        {
+            let core = state.core.borrow();
+            let mut reg = core.registry.borrow_mut();
+            let buf = reg.get_mut(buffer_id).expect("buffer");
+            state
+                .fold_registry
+                .store_or_attach(buf)
+                .lock()
+                .unwrap()
+                .insert(range);
+        }
+        assert_eq!(fold_frames(&mut s, &state), vec![vec![range]]);
+
+        // Unchanged → nothing.
+        assert!(fold_frames(&mut s, &state).is_empty());
+
+        // Clear → exactly one empty frame so the frontend drops its mirror.
+        {
+            let store = state.fold_registry.store(buffer_id).expect("store exists");
+            store.lock().unwrap().clear();
+        }
+        assert_eq!(fold_frames(&mut s, &state), vec![Vec::<ByteRange>::new()]);
+        // Empty → empty is suppressed.
+        assert!(fold_frames(&mut s, &state).is_empty());
+
+        // A snapshot resets the baseline: the still-empty set is again
+        // suppressed as "initial empty" (the frontend cleared its mirror
+        // when it applied the snapshot — the Stage 3 pairing).
+        s.on_buffer_snapshot_sent(buffer_id);
+        assert!(fold_frames(&mut s, &state).is_empty());
+        // …and a fold added after the reset is re-shipped.
+        {
+            let store = state.fold_registry.store(buffer_id).expect("store exists");
+            store.lock().unwrap().insert(range);
+        }
+        assert_eq!(fold_frames(&mut s, &state), vec![vec![range]]);
     }
 
     #[test]
