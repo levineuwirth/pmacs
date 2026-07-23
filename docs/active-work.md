@@ -57,17 +57,25 @@ If it does not, stop and repair the remote/fetch configuration.
 - Portable branch: `githubsucks/gpu-invocation`
 - Pull request: **#141 OPEN — do not merge without explicit user approval.**
 - Base: `githubsucks/main` @ `96d0bae`; protocol remains v19.
-- Implementation checkpoint: `6fd5834` (approved Revision-4 framing is the
-  preceding `821835b`).
-- State: implementation and all 18 acceptance criteria complete; awaiting user
-  review. Public path is additive `pmacs --gpu [--socket NAME|PATH]`; bare
-  `pmacs [FILE]` remains TUI and `pmacs --gpu FILE` remains rejected.
-- Verification: strict workspace Clippy; 1,768 default + 1,944 CRDT library
-  tests; root CLI 33; GPU 145 required; GPU invocation acceptance 1 default +
-  9 CRDT; Vterm Stage 3 7; M4 121 with 3 ignored and the requested
-  `basedpyright` skip; formatting and diff check clean. Unified release build
-  passed. Two real Wayland/Vulkan launches attached at protocol v19; the
-  second reused the daemon retained after the first GPU process exited.
+- Implementation checkpoints: `82355ca` (first implementation-review fixes)
+  atop `6fd5834`; approved framing began at `821835b` and is now Revision 5.
+- State: all six implementation-review findings are resolved, all 18
+  acceptance criteria complete, and the PR awaits another user review. Public
+  path is additive `pmacs --gpu [--socket NAME|PATH]`; bare `pmacs [FILE]`
+  remains TUI and `pmacs --gpu FILE` remains rejected.
+- Review fixes: pre-state GPU events are buffered until winit state exists;
+  daemon stderr is detached; spawned-child ownership is handed off without a
+  leak window; direct CLI guidance, help operands, and sibling-file discovery
+  are strict; transient retry, timeout reporting, hermetic socket paths, and
+  deterministic concurrent-loser reaping have behavioral coverage.
+- Verification: strict workspace and CRDT acceptance Clippy; 1,768 default +
+  1,944 CRDT library tests; root CLI 33; GPU 149 required; GPU invocation
+  acceptance 1 default + 9 CRDT; Vterm Stage 3 7; M4 121 with 3 ignored and
+  the requested `basedpyright` skip; full workspace 2,961 across 85 suites
+  with 19 ignored and 1 requested skip; formatting and diff check clean.
+  Unified release build passed. Two real Wayland/Vulkan launches attached at
+  protocol v19; the second reused the daemon retained after the first GPU
+  process exited.
 - Distribution remains source-checkout/workspace oriented: `pmacs-gpu` is
   still unpublished. No install/service packaging claim was added.
 

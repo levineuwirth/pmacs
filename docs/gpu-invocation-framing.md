@@ -1,7 +1,7 @@
 # GPU invocation — one-command broker framing
 
-**Revision 4 — implemented on `gpu-invocation`. Ground truth: canonical
-`main` @ `96d0bae`, protocol v19, 2026-07-23.**
+**Revision 5 — implementation review complete on `gpu-invocation`. Ground
+truth: canonical `main` @ `96d0bae`, protocol v19, 2026-07-23.**
 
 The GPU editor works, but reaching it is still a development-session ritual:
 build two packages with different feature requirements, keep a foreground
@@ -34,6 +34,13 @@ Revision 4 records the as-built cutover: the root broker, strict GPU CLI,
 managed connector, process-group isolation, named child reaper, deterministic
 managed probe, acceptance suite, coherent workspace build, and one-command
 visible smoke are implemented and verified.
+
+Revision 5 closes the first implementation review. Managed attach now buffers
+messages that arrive before winit creates application state, spawned-daemon
+ownership remains local until the named reaper accepts it, and the daemon
+inherits no launcher stdio. Direct GPU help points normal users to the root
+broker and labels raw socket attach as advanced. The retry, timeout, socket
+type, and concurrent-loser contracts now have deterministic behavioral tests.
 
 ## Ground truth
 
@@ -547,8 +554,10 @@ Vterm probe continues to cover offscreen wgpu.
    does not weaken the gate, and fake GPU/daemon executables record zero
    invocations. The default socket remains unowned.
 3. **Sibling discovery wins:** with executable fixtures at the current-exe
-   sibling and on PATH, the sibling receives the managed arguments. Removing
-   it uses PATH. With neither, the error names both lookup attempts.
+   sibling and on PATH, the sibling regular file receives the managed
+   arguments. A directory at the sibling pathname is ignored in favor of
+   PATH. With neither executable available, the error names both lookup
+   attempts.
 4. **Existing daemon fast path:** start a real CRDT daemon on a private socket,
    run `--headless-managed-probe`, and assert a v19 session establishes and a
    real `BufferSnapshot` arrives without invoking the supplied daemon spawner.
@@ -563,10 +572,11 @@ Vterm probe continues to cover offscreen wgpu.
    session remain usable. This does not require a controlling terminal or a
    foreground-process-group claim in CI. Direct foreground `pmacs --daemon`
    still exits cleanly on SIGINT.
-7. **Concurrent launchers converge:** start two managed probes together on an
-   absent named socket. Exactly one daemon owns the lock; both clients
-   establish sessions; the losing daemon child is reaped rather than becoming
-   a zombie or aborting its frontend.
+7. **Concurrent launchers converge:** hold two daemon wrappers behind a shared
+   barrier so both managed probes authorize and spawn before either daemon
+   binds the absent named socket. Exactly one daemon owns the lock; both
+   clients establish sessions; exactly one probe reports its losing daemon
+   child reaped rather than leaving a zombie or aborting its frontend.
 8. **Stale socket recovery stays daemon-owned:** leave a stale Unix socket
    with no lock owner, launch managed GPU, and assert the daemon replaces it
    and the frontend attaches. The launcher itself performs no unlink.
@@ -574,9 +584,11 @@ Vterm probe continues to cover offscreen wgpu.
    permission-denied initial socket path invokes no daemon spawner and reports
    the path/error immediately. A regular file at the socket path survives
    unchanged, invokes no daemon, and reports that managed startup refuses to
-   replace a non-socket entry. An injected post-spawn sequence of
-   `Interrupted`, `WouldBlock`, then a successful real connection stays
-   within the deadline and establishes the session.
+   replace a non-socket entry. A unit connector injects post-spawn
+   `Interrupted`, `WouldBlock`, then a successful real `UnixStream::connect`
+   inside a private temporary directory; it stays within the deadline,
+   establishes the protocol session, and hands the spawned child to the
+   reaper.
 10. **Live capability mismatch is not replaced:** against a non-CRDT daemon,
     managed launch reports the existing capability mismatch, invokes no
     second daemon, and leaves the live daemon untouched.
@@ -585,9 +597,10 @@ Vterm probe continues to cover offscreen wgpu.
     invokes no daemon spawner, and leaves the listener/path untouched.
 12. **Bounded startup failure:** substitute a daemon executable that exits
     nonzero without binding. Managed GPU exits after five seconds (50 ms
-    polls) and reports socket + child status. A concurrent-winner fixture
-    proves an early losing-child exit does not abort while another process
-    binds before the deadline.
+    polls) and reports socket + child status. Unit tests with a one-millisecond
+    deadline assert the configured duration appears in `StartupTimeout`.
+    A concurrent-winner fixture proves an early losing-child exit does not
+    abort while another process binds before the deadline.
 13. **Post-attach daemon exit is reaped:** let the spawned daemon establish a
     managed session, wait for the probe's `phase=ready`, then terminate the
     daemon while keeping the probe's stdin open. Poll the atomically replaced
@@ -598,11 +611,13 @@ Vterm probe continues to cover offscreen wgpu.
     succeed; fake nonzero and spawn failure make it fail with the executable
     named.
 15. **GPU argv is strict without breaking probes:** bare invocation points to
-    `pmacs --gpu`; direct `--attach PATH`, existing
-    `--headless-probe SOCKET REPORT`, and hidden
-    `--headless-managed-probe SOCKET REPORT DAEMON_EXE` accept exactly their
-    operands. Missing/trailing/unknown/incomplete args exit 2. `--version`
-    prints package and protocol versions without initializing winit/wgpu.
+    `pmacs --gpu`; `--help` leads with normal root-broker usage and labels
+    direct `--attach PATH` as advanced. Existing `--headless-probe SOCKET
+    REPORT` and hidden `--headless-managed-probe SOCKET REPORT DAEMON_EXE`
+    accept exactly their operands. Missing/trailing/unknown/incomplete args
+    exit 2; trailing help/version operands say those flags accept no operands.
+    `--version` prints package and protocol versions without initializing
+    winit/wgpu.
 16. **Existing direct and Vterm paths remain intact:** rebuilt
     `pmacs-gpu --attach RAW_PATH` still renders an existing CRDT daemon, and
     `tests/vterm_stage3_acceptance.rs` still invokes its unchanged
@@ -625,29 +640,36 @@ Vterm probe continues to cover offscreen wgpu.
   socket resolution, test override, sibling-first GPU discovery with PATH
   fallback, child argv, and exit-status propagation.
 - `pmacs-gpu/src/main.rs` accepts only explicit direct, managed, and headless
-  modes. Managed windowed attach completes before winit creates a window.
-  Bare invocation is an exit-2 usage error pointing users to `pmacs --gpu`.
+  modes. Managed windowed attach completes before winit creates a window;
+  decoded messages arriving first are buffered and drained in order once
+  application state exists. Bare invocation is an exit-2 usage error pointing
+  users to `pmacs --gpu`; help labels raw-socket attach as advanced.
 - `pmacs-gpu/src/attach.rs` owns connect-or-start policy, the five-second /
   50-ms retry window, socket-type protection, daemon process-group isolation,
-  and the named child-reaper thread. The first successful protocol connection
-  wins; protocol/capability failures never authorize replacement.
+  and the named child-reaper thread. A spawned child stays owned by the
+  connector until it is handed to that reaper, and daemon stdio is null. The
+  first successful protocol connection wins; protocol/capability failures
+  never authorize replacement.
 - `--headless-managed-probe SOCKET REPORT DAEMON_EXE` drives the production
   managed connector, writes atomic `phase=ready` / `phase=complete` reports,
   holds on stdin, and exposes disconnect plus daemon-reaper observations.
 - `tests/gpu_invocation_acceptance.rs` covers the root broker, non-CRDT gate,
   existing/missing/stale/racing daemon paths, process-group SIGINT isolation,
-  capability and protocol mismatches, bounded startup failure, child reaping,
-  outcome propagation, and strict headless CLI behavior.
+  capability and protocol mismatches, bounded startup failure, deterministic
+  losing-child reaping, outcome propagation, and strict headless CLI behavior.
 
-Verification on 2026-07-23:
+Verification on 2026-07-23 after the implementation review:
 
 - root CLI unit suite: 33 passed;
-- required GPU suite: 145 passed;
+- required GPU suite: 149 passed;
 - managed invocation acceptance: 1 default + 9 CRDT passed;
 - Vterm Stage 3: 7 passed with `PMACS_REQUIRE_GPU=1`;
 - default / CRDT libraries: 1,768 / 1,944 passed;
 - M4 acceptance: 121 passed, 3 ignored, 1 requested skip;
-- strict workspace Clippy and formatting passed;
+- full workspace sweep: 2,961 passed across 85 suites, 19 ignored, 1 requested
+  skip;
+- strict workspace Clippy, CRDT invocation-acceptance Clippy, formatting, and
+  `git diff --check` passed;
 - the documented release workspace build and `cargo run --release --
   --version` passed;
 - two real `target/release/pmacs --gpu` launches on Wayland/Vulkan attached at

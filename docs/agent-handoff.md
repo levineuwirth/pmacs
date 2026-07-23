@@ -24,14 +24,16 @@ commands, read `docs/active-work.md` immediately after this file.
   `ThemeFacts`, v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal
   frames/events).
 - **One-command GPU invocation is implemented on OPEN PR #141, not yet on
-  `main`** (`gpu-invocation`, implementation checkpoint `6fd5834`, framing
-  Revision 4). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;
-  bare `pmacs [FILE]` remains the TUI. Root owns the CRDT gate, socket
-  resolution, sibling-first GPU discovery/PATH fallback, and GPU outcome.
-  The separate `pmacs-gpu` binary owns connect-or-start, a five-second /
-  50-ms retry window, daemon process-group isolation, and named child
-  reaping. Direct `pmacs-gpu --attach RAW_PATH` remains strict and never
-  auto-starts. No protocol change.
+  `main`** (`gpu-invocation`, implementation-review checkpoint `82355ca`,
+  framing Revision 5). The additive public path is
+  `pmacs --gpu [--socket NAME|PATH]`; bare `pmacs [FILE]` remains the TUI.
+  Root owns the CRDT gate, socket resolution, sibling-regular-file GPU
+  discovery/PATH fallback, and GPU outcome. The separate `pmacs-gpu` binary
+  owns connect-or-start, a five-second / 50-ms retry window, pre-winit event
+  buffering, daemon process-group/stdin/stdout/stderr isolation, and named
+  child reaping with explicit ownership handoff. Direct
+  `pmacs-gpu --attach RAW_PATH` remains strict, is documented as advanced,
+  and never auto-starts. No protocol change.
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
   rev 3; merge `2e37c04`; two review rounds). `pmacs.config` is the
   typed, introspectable options registry the backlog ranked first, and
