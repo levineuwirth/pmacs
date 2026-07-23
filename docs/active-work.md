@@ -14,8 +14,8 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `63fbc66` (one-command GPU invocation #141 atop
-  documentation refresh #140; protocol v19).
+  `githubsucks/main` @ `4daa1b8` (inline-math framing #145 atop one-command
+  GPU invocation #141 and its landed-state handoff #143; protocol v19).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -49,8 +49,30 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `63fbc66` or a newer intentional main.
+The `git log` command must expose `4daa1b8` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
+
+## Active lane: GPU initial target framing
+
+- Portable branch: `githubsucks/gpu-initial-target-framing`
+- Framing checkpoint: `60ac7fa` (Revision 1; 2026-07-23).
+- Base: `githubsucks/main` @ `4daa1b8`; protocol v19.
+- State: framing only, proposed for user review; no implementation and no PR.
+- Scope: one session-scoped `pmacs --gpu [--socket …] FILE` target,
+  protocol-v20 semantic bootstrap, exact Unix path + launcher-cwd transport,
+  pre-window target readiness, replica coherence, and behavioral acceptance.
+- Next: user review/approval. Only then create the implementation branch from
+  this checkpoint; automatic GUI selection, multiple files, general live-open
+  commands, packaging, and remote GPU paths remain explicitly deferred.
+
+Recovery worktree:
+
+```sh
+git worktree add --track \
+  -b gpu-initial-target-framing \
+  ../pmacs-gpu-initial-target-framing \
+  githubsucks/gpu-initial-target-framing
+```
 
 ## Parked lane: kill-ring browser + persistence
 
