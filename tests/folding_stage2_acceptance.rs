@@ -917,18 +917,42 @@ fn an_interactive_edit_to_an_inactive_buffer_does_not_unfold() {
     let (s, _id) = seeded();
     let mut s = s;
     fold_active(&s, 2, 5);
-    set_cursor(&s, end_of(4));
-    // A second, NOT-displayed buffer; the command edits that one.
+    set_cursor(&s, end_of(4)); // byte 19, inside the ACTIVE buffer's fold
+
+    // A second, NOT-displayed buffer, deliberately shaped so the active
+    // window's cursor byte falls inside a fold of ITS OWN: without the
+    // active-window-buffer requirement the widening would anchor the
+    // wrong buffer's folds on this frontend's point and open it.
     exec(
         &s,
-        "other = pmacs.buffer.from_bytes('other.txt', 'aaa\\nbbb\\n')",
+        "other = pmacs.buffer.from_bytes('other.txt', 'aaa\\nbbb\\nccc\\nddd\\neee\\n')",
     );
+    let other_folded: bool = eval(
+        &s,
+        "return pmacs.fold.fold(other, { start = 3, ['end'] = 19 })",
+    );
+    assert!(other_folded);
+    let other_folds = |s: &EditorState| -> usize {
+        let core = s.core.borrow();
+        let registry = core.registry.clone();
+        let reg = registry.borrow();
+        let id = reg.find_by_name("other.txt").expect("other.txt");
+        s.fold_registry.folds(id).len()
+    };
+    assert_eq!(other_folds(&s), 1);
+
     define(&s, "test.other", "other:insert(0, 'q')");
     m_x(&mut s, "test.other");
     assert_eq!(
         fold_count(&s),
         1,
-        "an explicit inactive-buffer mutation stays programmatic"
+        "the active buffer was not edited, so its fold stands"
+    );
+    assert_eq!(
+        other_folds(&s),
+        1,
+        "an explicit inactive-buffer mutation stays programmatic — the \
+         invoking frontend's point does not name a place in THAT buffer"
     );
 }
 
