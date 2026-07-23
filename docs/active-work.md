@@ -56,7 +56,7 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Active lane: GPU initial target
 
 - Portable implementation branch: `githubsucks/gpu-initial-target` @
-  `19674a4` (verified code, integration, and as-built documentation); worktree
+  `010a4b5` (verified implementation plus portable ledger); worktree
   `../pmacs-gpu-initial-target`.
 - Approved framing branch: `githubsucks/gpu-initial-target-framing`;
   Revision 2 checkpoint `71039d1`.
@@ -64,8 +64,8 @@ If it does not, stop and repair the remote/fetch configuration.
   (folding Stage 1 #142); current canonical `main` @ `47581f4` is integrated
   conflict-free by merge `d6d4be6`. Protocol was v19 before this work.
 - State: implementation checkpoint `2dd30ec`; integrated, smoke-tested, fully
-  gated, and published on 2026-07-23 at protocol v20; no PR yet. Opening the PR
-  is next.
+  gated, and published on 2026-07-23 at protocol v20. PR #148 is open for user
+  review: `https://github.com/levineuwirth/pmacs/pull/148`.
 - Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
   protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
   Unix path transport, pre-window target readiness, replica coherence, and the
