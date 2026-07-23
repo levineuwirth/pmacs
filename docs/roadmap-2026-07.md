@@ -80,7 +80,7 @@ preference at protocol v17; and composable per-window
 `pmacs.statusline` providers transported to semantic/GPU frontends by
 protocol-v18 `StatuslineSegments`.
 
-### Arc 5 — Terminal, staged — VTERM STAGE 3 IN REVIEW
+### Arc 5 — Terminal, staged — COMPLETE
 
 - **Compile mode landed in #113**: line-oriented PTY/ANSI output,
   error-regex navigation, and `M-x compile`.
@@ -92,13 +92,12 @@ protocol-v18 `StatuslineSegments`.
 - **Vterm Stage 2 TUI landed in #130**: terminal-window composition,
   input/resize, per-context scroll/selection/copy, authenticated frontend
   ownership, BEL/clipboard drainage, and the strict Lua surface.
-- **Vterm Stage 3 protocol/GPU is implemented and in review (PR #135)**:
-  additive protocol v19 complete frames/events, an aggregate glyph-byte bound
-  under the unchanged transport cap, dual viewport bootstrap, authenticated
-  semantic routing, and native fixed-cell GPU terminal rendering. The 16 MiB
-  transport cap is preserved: the measured legal-worst frame encodes to
-  13,437,863 bytes under an 8 MiB aggregate glyph bound, never chunked.
-  Landing it closes Arc 5's terminal stage.
+- **Vterm Stage 3 protocol/GPU landed in #135**: additive protocol-v19
+  complete frames/events, an aggregate glyph-byte bound under the unchanged
+  transport cap, dual viewport bootstrap, authenticated semantic routing, and
+  native fixed-cell GPU terminal rendering. The 16 MiB transport cap is
+  preserved: the measured legal-worst frame encodes to 13,437,863 bytes under
+  an 8 MiB aggregate glyph bound, never chunked.
 
 ### Arc 6 — Folding (keystone gutter rider)
 
@@ -122,11 +121,10 @@ after daemon restart, cursor blink, font/theme config (overlaps Arc 4).
 
 ## Housekeeping (do opportunistically)
 
-- Merge PR #91 (gutter click classification + fit guard).
-- Delete or mark-superseded stale docs: `pmacs-gpu-editing-perf-handoff.md`
-  (freeze fixed by PR #60 arc), `session-5-stale-styling-handover.md`
-  (fixed, task #25 closed), `python_experiment.md`, `#run.sh#`,
-  `semantic-frontend-protocol.md.local-bak`.
+- ~~Merge PR #91 (gutter click classification + fit guard).~~ Landed on
+  2026-07-07.
+- Machine-local handoff/experiment files are intentionally untracked; see
+  `docs/agent-handoff.md` §7. They are not repository housekeeping targets.
 - `V0.2-PREREQUISITES.md` cited twice by CHANGELOG but missing on disk —
   reconstruct or unlink.
 - README still leads with "What v0.1 ships with" — refresh.
