@@ -56,8 +56,10 @@ If it does not, stop and repair the remote/fetch configuration.
 
 - Portable branch: `githubsucks/folding`; worktree `../pmacs-folding`.
 - Base: canonical `main` @ `cac4961` (post Vterm Stage 3 #135).
-- Framing head: `ee6c77f` (`docs/folding-framing.md` draft rev 1).
-- State: **framing only, awaiting review then approval.** No implementation.
+- Framing head: revision 4 of `docs/folding-framing.md` (this commit; rev 1
+  `ee6c77f` → rev 2 `7898b8f` → rev 3 `944b42b` → rev 4).
+- State: **framing only; three review rounds absorbed (rev 4), awaiting
+  approval.** No implementation.
   Load-bearing decision (Q#FD1): the bundled grammars ship no fold query and
   no `folds.scm`, so the roadmap's "tree-sitter fold ranges" is not free; the
   draft recommends structural node folding (nearest enclosing block-like node
@@ -68,8 +70,9 @@ If it does not, stop and repair the remote/fetch configuration.
   like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
 - PR: none yet — framing is committed to the branch for review, not opened as
   a PR. Stage 1 implements on this same branch after approval.
-- Next: user review rounds on `docs/folding-framing.md`; bindings (Q#FD4) and
-  the block-kind heuristic (Bet B1) are the two calls flagged for the user.
+- Next: user approval of rev 4 (or a round-4 review). Bindings (Q#FD4)
+  remain the user's call; the block-kind heuristic stays Bet B1 with
+  curated Tier-1 queries as fallback.
 
 Recovery worktree:
 
