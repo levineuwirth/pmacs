@@ -104,6 +104,10 @@ pub struct EditorState {
     /// default --- M4.2 wires the actual `tree-sitter-rust` and
     /// `tree-sitter-lua` registrations at startup.
     pub syntax_registry: crate::syntax::SharedSyntaxRegistry,
+    /// Per-buffer fold stores (Arc 6). The same `Rc` the core owns (for
+    /// the pre-edit unfold) and the `pmacs.fold` Lua surface reaches (via
+    /// Lua app-data); read here by the semantic `FoldState` producer.
+    pub fold_registry: crate::fold::SharedFoldRegistry,
     /// Process supervisor (T M4.4). Owns every child process the
     /// editor has spawned (LSP servers from M4.5; REPLs from M5).
     /// Drop-time `shutdown` enforces SIGTERM-then-SIGKILL so editor
@@ -283,6 +287,15 @@ impl EditorState {
         // state, but its search overlay resolves wash faces through
         // this handle.
         core.borrow_mut().theme = Some(syntax_registry.theme());
+        // Arc 6 folding: the core created the fold registry; share that
+        // same `Rc` into the `pmacs.fold` Lua surface (app-data) so
+        // commands and the data API mutate the stores the pre-edit unfold
+        // and the semantic producer read. Installed after
+        // `make_syntax_registry` so the data API can reach the parse tree
+        // (also app-data) when it computes a fold target.
+        let fold_registry = core.borrow().fold_registry.clone();
+        crate::lua_bindings::install_fold(lua_host.lua(), &fold_registry)
+            .expect("install pmacs.fold");
         // Arc 4 stage 2 (Q#F2/Q#F3): the GPU font preference and its
         // `pmacs.gpu` Lua surface. Installed BEFORE load_user_config
         // below, so an init.lua `set_font` lands in the same handle
@@ -459,6 +472,16 @@ impl EditorState {
                 include_str!("../builtin/runtime/comment.lua"),
             )
             .expect("load comment builtin chunk");
+        // Arc 6 folding: interactive fold commands + the Emacs hideshow
+        // `C-c @` bindings. Depends on the `pmacs.fold` Rust surface
+        // (installed above, after make_syntax_registry) plus pmacs.command
+        // / pmacs.keymap / pmacs.editor (all pre-runtime).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/fold.lua"),
+                include_str!("../builtin/runtime/fold.lua"),
+            )
+            .expect("load fold builtin chunk");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/indent.lua"),
@@ -551,6 +574,7 @@ impl EditorState {
             interactive_origin,
             async_runtime,
             syntax_registry,
+            fold_registry,
             process_supervisor,
             terminal_manager,
             lsp_manager,

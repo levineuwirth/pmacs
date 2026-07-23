@@ -85,6 +85,7 @@ use crate::workers_buffer;
 // stable.
 mod config;
 mod diag;
+mod fold;
 mod index;
 mod mcp;
 // Every `pub` item a moved domain owned is re-exported so its prior
@@ -94,6 +95,7 @@ mod mcp;
 // them), but they were `pub`, so their paths are preserved for
 // compile-compatibility; any deliberate narrowing is a separate change.
 pub use diag::install_diag;
+pub use fold::install_fold;
 pub use index::{SharedProjectIndexer, install_project_index, make_project_indexer};
 pub use mcp::{McpServerIdLua, install_mcp, make_mcp_manager};
 
