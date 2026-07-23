@@ -61,18 +61,21 @@ If it does not, stop and repair the remote/fetch configuration.
 - Framing head: revision 5 of `docs/folding-framing.md` (rev 1 → … → rev 4
   absorbed three review rounds; rev 5 records approval + the Q#FD4 binding
   decision).
-- State: **APPROVED; Stage 1 (fold engine, headless) implementing on this
-  branch.** Bindings decided (Q#FD4 → Emacs hideshow `C-c @` set); Bet B1
-  accepted as framed.
+- State: **Stage 1 (fold engine, headless) implemented; PR #142 OPEN**,
+  two review rounds landed on the branch. Bindings decided (Q#FD4 → Emacs
+  hideshow `C-c @` set); Bet B1 accepted as framed.
   Load-bearing decision (Q#FD1): the bundled grammars ship no fold query and
   no `folds.scm`, so the roadmap's "tree-sitter fold ranges" is not free; v1
   is structural node folding (block-like node ≥2 source lines, derived head
   line, closer-aware tail), with indentation fallback and curated queries
-  deferred. `FoldState` already exists in the protocol, declared-but-unproduced
-  (a test pins it is never emitted); no frontend consumes it yet; gutter
-  markers are frontend-derived like the diagnostic sign bars, so no new wire
-  type. Staged like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
-- PR: Stage 1 opens as the first folding PR once the gate suite is green.
+  deferred. `FoldState` already exists in the protocol; Stage 1 starts
+  *producing* it (authoritative-empty), no protocol bump; gutter markers are
+  frontend-derived like the diagnostic sign bars, so no new wire type. Staged
+  like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
+- PR: **#142** (`Arc 6 folding — Stage 1: instance fold engine`), open
+  against `main`. Round 1 (tail-boundary delete bug + buffer-kill cleanup +
+  close-all point-move) and round 2 (pin the kill-path + close-all through
+  the real command surface) are landed as fix commits on the branch.
 - Next: land Stage 1; Stages 2/3 are separate branches/PRs, each re-framed
   in detail after the prior stage lands.
 

@@ -493,24 +493,60 @@ fn forget_drops_store_and_detaches_view() {
 }
 
 #[test]
-fn forget_buffer_drops_store_on_kill() {
-    // The id-keyed reset the pmacs.buffer.kill path uses: the buffer (and
-    // its attached view) is gone, so only the map entry is cleared.
+fn killing_a_buffer_through_the_real_path_purges_its_fold_store() {
+    // Drive the production `pmacs.buffer.remove` route (not `forget_buffer`
+    // directly), so the app-data stash + the `after_buffer_removed` branch
+    // are what get exercised — deleting either would leave this red. The
+    // assertion reads through the DEAD id on purpose: BufferIds are never
+    // reused, so a stale id cannot alias a later buffer. Mirrors
+    // config_registry's `killing_a_buffer_through_the_real_path_...`.
+    let s = EditorState::new();
+    exec(
+        &s,
+        "b = pmacs.buffer.from_bytes('kill.rs', 'aaa\\nbbb\\nccc\\nddd\\n')",
+    );
+    let id = {
+        let core = s.core.borrow();
+        let reg = core.registry.borrow();
+        reg.find_by_name("kill.rs").expect("buffer")
+    };
+    // Fold via the data API (no parse tree needed) so the store exists.
+    let folded: bool = eval(&s, "return pmacs.fold.fold(b, { start = 3, ['end'] = 11 })");
+    assert!(folded);
+    assert!(
+        s.fold_registry.store(id).is_some(),
+        "store exists before kill"
+    );
+
+    exec(&s, "pmacs.buffer.remove(b)");
+    assert!(
+        s.fold_registry.store(id).is_none(),
+        "the real kill path purges the fold store"
+    );
+}
+
+#[test]
+fn close_all_command_moves_point_to_enclosing_head() {
+    // Q#FD3 through the command surface: `fold.close-all` is interactive,
+    // so when it collapses a top-level fold around the invoking point, the
+    // point moves to that fold's head line (Finding 3, round 1).
     let s = EditorState::new();
     let id = active_id(&s);
-    insert_into(&s, id, "line0\nline1\nline2\n");
-    {
-        let core = s.core.borrow();
-        let mut reg = core.registry.borrow_mut();
-        s.fold_registry
-            .store_or_attach(reg.get_mut(id).unwrap())
-            .lock()
-            .unwrap()
-            .insert(ByteRange { start: 5, end: 11 });
-    }
-    assert!(s.fold_registry.store(id).is_some());
-    s.fold_registry.forget_buffer(id);
-    assert!(s.fold_registry.store(id).is_none());
+    let src = "fn first() {\n    a();\n    b();\n}\nfn second() {\n    c();\n    d();\n}\n";
+    insert_into(&s, id, src);
+    install_rust_parse(&s, id);
+    // Point inside the SECOND function's body.
+    s.core.borrow_mut().set_cursor_byte(byte_of(src, "c()"));
+
+    exec(&s, "pmacs.command.invoke('fold.close-all')");
+
+    let n: i64 = eval(&s, "return #pmacs.fold.folds(pmacs.window.buffer())");
+    assert_eq!(n, 2, "both top-level functions are folded");
+    assert_eq!(
+        s.core.borrow().active_window().cursor,
+        line_content_end_of(src, "fn second() {"),
+        "the invoking point moved to the enclosing fold's head line"
+    );
 }
 
 #[test]
