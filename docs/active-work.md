@@ -55,24 +55,26 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Folding framing lane (Arc 6)
 
 - Portable branch: `githubsucks/folding`; worktree `../pmacs-folding`.
-- Base: canonical `main` @ `cac4961` (post Vterm Stage 3 #135).
-- Framing head: revision 4 of `docs/folding-framing.md` (this commit; rev 1
-  `ee6c77f` → rev 2 `7898b8f` → rev 3 `944b42b` → rev 4).
-- State: **framing only; three review rounds absorbed (rev 4), awaiting
-  approval.** No implementation.
+- Base: **rebased onto canonical `main` @ `96d0bae`** at implementation
+  start (was `cac4961`; the earlier base fell behind the docs + tab-width
+  housekeeping).
+- Framing head: revision 5 of `docs/folding-framing.md` (rev 1 → … → rev 4
+  absorbed three review rounds; rev 5 records approval + the Q#FD4 binding
+  decision).
+- State: **APPROVED; Stage 1 (fold engine, headless) implementing on this
+  branch.** Bindings decided (Q#FD4 → Emacs hideshow `C-c @` set); Bet B1
+  accepted as framed.
   Load-bearing decision (Q#FD1): the bundled grammars ship no fold query and
-  no `folds.scm`, so the roadmap's "tree-sitter fold ranges" is not free; the
-  draft recommends structural node folding (nearest enclosing block-like node
-  >= 2 rows), with indentation fallback and curated queries deferred.
-  `FoldState` already exists in the protocol, declared-but-unproduced (a test
-  pins it is never emitted); no frontend consumes it; gutter markers are
-  frontend-derived like the diagnostic sign bars, so no new wire type. Staged
-  like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
-- PR: none yet — framing is committed to the branch for review, not opened as
-  a PR. Stage 1 implements on this same branch after approval.
-- Next: user approval of rev 4 (or a round-4 review). Bindings (Q#FD4)
-  remain the user's call; the block-kind heuristic stays Bet B1 with
-  curated Tier-1 queries as fallback.
+  no `folds.scm`, so the roadmap's "tree-sitter fold ranges" is not free; v1
+  is structural node folding (block-like node ≥2 source lines, derived head
+  line, closer-aware tail), with indentation fallback and curated queries
+  deferred. `FoldState` already exists in the protocol, declared-but-unproduced
+  (a test pins it is never emitted); no frontend consumes it yet; gutter
+  markers are frontend-derived like the diagnostic sign bars, so no new wire
+  type. Staged like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
+- PR: Stage 1 opens as the first folding PR once the gate suite is green.
+- Next: land Stage 1; Stages 2/3 are separate branches/PRs, each re-framed
+  in detail after the prior stage lands.
 
 Recovery worktree:
 

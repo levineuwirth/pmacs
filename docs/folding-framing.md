@@ -1,10 +1,11 @@
 # Folding — framing (Arc 6)
 
-**Revision 4 — 2026-07-23. Status: framing only, on branch `folding`
-(off canonical `main` @ `cac4961`); no implementation.** Rev 1 passed a
+**Revision 5 — 2026-07-23. Status: APPROVED; Stage 1 implementing on branch
+`folding` (rebased onto canonical `main` @ `96d0bae`).** Rev 1 passed a
 ground-truth review; rev 2 fixed round 1's seven findings; rev 3 fixed round
 2's five majors and four minors; rev 4 fixes round 3's one major, three
-minors, and a nit. See §0 for the per-round changelog.
+minors, and a nit; rev 5 records the settled keybinding decision (Q#FD4) and
+approval. See §0 for the per-round changelog.
 
 ## 0. Revision history
 
@@ -87,6 +88,17 @@ minors, and a nit. See §0 for the per-round changelog.
   inference). **Nit:** stored-range containment pinned **start-exclusive,
   end-inclusive** with the matching `View` boundary bias, so typing at the
   end of a head line neither unfolds nor lands hidden (§5; acceptance 6).
+
+### Approval + keybindings (rev 4 → rev 5)
+
+- **Q#FD4 keybindings decided.** rev 4 deferred the binding to the user; the
+  user chose **Emacs hideshow parity**, so Stage 1 ships the `C-c @` prefix
+  set (§6, §9) — `C-c <letter>` is fully taken by the LSP surface, and the
+  `C-c @` hs-minor-mode prefix collides with nothing. This follows the
+  M-;/M-% precedent of shipping faithful Emacs-idiom defaults.
+- **Bet B1 accepted as framed** (block-kind target heuristic; curated Tier-1
+  queries the named fallback). rev 4's architecture is **approved**; Stage 1
+  implements on this branch, rebased onto canonical `main` @ `96d0bae`.
 
 ## 1. Problem and what ships
 
@@ -321,7 +333,19 @@ from the last clause (minor c): `(0,0)` on an empty terminal identity buffer
 is technically in-bounds, but it normalizes to zero hidden lines and is
 rejected — no special case.
 
-Bindings remain the user's call (Emacs has no single convention).
+**Default bindings (Q#FD4) — Emacs hideshow parity.** Stage 1 ships the
+`C-c @` prefix set. `C-c <letter>` is fully taken by the LSP surface, so the
+Emacs hs-minor-mode prefix `C-c @` is the one faithful choice that collides
+with nothing:
+
+- `C-c @ C-c` → `fold.toggle` (org-TAB-style cycle)
+- `C-c @ C-h` → `fold.close`
+- `C-c @ C-s` → `fold.open`
+- `C-c @ C-M-h` → `fold.close-all`
+- `C-c @ C-M-s` → `fold.open-all`
+
+These follow the M-;/M-% precedent of shipping faithful Emacs-idiom
+defaults; users rebind through `pmacs.keymap` as usual.
 
 ## 7. Frontend collapse + gutter marker (Q#FD7)
 
@@ -379,8 +403,8 @@ lands. This framing asks approval for the architecture and Stage 1's detail.
 - **Q#FD4** Interactive commands (invoking frontend's buffer; shared head
   lines use **state-aware ordering** — close innermost-open, open
   outermost-closed, toggle cycles); data API takes an explicit buffer, no
-  ambient resolution, with the §6 arbitrary-range normalization; bindings
-  decided by the user. (§6)
+  ambient resolution, with the §6 arbitrary-range normalization; **default
+  bindings = the Emacs hideshow `C-c @` prefix set** (§6), rebindable. (§6)
 - **Q#FD5** The store `View` translates + drops only (provenance-blind); the
   **pre-edit interactive unfold** lives at the dispatch layer, keyed on the
   authenticated source frontend's point (not transport), unfolding **every**
@@ -491,11 +515,11 @@ acceptance is bite-verified with `scripts/bite`.
 
 ## 14. Branch and PR plan
 
-Branch `folding`, worktree `../pmacs-folding`, off canonical `main` @
-`cac4961`. This framing (rev 1 → rev 4) is its opening commits. Canonical
-`main` has since advanced past the base (documentation + tab-width #137);
-Stage 1's instance-side scope does not overlap that work — rebase onto
-current `main` when implementation starts. After approval, Stage 1
-implements on this same branch and opens as the first folding PR. Stages 2
-and 3 are separate branches/PRs off the main resulting from the prior
-stage, each with its own detailed framing.
+Branch `folding`, worktree `../pmacs-folding`. This framing (rev 1 → rev 5)
+is its opening commits; the branch was **rebased onto canonical `main` @
+`96d0bae`** when implementation started (the earlier base `cac4961` was
+behind after the documentation + tab-width #137 housekeeping; Stage 1's
+instance-side scope does not overlap that work). Stage 1 implements on this
+same branch and opens as the first folding PR. Stages 2 and 3 are separate
+branches/PRs off the main resulting from the prior stage, each with its own
+detailed framing.
