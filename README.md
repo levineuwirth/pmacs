@@ -99,15 +99,33 @@ Single-process TUI:
 pmacs [FILE]                 # TUI; -nw reserved for when a GUI default lands
 ```
 
-Daemon + attached frontends (build with `--features crdt` for
-multi-frontend editing and the GPU frontend):
+GPU frontend (one command; the root binary starts or reuses the daemon):
 
 ```sh
-pmacs --daemon --socket NAME           # foreground daemon; bare NAME →
-                                       #   <runtime>/pmacs/NAME.sock
-pmacs --attach --socket NAME           # TUI frontend; F12 detaches
-pmacs --attach user@host               # remote TUI over SSH
-pmacs-gpu --attach /run/user/$UID/pmacs/NAME.sock   # GPU frontend
+pmacs --gpu                         # default instance
+pmacs --gpu --socket NAME           # named instance; bare NAME →
+                                    #   <runtime>/pmacs/NAME.sock
+```
+
+`pmacs --gpu` requires the root `pmacs` binary to be built with the
+`crdt` feature. It discovers a sibling `pmacs-gpu` binary first, then
+falls back to `pmacs-gpu` on `PATH`. Closing the window detaches only
+that frontend; the daemon remains available for later GPU or TUI
+attaches.
+
+Daemon + attached TUI frontends:
+
+```sh
+pmacs --daemon --socket NAME        # foreground daemon
+pmacs --attach --socket NAME        # TUI frontend; F12 detaches
+pmacs --attach user@host            # remote TUI over SSH
+```
+
+For debugging an already-running daemon, the low-level GPU command stays
+available and never auto-starts or replaces anything:
+
+```sh
+pmacs-gpu --attach /absolute/path/to/pmacs.sock
 ```
 
 `pmacs --attach` also understands `ssh:user@host/instance`,
@@ -126,11 +144,13 @@ Builds on the toolchain pinned in `rust-toolchain.toml` (Rust
 `1.95.0`, edition 2024); rustup selects it automatically.
 
 ```sh
-cargo build --release             # target/release/pmacs (LuaJIT flavor)
-cargo build --release --features crdt        # + CRDT buffers (daemon use)
-cargo build --release -p pmacs-gpu           # the GPU frontend binary
-cargo run --release -- <file>     # build and run on a file
-cargo test --workspace            # unit + integration tests (all crates)
+# Coherent root + GPU release build. The package-qualified feature keeps
+# the separate pmacs-gpu package feature-free while enabling CRDT in pmacs.
+cargo build --release --workspace --features pmacs/crdt
+
+target/release/pmacs --gpu           # one-command managed GPU launch
+cargo run --release -- --version     # default-run selects the pmacs binary
+cargo test --workspace              # unit + integration tests (all crates)
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings   # incl. pmacs-gpu
 ```

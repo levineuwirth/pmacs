@@ -1,19 +1,19 @@
 //! pmacs-gpu — GPU/GUI frontend for pmacs.
 //!
-//! Two run modes:
+//! User-facing invocation is strict:
 //!
-//! - **Hello-world** (no `--attach` argument; session 2 default).
-//!   Opens a window and renders "hello, pmacs" in the bundled
-//!   `JetBrains` Mono. Used to confirm the wgpu/winit/glyphon stack
-//!   without depending on a daemon.
-//! - **Attach** (`--attach <unix-socket-path>`; session 3+). Connects
-//!   to a running pmacs daemon, negotiates `semantic_render +
-//!   crdt_replica`, imports the daemon's `BufferSnapshot` into a
-//!   local loro replica, sends a `Viewport` back to request scoped
-//!   styling, and consumes the `StyleSpans` stream — rendering the
-//!   rope with per-span colors via cosmic-text's `set_rich_text`.
-//!   Live `CrdtOp` updates apply to the doc; subsequent `StyleSpans`
-//!   frames re-style.
+//! - `pmacs-gpu --attach <unix-socket-path>` directly attaches to an
+//!   already-running daemon and never starts or replaces it.
+//! - The root `pmacs --gpu` broker invokes a hidden managed mode that connects
+//!   first, starts the supplied daemon only for an absent/refused socket, and
+//!   creates the window only after protocol and capability negotiation.
+//! - Headless probe modes exercise the same direct and managed production
+//!   connectors for acceptance without requiring a display.
+//!
+//! An attached frontend imports the daemon's `BufferSnapshot` into a local
+//! loro replica, sends a `Viewport` back to request scoped styling, and
+//! consumes the `StyleSpans` stream. Live `CrdtOp` updates apply to the
+//! replica; subsequent `StyleSpans` frames re-style it.
 //!
 //! See `docs/pmacs-gpu-design.md` for the arc framing. Phase A's
 //! adversarial-verification framing applies from session 4 forward;
@@ -524,10 +524,7 @@ const SQUIGGLE_VERTEX_STRIDE: wgpu::BufferAddress = 32;
 const SQUIGGLE_VERTEX_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
 
-/// Text the hello-world (and attach-pre-snapshot / attach-failed)
-/// modes render. Once the daemon's `BufferSnapshot` arrives the
-/// rendered text becomes the rope contents instead.
-const HELLO_TEXT: &str = "hello, pmacs";
+const CONNECTING_TEXT: &str = "(connecting...)";
 
 /// Container id the daemon uses on its loro `LoroDoc` for the
 /// buffer's text. Must match `pmacs::crdt::CrdtState`'s container
@@ -546,13 +543,20 @@ pub enum AppEvent {
 }
 
 /// CLI mode derived from argv.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
-    /// `pmacs-gpu` (no args): inert hello-world.
-    HelloWorld,
-    /// `pmacs-gpu --attach <socket>`: connect + render the daemon's
-    /// rope.
+    /// Print CLI help without initializing winit or wgpu.
+    Help,
+    /// Print package and protocol versions without initializing winit or wgpu.
+    Version,
+    /// `pmacs-gpu --attach <socket>`: strict direct attach to an existing daemon.
     Attach { socket: PathBuf },
+    /// Hidden root-broker entry: connect or start the supplied daemon before
+    /// creating the window.
+    ManagedAttach {
+        socket: PathBuf,
+        daemon_executable: PathBuf,
+    },
     /// `pmacs-gpu --headless-probe <socket> <report>`: attach through
     /// the real client, render real frames offscreen, and write a
     /// machine-readable report.
@@ -563,6 +567,12 @@ enum Mode {
     /// `apply_attach_message`, and the same `render_to_view` the windowed
     /// mode does — only winit is absent, because CI has no display.
     HeadlessProbe { socket: PathBuf, report: PathBuf },
+    /// Hidden display-less acceptance seam for managed daemon lifecycle.
+    HeadlessManagedProbe {
+        socket: PathBuf,
+        report: PathBuf,
+        daemon_executable: PathBuf,
+    },
 }
 
 /// Number of decimal digits in `n` (for `n >= 1`); allocation-free. Sizes
@@ -580,19 +590,67 @@ fn decimal_digits(mut n: usize) -> u32 {
 
 fn main() {
     env_logger::init();
-    let mode = parse_args(std::env::args().skip(1).collect());
-    if let Mode::HeadlessProbe { socket, report } = &mode {
-        std::process::exit(run_headless_probe(socket, report));
+    let mode = match parse_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        Ok(mode) => mode,
+        Err(error) => {
+            eprintln!("pmacs-gpu: {error}\n\n{GPU_USAGE}");
+            std::process::exit(2);
+        }
+    };
+    match &mode {
+        Mode::Help => {
+            println!("{GPU_USAGE}");
+            return;
+        }
+        Mode::Version => {
+            println!(
+                "pmacs-gpu {} (protocol v{})",
+                env!("CARGO_PKG_VERSION"),
+                pmacs_protocol::PROTOCOL_VERSION
+            );
+            return;
+        }
+        Mode::HeadlessProbe { socket, report } => {
+            std::process::exit(run_headless_probe(socket, report));
+        }
+        Mode::HeadlessManagedProbe {
+            socket,
+            report,
+            daemon_executable,
+        } => {
+            std::process::exit(run_headless_managed_probe(
+                socket,
+                report,
+                daemon_executable,
+            ));
+        }
+        Mode::Attach { .. } | Mode::ManagedAttach { .. } => {}
     }
+
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .expect("create winit event loop");
     let proxy = event_loop.create_proxy();
+    let attach_client = if let Mode::ManagedAttach {
+        socket,
+        daemon_executable,
+    } = &mode
+    {
+        match attach::connect_managed(socket, daemon_executable, proxy.clone()) {
+            Ok(managed) => Some(managed.client),
+            Err(error) => {
+                eprintln!("pmacs-gpu: managed attach failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     let mut app = App {
         mode,
         proxy: Some(proxy),
         state: None,
-        attach_client: None,
+        attach_client,
         modifiers: winit::keyboard::ModifiersState::empty(),
     };
     event_loop
@@ -765,6 +823,162 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     0
 }
 
+/// Exercise the real managed connector without creating a display.
+///
+/// After the first real `BufferSnapshot`, the probe writes `phase=ready` and
+/// holds the session open until stdin reaches EOF. Lifecycle observations
+/// refresh the report while held; EOF writes `phase=complete`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear managed-connect and lifecycle observation probe"
+)]
+fn run_headless_managed_probe(socket: &Path, report: &Path, daemon_executable: &Path) -> i32 {
+    use std::io::Read as _;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let (event_tx, event_rx) = mpsc::channel::<AttachEvent>();
+    let managed = match attach::connect_managed_with_sink(socket, daemon_executable, move |event| {
+        event_tx.send(event).is_ok()
+    }) {
+        Ok(managed) => managed,
+        Err(error) => {
+            let contents = format!("phase=error\nerror={error}\n");
+            let _ = write_probe_report(report, &contents);
+            eprintln!("pmacs-gpu managed probe: attach failed: {error}");
+            return 4;
+        }
+    };
+    let client = managed.client;
+    let daemon = managed.daemon;
+    let protocol = client.server_protocol_version();
+
+    let (stdin_tx, stdin_rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("pmacs-gpu managed probe stdin".into())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut bytes);
+            let _ = stdin_tx.send(());
+        })
+        .expect("spawn managed probe stdin reader");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ready = false;
+    let mut stdin_closed = false;
+    let mut disconnect = String::new();
+    let mut last_reaped = false;
+    let mut last_wait_result = None;
+    let mut last_disconnect = String::new();
+    loop {
+        if stdin_rx.try_recv().is_ok() {
+            stdin_closed = true;
+        }
+        match event_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(AttachEvent::Message(message)) => {
+                if matches!(*message, InstanceMessage::BufferSnapshot { .. }) && !ready {
+                    ready = true;
+                    if let Err(error) =
+                        write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
+                    {
+                        eprintln!(
+                            "pmacs-gpu managed probe: writing {} failed: {error}",
+                            report.display()
+                        );
+                        return 5;
+                    }
+                }
+            }
+            Ok(AttachEvent::Disconnected(reason)) => disconnect = reason,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if disconnect.is_empty() {
+                    "attach event channel closed".clone_into(&mut disconnect);
+                }
+            }
+        }
+
+        let reaped = daemon.daemon_reaped();
+        let wait_result = daemon.daemon_wait_result();
+        if ready
+            && (reaped != last_reaped
+                || wait_result != last_wait_result
+                || disconnect != last_disconnect)
+        {
+            if let Err(error) =
+                write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
+            {
+                eprintln!(
+                    "pmacs-gpu managed probe: writing {} failed: {error}",
+                    report.display()
+                );
+                return 5;
+            }
+            last_reaped = reaped;
+            last_wait_result = wait_result;
+            last_disconnect.clone_from(&disconnect);
+        }
+
+        if ready && stdin_closed {
+            if let Err(error) =
+                write_managed_probe_report(report, "complete", protocol, &daemon, &disconnect)
+            {
+                eprintln!(
+                    "pmacs-gpu managed probe: writing {} failed: {error}",
+                    report.display()
+                );
+                return 5;
+            }
+            return 0;
+        }
+        if !ready && Instant::now() >= deadline {
+            let contents = format!(
+                "phase=error\nerror=timed out waiting for BufferSnapshot\ndisconnect={disconnect}\n"
+            );
+            let _ = write_probe_report(report, &contents);
+            eprintln!("pmacs-gpu managed probe: timed out waiting for BufferSnapshot");
+            return 6;
+        }
+    }
+}
+
+fn write_managed_probe_report(
+    report: &Path,
+    phase: &str,
+    protocol: u32,
+    daemon: &attach::ManagedDaemonFacts,
+    disconnect: &str,
+) -> std::io::Result<()> {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "phase={phase}");
+    let _ = writeln!(out, "server_protocol_version={protocol}");
+    let _ = writeln!(out, "buffer_snapshot=true");
+    let _ = writeln!(out, "spawned_daemon={}", daemon.spawned_daemon());
+    let _ = writeln!(
+        out,
+        "daemon_pid={}",
+        daemon.daemon_pid().unwrap_or_default()
+    );
+    let _ = writeln!(out, "daemon_reaped={}", daemon.daemon_reaped());
+    let _ = writeln!(
+        out,
+        "daemon_wait_result={}",
+        daemon.daemon_wait_result().unwrap_or_default()
+    );
+    let _ = writeln!(out, "disconnect={disconnect}");
+    write_probe_report(report, &out)
+}
+
+fn write_probe_report(report: &Path, contents: &str) -> std::io::Result<()> {
+    let mut temporary = report.as_os_str().to_os_string();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    std::fs::write(&temporary, contents)?;
+    std::fs::rename(temporary, report)
+}
+
 /// Named observations the headless probe reports back to the acceptance.
 #[derive(Default)]
 struct ProbeFacts {
@@ -799,51 +1013,49 @@ fn frame_probe_text(frame: &TerminalFrame) -> String {
     text
 }
 
-/// Tiny argv parser. No `clap` because the surface is genuinely two
-/// shapes; full CLI parsing arrives when there's more to parse. The
-/// `for` ranges over a small set: at most one `--attach <socket>` or
-/// `--help` arrives, plus any stray unrecognized flag.
-fn parse_args(args: Vec<String>) -> Mode {
-    let mut iter = args.into_iter();
-    let Some(first) = iter.next() else {
-        return Mode::HelloWorld;
-    };
-    match first.as_str() {
-        "--attach" => {
-            let socket = iter.next().unwrap_or_else(|| {
-                eprintln!("pmacs-gpu: --attach requires a socket path");
-                std::process::exit(2);
-            });
-            Mode::Attach {
+const GPU_USAGE: &str = "\
+pmacs-gpu — GPU frontend for pmacs
+
+USAGE:
+  pmacs-gpu --attach <socket>              attach to an existing daemon
+  pmacs-gpu --help                         print this help
+  pmacs-gpu --version                      print package and protocol versions";
+
+/// Strict parser for direct, managed, and headless GPU entry points.
+fn parse_args(args: &[String]) -> Result<Mode, String> {
+    match args {
+        [flag] if flag == "--help" || flag == "-h" => Ok(Mode::Help),
+        [flag] if flag == "--version" || flag == "-V" => Ok(Mode::Version),
+        [flag, socket] if flag == "--attach" => Ok(Mode::Attach {
+            socket: PathBuf::from(socket),
+        }),
+        [flag, socket, daemon_executable] if flag == "--managed-attach" => {
+            Ok(Mode::ManagedAttach {
                 socket: PathBuf::from(socket),
-            }
+                daemon_executable: PathBuf::from(daemon_executable),
+            })
         }
-        "--headless-probe" => {
-            let socket = iter.next().unwrap_or_else(|| {
-                eprintln!("pmacs-gpu: --headless-probe requires a socket path");
-                std::process::exit(2);
-            });
-            let report = iter.next().unwrap_or_else(|| {
-                eprintln!("pmacs-gpu: --headless-probe requires a report path");
-                std::process::exit(2);
-            });
-            Mode::HeadlessProbe {
+        [flag, socket, report] if flag == "--headless-probe" => Ok(Mode::HeadlessProbe {
+            socket: PathBuf::from(socket),
+            report: PathBuf::from(report),
+        }),
+        [flag, socket, report, daemon_executable] if flag == "--headless-managed-probe" => {
+            Ok(Mode::HeadlessManagedProbe {
                 socket: PathBuf::from(socket),
                 report: PathBuf::from(report),
-            }
+                daemon_executable: PathBuf::from(daemon_executable),
+            })
         }
-        "--help" | "-h" => {
-            eprintln!(
-                "pmacs-gpu — GPU/GUI frontend for pmacs\n\nUSAGE:\n  pmacs-gpu                       \
-                 hello-world (renders \"hello, pmacs\")\n  pmacs-gpu --attach <socket>     \
-                 connect to a daemon's Unix socket and render its rope\n"
-            );
-            std::process::exit(0);
+        [] => Err("an explicit mode is required; use --attach <socket>".to_owned()),
+        [flag, ..]
+            if matches!(
+                flag.as_str(),
+                "--attach" | "--managed-attach" | "--headless-probe" | "--headless-managed-probe"
+            ) =>
+        {
+            Err(format!("{flag} received the wrong number of operands"))
         }
-        other => {
-            eprintln!("pmacs-gpu: unrecognized argument: {other}");
-            std::process::exit(2);
-        }
+        [other, ..] => Err(format!("unrecognized argument: {other}")),
     }
 }
 
@@ -1554,11 +1766,12 @@ impl ApplicationHandler<AppEvent> for App {
         if self.state.is_some() {
             return;
         }
-        let initial_text = match &self.mode {
-            Mode::HelloWorld => HELLO_TEXT,
-            Mode::Attach { .. } | Mode::HeadlessProbe { .. } => "(connecting...)",
-        };
-        self.state = Some(State::new(event_loop, initial_text));
+        self.state = Some(State::new(event_loop, CONNECTING_TEXT));
+        if let Some(client) = self.attach_client.as_ref()
+            && let Some(state) = self.state.as_mut()
+        {
+            state.set_frontend_id(client.frontend_id());
+        }
 
         // In attach mode, kick off the connection now that the event
         // loop is running and a proxy is available. Failure logs and
@@ -13994,5 +14207,84 @@ mod tests {
         let mut hostile = plain_terminal_frame(buffer_id, "sh", 8);
         hostile.title = Some("\u{1b}]0;pwned\u{7}".into());
         assert!(hostile.validate().is_err());
+    }
+    #[test]
+    fn gpu_cli_accepts_only_explicit_exact_modes() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse_args(&args(&["--attach", "/tmp/pmacs.sock"])),
+            Ok(Mode::Attach {
+                socket: PathBuf::from("/tmp/pmacs.sock"),
+            })
+        );
+        assert_eq!(
+            parse_args(&args(&[
+                "--managed-attach",
+                "/tmp/pmacs.sock",
+                "/bin/pmacs"
+            ])),
+            Ok(Mode::ManagedAttach {
+                socket: PathBuf::from("/tmp/pmacs.sock"),
+                daemon_executable: PathBuf::from("/bin/pmacs"),
+            })
+        );
+        assert_eq!(
+            parse_args(&args(&[
+                "--headless-probe",
+                "/tmp/pmacs.sock",
+                "/tmp/report"
+            ])),
+            Ok(Mode::HeadlessProbe {
+                socket: PathBuf::from("/tmp/pmacs.sock"),
+                report: PathBuf::from("/tmp/report"),
+            })
+        );
+        assert_eq!(
+            parse_args(&args(&[
+                "--headless-managed-probe",
+                "/tmp/pmacs.sock",
+                "/tmp/report",
+                "/bin/pmacs"
+            ])),
+            Ok(Mode::HeadlessManagedProbe {
+                socket: PathBuf::from("/tmp/pmacs.sock"),
+                report: PathBuf::from("/tmp/report"),
+                daemon_executable: PathBuf::from("/bin/pmacs"),
+            })
+        );
+    }
+
+    #[test]
+    fn gpu_cli_rejects_bare_missing_and_trailing_arguments() {
+        let invalid = [
+            vec![],
+            vec!["--attach"],
+            vec!["--attach", "/tmp/pmacs.sock", "ignored"],
+            vec!["--headless-probe", "/tmp/pmacs.sock"],
+            vec![
+                "--headless-probe",
+                "/tmp/pmacs.sock",
+                "/tmp/report",
+                "ignored",
+            ],
+            vec!["--managed-attach", "/tmp/pmacs.sock"],
+            vec!["--headless-managed-probe", "/tmp/pmacs.sock", "/tmp/report"],
+            vec!["research"],
+        ];
+        for values in invalid {
+            let args = values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>();
+            assert!(
+                parse_args(&args).is_err(),
+                "accepted invalid argv: {values:?}"
+            );
+        }
     }
 }

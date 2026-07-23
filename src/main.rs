@@ -2,59 +2,36 @@
 
 //! Pmacs binary entry point.
 //!
-//! Parses command-line arguments and dispatches to [`pmacs::editor::run`].
+//! Parses command-line arguments and dispatches local TUI, daemon, attach,
+//! remote bridge, and managed GPU modes.
 //!
 //! # Command-line surface
 //!
 //! ```text
 //! pmacs [-nw|--no-window] [--help] [--version] [FILE]
+//! pmacs --gpu [--socket NAME|PATH]
+//! pmacs --daemon [--socket NAME|PATH]
+//! pmacs --attach [--socket NAME|PATH]
+//! pmacs --attach <target>
+//! pmacs --daemon-attach [--socket NAME|PATH]
 //! ```
 //!
-//! * `FILE` (positional, optional): file to open. Without one, the editor
-//!   opens an empty `*scratch*` buffer.
-//! * `-nw` / `--no-window`: select the terminal (TUI) frontend explicitly.
-//!   This is the *only* frontend pmacs ships in v0.1, so the flag is
-//!   currently a no-op marker — but it's parsed and recorded now so that
-//!   when a GUI frontend lands in M4 ("The Service Layer"), `pmacs` with
-//!   no flags will default to the GUI and `pmacs -nw` will keep launching
-//!   the TUI exactly as it does today. This mirrors GNU Emacs's
-//!   `emacs -nw` and Doom's behavior, and lets users wire `pmacs -nw` into
-//!   `EDITOR=` / git hooks today without their config breaking when the
-//!   GUI ships.
-//! * `--help` / `-h`, `--version` / `-V`: standard.
+//! `--gpu` is additive: bare `pmacs [FILE]` remains the local TUI. The root
+//! broker resolves the socket, requires a CRDT-capable build, discovers the
+//! separate `pmacs-gpu` executable, and waits for that frontend's outcome.
+//! The GPU child owns connect-or-start orchestration for the supplied daemon
+//! executable. Direct TUI and GPU attach modes remain available for debugging.
 //!
 //! Anything else is a usage error and exits 2.
-//!
-//! # Frontend selection (planning note for M4)
-//!
-//! When the GUI lands, the entry-point split looks like this:
-//!
-//! ```ignore
-//! match selected_frontend(&args) {
-//!     Frontend::Tui => editor::run_tui(file),
-//!     Frontend::Gui => editor::run_gui(file),
-//! }
-//! ```
-//!
-//! Selection precedence (high to low):
-//!  1. Explicit `-nw` / `--no-window` → TUI.
-//!  2. Explicit `--gui` (future) → GUI.
-//!  3. `PMACS_FRONTEND=tui|gui` env var.
-//!  4. `$DISPLAY` / `$WAYLAND_DISPLAY` present and a GUI build was linked
-//!     in → GUI; otherwise → TUI.
-//!  5. Fallback: TUI.
-//!
-//! `editor::run` stays as the canonical TUI entry point. The split
-//! happens in `main`, not deeper, so the rest of the codebase stays
-//! frontend-agnostic at the [`pmacs::frontend`] trait surface.
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 
 use pmacs::protocol::{AttachTarget, AttachTargetError};
 
 const USAGE: &str = "\
 usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
+       pmacs --gpu [--socket NAME|PATH]
        pmacs --daemon [--socket NAME|PATH]
        pmacs --attach [--socket NAME|PATH]
        pmacs --attach <target>
@@ -64,6 +41,8 @@ usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
                      (currently the only frontend; reserved for the
                      M4 GUI rollout, where `pmacs` will default to
                      the GUI and `-nw` will keep launching the TUI)
+  --gpu              start or reuse a CRDT daemon, then launch the
+                     separate pmacs-gpu frontend
   --daemon           run as a foreground daemon listening on a Unix
                      socket; supervised by the user (systemd, tmux,
                      `nohup &`, etc.)
@@ -116,6 +95,9 @@ enum Mode {
         file: Option<PathBuf>,
         frontend: FrontendChoice,
     },
+    /// `pmacs --gpu [--socket ...]`: launch the separate GPU frontend,
+    /// starting a CRDT daemon on the resolved socket when absent.
+    Gpu { socket: Option<String> },
     /// `pmacs --daemon [--socket ...]`: run a foreground daemon on a
     /// Unix socket, supervised by the user.
     Daemon { socket: Option<String> },
@@ -199,10 +181,15 @@ fn parse_attach_target_with_shorthand(s: &str) -> Result<AttachTarget, AttachTar
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "single-pass parser keeps mutually exclusive CLI modes explicit"
+)]
 fn parse_args(args: &[String]) -> CliResult {
     let mut file: Option<PathBuf> = None;
     let mut frontend = FrontendChoice::Auto;
     let mut daemon = false;
+    let mut gpu = false;
     let mut attach = false;
     let mut daemon_attach = false;
     let mut socket: Option<String> = None;
@@ -210,6 +197,7 @@ fn parse_args(args: &[String]) -> CliResult {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-nw" | "--no-window" => frontend = FrontendChoice::Tui,
+            "--gpu" => gpu = true,
             "--daemon" => daemon = true,
             "--attach" => attach = true,
             "--daemon-attach" => daemon_attach = true,
@@ -242,11 +230,24 @@ fn parse_args(args: &[String]) -> CliResult {
             }
         }
     }
-    let mode_flags = u8::from(daemon) + u8::from(attach) + u8::from(daemon_attach);
+    let mode_flags = u8::from(gpu) + u8::from(daemon) + u8::from(attach) + u8::from(daemon_attach);
     if mode_flags > 1 {
         return CliResult::Error(
-            "--daemon, --attach, and --daemon-attach are mutually exclusive".into(),
+            "--gpu, --daemon, --attach, and --daemon-attach are mutually exclusive".into(),
         );
+    }
+    if gpu {
+        if file.is_some() {
+            return CliResult::Error(
+                "--gpu does not yet accept FILE; open it from the GPU with C-x C-f".into(),
+            );
+        }
+        if frontend == FrontendChoice::Tui {
+            return CliResult::Error("--gpu and --no-window are mutually exclusive".into());
+        }
+        return CliResult::Run(CliArgs {
+            mode: Mode::Gpu { socket },
+        });
     }
     if daemon {
         if file.is_some() {
@@ -280,9 +281,80 @@ fn parse_args(args: &[String]) -> CliResult {
             mode: Mode::DaemonAttach { socket },
         });
     }
+    if socket.is_some() {
+        return CliResult::Error(
+            "--socket requires --gpu, --daemon, --attach, or --daemon-attach".into(),
+        );
+    }
     CliResult::Run(CliArgs {
         mode: Mode::Local { file, frontend },
     })
+}
+
+const PMACS_TEST_GPU_BIN: &str = "PMACS_TEST_GPU_BIN";
+
+fn gpu_binary(current_exe: &Path, override_bin: Option<PathBuf>) -> (PathBuf, PathBuf) {
+    let sibling = current_exe
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("pmacs-gpu");
+    if let Some(override_bin) = override_bin {
+        return (override_bin, sibling);
+    }
+    if sibling.exists() {
+        return (sibling.clone(), sibling);
+    }
+    (PathBuf::from("pmacs-gpu"), sibling)
+}
+
+fn run_gpu(socket: Option<&str>) -> ExitCode {
+    if !cfg!(feature = "crdt") {
+        eprintln!("pmacs: --gpu requires pmacs built with --features crdt");
+        return ExitCode::FAILURE;
+    }
+
+    let socket_path = pmacs::socket_path::resolve_socket_path(socket);
+    let current_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("pmacs: cannot locate the running pmacs executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (gpu, sibling) = gpu_binary(
+        &current_exe,
+        std::env::var_os(PMACS_TEST_GPU_BIN).map(PathBuf::from),
+    );
+    let status = Command::new(&gpu)
+        .arg("--managed-attach")
+        .arg(&socket_path)
+        .arg(&current_exe)
+        .status();
+    match status {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => {
+            eprintln!("pmacs: GPU frontend {} exited with {status}", gpu.display());
+            status
+                .code()
+                .and_then(|code| u8::try_from(code).ok())
+                .map_or(ExitCode::FAILURE, ExitCode::from)
+        }
+        Err(error) => {
+            if gpu == Path::new("pmacs-gpu") {
+                eprintln!(
+                    "pmacs: could not launch GPU frontend: sibling {} is absent and PATH lookup \
+                     for pmacs-gpu failed: {error}",
+                    sibling.display()
+                );
+            } else {
+                eprintln!(
+                    "pmacs: could not launch GPU frontend {}: {error}",
+                    gpu.display()
+                );
+            }
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -316,6 +388,7 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
+            Mode::Gpu { socket } => run_gpu(socket.as_deref()),
             Mode::Daemon { socket } => {
                 let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
                 // The user-provided NAME (no slashes) becomes the
@@ -735,5 +808,64 @@ mod tests {
                 other => panic!("combo {combo:?}: expected Error; got {other:?}"),
             }
         }
+    }
+    #[test]
+    fn gpu_flag_selects_managed_gpu_with_optional_socket() {
+        for (argv, expected) in [
+            (vec!["--gpu"], None),
+            (vec!["--gpu", "--socket", "research"], Some("research")),
+        ] {
+            let argv = args(&argv);
+            match parse_args(&argv) {
+                CliResult::Run(CliArgs {
+                    mode: Mode::Gpu { socket },
+                }) => assert_eq!(socket.as_deref(), expected),
+                other => panic!("expected GPU mode; got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_flag_rejects_files_tui_and_other_modes() {
+        for argv in [
+            vec!["--gpu", "README.md"],
+            vec!["--gpu", "-nw"],
+            vec!["--gpu", "--daemon"],
+            vec!["--gpu", "--attach"],
+            vec!["--gpu", "--daemon-attach"],
+        ] {
+            assert!(
+                matches!(parse_args(&args(&argv)), CliResult::Error(_)),
+                "accepted conflicting argv: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_socket_is_never_silently_ignored() {
+        match parse_args(&args(&["--socket", "research"])) {
+            CliResult::Error(message) => assert!(message.contains("--socket requires")),
+            other => panic!("expected bare --socket error; got {other:?}"),
+        }
+    }
+    #[test]
+    fn gpu_binary_discovery_prefers_override_then_sibling_then_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("pmacs");
+        let sibling = temp.path().join("pmacs-gpu");
+        let override_bin = temp.path().join("override-gpu");
+
+        let (selected, reported_sibling) = gpu_binary(&root, Some(override_bin.clone()));
+        assert_eq!(selected, override_bin);
+        assert_eq!(reported_sibling, sibling);
+
+        std::fs::write(&sibling, b"gpu").expect("create sibling");
+        let (selected, _) = gpu_binary(&root, None);
+        assert_eq!(selected, sibling);
+
+        std::fs::remove_file(&sibling).expect("remove sibling");
+        let (selected, reported_sibling) = gpu_binary(&root, None);
+        assert_eq!(selected, PathBuf::from("pmacs-gpu"));
+        assert_eq!(reported_sibling, sibling);
     }
 }

@@ -1,7 +1,7 @@
 # GPU invocation — one-command broker framing
 
-**Revision 3 — pre-implementation. Ground truth: canonical `main` @
-`96d0bae`, protocol v19, 2026-07-23.**
+**Revision 4 — implemented on `gpu-invocation`. Ground truth: canonical
+`main` @ `96d0bae`, protocol v19, 2026-07-23.**
 
 The GPU editor works, but reaching it is still a development-session ritual:
 build two packages with different feature requirements, keep a foreground
@@ -29,6 +29,11 @@ Revision 3 makes the managed probe deterministic for signal/reaper tests,
 keeps `Interrupted` / `WouldBlock` transient inside the post-spawn retry
 window, states the process-group signal simulation in CI-executable terms,
 and distinguishes the socket type check from liveness inference.
+
+Revision 4 records the as-built cutover: the root broker, strict GPU CLI,
+managed connector, process-group isolation, named child reaper, deterministic
+managed probe, acceptance suite, coherent workspace build, and one-command
+visible smoke are implemented and verified.
 
 ## Ground truth
 
@@ -611,3 +616,40 @@ Vterm probe continues to cover offscreen wgpu.
     build succeeds; `cargo run --release -- --version` selects `pmacs` through
     `default-run`; no documented command requires users to spell the resolved
     socket pathname for managed GPU startup.
+
+## As built
+
+- `Cargo.toml` sets `default-run = "pmacs"`. The documented coherent build is
+  `cargo build --release --workspace --features pmacs/crdt`.
+- `src/main.rs` owns `pmacs --gpu [--socket NAME|PATH]`, the non-CRDT gate,
+  socket resolution, test override, sibling-first GPU discovery with PATH
+  fallback, child argv, and exit-status propagation.
+- `pmacs-gpu/src/main.rs` accepts only explicit direct, managed, and headless
+  modes. Managed windowed attach completes before winit creates a window.
+  Bare invocation is an exit-2 usage error pointing users to `pmacs --gpu`.
+- `pmacs-gpu/src/attach.rs` owns connect-or-start policy, the five-second /
+  50-ms retry window, socket-type protection, daemon process-group isolation,
+  and the named child-reaper thread. The first successful protocol connection
+  wins; protocol/capability failures never authorize replacement.
+- `--headless-managed-probe SOCKET REPORT DAEMON_EXE` drives the production
+  managed connector, writes atomic `phase=ready` / `phase=complete` reports,
+  holds on stdin, and exposes disconnect plus daemon-reaper observations.
+- `tests/gpu_invocation_acceptance.rs` covers the root broker, non-CRDT gate,
+  existing/missing/stale/racing daemon paths, process-group SIGINT isolation,
+  capability and protocol mismatches, bounded startup failure, child reaping,
+  outcome propagation, and strict headless CLI behavior.
+
+Verification on 2026-07-23:
+
+- root CLI unit suite: 33 passed;
+- required GPU suite: 145 passed;
+- managed invocation acceptance: 1 default + 9 CRDT passed;
+- Vterm Stage 3: 7 passed with `PMACS_REQUIRE_GPU=1`;
+- default / CRDT libraries: 1,768 / 1,944 passed;
+- M4 acceptance: 121 passed, 3 ignored, 1 requested skip;
+- strict workspace Clippy and formatting passed;
+- the documented release workspace build and `cargo run --release --
+  --version` passed;
+- two real `target/release/pmacs --gpu` launches on Wayland/Vulkan attached at
+  protocol v19. The first auto-started daemon remained alive after the GPU
+  process closed; the second reused that same daemon and created no replacement.
