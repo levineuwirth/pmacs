@@ -1,7 +1,13 @@
 # GPU initial target — session-scoped file opening framing
 
-**Revision 1 — proposed framing for user review. Ground truth: canonical
-`main` @ `4daa1b8`, protocol v19, 2026-07-23. No implementation yet.**
+**Revision 2 — user-review findings resolved. Ground truth: canonical `main`
+@ `4daa1b8`, protocol v19, 2026-07-23. No implementation yet.**
+
+Revision 2 pins launcher-owned tilde expansion, requires `after-switch` even
+when dedup selects the view's existing buffer, fails bootstrap when a hook
+kills the target, and records the deliberate stderr-only wait during slow
+pre-window bootstrap. It also sharpens the observed argv panic and negotiated
+protocol-version echo.
 
 One-command GPU startup landed in #141:
 
@@ -41,9 +47,9 @@ solve installation, service management, remote GPU attach, or reconnect.
 - The root broker invokes the sibling/PATH GPU binary as
   `pmacs-gpu --managed-attach SOCKET DAEMON_EXE`, waits for its status, and
   reflects success/failure.
-- Both root and GPU parsers consume `std::env::args()` into `String`. That
-  cannot represent a non-UTF-8 Unix filename and may terminate before the
-  parser can issue a useful error.
+- Both root and GPU parsers consume `std::env::args()` into `String`; Rust
+  panics when an argument is not valid Unicode. They cannot admit a
+  non-UTF-8 Unix filename or issue a useful parser error for one.
 - The direct GPU CLI is intentionally strict. Public direct attach remains
   `pmacs-gpu --attach RAW_SOCKET`; managed and headless forms are private
   root/acceptance seams.
@@ -55,6 +61,9 @@ solve installation, service management, remote GPU attach, or reconnect.
   and becomes the reader for `FrontendEvent`s.
 - `AttachRequest` contains protocol version, capabilities, and initial cell
   size. It has no target. `FrontendEvent` has no open-path request.
+- The GPU copies `Hello.protocol_version` into `AttachRequest.protocol_version`
+  rather than sending its own maximum. Every old-daemon gate therefore keys on
+  the negotiated/echoed server version; changing that echo is not cleanup.
 - `handle_session_established` creates the authenticated frontend's own
   `FrontendView`, initially sharing the daemon-local active buffer, then sends
   CRDT snapshots and installs grid or semantic render state.
@@ -98,15 +107,18 @@ invariant as any other mid-session buffer creation.
 
 1. **Authenticated source owns the target.** No client-supplied frontend id,
    daemon-local active view, or ambient “last frontend” selects the window.
-2. **Launcher cwd owns relative resolution.** The daemon's cwd is irrelevant,
-   including when the daemon predates the launcher.
-3. **Path bytes survive.** On Unix, argv → broker → GPU → wire → daemon file
-   I/O preserves the exact `OsStr` bytes. Display text may be lossy; backing
+2. **Launcher environment owns path resolution.** Root applies the existing
+   leading-tilde rule with the launcher's `$HOME`; any still-relative result
+   resolves against the launcher cwd. Daemon cwd/HOME are irrelevant.
+3. **Path bytes survive defined resolution.** Apart from that deliberate
+   root-side tilde substitution, Unix argv → broker → GPU → wire → daemon file
+   I/O preserves exact `OsStr` bytes. Display text may be lossy; backing
    identity and filesystem access may not be.
 4. **One target, one buffer identity.** Reuse an already-open normalized path;
    never discard unsaved edits by reloading it.
 5. **Target before first draw.** The first buffer content eligible to render is
-   the requested target. “Connecting…” is acceptable; scratch content is not.
+   the requested target. The explicit terminal launcher may report the wait on
+   stderr; no editor window exists yet, and scratch content is never drawable.
 6. **Ready means usable.** Success is reported only after the target buffer is
    loaded/created, selected in the authenticated view, CRDT-backed, and its
    matching snapshot has been written to the GPU.
@@ -167,13 +179,20 @@ pmacs-gpu --managed-attach SOCKET DAEMON_EXE \
   --initial-target LAUNCHER_CWD FILE
 ```
 
-`LAUNCHER_CWD` is captured by root before spawn and must be absolute. Both cwd
-and file are passed as `OsString`/`Path` operands, not encoded into UTF-8,
-environment variables, JSON, or a delimiter-separated string. The marker
-makes an option-like `FILE` unambiguous. The no-target private argv remains
-unchanged.
-If `current_dir()` fails, root reports that error and does not spawn the GPU;
-falling back to the daemon cwd would violate the target's authority.
+Before transport, root applies the existing identity seam's tilde rule using
+the **launcher** environment: a valid-UTF-8 leading whole `~` or `~/…` expands
+through `std::env::var_os("HOME")`; `~user`, a non-UTF-8 spelling, or an
+unset `$HOME` remains unchanged. Expansion happens exactly once, before any
+cwd join. This makes quoted `~/x` dedup with an already-open `$HOME/x` buffer
+and prevents a long-lived daemon's different `$HOME` from changing identity.
+
+`LAUNCHER_CWD` is captured by root before spawn and must be absolute. The
+post-expansion file and cwd are passed as `OsString`/`Path` operands, not
+encoded into UTF-8, environment variables, JSON, or a delimiter-separated
+string. The marker makes an option-like `FILE` unambiguous. The no-target
+private argv remains unchanged. If `current_dir()` fails, root reports that
+error and does not spawn the GPU; falling back to daemon cwd would violate the
+target's authority.
 
 The GPU parser also moves to `args_os` for path operands. Public help continues
 to advertise only the root command and advanced direct attach; the private
@@ -229,18 +248,22 @@ transaction without yielding to another event:
 
 1. Register the new frontend's view and set `active_frontend` to the
    authenticated `FrontendId`.
-2. Resolve a relative `path` against the supplied launcher `cwd`, then
-   lexically normalize the result without canonicalizing symlinks.
+2. Accept root's already tilde-expanded `path`; if it is still relative, join
+   it to the supplied launcher `cwd`, then lexically normalize without
+   canonicalizing symlinks. The daemon never consults or re-applies `$HOME`.
 3. Reuse an existing buffer with that normalized backing path; otherwise load
    the file; on `NotFound`, create an empty path-backed buffer and set
    `[new file]`; on any other error, take the failure path below.
 4. Select that buffer in only the new frontend's active window.
-5. Fire `buffer.after-switch` on dedup or `buffer.after-load` on a fresh disk
-   load, with the authenticated frontend active. A newly created missing file
-   matches local startup and does not fire `after-load`.
-6. Reassert the requested target after hooks so startup configuration can
-   inspect the right session but cannot accidentally make `pmacs --gpu FILE`
-   acknowledge a different buffer.
+5. Fire `buffer.after-switch` exactly once on every dedup, including when the
+   fresh view already shares that `BufferId` and selection is a same-buffer
+   no-op. Fire `buffer.after-load` on a fresh disk load. Both run with the
+   authenticated frontend active; a newly created missing file matches local
+   startup and fires neither load nor switch hook.
+6. After hooks, verify the target `BufferId` is still live. A listener that
+   killed it causes the fail-closed bootstrap path in Q#GT9. Otherwise reassert
+   the requested target so configuration can inspect the right session but
+   cannot make `pmacs --gpu FILE` acknowledge a different buffer.
 7. Establish CRDT/snapshot coherence, then acknowledge readiness.
 
 The target-opening helper must be Rust/editor-core state, not synthetic keys
@@ -318,6 +341,15 @@ scratch snapshot can become drawable.
 daemon detail. Managed startup returns nonzero; root reflects that status.
 The daemon itself remains alive, whether reused or newly spawned.
 
+Because the connector waits before winit creates a window, slow dispatcher
+work has no graphical “Connecting…” surface. This is deliberate for the
+explicit terminal command: before blocking, `pmacs-gpu` writes one bounded,
+lossy-display-only `opening …` notice to stderr. There is no second target
+timeout beyond #141's bounded daemon-start retry; file I/O and user hooks may
+legitimately exceed five seconds, and timing out the client would not cancel
+dispatcher work. Ctrl-C remains the escape hatch and still cannot reach the
+isolated daemon process group.
+
 ### Q#GT9 — Failure cleanup never creates a ghost session
 
 On any target failure before readiness, the dispatcher:
@@ -327,6 +359,9 @@ On any target failure before readiness, the dispatcher:
   size/baseline entries, and stream entry if any were installed;
 - shuts down the connection so the per-attach reader wakes and emits at most
   idempotent detach cleanup;
+- treats a target `BufferId` killed by `buffer.after-load` or
+  `buffer.after-switch` as a bootstrap failure, never reasserts a stale id,
+  and performs the same provisional-session cleanup;
 - leaves every pre-existing buffer/view/session unchanged, except that a file
   successfully loaded before a later CRDT/export failure may remain as an
   ordinary daemon buffer. It must not become another frontend's active view.
@@ -359,7 +394,7 @@ source of truth for a mandatory v20 semantic handshake step.
 ## Startup state machine
 
 ```text
-root parses FILE bytes + cwd bytes
+root parses FILE bytes, expands eligible `~` with launcher HOME, captures cwd
   |
   +-- spawn/await pmacs-gpu managed child
         |
@@ -500,10 +535,11 @@ process behavior.
 6. **Old live daemon refusal:** target mode against a real/fake supported v19
    daemon fails with the protocol-v20 requirement, invokes no daemon spawner,
    leaves the socket/process untouched, and creates no GPU window.
-7. **Existing-daemon relative path:** start a real CRDT daemon from cwd A;
-   launch the real headless managed GPU target from cwd B with `sub/file.txt`;
-   require the snapshot contents from B, not A, and a ready buffer matching the
-   result.
+7. **Existing-daemon path authority:** start a real CRDT daemon from cwd/HOME
+   A; launch the real headless managed GPU target from cwd/HOME B with
+   `sub/file.txt`; require contents from B, not A. Repeat with a shell-quoted
+   `~/file.txt` after that `$HOME_B/file.txt` buffer is already open, and
+   require the same `BufferId`, proving root-side expansion and dedup.
 8. **Missing-daemon target:** from no socket/lock, the production managed path
    starts one daemon, opens the target, reaches ready, and leaves that daemon
    connectable after the probe/window exits. Repeating reuses it and creates no
@@ -528,13 +564,19 @@ process behavior.
     any CRDT op for it; both replicas accept later operations without unknown-
     buffer fallback or disconnect.
 14. **Hook context and count:** fresh disk load fires `buffer.after-load` once;
-    dedup fires `buffer.after-switch` once; missing-file creation fires neither
-    load hook. Each hook observes the authenticated frontend and requested
-    buffer, and the target remains selected afterward.
+    dedup fires `buffer.after-switch` once even when the fresh view already
+    shares that exact buffer and the select itself is a no-op; missing-file
+    creation fires neither hook. Each hook observes the authenticated frontend
+    and requested buffer, and the target remains selected afterward. A fixture
+    that kills the target inside either hook yields `Failed`, no ready phase,
+    and no stale-id reassertion.
 15. **Pre-window barrier:** the headless seam records that the only initial
     semantic `BufferSnapshot` is the target and precedes matching `Opened`.
     Injected load/export failure records no ready phase. A window-path unit seam
-    proves bootstrap state is applied before the first redraw request.
+    proves bootstrap state is applied before the first redraw request. A held
+    dispatcher fixture proves the bounded stderr notice appears while no
+    window/ready result exists, then succeeds after release without a separate
+    target timeout.
 16. **Concurrent same-target launch:** two target launchers racing an absent
     daemon and the same file converge on one daemon, one buffer identity, two
     ready sessions, and the existing #141 losing-daemon child is reaped.
