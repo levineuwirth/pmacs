@@ -233,6 +233,14 @@ tree-sitter-md = "0.5"
 # uses the in-repo overlay `builtin/queries/latex/highlights.scm` (the first
 # such overlay; `include_str!`'d in `crate::syntax::BUILTIN_LANGUAGES`).
 codebook-tree-sitter-latex = "0.6"
+# Web grammars: HTML + CSS (`.html`/`.htm`/`.xhtml`, `.css`). The official
+# tree-sitter-org grammars; both export `LANGUAGE` + query constants over
+# `tree-sitter-language 0.1` (shared ABI crate, `tree-sitter` dev-only), so no
+# overlay is needed. HTML's `INJECTIONS_QUERY` lights up `<script>` ->
+# javascript (already registered) and `<style>` -> css via the #122 injection
+# engine (see `crate::syntax::BUILTIN_LANGUAGES`).
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
 # the feature surface tight to keep build time low. `poll` feeds the
 # compile-mode group readers (cancellable poll-based reads, Q#CM3).
