@@ -1,11 +1,11 @@
 # Web grammars (HTML + CSS) + HTML injections — framing
 
-**Revision 3 — pre-implementation. Ground truth: canonical `main` @
-`4daa1b8` (after LaTeX #144 and inline-math-docs #145), 2026-07-23. Status:
-framing only; no implementation.** Rev 2 settled the capture set, injection
-scope, and LSP claim (round 1); rev 3 corrects the `#match?` predicate analysis
-(tree-sitter evaluates it natively) and refreshes the folding footprint to the
-current branch (round 2). See §0.1.
+**Revision 4 — implemented on branch `web-grammars` (PR #146). Ground truth:
+canonical `main` @ `4daa1b8` (after LaTeX #144 and inline-math-docs #145),
+2026-07-23.** Rev 2 settled the capture set, injection scope, and LSP claim
+(round 1); rev 3 corrected the `#match?` predicate analysis (round 2); rev 4
+names the intended `@attribute` retro-paint on the already-bundled rust/lua/yaml
+grammars — verified on a Rust buffer and pinned by a test (round 3). See §0.1.
 
 ## 0.1 Revision history
 
@@ -43,6 +43,17 @@ current branch (round 2). See §0.1.
   `semantic_render.rs`, `fold.lua`, and tests — not
   `overlay.rs`/`daemon.rs`/`syntax.rs`. §0 now lists the real set; the
   zero-overlap conclusion is unchanged (stronger, if anything).
+
+### Round 3 (rev 3 → rev 4)
+
+- **R3-1 (medium).** Q#WEB4 verified which captures pmacs *lacks* but not the
+  reverse: which already-bundled grammars *use* `@attribute`. Three do — rust
+  (`attribute_item`), lua (`<const>`), yaml (directives) — so the new
+  `("attribute", fg(3))` entry retro-paints their previously-unpainted spans
+  yellow. Named in Q#WEB4 as intended (verified on a Rust buffer: uniform
+  yellow, an improvement over unpainted), and pinned by
+  `rust_attribute_repaints_via_shared_attribute_capture`. `tag` is unaffected
+  (HTML/CSS only).
 
 Add tree-sitter **HTML** and **CSS** grammars so `.html`/`.htm` and `.css`
 buffers get lexical highlighting, and — the north-star payoff — light up
@@ -196,6 +207,19 @@ There is **no** `tag.delimiter` (rev-1 speculation, removed); HTML's `<`/`>`/
 - **low-conflict** — folding does not touch `highlight.rs`;
 - **general** — `tag`/`attribute` are standard tree-sitter web captures, so it
   also serves future html-ish grammars (vue/svelte/astro).
+
+**Retro-paint on already-bundled languages (intended, added rev 4).** The
+capture table is global, so adding `attribute` also colours the `@attribute`
+capture that three bundled grammars already emit but which was previously
+unrecognized (and so unpainted): **rust** (`attribute_item`/`inner_attribute_item`
+— every `#[derive(…)]` / `#![…]`), **lua** (the `<const>`/`<close>` variable
+attribute), and **yaml** (`%YAML`/`%TAG` directives). On merge these begin
+painting `attribute` yellow (`fg 3`). Verified on a Rust buffer: `#[derive(Debug)]`
+paints uniformly yellow (the `attribute_item` span carries no narrower overriding
+captures) — a distinct-attribute convention most editors follow, and an
+improvement over unpainted. This is **chosen, not incidental**: it is pinned by
+`rust_attribute_repaints_via_shared_attribute_capture` (`src/highlight.rs`).
+`tag` is clean — only HTML/CSS use it, so it has no retro-effect.
 
 **On CSS custom properties (corrected in rev 3):** pmacs passes the buffer text
 to `QueryCursor::captures` (`src/syntax.rs:1701`), so tree-sitter evaluates the

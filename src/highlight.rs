@@ -1417,6 +1417,61 @@ mod tests {
     }
 
     #[test]
+    fn rust_attribute_repaints_via_shared_attribute_capture() {
+        // Intended side effect, named in the framing (Q#WEB4): the
+        // `("attribute", fg(3))` entry added for HTML/CSS also colours the
+        // `@attribute` capture that tree-sitter-rust (attribute_item), -lua
+        // (`<const>`), and -yaml (directives) already emit. A Rust
+        // `#[derive(Debug)]` — previously unpainted, since `@attribute` was
+        // unrecognized — now paints the attribute style throughout. Pinned so
+        // the retro-paint on this repo's primary language is a chosen effect,
+        // not an incidental one.
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language("rust").expect("rust grammar");
+        let src = b"#[derive(Debug)]\nstruct S;\n";
+        let mut buf = Buffer::new(BufferId::next(), "a.rs");
+        buf.apply_edit(EditOp::Insert { pos: 0, bytes: src })
+            .unwrap();
+        let view = ParseView::new(&buf, language, "rust".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("rust parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let (rows, cols) = (1usize, 20usize);
+        let mut backing: Vec<Cell> = vec![Cell::default(); rows * cols];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols as u32,
+            size: CellSize::new(rows as u32, cols as u32),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows as u32, cols as u32),
+            gutter_w: 0,
+        };
+        let registry = buf;
+        hv.render(&registry, viewport, &mut grid);
+
+        // `derive` (col 2) sits inside the `attribute_item` and paints the
+        // shared @attribute style (fg 3) — the intended retro-paint.
+        assert_eq!(
+            grid.get(CellCoord::new(0, 2)).style.fg,
+            pmacs_protocol::cell::Color::Indexed(3),
+            "a Rust #[derive] attribute paints the shared @attribute style (fg 3)"
+        );
+    }
+
+    #[test]
     fn web_grid_paints_html_tag_and_attribute() {
         // Q#WEB4 acceptance: the two capture entries this lane adds (`tag`,
         // `attribute`) actually reach painted cells. The attribute assertion is
