@@ -1,10 +1,11 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-22, after Vterm Stage 3 (#135, protocol v19 and
-native GPU terminal) landed on `main`, following tab-width rendering parity
-(#137), locals-query processing (#134), modeline detection (#132), mode system
-wiring (#129), config registry (#127), Vterm Stages 1–2 (#126/#130), and
-completed Themes Arc 4 (#120/#124/#125).**
+**Last updated: 2026-07-23, with the approved one-command GPU invocation
+broker implemented on open PR #141, after the documentation refresh (#140),
+Vterm Stage 3 (#135, protocol v19 and native GPU terminal), tab-width
+rendering parity (#137), locals-query processing (#134), modeline detection
+(#132), mode system wiring (#129), config registry (#127), Vterm Stages 1–2
+(#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -16,11 +17,21 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-22)
+## 1. Where the project stands (2026-07-23)
 
-- `main` @ `cac4961` (Vterm Stage 3 #135 atop tab-width parity #137),
-  protocol **v19** (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 =
-  `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events).
+- `main` @ `96d0bae` (documentation refresh #140 atop Vterm Stage 3 #135
+  and tab-width parity #137), protocol **v19** (`SUPPORTED=[6..=19]`; v16 =
+  `ThemeFacts`, v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal
+  frames/events).
+- **One-command GPU invocation is implemented on OPEN PR #141, not yet on
+  `main`** (`gpu-invocation`, implementation checkpoint `6fd5834`, framing
+  Revision 4). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;
+  bare `pmacs [FILE]` remains the TUI. Root owns the CRDT gate, socket
+  resolution, sibling-first GPU discovery/PATH fallback, and GPU outcome.
+  The separate `pmacs-gpu` binary owns connect-or-start, a five-second /
+  50-ms retry window, daemon process-group isolation, and named child
+  reaping. Direct `pmacs-gpu --attach RAW_PATH` remains strict and never
+  auto-starts. No protocol change.
 - **Config registry LANDED — #127** (`docs/config-registry-framing.md`
   rev 3; merge `2e37c04`; two review rounds). `pmacs.config` is the
   typed, introspectable options registry the backlog ranked first, and
