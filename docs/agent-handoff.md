@@ -19,9 +19,9 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-23)
 
-- `main` @ `63fbc66` (one-command GPU invocation #141 atop documentation
-  refresh #140), protocol **v19** (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`,
-  v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events).
+- `main` @ `47581f4` (web grammars #146 atop folding Stage 1 #142,
+  inline-math framing #145, and one-command GPU invocation #141), protocol
+  **v19** (`SUPPORTED=[6..=19]`; v19 = terminal frames/events).
 - **GPU INITIAL TARGET IMPLEMENTED — PR pending**
   (`docs/gpu-initial-target-framing.md` rev 3; branch `gpu-initial-target`).
   `pmacs --gpu [--socket NAME|PATH] FILE` now transports exact Unix path bytes

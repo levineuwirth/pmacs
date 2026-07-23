@@ -619,13 +619,13 @@ supports both. The final full workspace sweep remains required before PR.
 As-built verification on 2026-07-23:
 
 - `cargo fmt --check` and strict workspace Clippy passed.
-- Library gates passed 1,792 default and 1,968 CRDT tests.
+- Library gates passed 1,800 default and 1,976 CRDT tests.
 - The named initial-target gate passed 1 default and 13 CRDT tests; the
   underlying GPU invocation suite passed 13 CRDT tests.
 - M4 passed 121 tests with the documented basedpyright skip; required real-GPU
   tests passed 152.
 - Vterm Stage 3 passed 5 default and 7 CRDT tests.
-- The workspace CRDT sweep passed 3,260 tests across 87 suites, with 29 ignored
+- The workspace CRDT sweep passed 3,268 tests across 87 suites, with 29 ignored
   and the documented basedpyright case filtered.
 - A coherent release build launched `target/release/pmacs --gpu --socket
   initial-target-smoke README.md` on the real Wayland/Vulkan workstation,
