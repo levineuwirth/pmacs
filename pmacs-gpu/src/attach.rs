@@ -17,10 +17,16 @@
 //! redraw.
 
 use std::collections::VecDeque;
+use std::fs;
+use std::io;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use pmacs_protocol::{
     AttachRequest, BufferId, ByteRange, CellCoord, CellSize, CrdtOp, FrontendCapabilities,
@@ -88,6 +94,169 @@ impl std::fmt::Display for AttachClientError {
 }
 
 impl std::error::Error for AttachClientError {}
+
+/// Failure while connecting the managed GPU path.
+#[derive(Debug)]
+pub enum ManagedAttachError {
+    /// The daemon connection reached the normal attach client and failed.
+    Attach(AttachClientError),
+    /// A refused socket path exists but is not a Unix socket.
+    NonSocketPath(PathBuf),
+    /// Inspecting a refused socket path failed.
+    InspectSocket {
+        /// Path whose entry type could not be inspected.
+        path: PathBuf,
+        /// Filesystem error from `metadata`.
+        source: io::Error,
+    },
+    /// The requested daemon executable could not be started.
+    SpawnDaemon {
+        /// Executable supplied by the root broker.
+        executable: PathBuf,
+        /// Process-spawn failure.
+        source: io::Error,
+    },
+    /// No attachable daemon appeared before the bounded deadline.
+    StartupTimeout {
+        /// Socket path that remained unreachable.
+        socket: PathBuf,
+        /// Most recent connect error.
+        connect: io::Error,
+        /// Observed daemon process outcome, when it exited early.
+        daemon_status: Option<String>,
+        /// Startup deadline used for this attempt.
+        timeout: Duration,
+    },
+}
+
+impl std::fmt::Display for ManagedAttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Attach(error) => error.fmt(f),
+            Self::NonSocketPath(path) => write!(
+                f,
+                "refusing to start a daemon: socket path {} exists and is not a Unix socket",
+                path.display()
+            ),
+            Self::InspectSocket { path, source } => write!(
+                f,
+                "cannot inspect refused socket path {}: {source}",
+                path.display()
+            ),
+            Self::SpawnDaemon { executable, source } => write!(
+                f,
+                "could not start daemon executable {}: {source}",
+                executable.display()
+            ),
+            Self::StartupTimeout {
+                socket,
+                connect,
+                daemon_status,
+                timeout,
+            } => {
+                write!(
+                    f,
+                    "daemon did not become attachable on {} within {timeout:?}: {connect}",
+                    socket.display()
+                )?;
+                if let Some(status) = daemon_status {
+                    write!(f, " (spawned daemon {status})")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ManagedAttachError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Attach(error) => Some(error),
+            Self::InspectSocket { source, .. }
+            | Self::SpawnDaemon { source, .. }
+            | Self::StartupTimeout {
+                connect: source, ..
+            } => Some(source),
+            Self::NonSocketPath(_) => None,
+        }
+    }
+}
+
+impl From<AttachClientError> for ManagedAttachError {
+    fn from(error: AttachClientError) -> Self {
+        Self::Attach(error)
+    }
+}
+
+#[derive(Debug, Default)]
+struct DaemonProcessState {
+    reaped: bool,
+    wait_result: Option<String>,
+}
+
+/// Observable process facts for a daemon started by managed attach.
+#[derive(Clone, Debug)]
+pub struct ManagedDaemonFacts {
+    spawned: bool,
+    pid: Option<u32>,
+    state: Arc<Mutex<DaemonProcessState>>,
+}
+
+impl ManagedDaemonFacts {
+    fn existing() -> Self {
+        Self {
+            spawned: false,
+            pid: None,
+            state: Arc::new(Mutex::new(DaemonProcessState::default())),
+        }
+    }
+
+    fn spawned(pid: u32) -> Self {
+        Self {
+            spawned: true,
+            pid: Some(pid),
+            state: Arc::new(Mutex::new(DaemonProcessState::default())),
+        }
+    }
+
+    fn record_wait(&self, result: String) {
+        let mut state = self.state.lock().expect("managed daemon state lock");
+        state.reaped = true;
+        state.wait_result = Some(result);
+    }
+
+    /// Whether this invocation started a daemon process.
+    pub fn spawned_daemon(&self) -> bool {
+        self.spawned
+    }
+
+    /// Process ID of the daemon this invocation started.
+    pub fn daemon_pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Whether the started child has been observed with `wait`.
+    pub fn daemon_reaped(&self) -> bool {
+        self.state.lock().expect("managed daemon state lock").reaped
+    }
+
+    /// Recorded `wait` result for a completed child.
+    pub fn daemon_wait_result(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("managed daemon state lock")
+            .wait_result
+            .clone()
+    }
+}
+
+/// A successful attach plus lifecycle facts for any daemon it started.
+pub struct ManagedAttach {
+    /// Connected semantic attach client.
+    pub client: AttachClient,
+    /// Shared facts updated by the daemon child reaper.
+    pub daemon: ManagedDaemonFacts,
+}
 
 /// The capabilities a semantic `pmacs-gpu` frontend requires the daemon to
 /// advertise in `Hello.instance_capabilities`, and which of them this
@@ -249,7 +418,13 @@ pub fn connect_with_sink(
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
+    connect_stream_with_sink(stream, sink)
+}
 
+fn connect_stream_with_sink(
+    stream: UnixStream,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<AttachClient, AttachClientError> {
     // Hello round-trip.
     let mut handshake_stream = stream.try_clone().map_err(AttachClientError::Connect)?;
     let hello: Hello = read_message(&mut handshake_stream).map_err(AttachClientError::Handshake)?;
@@ -389,6 +564,160 @@ pub fn connect_with_sink(
         frontend_id: hello.assigned_frontend_id,
         server_protocol_version: hello.protocol_version,
     })
+}
+
+const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const MANAGED_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Connect to an existing semantic daemon or start the supplied daemon first.
+pub fn connect_managed(
+    socket_path: &Path,
+    daemon_executable: &Path,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Result<ManagedAttach, ManagedAttachError> {
+    connect_managed_with_sink(socket_path, daemon_executable, move |event| {
+        proxy.send_event(AppEvent::Attach(event)).is_ok()
+    })
+}
+
+/// Managed attach with a caller-provided decoded-event sink.
+pub fn connect_managed_with_sink(
+    socket_path: &Path,
+    daemon_executable: &Path,
+    sink: impl Fn(AttachEvent) -> bool + Send + 'static,
+) -> Result<ManagedAttach, ManagedAttachError> {
+    connect_managed_inner(
+        socket_path,
+        daemon_executable,
+        |path| UnixStream::connect(path),
+        spawn_daemon,
+        MANAGED_STARTUP_TIMEOUT,
+        MANAGED_RETRY_INTERVAL,
+        sink,
+    )
+}
+
+fn spawn_daemon(daemon_executable: &Path, socket_path: &Path) -> io::Result<Child> {
+    let mut command = Command::new(daemon_executable);
+    command
+        .arg("--daemon")
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.process_group(0);
+    command.spawn()
+}
+
+fn initial_startup_authorized(
+    socket_path: &Path,
+    error: &io::Error,
+) -> Result<bool, ManagedAttachError> {
+    match error.kind() {
+        io::ErrorKind::NotFound => Ok(true),
+        io::ErrorKind::ConnectionRefused => match fs::metadata(socket_path) {
+            Ok(metadata) if metadata.file_type().is_socket() => Ok(true),
+            Ok(_) => Err(ManagedAttachError::NonSocketPath(socket_path.to_owned())),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(source) => Err(ManagedAttachError::InspectSocket {
+                path: socket_path.to_owned(),
+                source,
+            }),
+        },
+        _ => Ok(false),
+    }
+}
+
+fn post_spawn_retryable(socket_path: &Path, error: &io::Error) -> Result<bool, ManagedAttachError> {
+    match error.kind() {
+        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock => Ok(true),
+        _ => initial_startup_authorized(socket_path, error),
+    }
+}
+
+fn start_daemon_reaper(mut child: Child, facts: ManagedDaemonFacts) {
+    thread::Builder::new()
+        .name("pmacs-gpu daemon reaper".into())
+        .spawn(move || {
+            let result = match child.wait() {
+                Ok(status) => status.to_string(),
+                Err(error) => format!("wait failed: {error}"),
+            };
+            facts.record_wait(result);
+        })
+        .expect("spawn managed daemon reaper thread");
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "connector, spawner, timing, and sink stay injectable for deterministic lifecycle tests"
+)]
+fn connect_managed_inner<C, S, F>(
+    socket_path: &Path,
+    daemon_executable: &Path,
+    mut connector: C,
+    spawner: S,
+    timeout: Duration,
+    retry_interval: Duration,
+    sink: F,
+) -> Result<ManagedAttach, ManagedAttachError>
+where
+    C: FnMut(&Path) -> io::Result<UnixStream>,
+    S: FnOnce(&Path, &Path) -> io::Result<Child>,
+    F: Fn(AttachEvent) -> bool + Send + 'static,
+{
+    match connector(socket_path) {
+        Ok(stream) => {
+            let client = connect_stream_with_sink(stream, sink)?;
+            return Ok(ManagedAttach {
+                client,
+                daemon: ManagedDaemonFacts::existing(),
+            });
+        }
+        Err(error) => {
+            if !initial_startup_authorized(socket_path, &error)? {
+                return Err(AttachClientError::Connect(error).into());
+            }
+        }
+    }
+
+    let child = spawner(daemon_executable, socket_path).map_err(|source| {
+        ManagedAttachError::SpawnDaemon {
+            executable: daemon_executable.to_owned(),
+            source,
+        }
+    })?;
+    let daemon = ManagedDaemonFacts::spawned(child.id());
+    start_daemon_reaper(child, daemon.clone());
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match connector(socket_path) {
+            Ok(stream) => {
+                let client = connect_stream_with_sink(stream, sink)?;
+                return Ok(ManagedAttach { client, daemon });
+            }
+            Err(error) => {
+                let retryable = post_spawn_retryable(socket_path, &error)?;
+                if !retryable {
+                    return Err(AttachClientError::Connect(error).into());
+                }
+                if Instant::now() >= deadline {
+                    let daemon_status = daemon.daemon_wait_result();
+                    return Err(ManagedAttachError::StartupTimeout {
+                        socket: socket_path.to_owned(),
+                        connect: error,
+                        daemon_status,
+                        timeout,
+                    });
+                }
+                thread::sleep(
+                    retry_interval.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+        }
+    }
 }
 
 /// Handle the main loop keeps after `connect` returns. It queues
@@ -563,8 +892,8 @@ impl AttachClient {
             cvar.notify_one();
             Ok(())
         } else {
-            // Refused because the outbox is closed — a lossless overflow
-            // against a stalled daemon (or an earlier writer failure).
+            // Refusing a lossless event prevents replica divergence against
+            // a stalled daemon (or an earlier writer failure).
             // Tear the session down actively (F-008): shut the socket so
             // the reader wakes with EOF and fires `Disconnected`, giving a
             // visible "(daemon disconnected)" instead of a GPU that keeps
@@ -583,7 +912,7 @@ impl AttachClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pmacs_protocol::{InstanceCapabilities, MouseButton};
+    use pmacs_protocol::{InstanceCapabilities, InstanceIdentity, MouseButton};
 
     fn caps(
         multi_frontend: bool,
@@ -850,5 +1179,167 @@ mod tests {
             0,
             "peer should see EOF after the shutdown"
         );
+    }
+    #[test]
+    fn managed_attach_starts_only_for_absent_or_refused_sockets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("managed.sock");
+        let socket = socket_path.as_path();
+        assert!(
+            initial_startup_authorized(socket, &io::Error::new(io::ErrorKind::NotFound, "absent"))
+                .expect("classify absent socket")
+        );
+        assert!(
+            initial_startup_authorized(
+                socket,
+                &io::Error::new(io::ErrorKind::ConnectionRefused, "refused")
+            )
+            .expect("classify vanished socket")
+        );
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::InvalidInput,
+        ] {
+            assert!(
+                !initial_startup_authorized(socket, &io::Error::new(kind, "final"))
+                    .expect("classify final connect error"),
+                "{kind:?} must not authorize daemon startup"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_retry_adds_only_interrupted_and_would_block() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("managed.sock");
+        let socket = socket_path.as_path();
+        for kind in [io::ErrorKind::Interrupted, io::ErrorKind::WouldBlock] {
+            assert!(
+                post_spawn_retryable(socket, &io::Error::new(kind, "transient"))
+                    .expect("classify transient retry")
+            );
+        }
+        assert!(
+            !post_spawn_retryable(
+                socket,
+                &io::Error::new(io::ErrorKind::PermissionDenied, "final")
+            )
+            .expect("classify final retry error")
+        );
+    }
+
+    #[test]
+    fn managed_attach_refuses_a_non_socket_path_without_spawning() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let result = connect_managed_inner(
+            &path,
+            Path::new("/unused/pmacs"),
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "synthetic refused connect",
+                ))
+            },
+            |_, _| panic!("non-socket path must not spawn"),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            |_| false,
+        );
+        assert!(matches!(
+            result,
+            Err(ManagedAttachError::NonSocketPath(rejected)) if rejected == path
+        ));
+    }
+
+    #[test]
+    fn managed_attach_fails_closed_on_non_retryable_connect_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("managed.sock");
+        let result = connect_managed_inner(
+            &socket,
+            Path::new("/unused/pmacs"),
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "synthetic permission failure",
+                ))
+            },
+            |_, _| panic!("permission failure must not spawn"),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            |_| false,
+        );
+        assert!(matches!(
+            result,
+            Err(ManagedAttachError::Attach(AttachClientError::Connect(error)))
+                if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn managed_retry_survives_transients_and_uses_the_successful_stream() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket = temp.path().join("managed.sock");
+        let (client_stream, mut server_stream) = UnixStream::pair().expect("socket pair");
+        let server = thread::spawn(move || {
+            let hello = Hello {
+                protocol_version: PROTOCOL_VERSION,
+                assigned_frontend_id: FrontendId::LOCAL,
+                instance_identity: InstanceIdentity {
+                    pmacs_version: "managed-retry-test".to_owned(),
+                    build_hash: None,
+                    instance_name: None,
+                    uptime_secs: 0,
+                    working_directory: "/tmp".to_owned(),
+                },
+                instance_capabilities: caps(true, true, true),
+            };
+            write_message(&mut server_stream, &hello).expect("write Hello");
+            let _: AttachRequest =
+                read_message(&mut server_stream).expect("read real AttachRequest");
+        });
+        let mut attempts = 0;
+        let mut client_stream = Some(client_stream);
+        let managed = connect_managed_inner(
+            &socket,
+            Path::new("/bin/sh"),
+            |_| {
+                attempts += 1;
+                match attempts {
+                    1 => Err(io::Error::new(io::ErrorKind::NotFound, "initial miss")),
+                    2 => Err(io::Error::new(io::ErrorKind::Interrupted, "signal")),
+                    3 => Err(io::Error::new(io::ErrorKind::WouldBlock, "backlog")),
+                    4 => Ok(client_stream.take().expect("single successful stream")),
+                    _ => panic!("unexpected connection attempt"),
+                }
+            },
+            |_, _| Command::new("/bin/sh").args(["-c", "exit 0"]).spawn(),
+            Duration::from_secs(1),
+            Duration::ZERO,
+            |_| true,
+        )
+        .expect("transient sequence must attach");
+        assert_eq!(attempts, 4);
+        assert!(managed.daemon.spawned_daemon());
+        assert_eq!(managed.client.server_protocol_version(), PROTOCOL_VERSION);
+        server.join().expect("handshake server");
+    }
+
+    #[test]
+    fn startup_timeout_reports_the_configured_duration() {
+        let error = ManagedAttachError::StartupTimeout {
+            socket: PathBuf::from("/tmp/unused.sock"),
+            connect: io::Error::new(io::ErrorKind::NotFound, "still absent"),
+            daemon_status: Some("exit status: 17".to_owned()),
+            timeout: Duration::from_millis(1),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("1ms"),
+            "unexpected timeout message: {message}"
+        );
+        assert!(!message.contains("5 seconds"));
     }
 }

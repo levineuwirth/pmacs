@@ -20,6 +20,7 @@ unicode-width = "0.2"
 
 [package]
 name = "pmacs"
+default-run = "pmacs"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
