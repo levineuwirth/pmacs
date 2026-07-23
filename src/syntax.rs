@@ -1108,6 +1108,28 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
+    // HTML + CSS (framing `docs/web-grammars-html-css-framing.md`). Both crates
+    // export their query constants (no overlay). HTML's `INJECTIONS_QUERY`
+    // wires `<script>` -> javascript (already registered) and `<style>` -> css
+    // (below), riding the #122 injection engine; `css` must be registered here
+    // for that injection to resolve. The `tag`/`attribute` captures these
+    // queries use are taught to the highlighter in `crate::highlight` (Q#WEB4).
+    LanguageEntry {
+        name: "html",
+        extensions: &["html", "htm", "xhtml"],
+        loader: || tree_sitter_html::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_html::HIGHLIGHTS_QUERY],
+        locals_query: &[],
+        injections_query: &[tree_sitter_html::INJECTIONS_QUERY],
+    },
+    LanguageEntry {
+        name: "css",
+        extensions: &["css"],
+        loader: || tree_sitter_css::LANGUAGE.into(),
+        highlights_query: &[tree_sitter_css::HIGHLIGHTS_QUERY],
+        locals_query: &[],
+        injections_query: &[],
+    },
 ];
 
 /// LaTeX highlights overlay (framing Q#LX2). The chosen grammar crate
@@ -2368,6 +2390,127 @@ mod tests {
                 reg.language_name_for_path(path).as_deref(),
                 Some("latex"),
                 "{path} resolves to latex"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_languages_include_html_and_css() {
+        // Both crate grammars export their query constants (no overlay). HTML
+        // additionally carries an injections query (script/style); CSS does not.
+        let html = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "html")
+            .expect("`html` language entry must be present");
+        for ext in ["html", "htm", "xhtml"] {
+            assert!(html.extensions.contains(&ext), "`html` claims `.{ext}`");
+        }
+        assert!(
+            !html.highlights_query.is_empty(),
+            "`html` ships a highlights query"
+        );
+        assert!(
+            !html.injections_query.is_empty(),
+            "`html` ships an injections query (script/style)"
+        );
+        let css = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "css")
+            .expect("`css` language entry must be present");
+        assert!(css.extensions.contains(&"css"), "`css` claims `.css`");
+        assert!(
+            !css.highlights_query.is_empty(),
+            "`css` ships a highlights query"
+        );
+    }
+
+    #[test]
+    fn html_grammar_loads_and_parses() {
+        // ABI acceptance: `tree-sitter-html` (LanguageFn over
+        // `tree-sitter-language 0.1`) is accepted by our `tree-sitter` 0.26 core.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("html")
+            .expect("`html` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("index.html");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"<!DOCTYPE html>\n<html><body><a href=\"x\">Hi</a></body></html>\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "html".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.root_tree().root_node().kind(),
+            "document",
+            "HTML grammar roots at document"
+        );
+        assert!(
+            !bundle.root_tree().root_node().has_error(),
+            "HTML grammar parses a document without error"
+        );
+    }
+
+    #[test]
+    fn css_grammar_loads_and_parses() {
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("css")
+            .expect("`css` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("style.css");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"a { color: red; }\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "css".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.root_tree().root_node().kind(),
+            "stylesheet",
+            "CSS grammar roots at stylesheet"
+        );
+        assert!(
+            !bundle.root_tree().root_node().has_error(),
+            "CSS grammar parses a rule without error"
+        );
+    }
+
+    #[test]
+    fn html_and_css_highlights_resolve() {
+        // The crate-exported queries compile against their grammars (node-name
+        // compatibility gate), and both use the `@tag` capture this lane teaches
+        // the highlighter (Q#WEB4).
+        let reg = SyntaxRegistry::new();
+        for lang in ["html", "css"] {
+            let query = reg
+                .highlights_query(lang)
+                .unwrap_or_else(|| panic!("{lang} highlights compile against the grammar"));
+            let names = query.capture_names();
+            assert!(
+                names.contains(&"tag"),
+                "{lang} highlights use the @tag capture; got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn language_for_path_resolves_web_extensions() {
+        let reg = SyntaxRegistry::new();
+        for (path, lang) in [
+            ("index.html", "html"),
+            ("page.htm", "html"),
+            ("doc.xhtml", "html"),
+            ("style.css", "css"),
+        ] {
+            assert_eq!(
+                reg.language_name_for_path(path).as_deref(),
+                Some(lang),
+                "{path} resolves to {lang}"
             );
         }
     }
