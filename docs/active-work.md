@@ -52,6 +52,42 @@ git status --short --branch
 The first command must expose `63fbc66` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
+## Folding framing lane (Arc 6)
+
+- Portable branch: `githubsucks/folding`; worktree `../pmacs-folding`.
+- Base: **rebased onto canonical `main` @ `96d0bae`** at implementation
+  start (was `cac4961`; the earlier base fell behind the docs + tab-width
+  housekeeping).
+- Framing head: revision 5 of `docs/folding-framing.md` (rev 1 → … → rev 4
+  absorbed three review rounds; rev 5 records approval + the Q#FD4 binding
+  decision).
+- State: **Stage 1 (fold engine, headless) implemented; PR #142 OPEN**,
+  two review rounds landed on the branch. Bindings decided (Q#FD4 → Emacs
+  hideshow `C-c @` set); Bet B1 accepted as framed.
+  Load-bearing decision (Q#FD1): the bundled grammars ship no fold query and
+  no `folds.scm`, so the roadmap's "tree-sitter fold ranges" is not free; v1
+  is structural node folding (block-like node ≥2 source lines, derived head
+  line, closer-aware tail), with indentation fallback and curated queries
+  deferred. `FoldState` already exists in the protocol; Stage 1 starts
+  *producing* it (authoritative-empty), no protocol bump; gutter markers are
+  frontend-derived like the diagnostic sign bars, so no new wire type. Staged
+  like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
+- PR: **#142** (`Arc 6 folding — Stage 1: instance fold engine`), open
+  against `main`. Round 1 (tail-boundary delete bug + buffer-kill cleanup +
+  close-all point-move) and round 2 (pin the kill-path + close-all through
+  the real command surface) are landed as fix commits on the branch.
+- Next: land Stage 1; Stages 2/3 are separate branches/PRs, each re-framed
+  in detail after the prior stage lands.
+
+Recovery worktree:
+
+```sh
+git worktree add --track \
+  -b folding \
+  ../pmacs-folding \
+  githubsucks/folding
+```
+
 ## Parked lane: kill-ring browser + persistence
 
 - Portable branch: `githubsucks/kill-ring-browser`
@@ -87,6 +123,12 @@ git worktree add --track \
   so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
+
+- **Vterm Stage 3 (protocol v19 + GPU terminal) — MERGED as #135** (`main`
+  @ `cac4961`, 2026-07-22, after two review rounds). Arc 5's terminal stage
+  is complete (compile mode #113, Stage 1 #126, Stage 2 #130, Stage 3 #135).
+  Its lane, worktree (`../pmacs-vterm-gpu`), and branch are done; durable
+  substrate facts live in `docs/agent-handoff.md` and `docs/vterm-framing.md`.
 
 - **Branches deleted 2026-07-22 (authorized):** `vterm-stage3-framing`
   (Revision 8 framing; its content is carried on `vterm-gpu`, verified as a

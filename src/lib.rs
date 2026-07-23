@@ -75,6 +75,7 @@ pub mod document_highlight;
 pub mod editor;
 pub mod editor_core;
 pub mod file_io;
+pub mod fold;
 pub mod font_pref;
 pub mod formatting;
 pub mod frontend;
