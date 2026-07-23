@@ -57,8 +57,9 @@ If it does not, stop and repair the remote/fetch configuration.
 - Portable branch: `githubsucks/gpu-invocation`
 - Pull request: **#141 OPEN — do not merge without explicit user approval.**
 - Base: `githubsucks/main` @ `96d0bae`; protocol remains v19.
-- Implementation checkpoints: `82355ca` (first implementation-review fixes)
-  atop `6fd5834`; approved framing began at `821835b` and is now Revision 5.
+- Implementation checkpoints: `69825d0` (exception-safe immediate reaper
+  ownership) atop `82355ca` (first implementation-review fixes) and
+  `6fd5834`; approved framing began at `821835b` and is now Revision 5.
 - State: all six implementation-review findings are resolved, all 18
   acceptance criteria complete, and the PR awaits another user review. Public
   path is additive `pmacs --gpu [--socket NAME|PATH]`; bare `pmacs [FILE]`

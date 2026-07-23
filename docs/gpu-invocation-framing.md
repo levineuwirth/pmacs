@@ -646,10 +646,10 @@ Vterm probe continues to cover offscreen wgpu.
   users to `pmacs --gpu`; help labels raw-socket attach as advanced.
 - `pmacs-gpu/src/attach.rs` owns connect-or-start policy, the five-second /
   50-ms retry window, socket-type protection, daemon process-group isolation,
-  and the named child-reaper thread. A spawned child stays owned by the
-  connector until it is handed to that reaper, and daemon stdio is null. The
-  first successful protocol connection wins; protocol/capability failures
-  never authorize replacement.
+  and the named child-reaper thread. Every successful spawn is handed to the
+  reaper before any later connection or handshake operation can fail, and
+  daemon stdio is null. The first successful protocol connection wins;
+  protocol/capability failures never authorize replacement.
 - `--headless-managed-probe SOCKET REPORT DAEMON_EXE` drives the production
   managed connector, writes atomic `phase=ready` / `phase=complete` reports,
   holds on stdin, and exposes disconnect plus daemon-reaper observations.
