@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! pmacs [-nw|--no-window] [--help] [--version] [FILE]
-//! pmacs --gpu [--socket NAME|PATH]
+//! pmacs --gpu [--socket NAME|PATH] [--] [FILE]
 //! pmacs --daemon [--socket NAME|PATH]
 //! pmacs --attach [--socket NAME|PATH]
 //! pmacs --attach <target>
@@ -24,6 +24,8 @@
 //!
 //! Anything else is a usage error and exits 2.
 
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -31,7 +33,7 @@ use pmacs::protocol::{AttachTarget, AttachTargetError};
 
 const USAGE: &str = "\
 usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
-       pmacs --gpu [--socket NAME|PATH]
+       pmacs --gpu [--socket NAME|PATH] [--] [FILE]
        pmacs --daemon [--socket NAME|PATH]
        pmacs --attach [--socket NAME|PATH]
        pmacs --attach <target>
@@ -43,6 +45,7 @@ usage: pmacs [-nw|--no-window] [--help] [--version] [FILE]
                      the GUI and `-nw` will keep launching the TUI)
   --gpu              start or reuse a CRDT daemon, then launch the
                      separate pmacs-gpu frontend
+                     When FILE is present, open it before the GPU window appears.
   --daemon           run as a foreground daemon listening on a Unix
                      socket; supervised by the user (systemd, tmux,
                      `nohup &`, etc.)
@@ -95,9 +98,12 @@ enum Mode {
         file: Option<PathBuf>,
         frontend: FrontendChoice,
     },
-    /// `pmacs --gpu [--socket ...]`: launch the separate GPU frontend,
-    /// starting a CRDT daemon on the resolved socket when absent.
-    Gpu { socket: Option<String> },
+    /// `pmacs --gpu [--socket ...] [FILE]`: launch the separate GPU
+    /// frontend, starting a CRDT daemon on the resolved socket when absent.
+    Gpu {
+        socket: Option<String>,
+        file: Option<PathBuf>,
+    },
     /// `pmacs --daemon [--socket ...]`: run a foreground daemon on a
     /// Unix socket, supervised by the user.
     Daemon { socket: Option<String> },
@@ -185,7 +191,7 @@ fn parse_attach_target_with_shorthand(s: &str) -> Result<AttachTarget, AttachTar
     clippy::too_many_lines,
     reason = "single-pass parser keeps mutually exclusive CLI modes explicit"
 )]
-fn parse_args(args: &[String]) -> CliResult {
+fn parse_args(args: &[OsString]) -> CliResult {
     let mut file: Option<PathBuf> = None;
     let mut frontend = FrontendChoice::Auto;
     let mut daemon = false;
@@ -195,38 +201,45 @@ fn parse_args(args: &[String]) -> CliResult {
     let mut socket: Option<String> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-nw" | "--no-window" => frontend = FrontendChoice::Tui,
-            "--gpu" => gpu = true,
-            "--daemon" => daemon = true,
-            "--attach" => attach = true,
-            "--daemon-attach" => daemon_attach = true,
-            "--socket" => match iter.next() {
-                Some(s) => socket = Some(s.clone()),
+        if arg.as_os_str().as_bytes().starts_with(b"-") && arg.to_str().is_none() {
+            return CliResult::Error("option names must be valid UTF-8".into());
+        }
+        match arg.to_str() {
+            Some("-nw" | "--no-window") => frontend = FrontendChoice::Tui,
+            Some("--gpu") => gpu = true,
+            Some("--daemon") => daemon = true,
+            Some("--attach") => attach = true,
+            Some("--daemon-attach") => daemon_attach = true,
+            Some("--socket") => match iter.next() {
+                Some(value) => match value.to_str() {
+                    Some(value) => socket = Some(value.to_owned()),
+                    None => {
+                        return CliResult::Error("--socket value must be valid UTF-8".into());
+                    }
+                },
                 None => return CliResult::Error("--socket requires a value".into()),
             },
-            "-h" | "--help" => return CliResult::Help,
-            "-V" | "--version" => return CliResult::Version,
-            "--" => {
-                // Treat the rest as positional, even if they look like flags.
-                if let Some(p) = iter.next() {
+            Some("-h" | "--help") => return CliResult::Help,
+            Some("-V" | "--version") => return CliResult::Version,
+            Some("--") => {
+                if let Some(path) = iter.next() {
                     if file.is_some() {
                         return CliResult::Error("multiple files not yet supported".into());
                     }
-                    file = Some(PathBuf::from(p));
+                    file = Some(PathBuf::from(path));
                 }
                 if iter.next().is_some() {
                     return CliResult::Error("multiple files not yet supported".into());
                 }
             }
-            flag if flag.starts_with('-') => {
+            Some(flag) if flag.starts_with('-') => {
                 return CliResult::Error(format!("unknown option: {flag}"));
             }
-            path => {
+            Some(_) | None => {
                 if file.is_some() {
                     return CliResult::Error("multiple files not yet supported".into());
                 }
-                file = Some(PathBuf::from(path));
+                file = Some(PathBuf::from(arg));
             }
         }
     }
@@ -237,16 +250,11 @@ fn parse_args(args: &[String]) -> CliResult {
         );
     }
     if gpu {
-        if file.is_some() {
-            return CliResult::Error(
-                "--gpu does not yet accept FILE; open it from the GPU with C-x C-f".into(),
-            );
-        }
         if frontend == FrontendChoice::Tui {
             return CliResult::Error("--gpu and --no-window are mutually exclusive".into());
         }
         return CliResult::Run(CliArgs {
-            mode: Mode::Gpu { socket },
+            mode: Mode::Gpu { socket, file },
         });
     }
     if daemon {
@@ -307,7 +315,22 @@ fn gpu_binary(current_exe: &Path, override_bin: Option<PathBuf>) -> (PathBuf, Pa
     (PathBuf::from("pmacs-gpu"), sibling)
 }
 
-fn run_gpu(socket: Option<&str>) -> ExitCode {
+fn expand_launcher_tilde(path: &Path) -> PathBuf {
+    let Some(path_text) = path.to_str() else {
+        return path.to_owned();
+    };
+    if path_text == "~" {
+        return std::env::var_os("HOME").map_or_else(|| path.to_owned(), PathBuf::from);
+    }
+    if let Some(rest) = path_text.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return Path::new(&home).join(rest);
+    }
+    path.to_owned()
+}
+
+fn run_gpu(socket: Option<&str>, file: Option<&Path>) -> ExitCode {
     if !cfg!(feature = "crdt") {
         eprintln!("pmacs: --gpu requires pmacs built with --features crdt");
         return ExitCode::FAILURE;
@@ -321,15 +344,32 @@ fn run_gpu(socket: Option<&str>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let initial_target = match file {
+        Some(path) => {
+            let cwd = match std::env::current_dir() {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    eprintln!("pmacs: cannot determine launcher working directory: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            Some((cwd, expand_launcher_tilde(path)))
+        }
+        None => None,
+    };
     let (gpu, sibling) = gpu_binary(
         &current_exe,
         std::env::var_os(PMACS_TEST_GPU_BIN).map(PathBuf::from),
     );
-    let status = Command::new(&gpu)
+    let mut command = Command::new(&gpu);
+    command
         .arg("--managed-attach")
         .arg(&socket_path)
-        .arg(&current_exe)
-        .status();
+        .arg(&current_exe);
+    if let Some((cwd, path)) = initial_target {
+        command.arg("--initial-target").arg(cwd).arg(path);
+    }
+    let status = command.status();
     match status {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => {
@@ -358,7 +398,7 @@ fn run_gpu(socket: Option<&str>) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         CliResult::Help => {
             print!("{USAGE}");
@@ -388,7 +428,7 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             },
-            Mode::Gpu { socket } => run_gpu(socket.as_deref()),
+            Mode::Gpu { socket, file } => run_gpu(socket.as_deref(), file.as_deref()),
             Mode::Daemon { socket } => {
                 let socket_path = pmacs::socket_path::resolve_socket_path(socket.as_deref());
                 // The user-provided NAME (no slashes) becomes the
@@ -471,9 +511,10 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStringExt;
 
-    fn args(slice: &[&str]) -> Vec<String> {
-        slice.iter().map(|s| (*s).to_string()).collect()
+    fn args(slice: &[&str]) -> Vec<OsString> {
+        slice.iter().map(OsString::from).collect()
     }
 
     fn local_mode(parsed: CliArgs) -> (Option<PathBuf>, FrontendChoice) {
@@ -799,7 +840,7 @@ mod tests {
             vec!["--attach", "--daemon-attach"],
             vec!["--daemon", "--attach", "--daemon-attach"],
         ] {
-            let v: Vec<String> = combo.iter().map(|s| (*s).to_string()).collect();
+            let v: Vec<OsString> = combo.iter().map(OsString::from).collect();
             match parse_args(&v) {
                 CliResult::Error(m) => assert!(
                     m.contains("mutually exclusive"),
@@ -810,35 +851,73 @@ mod tests {
         }
     }
     #[test]
-    fn gpu_flag_selects_managed_gpu_with_optional_socket() {
-        for (argv, expected) in [
-            (vec!["--gpu"], None),
-            (vec!["--gpu", "--socket", "research"], Some("research")),
+    fn gpu_flag_accepts_one_optional_file_and_socket() {
+        for (argv, expected_socket, expected_file) in [
+            (vec!["--gpu"], None, None),
+            (
+                vec!["--gpu", "--socket", "research"],
+                Some("research"),
+                None,
+            ),
+            (vec!["--gpu", "README.md"], None, Some("README.md")),
+            (
+                vec!["--gpu", "--socket", "research", "README.md"],
+                Some("research"),
+                Some("README.md"),
+            ),
+            (vec!["--gpu", "--", "-notes"], None, Some("-notes")),
         ] {
-            let argv = args(&argv);
-            match parse_args(&argv) {
+            match parse_args(&args(&argv)) {
                 CliResult::Run(CliArgs {
-                    mode: Mode::Gpu { socket },
-                }) => assert_eq!(socket.as_deref(), expected),
+                    mode: Mode::Gpu { socket, file },
+                }) => {
+                    assert_eq!(socket.as_deref(), expected_socket);
+                    assert_eq!(file.as_deref(), expected_file.map(Path::new));
+                }
                 other => panic!("expected GPU mode; got {other:?}"),
             }
         }
     }
 
     #[test]
-    fn gpu_flag_rejects_files_tui_and_other_modes() {
+    fn gpu_flag_rejects_tui_other_modes_and_multiple_files() {
         for argv in [
-            vec!["--gpu", "README.md"],
             vec!["--gpu", "-nw"],
             vec!["--gpu", "--daemon"],
             vec!["--gpu", "--attach"],
             vec!["--gpu", "--daemon-attach"],
+            vec!["--gpu", "one", "two"],
         ] {
             assert!(
                 matches!(parse_args(&args(&argv)), CliResult::Error(_)),
                 "accepted conflicting argv: {argv:?}"
             );
         }
+    }
+
+    #[test]
+    fn gpu_file_keeps_non_utf8_bytes_and_launcher_tilde_expansion_is_exact() {
+        let raw = OsString::from_vec(vec![b'n', b'o', b't', b'e', 0xff]);
+        let parsed = parse_args(&[OsString::from("--gpu"), raw.clone()]);
+        match parsed {
+            CliResult::Run(CliArgs {
+                mode: Mode::Gpu {
+                    file: Some(file), ..
+                },
+            }) => assert_eq!(file.as_os_str().as_bytes(), raw.as_bytes()),
+            other => panic!("expected raw GPU file; got {other:?}"),
+        }
+
+        let home = std::env::var_os("HOME").expect("test HOME");
+        assert_eq!(expand_launcher_tilde(Path::new("~")), PathBuf::from(&home));
+        assert_eq!(
+            expand_launcher_tilde(Path::new("~/notes")),
+            PathBuf::from(home).join("notes")
+        );
+        assert_eq!(
+            expand_launcher_tilde(Path::new("~other/notes")),
+            PathBuf::from("~other/notes")
+        );
     }
 
     #[test]

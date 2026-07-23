@@ -19,6 +19,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -30,13 +31,24 @@ use std::time::{Duration, Instant};
 
 use pmacs_protocol::{
     AttachRequest, BufferId, ByteRange, CellCoord, CellSize, CrdtOp, FrontendCapabilities,
-    FrontendEvent, FrontendId, Hello, InstanceMessage, Key, KeyEvent, Modifiers, MouseKind,
-    PROTOCOL_VERSION, PointerKind, SUPPORTED_PROTOCOL_VERSIONS, TransportError,
-    is_supported_protocol_version, read_message, write_message,
+    FrontendEvent, FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceMessage, Key,
+    KeyEvent, Modifiers, MouseKind, PROTOCOL_VERSION, PointerKind, SUPPORTED_PROTOCOL_VERSIONS,
+    SessionBootstrapRequest, TransportError, is_supported_protocol_version, read_message,
+    write_message,
 };
 use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
+
+/// Private root-broker target operands, kept as exact Unix paths until the
+/// protocol-v20 bootstrap frame is serialized.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitialTargetPaths {
+    /// Absolute launcher working directory.
+    pub cwd: PathBuf,
+    /// Launcher-expanded target path.
+    pub path: PathBuf,
+}
 
 /// Errors the attach client surfaces. Kept narrow on purpose: the
 /// hello-world fallback is the right recovery for any of these in
@@ -57,6 +69,12 @@ pub enum AttachClientError {
     /// `BufferSnapshot` ever arrives and the window sits on
     /// `(connecting...)` forever. We reject up front instead.
     CapabilityMismatch { missing: Vec<&'static str> },
+    /// The requested target requires the protocol-v20 bootstrap envelope.
+    InitialTargetUnsupported { server: u32 },
+    /// The daemon rejected the target before a window was created.
+    InitialTargetFailed { path: PathBuf, message: String },
+    /// The daemon violated the target bootstrap ordering contract.
+    InitialTargetProtocol(String),
 }
 
 impl AttachClientError {
@@ -89,6 +107,20 @@ impl std::fmt::Display for AttachClientError {
                  built with the `crdt` feature (it advertises `crdt_replica` / `semantic_render` \
                  only on CRDT builds; without them no BufferSnapshot is ever sent)"
             ),
+            Self::InitialTargetUnsupported { server } => write!(
+                f,
+                "initial target requires daemon protocol v20, but the live daemon speaks v{server}"
+            ),
+            Self::InitialTargetFailed { path, message } => {
+                write!(
+                    f,
+                    "could not open initial target {}: {message}",
+                    path.display()
+                )
+            }
+            Self::InitialTargetProtocol(message) => {
+                write!(f, "invalid initial-target bootstrap: {message}")
+            }
         }
     }
 }
@@ -395,6 +427,67 @@ impl Outbox {
 /// classified under rule (iii) as deferred — a structural answer
 /// belongs with Q#2's minimap variant or its own protocol thread,
 /// not session 3's attach loop.
+fn read_initial_target_bootstrap(
+    stream: &mut UnixStream,
+    display_path: PathBuf,
+) -> Result<InstanceMessage, AttachClientError> {
+    let mut snapshot = None;
+    loop {
+        let message: InstanceMessage =
+            read_message(stream).map_err(AttachClientError::Handshake)?;
+        match message {
+            candidate @ InstanceMessage::BufferSnapshot { .. } if snapshot.is_none() => {
+                snapshot = Some(candidate);
+            }
+            InstanceMessage::BufferSnapshot { .. } => {
+                return Err(AttachClientError::InitialTargetProtocol(
+                    "received more than one target snapshot".to_owned(),
+                ));
+            }
+            InstanceMessage::InitialTargetResult(InitialTargetResult::Opened { buffer_id }) => {
+                let Some(snapshot) = snapshot else {
+                    return Err(AttachClientError::InitialTargetProtocol(
+                        "Opened arrived before BufferSnapshot".to_owned(),
+                    ));
+                };
+                let InstanceMessage::BufferSnapshot {
+                    buffer_id: snapshot_buffer,
+                    ..
+                } = snapshot
+                else {
+                    unreachable!("bootstrap snapshot variant checked above");
+                };
+                if snapshot_buffer != buffer_id {
+                    return Err(AttachClientError::InitialTargetProtocol(format!(
+                        "Opened named {buffer_id:?}, snapshot named {snapshot_buffer:?}"
+                    )));
+                }
+                return Ok(snapshot);
+            }
+            InstanceMessage::InitialTargetResult(InitialTargetResult::Failed { message }) => {
+                return Err(AttachClientError::InitialTargetFailed {
+                    path: display_path,
+                    message,
+                });
+            }
+            InstanceMessage::Goodbye(reason) => {
+                return Err(AttachClientError::InitialTargetProtocol(format!(
+                    "daemon closed bootstrap: {reason:?}"
+                )));
+            }
+            other => {
+                return Err(AttachClientError::InitialTargetProtocol(format!(
+                    "unexpected {} before target readiness",
+                    match other {
+                        InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
+                        _ => "instance message",
+                    }
+                )));
+            }
+        }
+    }
+}
+
 pub fn connect(
     socket_path: &Path,
     proxy: EventLoopProxy<AppEvent>,
@@ -418,11 +511,16 @@ pub fn connect_with_sink(
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     let stream = UnixStream::connect(socket_path).map_err(AttachClientError::Connect)?;
-    connect_stream_with_sink(stream, sink)
+    connect_stream_with_sink(stream, None, sink)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the synchronous handshake and thread startup remain one ordered transport transaction"
+)]
 fn connect_stream_with_sink(
     stream: UnixStream,
+    initial_target: Option<InitialTargetPaths>,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<AttachClient, AttachClientError> {
     // Hello round-trip.
@@ -453,6 +551,12 @@ fn connect_stream_with_sink(
         return Err(AttachClientError::CapabilityMismatch { missing });
     }
 
+    if initial_target.is_some() && hello.protocol_version < 20 {
+        return Err(AttachClientError::InitialTargetUnsupported {
+            server: hello.protocol_version,
+        });
+    }
+
     // AttachRequest — declare the capabilities a semantic frontend
     // needs. `multi_frontend` is included because the existing daemon
     // gates `crdt_replica` behind it (M10.x dependency).
@@ -476,6 +580,21 @@ fn connect_stream_with_sink(
         initial_size: pmacs_protocol::CellSize::new(24, 80),
     };
     write_message(&mut handshake_stream, &req).map_err(AttachClientError::Handshake)?;
+
+    let target_display_path = initial_target.as_ref().map(|target| target.path.clone());
+    if hello.protocol_version >= 20 {
+        let bootstrap = SessionBootstrapRequest {
+            initial_target: initial_target.map(|target| InitialTarget {
+                cwd: target.cwd.as_os_str().as_bytes().to_vec(),
+                path: target.path.as_os_str().as_bytes().to_vec(),
+            }),
+        };
+        write_message(&mut handshake_stream, &bootstrap).map_err(AttachClientError::Handshake)?;
+    }
+    let initial_message = match target_display_path {
+        Some(path) => Some(read_initial_target_bootstrap(&mut handshake_stream, path)?),
+        None => None,
+    };
 
     // Split read/write halves for the reader thread + writer thread.
     // UnixStream clones share the underlying FD with independent
@@ -563,27 +682,33 @@ fn connect_stream_with_sink(
         shutdown_handle,
         frontend_id: hello.assigned_frontend_id,
         server_protocol_version: hello.protocol_version,
+        initial_message,
     })
 }
 
 const MANAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const MANAGED_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Connect to an existing semantic daemon or start the supplied daemon first.
-pub fn connect_managed(
+/// Managed attach carrying an optional pre-window initial target.
+pub fn connect_managed_with_target(
     socket_path: &Path,
     daemon_executable: &Path,
+    initial_target: Option<InitialTargetPaths>,
     proxy: EventLoopProxy<AppEvent>,
 ) -> Result<ManagedAttach, ManagedAttachError> {
-    connect_managed_with_sink(socket_path, daemon_executable, move |event| {
-        proxy.send_event(AppEvent::Attach(event)).is_ok()
-    })
+    connect_managed_with_target_and_sink(
+        socket_path,
+        daemon_executable,
+        initial_target,
+        move |event| proxy.send_event(AppEvent::Attach(event)).is_ok(),
+    )
 }
 
-/// Managed attach with a caller-provided decoded-event sink.
-pub fn connect_managed_with_sink(
+/// Managed attach with both a target and caller-provided event sink.
+pub fn connect_managed_with_target_and_sink(
     socket_path: &Path,
     daemon_executable: &Path,
+    initial_target: Option<InitialTargetPaths>,
     sink: impl Fn(AttachEvent) -> bool + Send + 'static,
 ) -> Result<ManagedAttach, ManagedAttachError> {
     connect_managed_inner(
@@ -593,6 +718,7 @@ pub fn connect_managed_with_sink(
         spawn_daemon,
         MANAGED_STARTUP_TIMEOUT,
         MANAGED_RETRY_INTERVAL,
+        initial_target,
         sink,
     )
 }
@@ -660,6 +786,7 @@ fn connect_managed_inner<C, S, F>(
     spawner: S,
     timeout: Duration,
     retry_interval: Duration,
+    initial_target: Option<InitialTargetPaths>,
     sink: F,
 ) -> Result<ManagedAttach, ManagedAttachError>
 where
@@ -669,7 +796,7 @@ where
 {
     match connector(socket_path) {
         Ok(stream) => {
-            let client = connect_stream_with_sink(stream, sink)?;
+            let client = connect_stream_with_sink(stream, initial_target, sink)?;
             return Ok(ManagedAttach {
                 client,
                 daemon: ManagedDaemonFacts::existing(),
@@ -695,7 +822,7 @@ where
     loop {
         match connector(socket_path) {
             Ok(stream) => {
-                let client = connect_stream_with_sink(stream, sink)?;
+                let client = connect_stream_with_sink(stream, initial_target, sink)?;
                 return Ok(ManagedAttach { client, daemon });
             }
             Err(error) => {
@@ -739,12 +866,19 @@ pub struct AttachClient {
     /// than the daemon (e.g. `Pointer`, v5) must be gated on this —
     /// an older daemon hard-errors decoding an unknown variant.
     server_protocol_version: u32,
+    /// Target snapshot retained across the pre-window readiness barrier.
+    initial_message: Option<InstanceMessage>,
 }
 
 impl AttachClient {
     /// Frontend id assigned by the daemon in the initial `Hello`.
     pub fn frontend_id(&self) -> FrontendId {
         self.frontend_id
+    }
+
+    /// Take the target snapshot that must be applied before first redraw.
+    pub fn take_initial_message(&mut self) -> Option<InstanceMessage> {
+        self.initial_message.take()
     }
 
     /// Send a `FrontendEvent::Viewport` to the daemon. The daemon's
@@ -912,6 +1046,9 @@ impl AttachClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
     use pmacs_protocol::{InstanceCapabilities, InstanceIdentity, MouseButton};
 
     fn caps(
@@ -924,6 +1061,91 @@ mod tests {
             crdt_replica,
             semantic_render,
         }
+    }
+
+    fn hello(protocol_version: u32) -> Hello {
+        Hello {
+            protocol_version,
+            assigned_frontend_id: FrontendId(7),
+            instance_identity: InstanceIdentity {
+                pmacs_version: "test".to_owned(),
+                build_hash: None,
+                instance_name: None,
+                uptime_secs: 0,
+                working_directory: "/tmp".to_owned(),
+            },
+            instance_capabilities: caps(true, true, true),
+        }
+    }
+
+    #[test]
+    fn initial_target_bootstrap_is_synchronous_byte_exact_and_snapshot_first() {
+        let (client_stream, mut server_stream) = UnixStream::pair().expect("socketpair");
+        let raw_path = OsString::from_vec(vec![b'n', b'o', b't', b'e', 0xff]);
+        let paths = InitialTargetPaths {
+            cwd: PathBuf::from("/launcher"),
+            path: PathBuf::from(&raw_path),
+        };
+        let expected = paths.clone();
+        let server = thread::spawn(move || {
+            write_message(&mut server_stream, &hello(PROTOCOL_VERSION)).expect("write Hello");
+            let _: AttachRequest = read_message(&mut server_stream).expect("read AttachRequest");
+            let bootstrap: SessionBootstrapRequest =
+                read_message(&mut server_stream).expect("read bootstrap");
+            let target = bootstrap.initial_target.expect("initial target");
+            assert_eq!(target.cwd, expected.cwd.as_os_str().as_bytes());
+            assert_eq!(target.path, expected.path.as_os_str().as_bytes());
+
+            let buffer_id = BufferId::from_raw(41);
+            write_message(
+                &mut server_stream,
+                &InstanceMessage::BufferSnapshot {
+                    buffer_id,
+                    crdt_snapshot: vec![1, 2, 3],
+                },
+            )
+            .expect("write target snapshot");
+            write_message(
+                &mut server_stream,
+                &InstanceMessage::InitialTargetResult(InitialTargetResult::Opened { buffer_id }),
+            )
+            .expect("write target result");
+        });
+
+        let mut client = connect_stream_with_sink(client_stream, Some(paths), |_| true)
+            .expect("target bootstrap");
+        assert!(matches!(
+            client.take_initial_message(),
+            Some(InstanceMessage::BufferSnapshot {
+                buffer_id,
+                crdt_snapshot,
+            }) if buffer_id == BufferId::from_raw(41) && crdt_snapshot == [1, 2, 3]
+        ));
+        assert!(client.take_initial_message().is_none());
+        server.join().expect("bootstrap server");
+    }
+
+    #[test]
+    fn initial_target_fails_before_attach_on_legacy_protocol() {
+        let (client_stream, mut server_stream) = UnixStream::pair().expect("socketpair");
+        let server = thread::spawn(move || {
+            write_message(&mut server_stream, &hello(19)).expect("write legacy Hello");
+        });
+        let Err(error) = connect_stream_with_sink(
+            client_stream,
+            Some(InitialTargetPaths {
+                cwd: PathBuf::from("/launcher"),
+                path: PathBuf::from("note"),
+            }),
+            |_| true,
+        ) else {
+            panic!("legacy target must fail");
+        };
+        assert!(matches!(
+            error,
+            AttachClientError::InitialTargetUnsupported { server: 19 }
+        ));
+        server.join().expect("legacy server");
     }
 
     #[test]
@@ -1167,6 +1389,7 @@ mod tests {
             shutdown_handle: b,
             frontend_id: FrontendId::LOCAL,
             server_protocol_version: PROTOCOL_VERSION,
+            initial_message: None,
         };
         // A send against the closed outbox fails *and* shuts the socket
         // down (F-008 fail-fast is now a real teardown, not just a flag).
@@ -1245,6 +1468,7 @@ mod tests {
             |_, _| panic!("non-socket path must not spawn"),
             Duration::from_millis(1),
             Duration::from_millis(1),
+            None,
             |_| false,
         );
         assert!(matches!(
@@ -1269,6 +1493,7 @@ mod tests {
             |_, _| panic!("permission failure must not spawn"),
             Duration::from_millis(1),
             Duration::from_millis(1),
+            None,
             |_| false,
         );
         assert!(matches!(
@@ -1318,6 +1543,7 @@ mod tests {
             |_, _| Command::new("/bin/sh").args(["-c", "exit 0"]).spawn(),
             Duration::from_secs(1),
             Duration::ZERO,
+            None,
             |_| true,
         )
         .expect("transient sequence must attach");

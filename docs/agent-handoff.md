@@ -1,11 +1,11 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-23, after one-command GPU invocation (#141) landed,
-following the documentation refresh (#140), Vterm Stage 3 (#135, protocol v19
-and native GPU terminal), tab-width rendering parity (#137), locals-query
-processing (#134), modeline detection (#132), mode system wiring (#129),
-config registry (#127), Vterm Stages 1–2 (#126/#130), and completed Themes
-Arc 4 (#120/#124/#125).**
+**Last updated: 2026-07-23, after GPU initial-target implementation completed
+on branch `gpu-initial-target` (protocol v20, PR pending), following one-command
+GPU invocation (#141), the documentation refresh (#140), Vterm Stage 3 (#135),
+tab-width rendering parity (#137), locals-query processing (#134), modeline
+detection (#132), mode system wiring (#129), config registry (#127), Vterm
+Stages 1–2 (#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -22,6 +22,20 @@ commands, read `docs/active-work.md` immediately after this file.
 - `main` @ `63fbc66` (one-command GPU invocation #141 atop documentation
   refresh #140), protocol **v19** (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`,
   v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events).
+- **GPU INITIAL TARGET IMPLEMENTED — PR pending**
+  (`docs/gpu-initial-target-framing.md` rev 3; branch `gpu-initial-target`).
+  `pmacs --gpu [--socket NAME|PATH] FILE` now transports exact Unix path bytes
+  plus launcher cwd to the managed GPU client. Protocol v20 adds a
+  semantic-session `SessionBootstrapRequest` after `AttachRequest` and an
+  appended `InitialTargetResult` readiness barrier; v6–v19 wire encodings stay
+  pinned. The daemon resolves the path lexically, deduplicates or loads/creates
+  it in the authenticated frontend's view, runs the established load/switch
+  hooks, upgrades the buffer for CRDT, publishes fresh buffers to existing
+  replicas, and sends the target snapshot before readiness. Failed bootstrap
+  removes the provisional session without poisoning the daemon. Existing
+  no-target managed launch, direct attach, TUI, and legacy protocol behavior
+  remain intact. See `docs/active-work.md` for the portable checkpoint and
+  verification.
 - **One-command GPU invocation LANDED — #141**
   (`docs/gpu-invocation-framing.md` rev 6; merge `63fbc66`; two implementation
   reviews). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;
@@ -536,13 +550,14 @@ and `range` are three INDEPENDENT capabilities — gate each.
 buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
-**Protocol** — encoding-breaking bumps are deliberate and versioned
-(`SUPPORTED=[6..=19]`). v15 = `CompletionPopup` +
-`StatusFacts.message`; v16 = `ThemeFacts`; v17 = `FontFacts`; v18 =
-`StatuslineSegments`; v19 = the vterm terminal family. New wire surface ⇒
-bump + both-frontends support + acceptance. An APPENDED variant must be
-guarded by a byte pin on the PREVIOUS final variant — its own round-trip
-cannot detect a discriminant shift.
+**Protocol** — encoding-breaking bumps are deliberate and versioned. Canonical
+`main` remains `[6..=19]`; the active GPU initial-target branch is
+`[6..=20]`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
+`ThemeFacts`; v17 = `FontFacts`; v18 = `StatuslineSegments`; v19 = the vterm
+terminal family; v20 = semantic `SessionBootstrapRequest` plus appended
+`InitialTargetResult`. New wire surface ⇒ bump + both-frontends support +
+acceptance. An APPENDED variant must be guarded by a byte pin on the PREVIOUS
+final variant — its own round-trip cannot detect a discriminant shift.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),

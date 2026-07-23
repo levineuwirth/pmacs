@@ -3232,7 +3232,7 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
 /// Fold `.` and `..` components without touching the filesystem.
 /// `..` pops a preceding normal segment; against the root (or a
 /// Windows prefix) it is dropped, since you cannot ascend past it.
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut stack: Vec<Component> = Vec::new();
     for comp in path.components() {

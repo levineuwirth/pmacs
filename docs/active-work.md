@@ -61,14 +61,19 @@ If it does not, stop and repair the remote/fetch configuration.
   Revision 2 checkpoint `71039d1`.
 - Implementation base: canonical `githubsucks/main` @ `c49a8c7` (folding
   Stage 1 #142 merged after the framing base); protocol v19 before this work.
-- State: framing approved 2026-07-23; implementation started; no PR.
-- Scope: one session-scoped `pmacs --gpu [--socket …] FILE` target,
+- State: implementation complete and smoke-tested on 2026-07-23; protocol v20;
+  no PR yet. The first portable checkpoint and integration with current
+  canonical `main` are next.
+- Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
   protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
-  Unix path transport, pre-window target readiness, replica coherence, and
-  the approved behavioral acceptance matrix.
-- Next: implement and smoke-test the approved contract. Automatic GUI
-  selection, multiple files, general live-open commands, packaging, and
-  remote GPU paths remain deferred.
+  Unix path transport, pre-window target readiness, replica coherence, and the
+  approved behavioral acceptance matrix.
+- Verification: formatting and strict Clippy; 1,792 default + 1,968 CRDT
+  library tests; target gate 1 default + 13 CRDT; M4 121; required GPU 152;
+  Vterm Stage 3 5 default + 7 CRDT; workspace sweep 3,260 across 87 suites.
+  A coherent release launch displayed `README.md` first at protocol v20.
+- Deferred unchanged: automatic GUI selection, multiple files, general
+  live-open commands, packaging, and remote GPU paths.
 
 Recovery worktree after the first push:
 

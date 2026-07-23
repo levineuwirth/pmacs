@@ -1,12 +1,14 @@
 # GPU initial target — session-scoped file opening framing
 
-**Revision 2 — user-review findings resolved. Ground truth: canonical `main`
-@ `4daa1b8`, protocol v19, 2026-07-23. No implementation yet.**
+**Revision 3 — implemented as built on branch `gpu-initial-target`, protocol
+v20, 2026-07-23. Revision 2 was approved against canonical `main` @ `4daa1b8`;
+the implementation base includes folding Stage 1 through `c49a8c7`.**
 
-Revision 2 pins launcher-owned tilde expansion, requires `after-switch` even
-when dedup selects the view's existing buffer, fails bootstrap when a hook
-kills the target, and records the deliberate stderr-only wait during slow
-pre-window bootstrap. It also sharpens the observed argv panic and negotiated
+Revision 3 records the completed implementation and verification. Revision 2
+pinned launcher-owned tilde expansion, required `after-switch` even when dedup
+selects the view's existing buffer, failed bootstrap when a hook kills the
+target, and recorded the deliberate stderr-only wait during slow pre-window
+bootstrap. It also sharpened the observed argv panic and negotiated
 protocol-version echo.
 
 One-command GPU startup landed in #141:
@@ -465,7 +467,7 @@ pins the one initial target needed by `pmacs --gpu FILE`.
 
 ## Scope and touch map
 
-Expected implementation surface:
+As-built implementation surface:
 
 - `src/main.rs`
   - `args_os` parser, `Mode::Gpu { file, socket }`, help/grammar, exact private
@@ -613,6 +615,21 @@ git diff --check
 Also rerun the touched GPU invocation suite, protocol/transport tests, and
 Vterm Stage 3 acceptance in default and CRDT configurations where the suite
 supports both. The final full workspace sweep remains required before PR.
+
+As-built verification on 2026-07-23:
+
+- `cargo fmt --check` and strict workspace Clippy passed.
+- Library gates passed 1,792 default and 1,968 CRDT tests.
+- The named initial-target gate passed 1 default and 13 CRDT tests; the
+  underlying GPU invocation suite passed 13 CRDT tests.
+- M4 passed 121 tests with the documented basedpyright skip; required real-GPU
+  tests passed 152.
+- Vterm Stage 3 passed 5 default and 7 CRDT tests.
+- The workspace CRDT sweep passed 3,260 tests across 87 suites, with 29 ignored
+  and the documented basedpyright case filtered.
+- A coherent release build launched `target/release/pmacs --gpu --socket
+  initial-target-smoke README.md` on the real Wayland/Vulkan workstation,
+  attached at protocol v20, and displayed README rather than scratch.
 
 ## Deferred (named)
 

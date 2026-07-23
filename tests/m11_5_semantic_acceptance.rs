@@ -32,7 +32,7 @@ use pmacs::cell::CellSize;
 use pmacs::editor::EditorState;
 use pmacs::protocol::{
     AttachRequest, ByteRange, FrontendCapabilities, FrontendEvent, FrontendId, Hello,
-    InstanceMessage,
+    InstanceMessage, SessionBootstrapRequest,
 };
 use pmacs::semantic_client::SemanticClient;
 use pmacs::semantic_render::SemanticRenderState;
@@ -268,6 +268,7 @@ fn daemon_routes_semantic_family_to_semantic_session_only() {
         },
     )
     .expect("semantic write AttachRequest");
+    write_message(&mut sem, &SessionBootstrapRequest::default()).expect("semantic write bootstrap");
 
     // Learn a buffer id from the bootstrap snapshot, then declare a
     // viewport — the daemon emits nothing semantic until it does

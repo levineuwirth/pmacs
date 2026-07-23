@@ -49,7 +49,9 @@
 //! - Write fails (broken pipe) → return; ungraceful disconnect.
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -64,9 +66,10 @@ use crate::lockfile::{self, LockError, LockHandle};
 use crate::presence::{PresenceSnapshot, SessionRegistry};
 use crate::protocol::crossterm_translate::{key_to_crossterm, mouse_to_crossterm};
 use crate::protocol::{
-    AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello, InstanceCapabilities,
-    InstanceIdentity, InstanceMessage, InstanceSignal, PROTOCOL_VERSION, PointerKind,
-    SelectionSnapshot,
+    AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello, InitialTarget,
+    InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage, InstanceSignal,
+    MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES, PROTOCOL_VERSION, PointerKind,
+    SelectionSnapshot, SessionBootstrapRequest,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
@@ -114,6 +117,8 @@ enum DispatcherEvent {
         frontend_id: FrontendId,
         session_state: crate::presence::SessionState,
         initial_size: CellSize,
+        /// Validated protocol-v20 semantic bootstrap target, if requested.
+        initial_target: Option<InitialTarget>,
         /// Write-half of the per-attach stream. The dispatcher owns
         /// this end; the per-attach reader thread keeps the
         /// read-half via `try_clone`.
@@ -633,6 +638,47 @@ fn install_signal_handlers(shutdown: &Arc<AtomicBool>) -> Result<(), DaemonError
     Ok(())
 }
 
+fn bounded_initial_target_error(mut message: String) -> String {
+    if message.len() <= MAX_INITIAL_TARGET_ERROR_BYTES {
+        return message;
+    }
+    let mut end = MAX_INITIAL_TARGET_ERROR_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message
+}
+
+fn send_initial_target_failure(stream: &mut UnixStream, message: impl Into<String>) {
+    let result = InitialTargetResult::Failed {
+        message: bounded_initial_target_error(message.into()),
+    };
+    let _ = write_message(stream, &InstanceMessage::InitialTargetResult(result));
+}
+
+fn validate_initial_target(target: &InitialTarget) -> Result<(), String> {
+    if target.cwd.is_empty() {
+        return Err("initial target cwd is empty".to_owned());
+    }
+    if target.path.is_empty() {
+        return Err("initial target path is empty".to_owned());
+    }
+    if target.cwd.len() > MAX_INITIAL_TARGET_PATH_BYTES {
+        return Err("initial target cwd exceeds 32 KiB".to_owned());
+    }
+    if target.path.len() > MAX_INITIAL_TARGET_PATH_BYTES {
+        return Err("initial target path exceeds 32 KiB".to_owned());
+    }
+    if target.cwd.contains(&0) || target.path.contains(&0) {
+        return Err("initial target path contains an embedded NUL".to_owned());
+    }
+    if !Path::new(OsStr::from_bytes(&target.cwd)).is_absolute() {
+        return Err("initial target cwd is not absolute".to_owned());
+    }
+    Ok(())
+}
+
 /// T M10.8 — per-attach thread. Runs handshake on a fresh thread for
 /// each accepted connection; on success, sends `SessionEstablished`
 /// to the dispatcher and transitions to reader behavior on the same
@@ -644,7 +690,11 @@ fn install_signal_handlers(shutdown: &Arc<AtomicBool>) -> Result<(), DaemonError
 /// error) the thread writes a `Goodbye` variant and exits without
 /// notifying the dispatcher. The dispatcher never learns about
 /// failed handshakes.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    reason = "the ordered handshake and bootstrap read stay on one per-connection thread"
+)]
 fn per_attach_thread(
     mut stream: UnixStream,
     daemon_state: Arc<DaemonState>,
@@ -712,6 +762,28 @@ fn per_attach_thread(
             }
         };
 
+    // Q#GT4 — v20 semantic sessions send one bootstrap envelope after
+    // AttachRequest. Legacy and non-semantic sessions retain the exact
+    // two-message handshake and therefore must not be read here.
+    let initial_target = if req.protocol_version >= 20 && negotiated_caps.semantic_render {
+        let bootstrap: SessionBootstrapRequest = match read_message(&mut stream) {
+            Ok(bootstrap) => bootstrap,
+            Err(e) => {
+                eprintln!("pmacs: read SessionBootstrapRequest failed: {e}");
+                return;
+            }
+        };
+        if let Some(target) = bootstrap.initial_target.as_ref()
+            && let Err(message) = validate_initial_target(target)
+        {
+            send_initial_target_failure(&mut stream, message);
+            return;
+        }
+        bootstrap.initial_target
+    } else {
+        None
+    };
+
     // T M10.8 Day 4 — Q5 non-multi-session admission control.
     let _non_multi_guard = if negotiated_caps.multi_frontend {
         None
@@ -760,6 +832,7 @@ fn per_attach_thread(
             frontend_id,
             session_state,
             initial_size: req.initial_size,
+            initial_target,
             write_stream,
         })
         .is_err()
@@ -1526,8 +1599,134 @@ fn take_pending_terminal_bell(
     }
 }
 
+struct OpenedInitialTarget {
+    buffer_id: crate::buffer::BufferId,
+    publish_to_replicas: bool,
+}
+
+fn resolve_initial_target(target: InitialTarget) -> PathBuf {
+    let cwd = PathBuf::from(OsString::from_vec(target.cwd));
+    let path = PathBuf::from(OsString::from_vec(target.path));
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    crate::editor_core::lexical_normalize(&absolute)
+}
+
+fn open_initial_target(
+    editor: &mut EditorState,
+    frontend_id: FrontendId,
+    target: InitialTarget,
+) -> Result<OpenedInitialTarget, String> {
+    let path = resolve_initial_target(target);
+    let display_path = path.display().to_string();
+    let (buffer_id, newly_loaded, newly_created) = {
+        let mut core = editor.core.borrow_mut();
+        core.active_frontend = frontend_id;
+        let (buffer_id, newly_loaded, newly_created) = match core.get_or_load_buffer(&path) {
+            Ok((buffer_id, newly_loaded)) => (buffer_id, newly_loaded, false),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let buffer_id = core.registry.borrow_mut().create(display_path.clone());
+                core.set_buffer_path(buffer_id, Some(path.clone()));
+                "[new file]".clone_into(&mut core.status);
+                (buffer_id, false, true)
+            }
+            Err(error) => {
+                return Err(format!("cannot open {}: {error}", path.display()));
+            }
+        };
+        core.switch_active_buffer_for(frontend_id, buffer_id)
+            .map_err(|error| format!("cannot select {}: {error}", path.display()))?;
+        (buffer_id, newly_loaded, newly_created)
+    };
+
+    if newly_loaded {
+        editor
+            .lua_host
+            .run_hook("buffer.after-load", mlua::MultiValue::new());
+    } else if !newly_created {
+        // Dedup is a logical switch even when the fresh view already shares
+        // this BufferId; configuration must observe it exactly once.
+        editor
+            .lua_host
+            .run_hook("buffer.after-switch", mlua::MultiValue::new());
+    }
+
+    let mut core = editor.core.borrow_mut();
+    core.active_frontend = frontend_id;
+    if !core.registry.borrow().contains(buffer_id) {
+        return Err(format!(
+            "initial target {} was removed by a startup hook",
+            path.display()
+        ));
+    }
+    core.switch_active_buffer_for(frontend_id, buffer_id)
+        .map_err(|error| format!("cannot reselect {}: {error}", path.display()))?;
+    Ok(OpenedInitialTarget {
+        buffer_id,
+        publish_to_replicas: newly_loaded || newly_created,
+    })
+}
+
+#[cfg(feature = "crdt")]
+fn initial_target_snapshot(
+    editor: &EditorState,
+    buffer_id: crate::buffer::BufferId,
+) -> Result<Vec<u8>, String> {
+    let core = editor.core.borrow();
+    let mut registry = core.registry.borrow_mut();
+    let buffer = registry
+        .get_mut(buffer_id)
+        .map_err(|error| format!("initial target buffer disappeared: {error}"))?;
+    if !buffer.is_crdt_backed() {
+        let peer_id = crate::crdt::peer_id_from_frontend(FrontendId::LOCAL);
+        buffer
+            .upgrade_to_crdt(peer_id)
+            .map_err(|error| format!("initial target CRDT upgrade failed: {error:?}"))?;
+    }
+    buffer
+        .crdt_state()
+        .ok_or_else(|| "initial target CRDT state is unavailable".to_owned())?
+        .export_snapshot()
+        .map_err(|error| format!("initial target snapshot export failed: {error:?}"))
+}
+
+#[cfg(not(feature = "crdt"))]
+fn initial_target_snapshot(
+    _editor: &EditorState,
+    _buffer_id: crate::buffer::BufferId,
+) -> Result<Vec<u8>, String> {
+    Err("initial target requires a CRDT-enabled daemon".to_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cleanup_provisional_session(
+    editor: &mut EditorState,
+    render_states: &mut HashMap<FrontendId, RenderState>,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    streams: &mut HashMap<FrontendId, UnixStream>,
+    term_sizes: &mut HashMap<FrontendId, CellSize>,
+    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
+    session_registry: &mut SessionRegistry,
+    frontend_id: FrontendId,
+) {
+    render_states.remove(&frontend_id);
+    semantic_states.remove(&frontend_id);
+    streams.remove(&frontend_id);
+    term_sizes.remove(&frontend_id);
+    last_active_buffer_sent.remove(&frontend_id);
+    session_registry.unregister_session(frontend_id);
+    editor
+        .core
+        .borrow_mut()
+        .unregister_frontend_view(frontend_id);
+}
+
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "one session bootstrap transaction"
 )]
 fn handle_session_established(
@@ -1536,55 +1735,93 @@ fn handle_session_established(
     semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
     streams: &mut HashMap<FrontendId, UnixStream>,
     term_sizes: &mut HashMap<FrontendId, CellSize>,
+    last_active_buffer_sent: &mut HashMap<FrontendId, crate::buffer::BufferId>,
     session_registry: &mut SessionRegistry,
     frontend_id: FrontendId,
     session_state: crate::presence::SessionState,
     initial_size: CellSize,
+    initial_target: Option<InitialTarget>,
     mut write_stream: UnixStream,
 ) {
-    // Register the frontend's view (M10.8 Day 3: fresh scratch
-    // buffer view; future milestones may clone LOCAL's view or
-    // take an explicit initial-buffer argument).
-    let scratch_view = build_fresh_frontend_view(editor);
-    editor
-        .core
-        .borrow_mut()
-        .register_frontend_view(frontend_id, scratch_view);
+    let fresh_view = build_fresh_frontend_view(editor);
+    {
+        let mut core = editor.core.borrow_mut();
+        core.register_frontend_view(frontend_id, fresh_view);
+        core.active_frontend = frontend_id;
+    }
 
-    // T M10.10: bootstrap the new frontend's `BufferMirror` by
-    // sending one `BufferSnapshot` per CRDT-backed buffer. Gated on
-    // the negotiated `crdt_replica` capability — v0.1 / non-replica
-    // frontends never receive the variant (postcard would hard-error
-    // on the unknown variant; see M10.10-FRAMING.md Refinement 3).
-    // Ordering: snapshots are sent BEFORE any CellDelta flows (the
-    // next per-tick render is the first CellDelta source), so the
-    // mirror is initialized before any local-edit path can reference
-    // it.
+    let opened_target = match initial_target {
+        Some(target) => match open_initial_target(editor, frontend_id, target) {
+            Ok(opened) => Some(opened),
+            Err(message) => {
+                send_initial_target_failure(&mut write_stream, message);
+                editor
+                    .core
+                    .borrow_mut()
+                    .unregister_frontend_view(frontend_id);
+                return;
+            }
+        },
+        None => None,
+    };
+
     let crdt_replica = session_state.negotiated_capabilities.crdt_replica;
-    // T M11.2 — a semantic session is always a text replica (the
-    // negotiation dependency rule guarantees `semantic_render ⇒
-    // crdt_replica`), so the `BufferSnapshot` bootstrap below still
-    // fires: the semantic frontend holds the rope locally and the
-    // semantic frame ships no text.
     let semantic_render = session_state.negotiated_capabilities.semantic_render;
-    // Captured before `register_session` consumes the state: the
-    // semantic producer needs the peer's version (finding 3 below).
     let negotiated_protocol_version = session_state.negotiated_protocol_version;
-    if crdt_replica {
+
+    if let Some(opened) = opened_target.as_ref() {
+        let snapshot = match initial_target_snapshot(editor, opened.buffer_id) {
+            Ok(snapshot) => snapshot,
+            Err(message) => {
+                send_initial_target_failure(&mut write_stream, message);
+                editor
+                    .core
+                    .borrow_mut()
+                    .unregister_frontend_view(frontend_id);
+                return;
+            }
+        };
+        let snapshot_message = InstanceMessage::BufferSnapshot {
+            buffer_id: opened.buffer_id,
+            crdt_snapshot: snapshot,
+        };
+        if opened.publish_to_replicas {
+            for (peer_id, peer_stream) in streams.iter_mut() {
+                let is_replica = session_registry
+                    .session_state(*peer_id)
+                    .is_some_and(|state| state.negotiated_capabilities.crdt_replica);
+                if is_replica && let Err(error) = write_message(peer_stream, &snapshot_message) {
+                    send_initial_target_failure(
+                        &mut write_stream,
+                        format!("cannot publish initial target snapshot to {peer_id:?}: {error}"),
+                    );
+                    editor
+                        .core
+                        .borrow_mut()
+                        .unregister_frontend_view(frontend_id);
+                    return;
+                }
+                if is_replica && let Some(state) = semantic_states.get_mut(peer_id) {
+                    state.on_buffer_snapshot_sent(opened.buffer_id);
+                }
+            }
+        }
+        if write_message(&mut write_stream, &snapshot_message).is_err() {
+            editor
+                .core
+                .borrow_mut()
+                .unregister_frontend_view(frontend_id);
+            return;
+        }
+    } else if crdt_replica {
+        // Legacy no-target attach remains an all-buffer replica bootstrap.
         send_buffer_snapshots(editor, &mut write_stream);
     }
 
-    // Register the session in the registry (presence + capability
-    // filters).
     session_registry.register_session(frontend_id, session_state);
-
     if semantic_render {
         semantic_states.insert(
             frontend_id,
-            // for_peer, not new (PR #120 round 1 finding 3): a v15
-            // peer's producer must not resolve faces into the
-            // FileStyleSummary marks — that channel predates the v16
-            // gate.
             crate::semantic_render::SemanticRenderState::for_peer(
                 frontend_id,
                 negotiated_protocol_version,
@@ -1598,9 +1835,30 @@ fn handle_session_established(
     streams.insert(frontend_id, write_stream);
     term_sizes.insert(frontend_id, initial_size);
 
-    // Stamp active_frontend so the initial render's Lua statusline
-    // code sees the right fid.
-    editor.core.borrow_mut().active_frontend = frontend_id;
+    if let Some(opened) = opened_target {
+        last_active_buffer_sent.insert(frontend_id, opened.buffer_id);
+        let result = InstanceMessage::InitialTargetResult(InitialTargetResult::Opened {
+            buffer_id: opened.buffer_id,
+        });
+        let write_result = {
+            let stream = streams
+                .get_mut(&frontend_id)
+                .expect("new session stream installed");
+            write_message(stream, &result)
+        };
+        if write_result.is_err() {
+            cleanup_provisional_session(
+                editor,
+                render_states,
+                semantic_states,
+                streams,
+                term_sizes,
+                last_active_buffer_sent,
+                session_registry,
+                frontend_id,
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1622,6 +1880,7 @@ fn handle_dispatcher_event(
             frontend_id,
             session_state,
             initial_size,
+            initial_target,
             write_stream,
         } => {
             handle_session_established(
@@ -1630,10 +1889,12 @@ fn handle_dispatcher_event(
                 semantic_states,
                 streams,
                 term_sizes,
+                last_active_buffer_sent,
                 session_registry,
                 frontend_id,
                 session_state,
                 initial_size,
+                initial_target,
                 write_stream,
             );
         }

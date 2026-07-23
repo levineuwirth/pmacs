@@ -26,6 +26,8 @@ mod attach;
 mod terminal;
 
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -54,7 +56,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::attach::{AttachClient, AttachEvent};
+use crate::attach::{AttachClient, AttachEvent, InitialTargetPaths};
 use crate::terminal::{TerminalPaintPlan, TerminalPalette};
 
 /// Bundled font (SIL Open Font License 1.1 — see `fonts/OFL.txt`).
@@ -556,6 +558,7 @@ enum Mode {
     ManagedAttach {
         socket: PathBuf,
         daemon_executable: PathBuf,
+        initial_target: Option<InitialTargetPaths>,
     },
     /// `pmacs-gpu --headless-probe <socket> <report>`: attach through
     /// the real client, render real frames offscreen, and write a
@@ -572,6 +575,7 @@ enum Mode {
         socket: PathBuf,
         report: PathBuf,
         daemon_executable: PathBuf,
+        initial_target: Option<InitialTargetPaths>,
     },
 }
 
@@ -589,8 +593,7 @@ fn decimal_digits(mut n: usize) -> u32 {
 }
 
 fn main() {
-    env_logger::init();
-    let mode = match parse_args(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    let mode = match parse_args(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
         Ok(mode) => mode,
         Err(error) => {
             eprintln!("pmacs-gpu: {error}\n\n{GPU_USAGE}");
@@ -617,11 +620,13 @@ fn main() {
             socket,
             report,
             daemon_executable,
+            initial_target,
         } => {
             std::process::exit(run_headless_managed_probe(
                 socket,
                 report,
                 daemon_executable,
+                initial_target.clone(),
             ));
         }
         Mode::Attach { .. } | Mode::ManagedAttach { .. } => {}
@@ -631,27 +636,40 @@ fn main() {
         .build()
         .expect("create winit event loop");
     let proxy = event_loop.create_proxy();
-    let attach_client = if let Mode::ManagedAttach {
+    let (attach_client, pending_events) = if let Mode::ManagedAttach {
         socket,
         daemon_executable,
+        initial_target,
     } = &mode
     {
-        match attach::connect_managed(socket, daemon_executable, proxy.clone()) {
-            Ok(managed) => Some(managed.client),
+        match attach::connect_managed_with_target(
+            socket,
+            daemon_executable,
+            initial_target.clone(),
+            proxy.clone(),
+        ) {
+            Ok(mut managed) => {
+                let pending = managed
+                    .client
+                    .take_initial_message()
+                    .map(|message| vec![AppEvent::Attach(AttachEvent::Message(Box::new(message)))])
+                    .unwrap_or_default();
+                (Some(managed.client), pending)
+            }
             Err(error) => {
                 eprintln!("pmacs-gpu: managed attach failed: {error}");
                 std::process::exit(1);
             }
         }
     } else {
-        None
+        (None, Vec::new())
     };
     let mut app = App {
         mode,
         proxy: Some(proxy),
         state: None,
         attach_client,
-        pending_events: Vec::new(),
+        pending_events,
         modifiers: winit::keyboard::ModifiersState::empty(),
     };
     event_loop
@@ -833,15 +851,24 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     clippy::too_many_lines,
     reason = "one linear managed-connect and lifecycle observation probe"
 )]
-fn run_headless_managed_probe(socket: &Path, report: &Path, daemon_executable: &Path) -> i32 {
+fn run_headless_managed_probe(
+    socket: &Path,
+    report: &Path,
+    daemon_executable: &Path,
+    initial_target: Option<InitialTargetPaths>,
+) -> i32 {
     use std::io::Read as _;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     let (event_tx, event_rx) = mpsc::channel::<AttachEvent>();
-    let managed = match attach::connect_managed_with_sink(socket, daemon_executable, move |event| {
-        event_tx.send(event).is_ok()
-    }) {
+    let connector_tx = event_tx.clone();
+    let managed = match attach::connect_managed_with_target_and_sink(
+        socket,
+        daemon_executable,
+        initial_target,
+        move |event| connector_tx.send(event).is_ok(),
+    ) {
         Ok(managed) => managed,
         Err(error) => {
             let contents = format!("phase=error\nerror={error}\n");
@@ -850,7 +877,10 @@ fn run_headless_managed_probe(socket: &Path, report: &Path, daemon_executable: &
             return 4;
         }
     };
-    let client = managed.client;
+    let mut client = managed.client;
+    if let Some(message) = client.take_initial_message() {
+        let _ = event_tx.send(AttachEvent::Message(Box::new(message)));
+    }
     let daemon = managed.daemon;
     let protocol = client.server_protocol_version();
 
@@ -1019,7 +1049,7 @@ const GPU_USAGE: &str = "\
 pmacs-gpu — GPU frontend for pmacs
 
 NORMAL STARTUP:
-  pmacs --gpu [--socket NAME|PATH]          start or reuse a managed daemon
+  pmacs --gpu [--socket NAME|PATH] [FILE]   start/reuse a daemon and open FILE
 
 ADVANCED DIRECT ATTACH:
   pmacs-gpu --attach <socket>               attach to an existing daemon only
@@ -1029,58 +1059,124 @@ OPTIONS:
   pmacs-gpu --version                       print package and protocol versions";
 
 /// Strict parser for direct, managed, and headless GPU entry points.
-fn parse_args(args: &[String]) -> Result<Mode, String> {
-    if let [flag, operands @ ..] = args
-        && matches!(
-            flag.as_str(),
-            "--attach" | "--managed-attach" | "--headless-probe" | "--headless-managed-probe"
-        )
-        && let Some(operand) = operands.iter().find(|operand| operand.starts_with('-'))
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exact-arity parser keeps private GPU entry points visibly fail-closed"
+)]
+fn parse_args(args: &[OsString]) -> Result<Mode, String> {
+    fn option_like(value: &OsString) -> bool {
+        value.as_os_str().as_bytes().starts_with(b"-")
+    }
+
+    fn reject_option_like(command: &str, operands: &[&OsString]) -> Result<(), String> {
+        if let Some(operand) = operands.iter().find(|operand| option_like(operand)) {
+            return Err(format!(
+                "{command} received option-like path operand {}; prefix it with ./ if it is a path",
+                operand.to_string_lossy()
+            ));
+        }
+        Ok(())
+    }
+
+    fn target(cwd: &OsString, path: &OsString) -> InitialTargetPaths {
+        InitialTargetPaths {
+            cwd: PathBuf::from(cwd),
+            path: PathBuf::from(path),
+        }
+    }
+
+    if let Some(flag) = args.first()
+        && option_like(flag)
+        && flag.to_str().is_none()
     {
-        return Err(format!(
-            "{flag} received option-like path operand {operand}; prefix it with ./ if it is a path"
-        ));
+        return Err("option names must be valid UTF-8".to_owned());
     }
 
     match args {
         [flag] if flag == "--help" || flag == "-h" => Ok(Mode::Help),
         [flag] if flag == "--version" || flag == "-V" => Ok(Mode::Version),
-        [flag, socket] if flag == "--attach" => Ok(Mode::Attach {
-            socket: PathBuf::from(socket),
-        }),
+        [flag, socket] if flag == "--attach" => {
+            reject_option_like("--attach", &[socket])?;
+            Ok(Mode::Attach {
+                socket: PathBuf::from(socket),
+            })
+        }
         [flag, socket, daemon_executable] if flag == "--managed-attach" => {
+            reject_option_like("--managed-attach", &[socket, daemon_executable])?;
             Ok(Mode::ManagedAttach {
                 socket: PathBuf::from(socket),
                 daemon_executable: PathBuf::from(daemon_executable),
+                initial_target: None,
             })
         }
-        [flag, socket, report] if flag == "--headless-probe" => Ok(Mode::HeadlessProbe {
-            socket: PathBuf::from(socket),
-            report: PathBuf::from(report),
-        }),
+        [flag, socket, daemon_executable, marker, cwd, path]
+            if flag == "--managed-attach" && marker == "--initial-target" =>
+        {
+            reject_option_like("--managed-attach", &[socket, daemon_executable, cwd])?;
+            Ok(Mode::ManagedAttach {
+                socket: PathBuf::from(socket),
+                daemon_executable: PathBuf::from(daemon_executable),
+                initial_target: Some(target(cwd, path)),
+            })
+        }
+        [flag, socket, report] if flag == "--headless-probe" => {
+            reject_option_like("--headless-probe", &[socket, report])?;
+            Ok(Mode::HeadlessProbe {
+                socket: PathBuf::from(socket),
+                report: PathBuf::from(report),
+            })
+        }
         [flag, socket, report, daemon_executable] if flag == "--headless-managed-probe" => {
+            reject_option_like(
+                "--headless-managed-probe",
+                &[socket, report, daemon_executable],
+            )?;
             Ok(Mode::HeadlessManagedProbe {
                 socket: PathBuf::from(socket),
                 report: PathBuf::from(report),
                 daemon_executable: PathBuf::from(daemon_executable),
+                initial_target: None,
+            })
+        }
+        [flag, socket, report, daemon_executable, marker, cwd, path]
+            if flag == "--headless-managed-probe" && marker == "--initial-target" =>
+        {
+            reject_option_like(
+                "--headless-managed-probe",
+                &[socket, report, daemon_executable, cwd],
+            )?;
+            Ok(Mode::HeadlessManagedProbe {
+                socket: PathBuf::from(socket),
+                report: PathBuf::from(report),
+                daemon_executable: PathBuf::from(daemon_executable),
+                initial_target: Some(target(cwd, path)),
             })
         }
         [] => Err(
             "managed startup is provided by `pmacs --gpu`; direct use requires --attach <socket>"
                 .to_owned(),
         ),
-        [flag, ..] if matches!(flag.as_str(), "--help" | "-h" | "--version" | "-V") => {
-            Err(format!("{flag} does not accept operands"))
+        [flag, ..] if flag == "--help" || flag == "-h" || flag == "--version" || flag == "-V" => {
+            Err(format!(
+                "{} does not accept operands",
+                flag.to_string_lossy()
+            ))
         }
         [flag, ..]
-            if matches!(
-                flag.as_str(),
-                "--attach" | "--managed-attach" | "--headless-probe" | "--headless-managed-probe"
-            ) =>
+            if flag == "--attach"
+                || flag == "--managed-attach"
+                || flag == "--headless-probe"
+                || flag == "--headless-managed-probe" =>
         {
-            Err(format!("{flag} received the wrong number of operands"))
+            Err(format!(
+                "{} received the wrong number of operands",
+                flag.to_string_lossy()
+            ))
         }
-        [other, ..] => Err(format!("unrecognized argument: {other}")),
+        [other, ..] => Err(format!(
+            "unrecognized argument: {}",
+            other.to_string_lossy()
+        )),
     }
 }
 
@@ -8123,6 +8219,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::FontFacts { .. } => "FontFacts",
         InstanceMessage::StatuslineSegments { .. } => "StatuslineSegments",
         InstanceMessage::TerminalFrame(_) => "TerminalFrame",
+        InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
     }
 }
 
@@ -14263,12 +14360,7 @@ mod tests {
     }
     #[test]
     fn gpu_cli_accepts_only_explicit_exact_modes() {
-        let args = |values: &[&str]| {
-            values
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect::<Vec<_>>()
-        };
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
         assert_eq!(
             parse_args(&args(&["--attach", "/tmp/pmacs.sock"])),
             Ok(Mode::Attach {
@@ -14284,6 +14376,7 @@ mod tests {
             Ok(Mode::ManagedAttach {
                 socket: PathBuf::from("/tmp/pmacs.sock"),
                 daemon_executable: PathBuf::from("/bin/pmacs"),
+                initial_target: None,
             })
         );
         assert_eq!(
@@ -14308,7 +14401,53 @@ mod tests {
                 socket: PathBuf::from("/tmp/pmacs.sock"),
                 report: PathBuf::from("/tmp/report"),
                 daemon_executable: PathBuf::from("/bin/pmacs"),
+                initial_target: None,
             })
+        );
+    }
+
+    #[test]
+    fn gpu_private_target_marker_preserves_raw_file_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let raw_path = OsString::from_vec(vec![b'-', b'n', b'o', b't', b'e', 0xff]);
+        let argv = vec![
+            OsString::from("--managed-attach"),
+            OsString::from("/tmp/pmacs.sock"),
+            OsString::from("/bin/pmacs"),
+            OsString::from("--initial-target"),
+            OsString::from("/launcher"),
+            raw_path.clone(),
+        ];
+        assert_eq!(
+            parse_args(&argv),
+            Ok(Mode::ManagedAttach {
+                socket: PathBuf::from("/tmp/pmacs.sock"),
+                daemon_executable: PathBuf::from("/bin/pmacs"),
+                initial_target: Some(InitialTargetPaths {
+                    cwd: PathBuf::from("/launcher"),
+                    path: PathBuf::from(&raw_path),
+                }),
+            })
+        );
+
+        let bad_cwd = [
+            OsString::from("--managed-attach"),
+            OsString::from("/tmp/pmacs.sock"),
+            OsString::from("/bin/pmacs"),
+            OsString::from("--initial-target"),
+            OsString::from("--cwd"),
+            OsString::from("note"),
+        ];
+        assert!(
+            parse_args(&bad_cwd)
+                .expect_err("option-like cwd must fail")
+                .contains("option-like")
+        );
+        let bad_option = [OsString::from_vec(vec![b'-', 0xff])];
+        assert_eq!(
+            parse_args(&bad_option).expect_err("non-UTF-8 option must fail"),
+            "option names must be valid UTF-8"
         );
     }
 
@@ -14339,16 +14478,13 @@ mod tests {
             vec!["research"],
         ];
         for values in invalid {
-            let args = values
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect::<Vec<_>>();
+            let args = values.iter().map(OsString::from).collect::<Vec<_>>();
             assert!(
                 parse_args(&args).is_err(),
                 "accepted invalid argv: {values:?}"
             );
         }
-        let error = parse_args(&["--attach".to_owned(), "--help".to_owned()])
+        let error = parse_args(&[OsString::from("--attach"), OsString::from("--help")])
             .expect_err("option-like socket operand must fail");
         assert!(error.contains("option-like path operand --help"));
     }
@@ -14384,7 +14520,7 @@ mod tests {
         assert!(GPU_USAGE.contains("NORMAL STARTUP"));
         assert!(GPU_USAGE.contains("ADVANCED DIRECT ATTACH"));
 
-        let extra = ["--help", "extra"].map(str::to_owned);
+        let extra = ["--help", "extra"].map(OsString::from);
         let error = parse_args(&extra).expect_err("help operands must fail");
         assert_eq!(error, "--help does not accept operands");
     }
