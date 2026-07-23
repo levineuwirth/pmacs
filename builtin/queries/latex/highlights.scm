@@ -1,23 +1,41 @@
+; LaTeX highlights — vendored from nvim-treesitter (Apache-2.0) and reconciled
+; onto pmacs' recognized capture set (src/highlight.rs; framing Q#LX2 / F4).
+;
+; Reconciliation vs the verbatim upstream (previous commit):
+;   * @spell / @nospell markers stripped — meaningless to pmacs, and a
+;     same-node @nospell risks clobbering the real capture.
+;   * The 8 predicate-gated patterns (#eq? / #any-of? / #lua-match?) removed:
+;     pmacs evaluates only `#is? local` predicates, so unevaluated they would
+;     over-match every generic command (as \if-conditional / emphasis) and
+;     every line_comment (as a magic directive). Re-instating them is deferred
+;     to predicate support. This also drops the only @markup.italic/@markup.strong
+;     uses, so those need no remap.
+;   * Fall-through captures remapped onto the recognized set:
+;       @module        -> @keyword         (\begin/\end/sectioning commands)
+;       @label         -> @type            (environment / theorem names)
+;       @markup.heading -> @keyword.control (section-title text)
+;       @markup.link*  -> @constant        (labels, refs, citations, urls)
+;       @markup.math   -> @string          (inline/displayed formulas)
+; Grammar node names are UNCHANGED from upstream — Query::new compiling this
+; against the bundled grammar is the node-name compatibility gate (acceptance 3).
+
 ; General syntax
-(command_name) @function @nospell
+(command_name) @function
 
 (caption
   command: _ @function)
 
-; Turn spelling on for text
-(text) @spell
-
 ; \text, \intertext, \shortintertext, ...
 (text_mode
-  command: _ @function @nospell
+  command: _ @function
   content: (curly_group
-    (_) @none @spell))
+    (_) @none))
 
 ; Variables, parameters
 (placeholder) @variable
 
 (key_value_pair
-  key: (_) @variable.parameter @nospell
+  key: (_) @variable.parameter
   value: (_))
 
 (curly_group_spec
@@ -51,200 +69,167 @@
 
 ; General environments
 (begin
-  command: _ @module
+  command: _ @keyword
   name: (curly_group_text
-    (text) @label @nospell))
+    (text) @type))
 
 (end
-  command: _ @module
+  command: _ @keyword
   name: (curly_group_text
-    (text) @label @nospell))
+    (text) @type))
 
 ; Definitions and references
 (new_command_definition
-  command: _ @function.macro @nospell)
+  command: _ @function.macro)
 
 (old_command_definition
-  command: _ @function.macro @nospell)
+  command: _ @function.macro)
 
 (let_command_definition
-  command: _ @function.macro @nospell)
+  command: _ @function.macro)
 
 (environment_definition
-  command: _ @function.macro @nospell
+  command: _ @function.macro
   name: (curly_group_text
-    (_) @label @nospell))
+    (_) @type))
 
 (theorem_definition
-  command: _ @function.macro @nospell
+  command: _ @function.macro
   name: (curly_group_text_list
-    (_) @label @nospell))
+    (_) @type))
 
 (paired_delimiter_definition
-  command: _ @function.macro @nospell
+  command: _ @function.macro
   declaration: (curly_group_command_name
     (_) @function))
 
+; NOTE: this grammar cut (codebook 0.6.1, ~Dec 2025) uses distinct
+; `curly_group_label`/`curly_group_label_list` nodes for label commands, where
+; newer latex-lsp (which nvim's query targets) unified them onto
+; `curly_group_text`. Kept grammar-accurate here (acceptance 3 is the gate).
 (label_definition
   command: _ @function.macro
-  name: (curly_group_text
-    (_) @markup.link @nospell))
+  name: (curly_group_label
+    (_) @constant))
 
 (label_reference_range
   command: _ @function.macro
-  from: (curly_group_text
-    (_) @markup.link)
-  to: (curly_group_text
-    (_) @markup.link))
+  from: (curly_group_label
+    (_) @constant)
+  to: (curly_group_label
+    (_) @constant))
 
 (label_reference
   command: _ @function.macro
-  names: (curly_group_text_list
-    (_) @markup.link))
+  names: (curly_group_label_list
+    (_) @constant))
 
 (label_number
   command: _ @function.macro
-  name: (curly_group_text
-    (_) @markup.link)
-  number: (_) @markup.link)
+  name: (curly_group_label
+    (_) @constant)
+  number: (_) @constant)
 
 (citation
-  command: _ @function.macro @nospell
-  keys: (curly_group_text_list) @markup.link @nospell)
+  command: _ @function.macro
+  keys: (curly_group_text_list) @constant)
 
-((hyperlink
-  command: _ @function @nospell
+(hyperlink
+  command: _ @function
   uri: (curly_group_uri
-    (_) @markup.link.url @nospell)) @_hyperlink
-  (#set! @_hyperlink url @markup.link.url))
+    (_) @constant))
 
 (glossary_entry_definition
-  command: _ @function.macro @nospell
+  command: _ @function.macro
   name: (curly_group_text
-    (_) @markup.link @nospell))
+    (_) @constant))
 
 (glossary_entry_reference
   command: _ @function.macro
   name: (curly_group_text
-    (_) @markup.link))
+    (_) @constant))
 
 (acronym_definition
-  command: _ @function.macro @nospell
+  command: _ @function.macro
   name: (curly_group_text
-    (_) @markup.link @nospell))
+    (_) @constant))
 
 (acronym_reference
   command: _ @function.macro
   name: (curly_group_text
-    (_) @markup.link))
+    (_) @constant))
 
 (color_definition
   command: _ @function.macro
   name: (curly_group_text
-    (_) @markup.link))
+    (_) @constant))
 
 (color_reference
   command: _ @function.macro
   name: (curly_group_text
-    (_) @markup.link)?)
+    (_) @constant)?)
 
 ; Sectioning
 (title_declaration
-  command: _ @module
+  command: _ @keyword
   options: (brack_group
-    (_) @markup.heading.1)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.1))
+    (_) @keyword.control))
 
 (author_declaration
-  command: _ @module
+  command: _ @keyword
   authors: (curly_group_author_list
-    (author)+ @markup.heading.1))
+    (author)+ @keyword.control))
 
 (chapter
-  command: _ @module
+  command: _ @keyword
   toc: (brack_group
-    (_) @markup.heading.2)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.2))
+    (_) @keyword.control))
 
 (part
-  command: _ @module
+  command: _ @keyword
   toc: (brack_group
-    (_) @markup.heading.2)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.2))
+    (_) @keyword.control))
 
 (section
-  command: _ @module
+  command: _ @keyword
   toc: (brack_group
-    (_) @markup.heading.3)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.3))
+    (_) @keyword.control))
 
 (subsection
-  command: _ @module
+  command: _ @keyword
   toc: (brack_group
-    (_) @markup.heading.4)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.4))
+    (_) @keyword.control))
 
 (subsubsection
-  command: _ @module
+  command: _ @keyword
   toc: (brack_group
-    (_) @markup.heading.5)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.5))
+    (_) @keyword.control))
 
 (paragraph
-  command: _ @module
+  command: _ @keyword
   toc: (brack_group
-    (_) @markup.heading.6)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.6))
+    (_) @keyword.control))
 
 (subparagraph
-  command: _ @module
+  command: _ @keyword
   toc: (brack_group
-    (_) @markup.heading.6)?
+    (_) @keyword.control)?
   text: (curly_group
-    (_) @markup.heading.6))
-
-; Beamer frames
-(generic_environment
-  (begin
-    name: (curly_group_text
-      (text) @label)
-    (#any-of? @label "frame"))
-  .
-  (curly_group
-    (_) @markup.heading))
-
-((generic_command
-  command: (command_name) @_name
-  arg: (curly_group
-    (_) @markup.heading))
-  (#eq? @_name "\\frametitle"))
-
-((generic_command
-  command: (command_name) @_name
-  arg: (curly_group
-    (_) @markup.italic))
-  (#any-of? @_name "\\emph" "\\textit" "\\mathit"))
-
-((generic_command
-  command: (command_name) @_name
-  arg: (curly_group
-    (_) @markup.strong))
-  (#any-of? @_name "\\textbf" "\\mathbf"))
-
-(generic_command
-  (command_name) @keyword.conditional
-  (#lua-match? @keyword.conditional "^\\if[a-zA-Z@]+$"))
-
-(generic_command
-  (command_name) @keyword.conditional
-  (#any-of? @keyword.conditional "\\fi" "\\else"))
+    (_) @keyword.control))
 
 ; File inclusion commands
 (class_include
@@ -296,47 +281,18 @@
   command: _ @keyword.import
   paths: (curly_group_path_list) @string)
 
-; Turn spelling off for whole nodes
-[
-  (label_reference)
-  (label_reference_range)
-  (label_number)
-  (glossary_entry_reference)
-  (acronym_reference)
-  (color_definition)
-  (color_reference)
-  (class_include)
-  (package_include)
-  (latex_include)
-  (verbatim_include)
-  (import_include)
-  (bibstyle_include)
-  (bibtex_include)
-  (biblatex_include)
-  (graphics_include)
-  (svg_include)
-  (inkscape_include)
-  (tikz_library_import)
-] @nospell
-
 ; Math
 [
   (displayed_equation)
   (inline_formula)
-] @markup.math @nospell
+] @string
 
 (math_environment
-  (_) @markup.math)
+  (_) @string)
 
 ; Comments
 [
   (line_comment)
   (block_comment)
   (comment_environment)
-] @comment @spell
-
-((line_comment) @keyword.directive @nospell
-  (#lua-match? @keyword.directive "^%% !TeX"))
-
-((line_comment) @keyword.directive @nospell
-  (#lua-match? @keyword.directive "^%%&"))
+] @comment

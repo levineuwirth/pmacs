@@ -217,6 +217,22 @@ tree-sitter-yaml = "0.7"
 # alternative names `tree-sitter-markdown*` are forks of varying
 # maintenance status — pick the upstream one.
 tree-sitter-md = "0.5"
+# LaTeX / TeX (`.tex`/`.latex`/`.sty`/`.cls`) — the "basic LaTeX mode"
+# foothold and the tier-1 detection substrate for inline math
+# (`docs/inline-math-framing.md`; lane framing
+# `docs/latex-grammar-math-substrate-framing.md`). The canonical crate name
+# `tree-sitter-latex` is squatted by a broken 0.1.0 repackage that ships no
+# `scanner.c` for its declared external tokens and therefore CANNOT LINK
+# (undefined `tree_sitter_latex_external_scanner_*`). `codebook-tree-sitter-latex`
+# is a linkable republish of the real, maintained `latex-lsp/tree-sitter-latex`
+# (MIT, texlab's author) modernized to the `LanguageFn` shim: it ships
+# `scanner.c`, exports `LANGUAGE` over `tree-sitter-language 0.1` (tree-sitter
+# dev-only, shared ABI crate — no second core in the graph), and its
+# `grammar.js`/`scanner.c` are byte-identical to upstream (provenance diff
+# discharged in the framing). It exports NO query constants, so highlighting
+# uses the in-repo overlay `builtin/queries/latex/highlights.scm` (the first
+# such overlay; `include_str!`'d in `crate::syntax::BUILTIN_LANGUAGES`).
+codebook-tree-sitter-latex = "0.6"
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
 # the feature surface tight to keep build time low. `poll` feeds the
 # compile-mode group readers (cancellable poll-based reads, Q#CM3).

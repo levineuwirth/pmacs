@@ -1093,7 +1093,31 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         locals_query: &[],
         injections_query: &[],
     },
+    // LaTeX / TeX. The grammar crate exports no query constants (unlike every
+    // entry above), so the highlights query is the in-repo overlay
+    // `builtin/queries/latex/highlights.scm`, `include_str!`'d as
+    // `LATEX_HIGHLIGHTS` below — the first such overlay in the tree (framing
+    // Q#LX2; the `audit-rules.scm` include is the precedent). Locals and
+    // injections are empty for v0; `(math_environment) @math` injection
+    // detection is deferred to the inline-math arc.
+    LanguageEntry {
+        name: "latex",
+        extensions: &["tex", "latex", "sty", "cls"],
+        loader: || codebook_tree_sitter_latex::LANGUAGE.into(),
+        highlights_query: &[LATEX_HIGHLIGHTS],
+        locals_query: &[],
+        injections_query: &[],
+    },
 ];
+
+/// LaTeX highlights overlay (framing Q#LX2). The chosen grammar crate
+/// (`codebook-tree-sitter-latex`) ships no query constants, so — unlike every
+/// other [`BUILTIN_LANGUAGES`] entry, which references a crate-exported
+/// `HIGHLIGHTS_QUERY` — LaTeX highlighting is driven by this vendored query,
+/// reconciled onto pmacs' recognized capture set (`crate::highlight`). The
+/// `include_str!` path mirrors the sole prior `.scm` precedent,
+/// `crate::audit`'s `audit-rules.scm`.
+const LATEX_HIGHLIGHTS: &str = include_str!("../builtin/queries/latex/highlights.scm");
 
 /// Registry that the Lua surface ([`crate::lua_bindings::install_parse`])
 /// reads to map language names to grammars and buffer ids to attached
@@ -2235,6 +2259,117 @@ mod tests {
             reg.language_name_for_path("device.cuh").as_deref(),
             Some("cuda")
         );
+    }
+
+    #[test]
+    fn builtin_languages_include_latex() {
+        // The LaTeX entry claims its four extensions and — uniquely among
+        // BUILTIN_LANGUAGES — drives highlighting from the in-repo overlay
+        // `builtin/queries/latex/highlights.scm` (`LATEX_HIGHLIGHTS`), because
+        // the grammar crate exports no query constant (framing Q#LX2).
+        let latex = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "latex")
+            .expect("`latex` language entry must be present");
+        for ext in ["tex", "latex", "sty", "cls"] {
+            assert!(latex.extensions.contains(&ext), "`latex` claims `.{ext}`");
+        }
+        assert!(
+            latex.highlights_query.contains(&LATEX_HIGHLIGHTS),
+            "`latex` carries the in-repo highlights overlay"
+        );
+        assert!(
+            !LATEX_HIGHLIGHTS.trim().is_empty(),
+            "the vendored LaTeX highlights overlay is non-empty"
+        );
+    }
+
+    #[test]
+    fn latex_grammar_loads_and_parses() {
+        // ABI acceptance: `codebook-tree-sitter-latex` (LanguageFn over
+        // `tree-sitter-language 0.1`) must be accepted by our `tree-sitter`
+        // 0.26 core. The `verbatim` environment exercises the grammar's
+        // external scanner (`scanner.c`) — the exact surface the squatted,
+        // scanner-less `tree-sitter-latex` 0.1.0 crate lacked — so an
+        // error-free parse proves the linkable republish is wired, not a
+        // partial grammar.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("latex")
+            .expect("`latex` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("paper.tex");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: b"\\documentclass{article}\n\
+                     \\begin{document}\n\
+                     Hello $x^2$ and text.\n\
+                     \\begin{verbatim}\n\
+                     raw $ text\n\
+                     \\end{verbatim}\n\
+                     \\end{document}\n",
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "latex".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.root_tree().root_node().kind(),
+            "source_file",
+            "LaTeX grammar roots at source_file"
+        );
+        assert!(
+            !bundle.root_tree().root_node().has_error(),
+            "LaTeX grammar parses a document with a verbatim environment \
+             (external scanner) without error"
+        );
+    }
+
+    #[test]
+    fn latex_highlights_resolve() {
+        // The vendored overlay must COMPILE against the bundled grammar —
+        // simultaneously the grammar/query node-name compatibility gate
+        // (framing Q#LX2): a query referencing a node the grammar version
+        // lacks fails here. Assert the reconciled captures are the ones pmacs
+        // recognizes, and that no upstream fall-through capture survived.
+        let reg = SyntaxRegistry::new();
+        let query = reg
+            .highlights_query("latex")
+            .expect("latex highlights compile against the grammar");
+        let names = query.capture_names();
+        for expected in ["function", "keyword", "comment"] {
+            assert!(
+                names.contains(&expected),
+                "reconciled query carries the recognized `@{expected}` capture; got {names:?}"
+            );
+        }
+        for stray in [
+            "module",
+            "label",
+            "markup.heading",
+            "markup.link",
+            "markup.math",
+        ] {
+            assert!(
+                !names.contains(&stray),
+                "reconciliation removed the fall-through `@{stray}` capture; got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn language_for_path_resolves_latex_extensions() {
+        // `.tex`/`.latex`/`.sty`/`.cls` all resolve to the LaTeX grammar via
+        // the same extension path as every bundled language — the single
+        // `extensions` field wires detection ahead of the LSP filetype map.
+        let reg = SyntaxRegistry::new();
+        for path in ["paper.tex", "slides.latex", "mypkg.sty", "myclass.cls"] {
+            assert_eq!(
+                reg.language_name_for_path(path).as_deref(),
+                Some("latex"),
+                "{path} resolves to latex"
+            );
+        }
     }
 
     #[test]
