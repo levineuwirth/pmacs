@@ -520,15 +520,28 @@ something reaches the screen runs on a real device through
     the line-reuse predicate, the retained line keeps the stale state and this
     fails. Suppression follows the **effective** caret, so it does not flap
     during an unconfirmed optimistic edit.
-12. **Height budget (F1)** — a plain `$\frac{a}{b}$` renders at default
-    metrics within the line box and does not paint outside it (B6). A case
-    that exceeds the 0.6× floor falls back to source rather than overlapping
-    the line above. **The fallback case must be chosen by computing its scale
-    against the real font, not guessed:** the round-2 arithmetic puts
-    `\frac{a}{b}` near 0.85 and suggests even `\frac{x^2}{y}` clears the
-    floor, so a singly-nested case would surprise-pass by rendering. Expect a
-    doubly-nested `$\frac{\frac{a}{b}}{c}$`, and pin the computed scale in the
-    test so the boundary is asserted rather than assumed.
+12. **Height budget (F1) — measured, not assumed.** Computed against the
+    bundled font, with the budget derived as Q#MS10 defines it (the line box
+    less a 1 px margin, baseline placed by the **code** font — JetBrains Mono
+    asc 16.32 / desc 4.80 at 16 px inside the 22 px line, *not* the math
+    font's own 12.90/3.10):
+
+    | expression | ascent | descent | scale |
+    | --- | --- | --- | --- |
+    | `x^2`, `\alpha x` | 13.27 | 0.18 | 1.000 |
+    | `\frac{a}{b}` | 11.57 | 6.40 | **0.732** |
+    | `\frac{x^2}{y}` | 15.91 | 5.75 | 0.814 |
+    | nesting depth 2 | — | — | 0.744 |
+    | nesting depth 3 | — | — | **0.580** |
+
+    So **B6 holds** — the flagship fraction renders at 0.732 — and the
+    fallback case is **depth 3**, not the doubly-nested one rev 3 guessed.
+    Round 2 predicted exactly this trap. Two things worth keeping: depth 2
+    scores *higher* than depth 1 because the binding constraint flips from
+    descent to ascent as nesting grows asymmetrically, so "deeper is always
+    tighter" is false; and the test **searches** for the tripping depth rather
+    than hardcoding it, so a font or metric change cannot silently leave the
+    fallback arm unexercised.
 13. **Math italic (F7, R2-2)** — `$x$` renders the math-italic glyph, not
     roman `x`; `$h$` resolves through the U+210E hole rather than the 1D4xx
     run; digits in `$x2$` stay upright; **`$\alpha$` renders math-italic Greek
