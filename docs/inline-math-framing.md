@@ -1,7 +1,9 @@
 # Inline math rendering — framing
 
 **Revision 2 — framing only; no implementation. Ground truth re-scouted
-against canonical `main` @ `ddaa80d`, protocol v20, 2026-07-24.**
+against canonical `main` @ `ddaa80d`, protocol v20, 2026-07-24; every
+anchor re-checked at `f07b75b` (the vterm PTY-flake fix #153, test-only,
+which moved no anchor here).**
 
 Revision 1 was written against protocol v18, before LaTeX Stage 1 (#144),
 web grammars (#146), folding Stages 1–2 (#142/#149) and the GPU initial
@@ -14,7 +16,7 @@ knows revision 1 can read §0 alone.
 
 | # | Revision 1 said | Current state |
 | --- | --- | --- |
-| C1 | A MATH-table crate must be added; "neither is in the tree today" | **Both are already in `Cargo.lock`.** `ttf-parser` 0.25.1 reaches `pmacs-gpu` non-optionally via `fontdb` → `cosmic-text` → `glyphon`, and `pmacs-gpu` already calls `fontdb` directly in `build_font_system` (`pmacs-gpu/src/main.rs:217`). `read-fonts` 0.37.0, `skrifa`, `swash` and `font-types` are present too. |
+| C1 | A MATH-table crate must be added; "neither is in the tree today" | **Both are already in `Cargo.lock`.** `ttf-parser` 0.25.1 reaches `pmacs-gpu` non-optionally via `fontdb` → `cosmic-text` → `glyphon`, and `pmacs-gpu` already calls `fontdb` directly in `build_font_system` (`pmacs-gpu/src/main.rs:217`). `read-fonts` 0.37.0, `skrifa`, `swash` and `font-types` are present too. The MATH module is feature-gated, so the declaration must name its features deliberately — see Tier 3 §A. |
 | C2 | Use "one of `ttf-parser` or `read-fonts`" | **Not interchangeable.** `ttf-parser` ships the MATH table (`tables/math.rs`: `Constants::axis_height`, `display_operator_min_height`, `script_percent_scale_down`, the `MathValue`/`MathValues` accessors Tier 3 names). `read-fonts` 0.37.0 exposes no MATH table. Only `ttf-parser` satisfies Tier 3. |
 | C3 | "Protocol is v18 … `SUPPORTED=[6..=18]`" (Q#IM1) | Protocol is **v20**, `SUPPORTED=[6..=20]`. v19 = the vterm terminal family; v20 = the GPU initial-target bootstrap. The Q#IM1 *decision* (query font size locally, no protocol change) is unaffected. |
 | C4 | `rebuild_code_slice()` at `pmacs-gpu/src/main.rs:4849` | Now `:6136`. The file grew through vterm Stage 3, tab-width parity and the initial-target work. |
@@ -252,7 +254,20 @@ that "neither is in the tree today"; both parts were wrong:
   `fontdb` → `cosmic-text` → `glyphon` — the same `fontdb` the frontend
   already calls directly. It is not an optional or dev-only path. Adding
   it to `pmacs-gpu/Cargo.toml` declares a dependency the build already
-  compiles; it adds no new supply-chain surface and no new build cost.
+  compiles, so it adds no new supply-chain surface.
+
+  **Declare the feature set deliberately, or the "no rebuild" part stops
+  being true.** The MATH module is gated: `ttf-parser` re-exports `math`
+  under `#[cfg(feature = "opentype-layout")]`. It is compiled today only
+  because `fontdb` asks for it — and `fontdb` asks with
+  `default-features = false`, features `["opentype-layout",
+  "apple-layout", "variable-fonts", "glyph-names", "no-std-float"]`,
+  which is **not** `ttf-parser`'s own default set (that one adds `std`
+  and drops `no-std-float`). A plain `ttf-parser = "0.25"` therefore
+  unions `std` in and forces a one-time rebuild of `ttf-parser`,
+  `fontdb`, `cosmic-text` and `glyphon`. The zero-rebuild spelling is
+  `default-features = false, features = ["opentype-layout"]` — a subset
+  of what `fontdb` already enables.
 - The choice is **not** "one of `ttf-parser` or `read-fonts`". Only
   `ttf-parser` exposes the MATH table (`tables/math.rs`), and it supplies
   exactly the constants this tier names below — `Constants::axis_height`,
@@ -422,7 +437,7 @@ frontends — the v0 approach pays the scan cost per frontend.
 |-----------|--------|------|
 | `src/math_parse.rs` (new) | ~500-line recursive-descent parser | Low; pure fn, no deps. **Ships with Tier 3, not alone (Q#LX5).** |
 | `src/math_layout.rs` (new) | MATH-table loading + box layout | Medium; depends on `ttf-parser` |
-| `pmacs-gpu/Cargo.toml` | Declare `ttf-parser` (already transitive via `fontdb`); bundle Latin Modern Math | Low; no new crate enters the graph, ~200 KB font |
+| `pmacs-gpu/Cargo.toml` | Declare `ttf-parser` as `default-features = false, features = ["opentype-layout"]` (already transitive via `fontdb`); bundle Latin Modern Math | Low; no new crate enters the graph, ~200 KB font. Spelling the features matters — bare `ttf-parser = "0.25"` unions `std` in and rebuilds the font chain |
 | `pmacs-gpu/src/main.rs` | Detect math spans in visible text, insert MathBox draw calls | **High, and contended** — see C7: folding Stage 3 (GPU) is unframed and the bottom-panel arc's Stage 2 claims this same render path |
 | `builtin/queries/latex/highlights.scm` | Add a `@math` capture beside the existing `math_environment` / `math_delimiter` captures | Low; the overlay already exists |
 | `semantic_render.rs` | No changes (v0) | None by design |
