@@ -8501,8 +8501,8 @@ fn install_terminal(
         let supervisor = supervisor.clone();
         terminal.set(
             "_open",
-            lua.create_function(move |lua, spec: Table| -> mlua::Result<BufferIdLua> {
-                let spec = parse_terminal_spec(&spec)?;
+            lua.create_function(move |lua, spec_table: Table| -> mlua::Result<BufferIdLua> {
+                let spec = parse_terminal_spec(&spec_table)?;
                 let core = lua
                     .app_data_ref::<SharedCore>()
                     .map(|core| core.clone())
@@ -8515,37 +8515,54 @@ fn install_terminal(
                         "pmacs.terminal.open: target frontend has no active window",
                     ));
                 }
+                // Bottom-panel arc (Q#BP11b): parse placement BEFORE the
+                // session, process, buffer, or wrapper exists, so an
+                // unknown `display` value creates nothing to roll back.
+                let placement = window_panel::parse_adopter_placement(
+                    &core,
+                    frontend_id,
+                    "pmacs.terminal.open",
+                    spec_table.get::<Option<String>>("display")?.as_deref(),
+                    spec_table.get::<Option<u64>>("window")?,
+                )?;
                 let buffer_id = {
                     let mut manager = manager.borrow_mut();
                     manager
                         .open(spec, &mut core.borrow_mut(), &mut supervisor.borrow_mut())
                         .map_err(mlua::Error::external)?
                 };
-                let key = {
-                    let mut core = core.borrow_mut();
-                    if let Err(error) = core.switch_active_buffer_for(frontend_id, buffer_id) {
+                let outcome = match window_panel::place_adopter_buffer(
+                    lua,
+                    &core,
+                    frontend_id,
+                    buffer_id,
+                    &placement,
+                    true,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let mut core = core.borrow_mut();
                         let _ = core.registry.borrow_mut().remove(buffer_id);
                         manager
                             .borrow_mut()
                             .prune(&mut core, &mut supervisor.borrow_mut());
-                        return Err(mlua::Error::external(format!(
-                            "pmacs.terminal.open: active-window switch failed: {error}"
-                        )));
+                        return Err(error);
                     }
-                    crate::terminal::TerminalViewKey::new(
-                        frontend_id,
-                        core.views
-                            .get(&frontend_id)
-                            .expect("checked frontend has active view")
-                            .active,
-                        buffer_id,
-                    )
                 };
+                let key =
+                    crate::terminal::TerminalViewKey::new(frontend_id, outcome.target, buffer_id);
                 let claimed = {
                     let mut manager = manager.borrow_mut();
                     manager.register_view(key) && manager.claim_controller(key)
                 };
                 if !claimed {
+                    // Placement failure removes any side wrapper this
+                    // transaction created, BEFORE the existing
+                    // session/buffer rollback completes (Q#BP11b).
+                    if outcome.created_side {
+                        core.borrow_mut()
+                            .remove_side_window(frontend_id, outcome.target);
+                    }
                     let mut core = core.borrow_mut();
                     let _ = core.registry.borrow_mut().remove(buffer_id);
                     manager
@@ -8555,7 +8572,7 @@ fn install_terminal(
                         "pmacs.terminal.open: failed to claim the new terminal view",
                     ));
                 }
-                run_hook_if_defined(lua, "buffer.after-switch", mlua::MultiValue::new());
+                window_panel::finish_adopter_placement(lua, &core, frontend_id, outcome)?;
                 Ok(BufferIdLua(buffer_id))
             })?,
         )?;
@@ -8717,6 +8734,10 @@ fn parse_terminal_spec(table: &Table) -> mlua::Result<crate::terminal::TerminalS
         "rows",
         "cols",
         "scrollback_rows",
+        // Bottom-panel arc (Q#BP11b): placement, parsed separately by
+        // `_open` and never part of the child's `TerminalSpec`.
+        "display",
+        "window",
     ];
     let mut unknown = None;
     table.clone().for_each(|key: Value, _: Value| {
@@ -12300,9 +12321,7 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
         win.set(
             "close_others",
             lua.create_function(move |_, ()| {
-                cc.borrow_mut()
-                    .close_others()
-                    .map_err(mlua::Error::runtime)
+                cc.borrow_mut().close_others().map_err(mlua::Error::runtime)
             })?,
         )?;
     }

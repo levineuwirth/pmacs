@@ -27,12 +27,17 @@ pmacs.config.define {
 -- (drag and the commands below) and is deliberately ignored by the
 -- ordinary layout pass and by frame-resize reconciliation, so raising it
 -- can never invalidate a layout that already exists.
+--
+-- The registry floor is 1 rather than 2 on purpose: a value below the
+-- STRUCTURAL floor is clamped when it is read, not rejected when it is
+-- written, so a user who asks for a smaller minimum simply gets the
+-- smallest one the layout can actually honor.
 pmacs.config.define {
   name = "window.min-height",
   description = "Smallest outer rows interactive resize will leave a window.",
   type = "integer",
   default = 2,
-  min = 2,
+  min = 1,
   mutability = "live",
 }
 

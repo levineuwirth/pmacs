@@ -905,7 +905,7 @@ fn peer_declared_terminal_support(
 /// from the daemon's own negotiated state, and Stage 2 turns the version
 /// arm on (`semantic_render && negotiated_protocol_version >=
 /// PANEL_MIN_VERSION`).
-fn peer_declared_panel_support(session_state: &crate::presence::SessionState) -> bool {
+fn peer_declared_panel_support(session_state: crate::presence::SessionState) -> bool {
     !session_state.negotiated_capabilities.semantic_render
 }
 
@@ -1808,7 +1808,7 @@ fn handle_session_established(
     let fresh_view = build_fresh_frontend_view(
         editor,
         !session_state.negotiated_capabilities.semantic_render,
-        peer_declared_panel_support(&session_state),
+        peer_declared_panel_support(session_state),
     );
     {
         let mut core = editor.core.borrow_mut();

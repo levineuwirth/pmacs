@@ -882,10 +882,7 @@ impl EditorCore {
     ///
     /// # Errors
     /// Any load failure other than `NotFound`.
-    pub fn resolve_target_buffer(
-        &mut self,
-        path: &Path,
-    ) -> Result<(BufferId, HookKind), String> {
+    pub fn resolve_target_buffer(&mut self, path: &Path) -> Result<(BufferId, HookKind), String> {
         match self.get_or_load_buffer(path) {
             Ok((buffer_id, true)) => Ok((buffer_id, HookKind::AfterLoad)),
             Ok((buffer_id, false)) => Ok((buffer_id, HookKind::AfterSwitch)),
@@ -1060,11 +1057,7 @@ impl EditorCore {
     pub fn jump_back(&mut self) -> bool {
         let fid = self.active_frontend;
         loop {
-            let Some(entry) = self
-                .jump_ring
-                .get_mut(&fid)
-                .and_then(std::vec::Vec::pop)
-            else {
+            let Some(entry) = self.jump_ring.get_mut(&fid).and_then(std::vec::Vec::pop) else {
                 return false;
             };
             if !self.registry.borrow().contains(entry.buffer_id) {
@@ -1081,12 +1074,20 @@ impl EditorCore {
                 && !self.side_window_is_hidden(fid, entry.window_id);
             if origin_valid {
                 self.set_active_window_id(entry.window_id);
-            } else if entry.side_origin {
-                continue;
-            } else if self.active_buffer_id() != entry.buffer_id
-                && self.switch_active_buffer(entry.buffer_id).is_err()
-            {
-                continue;
+            } else {
+                // A stale SIDE origin is skipped outright: switching a
+                // panel's buffer into the document window is exactly the
+                // duplicate-presentation corruption this design removes.
+                // A stale non-side origin keeps today's active-window
+                // fallback.
+                if entry.side_origin {
+                    continue;
+                }
+                if self.active_buffer_id() != entry.buffer_id
+                    && self.switch_active_buffer(entry.buffer_id).is_err()
+                {
+                    continue;
+                }
             }
             let clamped = entry.position.min(self.active_buffer_len());
             let aw = self.active_window_mut();
@@ -2713,10 +2714,8 @@ impl EditorCore {
         }
         self.active_layout_mut().close_window(target);
         self.windows.remove(&target);
-        if target_is_side {
-            if let Some(view) = self.views.get_mut(&fid) {
-                view.panel_hidden = false;
-            }
+        if target_is_side && let Some(view) = self.views.get_mut(&fid) {
+            view.panel_hidden = false;
         }
         // Pick an adjacent window as the new focus, preferring a document.
         let ids = self.active_layout().iter_ids();
@@ -3002,10 +3001,9 @@ impl EditorCore {
         self.windows.remove(&side);
         if was_active
             && let Ok(target) = self.non_side_target(fid)
+            && let Some(view) = self.views.get_mut(&fid)
         {
-            if let Some(view) = self.views.get_mut(&fid) {
-                view.active = target;
-            }
+            view.active = target;
         }
         // A remembered origin pointing at a now-dead window is cleared by
         // `non_side_target`'s revalidation on next use; nothing else here
@@ -3050,14 +3048,34 @@ impl EditorCore {
         };
         match action {
             QuitAction::Delete => {
-                let saved_active = self.views.get(&fid).map(|view| view.active);
+                // Capture the remembered origin BEFORE the window dies:
+                // executing `Delete` focuses the revalidated origin, not
+                // merely whatever leaf the wrapper collapse surfaced
+                // (Q#BP11b). Entering the panel from document window B
+                // must therefore return focus to B, not to the window
+                // that happened to create the panel.
+                let origin = self
+                    .windows
+                    .get(&target)
+                    .and_then(|window| window.params.origin_document());
                 self.remove_side_window(fid, target);
-                Ok(QuitOutcome::Deleted {
-                    focus: self
-                        .views
+                let origin_valid = origin.is_some_and(|origin| {
+                    self.views
                         .get(&fid)
-                        .map(|view| view.active)
-                        .or(saved_active),
+                        .is_some_and(|view| view.layout.iter_ids().contains(&origin))
+                        && !self
+                            .windows
+                            .get(&origin)
+                            .is_some_and(crate::window::Window::is_side)
+                });
+                if origin_valid
+                    && let Some(origin) = origin
+                    && let Some(view) = self.views.get_mut(&fid)
+                {
+                    view.active = origin;
+                }
+                Ok(QuitOutcome::Deleted {
+                    focus: self.views.get(&fid).map(|view| view.active),
                 })
             }
             QuitAction::Restore {
@@ -3073,7 +3091,7 @@ impl EditorCore {
                 self.install_buffer_in_window(target, buffer_id)?;
                 let len = {
                     let reg = self.registry.borrow();
-                    reg.get(buffer_id).map(Buffer::len).unwrap_or(0)
+                    reg.get(buffer_id).map_or(0, Buffer::len)
                 };
                 let window = self
                     .windows
@@ -3091,10 +3109,7 @@ impl EditorCore {
                 window.view_top = view_top;
                 window.goal_col = goal_col;
                 window.selection = selection.filter(|sel| sel.anchor <= len);
-                Ok(QuitOutcome::Restored {
-                    target,
-                    buffer_id,
-                })
+                Ok(QuitOutcome::Restored { target, buffer_id })
             }
         }
     }
@@ -3117,8 +3132,7 @@ impl EditorCore {
     #[must_use]
     pub fn frontend_area_rows(&self, fid: FrontendId) -> Option<u32> {
         let geometry = self.views.get(&fid)?.frame_geometry?;
-        (geometry.total.rows >= 2 && geometry.total.cols > 0)
-            .then(|| geometry.total.rows - 1)
+        (geometry.total.rows >= 2 && geometry.total.cols > 0).then(|| geometry.total.rows - 1)
     }
 
     /// Cache a frontend's authoritative frame capacity (Q#BP2b).
@@ -3207,6 +3221,10 @@ impl EditorCore {
     /// # Errors
     /// When `win` is not live in `fid`'s layout, when the panel is
     /// hidden, or when no adjustable horizontal boundary exists.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one boundary-resize transaction: resolve, snapshot minima, clamp, write back"
+    )]
     pub fn resize_boundary(
         &mut self,
         fid: FrontendId,
@@ -3260,9 +3278,9 @@ impl EditorCore {
             )
         } else {
             (
-                view.layout
-                    .boundary_below(win)
-                    .ok_or_else(|| "window.resize: no adjustable horizontal boundary".to_string())?,
+                view.layout.boundary_below(win).ok_or_else(|| {
+                    "window.resize: no adjustable horizontal boundary".to_string()
+                })?,
                 false,
             )
         };
@@ -3423,13 +3441,7 @@ impl EditorCore {
             target: placement.target,
             saved_active,
             select,
-            created_side: matches!(
-                placement.kind,
-                PlacementKind::Side {
-                    created: true,
-                    ..
-                }
-            ),
+            created_side: matches!(placement.kind, PlacementKind::Side { created: true, .. }),
         })
     }
 
@@ -3494,7 +3506,12 @@ impl EditorCore {
         if let Ok(preferred) = self.non_side_target(fid) {
             candidates.push(preferred);
         }
-        candidates.extend(view.layout.iter_ids().into_iter().filter(|id| !is_side(*id)));
+        candidates.extend(
+            view.layout
+                .iter_ids()
+                .into_iter()
+                .filter(|id| !is_side(*id)),
+        );
         candidates
             .into_iter()
             .find(|id| eligible(*id))
@@ -3506,6 +3523,10 @@ impl EditorCore {
     /// otherwise a persistent `*compilation*` buffer already visible in a
     /// document window makes `{side = "bottom"}` silently ignore its
     /// requested placement.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Q#BP3's precedence ladder reads as one ordered policy"
+    )]
     fn resolve_placement(
         &self,
         fid: FrontendId,
@@ -3594,7 +3615,12 @@ impl EditorCore {
                     });
                 }
             }
-        } else if request.height.is_some() {
+        } else if request.side.is_none() && request.height.is_some() {
+            // A freestanding `height` with no side request is a mistake.
+            // A `height` that arrived WITH a side request and fell
+            // through (not panel-capable, or the one slot is dedicated
+            // elsewhere) is discarded, not rejected — capability
+            // fallback must not turn into an error (Q#BP2c).
             return Err("display: `height` requires a side window".into());
         }
 
@@ -3624,11 +3650,17 @@ impl EditorCore {
         if let Ok(preferred) = self.non_side_target(fid) {
             candidates.push(preferred);
         }
-        candidates.extend(view.layout.iter_ids().into_iter().filter(|id| !is_side(*id)));
+        candidates.extend(
+            view.layout
+                .iter_ids()
+                .into_iter()
+                .filter(|id| !is_side(*id)),
+        );
         for candidate in candidates {
-            let eligible = self.windows.get(&candidate).is_some_and(|w| {
-                !w.params.dedicated || w.buffer_id == request.buffer_id
-            });
+            let eligible = self
+                .windows
+                .get(&candidate)
+                .is_some_and(|w| !w.params.dedicated || w.buffer_id == request.buffer_id);
             if eligible {
                 return Ok(Placement {
                     target: candidate,
@@ -3681,7 +3713,8 @@ impl EditorCore {
         let requested_side = request.side.unwrap_or(Side::Bottom);
 
         if created {
-            let rows = Self::clamp_panel_rows(request.height.unwrap_or(request.default_panel_rows))?;
+            let rows =
+                Self::clamp_panel_rows(request.height.unwrap_or(request.default_panel_rows))?;
             let origin = self.non_side_target(fid).ok();
             let text_view = {
                 let reg = self.registry.borrow();

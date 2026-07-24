@@ -975,20 +975,21 @@ fn compute_node(
             let mut flexible_used: u32 = 0;
             let mut cursor: u32 = 0;
             for (i, child) in children.iter().enumerate() {
-                let extent = match extents[i] {
-                    Some(rows) => rows,
-                    None => {
-                        let w = weights.get(i).copied().unwrap_or(1).max(1);
-                        let e = if Some(i) == last_flexible {
-                            remainder - flexible_used
-                        } else if total == 0 {
-                            0
-                        } else {
-                            remainder * w / total
-                        };
-                        flexible_used += e;
-                        e
-                    }
+                let extent = if let Some(rows) = extents[i] {
+                    rows
+                } else {
+                    let w = weights.get(i).copied().unwrap_or(1).max(1);
+                    let e = if Some(i) == last_flexible {
+                        remainder - flexible_used
+                    } else {
+                        remainder
+                            .checked_mul(w)
+                            .unwrap_or(remainder)
+                            .checked_div(total)
+                            .unwrap_or(0)
+                    };
+                    flexible_used += e;
+                    e
                 };
                 let child_area = match orientation {
                     Orientation::Horizontal => Rect {

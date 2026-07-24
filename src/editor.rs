@@ -841,14 +841,13 @@ impl EditorState {
                 .get(&window_id)
                 .map(|window| window.buffer_id);
             if let Some(buffer_id) = buffer_id {
-                let _ = self
-                    .terminal_manager
-                    .borrow_mut()
-                    .release_controller(crate::terminal::TerminalViewKey {
+                let _ = self.terminal_manager.borrow_mut().release_controller(
+                    crate::terminal::TerminalViewKey {
                         frontend_id,
                         window_id,
                         buffer_id,
-                    });
+                    },
+                );
             }
         }
         outcome.changed
@@ -1931,7 +1930,8 @@ impl EditorState {
                 MouseEventKind::Drag(MouseButton::Left) => {
                     self.drag_window_boundary(frontend_id, cell_row, term_size);
                 }
-                MouseEventKind::Up(MouseButton::Left) => self.window_drag = None,
+                // Any other event — release, a different button, a
+                // wheel notch — ends the gesture.
                 _ => self.window_drag = None,
             }
             return;
@@ -2062,9 +2062,12 @@ impl EditorState {
     /// Arm a divider drag if `owner`'s bottom row really is an exposed
     /// segment of a horizontal boundary (Q#BP5).
     fn arm_window_drag(&mut self, frontend_id: FrontendId, owner: WindowId, cell_row: u32) {
-        let is_divider = self.core.borrow().views.get(&frontend_id).is_some_and(|view| {
-            view.layout.boundary_below(owner).is_some()
-        });
+        let is_divider = self
+            .core
+            .borrow()
+            .views
+            .get(&frontend_id)
+            .is_some_and(|view| view.layout.boundary_below(owner).is_some());
         self.window_drag = is_divider.then_some(WindowDragState {
             frontend_id,
             owner,
@@ -2078,14 +2081,22 @@ impl EditorState {
     /// layout mutation mid-drag cannot move a boundary that no longer
     /// exists. Motion is applied incrementally and re-anchored each
     /// event, so the clamp absorbs over-travel instead of accumulating it.
-    fn drag_window_boundary(&mut self, frontend_id: FrontendId, cell_row: u32, term_size: CellSize) {
+    fn drag_window_boundary(
+        &mut self,
+        frontend_id: FrontendId,
+        cell_row: u32,
+        term_size: CellSize,
+    ) {
         let Some(drag) = self.window_drag else {
             return;
         };
         if drag.frontend_id != frontend_id {
             return;
         }
-        self.window_drag = Some(WindowDragState { last_row: cell_row, ..drag });
+        self.window_drag = Some(WindowDragState {
+            last_row: cell_row,
+            ..drag
+        });
         let delta = i64::from(cell_row) - i64::from(drag.last_row);
         let Ok(delta) = i32::try_from(delta) else {
             return;
@@ -3126,13 +3137,14 @@ pub fn paint_frame(
     // upper child is a nested subtree exposes SEVERAL leaf segments along
     // the same edge, so the root panel divider is full width even when
     // the document subtree ends in several columns.
-    let divider_windows: Vec<WindowId> = core.views.get(&frontend_id).map_or_else(Vec::new, |view| {
-        view.layout
-            .iter_ids()
-            .into_iter()
-            .filter(|id| view.layout.boundary_below(*id).is_some())
-            .collect()
-    });
+    let divider_windows: Vec<WindowId> =
+        core.views.get(&frontend_id).map_or_else(Vec::new, |view| {
+            view.layout
+                .iter_ids()
+                .into_iter()
+                .filter(|id| view.layout.boundary_below(*id).is_some())
+                .collect()
+        });
     let divider_style = theme.face("ui.divider");
 
     // Clear the whole grid first so windows that shrink on resize
@@ -7073,22 +7085,14 @@ mod tests {
         } else {
             panic!("expected split");
         }
-        let p1 = s
-            .core
-            .borrow()
-            .active_layout()
-            .compute(
-                crate::window::Rect::new(0, 0, 24, 90),
-                &std::collections::HashMap::new(),
-            );
-        let p2 = s
-            .core
-            .borrow()
-            .active_layout()
-            .compute(
-                crate::window::Rect::new(0, 0, 24, 60),
-                &std::collections::HashMap::new(),
-            );
+        let p1 = s.core.borrow().active_layout().compute(
+            crate::window::Rect::new(0, 0, 24, 90),
+            &std::collections::HashMap::new(),
+        );
+        let p2 = s.core.borrow().active_layout().compute(
+            crate::window::Rect::new(0, 0, 24, 60),
+            &std::collections::HashMap::new(),
+        );
         // Both should preserve the 2:1 ratio. Find the two windows
         // and verify the larger:smaller ratio is 2:1 in both.
         let wider1 = p1.values().map(|r| r.size.cols).max().unwrap();

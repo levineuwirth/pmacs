@@ -120,10 +120,11 @@ fn complete_display(
     let target_ok = visible(core, fid, outcome.target);
     let saved_ok = visible(core, fid, outcome.saved_active);
     let final_focus = match (outcome.select, target_ok, saved_ok) {
-        (true, true, _) => Some(outcome.target),
-        (true, false, true) => Some(outcome.saved_active),
-        (false, _, true) => Some(outcome.saved_active),
-        (false, true, false) => Some(outcome.target),
+        // `select = true` KEEPS the target selected.
+        (true, true, _) | (false, true, false) => Some(outcome.target),
+        // `select = false` restores the saved window even when it is the
+        // panel — a passive display from a focused panel must not blur it.
+        (true, false, true) | (false, _, true) => Some(outcome.saved_active),
         // Both ids died with the hook: fall back to the non-side target
         // rule rather than leaving focus on a dead window.
         _ => None,
@@ -202,8 +203,135 @@ fn lookup_window(core: &SharedCore, fid: FrontendId, raw: u64) -> mlua::Result<W
         })
 }
 
+/// A parsed adopter placement request (Q#BP11b).
+///
+/// `listview`, compile, and terminal all take the same strict
+/// `display = "current" | "panel"` value. In Stages 1–2 omission means
+/// `"current"`; Stage 3 flips omission to `"panel"`. Explicit
+/// `"current"` always preserves the adopter's pre-arc selected-window
+/// behavior and is the user-facing opt-out from that flip.
+pub(crate) enum AdopterPlacement {
+    /// Today's behavior: the raw switch into the frontend's active
+    /// window, deliberately bypassing display-policy dedication.
+    Current,
+    /// The bottom panel.
+    Panel,
+    /// An exact target window.
+    Window(WindowId),
+}
+
+/// Parse an adopter's placement **before** it creates a buffer, session,
+/// process, or wrapper — so an unknown value leaves nothing to roll back.
+///
+/// # Errors
+/// An unknown `display` value, a `window` combined with
+/// `display = "panel"`, or a window id that is not live in the acting
+/// frontend's layout.
+pub(crate) fn parse_adopter_placement(
+    core: &SharedCore,
+    fid: FrontendId,
+    operation: &str,
+    display: Option<&str>,
+    window: Option<u64>,
+) -> mlua::Result<AdopterPlacement> {
+    let display = match display {
+        None | Some("current") => AdopterPlacement::Current,
+        Some("panel") => AdopterPlacement::Panel,
+        Some(other) => {
+            return Err(mlua::Error::runtime(format!(
+                "{operation}: unknown display {other:?} (expected \"current\" or \"panel\")"
+            )));
+        }
+    };
+    match (window, &display) {
+        (Some(_), AdopterPlacement::Panel) => Err(mlua::Error::runtime(format!(
+            "{operation}: `window` and `display = \"panel\"` are mutually exclusive"
+        ))),
+        (Some(raw), _) => Ok(AdopterPlacement::Window(lookup_window(core, fid, raw)?)),
+        (None, _) => Ok(display),
+    }
+}
+
+/// Install `buffer_id` per `placement`, returning Phase 1's outcome
+/// (Q#BP11b).
+///
+/// `Current` keeps the pre-arc raw switch: it is the deliberate escape
+/// hatch every existing adopter caller already relies on, and it does not
+/// consult display-policy dedication.
+///
+/// # Errors
+/// Any placement failure. The caller owns its own session/buffer
+/// rollback, and inspects `created_side` to remove a wrapper this
+/// transaction created.
+pub(crate) fn place_adopter_buffer(
+    lua: &Lua,
+    core: &SharedCore,
+    fid: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+    placement: &AdopterPlacement,
+    select: bool,
+) -> mlua::Result<DisplayOutcome> {
+    if matches!(placement, AdopterPlacement::Current) {
+        let mut borrowed = core.borrow_mut();
+        borrowed
+            .switch_active_buffer_for(fid, buffer_id)
+            .map_err(mlua::Error::runtime)?;
+        let target = borrowed
+            .views
+            .get(&fid)
+            .map(|view| view.active)
+            .ok_or_else(|| {
+                mlua::Error::runtime("adopter placement: acting frontend has no active window")
+            })?;
+        return Ok(DisplayOutcome {
+            target,
+            saved_active: target,
+            select: true,
+            created_side: false,
+        });
+    }
+    let mut request = DisplayRequest::new(buffer_id);
+    match placement {
+        AdopterPlacement::Panel => request.side = Some(Side::Bottom),
+        AdopterPlacement::Window(window) => request.window = Some(*window),
+        AdopterPlacement::Current => unreachable!("handled above"),
+    }
+    request.select = Some(select);
+    request.default_panel_rows = config_u32(
+        lua,
+        "window.panel-height",
+        Some(buffer_id),
+        DEFAULT_PANEL_ROWS,
+    )
+    .max(MIN_WINDOW_OUTER_ROWS);
+    core.borrow_mut()
+        .display_buffer(fid, &request)
+        .map_err(mlua::Error::runtime)
+}
+
+/// Phase 2 for an adopter that had to interleave its own work (claiming a
+/// terminal controller, seating a cursor) between placement and the hook.
+///
+/// # Errors
+/// Propagates the final-focus resolution error when both window ids died
+/// inside the hook.
+pub(crate) fn finish_adopter_placement(
+    lua: &Lua,
+    core: &SharedCore,
+    fid: FrontendId,
+    outcome: DisplayOutcome,
+) -> mlua::Result<()> {
+    complete_display(lua, core, fid, outcome, HookKind::AfterSwitch)
+}
+
 /// Install the bottom-panel surface onto the existing `pmacs.window`
 /// table.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat list of bindings, each following the same \
+              acting-frontend / Rc-borrow shape; splitting them fragments \
+              a coherent surface"
+)]
 pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result<()> {
     {
         let cc = core.clone();
@@ -386,10 +514,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                         .quit_action()
                         .map_or(0, crate::window::QuitAction::depth),
                 )?;
-                table.set(
-                    "hidden",
-                    window.is_side() && core.panel_hidden_for(fid),
-                )?;
+                table.set("hidden", window.is_side() && core.panel_hidden_for(fid))?;
                 Ok(table)
             })?,
         )?;
@@ -400,41 +525,43 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
         let cc = core.clone();
         win.set(
             "set_params",
-            lua.create_function(move |lua, (target, opts): (u64, Table)| -> mlua::Result<()> {
-                let fid = acting_frontend(lua, &cc);
-                let id = lookup_window(&cc, fid, target)?;
-                for key in ["side", "origin_document", "quit_action"] {
-                    if opts.get::<Value>(key)? != Value::Nil {
-                        return Err(mlua::Error::runtime(format!(
-                            "pmacs.window.set_params: `{key}` is not settable"
-                        )));
+            lua.create_function(
+                move |lua, (target, opts): (u64, Table)| -> mlua::Result<()> {
+                    let fid = acting_frontend(lua, &cc);
+                    let id = lookup_window(&cc, fid, target)?;
+                    for key in ["side", "origin_document", "quit_action"] {
+                        if opts.get::<Value>(key)? != Value::Nil {
+                            return Err(mlua::Error::runtime(format!(
+                                "pmacs.window.set_params: `{key}` is not settable"
+                            )));
+                        }
                     }
-                }
-                let height = match opts.get::<Option<u32>>("fixed_rows")? {
-                    Some(rows) => Some(
-                        crate::editor_core::EditorCore::clamp_panel_rows(rows)
-                            .map_err(mlua::Error::runtime)?,
-                    ),
-                    None => None,
-                };
-                let dedicated = opts.get::<Option<bool>>("dedicated")?;
-                {
-                    let mut core = cc.borrow_mut();
-                    let window = core.windows.get_mut(&id).ok_or_else(|| {
-                        mlua::Error::runtime("pmacs.window.set_params: window not live")
-                    })?;
-                    if let Some(rows) = height {
-                        // Inert on an ordinary window by construction:
-                        // the fixed map is built from side windows only.
-                        window.params.fixed_rows = Some(rows);
+                    let height = match opts.get::<Option<u32>>("fixed_rows")? {
+                        Some(rows) => Some(
+                            crate::editor_core::EditorCore::clamp_panel_rows(rows)
+                                .map_err(mlua::Error::runtime)?,
+                        ),
+                        None => None,
+                    };
+                    let dedicated = opts.get::<Option<bool>>("dedicated")?;
+                    {
+                        let mut core = cc.borrow_mut();
+                        let window = core.windows.get_mut(&id).ok_or_else(|| {
+                            mlua::Error::runtime("pmacs.window.set_params: window not live")
+                        })?;
+                        if let Some(rows) = height {
+                            // Inert on an ordinary window by construction:
+                            // the fixed map is built from side windows only.
+                            window.params.fixed_rows = Some(rows);
+                        }
+                        if let Some(dedicated) = dedicated {
+                            window.params.dedicated = dedicated;
+                        }
                     }
-                    if let Some(dedicated) = dedicated {
-                        window.params.dedicated = dedicated;
-                    }
-                }
-                reconcile_panel_layout(lua, &cc, fid);
-                Ok(())
-            })?,
+                    reconcile_panel_layout(lua, &cc, fid);
+                    Ok(())
+                },
+            )?,
         )?;
     }
 
@@ -466,8 +593,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                                     .iter_ids()
                                     .into_iter()
                                     .map(|id| {
-                                        let buffer_id =
-                                            core.windows.get(&id).map(|w| w.buffer_id);
+                                        let buffer_id = core.windows.get(&id).map(|w| w.buffer_id);
                                         (
                                             id,
                                             config_u32(

@@ -1565,7 +1565,11 @@ function pmacs.lsp.go_to_definition()
         return
       end
       pmacs.editor.push_jump()
-      local ok2, oerr = pcall(pmacs.buffer.find_or_open, path)
+      -- Bottom-panel arc (Q#BP11b): the target-aware load. `find_or_open`
+      -- switches the ACTIVE window, which would replace a focused panel;
+      -- `display_file` resolves the DOCUMENT target first and fires the
+      -- load/switch hook with that window active.
+      local ok2, oerr = pcall(pmacs.window.display_file, path, { select = true })
       if not ok2 then
         -- Open failed: drop the origin we just pushed so M-, isn't
         -- left pointing at a jump that never happened.
@@ -1601,7 +1605,9 @@ local function visit_location(loc)
     return
   end
   pmacs.editor.push_jump()
-  local ok, err = pcall(pmacs.buffer.find_or_open, path)
+  -- Bottom-panel arc (Q#BP11b): a visit FROM a panel must land in the
+  -- document target and leave the panel intact.
+  local ok, err = pcall(pmacs.window.display_file, path, { select = true })
   if not ok then
     -- Open failed: drop the origin we just pushed so M-, isn't left
     -- pointing at a jump that never happened.
