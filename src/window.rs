@@ -154,6 +154,201 @@ pub fn decimal_digits(mut n: usize) -> u32 {
     d
 }
 
+// ---------------------------------------------------------------------------
+// Window parameters (bottom-panel arc, Q#BP2)
+// ---------------------------------------------------------------------------
+
+/// Which edge of the frame a *side window* is pinned to.
+///
+/// Stage 1 of the bottom-panel arc ships exactly one side. Left / right /
+/// top are named deferrals, so the enum stays closed rather than
+/// accepting a value no allocator honors: a Lua caller asking for an
+/// unsupported side gets a pointed error at the boundary instead of a
+/// silently ordinary window.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Side {
+    /// Pinned to the bottom of the frame (the panel slot).
+    Bottom,
+}
+
+impl Side {
+    /// Parse the Lua-facing spelling. `None` for every unsupported value.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    /// The Lua-facing spelling.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
+/// Structural floor for a window's **outer** row extent: one text row
+/// plus its mode line (`content = outer - 1`).
+///
+/// Every programmatic source of `fixed_rows` clamps a nonzero request up
+/// to this floor; a request of `0` is rejected rather than being an
+/// invisible "open" (Q#BP2). This is *not* a promise that the layout can
+/// never produce a smaller rect — [`Layout::compute`] has always been
+/// allowed to hand out zero extents on an intrinsically tiny frame. The
+/// bounded promise is narrower: the panel allocator never makes an
+/// otherwise satisfiable document tree unsatisfiable.
+pub const MIN_WINDOW_OUTER_ROWS: u32 = 2;
+
+/// Default `window.panel-height`: outer rows a freshly created panel
+/// takes when the caller supplies no explicit `height` (Q#BP11).
+pub const DEFAULT_PANEL_ROWS: u32 = 12;
+
+/// How far back [`QuitAction::Restore`] chains may be retained before the
+/// oldest retained presentation is truncated to [`QuitAction::Delete`]
+/// (Q#BP2c, R4-B6). Repeated panel replacement would otherwise grow the
+/// recursive history without bound.
+pub const MAX_PANEL_QUIT_DEPTH: usize = 64;
+
+/// What `window.quit` does to a side window (Q#BP2c).
+///
+/// Present only on a side window; ordinary windows and every capability
+/// fallback carry `None`. Replacing a side presentation captures the
+/// outgoing one in `Restore` so `C → B → A → delete` restores the actual
+/// presentations rather than forgetting `A` or leaking `C`'s height and
+/// dedication into it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QuitAction {
+    /// Close the side window and collapse its wrapper.
+    Delete,
+    /// Reinstate a previously displayed presentation, then fall back to
+    /// `then` on the next quit.
+    Restore {
+        /// Buffer that was displayed. Revalidated at quit time: a killed
+        /// buffer degrades the whole entry to [`QuitAction::Delete`].
+        buffer_id: BufferId,
+        /// Requested outer rows of that presentation.
+        fixed_rows: u32,
+        /// Whether that presentation was dedicated.
+        dedicated: bool,
+        /// Saved cursor, clamped against the buffer's current contents.
+        cursor: Position,
+        /// Saved first visible line.
+        view_top: usize,
+        /// Saved sticky goal column.
+        goal_col: Option<u32>,
+        /// Saved region, if one was active.
+        selection: Option<Selection>,
+        /// The action that was in force *before* this presentation
+        /// replaced its predecessor.
+        then: Box<QuitAction>,
+    },
+}
+
+impl QuitAction {
+    /// Number of retained presentations in this chain, counted
+    /// iteratively so a long history can never blow the stack.
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        let mut depth = 0usize;
+        let mut cursor = self;
+        while let Self::Restore { then, .. } = cursor {
+            depth += 1;
+            cursor = then;
+        }
+        depth
+    }
+
+    /// Truncate the oldest retained `Restore` to [`QuitAction::Delete`]
+    /// so the chain holds at most `cap` presentations. Iterative, like
+    /// [`Self::depth`].
+    pub fn truncate_to(&mut self, cap: usize) {
+        if cap == 0 {
+            *self = Self::Delete;
+            return;
+        }
+        let mut kept = 0usize;
+        let mut cursor = self;
+        loop {
+            match cursor {
+                Self::Delete => return,
+                Self::Restore { then, .. } => {
+                    kept += 1;
+                    if kept >= cap {
+                        **then = Self::Delete;
+                        return;
+                    }
+                    cursor = then;
+                }
+            }
+        }
+    }
+}
+
+/// Per-window display-policy parameters (Q#BP2).
+///
+/// `side` is immutable after placement; `quit_action` and
+/// `origin_document` are implementation-owned bookkeeping that the Lua
+/// `set_params` surface refuses to write (Q#BP2c), so Lua cannot forge a
+/// window id, a buffer restore chain, or stale cursor state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowParams {
+    /// Side this window is pinned to, or `None` for an ordinary
+    /// document window. Immutable after placement (Q#BP2a).
+    pub side: Option<Side>,
+    /// Requested **outer** rows (including the mode line) when this is a
+    /// side window. Inert on any other window — the fixed map is built
+    /// from side windows only.
+    pub fixed_rows: Option<u32>,
+    /// Whether `display_buffer` may replace this window's buffer.
+    ///
+    /// Binds the **policy layer only**: raw `pmacs.window.switch_buffer`
+    /// and `switch_active_buffer_for` deliberately ignore it, because
+    /// they are the low-level escape hatch and every existing caller
+    /// predates this arc (Q#BP2c).
+    pub dedicated: bool,
+    /// See [`WindowParams::quit_action`].
+    quit_action: Option<QuitAction>,
+    /// See [`WindowParams::origin_document`].
+    origin_document: Option<WindowId>,
+}
+
+impl WindowParams {
+    /// What `window.quit` does here, if anything.
+    #[must_use]
+    pub fn quit_action(&self) -> Option<&QuitAction> {
+        self.quit_action.as_ref()
+    }
+
+    /// Install (or clear) the quit action. Rust-internal: no Lua path
+    /// reaches this.
+    pub fn set_quit_action(&mut self, action: Option<QuitAction>) {
+        self.quit_action = action;
+    }
+
+    /// The remembered document window this side window was entered
+    /// from (Q#BP2c). Recorded at panel creation, refreshed on every
+    /// focus transition from a non-side window into the panel, and
+    /// revalidated on every use.
+    #[must_use]
+    pub fn origin_document(&self) -> Option<WindowId> {
+        self.origin_document
+    }
+
+    /// Record (or clear) the remembered document window. Rust-internal.
+    pub fn set_origin_document(&mut self, origin: Option<WindowId>) {
+        self.origin_document = origin;
+    }
+
+    /// True iff this window is pinned to a side.
+    #[must_use]
+    pub fn is_side(&self) -> bool {
+        self.side.is_some()
+    }
+}
+
 /// One leaf of the window tree: a buffer plus per-window state.
 pub struct Window {
     /// Unique identifier.
@@ -186,6 +381,9 @@ pub struct Window {
     /// Line-number gutter mode for this window (UX gutter arc). `Off` by
     /// default → no gutter, no coordinate change.
     pub line_numbers: LineNumberMode,
+    /// Display-policy parameters (bottom-panel arc, Q#BP2). Default for
+    /// every ordinary window: no side, no fixed extent, undedicated.
+    pub params: WindowParams,
 }
 
 impl Window {
@@ -204,7 +402,14 @@ impl Window {
             goal_col: None,
             last_visible_rows: 0,
             line_numbers: LineNumberMode::Off,
+            params: WindowParams::default(),
         }
+    }
+
+    /// True iff this window is pinned to a side (bottom-panel arc).
+    #[must_use]
+    pub fn is_side(&self) -> bool {
+        self.params.is_side()
     }
 
     /// Width in cells this window's line-number gutter occupies, or `0`
@@ -305,6 +510,23 @@ pub struct Layout {
     pub root: LayoutNode,
 }
 
+/// A frontend's last authoritative cell-equivalent frame capacity
+/// (Q#BP2b / Q#BP15a).
+///
+/// `geometry_epoch` is a monotonically increasing declaration id owned by
+/// the frontend. Grid / `LOCAL` views cache their real attach and resize
+/// sizes here with an internal epoch; a semantic view stays `None` —
+/// **unknown**, never `24×80` — until Stage 2's authenticated
+/// `FrontendCellGeometry` fills it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DeclaredFrameGeometry {
+    /// Monotonic declaration id. A lower or repeated epoch carrying
+    /// different data is stale.
+    pub geometry_epoch: u64,
+    /// Whole-frame capacity in cells, including the one global status row.
+    pub total: CellSize,
+}
+
 /// T M10.8 — one attached frontend's view of the editor.
 ///
 /// Per-frontend state for multi-frontend operation: the split tree
@@ -346,6 +568,32 @@ pub struct FrontendView {
     /// explicitly, so the projection is never inferred from a
     /// `FrontendId` (**Bet B8**).
     pub fold_projection: bool,
+    /// Whether this frontend can *render* a side window (bottom-panel
+    /// arc, Q#BP13).
+    ///
+    /// `true` for [`FrontendId::LOCAL`](crate::protocol::FrontendId) and
+    /// every grid session. Stage 1 sets `false` for every semantic
+    /// session — the GPU band is Stage 2 — so a `display` carrying a
+    /// `side` falls back to the non-side target and **discards every
+    /// side-specific parameter** rather than pinning a document window it
+    /// could not show. Like `fold_projection`, deliberately has no
+    /// `Default`: every construction site chooses explicitly.
+    pub panel_capable: bool,
+    /// This frontend's last authoritative frame capacity, or `None` while
+    /// it is **unknown** (Q#BP2b).
+    ///
+    /// The panel allocator is the only consumer, and it must never guess:
+    /// a panel requested before a real declaration stays non-presentable
+    /// rather than being sized against the GPU attach request's permanent
+    /// `24×80` placeholder.
+    pub frame_geometry: Option<DeclaredFrameGeometry>,
+    /// Cached derived layout state: the side window exists but cannot be
+    /// satisfied on the current frame (Q#BP2b).
+    ///
+    /// Recomputed from authoritative geometry by
+    /// `EditorState::reconcile_panel_layout`; never persisted, never set
+    /// from Lua, and never `true` while no side window exists.
+    pub panel_hidden: bool,
 }
 
 impl Layout {
@@ -359,15 +607,73 @@ impl Layout {
 
     /// Walk the tree and assign each leaf a viewport rectangle.
     ///
-    /// Splits divide proportionally according to their weights. If a
-    /// child's allocated extent is `0` (terminal too small for the
+    /// Splits divide proportionally according to their weights, except
+    /// that a leaf listed in `fixed` takes exactly that many **rows** out
+    /// of a horizontal split before the remainder is divided (Q#BP2).
+    /// The map is the *effective* allocation, not the stored request: a
+    /// hidden panel is passed as `0`, which gives it an empty rect and
+    /// hands every reclaimed row back to the document subtree.
+    ///
+    /// `fixed` is interpreted only on leaves of a **horizontal** split —
+    /// a vertical split divides columns, where a row count means nothing
+    /// — and the last flexible child still takes the remainder, so a tree
+    /// with no fixed leaves computes byte-identically to before this arc.
+    /// If a child's allocated extent is `0` (terminal too small for the
     /// split), that child receives an empty rect, and renderers must
     /// skip it.
     #[must_use]
-    pub fn compute(&self, area: Rect) -> HashMap<WindowId, Rect> {
+    pub fn compute(&self, area: Rect, fixed: &HashMap<WindowId, u32>) -> HashMap<WindowId, Rect> {
         let mut out = HashMap::new();
-        compute_node(&self.root, area, &mut out);
+        compute_node(&self.root, area, fixed, &mut out);
         out
+    }
+
+    /// The single side leaf among `sides`, if this layout holds one.
+    ///
+    /// `sides` answers "is this window pinned to a side"; the caller owns
+    /// the `Window` table, so the predicate is injected rather than
+    /// duplicated here. At most one bottom side leaf exists per
+    /// `FrontendView` (Q#BP2a).
+    #[must_use]
+    pub fn side_leaf(&self, sides: impl Fn(WindowId) -> bool) -> Option<WindowId> {
+        self.iter_ids().into_iter().find(|id| sides(*id))
+    }
+
+    /// The document subtree beneath the root-level panel wrapper.
+    ///
+    /// A side window is installed as the final child of a horizontal
+    /// split wrapping the entire prior root (Q#BP2a), so the document
+    /// subtree is that wrapper's first child. Returns `None` when the
+    /// tree does not have that exact shape.
+    #[must_use]
+    pub fn document_subtree(&self, side: WindowId) -> Option<&LayoutNode> {
+        match &self.root {
+            LayoutNode::Split {
+                orientation: Orientation::Horizontal,
+                children,
+                ..
+            } if children.len() == 2
+                && matches!(children[1], LayoutNode::Leaf(id) if id == side) =>
+            {
+                Some(&children[0])
+            }
+            _ => None,
+        }
+    }
+
+    /// Wrap the entire current root in a horizontal split whose final
+    /// child is `side` (Q#BP2a).
+    ///
+    /// `fixed_rows` makes the panel's weight inert, so the prior root
+    /// keeps the flexible remainder and its **structure** — nodes,
+    /// weights, order, ids — is untouched (Bet B6).
+    pub fn install_side_leaf(&mut self, side: WindowId) {
+        let prior = std::mem::replace(&mut self.root, LayoutNode::Leaf(side));
+        self.root = LayoutNode::Split {
+            orientation: Orientation::Horizontal,
+            weights: vec![1, 1],
+            children: vec![prior, LayoutNode::Leaf(side)],
+        };
     }
 
     /// All [`WindowId`]s in left→right / top→bottom order.
@@ -414,25 +720,211 @@ impl Layout {
     /// if the layout has only one window.
     #[must_use]
     pub fn focus_next(&self, current: WindowId) -> WindowId {
-        let ids = self.iter_ids();
-        match ids.iter().position(|&id| id == current) {
-            Some(i) => ids[(i + 1) % ids.len()],
-            None => *ids.first().unwrap_or(&current),
-        }
+        self.focus_step(current, true, &|_| true)
     }
 
     /// Step focus to the previous window.
     #[must_use]
     pub fn focus_prev(&self, current: WindowId) -> WindowId {
+        self.focus_step(current, false, &|_| true)
+    }
+
+    /// [`Self::focus_next`] / [`Self::focus_prev`] restricted to windows
+    /// `eligible` accepts (Q#BP6: a hidden panel is never a focus
+    /// destination, though it becomes one again as soon as it reappears).
+    ///
+    /// A currently focused ineligible window can always leave, so the
+    /// caller can never strand focus: `current` itself is not filtered.
+    #[must_use]
+    pub fn focus_step(
+        &self,
+        current: WindowId,
+        forward: bool,
+        eligible: &impl Fn(WindowId) -> bool,
+    ) -> WindowId {
         let ids = self.iter_ids();
-        match ids.iter().position(|&id| id == current) {
-            Some(i) => ids[(i + ids.len() - 1) % ids.len()],
-            None => *ids.first().unwrap_or(&current),
+        if ids.is_empty() {
+            return current;
+        }
+        let Some(start) = ids.iter().position(|&id| id == current) else {
+            return ids
+                .iter()
+                .copied()
+                .find(|id| eligible(*id))
+                .unwrap_or_else(|| *ids.first().unwrap_or(&current));
+        };
+        let n = ids.len();
+        for step in 1..=n {
+            let i = if forward {
+                (start + step) % n
+            } else {
+                (start + n - (step % n)) % n
+            };
+            if eligible(ids[i]) {
+                return ids[i];
+            }
+        }
+        current
+    }
+
+    /// Index path from the root to `target`'s leaf, or `None` when the
+    /// layout does not hold it.
+    #[must_use]
+    pub fn path_to(&self, target: WindowId) -> Option<Vec<usize>> {
+        let mut path = Vec::new();
+        path_to_node(&self.root, target, &mut path).then_some(path)
+    }
+
+    /// The node at `path`, or `None` when the path does not resolve.
+    #[must_use]
+    pub fn node_at(&self, path: &[usize]) -> Option<&LayoutNode> {
+        let mut node = &self.root;
+        for &i in path {
+            match node {
+                LayoutNode::Split { children, .. } => node = children.get(i)?,
+                LayoutNode::Leaf(_) => return None,
+            }
+        }
+        Some(node)
+    }
+
+    /// Mutable [`Self::node_at`].
+    pub fn node_at_mut(&mut self, path: &[usize]) -> Option<&mut LayoutNode> {
+        let mut node = &mut self.root;
+        for &i in path {
+            match node {
+                LayoutNode::Split { children, .. } => node = children.get_mut(i)?,
+                LayoutNode::Leaf(_) => return None,
+            }
+        }
+        Some(node)
+    }
+
+    /// The horizontal boundary immediately **below** `target` (Q#BP5b
+    /// rule 2), or `None` when there is none.
+    ///
+    /// Walk up from the leaf to the nearest horizontal-split ancestor at
+    /// which the path child has a **following sibling**. "Nearest
+    /// horizontal ancestor" alone is wrong: when the subtree is that
+    /// ancestor's *final* child there is no boundary below it there, and
+    /// the real one is further up. This is also the boundary a drag on
+    /// `target`'s bottom mode-line row moves, so keyboard resize and drag
+    /// are the same operation (acceptance 31).
+    #[must_use]
+    pub fn boundary_below(&self, target: WindowId) -> Option<SplitBoundary> {
+        let path = self.path_to(target)?;
+        for depth in (0..path.len()).rev() {
+            let parent_path = &path[..depth];
+            let child_index = path[depth];
+            let LayoutNode::Split {
+                orientation: Orientation::Horizontal,
+                children,
+                ..
+            } = self.node_at(parent_path)?
+            else {
+                continue;
+            };
+            if child_index + 1 < children.len() {
+                return Some(SplitBoundary {
+                    path: parent_path.to_vec(),
+                    upper: child_index,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// One horizontal split boundary: the split node plus the index of the
+/// child immediately **above** the dividing line (Q#BP5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitBoundary {
+    /// Index path from the root to the horizontal split node.
+    pub path: Vec<usize>,
+    /// Index of the child above the boundary; `upper + 1` is below it.
+    pub upper: usize,
+}
+
+fn path_to_node(node: &LayoutNode, target: WindowId, path: &mut Vec<usize>) -> bool {
+    match node {
+        LayoutNode::Leaf(id) => *id == target,
+        LayoutNode::Split { children, .. } => {
+            for (i, child) in children.iter().enumerate() {
+                path.push(i);
+                if path_to_node(child, target, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
         }
     }
 }
 
-fn compute_node(node: &LayoutNode, area: Rect, out: &mut HashMap<WindowId, Rect>) {
+/// Minimum **outer** rows a subtree needs for every one of its leaves to
+/// clear [`MIN_WINDOW_OUTER_ROWS`] (Q#BP2).
+///
+/// The recursion is the point: "leave the document tree two rows" is
+/// wrong, because two rows at the root does not give each nested leaf two
+/// rows. Horizontal splits stack rows, so minima add; vertical splits
+/// share rows, so the tallest child governs.
+#[must_use]
+pub fn subtree_min_rows(node: &LayoutNode) -> u32 {
+    match node {
+        LayoutNode::Leaf(_) => MIN_WINDOW_OUTER_ROWS,
+        LayoutNode::Split {
+            orientation: Orientation::Horizontal,
+            children,
+            ..
+        } => children.iter().map(subtree_min_rows).sum(),
+        LayoutNode::Split {
+            orientation: Orientation::Vertical,
+            children,
+            ..
+        } => children.iter().map(subtree_min_rows).max().unwrap_or(0),
+    }
+}
+
+/// The same sum/max recursion over the user's `window.min-height`
+/// *preference* (Q#BP2).
+///
+/// `per_leaf` resolves the setting against that window's own buffer
+/// (buffer-local override → global → default) and is snapshotted once per
+/// gesture, before any geometry changes. Only **interactive** resize —
+/// drag, keyboard, and the Stage 2 `PanelResizeRows` — consults this; the
+/// ordinary layout pass and frame-resize reconciliation use
+/// [`subtree_min_rows`] alone, so changing a preference can never
+/// invalidate an existing layout.
+#[must_use]
+pub fn interactive_min_rows(node: &LayoutNode, per_leaf: &impl Fn(WindowId) -> u32) -> u32 {
+    match node {
+        LayoutNode::Leaf(id) => per_leaf(*id),
+        LayoutNode::Split {
+            orientation: Orientation::Horizontal,
+            children,
+            ..
+        } => children
+            .iter()
+            .map(|child| interactive_min_rows(child, per_leaf))
+            .sum(),
+        LayoutNode::Split {
+            orientation: Orientation::Vertical,
+            children,
+            ..
+        } => children
+            .iter()
+            .map(|child| interactive_min_rows(child, per_leaf))
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+fn compute_node(
+    node: &LayoutNode,
+    area: Rect,
+    fixed: &HashMap<WindowId, u32>,
+    out: &mut HashMap<WindowId, Rect>,
+) {
     match node {
         LayoutNode::Leaf(id) => {
             out.insert(*id, area);
@@ -442,18 +934,61 @@ fn compute_node(node: &LayoutNode, area: Rect, out: &mut HashMap<WindowId, Rect>
             weights,
             children,
         } => {
-            let total: u32 = weights.iter().map(|w| (*w).max(1)).sum();
             let primary = match orientation {
                 Orientation::Horizontal => area.size.rows,
                 Orientation::Vertical => area.size.cols,
             };
+            // Pass 1 — subtract the fixed children. Only a horizontal
+            // split divides rows, so `fixed` is inert anywhere else.
+            let mut extents: Vec<Option<u32>> = vec![None; children.len()];
+            let mut fixed_total: u32 = 0;
+            if matches!(orientation, Orientation::Horizontal) {
+                for (i, child) in children.iter().enumerate() {
+                    if let LayoutNode::Leaf(id) = child
+                        && let Some(rows) = fixed.get(id).copied()
+                    {
+                        // Saturating: a request larger than the frame
+                        // takes what is left rather than wrapping. The
+                        // caller has already clamped against the document
+                        // minimum; this is the last-resort floor.
+                        let take = rows.min(primary.saturating_sub(fixed_total));
+                        extents[i] = Some(take);
+                        fixed_total += take;
+                    }
+                }
+            }
+            // Pass 2 — divide the remainder by weight among the flexible
+            // children, preserving last-flexible-takes-the-remainder.
+            let remainder = primary.saturating_sub(fixed_total);
+            let total: u32 = children
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| extents[*i].is_none())
+                .map(|(i, _)| weights.get(i).copied().unwrap_or(1).max(1))
+                .sum();
+            let last_flexible = children
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(i, _)| extents[*i].is_none())
+                .map(|(i, _)| i);
+            let mut flexible_used: u32 = 0;
             let mut cursor: u32 = 0;
             for (i, child) in children.iter().enumerate() {
-                let w = weights.get(i).copied().unwrap_or(1).max(1);
-                let extent = if i + 1 == children.len() {
-                    primary - cursor
-                } else {
-                    primary * w / total
+                let extent = match extents[i] {
+                    Some(rows) => rows,
+                    None => {
+                        let w = weights.get(i).copied().unwrap_or(1).max(1);
+                        let e = if Some(i) == last_flexible {
+                            remainder - flexible_used
+                        } else if total == 0 {
+                            0
+                        } else {
+                            remainder * w / total
+                        };
+                        flexible_used += e;
+                        e
+                    }
                 };
                 let child_area = match orientation {
                     Orientation::Horizontal => Rect {
@@ -465,11 +1000,19 @@ fn compute_node(node: &LayoutNode, area: Rect, out: &mut HashMap<WindowId, Rect>
                         size: CellSize::new(area.size.rows, extent),
                     },
                 };
-                compute_node(child, child_area, out);
+                compute_node(child, child_area, fixed, out);
                 cursor += extent;
             }
         }
     }
+}
+
+/// Every [`WindowId`] beneath `node`, in layout order.
+#[must_use]
+pub fn node_ids(node: &LayoutNode) -> Vec<WindowId> {
+    let mut out = Vec::new();
+    collect_ids(node, &mut out);
+    out
 }
 
 fn collect_ids(node: &LayoutNode, out: &mut Vec<WindowId>) {
@@ -598,7 +1141,7 @@ mod tests {
     fn single_window_takes_full_area() {
         let w = id();
         let layout = Layout::single(w);
-        let placements = layout.compute(rect_24x80());
+        let placements = layout.compute(rect_24x80(), &HashMap::new());
         assert_eq!(placements.get(&w), Some(&rect_24x80()));
     }
 
@@ -608,7 +1151,7 @@ mod tests {
         let b = id();
         let mut layout = Layout::single(a);
         assert!(layout.split_window(a, Orientation::Vertical, b));
-        let placements = layout.compute(rect_24x80());
+        let placements = layout.compute(rect_24x80(), &HashMap::new());
         let ra = placements[&a];
         let rb = placements[&b];
         assert_eq!(ra.size.rows, 24);
@@ -624,7 +1167,7 @@ mod tests {
         let b = id();
         let mut layout = Layout::single(a);
         assert!(layout.split_window(a, Orientation::Horizontal, b));
-        let placements = layout.compute(rect_24x80());
+        let placements = layout.compute(rect_24x80(), &HashMap::new());
         let ra = placements[&a];
         let rb = placements[&b];
         assert_eq!(ra.size.cols, 80);
@@ -644,15 +1187,15 @@ mod tests {
         } else {
             panic!("expected split");
         }
-        let p1 = layout.compute(Rect::new(0, 0, 24, 90));
+        let p1 = layout.compute(Rect::new(0, 0, 24, 90), &HashMap::new());
         assert_eq!(p1[&a].size.cols, 60);
         assert_eq!(p1[&b].size.cols, 30);
         // Resize down by 1/3.
-        let p2 = layout.compute(Rect::new(0, 0, 24, 60));
+        let p2 = layout.compute(Rect::new(0, 0, 24, 60), &HashMap::new());
         assert_eq!(p2[&a].size.cols, 40);
         assert_eq!(p2[&b].size.cols, 20);
         // Resize wide.
-        let p3 = layout.compute(Rect::new(0, 0, 24, 300));
+        let p3 = layout.compute(Rect::new(0, 0, 24, 300), &HashMap::new());
         assert_eq!(p3[&a].size.cols, 200);
         assert_eq!(p3[&b].size.cols, 100);
     }
@@ -681,7 +1224,7 @@ mod tests {
         }
         leaves.extend(more);
         assert_eq!(leaves.len(), 8);
-        let placements = layout.compute(rect_24x80());
+        let placements = layout.compute(rect_24x80(), &HashMap::new());
         assert_eq!(placements.len(), 8);
         // Every rect must be non-empty (terminal large enough).
         for id in &leaves {

@@ -33,7 +33,10 @@ use crate::rope::Edit;
 use crate::rope::{Position, Range};
 use crate::text_view::TextView;
 use crate::view::{DisplayCoord, View};
-use crate::window::{FrontendView, Layout, Orientation, Window, WindowId};
+use crate::window::{
+    FrontendView, Layout, LayoutNode, MAX_PANEL_QUIT_DEPTH, MIN_WINDOW_OUTER_ROWS, Orientation,
+    QuitAction, Side, Window, WindowId, subtree_min_rows,
+};
 
 /// T M10.10 post-audit-round-3 F16 — origin of a queued CRDT op.
 ///
@@ -55,6 +58,157 @@ pub enum CrdtOpOrigin {
     /// frontend, including the one whose `Key` event drove the
     /// daemon path (its mirror is otherwise stale).
     DaemonKey,
+}
+
+/// One recorded jump origin (bottom-panel arc, Q#BP11c).
+///
+/// `window_id` and `side_origin` are what make `M-,` correct once a panel
+/// can be a separate window: restoring into the recorded window keeps the
+/// document window untouched, and a *side* origin that no longer
+/// revalidates is **skipped** rather than degrading to an active-window
+/// switch — that degradation is exactly the duplicate-panel corruption
+/// this design removes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct JumpEntry {
+    /// Window the origin was recorded in.
+    pub window_id: WindowId,
+    /// Buffer displayed there at the time.
+    pub buffer_id: BufferId,
+    /// Cursor position to restore.
+    pub position: Position,
+    /// Whether `window_id` was a side window when recorded.
+    pub side_origin: bool,
+}
+
+/// Which lifecycle hook Phase 2 of the display transaction must fire
+/// **with the target window active** (Q#BP4 / Q#BP11b).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum HookKind {
+    /// `buffer.after-switch` — a reuse, including a same-buffer no-op.
+    AfterSwitch,
+    /// `buffer.after-load` — a fresh load. saveplace, recentf, syntax
+    /// and LSP all require the document target to be active for this.
+    AfterLoad,
+    /// Nothing to fire (a newly created path-backed buffer for a
+    /// `NotFound` path, matching initial-target / local-startup).
+    None,
+}
+
+/// A `display_buffer` request (Q#BP3).
+///
+/// `height` and `dedicated` are deliberately option-valued at the policy
+/// boundary: omission is **not** silently equivalent to an explicit
+/// zero/false, which is what lets a user-resized panel keep its height as
+/// compile and listview replace one another.
+#[derive(Clone, Debug)]
+pub struct DisplayRequest {
+    /// Buffer to display.
+    pub buffer_id: BufferId,
+    /// Exact target window. Mutually exclusive with `side`.
+    pub window: Option<WindowId>,
+    /// Requested side. Mutually exclusive with `window`.
+    pub side: Option<Side>,
+    /// Explicit requested outer rows for a side placement.
+    pub height: Option<u32>,
+    /// Explicit dedication for the installed presentation.
+    pub dedicated: Option<bool>,
+    /// Explicit final-focus request. Omission defaults to `false` for an
+    /// actual side target and `true` for an ordinary one; an explicit
+    /// value survives fallback unchanged.
+    pub select: Option<bool>,
+    /// The caller's resolved `window.panel-height`, used only when a side
+    /// slot is **created** with no explicit `height`.
+    pub default_panel_rows: u32,
+}
+
+impl DisplayRequest {
+    /// A bare ordinary-placement request for `buffer_id`.
+    #[must_use]
+    pub fn new(buffer_id: BufferId) -> Self {
+        Self {
+            buffer_id,
+            window: None,
+            side: None,
+            height: None,
+            dedicated: None,
+            select: None,
+            default_panel_rows: crate::window::DEFAULT_PANEL_ROWS,
+        }
+    }
+}
+
+/// What Phase 1 of the display transaction decided (Q#BP4).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DisplayOutcome {
+    /// Window the buffer was installed in.
+    pub target: WindowId,
+    /// The frontend's focused window before Phase 1 ran.
+    pub saved_active: WindowId,
+    /// Resolved final-focus request.
+    pub select: bool,
+    /// Whether this call created the side window — the adopter rollback
+    /// hook (a terminal whose session fails to start must remove the
+    /// wrapper it just created).
+    pub created_side: bool,
+}
+
+/// What [`EditorCore::reconcile_panel_layout_core`] resolved (Q#BP2b).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PanelReconciliation {
+    /// The panel's effective visibility after the transaction.
+    pub hidden: bool,
+    /// Whether `hidden` changed in this transaction — Stage 2 keys its
+    /// authoritative `PanelFrame::Absent` / fresh `Present` on this.
+    pub changed: bool,
+    /// A side window whose terminal controller the caller must release,
+    /// because focus just left an invisible panel.
+    pub released_terminal: Option<WindowId>,
+}
+
+/// Row extent of an arbitrary subtree, derived from its leaves' computed
+/// rects: leaves tile their parent, so the union's height is the node's.
+fn node_row_extent(node: &LayoutNode, placements: &HashMap<WindowId, crate::window::Rect>) -> u32 {
+    let ids = crate::window::node_ids(node);
+    let mut lo = u32::MAX;
+    let mut hi = 0u32;
+    for id in ids {
+        let Some(rect) = placements.get(&id) else {
+            continue;
+        };
+        lo = lo.min(rect.origin.row);
+        hi = hi.max(rect.origin.row + rect.size.rows);
+    }
+    if lo == u32::MAX { 0 } else { hi - lo }
+}
+
+/// What Phase 1 of `window.quit` did (Q#BP2c).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum QuitOutcome {
+    /// The side window was closed and its wrapper collapsed.
+    Deleted {
+        /// Where focus landed, when the frontend still has a view.
+        focus: Option<WindowId>,
+    },
+    /// A saved presentation was reinstalled; Phase 2 must fire the
+    /// ordinary switch hook so overlays reattach.
+    Restored {
+        /// The window that was restored.
+        target: WindowId,
+        /// The buffer now displayed there.
+        buffer_id: BufferId,
+    },
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Placement {
+    target: WindowId,
+    kind: PlacementKind,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PlacementKind {
+    Ordinary,
+    Side { created: bool, replacing: bool },
 }
 
 /// Live state of an in-progress incremental search (Q#SR5).
@@ -285,7 +439,16 @@ pub struct EditorCore {
     /// this without limit. Entries naming a now-removed buffer are
     /// skipped on pop (stale-handle safe, mirrors the registry's
     /// `Missing` contract).
-    pub jump_ring: Vec<(BufferId, Position)>,
+    ///
+    /// **Per frontend** (bottom-panel arc, Q#BP11c), matching
+    /// `command_history`. Once a panel is a separate window, an entry
+    /// must remember *which window* it was recorded in — otherwise `M-,`
+    /// from a source file would switch the **document** window to the
+    /// panel's buffer while the panel stays open, duplicating the
+    /// presentation. Keying the whole ring by frontend additionally
+    /// stops one frontend consuming or destroying another's navigation
+    /// trail; detach purges the vector.
+    pub jump_ring: HashMap<FrontendId, Vec<JumpEntry>>,
     /// In-buffer incremental search store (Q#SR1). Per-buffer query +
     /// matches + active index, written by the search session /
     /// `search.*` commands and read by the decorations producer
@@ -388,6 +551,11 @@ impl EditorCore {
                 active: id,
                 // LOCAL is the in-process grid editor (Q#FD21).
                 fold_projection: true,
+                // …and it renders side windows natively (Q#BP13).
+                panel_capable: true,
+                // Real geometry arrives with the first render/resize.
+                frame_geometry: None,
+                panel_hidden: false,
             },
         );
         Self {
@@ -400,7 +568,7 @@ impl EditorCore {
             minibuffer: Minibuffer::new(),
             active_frontend: FrontendId::LOCAL,
             pending_crdt_ops: Vec::new(),
-            jump_ring: Vec::new(),
+            jump_ring: HashMap::new(),
             search_store: crate::search::make_shared_store(),
             theme: None,
             search: None,
@@ -595,6 +763,10 @@ impl EditorCore {
     /// closing a window left others intact).
     pub fn unregister_frontend_view(&mut self, fid: FrontendId) {
         self.views.remove(&fid);
+        // Bottom-panel arc (Q#BP11c): a detached frontend's navigation
+        // trail dies with its view — its `WindowId`s are gone, and no
+        // other frontend may pop or destroy those entries.
+        self.jump_ring.remove(&fid);
         if self.active_frontend == fid {
             self.active_frontend = FrontendId::LOCAL;
         }
@@ -668,10 +840,10 @@ impl EditorCore {
     /// Propagates a load failure (e.g. a since-deleted file) so restore
     /// can skip that leaf rather than abort.
     pub fn get_or_load_buffer(&mut self, path: &Path) -> std::io::Result<(BufferId, bool)> {
-        let normalized = normalize_buffer_path(path.to_path_buf());
-        if let Some(id) = self.registry.borrow().find_by_path(&normalized) {
+        if let Some(id) = self.find_buffer_for_path(path) {
             return Ok((id, false));
         }
+        let normalized = normalize_buffer_path(path.to_path_buf());
         let (bytes, meta) = crate::file_io::load_file(path)?;
         let display_name = path.display().to_string();
         let id = self
@@ -681,6 +853,51 @@ impl EditorCore {
         self.set_buffer_path(id, Some(normalized));
         self.set_buffer_meta(id, Some(meta));
         Ok((id, true))
+    }
+
+    /// The buffer already bound to `path`, under the same normalization
+    /// [`Self::get_or_load_buffer`] uses — **side-effect free**, so a
+    /// target-aware display can resolve its destination *before* any I/O
+    /// (Q#BP11b step 1: an ineligible destination must fail without
+    /// loading the file).
+    #[must_use]
+    pub fn find_buffer_for_path(&self, path: &Path) -> Option<BufferId> {
+        let normalized = normalize_buffer_path(path.to_path_buf());
+        self.registry.borrow().find_by_path(&normalized)
+    }
+
+    /// The shared resolve/load-without-switch primitive behind both
+    /// `pmacs.window.display_file` and the daemon's initial-target
+    /// bootstrap (Q#BP11b).
+    ///
+    /// Returns the buffer plus the hook Phase 2 must fire **with the
+    /// destination window active**: `AfterSwitch` for a dedup hit
+    /// (including a same-buffer no-op), `AfterLoad` for a fresh load, and
+    /// `None` for a path that does not exist yet — a `NotFound` path
+    /// becomes an empty path-backed buffer and fires nothing, matching
+    /// the initial-target and local-startup contract.
+    ///
+    /// One primitive, so two path-normalization, dedup, and hook
+    /// transactions cannot drift apart.
+    ///
+    /// # Errors
+    /// Any load failure other than `NotFound`.
+    pub fn resolve_target_buffer(
+        &mut self,
+        path: &Path,
+    ) -> Result<(BufferId, HookKind), String> {
+        match self.get_or_load_buffer(path) {
+            Ok((buffer_id, true)) => Ok((buffer_id, HookKind::AfterLoad)),
+            Ok((buffer_id, false)) => Ok((buffer_id, HookKind::AfterSwitch)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let display_path = path.display().to_string();
+                let buffer_id = self.registry.borrow_mut().create(display_path);
+                self.set_buffer_path(buffer_id, Some(path.to_path_buf()));
+                "[new file]".clone_into(&mut self.status);
+                Ok((buffer_id, HookKind::None))
+            }
+            Err(error) => Err(format!("cannot open {}: {error}", path.display())),
+        }
     }
 
     /// Cursor of the active window (compatibility shim for callers
@@ -796,11 +1013,27 @@ impl EditorCore {
     /// origin is evicted (front drop) — the user keeps the most
     /// recent trail, which is the one they're likely to unwind.
     pub fn push_jump(&mut self) {
-        let entry = (self.active_buffer_id(), self.cursor());
-        if self.jump_ring.len() >= Self::JUMP_RING_CAP {
-            self.jump_ring.remove(0);
+        let fid = self.active_frontend;
+        let window_id = self.active_window_id();
+        let entry = JumpEntry {
+            window_id,
+            buffer_id: self.active_buffer_id(),
+            position: self.cursor(),
+            side_origin: self
+                .windows
+                .get(&window_id)
+                .is_some_and(crate::window::Window::is_side),
+        };
+        let ring = self.jump_ring.entry(fid).or_default();
+        if ring.len() >= Self::JUMP_RING_CAP {
+            ring.remove(0);
         }
-        self.jump_ring.push(entry);
+        ring.push(entry);
+    }
+
+    /// Drop one detached frontend's navigation trail (Q#BP11c).
+    pub fn purge_jump_ring(&mut self, fid: FrontendId) {
+        self.jump_ring.remove(&fid);
     }
 
     /// Pop the most recent jump origin and move there. Returns
@@ -811,21 +1044,66 @@ impl EditorCore {
     /// it finds a live target or the ring empties), so a jump-back
     /// never lands on a missing buffer. The restored cursor is
     /// clamped to the (possibly now shorter) buffer length.
+    ///
+    /// # Origin windows (Q#BP11c)
+    ///
+    /// The entry restores into its **origin window** when that window is
+    /// live, belongs to the acting frontend's layout, is not a hidden
+    /// side window, and **still shows the recorded buffer**. A live panel
+    /// that has since been replaced does not resurrect its old buffer.
+    ///
+    /// When revalidation fails the entry degrades differently by origin
+    /// kind. A **non-side** origin falls back to today's active-window
+    /// switch. A **side** origin is *skipped*: switching a panel's buffer
+    /// into the document window is precisely the duplicate-presentation
+    /// corruption this design removes.
     pub fn jump_back(&mut self) -> bool {
-        while let Some((bid, pos)) = self.jump_ring.pop() {
-            if !self.registry.borrow().contains(bid) {
+        let fid = self.active_frontend;
+        loop {
+            let Some(entry) = self
+                .jump_ring
+                .get_mut(&fid)
+                .and_then(std::vec::Vec::pop)
+            else {
+                return false;
+            };
+            if !self.registry.borrow().contains(entry.buffer_id) {
                 continue;
             }
-            if self.active_buffer_id() != bid && self.switch_active_buffer(bid).is_err() {
+            let origin_valid = self
+                .views
+                .get(&fid)
+                .is_some_and(|view| view.layout.iter_ids().contains(&entry.window_id))
+                && self
+                    .windows
+                    .get(&entry.window_id)
+                    .is_some_and(|window| window.buffer_id == entry.buffer_id)
+                && !self.side_window_is_hidden(fid, entry.window_id);
+            if origin_valid {
+                self.set_active_window_id(entry.window_id);
+            } else if entry.side_origin {
+                continue;
+            } else if self.active_buffer_id() != entry.buffer_id
+                && self.switch_active_buffer(entry.buffer_id).is_err()
+            {
                 continue;
             }
-            let clamped = pos.min(self.active_buffer_len());
+            let clamped = entry.position.min(self.active_buffer_len());
             let aw = self.active_window_mut();
             aw.cursor = clamped;
             aw.goal_col = None;
             return true;
         }
-        false
+    }
+
+    /// True when `win` is a side window on `fid` and that frontend's
+    /// panel is currently derived-hidden (Q#BP2b).
+    #[must_use]
+    fn side_window_is_hidden(&self, fid: FrontendId, win: WindowId) -> bool {
+        self.windows
+            .get(&win)
+            .is_some_and(crate::window::Window::is_side)
+            && self.views.get(&fid).is_some_and(|view| view.panel_hidden)
     }
 
     // ---- incremental search (Q#SR5) ----------------------------------------
@@ -2296,6 +2574,27 @@ impl EditorCore {
 
     // ---- window operations -------------------------------------------------
 
+    /// [`Self::split_active`], refusing a side window (Q#BP6): the panel
+    /// is a leaf of the root-level wrapper, so splitting it would produce
+    /// a second, unallocatable side slot.
+    ///
+    /// # Errors
+    /// When the active window is a side window.
+    pub fn try_split_active(
+        &mut self,
+        orientation: Orientation,
+        same_buffer: bool,
+    ) -> Result<WindowId, String> {
+        if self
+            .windows
+            .get(&self.active_window_id())
+            .is_some_and(crate::window::Window::is_side)
+        {
+            return Err("window.split: not available in a side window".into());
+        }
+        Ok(self.split_active(orientation, same_buffer))
+    }
+
     /// Split the active window. Returns the new window's id.
     /// `same_buffer` controls whether the new window opens on the
     /// active buffer (Emacs default) or a fresh `*scratch*` buffer.
@@ -2334,52 +2633,129 @@ impl EditorCore {
 
     /// Move focus to the next window in iteration order.
     pub fn focus_next(&mut self) {
-        let active = self.active_window_id();
-        let next = self.active_layout().focus_next(active);
-        self.set_active_window_id(next);
+        self.focus_step(true);
     }
 
     /// Move focus to the previous window in iteration order.
     pub fn focus_prev(&mut self) {
-        let active = self.active_window_id();
-        let prev = self.active_layout().focus_prev(active);
-        self.set_active_window_id(prev);
+        self.focus_step(false);
     }
 
-    /// Close the active window (unless it's the only one in this
-    /// frontend). Returns false if the active frontend's layout has a
-    /// single window.
+    /// Shared `C-x o` traversal, skipping a **hidden** side window
+    /// (Q#BP6): keys must never route to an invisible panel, and once it
+    /// reappears traversal reaches it normally again.
+    ///
+    /// Also the seam that refreshes `origin_document` (Q#BP2c): entering
+    /// the panel from document window B must retarget `display_target`,
+    /// panel visits, and a `Delete`-form `window.quit` at B rather than
+    /// at whichever window happened to create the panel.
+    fn focus_step(&mut self, forward: bool) {
+        let fid = self.active_frontend_key();
+        let active = self.active_window_id();
+        let hidden_panel = if self.views.get(&fid).is_some_and(|view| view.panel_hidden) {
+            self.side_window_for(fid)
+        } else {
+            None
+        };
+        let next = self
+            .active_layout()
+            .focus_step(active, forward, &|id| Some(id) != hidden_panel);
+        self.set_active_window_id(next);
+        self.note_focus_transition(fid, active, next);
+    }
+
+    /// Focus an explicit window in the acting frontend, refreshing the
+    /// panel's remembered document origin on the way (Q#BP2c).
+    pub fn focus_window(&mut self, fid: FrontendId, target: WindowId) {
+        let Some(view) = self.views.get_mut(&fid) else {
+            return;
+        };
+        let previous = view.active;
+        view.active = target;
+        self.note_focus_transition(fid, previous, target);
+    }
+
+    /// Close the active window. Returns false when the layout would be
+    /// left with no **document** window.
+    ///
+    /// Q#BP6 narrows the pre-arc "unless it's the only one" rule: a side
+    /// window is never load-bearing, so closing the panel itself is
+    /// always legal — including when it is the only other window — while
+    /// closing the last *non-side* window is always refused.
     pub fn close_active(&mut self) -> bool {
         // Per-frontend: gate on the *active frontend's* window count, not
         // the global `self.windows` set. Every attached frontend keeps its
         // own windows in `self.windows`, so a global `<= 1` check let a
         // multi-frontend session close a frontend's last window and then
         // panic picking a successor from the now-empty layout.
-        if self.active_layout().iter_ids().len() <= 1 {
-            return false;
-        }
+        let fid = self.active_frontend_key();
         let target = self.active_window_id();
+        let target_is_side = self
+            .windows
+            .get(&target)
+            .is_some_and(crate::window::Window::is_side);
+        if !target_is_side {
+            let remaining_documents = self
+                .active_layout()
+                .iter_ids()
+                .into_iter()
+                .filter(|id| {
+                    *id != target
+                        && !self
+                            .windows
+                            .get(id)
+                            .is_some_and(crate::window::Window::is_side)
+                })
+                .count();
+            if remaining_documents == 0 {
+                return false;
+            }
+        }
         self.active_layout_mut().close_window(target);
         self.windows.remove(&target);
-        // Pick an adjacent window as the new focus.
-        let next = *self
-            .active_layout()
-            .iter_ids()
-            .first()
-            .expect("at least one window remains");
+        if target_is_side {
+            if let Some(view) = self.views.get_mut(&fid) {
+                view.panel_hidden = false;
+            }
+        }
+        // Pick an adjacent window as the new focus, preferring a document.
+        let ids = self.active_layout().iter_ids();
+        let next = ids
+            .iter()
+            .copied()
+            .find(|id| {
+                !self
+                    .windows
+                    .get(id)
+                    .is_some_and(crate::window::Window::is_side)
+            })
+            .unwrap_or_else(|| *ids.first().expect("at least one window remains"));
+        let previous = self.active_window_id();
         self.set_active_window_id(next);
+        self.note_focus_transition(fid, previous, next);
         true
     }
 
     /// Close every window except the active one, *within the active
-    /// frontend*.
-    pub fn close_others(&mut self) {
+    /// frontend* — including the panel (Q#BP6).
+    ///
+    /// # Errors
+    /// From a side window: a panel cannot swallow the document tree.
+    pub fn close_others(&mut self) -> Result<(), String> {
         // Per-frontend: only prune the active frontend's own layout. The
         // global `self.windows` set holds every frontend's windows, so a
         // global `retain(|id| id == keep)` deleted OTHER frontends'
         // windows — leaving their `view.active` dangling and panicking the
         // next `active_window()` (the multi-frontend close-others crash).
         let keep = self.active_window_id();
+        if self
+            .windows
+            .get(&keep)
+            .is_some_and(crate::window::Window::is_side)
+        {
+            return Err("window.close-others: not available in a side window".into());
+        }
+        let fid = self.active_frontend_key();
         let doomed: Vec<WindowId> = self
             .active_layout()
             .iter_ids()
@@ -2390,6 +2766,993 @@ impl EditorCore {
         for id in doomed {
             self.windows.remove(&id);
         }
+        if let Some(view) = self.views.get_mut(&fid) {
+            view.panel_hidden = false;
+        }
+        Ok(())
+    }
+
+    /// The `views` key the active-frontend accessors resolve to.
+    #[must_use]
+    pub fn active_frontend_key(&self) -> FrontendId {
+        if self.views.contains_key(&self.active_frontend) {
+            self.active_frontend
+        } else {
+            FrontendId::LOCAL
+        }
+    }
+
+    // ---- side windows + display policy (bottom-panel arc) ------------------
+
+    /// The one side leaf in `fid`'s layout, if it has one (Q#BP2a).
+    #[must_use]
+    pub fn side_window_for(&self, fid: FrontendId) -> Option<WindowId> {
+        let view = self.views.get(&fid)?;
+        view.layout.side_leaf(|id| {
+            self.windows
+                .get(&id)
+                .is_some_and(crate::window::Window::is_side)
+        })
+    }
+
+    /// Whether `fid`'s side window exists but is currently hidden.
+    #[must_use]
+    pub fn panel_hidden_for(&self, fid: FrontendId) -> bool {
+        self.views.get(&fid).is_some_and(|view| view.panel_hidden)
+            && self.side_window_for(fid).is_some()
+    }
+
+    /// Whether `fid` can render a side window at all (Q#BP13).
+    #[must_use]
+    pub fn panel_capable_for(&self, fid: FrontendId) -> bool {
+        self.views.get(&fid).is_some_and(|view| view.panel_capable)
+    }
+
+    /// **The** primary document window for `fid` (Q#BP14).
+    ///
+    /// The frontend's active window when it is non-side, else its
+    /// non-side target. Every consumer classified *Projection* in the
+    /// framing's §1.3 census routes through this rather than through
+    /// `active_window_for` / `active_buffer_id`, so focusing a panel
+    /// re-sends no snapshot, suppresses no document, swaps no mirror,
+    /// and cannot leak into a newly attached frontend's document view.
+    #[must_use]
+    pub fn primary_document_window(&self, fid: FrontendId) -> Option<WindowId> {
+        let view = self.views.get(&fid)?;
+        if !self
+            .windows
+            .get(&view.active)
+            .is_some_and(crate::window::Window::is_side)
+        {
+            return Some(view.active);
+        }
+        self.non_side_target(fid).ok()
+    }
+
+    /// [`Self::primary_document_window`]'s buffer, falling back to the
+    /// focused window's when the layout is degenerate.
+    #[must_use]
+    pub fn primary_document_buffer(&self, fid: FrontendId) -> Option<BufferId> {
+        let win = self.primary_document_window(fid)?;
+        self.windows.get(&win).map(|window| window.buffer_id)
+    }
+
+    /// The non-side target rule (Q#BP11a).
+    ///
+    /// 1. the selected window when it is **not** a side window
+    ///    (byte-identical to pre-arc behavior),
+    /// 2. else the remembered `origin_document`, when it revalidates,
+    /// 3. else the first non-side window in `iter_ids()` order,
+    /// 4. else a pointed error. There is no document leaf from which a
+    ///    valid fallback could be fabricated, and Q#BP6 forbids this as
+    ///    a resting state, so the broken invariant is asserted rather
+    ///    than papered over.
+    ///
+    /// # Errors
+    /// When `fid` has no view, or its layout holds no non-side window.
+    pub fn non_side_target(&self, fid: FrontendId) -> Result<WindowId, String> {
+        let view = self
+            .views
+            .get(&fid)
+            .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?;
+        let is_side = |id: WindowId| {
+            self.windows
+                .get(&id)
+                .is_some_and(crate::window::Window::is_side)
+        };
+        if !is_side(view.active) {
+            return Ok(view.active);
+        }
+        if let Some(origin) = self
+            .windows
+            .get(&view.active)
+            .and_then(|w| w.params.origin_document())
+            && view.layout.iter_ids().contains(&origin)
+            && !is_side(origin)
+        {
+            return Ok(origin);
+        }
+        if let Some(first) = view.layout.iter_ids().into_iter().find(|id| !is_side(*id)) {
+            return Ok(first);
+        }
+        debug_assert!(
+            false,
+            "invariant (Q#BP6): a frontend layout always retains at least one non-side window"
+        );
+        Err("no document window is available".into())
+    }
+
+    /// Record the document window a focus transition into the panel came
+    /// from (Q#BP2c).
+    ///
+    /// Called on every focus change. Only a **non-side → side**
+    /// transition refreshes the memory: panel→panel redisplay and
+    /// passive display must not overwrite it, and a creation-only
+    /// origin would go stale the moment the user entered the panel from
+    /// a different document split.
+    pub fn note_focus_transition(&mut self, fid: FrontendId, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+        debug_assert!(
+            self.views
+                .get(&fid)
+                .is_some_and(|view| view.layout.iter_ids().contains(&to)),
+            "focus transition target must belong to the acting frontend's layout"
+        );
+        let from_side = self
+            .windows
+            .get(&from)
+            .is_some_and(crate::window::Window::is_side);
+        let to_side = self
+            .windows
+            .get(&to)
+            .is_some_and(crate::window::Window::is_side);
+        if from_side || !to_side {
+            return;
+        }
+        if let Some(window) = self.windows.get_mut(&to) {
+            window.params.set_origin_document(Some(from));
+        }
+    }
+
+    /// Minimum outer rows the document subtree beneath `fid`'s panel
+    /// wrapper needs (Q#BP2). Falls back to the whole root when the tree
+    /// does not have the wrapper shape.
+    #[must_use]
+    fn document_min_rows(&self, fid: FrontendId) -> u32 {
+        let Some(view) = self.views.get(&fid) else {
+            return MIN_WINDOW_OUTER_ROWS;
+        };
+        let node = self
+            .side_window_for(fid)
+            .and_then(|side| view.layout.document_subtree(side))
+            .unwrap_or(&view.layout.root);
+        subtree_min_rows(node)
+    }
+
+    /// The panel's **effective** row allocation on a frame whose window
+    /// area is `area_rows` (Q#BP2), or `None` when it cannot be
+    /// satisfied and must be hidden.
+    ///
+    /// `min(requested, area_rows - subtree_min_rows(document_root))`, then
+    /// the structural floor. This is the whole bounded promise: the panel
+    /// allocator never makes an otherwise satisfiable document tree
+    /// unsatisfiable, and what the frame does to a document tree that
+    /// could not fit anyway is unchanged behavior.
+    #[must_use]
+    pub fn panel_allocation(&self, fid: FrontendId, area_rows: u32) -> Option<u32> {
+        let side = self.side_window_for(fid)?;
+        let requested = self.windows.get(&side)?.params.fixed_rows?;
+        let allowed = area_rows.saturating_sub(self.document_min_rows(fid));
+        let alloc = requested.min(allowed);
+        (alloc >= MIN_WINDOW_OUTER_ROWS).then_some(alloc)
+    }
+
+    /// The fixed-extent map both [`crate::window::Layout::compute`]
+    /// production callers feed in (Q#BP2, R5-B1).
+    ///
+    /// Derived by this one shared helper rather than assembled at each
+    /// call site: `window_placements` and the peer-presence overlay pass
+    /// build different areas, and leaving the second on unfixed geometry
+    /// would paint every peer cursor at the row it would occupy with no
+    /// panel open.
+    ///
+    /// A hidden panel maps to `0`, which is Q#BP2's exact effective
+    /// geometry for that state: the side leaf gets an empty rect, the
+    /// document subtree receives every reclaimed row, and the stored
+    /// request, wrapper, ids, weights, and order all stay intact.
+    #[must_use]
+    pub fn panel_fixed_rows(&self, fid: FrontendId, area_rows: u32) -> HashMap<WindowId, u32> {
+        let mut fixed = HashMap::new();
+        let Some(side) = self.side_window_for(fid) else {
+            return fixed;
+        };
+        if self.views.get(&fid).is_some_and(|view| view.panel_hidden) {
+            fixed.insert(side, 0);
+            return fixed;
+        }
+        fixed.insert(side, self.panel_allocation(fid, area_rows).unwrap_or(0));
+        fixed
+    }
+
+    /// Delete `side` from `fid`'s layout, collapsing the root-level
+    /// wrapper and rehoming focus (Q#BP2a).
+    ///
+    /// Idempotent and safe to call from `kill_buffer`: the wrapper
+    /// collapse is `Layout::close_window`'s existing
+    /// `collapse_single_child_splits` pass, so no new tree code runs.
+    pub fn remove_side_window(&mut self, fid: FrontendId, side: WindowId) {
+        let Some(view) = self.views.get_mut(&fid) else {
+            return;
+        };
+        if !view.layout.close_window(side) {
+            return;
+        }
+        view.panel_hidden = false;
+        let was_active = view.active == side;
+        if was_active {
+            let fallback = *view
+                .layout
+                .iter_ids()
+                .first()
+                .expect("Q#BP6: a document leaf always survives the wrapper collapse");
+            view.active = fallback;
+        }
+        self.windows.remove(&side);
+        if was_active
+            && let Ok(target) = self.non_side_target(fid)
+        {
+            if let Some(view) = self.views.get_mut(&fid) {
+                view.active = target;
+            }
+        }
+        // A remembered origin pointing at a now-dead window is cleared by
+        // `non_side_target`'s revalidation on next use; nothing else here
+        // may reference the removed id.
+        for window in self.windows.values_mut() {
+            if window.params.origin_document() == Some(side) {
+                window.params.set_origin_document(None);
+            }
+        }
+    }
+
+    /// Phase 1 of `window.quit` (Q#BP2c / Q#BP11b).
+    ///
+    /// Executes the window's recorded [`QuitAction`], returning the
+    /// Phase-2 transaction Q#BP4 owns. A `Restore` whose buffer has been
+    /// killed fails closed to `Delete`, dropping the unusable chain.
+    ///
+    /// # Errors
+    /// A window with no recorded action returns a pointed error **without
+    /// closing or switching anything** — non-side adopter fallbacks call
+    /// their own existing restore path instead.
+    pub fn quit_window(
+        &mut self,
+        fid: FrontendId,
+        target: WindowId,
+    ) -> Result<QuitOutcome, String> {
+        let action = self
+            .windows
+            .get(&target)
+            .ok_or_else(|| format!("window {} is not live", target.raw()))?
+            .params
+            .quit_action()
+            .cloned()
+            .ok_or_else(|| "window.quit: this window has no quit action".to_string())?;
+        let action = match action {
+            QuitAction::Restore { buffer_id, .. }
+                if !self.registry.borrow().contains(buffer_id) =>
+            {
+                QuitAction::Delete
+            }
+            other => other,
+        };
+        match action {
+            QuitAction::Delete => {
+                let saved_active = self.views.get(&fid).map(|view| view.active);
+                self.remove_side_window(fid, target);
+                Ok(QuitOutcome::Deleted {
+                    focus: self
+                        .views
+                        .get(&fid)
+                        .map(|view| view.active)
+                        .or(saved_active),
+                })
+            }
+            QuitAction::Restore {
+                buffer_id,
+                fixed_rows,
+                dedicated,
+                cursor,
+                view_top,
+                goal_col,
+                selection,
+                then,
+            } => {
+                self.install_buffer_in_window(target, buffer_id)?;
+                let len = {
+                    let reg = self.registry.borrow();
+                    reg.get(buffer_id).map(Buffer::len).unwrap_or(0)
+                };
+                let window = self
+                    .windows
+                    .get_mut(&target)
+                    .ok_or_else(|| "window.quit: target vanished".to_string())?;
+                window.params.fixed_rows = Some(fixed_rows.max(MIN_WINDOW_OUTER_ROWS));
+                window.params.dedicated = dedicated;
+                window.params.set_quit_action(Some(*then));
+                // Clamp saved positions against the buffer's CURRENT
+                // contents: it may have shrunk while the panel showed
+                // something else. Derived `last_visible_rows` and
+                // trait-object overlays are deliberately not snapshotted —
+                // the switch hook reattaches overlays.
+                window.cursor = cursor.min(len);
+                window.view_top = view_top;
+                window.goal_col = goal_col;
+                window.selection = selection.filter(|sel| sel.anchor <= len);
+                Ok(QuitOutcome::Restored {
+                    target,
+                    buffer_id,
+                })
+            }
+        }
+    }
+
+    /// Clamp a programmatic `fixed_rows` request (Q#BP2).
+    ///
+    /// # Errors
+    /// A request of `0` is rejected rather than being an invisible
+    /// "open".
+    pub fn clamp_panel_rows(rows: u32) -> Result<u32, String> {
+        if rows == 0 {
+            return Err("panel height must be at least 1 row".into());
+        }
+        Ok(rows.max(MIN_WINDOW_OUTER_ROWS))
+    }
+
+    /// The window area a frontend's layout is computed into: the whole
+    /// declared frame minus the one global status row, matching
+    /// `window_placements`. `None` while geometry is **unknown**.
+    #[must_use]
+    pub fn frontend_area_rows(&self, fid: FrontendId) -> Option<u32> {
+        let geometry = self.views.get(&fid)?.frame_geometry?;
+        (geometry.total.rows >= 2 && geometry.total.cols > 0)
+            .then(|| geometry.total.rows - 1)
+    }
+
+    /// Cache a frontend's authoritative frame capacity (Q#BP2b).
+    ///
+    /// Grid / `LOCAL` views call this from their real attach and resize
+    /// sizes with an internally minted epoch; a semantic view stays
+    /// `None` until Stage 2's authenticated declaration. A repeated
+    /// identical size is not a new declaration.
+    pub fn declare_frame_geometry(&mut self, fid: FrontendId, total: crate::cell::CellSize) {
+        let Some(view) = self.views.get_mut(&fid) else {
+            return;
+        };
+        if view
+            .frame_geometry
+            .is_some_and(|geometry| geometry.total == total)
+        {
+            return;
+        }
+        let next = view
+            .frame_geometry
+            .map_or(1, |geometry| geometry.geometry_epoch.saturating_add(1));
+        view.frame_geometry = Some(crate::window::DeclaredFrameGeometry {
+            geometry_epoch: next,
+            total,
+        });
+    }
+
+    /// Core half of the idempotent panel-reconciliation transaction
+    /// (Q#BP2b). The caller owns the terminal manager, so releasing a
+    /// controller is reported rather than performed.
+    ///
+    /// Hiding is a **durable state transition**, not a per-frame effect:
+    /// a render-time dodge would still route keys to an invisible window
+    /// and would leave the terminal controller claimed, because the
+    /// resize path merely returns on zero content without releasing it.
+    pub fn reconcile_panel_layout_core(&mut self, fid: FrontendId) -> PanelReconciliation {
+        let mut result = PanelReconciliation::default();
+        let Some(side) = self.side_window_for(fid) else {
+            // `panel_hidden` never describes a panel that no longer
+            // exists.
+            if let Some(view) = self.views.get_mut(&fid) {
+                result.changed = view.panel_hidden;
+                view.panel_hidden = false;
+            }
+            return result;
+        };
+        let was_hidden = self.views.get(&fid).is_some_and(|view| view.panel_hidden);
+        // Unknown geometry (a semantic view before Stage 2's declaration)
+        // and a zero-column frame are both non-presentable, and follow the
+        // hidden arm rather than being sized against a placeholder.
+        let satisfiable = self
+            .frontend_area_rows(fid)
+            .and_then(|rows| self.panel_allocation(fid, rows))
+            .is_some();
+        let Some(view) = self.views.get_mut(&fid) else {
+            return result;
+        };
+        view.panel_hidden = !satisfiable;
+        result.hidden = !satisfiable;
+        result.changed = was_hidden != result.hidden;
+        if satisfiable {
+            // Focus is deliberately NOT restored when the panel
+            // reappears — the user moved on; `C-x o` returns.
+            return result;
+        }
+        if view.active == side {
+            // Durable transition: move focus out and tell the caller to
+            // release the terminal controller for this view key.
+            result.released_terminal = Some(side);
+            if let Ok(target) = self.non_side_target(fid)
+                && let Some(view) = self.views.get_mut(&fid)
+            {
+                view.active = target;
+            }
+        }
+        result
+    }
+
+    /// Move the horizontal boundary that `win` owns by `delta_rows`,
+    /// growing `win` (Q#BP5 / Q#BP5b).
+    ///
+    /// `min_for` resolves each leaf's `window.min-height` preference; it
+    /// is snapshotted by the caller **before** any geometry changes, so
+    /// one gesture uses one set of minima.
+    ///
+    /// # Errors
+    /// When `win` is not live in `fid`'s layout, when the panel is
+    /// hidden, or when no adjustable horizontal boundary exists.
+    pub fn resize_boundary(
+        &mut self,
+        fid: FrontendId,
+        win: WindowId,
+        delta_rows: i32,
+        area_rows: u32,
+        min_for: &impl Fn(WindowId) -> u32,
+    ) -> Result<(), String> {
+        let view = self
+            .views
+            .get(&fid)
+            .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?;
+        if !view.layout.iter_ids().contains(&win) {
+            return Err(format!(
+                "window {} does not belong to this frontend",
+                win.raw()
+            ));
+        }
+        let win_is_side = self
+            .windows
+            .get(&win)
+            .is_some_and(crate::window::Window::is_side);
+        if win_is_side && view.panel_hidden {
+            return Err("window.resize: the panel is not currently visible".into());
+        }
+        // Q#BP5b rule 1: a side window resolves to its OWN fixed
+        // boundary; rule 2: any other window resolves to the nearest
+        // horizontal ancestor at which its path child has a following
+        // sibling — the same boundary a drag on its bottom mode-line row
+        // moves.
+        let (boundary, lower_grows) = if win_is_side {
+            let side = self
+                .side_window_for(fid)
+                .ok_or_else(|| "window.resize: no side window".to_string())?;
+            let path = view
+                .layout
+                .path_to(side)
+                .ok_or_else(|| "window.resize: side window is not in the layout".to_string())?;
+            let (&last, parent) = path
+                .split_last()
+                .ok_or_else(|| "window.resize: no adjustable horizontal boundary".to_string())?;
+            if last == 0 {
+                return Err("window.resize: no adjustable horizontal boundary".into());
+            }
+            (
+                crate::window::SplitBoundary {
+                    path: parent.to_vec(),
+                    upper: last - 1,
+                },
+                true,
+            )
+        } else {
+            (
+                view.layout
+                    .boundary_below(win)
+                    .ok_or_else(|| "window.resize: no adjustable horizontal boundary".to_string())?,
+                false,
+            )
+        };
+
+        let placements = view.layout.compute(
+            crate::window::Rect::new(0, 0, area_rows, 1),
+            &self.panel_fixed_rows(fid, area_rows),
+        );
+        let view = self
+            .views
+            .get(&fid)
+            .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?;
+        let LayoutNode::Split { children, .. } = view
+            .layout
+            .node_at(&boundary.path)
+            .ok_or_else(|| "window.resize: boundary vanished".to_string())?
+        else {
+            return Err("window.resize: boundary is not a split".into());
+        };
+        let upper_node = &children[boundary.upper];
+        let lower_node = &children[boundary.upper + 1];
+        let upper_rows = node_row_extent(upper_node, &placements);
+        let lower_rows = node_row_extent(lower_node, &placements);
+        let total = upper_rows + lower_rows;
+        let min_upper = crate::window::interactive_min_rows(upper_node, min_for);
+        let min_lower = crate::window::interactive_min_rows(lower_node, min_for);
+        // Preserve the preferred minimum on BOTH sides when the frame can
+        // satisfy it; when it is already smaller, the motion may not make
+        // either side worse than it already is.
+        let floor_upper = min_upper.min(upper_rows);
+        let floor_lower = min_lower.min(lower_rows);
+        let boundary_delta = if lower_grows { -delta_rows } else { delta_rows };
+        let proposed = i64::from(upper_rows) + i64::from(boundary_delta);
+        let lo = i64::from(floor_upper);
+        let hi = i64::from(total.saturating_sub(floor_lower));
+        if hi < lo {
+            return Err("window.resize: no room to move this boundary".into());
+        }
+        let new_upper = u32::try_from(proposed.clamp(lo, hi))
+            .map_err(|_| "window.resize: boundary out of range".to_string())?;
+        let new_lower = total - new_upper;
+
+        // A side window writes `fixed_rows` (its ABSOLUTE height survives
+        // a terminal resize); a flexible pair writes weights (its RATIO
+        // survives). That difference is the point.
+        let lower_id = match lower_node {
+            LayoutNode::Leaf(id) => Some(*id),
+            LayoutNode::Split { .. } => None,
+        };
+        let lower_is_side = lower_id.is_some_and(|id| {
+            self.windows
+                .get(&id)
+                .is_some_and(crate::window::Window::is_side)
+        });
+        if lower_is_side {
+            let id = lower_id.expect("checked above");
+            if let Some(window) = self.windows.get_mut(&id) {
+                window.params.fixed_rows = Some(new_lower.max(MIN_WINDOW_OUTER_ROWS));
+            }
+            return Ok(());
+        }
+        // Rewrite every flexible child's weight as its current row
+        // extent, with the two adjacent children replaced. Untouched
+        // siblings therefore keep the extents they already had.
+        let extents: Vec<u32> = children
+            .iter()
+            .enumerate()
+            .map(|(i, child)| {
+                if i == boundary.upper {
+                    new_upper
+                } else if i == boundary.upper + 1 {
+                    new_lower
+                } else {
+                    node_row_extent(child, &placements)
+                }
+            })
+            .collect();
+        let fixed = self.panel_fixed_rows(fid, area_rows);
+        let view = self
+            .views
+            .get_mut(&fid)
+            .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?;
+        let Some(LayoutNode::Split {
+            weights, children, ..
+        }) = view.layout.node_at_mut(&boundary.path)
+        else {
+            return Err("window.resize: boundary vanished".into());
+        };
+        weights.resize(children.len(), 1);
+        for (i, child) in children.iter().enumerate() {
+            let pinned = matches!(child, LayoutNode::Leaf(id) if fixed.contains_key(id));
+            if !pinned {
+                weights[i] = extents[i].max(1);
+            }
+        }
+        Ok(())
+    }
+
+    /// Install `buffer_id` in an explicit window, resetting its view
+    /// state exactly as [`Self::switch_active_buffer_for`] does — except
+    /// that redisplaying the buffer a window **already shows** is a no-op
+    /// on cursor, viewport, selection, and overlays.
+    ///
+    /// # Errors
+    /// Unknown window or buffer.
+    pub fn install_buffer_in_window(
+        &mut self,
+        window_id: WindowId,
+        buffer_id: BufferId,
+    ) -> Result<(), String> {
+        let text_view = {
+            let reg = self.registry.borrow();
+            let buf = reg.get(buffer_id).map_err(|e| e.to_string())?;
+            TextView::new(buf)
+        };
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .ok_or_else(|| format!("window {window_id:?} is not live"))?;
+        if window.buffer_id == buffer_id {
+            return Ok(());
+        }
+        window.buffer_id = buffer_id;
+        window.text_view = text_view;
+        window.overlays.clear();
+        window.cursor = 0;
+        window.selection = None;
+        window.view_top = 0;
+        window.goal_col = None;
+        Ok(())
+    }
+
+    /// Phase 1 of the display transaction (Q#BP4): choose a target,
+    /// install the buffer, and report what Phase 2 must do.
+    ///
+    /// Contains **no** Lua: the hook fan-out, the reconciliation, and the
+    /// final-focus matrix all belong to the layer that owns the Lua host.
+    ///
+    /// # Errors
+    /// An unusable exact target, an unsatisfiable placement request, or a
+    /// layout with no eligible document window.
+    pub fn display_buffer(
+        &mut self,
+        fid: FrontendId,
+        request: &DisplayRequest,
+    ) -> Result<DisplayOutcome, String> {
+        let saved_active = self
+            .views
+            .get(&fid)
+            .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?
+            .active;
+        let placement = self.resolve_placement(fid, request)?;
+        self.apply_placement(fid, request, &placement)?;
+        let select = request
+            .select
+            .unwrap_or(!matches!(placement.kind, PlacementKind::Side { .. }));
+        Ok(DisplayOutcome {
+            target: placement.target,
+            saved_active,
+            select,
+            created_side: matches!(
+                placement.kind,
+                PlacementKind::Side {
+                    created: true,
+                    ..
+                }
+            ),
+        })
+    }
+
+    /// Answer "is there a usable destination for this visit?" **without
+    /// loading anything** (Q#BP11b step 2, R3-B17).
+    ///
+    /// `existing` is the side-effect-free dedup result: `None` means the
+    /// file is not open yet, in which case an eligible destination must
+    /// not be dedicated to *any* buffer — otherwise a dedicated origin
+    /// could force a load that then has nowhere to go.
+    ///
+    /// # Errors
+    /// An exact target that is dead, foreign, or dedicated; or a layout
+    /// with no eligible document window.
+    pub fn probe_display_target(
+        &self,
+        fid: FrontendId,
+        existing: Option<BufferId>,
+        window: Option<WindowId>,
+    ) -> Result<WindowId, String> {
+        let view = self
+            .views
+            .get(&fid)
+            .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?;
+        let eligible = |id: WindowId| {
+            self.windows.get(&id).is_some_and(|w| {
+                !w.params.dedicated || existing.is_some_and(|buffer_id| w.buffer_id == buffer_id)
+            })
+        };
+        if let Some(target) = window {
+            if !view.layout.iter_ids().contains(&target) {
+                return Err(format!(
+                    "display_file: window {} does not belong to this frontend",
+                    target.raw()
+                ));
+            }
+            if !eligible(target) {
+                return Err(format!(
+                    "display_file: window {} is dedicated to another buffer",
+                    target.raw()
+                ));
+            }
+            return Ok(target);
+        }
+        let is_side = |id: WindowId| {
+            self.windows
+                .get(&id)
+                .is_some_and(crate::window::Window::is_side)
+        };
+        if let Some(buffer_id) = existing
+            && let Some(showing) = view.layout.iter_ids().into_iter().find(|id| {
+                !is_side(*id)
+                    && self
+                        .windows
+                        .get(id)
+                        .is_some_and(|w| w.buffer_id == buffer_id)
+            })
+        {
+            return Ok(showing);
+        }
+        let mut candidates: Vec<WindowId> = Vec::new();
+        if let Ok(preferred) = self.non_side_target(fid) {
+            candidates.push(preferred);
+        }
+        candidates.extend(view.layout.iter_ids().into_iter().filter(|id| !is_side(*id)));
+        candidates
+            .into_iter()
+            .find(|id| eligible(*id))
+            .ok_or_else(|| "display_file: no eligible document window is available".into())
+    }
+
+    /// Q#BP3's precedence: exact target, then side affinity, then
+    /// ordinary reuse. Placement affinity precedes generic reuse —
+    /// otherwise a persistent `*compilation*` buffer already visible in a
+    /// document window makes `{side = "bottom"}` silently ignore its
+    /// requested placement.
+    fn resolve_placement(
+        &self,
+        fid: FrontendId,
+        request: &DisplayRequest,
+    ) -> Result<Placement, String> {
+        if request.window.is_some() && request.side.is_some() {
+            return Err("display: `window` and `side` are mutually exclusive".into());
+        }
+        let view = self
+            .views
+            .get(&fid)
+            .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?;
+
+        // 1. Exact target.
+        if let Some(target) = request.window {
+            if !view.layout.iter_ids().contains(&target) {
+                return Err(format!(
+                    "display: window {} does not belong to this frontend",
+                    target.raw()
+                ));
+            }
+            let window = self
+                .windows
+                .get(&target)
+                .ok_or_else(|| format!("display: window {} is not live", target.raw()))?;
+            if window.params.dedicated && window.buffer_id != request.buffer_id {
+                return Err(format!(
+                    "display: window {} is dedicated to another buffer",
+                    target.raw()
+                ));
+            }
+            if request.height.is_some() && !window.is_side() {
+                return Err("display: `height` requires a side window".into());
+            }
+            return Ok(Placement {
+                target,
+                kind: if window.is_side() {
+                    PlacementKind::Side {
+                        created: false,
+                        replacing: window.buffer_id != request.buffer_id,
+                    }
+                } else {
+                    PlacementKind::Ordinary
+                },
+            });
+        }
+
+        // 2. Side target — only on a panel-capable frontend.
+        if request.side.is_some() && view.panel_capable {
+            match self.side_window_for(fid) {
+                Some(side) => {
+                    let window = self
+                        .windows
+                        .get(&side)
+                        .ok_or_else(|| "display: side window is not live".to_string())?;
+                    if window.buffer_id == request.buffer_id {
+                        return Ok(Placement {
+                            target: side,
+                            kind: PlacementKind::Side {
+                                created: false,
+                                replacing: false,
+                            },
+                        });
+                    }
+                    if !window.params.dedicated {
+                        return Ok(Placement {
+                            target: side,
+                            kind: PlacementKind::Side {
+                                created: false,
+                                replacing: true,
+                            },
+                        });
+                    }
+                    // The one side slot is dedicated to another buffer.
+                    // Never create a second one: fall through to the
+                    // ordinary policy, discarding every side-specific
+                    // parameter (Q#BP3 2.iii).
+                }
+                None => {
+                    return Ok(Placement {
+                        target: WindowId::next(),
+                        kind: PlacementKind::Side {
+                            created: true,
+                            replacing: false,
+                        },
+                    });
+                }
+            }
+        } else if request.height.is_some() {
+            return Err("display: `height` requires a side window".into());
+        }
+
+        // 3. Ordinary target.
+        let is_side = |id: WindowId| {
+            self.windows
+                .get(&id)
+                .is_some_and(crate::window::Window::is_side)
+        };
+        // 3.i — reuse a visible NON-side window already showing it. An
+        // ordinary display never selects the panel by coincidence.
+        if let Some(existing) = view.layout.iter_ids().into_iter().find(|id| {
+            !is_side(*id)
+                && self
+                    .windows
+                    .get(id)
+                    .is_some_and(|w| w.buffer_id == request.buffer_id)
+        }) {
+            return Ok(Placement {
+                target: existing,
+                kind: PlacementKind::Ordinary,
+            });
+        }
+        // 3.ii — the Q#BP11a candidate, then `iter_ids()` order, skipping
+        // any window dedicated to a different buffer.
+        let mut candidates: Vec<WindowId> = Vec::new();
+        if let Ok(preferred) = self.non_side_target(fid) {
+            candidates.push(preferred);
+        }
+        candidates.extend(view.layout.iter_ids().into_iter().filter(|id| !is_side(*id)));
+        for candidate in candidates {
+            let eligible = self.windows.get(&candidate).is_some_and(|w| {
+                !w.params.dedicated || w.buffer_id == request.buffer_id
+            });
+            if eligible {
+                return Ok(Placement {
+                    target: candidate,
+                    kind: PlacementKind::Ordinary,
+                });
+            }
+        }
+        Err("display: no eligible document window is available".into())
+    }
+
+    /// Create the side window when needed, then install the buffer and
+    /// reconcile the parameter semantics of Q#BP3.
+    fn apply_placement(
+        &mut self,
+        fid: FrontendId,
+        request: &DisplayRequest,
+        placement: &Placement,
+    ) -> Result<(), String> {
+        let side = match placement.kind {
+            PlacementKind::Ordinary => {
+                // Reaching Ordinary while a side was REQUESTED means the
+                // request fell back (not panel-capable, or the one slot
+                // is dedicated elsewhere). A failed placement request may
+                // never pin or dedicate a document window, so `side`,
+                // `height`, `dedicated`, and quit bookkeeping are all
+                // discarded here; only an explicit `select` survives, and
+                // that is Phase 2's business.
+                let fell_back = request.side.is_some();
+                let same_buffer_redisplay = self
+                    .windows
+                    .get(&placement.target)
+                    .is_some_and(|w| w.buffer_id == request.buffer_id);
+                self.install_buffer_in_window(placement.target, request.buffer_id)?;
+                let window = self
+                    .windows
+                    .get_mut(&placement.target)
+                    .ok_or_else(|| "display: target window vanished".to_string())?;
+                match request.dedicated {
+                    Some(dedicated) if !fell_back => window.params.dedicated = dedicated,
+                    // A same-buffer redisplay must not silently unpin a
+                    // window; a genuine replacement starts undedicated.
+                    _ if !same_buffer_redisplay => window.params.dedicated = false,
+                    _ => {}
+                }
+                return Ok(());
+            }
+            PlacementKind::Side { created, replacing } => (created, replacing),
+        };
+        let (created, replacing) = side;
+        let requested_side = request.side.unwrap_or(Side::Bottom);
+
+        if created {
+            let rows = Self::clamp_panel_rows(request.height.unwrap_or(request.default_panel_rows))?;
+            let origin = self.non_side_target(fid).ok();
+            let text_view = {
+                let reg = self.registry.borrow();
+                let buf = reg.get(request.buffer_id).map_err(|e| e.to_string())?;
+                TextView::new(buf)
+            };
+            let mut window = Window::new(placement.target, request.buffer_id, text_view);
+            window.params.side = Some(requested_side);
+            window.params.fixed_rows = Some(rows);
+            window.params.dedicated = request.dedicated.unwrap_or(false);
+            window.params.set_quit_action(Some(QuitAction::Delete));
+            window.params.set_origin_document(origin);
+            self.windows.insert(placement.target, window);
+            self.views
+                .get_mut(&fid)
+                .ok_or_else(|| format!("frontend {fid:?} has no window layout"))?
+                .layout
+                .install_side_leaf(placement.target);
+            return Ok(());
+        }
+
+        // Reusing the existing slot. Capture the outgoing presentation
+        // BEFORE the install resets the window's view state.
+        let prior = {
+            let window = self
+                .windows
+                .get(&placement.target)
+                .ok_or_else(|| "display: side window vanished".to_string())?;
+            QuitAction::Restore {
+                buffer_id: window.buffer_id,
+                fixed_rows: window.params.fixed_rows.unwrap_or(MIN_WINDOW_OUTER_ROWS),
+                dedicated: window.params.dedicated,
+                cursor: window.cursor,
+                view_top: window.view_top,
+                goal_col: window.goal_col,
+                selection: window.selection,
+                then: Box::new(
+                    window
+                        .params
+                        .quit_action()
+                        .cloned()
+                        .unwrap_or(QuitAction::Delete),
+                ),
+            }
+        };
+        self.install_buffer_in_window(placement.target, request.buffer_id)?;
+        let height = match request.height {
+            Some(rows) => Some(Self::clamp_panel_rows(rows)?),
+            None => None,
+        };
+        let window = self
+            .windows
+            .get_mut(&placement.target)
+            .ok_or_else(|| "display: side window vanished".to_string())?;
+        if let Some(rows) = height {
+            window.params.fixed_rows = Some(rows);
+        }
+        if replacing {
+            // A replacement's new presentation defaults to undedicated so
+            // the one slot stays replaceable; an explicit dedication
+            // applies only after the OLD presentation already passed
+            // eligibility, so `dedicated = false` cannot clear-and-bypass
+            // an existing dedication in the same call.
+            window.params.dedicated = request.dedicated.unwrap_or(false);
+            let mut action = prior;
+            action.truncate_to(MAX_PANEL_QUIT_DEPTH);
+            window.params.set_quit_action(Some(action));
+        } else if let Some(dedicated) = request.dedicated {
+            window.params.dedicated = dedicated;
+        }
+        Ok(())
     }
 
     // ---- selection / region (T M2.12) --------------------------------------
@@ -3070,6 +4433,25 @@ impl EditorCore {
                 }
             }
         };
+        // Q#BP10a: a side window showing the victim is CLOSED, not
+        // redirected to `*scratch*`. Redirecting would strand an
+        // unrelated buffer in the panel slot; the wrapper collapse
+        // restores the prior root, which by construction holds a leaf.
+        let doomed_sides: Vec<(FrontendId, WindowId)> = self
+            .views
+            .iter()
+            .filter_map(|(fid, view)| {
+                let side = view.layout.side_leaf(|id| {
+                    self.windows
+                        .get(&id)
+                        .is_some_and(crate::window::Window::is_side)
+                })?;
+                (self.windows.get(&side)?.buffer_id == buffer_id).then_some((*fid, side))
+            })
+            .collect();
+        for (fid, side) in doomed_sides {
+            self.remove_side_window(fid, side);
+        }
         {
             let reg = self.registry.borrow();
             let buf = reg.get(fallback).map_err(|e| e.to_string())?;
@@ -3509,6 +4891,9 @@ mod tests {
                 layout: Layout::single(win_id),
                 active: win_id,
                 fold_projection: true,
+                panel_capable: true,
+                frame_geometry: None,
+                panel_hidden: false,
             },
         );
         win_id
@@ -3525,7 +4910,7 @@ mod tests {
         let win2 = attach_frontend(&mut s, fid2);
 
         s.active_frontend = fid2;
-        s.close_others();
+        s.close_others().expect("document window may close others");
 
         assert!(
             s.windows.contains_key(&win2),
@@ -4093,8 +5478,10 @@ mod tests {
             s.active_window_mut().cursor = (i % 10) as u64;
             s.push_jump();
         }
+        // Bottom-panel arc (Q#BP11c): the cap applies independently to
+        // each frontend's own vector, with today's oldest-entry eviction.
         assert_eq!(
-            s.jump_ring.len(),
+            s.jump_ring[&FrontendId::LOCAL].len(),
             EditorCore::JUMP_RING_CAP,
             "ring must stay bounded at JUMP_RING_CAP"
         );

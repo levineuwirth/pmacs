@@ -88,6 +88,7 @@ mod diag;
 mod fold;
 mod index;
 mod mcp;
+mod window_panel;
 // Every `pub` item a moved domain owned is re-exported so its prior
 // `crate::lua_bindings::<item>` path still resolves — the split must not
 // shrink the public API surface. That includes the `install_*` wiring fns:
@@ -644,6 +645,26 @@ impl PackageInstallOverride {
     pub fn with_user_install_root(mut self, p: std::path::PathBuf) -> Self {
         self.user_install_root = Some(p);
         self
+    }
+}
+
+/// Resolve an integer setting out of the shared `pmacs.config` registry
+/// (bottom-panel arc, Q#BP2 / Q#BP11).
+///
+/// The registry lives in Lua app data, so Rust-side consumers — the
+/// divider drag, the keyboard resize commands, and side-window creation
+/// — reach it here rather than round-tripping through Lua. `fallback`
+/// covers a bare core whose runtime never defined the setting (unit-test
+/// construction), and a negative or out-of-range stored value.
+#[must_use]
+pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: u32) -> u32 {
+    let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() else {
+        return fallback;
+    };
+    let borrowed = registry.borrow();
+    match borrowed.get(name, buffer_id) {
+        Ok(crate::config_registry::ConfigValue::Int(v)) => u32::try_from(*v).unwrap_or(fallback),
+        _ => fallback,
     }
 }
 
@@ -1572,7 +1593,7 @@ fn after_buffer_removed(lua: &Lua, id: BufferId) {
     }
 }
 
-fn run_hook_if_defined(lua: &Lua, name: &str, args: mlua::MultiValue) {
+pub(crate) fn run_hook_if_defined(lua: &Lua, name: &str, args: mlua::MultiValue) {
     let snapshot = match lua.app_data_ref::<SharedHookRegistry>() {
         Some(hooks) => hooks.borrow().snapshot(name),
         None => None,
@@ -8467,6 +8488,11 @@ fn install_terminal(
     manager: &crate::terminal::SharedTerminalManager,
     supervisor: &SharedProcessSupervisor,
 ) -> mlua::Result<()> {
+    // Bottom-panel arc (Q#BP2b): the panel-reconciliation transaction
+    // must be able to RELEASE a hidden panel's terminal controller from a
+    // Lua-owning context, so the manager joins the LSP manager and the
+    // process supervisor as app data.
+    lua.set_app_data(manager.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
     let terminal = lua.create_table()?;
 
@@ -12166,6 +12192,9 @@ fn lua_compat_ctx_args(ctx: &CompletionContext) -> LuaProviderArgs {
 )]
 fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
     let win = lua.create_table()?;
+    // Bottom-panel arc (Q#BP11): display policy, side windows, quit, and
+    // boundary resize live in their own module.
+    window_panel::install(lua, core, &win)?;
 
     {
         let cc = core.clone();
@@ -12271,8 +12300,9 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
         win.set(
             "close_others",
             lua.create_function(move |_, ()| {
-                cc.borrow_mut().close_others();
-                Ok(())
+                cc.borrow_mut()
+                    .close_others()
+                    .map_err(mlua::Error::runtime)
             })?,
         )?;
     }

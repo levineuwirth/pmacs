@@ -161,6 +161,11 @@ pub struct EditorState {
     /// Last left-button down event, used to synthesize terminal double
     /// clicks from crossterm's plain Down/Up mouse event stream.
     mouse_click: Option<MouseClickState>,
+    /// In-progress split-boundary drag (bottom-panel arc, Q#BP5), armed
+    /// by a left press on a mode-line row that is an exposed segment of a
+    /// horizontal boundary. Lives beside `mouse_click`; selection is
+    /// untouched for the whole gesture.
+    window_drag: Option<WindowDragState>,
 }
 
 #[derive(Default)]
@@ -208,7 +213,25 @@ struct MouseClickState {
     at: Instant,
 }
 
+/// An armed split-boundary drag (Q#BP5).
+///
+/// `owner` is the window whose bottom mode-line row was pressed; the
+/// boundary it resolves to is recomputed on every motion, so a layout
+/// mutation mid-drag cannot move a boundary that no longer exists.
+#[derive(Copy, Clone)]
+struct WindowDragState {
+    frontend_id: FrontendId,
+    owner: WindowId,
+    last_row: u32,
+}
+
 const DOUBLE_CLICK_MAX_DELAY: Duration = Duration::from_millis(500);
+
+/// Grip glyph stamped at the right end of a divider segment (Q#BP5a).
+///
+/// It lands on the mode line's protected trailing blank, so it adds no
+/// column and clobbers no information.
+const DIVIDER_HANDLE_GLYPH: char = '⇕';
 
 impl EditorState {
     /// Construct a fresh editor for an unnamed scratch buffer.
@@ -488,6 +511,16 @@ impl EditorState {
                 include_str!("../builtin/runtime/indent.lua"),
             )
             .expect("load indent builtin chunk");
+        // Bottom-panel arc: `window.panel-height` / `window.min-height`
+        // plus the quit and keyboard-resize commands. Must load BEFORE
+        // listview/compile/terminal, which resolve `window.panel-height`
+        // when they open a panel.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/window.lua"),
+                include_str!("../builtin/runtime/window.lua"),
+            )
+            .expect("load window builtin chunk");
         // Compile-mode (Arc 5 stage 1, Q#CM1) — ORDERING CONTRACT:
         // compile.lua must load AFTER lsp.lua. It takes over
         // `M-g n` / `M-g p` for the unified error dispatchers, and
@@ -586,6 +619,7 @@ impl EditorState {
             snippets,
             statusline_registry,
             mouse_click: None,
+            window_drag: None,
         }
     }
 
@@ -763,9 +797,74 @@ impl EditorState {
             && !core.search_active()
             && !core.query_replace_active()
             && !core.menu_is_open()
-            && core
-                .active_window_for(frontend_id)
-                .is_some_and(|window| !core.buffer_round_trips(window.buffer_id))
+            && core.active_window_for(frontend_id).is_some_and(|window| {
+                // Bottom-panel arc (Q#BP14a): a focused SIDE window turns
+                // optimistic apply off for this frontend, independently
+                // of the buffer-global round-trip set.
+                //
+                // Marking the panel's BUFFER round-trip instead would be
+                // wrong twice: `round_trip_buffers` is keyed by
+                // `BufferId` across every frontend and window, so it
+                // would disable optimistic input for another frontend
+                // editing the same buffer as its document; and an opt-out
+                // would be unsafe, because the GPU would optimistically
+                // edit its document mirror while daemon input targets the
+                // panel — every resulting op then fails remote-op
+                // validation and the mirror silently diverges.
+                !window.is_side() && !core.buffer_round_trips(window.buffer_id)
+            })
+    }
+
+    /// The idempotent panel-reconciliation transaction (Q#BP2b).
+    ///
+    /// Runs after attach / resize / display / split / close, after any
+    /// `fixed_rows` or setting change, after any Lua hook or callback
+    /// transaction that can mutate the layout, and **defensively** before
+    /// final-focus resolution, input dispatch, terminal sync, and paint.
+    /// Two events drained in one burst therefore cannot route the second
+    /// to a panel the first made invisible, and a render callback cannot
+    /// leave stale panel geometry for the painter.
+    pub fn reconcile_panel_layout(&self, frontend_id: FrontendId) -> bool {
+        let outcome = self
+            .core
+            .borrow_mut()
+            .reconcile_panel_layout_core(frontend_id);
+        if let Some(window_id) = outcome.released_terminal {
+            // Hiding is a DURABLE transition: the terminal resize path
+            // merely returns on zero content without releasing the
+            // controller, so an invisible panel would otherwise keep
+            // owning its child.
+            let buffer_id = self
+                .core
+                .borrow()
+                .windows
+                .get(&window_id)
+                .map(|window| window.buffer_id);
+            if let Some(buffer_id) = buffer_id {
+                let _ = self
+                    .terminal_manager
+                    .borrow_mut()
+                    .release_controller(crate::terminal::TerminalViewKey {
+                        frontend_id,
+                        window_id,
+                        buffer_id,
+                    });
+            }
+        }
+        outcome.changed
+    }
+
+    /// Cache one frontend's authoritative frame capacity and reconcile
+    /// (Q#BP2b / Q#BP15a).
+    ///
+    /// The single seam for grid and `LOCAL` views, whose real attach and
+    /// resize sizes ARE the declaration. A semantic view never calls this
+    /// in Stage 1; its geometry stays **unknown**.
+    pub fn sync_frame_geometry(&self, frontend_id: FrontendId, total: CellSize) {
+        self.core
+            .borrow_mut()
+            .declare_frame_geometry(frontend_id, total);
+        self.reconcile_panel_layout(frontend_id);
     }
 
     /// Local-frontend compatibility wrapper.
@@ -800,6 +899,10 @@ impl EditorState {
         // Authenticate every path through this input event, including modal
         // callbacks such as M-x minibuffer acceptance.
         let _origin = self.interactive_origin.enter(frontend_id);
+        // Bottom-panel arc (Q#BP2b): reconcile defensively before input
+        // dispatch, so two events drained in one burst cannot route the
+        // second to a panel the first made invisible.
+        self.reconcile_panel_layout(frontend_id);
         let chord = key_event_to_chord(key);
         {
             let mut core = self.core.borrow_mut();
@@ -1084,6 +1187,10 @@ impl EditorState {
     ///
     /// This is called before process drain and paint, never from rendering.
     pub fn sync_terminal_layout(&mut self, frontend_id: FrontendId, term_size: CellSize) -> bool {
+        // Bottom-panel arc (Q#BP2b): a panel that just became
+        // unsatisfiable must have released its controller before this
+        // runs, or the child would be resized against a dead rect.
+        self.reconcile_panel_layout(frontend_id);
         let Some(key) = self
             .terminal_manager
             .borrow()
@@ -1815,6 +1922,21 @@ impl EditorState {
             return;
         }
 
+        // Bottom-panel arc (Q#BP5): an armed divider drag owns the
+        // pointer for the whole gesture, INCLUDING rows outside any
+        // window — otherwise tracking would stop the moment the pointer
+        // crossed the frame's status row.
+        if self.window_drag.is_some() {
+            match ev.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.drag_window_boundary(frontend_id, cell_row, term_size);
+                }
+                MouseEventKind::Up(MouseButton::Left) => self.window_drag = None,
+                _ => self.window_drag = None,
+            }
+            return;
+        }
+
         let Some((win_id, rect)) = window_at_cell(
             &self.core.borrow(),
             frontend_id,
@@ -1826,6 +1948,15 @@ impl EditorState {
         };
         let inner_rows = rect.size.rows.saturating_sub(1);
         let local_row = cell_row.saturating_sub(rect.origin.row);
+        // A press on a mode-line row that is an exposed segment of a
+        // horizontal boundary arms a divider drag, ahead of the terminal
+        // router: a document terminal above the panel owns a boundary
+        // too. Selection is untouched, so this click still creates none.
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left)) && local_row >= inner_rows {
+            self.mouse_click = None;
+            self.arm_window_drag(frontend_id, win_id, cell_row);
+            return;
+        }
         let buffer_id = self.core.borrow().windows[&win_id].buffer_id;
         if self.terminal_manager.borrow().is_terminal(buffer_id) {
             let content_size = CellSize::new(inner_rows, rect.size.cols);
@@ -1926,6 +2057,112 @@ impl EditorState {
                 self.mouse_click = None;
             }
         }
+    }
+
+    /// Arm a divider drag if `owner`'s bottom row really is an exposed
+    /// segment of a horizontal boundary (Q#BP5).
+    fn arm_window_drag(&mut self, frontend_id: FrontendId, owner: WindowId, cell_row: u32) {
+        let is_divider = self.core.borrow().views.get(&frontend_id).is_some_and(|view| {
+            view.layout.boundary_below(owner).is_some()
+        });
+        self.window_drag = is_divider.then_some(WindowDragState {
+            frontend_id,
+            owner,
+            last_row: cell_row,
+        });
+    }
+
+    /// Continue an armed divider drag (Q#BP5).
+    ///
+    /// The boundary is re-resolved from `owner` on every motion, so a
+    /// layout mutation mid-drag cannot move a boundary that no longer
+    /// exists. Motion is applied incrementally and re-anchored each
+    /// event, so the clamp absorbs over-travel instead of accumulating it.
+    fn drag_window_boundary(&mut self, frontend_id: FrontendId, cell_row: u32, term_size: CellSize) {
+        let Some(drag) = self.window_drag else {
+            return;
+        };
+        if drag.frontend_id != frontend_id {
+            return;
+        }
+        self.window_drag = Some(WindowDragState { last_row: cell_row, ..drag });
+        let delta = i64::from(cell_row) - i64::from(drag.last_row);
+        let Ok(delta) = i32::try_from(delta) else {
+            return;
+        };
+        if delta == 0 || term_size.rows < 2 {
+            return;
+        }
+        // A drag that runs into the clamp is a no-op, not an error to
+        // surface: the pointer simply cannot move the boundary further.
+        let _ = self.resize_window_boundary(frontend_id, drag.owner, delta, term_size.rows - 1);
+    }
+
+    /// Move the boundary `win` owns by `delta_rows`, growing `win`
+    /// (Q#BP5 / Q#BP5b), under the interactive `window.min-height`
+    /// preference snapshotted before any geometry changes.
+    ///
+    /// Returns the core's pointed error, if any; a `no adjustable
+    /// horizontal boundary` result is a no-op by construction.
+    pub fn resize_window_boundary(
+        &self,
+        frontend_id: FrontendId,
+        win: WindowId,
+        delta_rows: i32,
+        area_rows: u32,
+    ) -> Result<(), String> {
+        // One gesture, one set of minima: resolved against each leaf's
+        // CURRENT buffer (buffer-local override → global → default)
+        // before the geometry moves.
+        let minima: HashMap<WindowId, u32> = {
+            let core = self.core.borrow();
+            core.views
+                .get(&frontend_id)
+                .map(|view| {
+                    view.layout
+                        .iter_ids()
+                        .into_iter()
+                        .map(|id| {
+                            let buffer_id = core.windows.get(&id).map(|w| w.buffer_id);
+                            (id, self.window_min_height(buffer_id))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let result = self.core.borrow_mut().resize_boundary(
+            frontend_id,
+            win,
+            delta_rows,
+            area_rows,
+            &|id| {
+                minima
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(crate::window::MIN_WINDOW_OUTER_ROWS)
+            },
+        );
+        if result.is_ok() {
+            self.reconcile_panel_layout(frontend_id);
+        }
+        result
+    }
+
+    /// Resolve the `window.min-height` preference for a buffer, clamped
+    /// into `[MIN_WINDOW_OUTER_ROWS, …]` (Q#BP2).
+    ///
+    /// A core with no Lua host — or one whose runtime has not defined the
+    /// setting — falls back to the structural floor, so the preference
+    /// can never make an existing layout invalid.
+    #[must_use]
+    pub fn window_min_height(&self, buffer_id: Option<crate::buffer::BufferId>) -> u32 {
+        crate::lua_bindings::config_u32(
+            self.lua_host.lua(),
+            "window.min-height",
+            buffer_id,
+            crate::window::MIN_WINDOW_OUTER_ROWS,
+        )
+        .max(crate::window::MIN_WINDOW_OUTER_ROWS)
     }
 
     fn dispatch_terminal_mouse(
@@ -2368,8 +2605,12 @@ pub(crate) fn window_placements(
         return HashMap::new();
     };
     let area = Rect::new(0, 0, term_size.rows - 1, term_size.cols);
+    // Bottom-panel arc (Q#BP2, R5-B1): both production `Layout::compute`
+    // callers feed in the SAME shared fixed map, so a side window's rows
+    // are identical in the placement pass and the peer-overlay pass.
+    let fixed = core.panel_fixed_rows(frontend_id, area.size.rows);
     view.layout
-        .compute(area)
+        .compute(area, &fixed)
         .into_iter()
         .map(|(window_id, outer)| {
             let content = Rect::new(
@@ -2834,6 +3075,13 @@ pub fn paint_frame(
     if term_size.rows < 2 || term_size.cols == 0 {
         return None;
     }
+    // Bottom-panel arc (Q#BP2b/Q#BP15a): a grid frontend's real frame
+    // size IS its authoritative geometry declaration. Declaring and
+    // reconciling here — before the statusline fan-out and before the
+    // long mutable borrow — means the painter never sees stale panel
+    // geometry, and a panel the frame can no longer satisfy has already
+    // surrendered focus and its terminal controller.
+    state.sync_frame_geometry(frontend_id, term_size);
     // Statusline callbacks may call arbitrary editor APIs. Evaluate the
     // complete visible-window fan-out before the long mutable core borrow
     // below, then paint only the transactionally validated owned results.
@@ -2871,6 +3119,21 @@ pub fn paint_frame(
 
     let placements = window_placements(core, frontend_id, term_size);
     let active = core.views.get(&frontend_id)?.active;
+    // Bottom-panel arc (Q#BP5a): the divider IS the upper subtree's
+    // existing mode-line row — no row is added or consumed, and
+    // `fixed_rows` excludes it. Resolved once per frame, before the
+    // mutable per-window loop borrows `core.windows`. A boundary whose
+    // upper child is a nested subtree exposes SEVERAL leaf segments along
+    // the same edge, so the root panel divider is full width even when
+    // the document subtree ends in several columns.
+    let divider_windows: Vec<WindowId> = core.views.get(&frontend_id).map_or_else(Vec::new, |view| {
+        view.layout
+            .iter_ids()
+            .into_iter()
+            .filter(|id| view.layout.boundary_below(*id).is_some())
+            .collect()
+    });
+    let divider_style = theme.face("ui.divider");
 
     // Clear the whole grid first so windows that shrink on resize
     // don't leak the old contents.
@@ -3093,6 +3356,12 @@ pub fn paint_frame(
         );
     }
     drop(reg);
+
+    for id in &divider_windows {
+        if let Some(placement) = placements.get(id) {
+            paint_divider_segment(grid, &placement.outer, divider_style);
+        }
+    }
 
     paint_status_line(grid, core, &state.lua_host, dispatcher, term_size, &theme);
 
@@ -3582,6 +3851,33 @@ fn mode_line_grapheme_width(graphemes: &[ModeLineGrapheme]) -> u32 {
 /// Paint complete graphemes at a logical signed origin. A grapheme that
 /// straddles either clip edge is omitted wholesale, so a wide glyph can never
 /// leave a dangling half-cell at a window or left/right collision boundary.
+/// Restyle one exposed segment of a horizontal split boundary and stamp
+/// its grip (Q#BP5a).
+///
+/// The segment is the window's own mode-line row: the glyphs the mode
+/// line already painted are preserved, only the *surface* changes, and
+/// the grip lands on the protected suffix's trailing blank. `ui.divider`
+/// resolves through the ordinary `ui.*` face walk, so an unset face
+/// leaves today's mode-line surface untouched and the affordance is the
+/// grip alone.
+fn paint_divider_segment(
+    grid: &mut crate::cell::CellGrid<'_>,
+    rect: &crate::window::Rect,
+    style: Option<crate::cell::Style>,
+) {
+    if rect.size.rows == 0 || rect.size.cols == 0 {
+        return;
+    }
+    let row = rect.origin.row + rect.size.rows - 1;
+    if let Some(style) = style {
+        for col in 0..rect.size.cols {
+            grid.at(CellCoord::new(row, rect.origin.col + col)).style = style;
+        }
+    }
+    let cell = grid.at(CellCoord::new(row, rect.origin.col + rect.size.cols - 1));
+    cell.glyph = crate::cell::Glyph::Char(DIVIDER_HANDLE_GLYPH);
+}
+
 fn paint_mode_line_graphemes(
     grid: &mut crate::cell::CellGrid<'_>,
     rect: &crate::window::Rect,
@@ -6360,7 +6656,8 @@ mod tests {
         let core = s.core.borrow();
         assert_eq!(core.windows.len(), 8);
         let area = crate::window::Rect::new(0, 0, 40, 120);
-        let placements = core.active_layout().compute(area);
+        let fixed = core.panel_fixed_rows(core.active_frontend_key(), area.size.rows);
+        let placements = core.active_layout().compute(area, &fixed);
         assert_eq!(placements.len(), 8);
         for r in placements.values() {
             assert!(!r.is_empty(), "rect was empty: {r:?}");
@@ -6780,12 +7077,18 @@ mod tests {
             .core
             .borrow()
             .active_layout()
-            .compute(crate::window::Rect::new(0, 0, 24, 90));
+            .compute(
+                crate::window::Rect::new(0, 0, 24, 90),
+                &std::collections::HashMap::new(),
+            );
         let p2 = s
             .core
             .borrow()
             .active_layout()
-            .compute(crate::window::Rect::new(0, 0, 24, 60));
+            .compute(
+                crate::window::Rect::new(0, 0, 24, 60),
+                &std::collections::HashMap::new(),
+            );
         // Both should preserve the 2:1 ratio. Find the two windows
         // and verify the larger:smaller ratio is 2:1 in both.
         let wider1 = p1.values().map(|r| r.size.cols).max().unwrap();

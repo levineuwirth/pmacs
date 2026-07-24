@@ -109,7 +109,12 @@ pub fn paint_other_frontend_overlays(
         return;
     }
     let text_area = Rect::new(0, 0, text_rows, term_size.cols);
-    let placements = core.active_layout().compute(text_area);
+    // Bottom-panel arc (R5-B1): this pass derives its own text-area
+    // `Rect` instead of reusing `window_placements`, so it must ask for
+    // the same fixed extents — otherwise every peer cursor paints at the
+    // row it would occupy with no panel open.
+    let fixed = core.panel_fixed_rows(core.active_frontend_key(), text_rows);
+    let placements = core.active_layout().compute(text_area, &fixed);
 
     let registry = core.registry.clone();
     let reg = registry.borrow();

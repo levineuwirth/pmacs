@@ -1516,6 +1516,9 @@ fn attach_frontend(s: &EditorState, fid: FrontendId, fold_projection: bool) -> W
             layout: Layout::single(win_id),
             active: win_id,
             fold_projection,
+            panel_capable: true,
+            frame_geometry: None,
+            panel_hidden: false,
         },
     );
     win_id

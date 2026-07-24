@@ -82,6 +82,9 @@ fn attach_view(
             layout: Layout::single(window_id),
             active: window_id,
             fold_projection: true,
+            panel_capable: true,
+            frame_geometry: None,
+            panel_hidden: false,
         },
     );
     window_id
