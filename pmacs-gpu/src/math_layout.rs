@@ -432,11 +432,63 @@ impl<'a> MathLayout<'a> {
     }
 }
 
+/// Spacer text reserving `width_px`, quantized UP to whole space advances.
+///
+/// Q#MS4 / B1': a `RichChunk`'s only width is its text, so a suppressed math
+/// span reserves room the way `SourceTab` does — with spaces. Quantizing up
+/// is deliberate: it keeps the projection grid-aligned with the surrounding
+/// monospace text and keeps hit runs integral, at the cost of up to one
+/// advance of slack on the right of the box.
+#[must_use]
+pub fn spacer_for_width(width_px: f32, space_advance_px: f32) -> String {
+    if !width_px.is_finite() || width_px <= 0.0 || space_advance_px <= 0.0 {
+        return String::new();
+    }
+    let n = (width_px / space_advance_px).ceil();
+    // Guard the cast: a pathological advance must not mint a giant string.
+    let n = n.clamp(0.0, 4096.0) as usize;
+    " ".repeat(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::math_parse::parse;
+
+    #[test]
+    fn spacer_quantizes_up_to_whole_advances() {
+        // Exactly two advances stays two; a sliver over rounds up, so the
+        // box never overlaps the text that follows it.
+        assert_eq!(spacer_for_width(20.0, 10.0).len(), 2);
+        assert_eq!(spacer_for_width(20.1, 10.0).len(), 3);
+        assert_eq!(spacer_for_width(0.1, 10.0).len(), 1);
+        // Degenerate inputs reserve nothing rather than panicking or
+        // minting an enormous string.
+        assert!(spacer_for_width(0.0, 10.0).is_empty());
+        assert!(spacer_for_width(-5.0, 10.0).is_empty());
+        assert!(spacer_for_width(10.0, 0.0).is_empty());
+        assert!(spacer_for_width(f32::NAN, 10.0).is_empty());
+        assert!(spacer_for_width(f32::INFINITY, 10.0).is_empty());
+        assert!(spacer_for_width(1e9, 0.001).len() <= 4096);
+    }
+
+    #[test]
+    fn a_real_box_reserves_at_least_its_own_width() {
+        let boxed = lay(r"\frac{a}{b}", crate::BASE_CODE_FONT_SIZE);
+        let advance = 9.6_f32; // a plausible monospace advance at 16 px
+        let spacer = spacer_for_width(boxed.width, advance);
+        let reserved = spacer.len() as f32 * advance;
+        assert!(
+            reserved >= boxed.width,
+            "reserved {reserved} must cover box width {}",
+            boxed.width
+        );
+        assert!(
+            reserved - boxed.width < advance,
+            "slack stays under one advance"
+        );
+    }
 
     fn engine() -> MathLayout<'static> {
         MathLayout::new(LATIN_MODERN_MATH).expect("bundled font")

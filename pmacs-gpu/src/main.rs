@@ -7722,6 +7722,13 @@ enum ChunkSource {
     /// Injected adornment text (inlay hint) anchored at this slice
     /// byte offset. Hits inside it snap to the anchor.
     Adornment { anchor: u64 },
+    /// A suppressed inline-math span (Q#MS4). The chunk's text is SPACER
+    /// spaces reserving the laid-out box's width — a `RichChunk`'s only
+    /// width is its text, so there is no zero-glyph strut to reserve with
+    /// (framing F2). `start`..`end` is the suppressed source range,
+    /// delimiters included; hits inside snap to `start`, the same rule
+    /// `Adornment` uses, because the box has no interior byte map.
+    MathBox { start: u64, end: u64 },
 }
 
 /// One run of the projected→source hit map (Q#M2), built by
@@ -7738,6 +7745,95 @@ struct ProjectedRun {
 
 /// Build the projected→source run map plus the projected text's line
 /// start table (cosmic-text reports hits as line + byte-within-line).
+
+#[cfg(test)]
+mod math_chunk_tests {
+    use super::*;
+
+    fn spacer_chunk(start: u64, end: u64, spaces: usize) -> RichChunk {
+        RichChunk {
+            text: " ".repeat(spaces),
+            color: None,
+            source: ChunkSource::MathBox { start, end },
+        }
+    }
+
+    /// Q#MS4: hits anywhere inside a suppressed span snap to its start, the
+    /// same rule `Adornment` uses, because the box has no interior byte map.
+    #[test]
+    fn hits_inside_a_math_box_snap_to_the_span_start() {
+        // `ab` + `$x^2$` suppressed to 3 spacer columns + `cd`
+        let chunks = vec![
+            RichChunk {
+                text: "ab".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 0 },
+            },
+            spacer_chunk(2, 7, 3),
+            RichChunk {
+                text: "cd".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 7 },
+            },
+        ];
+        let (runs, _) = build_hit_runs(&chunks);
+        assert_eq!(projected_to_source(&runs, 0), Some(0));
+        assert_eq!(projected_to_source(&runs, 1), Some(1));
+        // Every boundary within the spacer maps to the span start (2).
+        for projected in 2..=4 {
+            assert_eq!(
+                projected_to_source(&runs, projected),
+                Some(2),
+                "projected {projected} must snap to the span start"
+            );
+        }
+        // Past the box, ordinary source mapping resumes.
+        assert_eq!(projected_to_source(&runs, 5), Some(7));
+        assert_eq!(projected_to_source(&runs, 6), Some(8));
+    }
+
+    /// The inverse direction: a caret anywhere in the suppressed range sits
+    /// at the box's left edge, and text after it accounts for the full
+    /// reserved width (acceptance 10's "shifts by the quantized difference").
+    #[test]
+    fn source_positions_inside_a_math_box_map_to_its_left_edge() {
+        let chunks = vec![
+            RichChunk {
+                text: "ab".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 0 },
+            },
+            spacer_chunk(2, 7, 3),
+            RichChunk {
+                text: "cd".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 7 },
+            },
+        ];
+        assert_eq!(source_to_projected(&chunks, 0), Some(0));
+        assert_eq!(source_to_projected(&chunks, 2), Some(2));
+        // Interior source bytes collapse onto the left edge.
+        assert_eq!(source_to_projected(&chunks, 4), Some(2));
+        assert_eq!(source_to_projected(&chunks, 7), Some(2));
+        // The first byte after the span lands past the reserved width.
+        assert_eq!(source_to_projected(&chunks, 8), Some(6));
+    }
+
+    /// A math chunk carries generated spacer text, so tab expansion must
+    /// leave it alone rather than treating a space as a source tab.
+    #[test]
+    fn tab_expansion_preserves_a_math_chunk_untouched() {
+        let chunks = vec![spacer_chunk(0, 5, 4)];
+        let expanded = expand_chunk_tabs(chunks);
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].text, "    ");
+        assert!(matches!(
+            expanded[0].source,
+            ChunkSource::MathBox { start: 0, end: 5 }
+        ));
+    }
+}
+
 fn build_hit_runs(chunks: &[RichChunk]) -> (Vec<ProjectedRun>, Vec<u64>) {
     let mut runs = Vec::with_capacity(chunks.len());
     let mut line_starts = vec![0u64];
@@ -7776,6 +7872,9 @@ fn projected_to_source(runs: &[ProjectedRun], projected: u64) -> Option<u64> {
         ChunkSource::Source { start } => Some(start + within),
         ChunkSource::SourceTab { start } => Some(start + u64::from(within > 0)),
         ChunkSource::Adornment { anchor } => Some(anchor),
+        // Q#MS4: the box has no interior byte map, so every boundary inside
+        // it snaps to the span start rather than inventing a sub-position.
+        ChunkSource::MathBox { start, .. } => Some(start),
     }
 }
 
@@ -7807,6 +7906,16 @@ fn source_to_projected(chunks: &[RichChunk], source: u64) -> Option<u64> {
             }
             ChunkSource::Adornment { anchor } => {
                 if source <= anchor {
+                    return Some(projected);
+                }
+            }
+            ChunkSource::MathBox { start, end } => {
+                // Anywhere within the suppressed range maps to the box's
+                // left edge; past it, the box's full reserved width applies.
+                if source <= start {
+                    return Some(projected);
+                }
+                if source <= end {
                     return Some(projected);
                 }
             }
@@ -9131,6 +9240,9 @@ fn expand_chunk_tabs(chunks: Vec<RichChunk>) -> Vec<RichChunk> {
                     },
                     ChunkSource::Adornment { anchor } => ChunkSource::Adornment { anchor },
                     ChunkSource::SourceTab { start } => ChunkSource::SourceTab { start },
+                    // A suppressed math span's spacer text is generated, not
+                    // source, so it holds no tab byte to expand.
+                    ChunkSource::MathBox { start, end } => ChunkSource::MathBox { start, end },
                 },
             });
             column += tab_width;
@@ -9156,6 +9268,9 @@ fn offset_chunk_source(source: ChunkSource, byte_offset: u64) -> ChunkSource {
         },
         ChunkSource::SourceTab { start } => ChunkSource::SourceTab { start },
         ChunkSource::Adornment { anchor } => ChunkSource::Adornment { anchor },
+        // The suppressed range is already in slice coordinates and is never
+        // split, so a within-chunk offset does not move it.
+        ChunkSource::MathBox { start, end } => ChunkSource::MathBox { start, end },
     }
 }
 
