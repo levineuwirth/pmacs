@@ -108,9 +108,38 @@ If it does not, stop and repair the remote/fetch configuration.
   inherits `LOCAL`'s **document** buffer, and an initial-target bootstrap
   whose `after-load` hook creates and selects a panel still reasserts
   into a document window.
+- **Review round 2 addressed.** The load-bearing finding: **Q#BP7 item 1
+  — "growth reaching the live tail re-arms follow" — was never
+  implemented.** `at_bottom` is the instantaneous geometric readout
+  `scroll_offset == 0`, which a still-anchored view satisfies whenever it
+  is momentarily tall enough to reach the tail, so the round-1 assertion
+  could not see the gap: the next rows the child printed pushed the
+  anchored view back into history. `src/terminal/view.rs` now has
+  `rearm_follow_on_growth`, reached by one shared `declare_view_size`
+  helper from every size-declaring path (`snapshot_for_view`,
+  `record_view_size`, `view_status_for_size`) so grid and semantic
+  declarations cannot disagree.
+  Also fixed: the PTY fixtures emitted LF-only output, which staircases
+  until every row clips to blanks — so the anchor assertions compared
+  `""` with `""` and could not fail (now CRLF, each guarded by
+  `assert!(!top_before.is_empty())`); acc33's contrast case asserted
+  nothing; `start_run` let `already_in_panel` override an **explicit**
+  `display = "current"`, which is the documented opt-out from the Stage 3
+  flip (now gated on omission); and `window_drag` was a daemon-global
+  slot that a peer's mode-line press could clear.
+- Durable test lessons from this round, both the same class:
+  1. **A geometric readout is not a state predicate.** `at_bottom` says
+     "the viewport currently reaches the tail", not "this view follows
+     the tail". Pinning follow requires feeding MORE output and asserting
+     the view moved (acc32b uses a filesystem gate between two bursts).
+  2. **A PTY in the default mode does not translate LF to CRLF.** An
+     `echo`-driven fixture staircases rightward and clips to blanks past
+     the viewport width, so any text equality over it is vacuously true.
+     Emit `\r\n`, and guard text comparisons with a non-empty assertion
+     the way the daemon pin guards on `!panel_hidden`.
 - Verification on this branch: `cargo fmt --check` clean; strict
   workspace Clippy clean; 1,817 default + 1,994 CRDT library tests;
-  `bottom_panel_stage1_acceptance` 44/44; M4 121; required GPU 152;
+  `bottom_panel_stage1_acceptance` 45/45; vterm Stage 1 9; M4 121; required GPU 152;
   `gpu_initial_target_acceptance` 14 CRDT; compile 67; vterm Stage 2 4 /
   Stage 3 5; folding Stage 2 48; statusline 7; listview 6; desktop 11;
   **workspace sweep 3,128 passed, zero failures**; `git diff --check`
@@ -123,9 +152,12 @@ If it does not, stop and repair the remote/fetch configuration.
     which the acceptance now pins by comparing the first visible row's
     text, plus `at_bottom` for the follow re-arm.
   - `compile_mode_acceptance` needs `--test-threads=1` locally; it is
-    67/67 there. The `pmacs-gpu` bin tests have historically gone red
-    under a loaded sweep (wgpu device contention) — they were green in
-    the final run, but rerun isolated before treating one as a
+    67/67 there. Under default parallelism it fails roughly 1 run in 3,
+    with a *different* test each time (acc14/acc25a, then acc24) —
+    **verified pre-existing** by swapping in `githubsucks/main`'s
+    `builtin/runtime/compile.lua` and reproducing the same rate. The
+    `pmacs-gpu` bin tests have historically gone red under a loaded sweep
+    (wgpu device contention). Rerun isolated before treating either as a
     regression.
 - Stage 2 (the GPU panel band, next available protocol version) has its
   own re-framing obligation before implementation; Stage 3 is the default
