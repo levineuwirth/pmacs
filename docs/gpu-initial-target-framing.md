@@ -7,8 +7,8 @@ the implementation base includes folding Stage 1 through `c49a8c7`.**
 Revision 3 records the completed implementation and verification. Revision 2
 pinned launcher-owned tilde expansion, required `after-switch` even when dedup
 selects the view's existing buffer, failed bootstrap when a hook kills the
-target, and recorded the deliberate stderr-only wait during slow pre-window
-bootstrap. It also sharpened the observed argv panic and negotiated
+target, and kept slow pre-window bootstrap terminal-only (no graphical
+progress surface). It also sharpened the observed argv panic and negotiated
 protocol-version echo.
 
 One-command GPU startup landed in #141:
@@ -344,13 +344,12 @@ daemon detail. Managed startup returns nonzero; root reflects that status.
 The daemon itself remains alive, whether reused or newly spawned.
 
 Because the connector waits before winit creates a window, slow dispatcher
-work has no graphical “Connecting…” surface. This is deliberate for the
-explicit terminal command: before blocking, `pmacs-gpu` writes one bounded,
-lossy-display-only `opening …` notice to stderr. There is no second target
-timeout beyond #141's bounded daemon-start retry; file I/O and user hooks may
-legitimately exceed five seconds, and timing out the client would not cancel
-dispatcher work. Ctrl-C remains the escape hatch and still cannot reach the
-isolated daemon process group.
+work has no graphical “Connecting…” surface. The managed GPU child waits
+silently and reports a failure on stderr if bootstrap fails. There is no
+second target timeout beyond #141's bounded daemon-start retry; file I/O and
+user hooks may legitimately exceed five seconds, and timing out the client
+would not cancel dispatcher work. Ctrl-C remains the escape hatch and still
+cannot reach the isolated daemon process group.
 
 ### Q#GT9 — Failure cleanup never creates a ghost session
 
@@ -524,8 +523,9 @@ process behavior.
    pointed usage error rather than panic or replacement characters.
 3. **Private GPU grammar:** managed and headless modes accept either their
    unchanged no-target arity or exactly `--initial-target CWD FILE`; missing,
-   trailing, duplicated, or relative-cwd forms exit 2. An option-like `FILE`
-   after the marker remains literal.
+   trailing, or duplicated forms exit 2. An option-like `FILE` after the marker
+   remains literal. A relative `CWD` is syntactically accepted and then fails
+   the daemon's bootstrap validation before readiness.
 4. **v20 wire and legacy pins:** bootstrap request/result round trips preserve
    arbitrary Unix bytes and enforce bounds. Every pinned v6–v19 encoding stays
    unchanged; the new result discriminant is appended. The supported ladder is
@@ -616,20 +616,25 @@ Also rerun the touched GPU invocation suite, protocol/transport tests, and
 Vterm Stage 3 acceptance in default and CRDT configurations where the suite
 supports both. The final full workspace sweep remains required before PR.
 
-As-built verification on 2026-07-23:
+The named gate intentionally reuses the managed-lifecycle acceptance module,
+so a workspace sweep executes those 13 CRDT cases under both test-binary
+names. The duplicate runtime is retained to keep the approved named command
+and the complete #141 lifecycle fixture coverage together.
+
+Post-review verification on 2026-07-23:
 
 - `cargo fmt --check` and strict workspace Clippy passed.
-- Library gates passed 1,800 default and 1,976 CRDT tests.
+- Library gates passed 1,800 default and 1,977 CRDT tests.
 - The named initial-target gate passed 1 default and 13 CRDT tests; the
   underlying GPU invocation suite passed 13 CRDT tests.
 - M4 passed 121 tests with the documented basedpyright skip; required real-GPU
   tests passed 152.
 - Vterm Stage 3 passed 5 default and 7 CRDT tests.
-- The workspace CRDT sweep passed 3,268 tests across 87 suites, with 29 ignored
-  and the documented basedpyright case filtered.
-- A coherent release build launched `target/release/pmacs --gpu --socket
-  initial-target-smoke README.md` on the real Wayland/Vulkan workstation,
-  attached at protocol v20, and displayed README rather than scratch.
+- The isolated-config workspace CRDT sweep passed 3,269 tests across 87 suites,
+  with 29 ignored and the documented basedpyright case filtered.
+- A coherent release build launched two concurrent real Wayland/Vulkan GPU
+  windows on one daemon, targeting distinct `alpha` and `beta` files. Both
+  remained visible on their own buffer after the second target attached.
 
 ## Deferred (named)
 

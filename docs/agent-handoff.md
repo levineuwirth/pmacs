@@ -1,11 +1,12 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-23, after GPU initial-target implementation completed
-on branch `gpu-initial-target` (protocol v20, PR pending), following one-command
-GPU invocation (#141), the documentation refresh (#140), Vterm Stage 3 (#135),
-tab-width rendering parity (#137), locals-query processing (#134), modeline
-detection (#132), mode system wiring (#129), config registry (#127), Vterm
-Stages 1–2 (#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
+**Last updated: 2026-07-23, after GPU initial-target PR #148 review fixes and
+verification completed on branch `gpu-initial-target` (protocol v20), following
+one-command GPU invocation (#141), the documentation refresh (#140), Vterm
+Stage 3 (#135), tab-width rendering parity (#137), locals-query processing
+(#134), modeline detection (#132), mode system wiring (#129), config registry
+(#127), Vterm Stages 1–2 (#126/#130), and completed Themes Arc 4
+(#120/#124/#125).**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -22,7 +23,7 @@ commands, read `docs/active-work.md` immediately after this file.
 - `main` @ `47581f4` (web grammars #146 atop folding Stage 1 #142,
   inline-math framing #145, and one-command GPU invocation #141), protocol
   **v19** (`SUPPORTED=[6..=19]`; v19 = terminal frames/events).
-- **GPU INITIAL TARGET IMPLEMENTED — PR pending**
+- **GPU INITIAL TARGET IMPLEMENTED — PR #148 under user review**
   (`docs/gpu-initial-target-framing.md` rev 3; branch `gpu-initial-target`).
   `pmacs --gpu [--socket NAME|PATH] FILE` now transports exact Unix path bytes
   plus launcher cwd to the managed GPU client. Protocol v20 adds a
@@ -30,12 +31,14 @@ commands, read `docs/active-work.md` immediately after this file.
   appended `InitialTargetResult` readiness barrier; v6–v19 wire encodings stay
   pinned. The daemon resolves the path lexically, deduplicates or loads/creates
   it in the authenticated frontend's view, runs the established load/switch
-  hooks, upgrades the buffer for CRDT, publishes fresh buffers to existing
-  replicas, and sends the target snapshot before readiness. Failed bootstrap
-  removes the provisional session without poisoning the daemon. Existing
-  no-target managed launch, direct attach, TUI, and legacy protocol behavior
-  remain intact. See `docs/active-work.md` for the portable checkpoint and
-  verification.
+  hooks, upgrades the buffer for CRDT, publishes fresh buffers to existing grid
+  replicas, and sends the target snapshot before readiness. Semantic replicas
+  receive a publication only when displaying that buffer, so a second target
+  launch cannot switch an existing GPU window; one dead peer cannot fail the
+  new session. Failed bootstrap removes the provisional session and restores
+  the ambient active frontend without poisoning the daemon. Existing no-target
+  managed launch, direct attach, TUI, and legacy protocol behavior remain
+  intact. See `docs/active-work.md` for the portable checkpoint and verification.
 - **One-command GPU invocation LANDED — #141**
   (`docs/gpu-invocation-framing.md` rev 6; merge `63fbc66`; two implementation
   reviews). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;

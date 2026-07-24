@@ -64,17 +64,18 @@ If it does not, stop and repair the remote/fetch configuration.
   (folding Stage 1 #142); current canonical `main` @ `47581f4` is integrated
   conflict-free by merge `d6d4be6`. Protocol was v19 before this work.
 - State: implementation checkpoint `2dd30ec`; integrated, smoke-tested, fully
-  gated, and published on 2026-07-23 at protocol v20. PR #148 is open for user
-  review: `https://github.com/levineuwirth/pmacs/pull/148`.
+  gated, and published on 2026-07-23 at protocol v20. PR #148 review fixes are
+  complete locally and awaiting publication; PR:
+  `https://github.com/levineuwirth/pmacs/pull/148`.
 - Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
   protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
   Unix path transport, pre-window target readiness, replica coherence, and the
   approved behavioral acceptance matrix.
-- Verification after current-main integration: formatting and strict Clippy;
-  1,800 default + 1,976 CRDT library tests; target gate 1 default + 13 CRDT;
-  M4 121; required GPU 152; Vterm Stage 3 5 default + 7 CRDT; workspace sweep
-  3,268 across 87 suites.
-  A coherent release launch displayed `README.md` first at protocol v20.
+- Post-review verification: formatting and strict Clippy; 1,800 default + 1,977
+  CRDT library tests; target gate 1 default + 13 CRDT; M4 121; required GPU 152;
+  Vterm Stage 3 5 default + 7 CRDT; isolated-config workspace sweep 3,269 across
+  87 suites. Two concurrent real Wayland/Vulkan GPU windows remained on distinct
+  target buffers after the second attach.
 - Deferred unchanged: automatic GUI selection, multiple files, general
   live-open commands, packaging, and remote GPU paths.
 

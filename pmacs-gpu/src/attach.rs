@@ -478,10 +478,7 @@ fn read_initial_target_bootstrap(
             other => {
                 return Err(AttachClientError::InitialTargetProtocol(format!(
                     "unexpected {} before target readiness",
-                    match other {
-                        InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
-                        _ => "instance message",
-                    }
+                    crate::instance_message_label(&other)
                 )));
             }
         }

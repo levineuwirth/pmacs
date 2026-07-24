@@ -593,6 +593,7 @@ fn decimal_digits(mut n: usize) -> u32 {
 }
 
 fn main() {
+    env_logger::init();
     let mode = match parse_args(&std::env::args_os().skip(1).collect::<Vec<_>>()) {
         Ok(mode) => mode,
         Err(error) => {
@@ -861,8 +862,7 @@ fn run_headless_managed_probe(
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    let (event_tx, event_rx) = mpsc::channel::<AttachEvent>();
-    let connector_tx = event_tx.clone();
+    let (connector_tx, event_rx) = mpsc::channel::<AttachEvent>();
     let managed = match attach::connect_managed_with_target_and_sink(
         socket,
         daemon_executable,
@@ -878,9 +878,10 @@ fn run_headless_managed_probe(
         }
     };
     let mut client = managed.client;
-    if let Some(message) = client.take_initial_message() {
-        let _ = event_tx.send(AttachEvent::Message(Box::new(message)));
-    }
+    let initial_target_ready = matches!(
+        client.take_initial_message(),
+        Some(InstanceMessage::BufferSnapshot { .. })
+    );
     let daemon = managed.daemon;
     let protocol = client.server_protocol_version();
 
@@ -895,12 +896,22 @@ fn run_headless_managed_probe(
         .expect("spawn managed probe stdin reader");
 
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut ready = false;
+    let mut ready = initial_target_ready;
     let mut stdin_closed = false;
     let mut disconnect = String::new();
     let mut last_reaped = false;
     let mut last_wait_result = None;
     let mut last_disconnect = String::new();
+    if ready
+        && let Err(error) =
+            write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
+    {
+        eprintln!(
+            "pmacs-gpu managed probe: writing {} failed: {error}",
+            report.display()
+        );
+        return 5;
+    }
     loop {
         if stdin_rx.try_recv().is_ok() {
             stdin_closed = true;

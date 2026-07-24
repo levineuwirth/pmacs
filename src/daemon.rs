@@ -1085,12 +1085,12 @@ fn dispatcher_loop(
                 .is_some_and(|s| s.negotiated_capabilities.crdt_replica)
             {
                 // F29 — when a mid-session upgrade occurs, push a
-                // `BufferSnapshot` for the newly-CRDT-backed buffer
-                // to every currently-attached replica so their
-                // `BufferMirror`s gain an entry for it. Without
-                // this, replicas attached before the upgrade
-                // permanently fall back to v0.1 round-trip on that
-                // buffer.
+                // `BufferSnapshot` to every grid replica so its
+                // `BufferMirror` gains an entry for the buffer. A
+                // semantic replica receives it only when that replica
+                // is displaying this buffer: applying a foreign-buffer
+                // snapshot would switch the GPU window away from its
+                // own active view.
                 if let Some(upgraded) = ensure_active_buffer_crdt_backed(editor, *fid) {
                     broadcast_buffer_snapshot_to_replicas(
                         editor,
@@ -1786,25 +1786,14 @@ fn handle_session_established(
             crdt_snapshot: snapshot,
         };
         if opened.publish_to_replicas {
-            for (peer_id, peer_stream) in streams.iter_mut() {
-                let is_replica = session_registry
-                    .session_state(*peer_id)
-                    .is_some_and(|state| state.negotiated_capabilities.crdt_replica);
-                if is_replica && let Err(error) = write_message(peer_stream, &snapshot_message) {
-                    send_initial_target_failure(
-                        &mut write_stream,
-                        format!("cannot publish initial target snapshot to {peer_id:?}: {error}"),
-                    );
-                    editor
-                        .core
-                        .borrow_mut()
-                        .unregister_frontend_view(frontend_id);
-                    return;
-                }
-                if is_replica && let Some(state) = semantic_states.get_mut(peer_id) {
-                    state.on_buffer_snapshot_sent(opened.buffer_id);
-                }
-            }
+            publish_buffer_snapshot_to_replicas(
+                editor,
+                opened.buffer_id,
+                &snapshot_message,
+                session_registry,
+                streams,
+                semantic_states,
+            );
         }
         if write_message(&mut write_stream, &snapshot_message).is_err() {
             editor
@@ -2400,28 +2389,56 @@ fn broadcast_buffer_snapshot_to_replicas(
     streams: &mut HashMap<FrontendId, UnixStream>,
     semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
 ) {
-    let Some(snapshot_bytes) = export_buffer_snapshot(editor, buffer_id) else {
+    let Some(snapshot) = export_buffer_snapshot(editor, buffer_id) else {
         return;
     };
-    let msg = InstanceMessage::BufferSnapshot {
+    let message = InstanceMessage::BufferSnapshot {
         buffer_id,
-        crdt_snapshot: snapshot_bytes,
+        crdt_snapshot: snapshot,
     };
-    for (fid, stream) in streams.iter_mut() {
-        let is_replica = session_registry
-            .session_state(*fid)
-            .is_some_and(|s| s.negotiated_capabilities.crdt_replica);
-        if !is_replica {
+    publish_buffer_snapshot_to_replicas(
+        editor,
+        buffer_id,
+        &message,
+        session_registry,
+        streams,
+        semantic_states,
+    );
+}
+
+fn publish_buffer_snapshot_to_replicas(
+    editor: &EditorState,
+    buffer_id: crate::buffer::BufferId,
+    message: &InstanceMessage,
+    session_registry: &SessionRegistry,
+    streams: &mut HashMap<FrontendId, UnixStream>,
+    semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+) {
+    for (peer_id, stream) in streams {
+        let Some(session) = session_registry.session_state(*peer_id) else {
+            continue;
+        };
+        if !session.negotiated_capabilities.crdt_replica {
             continue;
         }
-        if let Err(e) = write_message(stream, &msg) {
-            eprintln!("pmacs: F29 send BufferSnapshot for {buffer_id:?} to {fid:?} failed: {e}");
+        if session.negotiated_capabilities.semantic_render {
+            let displays_buffer = editor
+                .core
+                .borrow()
+                .active_window_for(*peer_id)
+                .is_some_and(|window| window.buffer_id == buffer_id);
+            if !displays_buffer {
+                continue;
+            }
         }
-        // PR #120 round 2 — same reset contract as the follow path:
-        // the snapshot wiped this replica's buffer-scoped render
-        // state, so its emission baselines for the buffer die too.
-        if let Some(sem) = semantic_states.get_mut(fid) {
-            sem.on_buffer_snapshot_sent(buffer_id);
+        if let Err(error) = write_message(stream, message) {
+            eprintln!(
+                "pmacs: BufferSnapshot publish for {buffer_id:?} to {peer_id:?} failed: {error}"
+            );
+            continue;
+        }
+        if let Some(semantic) = semantic_states.get_mut(peer_id) {
+            semantic.on_buffer_snapshot_sent(buffer_id);
         }
     }
 }
@@ -3151,6 +3168,7 @@ mod tests {
         let semantic = crate::protocol::NegotiatedCapabilities {
             multi_frontend: true,
             crdt_replica: true,
+
             semantic_render: true,
         };
         let old_peer = FrontendId(2);
@@ -3168,6 +3186,81 @@ mod tests {
         assert!(peer_declared_terminal_support(&registry, new_peer));
         // An unknown session is refused rather than defaulted open.
         assert!(!peer_declared_terminal_support(&registry, FrontendId(99)));
+    }
+
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn snapshot_publication_skips_foreign_semantic_views_and_ignores_dead_peers() {
+        let mut editor = EditorState::new();
+        let semantic_peer = FrontendId(20);
+        let live_grid_peer = FrontendId(21);
+        let dead_grid_peer = FrontendId(22);
+        let semantic_view = build_fresh_frontend_view(&mut editor);
+        editor
+            .core
+            .borrow_mut()
+            .register_frontend_view(semantic_peer, semantic_view);
+
+        let semantic_caps = crate::protocol::NegotiatedCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        };
+        let grid_caps = crate::protocol::NegotiatedCapabilities {
+            semantic_render: false,
+            ..semantic_caps
+        };
+        let mut registry = SessionRegistry::new();
+        registry.register_session(
+            semantic_peer,
+            crate::presence::SessionState::new(PROTOCOL_VERSION, semantic_caps, 0),
+        );
+        registry.register_session(
+            live_grid_peer,
+            crate::presence::SessionState::new(PROTOCOL_VERSION, grid_caps, 1),
+        );
+        registry.register_session(
+            dead_grid_peer,
+            crate::presence::SessionState::new(PROTOCOL_VERSION, grid_caps, 2),
+        );
+
+        let (semantic_server, mut semantic_client) =
+            UnixStream::pair().expect("semantic socketpair");
+        let (live_grid_server, mut live_grid_client) =
+            UnixStream::pair().expect("live grid socketpair");
+        let (dead_grid_server, dead_grid_client) =
+            UnixStream::pair().expect("dead grid socketpair");
+        drop(dead_grid_client);
+        let mut streams = HashMap::from([
+            (semantic_peer, semantic_server),
+            (live_grid_peer, live_grid_server),
+            (dead_grid_peer, dead_grid_server),
+        ]);
+        let published_buffer = crate::buffer::BufferId::from_raw(900);
+        let message = InstanceMessage::BufferSnapshot {
+            buffer_id: published_buffer,
+            crdt_snapshot: vec![1, 2, 3],
+        };
+
+        publish_buffer_snapshot_to_replicas(
+            &editor,
+            published_buffer,
+            &message,
+            &registry,
+            &mut streams,
+            &mut HashMap::new(),
+        );
+
+        let delivered: InstanceMessage =
+            read_message(&mut live_grid_client).expect("live grid snapshot");
+        assert_eq!(delivered, message);
+        semantic_client
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("semantic timeout");
+        assert!(
+            read_message::<InstanceMessage>(&mut semantic_client).is_err(),
+            "a semantic peer displaying another buffer must receive no snapshot"
+        );
     }
 
     #[test]

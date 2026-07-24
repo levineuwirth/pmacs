@@ -107,6 +107,7 @@ pmacs --gpu README.md               # default instance; open one file
 pmacs --gpu --socket NAME FILE      # named instance; bare NAME →
                                     #   <runtime>/pmacs/NAME.sock
 pmacs --gpu -- --leading-dash       # `--` ends option parsing
+```
 
 `pmacs --gpu` requires the root `pmacs` binary to be built with the
 `crdt` feature. It discovers a sibling `pmacs-gpu` binary first, then

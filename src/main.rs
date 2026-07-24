@@ -315,21 +315,6 @@ fn gpu_binary(current_exe: &Path, override_bin: Option<PathBuf>) -> (PathBuf, Pa
     (PathBuf::from("pmacs-gpu"), sibling)
 }
 
-fn expand_launcher_tilde(path: &Path) -> PathBuf {
-    let Some(path_text) = path.to_str() else {
-        return path.to_owned();
-    };
-    if path_text == "~" {
-        return std::env::var_os("HOME").map_or_else(|| path.to_owned(), PathBuf::from);
-    }
-    if let Some(rest) = path_text.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return Path::new(&home).join(rest);
-    }
-    path.to_owned()
-}
-
 fn run_gpu(socket: Option<&str>, file: Option<&Path>) -> ExitCode {
     if !cfg!(feature = "crdt") {
         eprintln!("pmacs: --gpu requires pmacs built with --features crdt");
@@ -353,7 +338,7 @@ fn run_gpu(socket: Option<&str>, file: Option<&Path>) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            Some((cwd, expand_launcher_tilde(path)))
+            Some((cwd, pmacs::editor_core::expand_tilde(path.to_owned())))
         }
         None => None,
     };
@@ -909,13 +894,16 @@ mod tests {
         }
 
         let home = std::env::var_os("HOME").expect("test HOME");
-        assert_eq!(expand_launcher_tilde(Path::new("~")), PathBuf::from(&home));
         assert_eq!(
-            expand_launcher_tilde(Path::new("~/notes")),
+            pmacs::editor_core::expand_tilde(PathBuf::from("~")),
+            PathBuf::from(&home)
+        );
+        assert_eq!(
+            pmacs::editor_core::expand_tilde(PathBuf::from("~/notes")),
             PathBuf::from(home).join("notes")
         );
         assert_eq!(
-            expand_launcher_tilde(Path::new("~other/notes")),
+            pmacs::editor_core::expand_tilde(PathBuf::from("~other/notes")),
             PathBuf::from("~other/notes")
         );
     }
