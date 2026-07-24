@@ -1,7 +1,29 @@
 # Inline math — the first vertical slice (framing)
 
-**Revision 1 — pre-implementation, framing only. Ground truth scouted against
-canonical `main` @ `352bf0b`, protocol v20, 2026-07-24.**
+**Revision 2 — pre-implementation, framing only. Ground truth scouted against
+canonical `main` @ `352bf0b`, protocol v20, 2026-07-24. Rev 2 closes review
+round 1 (F1–F9).**
+
+### Round 1 (rev 1 → rev 2)
+
+Verdict: the slice's shape survived, both load-bearing corrections held, and
+nine findings landed — two of them decisions the implementation could not have
+proceeded without, one a compliance error.
+
+| # | Finding | Closed in |
+| --- | --- | --- |
+| F1 | The fraction height budget was never confronted; lines cannot grow (`BASE_CODE_LINE_HEIGHT = 22.0` fixed) and a textstyle fraction does not fit | Q#MS10 (new) |
+| F2 | "Contributes no glyphs, reserves width" is a mechanism the chunk model does not have — a `RichChunk`'s only width is its `text` | Q#MS4, B1 |
+| F3 | Criterion 10 required source-width boxes while Q#MS4 implied layout-chosen width; the contradiction *is* the caret-toggle reflow question | Q#MS4, acceptance 10 |
+| F4 | Q#MS5 makes shaping depend on the caret — a new invalidation edge, and it must read the *effective* caret or flap during optimistic typing | Q#MS5 |
+| F5 | Detection had no currency guard (`$5 and $6` pairs) and no newline rule | Q#MS3 |
+| F6 | **Factual:** Latin Modern Math is GUST Font License and ~717 KiB, not OFL and ~200 KB | Q#MS7, §9 |
+| F7 | Without a math-italic mapping, `$x^2$` renders an upright roman `x` | Q#MS2 |
+| F8 | Layout still resolves glyph IDs internally; drawing must pin `Attrs` to the math family or measured and drawn advances diverge | Q#MS6, Q#MS7 |
+| F9 | Smaller: "after shaping decisions" contradicts Q#MS4; no selection/wash rule; `$$…$$` degradation untested; `Char` vs `Symbol` unmotivated | Q#MS3, Q#MS2, Q#MS11 (new), acceptance |
+
+Two rev-1 claims were **wrong, not merely imprecise**, and are called out
+where they occur: the zero-glyph strut (F2) and the font licence (F6).
 
 Parent arc: `docs/inline-math-framing.md` (rev 2, merged as #154). Sibling
 substrate lane: `docs/latex-grammar-math-substrate-framing.md` (rev 3), whose
@@ -116,13 +138,17 @@ should assume it will.
 
 ```rust
 enum MathNode {
-    Char(char),                                 // x, 2, +
-    Symbol(char),                               // \alpha → U+03B1 (seed map)
+    Char(char),                                 // resolved codepoint: x, 2, +, α
     Group(Vec<MathNode>),
     Script { base: Box<MathNode>, sub: Option<Box<MathNode>>, sup: Option<Box<MathNode>> },
     Fraction { num: Box<MathNode>, den: Box<MathNode> },
 }
 ```
+
+Rev 1 had both `Char` and `Symbol`, each carrying a `char`, with no stated
+difference (F9d). Folded: `\alpha` resolves to `'α'` **in the parser**, so
+layout sees one kind. Provenance would only matter for error messages, which
+Q#MS8 does not produce.
 
 This subset is chosen because it is the smallest one that **forces the MATH
 table to matter**. Characters alone could be positioned by guesswork and prove
@@ -134,12 +160,45 @@ kinds are more of the same; get them wrong and no amount of breadth helps.
 The symbol map ships as a **seed** (Greek letters only, ~50 entries), not the
 parent's full ~200. Growing it is mechanical and needs no design.
 
-### Q#MS3 — Detection is the frontend byte scanner, inline only
+**Math italic is in scope (F7).** Neither rev 1 nor the parent mentioned it,
+and without it `$x^2$` renders an upright roman `x` — which does not look like
+math, and would make the slice's flagship acceptance case visibly wrong.
+Variables map into the Mathematical Alphanumeric Symbols block
+(U+1D400–U+1D7FF): ASCII letters become math-italic, **with the U+210E hole
+for `h`** (that codepoint is Letterlike Symbols, not in the 1D4xx run) and
+with digits and operators left upright. Because the slice positions
+characters, this is a pure char→char mapping — the same mechanical class as
+the Greek seed, and it is what makes the output read as math at all.
 
-A two-pass scan over the visible slice for unescaped `$…$` pairs, run where
-the parent specifies — in `rebuild_code_slice`, after shaping decisions, not
-on the edit path. `\$` is an escape and does not open or close a span. An
-unpaired `$` yields no span (acceptance 6 of the parent).
+### Q#MS3 — Detection is the frontend byte scanner, inline only, currency-guarded
+
+A two-pass scan over the visible slice for unescaped `$…$` pairs, run in
+`rebuild_code_slice` **off the edit path**. (Rev 1 said "after shaping
+decisions", inherited from the parent's "post-shape hook"; that contradicts
+Q#MS4, since a suppression chunk must exist *before* the line is shaped. The
+property that actually matters is that detection does not run per keystroke —
+F9a.)
+
+**Currency guards are mandatory, not a refinement (F5).** Rev 1 relied on the
+parent's lone-`$` case and would have rendered `prices are $5 and $6 today` as
+math over `5 and ` — in exactly the grammar-less prose buffers this rule
+targets. Adopt Pandoc's rule:
+
+- an opening `$` must be followed by a **non-space**;
+- a closing `$` must be preceded by a **non-space** and not followed by a
+  **digit**;
+- `\$` is an escape and neither opens nor closes.
+
+**A span may not cross a newline in v0.** Chunking is per line and the visible
+slice is line-ranged, so single-line spans are what keep visible-slice-scoped
+scanning stable under scroll. A `$` with no same-line partner yields no span.
+
+Tree-sitter injection detection is deliberately not used, even though #144
+gives us `math_environment` / `math_delimiter` for `.tex`: that path is
+instance-side, the substrate lane already deferred it to this arc, and the
+slice must work in the grammar-less buffers where most inline math is typed.
+It stays available as the natural upgrade — and it is the principled fix for
+currency false-positives, which guards only approximate.
 
 Tree-sitter injection detection is deliberately not used, even though #144
 gives us `math_environment` / `math_delimiter` for `.tex`: that path is
@@ -147,19 +206,74 @@ instance-side, the substrate lane already deferred it to this arc, and the
 slice must work in the grammar-less buffers where most inline math is typed.
 It stays available as the natural upgrade.
 
-### Q#MS4 — Suppression is a new chunk kind, and it owns its hit runs
+### Q#MS4 — Suppression is a spacer chunk, width-quantized, layout-chosen (F2, F3)
 
-`ChunkSource` gains a variant carrying the suppressed source range and the
-projected width the box occupies. The chunk contributes **no glyphs** to the
-cosmic-text buffer; it reserves width so the surrounding text lays out around
-it, and the math is drawn over that reserved space in a later pass.
+**Rev 1 was wrong about the mechanism.** It said the chunk "contributes no
+glyphs… reserves width". A `RichChunk`'s only width *is* its `text: String`
+(`pmacs-gpu/src/main.rs:7703`), which `line_from_chunks` feeds straight into a
+`BufferLine`; cosmic-text has no zero-glyph strut. There is nothing to reserve
+width with except text.
 
-The invariant `build_hit_runs` exists to preserve — that the hit map is
-derived from the same chunks glyphon shaped — is not weakened: the new
-variant participates like any other. A click inside a math box maps to the
-**start byte of the suppressed range**, the same "snap to anchor" rule
-`Adornment` already uses. Sub-expression hit-testing is deferred; it needs a
-box→byte map that this slice deliberately does not build.
+The mechanism is therefore the **`SourceTab` precedent**: `ChunkSource` gains a
+variant carrying the suppressed source range, and the chunk projects **spacer
+text** — runs of spaces — whose advance covers the box. Reserved width is
+consequently **quantized up to whole space advances**, which is a feature, not
+a rounding error: the projection stays grid-aligned with the surrounding
+monospace text, and hit runs stay integral.
+
+**Width is layout-chosen, not pinned to the source width (F3).** Rev 1 implied
+both, and acceptance 10 demanded the latter. Resolved deliberately in favour of
+layout-chosen:
+
+- Pinning to source width removes reflow, but `$\frac{a}{b}$` is 13 source
+  columns against a box roughly 2 wide, so every fraction would sit in a large
+  blank gap. That defect is permanent and visible on every render.
+- Layout-chosen width means the line **reflows when the caret crosses a span
+  boundary** (Q#MS5 toggles suppression). That is a jump, but it is confined to
+  one line, it happens only on a deliberate caret move, and it is the same
+  behaviour `org-appear` has trained users to expect from Emacs.
+
+A permanent visual defect is worse than a transient one tied to an explicit
+user action. Acceptance 10 is rewritten to match: text *before* the span never
+moves, text *after* it moves by exactly the quantized difference, and the
+reflow is confined to the affected line.
+
+`build_hit_runs`'s invariant — the hit map derives from the same chunks
+glyphon shaped — is not weakened; the new variant participates like any other.
+A click inside a math box maps to the **start byte of the suppressed range**,
+the same snap-to-anchor rule `Adornment` uses. Sub-expression hit-testing is
+deferred; it needs a box→byte map this slice deliberately does not build.
+
+### Q#MS10 — The height budget: fit to the line, or fall back (F1)
+
+The code buffer is one cosmic-text `Buffer` with uniform metrics —
+`BASE_CODE_FONT_SIZE = 16.0`, `BASE_CODE_LINE_HEIGHT = 22.0`
+(`pmacs-gpu/src/main.rs:362`, `:359`). **Lines cannot grow.** A textstyle
+fraction at those metrics is roughly 17 px tall against an above-baseline
+budget of ~12–14 px, so a simple fraction is marginal and acceptance 1's own
+nested `\frac{x^2}{y}` plainly exceeds. Rev 1 hid this inside Q#MS8's "a box
+that would exceed the line" without saying whether that meant width or height,
+or what the budget was.
+
+**Rule: the box is uniformly scaled to fit the line box, down to a floor of
+0.6×; below the floor the span falls back to source (Q#MS8).** No overdraw, no
+reflow of line height, no clipping surprises. The available budget is the line
+box less a one-pixel margin, split at the text baseline.
+
+Rejected alternatives, for the record:
+
+- **Overdraw into adjacent lines' leading.** The math pass draws after
+  glyphon and *could* paint outside the line box, but a tall fraction would
+  then visually collide with the line above — a defect the user cannot fix
+  except by not writing math.
+- **Growing the line.** Not available: metrics are uniform for the whole
+  buffer.
+
+The honest consequence: **v0 shrinks nested math uniformly rather than by
+proper style level.** TeX shrinks nested fractions too, but it does so through
+display/text/script/scriptscript levels with per-level constants, which is the
+real answer and is deferred by name in §6. A uniform scale is a visibly
+cruder approximation of the same idea, and it is what keeps the slice thin.
 
 ### Q#MS5 — The cursor rule: render math only when the cursor is outside
 
@@ -176,6 +290,28 @@ all in v0, and is deferred rather than approximated.
 It also gives the feature an honest, self-explaining interaction model, which
 is worth more in v0 than sub-glyph caret fidelity.
 
+**This creates a new shaping-invalidation edge, and it is the #120 trap class
+(F4).** Today caret motion within the visible slice touches no shaped line:
+the `CursorByte` arm updates the cursor and reshapes only on scroll-follow,
+and `rebuild_lines_reusing_scroll` (`pmacs-gpu/src/main.rs:5116`) retains
+lines on the premise that content and styling are unchanged. Making
+suppression a function of the caret breaks that premise. Two obligations
+follow, both of which the implementation owns explicitly:
+
+- **Caret motion that crosses a span boundary must dirty the affected
+  lines**, and the line-reuse predicate gains suppression state as a third
+  input beside content and styling. A retained line computed under the
+  opposite suppression state is exactly the stale-mirror failure #120 taught.
+- **The rule reads the *effective* caret the frontend draws**, not the last
+  confirmed `CursorByte`. The GPU holds an optimistic cursor during
+  unconfirmed edits; keying suppression off the confirmed value would make
+  spans flap between rendered and source while typing.
+
+Acceptance 7 exercises the behaviour; these two are named here because a test
+that only moves the caret and re-renders would pass even if the reuse
+predicate were left untouched, as long as something else happened to dirty the
+line.
+
 ### Q#MS6 — Layout positions CHARACTERS, not glyph IDs
 
 ```rust
@@ -189,22 +325,51 @@ enum MathItem {
 Positions are in pixels relative to the box origin, resolved by the frontend
 that owns font metrics — consistent with the parent's contract.
 
-**Characters, not glyph IDs, is a deliberate boundary.** Glyph-ID work exists
-to select *variants* from the MATH table's `GlyphVariantRecord` / `Glyph‐
-Construction` chains — which is precisely what stretchy fences and big
-operators need, and precisely what this slice defers. Positioning characters
-lets each item be drawn with the existing text machinery. The slice must not
-pretend this generalises: when stretchy delimiters arrive they will need glyph
-IDs, and `MathItem` will gain a variant then.
+**Characters, not glyph IDs, is a deliberate boundary — on the OUTPUT only
+(F8a).** Layout still resolves glyph IDs *internally*: advances and
+`MathItalicsCorrection` are glyph-keyed, so a `cmap` lookup happens whatever
+the item type. What the boundary buys is that the *emitted* items are
+drawable by the existing text machinery.
+
+Glyph-ID **output** exists to select *variants* from the MATH table's
+`GlyphVariantRecord` / `GlyphConstruction` chains — precisely what stretchy
+fences and big operators need, and precisely what this slice defers. The slice
+must not pretend this generalises: when stretchy delimiters arrive they will
+need glyph-ID items, and `MathItem` will gain a variant then.
 
 The fraction rule is a filled quad on the existing quad pipeline, not a glyph.
 
 ### Q#MS7 — The MATH font and its feature declaration
 
-Bundle **Latin Modern Math** (OFL, GUST) as `pmacs-gpu/fonts/`, embedded with
-`include_bytes!` beside JetBrains Mono, with its licence file. Two consumers
-read the same bytes: `fontdb`/cosmic-text for drawing, and `ttf-parser`
-directly for the MATH table, which cosmic-text does not expose.
+Bundle **Latin Modern Math** in `pmacs-gpu/fonts/`, embedded with
+`include_bytes!` beside JetBrains Mono. Two consumers read the same bytes:
+`fontdb`/cosmic-text for drawing, and `ttf-parser` directly for the MATH
+table, which cosmic-text does not expose.
+
+**Licence and size, corrected (F6).** Rev 1 said "OFL, GUST" and the parent's
+table says "OFL (GUST)". Both are **wrong**. Verified against a local TeX Live
+copy, `latinmodern-math.otf` is **733,736 bytes (~717 KiB)** and its own
+copyright string reads *"released under the GUST Font License"* — an
+LPPL-derived licence, not the SIL OFL. Consequences:
+
+- the bundled licence file must be the **GUST Font License**, named as such,
+  not `OFL.txt` (the existing `fonts/OFL.txt` covers JetBrains Mono only);
+- the size claim must be honest: at ~717 KiB this becomes **the largest single
+  embedded asset in the repository**, roughly 3.5× the figure rev 1 quoted;
+- GFL permits redistribution with its licence text, so the plan stands — but
+  it is a *different* obligation from OFL and must be discharged as one;
+- if OFL-only ever becomes a requirement, **STIX Two Math** is the OFL
+  alternative already listed in the parent's font table.
+
+The parent framing carries the same error and needs the same correction; that
+is recorded in §9 as a follow-up rather than smuggled into this lane.
+
+**Pin `Attrs` to the math family when drawing (F8b).** Layout measures with
+`ttf-parser` against the bundled bytes; drawing goes through cosmic-text. If
+fallback selects a different face for `α` or a math-italic `𝑥` than the one
+measured, drawn advances diverge silently from computed geometry and the box
+is subtly wrong everywhere. The draw path sets the family explicitly and does
+not rely on fallback.
 
 Declare the dependency exactly as the parent's rev-2 C1 records:
 
@@ -217,6 +382,25 @@ Bare `ttf-parser = "0.25"` unions `std` in and rebuilds the font chain.
 A font whose MATH table is absent or unparseable is a **hard startup error in
 the math path only** — math spans fall back to raw source (Q#MS8), the editor
 does not fail. Bundled-font regressions must not be silent.
+
+### Q#MS11 — Selection, search washes, and peer carets over a box (F9b)
+
+Rev 1 named selection as a falsifier of B4 without proposing a rule. Any
+overlay addressed in *source* bytes meets a span whose source is suppressed.
+
+- **A selection endpoint inside a span unsuppresses it.** This is Q#MS5's rule
+  generalised from the caret to any selection boundary: if the user is
+  addressing bytes inside the math, they see the bytes. A selection that
+  merely *spans* the region (both endpoints outside) leaves it rendered.
+- **A wash that covers a rendered span washes the whole reserved rectangle.**
+  Search hits and peer-presence highlights paint the projected box, not a
+  sub-range of it — the box has no interior byte map (Q#MS4), so partial
+  washes cannot be placed honestly.
+- **Peer carets snap to the span start**, the same rule as hits.
+
+This keeps every overlay addressable without inventing a box→byte projection
+the slice does not build, and it makes "you are addressing this text" and "you
+see this text" the same condition throughout.
 
 ### Q#MS8 — Failure is always "show the source"
 
@@ -242,22 +426,31 @@ cost.
 
 ## 4. Bets (falsifiable)
 
-- **B1 — the reserved-width chunk composes with the existing pipeline.**
-  Falsified if reserving width for a suppressed range requires changing how
-  cosmic-text shapes the surrounding line, rather than adding a chunk kind
-  that `chunks_for_line` and `build_hit_runs` both already iterate.
+- **B1' (restated after F2) — a spacer chunk composes with the existing
+  pipeline.** Reserving width via projected spaces, quantized to whole space
+  advances, needs only a new `ChunkSource` variant that `chunks_for_line` and
+  `build_hit_runs` already iterate. Falsified if it requires changing how
+  cosmic-text shapes the surrounding line, or if quantized spacer width cannot
+  keep the projected hit map integral. *(Rev 1's "zero-glyph strut" wording is
+  withdrawn: no such mechanism exists.)*
 - **B2 — scripts and fractions are enough to validate `MathBox`.** Falsified
   if adding a deferred node kind later forces a change to `MathBox`'s width /
   ascent / descent / origin contract, rather than only adding a `MathItem`
   variant.
 - **B3 — character positioning suffices for the subset.** Falsified if any
   node in Q#MS2 cannot be drawn correctly without selecting a glyph variant.
-- **B4 — the cursor rule removes the caret problem rather than hiding it.**
-  Falsified if any caret position, selection, or click inside or across a math
-  span still needs a projected-position approximation to behave correctly.
+- **B4' (sharpened after F9b) — the cursor rule plus Q#MS11 remove the caret
+  problem rather than hiding it.** Falsified if any caret position, selection
+  endpoint, search wash, or peer caret inside or across a math span still needs
+  a projected-position approximation to behave correctly.
 - **B5 — `ttf-parser` supplies every constant the subset needs.** Falsified if
   script or fraction layout requires a MATH value `ttf-parser` does not
   expose.
+- **B6 (new, F1) — fit-to-line with a 0.6× floor keeps the subset legible.**
+  Falsified if a plain `\frac{a}{b}` at default metrics lands below the floor
+  (making the flagship case fall back to source), or if scaled output is
+  illegible at the floor. Either outcome means the slice needs real TeX style
+  levels rather than a uniform scale, which would be a scope change.
 
 ## 5. Acceptance
 
@@ -268,8 +461,11 @@ something reaches the screen runs on a real device through
 1. **Parser** — `x^2`, `x_i`, `x_i^2`, `\frac{a}{b}`, `\alpha`, nested
    `\frac{x^2}{y}` produce the expected `MathNode` trees. Unbalanced `{`,
    unknown command, and an empty span are errors, not panics.
-2. **Detection** — `$x^2$` yields one span; `Price: $5.00` yields none;
-   `\$5` yields none; `$a$ and $b$` yields two.
+2. **Detection** — `$x^2$` yields one span; `$a$ and $b$` yields two;
+   `\$5` yields none. **Currency guards (F5):** `Price: $5.00` yields none,
+   `prices are $5 and $6 today` yields **none** (the rev-1 rule would have
+   matched `5 and `), `$ x $` yields none (space after opener), and a `$`
+   whose only partner is on the next line yields none.
 3. **MATH constants are actually consulted** — layout of `x^2` with the real
    font places the `2` above the baseline and scaled down. Bite: stubbing
    `ScriptPercentScaleDown` to 100% changes the laid-out box, proving the
@@ -288,11 +484,36 @@ something reaches the screen runs on a real device through
    span's start byte, and the surrounding text's hit runs are unchanged.
 9. **Failure shows source** — `$\frac{a$` and `$\unknown{}$` render as
    ordinary source text with no panic and no missing glyphs.
-10. **Surrounding layout is undisturbed** — `before $x^2$ after` keeps
-    `before`/`after` at the same positions as when the span is not math.
-11. **Feature declaration** — `cargo tree -e features` shows `ttf-parser`
+10. **Reflow is bounded and predictable (F3)** — in `before $x^2$ after`,
+    `before` occupies identical pixels whether or not the span is rendered;
+    `after` shifts by exactly the quantized width difference; no other line
+    moves. Toggling via the Q#MS5 caret rule reflows only the affected line.
+11. **Line reuse honours suppression (F4)** — moving the caret across a span
+    boundary changes the rendered output. Bite: with suppression left out of
+    the line-reuse predicate, the retained line keeps the stale state and this
+    fails. Suppression follows the **effective** caret, so it does not flap
+    during an unconfirmed optimistic edit.
+12. **Height budget (F1)** — a plain `$\frac{a}{b}$` renders at default
+    metrics within the line box and does not paint outside it (B6). A
+    deliberately over-tall nested case falls back to source rather than
+    overlapping the line above.
+13. **Math italic (F7)** — `$x$` renders the math-italic glyph, not roman
+    `x`; `$h$` resolves through the U+210E hole rather than the 1D4xx run;
+    digits in `$x2$` stay upright.
+14. **Overlays (Q#MS11)** — a selection endpoint inside a span unsuppresses
+    it; a selection enclosing a rendered span leaves it rendered and washes
+    the whole reserved rectangle; a peer caret inside a rendered span draws at
+    the span start.
+15. **Deferred syntax degrades, not corrupts** — `$$x$$` renders as ordinary
+    source text through the empty-span error path, with no panic and no
+    half-rendered box (F9c).
+16. **Font provenance** — the bundled licence file is the GUST Font License
+    and is distinct from the existing `fonts/OFL.txt`; a build with the MATH
+    table absent or unparseable falls back to source and surfaces the error
+    rather than failing silently (Q#MS7).
+17. **Feature declaration** — `cargo tree -e features` shows `ttf-parser`
     without `std`, i.e. the declaration did not widen the shared feature set.
-12. Full gate suite per `CLAUDE.md`, including `PMACS_REQUIRE_GPU=1`.
+18. Full gate suite per `CLAUDE.md`, including `PMACS_REQUIRE_GPU=1`.
 
 ## 6. Deferred (named)
 
@@ -303,7 +524,18 @@ the red-squiggle error treatment (parent Q#IM4); the `MathBox` cache (Q#MS9);
 sub-expression hit-testing and caret projection inside rendered math (parent
 Q#IM6); colour-by-context (parent Q#IM2); tree-sitter injection detection and
 any `MathSpans` wire surface; the TUI's distinct-face fallback; Lua-registered
-delimiters.
+delimiters; **proper TeX style levels** (display/text/script/scriptscript with
+per-level MATH constants), for which Q#MS10's uniform fit-to-line scale is a
+deliberately cruder stand-in; **sub-range washes** inside a rendered box
+(Q#MS11 washes the whole rectangle).
+
+## 9. Follow-up outside this lane
+
+The parent framing (`docs/inline-math-framing.md`, rev 2, merged as #154)
+carries the same font error F6 found here: its table row reads "Latin Modern
+Math | Full | OFL (GUST)". It should be corrected to the GUST Font License,
+with the ~717 KiB size, in its own docs change rather than in this branch —
+the parent is a merged document and this lane should not quietly edit it.
 
 ## 7. Interaction with other work
 
