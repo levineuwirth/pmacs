@@ -1073,7 +1073,12 @@ impl EditorCore {
                     .is_some_and(|window| window.buffer_id == entry.buffer_id)
                 && !self.side_window_is_hidden(fid, entry.window_id);
             if origin_valid {
-                self.set_active_window_id(entry.window_id);
+                // Through `focus_window`, not `set_active_window_id`:
+                // returning INTO a panel from a document window is a
+                // focus transition like any other, so it refreshes
+                // `origin_document` and a later `window.quit` returns to
+                // the window the jump came from.
+                self.focus_window(fid, entry.window_id);
             } else {
                 // A stale SIDE origin is skipped outright: switching a
                 // panel's buffer into the document window is exactly the
@@ -2667,6 +2672,12 @@ impl EditorCore {
 
     /// Focus an explicit window in the acting frontend, refreshing the
     /// panel's remembered document origin on the way (Q#BP2c).
+    ///
+    /// **The caller must have validated `target`** — that it is live and
+    /// belongs to `fid`'s layout. Every Lua path does so through
+    /// `lookup_window` or the display transaction's own revalidation;
+    /// this function only `debug_assert!`s it, so a release-mode caller
+    /// passing a foreign or dead id would leave `view.active` dangling.
     pub fn focus_window(&mut self, fid: FrontendId, target: WindowId) {
         let Some(view) = self.views.get_mut(&fid) else {
             return;

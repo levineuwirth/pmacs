@@ -1300,6 +1300,55 @@ fn acc19_adopters_place_side_affinely_through_real_entry_points() {
     assert_ne!(panel, document);
 }
 
+/// A recompile carries no `display` (only cmdline/cwd are stored), so
+/// the raw switch would put `*compilation*` in the selected DOCUMENT
+/// window while the panel still shows it — the duplicate presentation
+/// this arc removes elsewhere.
+#[test]
+fn acc19b_recompile_reuses_the_panel_instead_of_duplicating_into_the_document() {
+    let s = editor();
+    exec(&s, "pmacs.window.split_horizontal()");
+    exec(&s, "pmacs.compile.run(\"true\", { display = \"panel\" })");
+    let panel = side_window(&s).expect("compile opened a panel");
+    let compilation = s.core.borrow().windows[&panel].buffer_id;
+
+    // Focus a document window, then recompile — which reaches
+    // `start_run` with no `display` at all.
+    let document = s
+        .core
+        .borrow()
+        .non_side_target(FrontendId::LOCAL)
+        .expect("document");
+    s.core
+        .borrow_mut()
+        .focus_window(FrontendId::LOCAL, document);
+    let document_buffer = s.core.borrow().windows[&document].buffer_id;
+    exec(&s, "pmacs.command.invoke(\"compile.recompile\")");
+
+    assert_eq!(
+        s.core.borrow().windows[&panel].buffer_id,
+        compilation,
+        "the recompile stayed in the panel"
+    );
+    assert_eq!(
+        s.core.borrow().windows[&document].buffer_id,
+        document_buffer,
+        "…and did not duplicate itself into the document window"
+    );
+
+    // A compilation that is NOT in a panel keeps the pre-arc raw switch.
+    let s = editor();
+    exec(&s, "pmacs.compile.run(\"true\")");
+    assert!(side_window(&s).is_none());
+    let target = active_window(&s);
+    exec(&s, "pmacs.command.invoke(\"compile.recompile\")");
+    assert_eq!(active_window(&s), target);
+    assert!(
+        side_window(&s).is_none(),
+        "no panel is created out of nowhere"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 20 / 23 — quit: delete, restore chains, revalidation, and the cap
 // ---------------------------------------------------------------------------
@@ -1549,27 +1598,30 @@ fn acc26_close_others_and_split_respect_the_side_window() {
     let s = editor();
     exec(&s, "pmacs.window.split_horizontal()");
     let panel = open_panel(&s, "*panel*", 5);
-    // From a side window both are pointed errors.
+    // From a side window both are pointed errors — asserted through the
+    // REAL Lua bindings, which is what `C-x 1` / `C-x 2` / `C-x 3`
+    // reach. A direct `core.try_split_active(..)` call would pass even
+    // with the guard unwired, which is exactly how an unwired guard
+    // survives review.
     exec(&s, "pmacs.window.focus_next()");
     while active_window(&s) != panel {
         exec(&s, "pmacs.window.focus_next()");
     }
-    assert!(s.core.borrow_mut().close_others().is_err());
-    assert!(
-        s.core
-            .borrow_mut()
-            .try_split_active(Orientation::Horizontal, true)
-            .is_err()
-    );
+    let before = structure(&layout_root(&s));
+    assert!(try_exec(&s, "pmacs.window.close_others()").is_err());
+    assert!(try_exec(&s, "pmacs.window.split_horizontal()").is_err());
+    assert!(try_exec(&s, "pmacs.window.split_vertical()").is_err());
     assert!(side_window(&s).is_some(), "nothing was mutated");
+    assert_eq!(
+        before,
+        structure(&layout_root(&s)),
+        "the wrapper's final child is still Leaf(side)"
+    );
 
     // From a document window, close_others deletes the panel too.
     exec(&s, "pmacs.window.focus_next()");
     assert_ne!(active_window(&s), panel);
-    s.core
-        .borrow_mut()
-        .close_others()
-        .expect("document may close others");
+    exec(&s, "pmacs.window.close_others()");
     assert!(side_window(&s).is_none());
     assert_eq!(
         s.core.borrow().views[&FrontendId::LOCAL]
@@ -1726,6 +1778,57 @@ fn acc30_divider_drag_writes_fixed_rows_and_weights_and_creates_no_selection() {
     s.sync_frame_geometry(FrontendId::LOCAL, CellSize::new(ROWS * 2, COLS));
     let doubled = render_at(&s, CellSize::new(ROWS * 2, COLS))[&top].size.rows;
     assert!(doubled > after, "the ratio scales with the frame");
+}
+
+/// An armed drag owns the pointer for its OWN frontend only. The daemon
+/// routes every attached grid frontend through one `dispatch_mouse`, so
+/// an unscoped guard would let one frontend's in-flight gesture cancel
+/// and swallow another frontend's clicks.
+#[test]
+fn acc30c_an_armed_drag_does_not_swallow_another_frontends_mouse_events() {
+    let mut s = editor();
+    let panel = open_panel(&s, "*panel*", 6);
+    let document = s
+        .core
+        .borrow()
+        .non_side_target(FrontendId::LOCAL)
+        .expect("document");
+    let other = FrontendId(30);
+    let other_window = attach_frontend(&s, other, true);
+
+    let rects = render(&s);
+    let divider_row = u16::try_from(rects[&document].origin.row + rects[&document].size.rows - 1)
+        .expect("row fits");
+    s.dispatch_mouse(
+        FrontendId::LOCAL,
+        mouse(MouseEventKind::Down(MouseButton::Left), divider_row, 3),
+        CellSize::new(ROWS, COLS),
+    );
+    let armed_rows = fixed_rows_of(&s, panel);
+
+    // A click from the OTHER frontend must be dispatched normally…
+    s.dispatch_mouse(
+        other,
+        mouse(MouseEventKind::Down(MouseButton::Left), 1, 2),
+        CellSize::new(ROWS, COLS),
+    );
+    assert_eq!(
+        s.core.borrow().views[&other].active,
+        other_window,
+        "the peer's click reached its own window instead of being swallowed"
+    );
+
+    // …and LOCAL's gesture must still be armed and still work.
+    s.dispatch_mouse(
+        FrontendId::LOCAL,
+        mouse(MouseEventKind::Drag(MouseButton::Left), divider_row + 2, 3),
+        CellSize::new(ROWS, COLS),
+    );
+    assert_eq!(
+        fixed_rows_of(&s, panel),
+        Some(armed_rows.expect("armed rows") - 2),
+        "the peer's event did not cancel LOCAL's in-flight drag"
+    );
 }
 
 #[test]

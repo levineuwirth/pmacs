@@ -979,14 +979,18 @@ fn compute_node(
                     rows
                 } else {
                     let w = weights.get(i).copied().unwrap_or(1).max(1);
+                    // u64 intermediates: `remainder * w` is the only
+                    // place this arithmetic could overflow a u32, and a
+                    // saturating fallback there would hand a non-last
+                    // child the whole remainder and underflow the last
+                    // one. Widening deletes the case outright.
                     let e = if Some(i) == last_flexible {
                         remainder - flexible_used
+                    } else if total == 0 {
+                        0
                     } else {
-                        remainder
-                            .checked_mul(w)
+                        u32::try_from(u64::from(remainder) * u64::from(w) / u64::from(total))
                             .unwrap_or(remainder)
-                            .checked_div(total)
-                            .unwrap_or(0)
                     };
                     flexible_used += e;
                     e

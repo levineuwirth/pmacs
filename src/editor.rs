@@ -1925,7 +1925,15 @@ impl EditorState {
         // pointer for the whole gesture, INCLUDING rows outside any
         // window — otherwise tracking would stop the moment the pointer
         // crossed the frame's status row.
-        if self.window_drag.is_some() {
+        //
+        // Scoped to the ARMING frontend. The daemon routes every attached
+        // grid frontend through this same dispatcher, so an unscoped
+        // check would let one frontend's in-flight drag cancel and
+        // swallow another frontend's clicks.
+        if self
+            .window_drag
+            .is_some_and(|drag| drag.frontend_id == frontend_id)
+        {
             match ev.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
                     self.drag_window_boundary(frontend_id, cell_row, term_size);
@@ -3860,9 +3868,6 @@ fn mode_line_grapheme_width(graphemes: &[ModeLineGrapheme]) -> u32 {
     graphemes.iter().map(|grapheme| grapheme.width).sum()
 }
 
-/// Paint complete graphemes at a logical signed origin. A grapheme that
-/// straddles either clip edge is omitted wholesale, so a wide glyph can never
-/// leave a dangling half-cell at a window or left/right collision boundary.
 /// Restyle one exposed segment of a horizontal split boundary and stamp
 /// its grip (Q#BP5a).
 ///
@@ -3890,6 +3895,9 @@ fn paint_divider_segment(
     cell.glyph = crate::cell::Glyph::Char(DIVIDER_HANDLE_GLYPH);
 }
 
+/// Paint complete graphemes at a logical signed origin. A grapheme that
+/// straddles either clip edge is omitted wholesale, so a wide glyph can never
+/// leave a dangling half-cell at a window or left/right collision boundary.
 fn paint_mode_line_graphemes(
     grid: &mut crate::cell::CellGrid<'_>,
     rect: &crate::window::Rect,

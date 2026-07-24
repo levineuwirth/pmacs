@@ -4190,4 +4190,133 @@ mod tests {
             "key must self-insert into the displayed buffer, not the attach-time scratch"
         );
     }
+
+    /// Bottom-panel arc, §1.3 #22 (framing acceptance 51's Stage-1 half).
+    ///
+    /// A fresh no-target attach clones `LOCAL`'s **primary document**
+    /// buffer, not `local_view.active`. Stage 1 makes a TUI panel a real
+    /// focus target, so `LOCAL` can legitimately own focus in a panel at
+    /// attach time — and panel content must never become a newly attached
+    /// frontend's full-window document.
+    #[test]
+    fn fresh_attach_inherits_locals_document_buffer_not_its_focused_panel() {
+        let mut editor = EditorState::new();
+        let document_buffer = editor.core.borrow().active_buffer_id();
+        let panel_buffer = editor.core.borrow().registry.borrow_mut().create("*panel*");
+        // Open a bottom panel on LOCAL and focus it.
+        let panel = {
+            let mut core = editor.core.borrow_mut();
+            let mut request = crate::editor_core::DisplayRequest::new(panel_buffer);
+            request.side = Some(crate::window::Side::Bottom);
+            request.height = Some(5);
+            request.select = Some(true);
+            let outcome = core
+                .display_buffer(FrontendId::LOCAL, &request)
+                .expect("panel placement");
+            core.focus_window(FrontendId::LOCAL, outcome.target);
+            outcome.target
+        };
+        assert_eq!(
+            editor.core.borrow().views[&FrontendId::LOCAL].active,
+            panel,
+            "LOCAL really is focused in the panel"
+        );
+
+        let fid = FrontendId(123);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        assert_eq!(
+            editor
+                .core
+                .borrow()
+                .active_window_for(fid)
+                .expect("fresh view window")
+                .buffer_id,
+            document_buffer,
+            "the new frontend inherited LOCAL's DOCUMENT buffer; inheriting \
+             `local_view.active` would have made the panel its document"
+        );
+        assert_ne!(document_buffer, panel_buffer);
+    }
+
+    /// Bottom-panel arc, Q#BP11b / R4-B4 (framing acceptance 55's
+    /// Stage-1 half).
+    ///
+    /// Stage 1 lets a startup hook create and select a side window. The
+    /// initial-target bootstrap must still reassert the requested buffer
+    /// in — and activate — a **non-side** document window, rather than
+    /// overwriting the panel merely because it became `view.active`.
+    #[test]
+    fn initial_target_reasserts_a_document_window_when_a_hook_selects_a_panel() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, b"target contents\n").expect("write target");
+
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .lua()
+            .load(
+                r#"
+                pmacs.lsp.config = {}
+                pmacs.hook.add("buffer.after-load", function()
+                  if HOOK_RAN then return end
+                  HOOK_RAN = true
+                  HOOK_PANEL = pmacs.window.display(
+                    pmacs.buffer.create("*hook-panel*"),
+                    { side = "bottom", height = 4, select = true })
+                end)
+                "#,
+            )
+            .exec()
+            .expect("install hook");
+
+        // A GRID session (panel-capable), which is the realistic shape
+        // for a hook-created panel in Stage 1 — and real geometry, so
+        // the panel is genuinely VISIBLE and focused when the reassert
+        // runs. Without the declaration, reconciliation would hide the
+        // panel and move focus out on its own, and the assertions below
+        // would pass without exercising the reassert at all.
+        let fid = FrontendId(124);
+        let view = build_fresh_frontend_view(&mut editor, true, true);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        editor.sync_frame_geometry(fid, CellSize::new(24, 80));
+
+        let opened = open_initial_target(
+            &mut editor,
+            fid,
+            InitialTarget {
+                path: target.as_os_str().as_bytes().to_vec(),
+                cwd: dir.path().as_os_str().as_bytes().to_vec(),
+            },
+        )
+        .expect("bootstrap succeeds despite the panel-creating hook");
+
+        let core = editor.core.borrow();
+        assert!(
+            !core.views[&fid].panel_hidden,
+            "the hook's panel is visible, so focus really was on it when \
+             the reassert ran"
+        );
+        let active = core.views[&fid].active;
+        let active_window = core.windows.get(&active).expect("active window live");
+        assert!(
+            !active_window.is_side(),
+            "bootstrap activated a DOCUMENT window, not the hook's panel"
+        );
+        assert_eq!(
+            active_window.buffer_id, opened.buffer_id,
+            "…showing the requested target"
+        );
+        let panel = core
+            .side_window_for(fid)
+            .expect("the hook's panel survived");
+        assert_ne!(
+            core.windows[&panel].buffer_id, opened.buffer_id,
+            "the panel was not overwritten with the target"
+        );
+    }
 }

@@ -12218,14 +12218,20 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
     window_panel::install(lua, core, &win)?;
 
     {
+        // Bottom-panel arc (Q#BP6): `try_split_active` refuses a side
+        // window. This binding is what `C-x 2` reaches, so the refusal
+        // has to live on THIS path — splitting the panel leaf would make
+        // the root wrapper's final child a split rather than
+        // `Leaf(side)`, and both `Layout::compute`'s fixed pass and
+        // `document_subtree` key on exactly that shape.
         let cc = core.clone();
         win.set(
             "split_horizontal",
             lua.create_function(move |_, ()| {
-                let new_id = cc
-                    .borrow_mut()
-                    .split_active(crate::window::Orientation::Horizontal, true);
-                Ok(new_id.raw())
+                cc.borrow_mut()
+                    .try_split_active(crate::window::Orientation::Horizontal, true)
+                    .map(crate::window::WindowId::raw)
+                    .map_err(mlua::Error::runtime)
             })?,
         )?;
     }
@@ -12235,10 +12241,10 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
         win.set(
             "split_vertical",
             lua.create_function(move |_, ()| {
-                let new_id = cc
-                    .borrow_mut()
-                    .split_active(crate::window::Orientation::Vertical, true);
-                Ok(new_id.raw())
+                cc.borrow_mut()
+                    .try_split_active(crate::window::Orientation::Vertical, true)
+                    .map(crate::window::WindowId::raw)
+                    .map_err(mlua::Error::runtime)
             })?,
         )?;
     }
@@ -12351,9 +12357,38 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
 
     {
         let cc = core.clone();
+        // With no argument: the selected window's buffer (unchanged).
+        // With an explicit window id: that window's buffer, validated
+        // against the acting frontend's layout like every other
+        // `WindowId`-taking operation (bottom-panel arc, Q#BP11) — an
+        // adopter has to be able to ask "is my buffer the one in the
+        // panel" without first selecting the panel.
         win.set(
             "buffer",
-            lua.create_function(move |_, ()| Ok(BufferIdLua(cc.borrow().active_buffer_id())))?,
+            lua.create_function(move |lua, target: Option<u64>| -> mlua::Result<BufferIdLua> {
+                let Some(raw) = target else {
+                    return Ok(BufferIdLua(cc.borrow().active_buffer_id()));
+                };
+                let fid = window_panel::acting_frontend(lua, &cc);
+                let core = cc.borrow();
+                let view = core.views.get(&fid).ok_or_else(|| {
+                    mlua::Error::runtime("pmacs.window.buffer: acting frontend has no layout")
+                })?;
+                let id = view
+                    .layout
+                    .iter_ids()
+                    .into_iter()
+                    .find(|id| id.raw() == raw)
+                    .ok_or_else(|| {
+                        mlua::Error::runtime(format!(
+                            "pmacs.window.buffer: window {raw} is not live in this frontend's layout"
+                        ))
+                    })?;
+                core.windows
+                    .get(&id)
+                    .map(|window| BufferIdLua(window.buffer_id))
+                    .ok_or_else(|| mlua::Error::runtime("pmacs.window.buffer: window not live"))
+            })?,
         )?;
     }
 

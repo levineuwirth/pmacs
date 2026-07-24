@@ -136,10 +136,8 @@ function pmacs.listview.open(spec)
       tostring(display)))
   end
   if display == "panel" then
-    p.side = true
     pmacs.window.display(p.buffer, { side = "bottom", select = true })
   else
-    p.side = false
     pmacs.window.switch_buffer(p.buffer)
   end
   seat_cursor(p, 1)

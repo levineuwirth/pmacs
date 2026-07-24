@@ -184,6 +184,19 @@ fn parse_request(
     Ok(request)
 }
 
+/// The ACTING frontend's selected window.
+///
+/// Not `active_window_id()`, which resolves through the ambient active
+/// frontend: every other id in this module is `fid`-scoped, and the two
+/// only coincide because dispatch happens to set `active_frontend` first.
+fn selected_window(core: &SharedCore, fid: FrontendId) -> mlua::Result<WindowId> {
+    core.borrow()
+        .views
+        .get(&fid)
+        .map(|view| view.active)
+        .ok_or_else(|| mlua::Error::runtime("pmacs.window: acting frontend has no layout"))
+}
+
 /// Resolve a raw Lua window id, refusing one that is not live in the
 /// acting frontend's layout (Q#BP11).
 fn lookup_window(core: &SharedCore, fid: FrontendId, raw: u64) -> mlua::Result<WindowId> {
@@ -484,7 +497,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                 let fid = acting_frontend(lua, &cc);
                 let id = match target {
                     Some(raw) => lookup_window(&cc, fid, raw)?,
-                    None => cc.borrow().active_window_id(),
+                    None => selected_window(&cc, fid)?,
                 };
                 let core = cc.borrow();
                 let window = core
@@ -577,7 +590,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     let fid = acting_frontend(lua, &cc);
                     let id = match target {
                         Some(raw) => lookup_window(&cc, fid, raw)?,
-                        None => cc.borrow().active_window_id(),
+                        None => selected_window(&cc, fid)?,
                     };
                     let area_rows = cc.borrow().frontend_area_rows(fid).ok_or_else(|| {
                         mlua::Error::runtime(

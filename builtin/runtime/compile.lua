@@ -732,6 +732,17 @@ end)
 
 -- Start a run in `slot`. Shared by compile and shell-command; grep
 -- has its own worker path.
+-- Whether `buf` is currently the acting frontend's side-window buffer
+-- (bottom-panel arc). Used so a recompile re-displays into the panel it
+-- is already in rather than duplicating itself into the document window.
+local function already_in_panel(buf)
+  if not buf then return false end
+  local panel = pmacs.window.panel()
+  if not panel then return false end
+  local ok, shown = pcall(pmacs.window.buffer, panel)
+  return ok and shown == buf
+end
+
 local function start_run(slot, cmdline, opts)
   opts = opts or {}
   -- Bottom-panel arc (Q#BP11b): validate placement BEFORE the run
@@ -818,9 +829,14 @@ local function start_run(slot, cmdline, opts)
   -- The FIRST display of this run is the side-affine one (Q#BP3): a
   -- persistent *compilation* already visible in a document window must
   -- not preempt the requested panel. Compile output is passive, so it
-  -- takes `select = false` explicitly; a recompile simply reuses the
-  -- panel it is already in.
-  if display == "panel" then
+  -- takes `select = false` explicitly.
+  --
+  -- A recompile reaches here with NO `display` (only cmdline/cwd are
+  -- stored in `_last`), so the raw switch below would put this buffer in
+  -- the selected DOCUMENT window while the panel still shows it — the
+  -- duplicate presentation this arc removes elsewhere. Detect that the
+  -- buffer already owns the panel slot and keep it there.
+  if display == "panel" or already_in_panel(slot.buf) then
     pmacs.window.display(slot.buf, { side = "bottom", select = false })
   else
     pmacs.window.switch_buffer(slot.buf)
