@@ -23,6 +23,7 @@
 //! the SIL Open Font License 1.1 (see `fonts/OFL.txt`).
 
 mod attach;
+mod math_parse;
 mod terminal;
 
 use std::collections::HashMap;
