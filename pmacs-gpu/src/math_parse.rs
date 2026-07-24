@@ -264,6 +264,99 @@ impl Parser {
     }
 }
 
+/// One detected inline span, as byte offsets into the scanned line.
+///
+/// `start`/`end` bracket the WHOLE span including both `$` delimiters, which
+/// is what Q#MS4 suppresses; [`Self::interior`] is what the parser sees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MathSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl MathSpan {
+    /// Byte range of the math source between the delimiters.
+    #[must_use]
+    pub fn interior(self) -> std::ops::Range<usize> {
+        self.start + 1..self.end - 1
+    }
+}
+
+/// Find inline `$…$` spans in ONE line (Q#MS3).
+///
+/// Spans never cross a newline: chunking is per line and the visible slice is
+/// line-ranged, so single-line spans are what keep visible-slice-scoped
+/// scanning stable under scroll. Callers pass one line at a time.
+///
+/// Currency guards are mandatory, not a refinement (framing F5). Without
+/// them `prices are $5 and $6 today` pairs the two `$` and renders `5 and `
+/// as math — in exactly the grammar-less prose buffers this scanner targets.
+/// Pandoc's rule:
+///
+/// - an opening `$` must be followed by a non-space;
+/// - a closing `$` must be preceded by a non-space and not followed by a digit;
+/// - `\$` is an escape and neither opens nor closes.
+#[must_use]
+pub fn detect_math_spans(line: &str) -> Vec<MathSpan> {
+    let bytes = line.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    let mut open: Option<usize> = None;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            // Skip the escaped byte: `\$` is literal, so it can neither open
+            // nor close. Stepping two also stops `\\$` from being read as an
+            // escape of the dollar.
+            i += 2;
+            continue;
+        }
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'$') {
+            // `$$` is display math, which this slice defers. It is NOT two
+            // inline delimiters: reading it that way makes `$$x$$` match the
+            // inner `$x$`, which parses, so the span would half-render as
+            // math with a stray `$` on each side. Acceptance 15 requires it
+            // to degrade to source, so `$$` is opaque — it neither opens nor
+            // closes, and abandons any pending opener.
+            i += 2;
+            open = None;
+            continue;
+        }
+        match open {
+            None => {
+                // Opener: next byte must exist and be a non-space.
+                let opens = bytes
+                    .get(i + 1)
+                    .is_some_and(|b| !b.is_ascii_whitespace() && *b != b'$');
+                if opens {
+                    open = Some(i);
+                }
+            }
+            Some(start) => {
+                let prev_ok = i > start + 1 && !bytes[i - 1].is_ascii_whitespace();
+                let next_ok = bytes.get(i + 1).is_none_or(|b| !b.is_ascii_digit());
+                if prev_ok && next_ok {
+                    spans.push(MathSpan { start, end: i + 1 });
+                    open = None;
+                } else if !prev_ok {
+                    // `$foo $` — the closer is disqualified by the space
+                    // before it. Treat this `$` as a fresh opener candidate
+                    // rather than letting the span run to the next one.
+                    open = bytes
+                        .get(i + 1)
+                        .is_some_and(|b| !b.is_ascii_whitespace() && *b != b'$')
+                        .then_some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +367,77 @@ mod tests {
 
     fn group(nodes: Vec<MathNode>) -> MathNode {
         MathNode::Group(nodes)
+    }
+
+    #[test]
+    fn detection_finds_inline_spans() {
+        assert_eq!(
+            detect_math_spans("$x^2$"),
+            vec![MathSpan { start: 0, end: 5 }]
+        );
+        let two = detect_math_spans("$a$ and $b$");
+        assert_eq!(two.len(), 2, "{two:?}");
+        let line = "before $x^2$ after";
+        let span = detect_math_spans(line)[0];
+        assert_eq!(&line[span.start..span.end], "$x^2$");
+        assert_eq!(&line[span.interior()], "x^2");
+    }
+
+    /// Framing F5 / acceptance 2 — the case rev 1's rule would have
+    /// mis-rendered as math over "5 and ".
+    #[test]
+    fn currency_guards_reject_prose_dollars() {
+        assert!(detect_math_spans("Price: $5.00").is_empty());
+        assert!(
+            detect_math_spans("prices are $5 and $6 today").is_empty(),
+            "a digit after the closer disqualifies it"
+        );
+        assert!(
+            detect_math_spans("$ x $").is_empty(),
+            "space after the opener disqualifies it"
+        );
+        assert!(
+            detect_math_spans("costs $5 or $6").is_empty(),
+            "both guards together"
+        );
+    }
+
+    #[test]
+    fn escaped_dollars_neither_open_nor_close() {
+        assert!(detect_math_spans(r"\$5 and \$6").is_empty());
+        // An escaped dollar inside a span does not close it.
+        let line = r"$a\$b$";
+        let spans = detect_math_spans(line);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(&line[spans[0].start..spans[0].end], r"$a\$b$");
+    }
+
+    #[test]
+    fn an_unpaired_dollar_yields_nothing() {
+        assert!(detect_math_spans("$x").is_empty());
+        assert!(detect_math_spans("x$").is_empty());
+        // Q#MS3: spans never cross a newline. Callers scan per line, so a
+        // partner on the next line is simply not visible to this call.
+        assert!(detect_math_spans("$x").is_empty());
+        assert!(detect_math_spans("y$").is_empty());
+    }
+
+    #[test]
+    fn empty_and_display_delimiters_degrade_rather_than_half_match() {
+        // Acceptance 15. `$$` is opaque, so display math yields NO span and
+        // falls through to source. Asserting emptiness rather than "any span
+        // found must fail to parse" matters: the interior of the inner `$x$`
+        // parses perfectly well, so the weaker form passed vacuously while
+        // `$$x$$` half-rendered with a stray `$` on each side.
+        assert!(detect_math_spans("$$").is_empty());
+        assert!(
+            detect_math_spans("$$x$$").is_empty(),
+            "display math must not match the inner $x$"
+        );
+        assert!(detect_math_spans(r"$$\frac{a}{b}$$").is_empty());
+        // A real inline span beside display math is still found.
+        let mixed = detect_math_spans("$a$ then $$b$$");
+        assert_eq!(mixed.len(), 1, "{mixed:?}");
     }
 
     #[test]
