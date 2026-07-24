@@ -63,19 +63,19 @@ If it does not, stop and repair the remote/fetch configuration.
 - Original implementation base: canonical `githubsucks/main` @ `c49a8c7`
   (folding Stage 1 #142); current canonical `main` @ `47581f4` is integrated
   conflict-free by merge `d6d4be6`. Protocol was v19 before this work.
-- State: implementation checkpoint `2dd30ec`; review-fix checkpoint `bef1c08`.
-  Integrated, smoke-tested, fully gated, and published on 2026-07-23 at
-  protocol v20. PR #148 remains open for user review:
-  `https://github.com/levineuwirth/pmacs/pull/148`.
+- State: implementation checkpoint `2dd30ec`; first review-fix checkpoint
+  `bef1c08`. Second-review fixes are complete locally, smoke-tested, and fully
+  gated at protocol v20; publication is next. PR #148 remains open for user
+  review: `https://github.com/levineuwirth/pmacs/pull/148`.
 - Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
   protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
   Unix path transport, pre-window target readiness, replica coherence, and the
   approved behavioral acceptance matrix.
-- Post-review verification: formatting and strict Clippy; 1,800 default + 1,977
-  CRDT library tests; target gate 1 default + 13 CRDT; M4 121; required GPU 152;
-  Vterm Stage 3 5 default + 7 CRDT; isolated-config workspace sweep 3,269 across
-  87 suites. Two concurrent real Wayland/Vulkan GPU windows remained on distinct
-  target buffers after the second attach.
+- Second-review verification: formatting and strict Clippy; 1,801 default +
+  1,978 CRDT library tests; target gate 1 default + 14 CRDT; M4 121; required
+  GPU 152; Vterm Stage 3 5 default + 7 CRDT; isolated-config workspace sweep
+  3,272 across 87 suites. The prior two-window Wayland/Vulkan isolation smoke
+  remains valid; this round changes only daemon failure/publication behavior.
 - Deferred unchanged: automatic GUI selection, multiple files, general
   live-open commands, packaging, and remote GPU paths.
 

@@ -281,7 +281,11 @@ mod crdt {
         }
     }
 
-    fn request_raw_target(socket: &Path, cwd: Vec<u8>, path: Vec<u8>) -> Vec<InstanceMessage> {
+    fn open_raw_target(
+        socket: &Path,
+        cwd: Vec<u8>,
+        path: Vec<u8>,
+    ) -> (FrontendId, UnixStream, Vec<InstanceMessage>) {
         let mut stream = UnixStream::connect(socket).expect("connect raw target frontend");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -310,14 +314,19 @@ mod crdt {
         .expect("send raw target");
 
         let first = read_message::<InstanceMessage>(&mut stream).expect("raw target result");
-        if matches!(first, InstanceMessage::BufferSnapshot { .. }) {
+        let messages = if matches!(first, InstanceMessage::BufferSnapshot { .. }) {
             vec![
                 first,
                 read_message::<InstanceMessage>(&mut stream).expect("raw opened result"),
             ]
         } else {
             vec![first]
-        }
+        };
+        (hello.assigned_frontend_id, stream, messages)
+    }
+
+    fn request_raw_target(socket: &Path, cwd: Vec<u8>, path: Vec<u8>) -> Vec<InstanceMessage> {
+        open_raw_target(socket, cwd, path).2
     }
 
     fn spawn_daemon(socket: &Path, envs: &[(&str, &str)]) -> Child {
@@ -666,8 +675,8 @@ mod crdt {
             (cwd.clone(), vec![b'x'; 32 * 1024 + 1]),
             (cwd.clone(), b".".to_vec()),
         ];
-        for (bad_cwd, bad_path) in invalid {
-            let messages = request_raw_target(&socket, bad_cwd, bad_path);
+        for (index, (bad_cwd, bad_path)) in invalid.into_iter().enumerate() {
+            let (frontend_id, mut stream, messages) = open_raw_target(&socket, bad_cwd, bad_path);
             assert_eq!(messages.len(), 1, "failure must send no snapshot");
             match &messages[0] {
                 InstanceMessage::InitialTargetResult(InitialTargetResult::Failed { message }) => {
@@ -676,11 +685,80 @@ mod crdt {
                 }
                 other => panic!("expected bounded target failure, got {other:?}"),
             }
+            assert!(
+                read_message::<InstanceMessage>(&mut stream).is_err(),
+                "failed bootstrap {index} must close its socket"
+            );
+            let _ = write_message(
+                &mut stream,
+                &FrontendEvent::Key(pmacs::protocol::KeyEvent {
+                    frontend_id,
+                    key: pmacs::protocol::Key::Char('x'),
+                    mods: pmacs::protocol::Modifiers::NONE,
+                    timestamp_ns: 0,
+                }),
+            );
         }
-
         fs::write(temp.path().join("still-alive.txt"), "alive\n").expect("write survivor");
         let survivor = attach_target(&socket, temp.path(), Path::new("still-alive.txt"));
         assert_eq!(survivor.replica.materialize_string(), "alive\n");
+        signal_pid(daemon.id(), Signal::SIGTERM);
+        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+    }
+
+    #[test]
+    fn dedup_upgrade_publishes_the_snapshot_to_preexisting_grid_replicas() {
+        let temp = secure_tempdir();
+        let config_dir = temp.path().join("pmacs");
+        fs::create_dir(&config_dir).expect("create config dir");
+        let seed_path = temp.path().join("seed.txt");
+        let hidden_path = temp.path().join("hidden.txt");
+        fs::write(&seed_path, "seed\n").expect("write seed");
+        fs::write(&hidden_path, "hidden\n").expect("write hidden");
+        fs::write(
+            config_dir.join("init.lua"),
+            format!(
+                "local created_hidden = false\n\
+                 pmacs.hook.add('buffer.after-load', function()\n\
+                   if created_hidden then return end\n\
+                   created_hidden = true\n\
+                   pmacs.buffer.find_or_open({hidden_path:?})\n\
+                 end)\n"
+            ),
+        )
+        .expect("write hidden-buffer hook");
+        let socket = temp.path().join("dedup-upgrade.sock");
+        let mut daemon = spawn_daemon(&socket, &[]);
+        let (_, mut grid) = attach_surviving_frontend(&socket);
+
+        let seed = attach_target(&socket, temp.path(), Path::new("seed.txt"));
+        loop {
+            match read_message::<InstanceMessage>(&mut grid).expect("grid seed publication") {
+                InstanceMessage::BufferSnapshot { buffer_id, .. }
+                    if buffer_id == seed.buffer_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let hidden = attach_target(&socket, temp.path(), Path::new("hidden.txt"));
+        let hidden_snapshot = loop {
+            match read_message::<InstanceMessage>(&mut grid).expect("grid hidden publication") {
+                InstanceMessage::BufferSnapshot {
+                    buffer_id,
+                    crdt_snapshot,
+                } if buffer_id == hidden.buffer_id => break crdt_snapshot,
+                _ => {}
+            }
+        };
+        let replica = CrdtState::new(900).expect("grid hidden replica");
+        replica
+            .import_snapshot(&hidden_snapshot)
+            .expect("import hidden publication");
+        assert_eq!(replica.materialize_string(), "hidden\n");
+
         signal_pid(daemon.id(), Signal::SIGTERM);
         assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
     }

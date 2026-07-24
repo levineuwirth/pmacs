@@ -51,6 +51,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::ErrorKind;
+use std::net::Shutdown;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -655,6 +656,7 @@ fn send_initial_target_failure(stream: &mut UnixStream, message: impl Into<Strin
         message: bounded_initial_target_error(message.into()),
     };
     let _ = write_message(stream, &InstanceMessage::InitialTargetResult(result));
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 fn validate_initial_target(target: &InitialTarget) -> Result<(), String> {
@@ -1604,6 +1606,11 @@ struct OpenedInitialTarget {
     publish_to_replicas: bool,
 }
 
+struct InitialTargetSnapshot {
+    crdt_snapshot: Vec<u8>,
+    upgraded_to_crdt: bool,
+}
+
 fn resolve_initial_target(target: InitialTarget) -> PathBuf {
     let cwd = PathBuf::from(OsString::from_vec(target.cwd));
     let path = PathBuf::from(OsString::from_vec(target.path));
@@ -1674,30 +1681,35 @@ fn open_initial_target(
 fn initial_target_snapshot(
     editor: &EditorState,
     buffer_id: crate::buffer::BufferId,
-) -> Result<Vec<u8>, String> {
+) -> Result<InitialTargetSnapshot, String> {
     let core = editor.core.borrow();
     let mut registry = core.registry.borrow_mut();
     let buffer = registry
         .get_mut(buffer_id)
         .map_err(|error| format!("initial target buffer disappeared: {error}"))?;
-    if !buffer.is_crdt_backed() {
+    let upgraded_to_crdt = !buffer.is_crdt_backed();
+    if upgraded_to_crdt {
         let peer_id = crate::crdt::peer_id_from_frontend(FrontendId::LOCAL);
         buffer
             .upgrade_to_crdt(peer_id)
             .map_err(|error| format!("initial target CRDT upgrade failed: {error:?}"))?;
     }
-    buffer
+    let crdt_snapshot = buffer
         .crdt_state()
         .ok_or_else(|| "initial target CRDT state is unavailable".to_owned())?
         .export_snapshot()
-        .map_err(|error| format!("initial target snapshot export failed: {error:?}"))
+        .map_err(|error| format!("initial target snapshot export failed: {error:?}"))?;
+    Ok(InitialTargetSnapshot {
+        crdt_snapshot,
+        upgraded_to_crdt,
+    })
 }
 
 #[cfg(not(feature = "crdt"))]
 fn initial_target_snapshot(
     _editor: &EditorState,
     _buffer_id: crate::buffer::BufferId,
-) -> Result<Vec<u8>, String> {
+) -> Result<InitialTargetSnapshot, String> {
     Err("initial target requires a CRDT-enabled daemon".to_owned())
 }
 
@@ -1714,7 +1726,9 @@ fn cleanup_provisional_session(
 ) {
     render_states.remove(&frontend_id);
     semantic_states.remove(&frontend_id);
-    streams.remove(&frontend_id);
+    if let Some(stream) = streams.remove(&frontend_id) {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
     term_sizes.remove(&frontend_id);
     last_active_buffer_sent.remove(&frontend_id);
     session_registry.unregister_session(frontend_id);
@@ -1770,7 +1784,7 @@ fn handle_session_established(
     let negotiated_protocol_version = session_state.negotiated_protocol_version;
 
     if let Some(opened) = opened_target.as_ref() {
-        let snapshot = match initial_target_snapshot(editor, opened.buffer_id) {
+        let target_snapshot = match initial_target_snapshot(editor, opened.buffer_id) {
             Ok(snapshot) => snapshot,
             Err(message) => {
                 send_initial_target_failure(&mut write_stream, message);
@@ -1783,9 +1797,9 @@ fn handle_session_established(
         };
         let snapshot_message = InstanceMessage::BufferSnapshot {
             buffer_id: opened.buffer_id,
-            crdt_snapshot: snapshot,
+            crdt_snapshot: target_snapshot.crdt_snapshot,
         };
-        if opened.publish_to_replicas {
+        if opened.publish_to_replicas || target_snapshot.upgraded_to_crdt {
             publish_buffer_snapshot_to_replicas(
                 editor,
                 opened.buffer_id,
@@ -1796,6 +1810,7 @@ fn handle_session_established(
             );
         }
         if write_message(&mut write_stream, &snapshot_message).is_err() {
+            let _ = write_stream.shutdown(Shutdown::Both);
             editor
                 .core
                 .borrow_mut()
@@ -1888,6 +1903,10 @@ fn handle_dispatcher_event(
             );
         }
         DispatcherEvent::FrontendEvent { source, event } => {
+            if session_registry.session_state(source).is_none() {
+                eprintln!("pmacs: dropping frontend event from uninstalled session {source:?}");
+                return;
+            }
             match event {
                 FrontendEvent::Detach(_) => {
                     // The per-attach thread will follow up with a
@@ -2102,9 +2121,12 @@ fn handle_dispatcher_event(
                     }
                 }
                 _ => {
-                    let term_size = *term_sizes
-                        .get(&source)
-                        .expect("term_size present for source");
+                    let Some(&term_size) = term_sizes.get(&source) else {
+                        eprintln!(
+                            "pmacs: dropping frontend event without size state for {source:?}"
+                        );
+                        return;
+                    };
                     let mut term_size = term_size;
                     if let Some(render_state) = render_states.get_mut(&source) {
                         apply_event(editor, source, event, &mut term_size, render_state);
@@ -2123,10 +2145,8 @@ fn handle_dispatcher_event(
                         // nothing before B1.)
                         apply_semantic_input_event(editor, source, event, term_size);
                     } else {
-                        debug_assert!(
-                            false,
-                            "fid with neither a render_state nor a semantic_state \
-                             sent a frontend event"
+                        eprintln!(
+                            "pmacs: dropping frontend event without render state for {source:?}"
                         );
                     }
                 }
@@ -3168,7 +3188,6 @@ mod tests {
         let semantic = crate::protocol::NegotiatedCapabilities {
             multi_frontend: true,
             crdt_replica: true,
-
             semantic_render: true,
         };
         let old_peer = FrontendId(2);
@@ -3261,6 +3280,44 @@ mod tests {
             read_message::<InstanceMessage>(&mut semantic_client).is_err(),
             "a semantic peer displaying another buffer must receive no snapshot"
         );
+    }
+
+    #[test]
+    fn frontend_events_from_uninstalled_sessions_are_dropped_without_state_access() {
+        let source = FrontendId(77);
+        let mut editor = EditorState::new();
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        let mut last_dispatch_idle_sent = HashMap::new();
+        let mut last_active_buffer_sent = HashMap::new();
+        let mut terminal_bell_baselines = HashMap::new();
+        let mut session_registry = SessionRegistry::new();
+
+        handle_dispatcher_event(
+            DispatcherEvent::FrontendEvent {
+                source,
+                event: FrontendEvent::Key(crate::protocol::KeyEvent {
+                    frontend_id: source,
+                    key: crate::protocol::Key::Char('x'),
+                    mods: crate::protocol::Modifiers::NONE,
+                    timestamp_ns: 0,
+                }),
+            },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_dispatch_idle_sent,
+            &mut last_active_buffer_sent,
+            &mut terminal_bell_baselines,
+            &mut session_registry,
+        );
+
+        assert_eq!(editor.core.borrow().active_frontend, FrontendId::LOCAL);
+        assert!(term_sizes.is_empty());
     }
 
     #[test]
@@ -3654,6 +3711,18 @@ mod tests {
         let mut last_active_buffer_sent = HashMap::new();
         let mut terminal_bell_baselines = HashMap::new();
         let mut session_registry = SessionRegistry::new();
+        session_registry.register_session(
+            source,
+            crate::presence::SessionState::new(
+                PROTOCOL_VERSION,
+                crate::protocol::NegotiatedCapabilities {
+                    multi_frontend: true,
+                    crdt_replica: false,
+                    semantic_render: false,
+                },
+                0,
+            ),
+        );
 
         handle_dispatcher_event(
             DispatcherEvent::FrontendEvent {

@@ -230,7 +230,8 @@ pub struct InitialTarget {
   are the authority.
 - `cwd` and `path` are Unix path bytes, not text. This stage is the local Unix-
   socket GPU path; it does not claim a cross-platform/remote path protocol.
-- Each field is bounded to 32 KiB before allocation/use. `path` must be
+- Postcard decodes each field under the transport's 16 MiB frame cap; daemon
+  validation then bounds each to 32 KiB before filesystem use. `path` must be
   nonempty, `cwd` must be nonempty and absolute, and embedded NUL is rejected
   with a bootstrap failure.
 
@@ -550,9 +551,11 @@ process behavior.
    status/path identity, accepts an edit/save through the real session, and
    creates the requested file under the launcher cwd—not the daemon cwd.
 10. **Open error:** a directory/permission-denied target returns a specific
-    failure before ready/window creation and makes root fail. An existing daemon
-    remains connectable; a pre-existing frontend's active buffer and contents
-    remain unchanged.
+    failure before ready/window creation and makes root fail. The daemon shuts
+    down that failed session's socket; a client that lingers or sends another
+    event cannot reach uninstalled session state. An existing daemon remains
+    connectable; a pre-existing frontend's active buffer and contents remain
+    unchanged.
 11. **Dedup preserves unsaved edits:** frontend A opens and modifies a file
     without saving; target-launch frontend B opens the same normalized path and
     receives A's authoritative unsaved text with the same `BufferId`, not disk
@@ -561,10 +564,11 @@ process behavior.
     target launches B and C open different files. Each result/snapshot pair
     names its own view; a subsequent input/resize proof shows A, B, and C remain
     independently usable on their original buffers.
-13. **Fresh-buffer publication:** keep replica A attached, then target-launch B
-    onto a previously unknown file. A receives the new buffer snapshot before
-    any CRDT op for it; both replicas accept later operations without unknown-
-    buffer fallback or disconnect.
+13. **Replica publication after target upgrade:** keep grid replica A attached,
+    then target-launch B onto a previously unknown file. Repeat for a file that
+    Lua loaded into a hidden, not-yet-CRDT-backed buffer before the target dedup.
+    A receives each buffer snapshot before any CRDT op for it; both replicas
+    accept later operations without unknown-buffer fallback or disconnect.
 14. **Hook context and count:** fresh disk load fires `buffer.after-load` once;
     dedup fires `buffer.after-switch` once even when the fresh view already
     shares that exact buffer and the select itself is a no-op; missing-file
@@ -617,20 +621,20 @@ Vterm Stage 3 acceptance in default and CRDT configurations where the suite
 supports both. The final full workspace sweep remains required before PR.
 
 The named gate intentionally reuses the managed-lifecycle acceptance module,
-so a workspace sweep executes those 13 CRDT cases under both test-binary
+so a workspace sweep executes those 14 CRDT cases under both test-binary
 names. The duplicate runtime is retained to keep the approved named command
 and the complete #141 lifecycle fixture coverage together.
 
-Post-review verification on 2026-07-23:
+Post-second-review verification on 2026-07-24:
 
 - `cargo fmt --check` and strict workspace Clippy passed.
-- Library gates passed 1,800 default and 1,977 CRDT tests.
-- The named initial-target gate passed 1 default and 13 CRDT tests; the
-  underlying GPU invocation suite passed 13 CRDT tests.
+- Library gates passed 1,801 default and 1,978 CRDT tests.
+- The named initial-target gate passed 1 default and 14 CRDT tests; the
+  underlying GPU invocation suite passed 14 CRDT tests.
 - M4 passed 121 tests with the documented basedpyright skip; required real-GPU
   tests passed 152.
 - Vterm Stage 3 passed 5 default and 7 CRDT tests.
-- The isolated-config workspace CRDT sweep passed 3,269 tests across 87 suites,
+- The isolated-config workspace CRDT sweep passed 3,272 tests across 87 suites,
   with 29 ignored and the documented basedpyright case filtered.
 - A coherent release build launched two concurrent real Wayland/Vulkan GPU
   windows on one daemon, targeting distinct `alpha` and `beta` files. Both
