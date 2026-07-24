@@ -8,13 +8,14 @@ use pmacs::overlay::{BufferStyleOverlay, BufferStyleSpan, SharedBufferStyleSpans
 use pmacs::text_view::TextView;
 use pmacs::view::{DisplayCoord, View, Viewport};
 
-fn viewport(rows: u32, cols: u32, buffer_end: u64) -> Viewport {
+fn viewport(rows: u32, cols: u32, buffer_end: u64) -> Viewport<'static> {
     Viewport {
         buffer_start: 0,
         buffer_end,
         cell_origin: CellCoord::new(0, 0),
         cell_size: CellSize::new(rows, cols),
         gutter_w: 0,
+        folds: None,
     }
 }
 

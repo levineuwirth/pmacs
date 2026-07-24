@@ -493,7 +493,7 @@ impl View for DiagnosticView {
         "diagnostic"
     }
 
-    fn render(&mut self, buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         // Snapshot the diagnostics under the lock and drop it
         // immediately so we don't hold the lock through rendering
         // (rendering touches the rope, which could in principle
@@ -557,20 +557,23 @@ impl View for DiagnosticView {
                 if line >= total_lines {
                     break;
                 }
-                if line < start_line_buf {
+                let row_offset = viewport.row_offset_of(start_line_buf as usize, line as usize);
+                let Some(sign_row) = sign_row_for(viewport, start_line_buf, line) else {
                     continue;
-                }
-                let row_offset = line - start_line_buf;
-                if row_offset >= max_rows {
+                };
+                if sign_row >= max_rows {
                     break;
                 }
                 // Record the line marker before any byte-range work:
                 // zero-width ranges (`byte_end <= byte_start` below)
                 // skip the underline but still mark the line.
                 line_markers
-                    .entry(row_offset)
+                    .entry(sign_row)
                     .and_modify(|s| *s = (*s).min(diag.severity))
                     .or_insert(diag.severity);
+                let Some(row_offset) = row_offset else {
+                    continue;
+                };
                 let line_start = line_offsets[line as usize];
                 let line_end = line_offsets
                     .get(line as usize + 1)
@@ -623,6 +626,25 @@ impl View for DiagnosticView {
             theme.as_ref(),
         );
     }
+}
+
+/// The grid row a diagnostic on source `line` marks (Arc 6 Stage 2,
+/// Q#FD15).
+///
+/// Its own row normally; when the line is collapsed away, the fold's
+/// **outermost visible head** row — a clamp, not a drop, so "there is a
+/// problem inside this collapsed region" survives the collapse (the
+/// most-severe-per-row merge then makes the head show the worst severity
+/// among itself and every line its fold hides). `None` when neither has
+/// a row in this viewport. Only the *sign* clamps: a squiggle needs a
+/// real row, so a hidden line contributes no underline.
+fn sign_row_for(viewport: Viewport<'_>, start_line: u32, line: u32) -> Option<u32> {
+    viewport
+        .row_offset_of(start_line as usize, line as usize)
+        .or_else(|| {
+            let map = viewport.folds?;
+            viewport.row_offset_of(start_line as usize, map.visible_head_of(line as usize))
+        })
 }
 
 /// Paint one severity marker per diagnostic line (UX gutter sub-arc 2).
@@ -1046,6 +1068,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(1, 10),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );
@@ -1110,6 +1133,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(3, 10),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );
@@ -1185,6 +1209,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 2),
                 cell_size: CellSize::new(3, 8),
                 gutter_w: 2,
+                folds: None,
             },
             &mut grid,
         );
@@ -1253,6 +1278,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(2, 10),
                 gutter_w: 0,
+                folds: None,
             },
             &mut grid,
         );

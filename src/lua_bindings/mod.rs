@@ -1308,11 +1308,90 @@ fn run_buffer_edit(
     op: EditOp<'_>,
     bypass_intercept: bool,
 ) -> mlua::Result<crate::rope::Edit> {
+    // Arc 6 Stage 2 (Q#FD19): the interactive-Lua-command unfold seam.
+    // BOTH paths are covered — hooking only `run_managed_edit` would let
+    // an interactive `bypass_intercept` edit escape — but each keys on
+    // *its own* effective edit site (round-5 F1):
+    //
+    // - bypass applies `op` verbatim, so the site is known right here;
+    // - managed runs the intercept chain first, and an intercept may
+    //   legally relocate `pos` / `start` / `end`, so only the op the
+    //   chain settles on names where the edit will land.
     if bypass_intercept {
+        unfold_before_interactive_lua_edit(lua, id, edit_start_of(&op));
         run_bypass_edit(lua, id, op)
     } else {
         run_managed_edit(lua, id, op)
     }
+}
+
+/// Where an [`EditOp`] lands — the `edit.range.start` Q#FD19 keys the
+/// interactive unfold on.
+fn edit_start_of(op: &EditOp<'_>) -> u64 {
+    match op {
+        EditOp::Insert { pos, .. } => *pos,
+        EditOp::Delete { range } | EditOp::Replace { range, .. } => range.start,
+    }
+}
+
+/// Unfold at the **edit site** before an **interactive** Lua-mutator edit
+/// (comment-toggle, yank-pop, and any other `pmacs.buffer.X` mutation a
+/// command body performs on the buffer the user is looking at).
+///
+/// Unfolds only when **all** of:
+///
+/// 1. [`InteractiveCommandOrigin::current`] is `Some(f)` — an
+///    interactive command is running, and `f` is the authenticated
+///    frontend that invoked it. This is the scoped authority that
+///    distinguishes a user command's edit from a plugin's or the data
+///    API's programmatic one; no command-history inference is involved,
+///    and the guard clears even when the Lua command errors.
+/// 2. The edited buffer **is `f`'s active-window buffer**. An explicit
+///    mutation of some *other*, inactive buffer stays programmatic — it
+///    is not an edit the user can see land.
+/// 3. A fold actually contains **`edit_start`** (handled by
+///    [`crate::fold::FoldRegistry::unfold_containing`], a no-op
+///    otherwise).
+///
+/// Condition 3 is the edit site, **not the point** (Q#FD19). A Lua
+/// command is free to edit somewhere other than where the cursor sits:
+/// keying on the cursor would open an unrelated fold when a command
+/// edits elsewhere, and — worse — leave the edit invisible when a
+/// command edits *into* a fold from an outside point. The six
+/// `EditorCore` primitives, yank, and query-replace all edit exactly at
+/// the point, so
+/// [`apply_active_edit`](crate::editor_core::EditorCore::apply_active_edit)'s
+/// funnel keys on the point; only this Lua path can diverge.
+///
+/// "Edit site" means the **effective** one (round-5 F1). On the managed
+/// path a buffer intercept may legally rewrite `pos` / `start` / `end`
+/// before the op is applied, so [`run_managed_edit`] calls this *after*
+/// the intercept chain settles; only [`run_bypass_edit`], which applies
+/// its op verbatim, can name the site up front.
+///
+/// Matches Stage 1's data-API exemption: `pmacs.buffer.insert` called
+/// from a plugin, a hook, or a bare Lua chunk unfolds nothing.
+fn unfold_before_interactive_lua_edit(lua: &Lua, id: BufferId, edit_start: u64) {
+    let Some(origin) = lua
+        .app_data_ref::<InteractiveCommandOrigin>()
+        .and_then(|origin| origin.current())
+    else {
+        return; // programmatic: no interactive command in scope
+    };
+    let Some(folds) = lua.app_data_ref::<crate::fold::SharedFoldRegistry>() else {
+        return;
+    };
+    let Some(core) = lua.app_data_ref::<SharedCore>() else {
+        return;
+    };
+    let core = core.borrow();
+    let Some(window) = core.active_window_for(origin) else {
+        return; // the invoking frontend has no view (nothing to anchor on)
+    };
+    if window.buffer_id != id {
+        return; // an inactive-buffer mutation stays programmatic
+    }
+    folds.unfold_containing(id, edit_start);
 }
 
 fn run_bypass_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<crate::rope::Edit> {
@@ -1365,6 +1444,19 @@ fn run_managed_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<cra
         }
         Ok(current)
     })();
+
+    // Arc 6 Stage 2 (Q#FD19, round-5 F1): the interactive unfold keys on
+    // the EFFECTIVE edit site, so it must run here — after the chain has
+    // settled, before the apply. An intercept may legally relocate `pos`
+    // / `start` / `end`, so widening on the *requested* op would leave a
+    // relocated-into-a-fold edit invisible, and would open an unrelated
+    // fold when the intercept moved the edit out of one. A rejected
+    // chain (`Err`) applies nothing, so it unfolds nothing. The registry
+    // borrow is released at this point; this reads `SharedCore` and the
+    // fold registry only.
+    if let Ok(final_op) = intercept_result.as_ref() {
+        unfold_before_interactive_lua_edit(lua, id, edit_start_of(final_op));
+    }
 
     // Phase 3: re-borrow, restore views, clear mid-edit flag, apply.
     // We restore views and clear the flag even on intercept error,

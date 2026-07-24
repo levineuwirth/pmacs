@@ -144,21 +144,47 @@ pub fn paint_other_frontend_overlays(
                 if g >= rect.size.cols { 0 } else { g }
             };
             let text_cols = rect.size.cols.saturating_sub(gutter_w);
+            // Arc 6 Stage 2 (round-2 F2): the fold map belongs to THIS
+            // RECIPIENT WINDOW — built from its own buffer and line
+            // offsets, exactly like its `paint_frame` pass. A split
+            // showing two buffers derives two maps, and a peer in the
+            // unfolded pane is never projected through the folded one's.
+            let folds = crate::fold_view::map_for_window(&state.fold_registry, window);
             // Source's byte position → display coords via THIS
             // recipient window's text_view (the recipient's view
-            // of the buffer).
-            let Some(disp) = window
-                .text_view
-                .pos_to_display(buf, presence.snapshot.cursor)
-            else {
+            // of the buffer). Q#FD16: a peer cursor on a line this
+            // recipient has collapsed clamps to the head POSITION.
+            let peer_cursor = match folds.as_ref() {
+                Some(map) => map.visible_position(
+                    window.text_view.line_at_offset(presence.snapshot.cursor),
+                    presence.snapshot.cursor,
+                ),
+                None => presence.snapshot.cursor,
+            };
+            let Some(disp) = window.text_view.pos_to_display(buf, peer_cursor) else {
                 continue;
             };
             // Filter to viewport visible range. `view_top` is the
             // top visible buffer-line; cells below it are in-frame
-            // until `view_top + inner_rows`.
-            let row_in_window = match (disp.row as usize).checked_sub(window.view_top) {
-                Some(r) if r < inner_rows as usize => r,
-                _ => continue,
+            // until `view_top + inner_rows` — counted in VISIBLE rows
+            // once this window has folds.
+            let row_in_window = match folds.as_ref() {
+                Some(map) => {
+                    let top = map.clamp_view_top(window.view_top);
+                    let row = disp.row as usize;
+                    if row < top {
+                        continue;
+                    }
+                    let r = map.visible_rows_between(top, row);
+                    if r >= inner_rows as usize {
+                        continue;
+                    }
+                    r
+                }
+                None => match (disp.row as usize).checked_sub(window.view_top) {
+                    Some(r) if r < inner_rows as usize => r,
+                    _ => continue,
+                },
             };
             // Column bounds: disp.col is the buffer column; window
             // doesn't horizontally scroll in v1.0, so cells past
@@ -181,7 +207,16 @@ pub fn paint_other_frontend_overlays(
                     (sel.active, sel.anchor)
                 };
                 paint_selection_in_window(
-                    grid, buf, window, rect, inner_rows, gutter_w, lo, hi, color,
+                    grid,
+                    buf,
+                    window,
+                    rect,
+                    inner_rows,
+                    gutter_w,
+                    folds.as_ref(),
+                    lo,
+                    hi,
+                    color,
                 );
             }
         }
@@ -235,10 +270,21 @@ fn paint_selection_in_window(
     rect: Rect,
     inner_rows: u32,
     gutter_w: u32,
+    folds: Option<&crate::fold_view::VisibleLineMap>,
     lo: crate::rope::Position,
     hi: crate::rope::Position,
     color: Color,
 ) {
+    // Arc 6 Stage 2 (Q#FD16): endpoints on a collapsed line project to
+    // their component's head position; hidden interior bytes have no row
+    // and drop below.
+    let (lo, hi) = match folds {
+        Some(map) => (
+            map.visible_position(window.text_view.line_at_offset(lo), lo),
+            map.visible_position(window.text_view.line_at_offset(hi), hi),
+        ),
+        None => (lo, hi),
+    };
     if lo >= hi {
         return;
     }
@@ -261,7 +307,15 @@ fn paint_selection_in_window(
         let Some(disp) = window.text_view.pos_to_display(buf, pos) else {
             break;
         };
-        match (disp.row as usize).checked_sub(window.view_top) {
+        let row_in_window = match folds {
+            Some(map) if map.is_hidden(disp.row as usize) => None,
+            Some(map) => {
+                let top = map.clamp_view_top(window.view_top);
+                (disp.row as usize >= top).then(|| map.visible_rows_between(top, disp.row as usize))
+            }
+            None => (disp.row as usize).checked_sub(window.view_top),
+        };
+        match row_in_window {
             Some(r) if r < inner_rows as usize && disp.col < text_cols => {
                 let grid_row = rect.origin.row + r as u32;
                 let grid_col = rect.origin.col + gutter_w + disp.col;

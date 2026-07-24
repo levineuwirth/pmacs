@@ -324,6 +324,28 @@ pub struct FrontendView {
     /// `layout` references (invariant: `layout.iter_ids()` contains
     /// `active`).
     pub active: WindowId,
+    /// Whether this frontend's display *projects* folds — i.e. whether
+    /// it collapses hidden lines away (Arc 6 Stage 2, Q#FD21).
+    ///
+    /// Motion, paging, wheel scrolling, click inverses, and the
+    /// auto-scroll clamp all live in shared
+    /// [`EditorCore`](crate::editor_core::EditorCore) code, but Stage 2
+    /// collapses only the **grid** renderer — a `semantic_render` (GPU)
+    /// session still displays every source line until Stage 3, and both
+    /// kinds may attach to one buffer at once over the same shared fold
+    /// store. Reckoning in visible lines unconditionally would make that
+    /// GPU session's cursor skip lines it is still showing, so every
+    /// command/event-time visible-line reckoning is gated on the
+    /// **acting** frontend's flag. Render-time clamps need no gate: a
+    /// semantic session never enters `paint_frame`.
+    ///
+    /// Set at attach from the negotiated selected-render bit (grid ⇒
+    /// `true`, semantic ⇒ `false`), cleared with the view at detach, and
+    /// `true` for [`FrontendId::LOCAL`](crate::protocol::FrontendId).
+    /// Deliberately has no `Default`: every construction site chooses
+    /// explicitly, so the projection is never inferred from a
+    /// `FrontendId` (**Bet B8**).
+    pub fold_projection: bool,
 }
 
 impl Layout {
