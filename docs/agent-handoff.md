@@ -1,12 +1,13 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-24, after GPU initial-target PR #148 second-review fixes
-and verification completed on branch `gpu-initial-target` (protocol v20),
-following one-command GPU invocation (#141), the documentation refresh (#140),
-Vterm Stage 3 (#135), tab-width rendering parity (#137), locals-query
-processing (#134), modeline detection (#132), mode system wiring (#129),
-config registry (#127), Vterm Stages 1–2 (#126/#130), and completed Themes
-Arc 4 (#120/#124/#125).**
+**Last updated: 2026-07-24, after GPU initial-target PR #148 second-review
+fixes were integrated with folding Stage 2 (#149) and its landed-doc refresh
+(#150), following web grammars HTML+CSS (#146), the LaTeX Stage 1 / inline-math
+framing pair (#144/#145), folding Stage 1 (#142), one-command GPU invocation
+(#141), the documentation refresh (#140), Vterm Stage 3 (#135), tab-width
+rendering parity (#137), locals-query processing (#134), modeline detection
+(#132), mode system wiring (#129), config registry (#127), Vterm Stages 1–2
+(#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -20,9 +21,11 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-24)
 
-- `main` @ `47581f4` (web grammars #146 atop folding Stage 1 #142,
-  inline-math framing #145, and one-command GPU invocation #141), protocol
-  **v19** (`SUPPORTED=[6..=19]`; v19 = terminal frames/events).
+- `main` @ `b168dca` (folding Stage 2 landed-doc refresh #150 atop folding
+  Stage 2 #149, ledger refresh #147, web grammars #146, LaTeX Stage 1 #144 /
+  inline-math framing #145, and folding Stage 1 #142), protocol **v19**
+  (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
+  `StatuslineSegments`, v19 = terminal frames/events).
 - **GPU INITIAL TARGET IMPLEMENTED — PR #148 under user review**
   (`docs/gpu-initial-target-framing.md` rev 3; branch `gpu-initial-target`).
   `pmacs --gpu [--socket NAME|PATH] FILE` now transports exact Unix path bytes
@@ -41,6 +44,71 @@ commands, read `docs/active-work.md` immediately after this file.
   Existing no-target managed launch, direct attach, TUI, and legacy protocol
   behavior remain intact. See `docs/active-work.md` for the portable checkpoint
   and verification.
+- **Folding Stage 1 (headless fold engine) LANDED — #142**
+  (`docs/folding-framing.md` rev 5; merge `c49a8c7`; three review rounds,
+  round 3 clean). Arc 6's engine — instance-side and headless; **no frontend
+  renders a collapse yet** (that is Stage 2). No protocol bump.
+  - `src/fold.rs`: a per-buffer `FoldStore` of byte ranges attached as a
+    translating/dropping `View` (the `BufferStyleSpanTranslator` pattern — it
+    translates strictly-inside edits and DROPS boundary-crossers,
+    provenance-blind); `FoldRegistry`/`SharedFoldRegistry` =
+    `Rc<RefCell<HashMap<BufferId, {Arc<Mutex<FoldStore>>, ViewId}>>>` (the
+    SyntaxRegistry per-buffer model), held on both `EditorCore`
+    (`src/editor_core.rs:223`) and `EditorState` (`src/editor.rs:110`).
+    Containment is **start-exclusive, end-inclusive `(start, end]`**; the
+    stored range is `[end of head line, end of last hidden line]` (NOT the
+    `ByteRange` struct doc's `[start,end)`).
+  - Structural source: nearest enclosing block-like node ≥2 source lines →
+    resolve introducer↔body → **derived head line** (the line immediately
+    above the first hidden line, so wrapped signatures / `where` clauses stay
+    visible) → **closer-aware tail** (a closing-delimiter line stays visible,
+    e.g. `} else {`). Stale/absent parse tree refuses.
+  - The six `EditorCore` edit primitives call `unfold_before_point_edit`
+    first (command-path pre-edit unfold, keyed on the active frontend's
+    point). Interactive Lua-command unfold (yank/query-replace/comment) is a
+    Stage 2 obligation; CRDT-origin unfold is Stage 3.
+  - `src/lua_bindings/fold.rs` (`install_fold`): `pmacs.fold.*` data API
+    (explicit buffer, no ambient resolution, matching #127) + interactive
+    commands on the **Emacs hideshow `C-c @` prefix set**;
+    `builtin/runtime/fold.lua`.
+  - `src/semantic_render.rs`: `fold_state_msg` PRODUCES `FoldState`
+    (semantic/GPU sessions) — authoritative-empty, diff-suppressed, per-session
+    baseline reset on `BufferSnapshot` (the #120 stale-mirror trap class; the
+    GPU fold-mirror clear-on-snapshot is a named Stage 3 obligation).
+  - Durable lesson (round 2): after wiring a cleanup into a production hook,
+    PIN IT THROUGH THE REAL PATH — a direct-call unit test misses the wiring
+    (falsify by revert).
+  - **Stage 2 (grid/daemon collapse) LANDED — #149** (merge `6ed4fe9`; five
+    review rounds; `docs/folding-stage2-framing.md` rev 4). Its
+    load-bearing reframe: the TUI had **no non-identity
+    source-line↔display-row map** (`view_top + row` was baked into ~13 sites),
+    so Stage 2's spine is `src/fold_view.rs`'s `VisibleLineMap` — derived from
+    the fold store plus a window's line offsets, never stored — that the render
+    loop, gutter, diagnostics, caret, selection, peer presence,
+    viewport/scroll/motion, and the mode-line indicator all route through, plus
+    the interactive-Lua unfold widening. Threaded as `Option<&'a
+    VisibleLineMap>` on a lifetime-bearing `Viewport<'a>` that stays `Copy`.
+    Design points the review rounds forced, each a trap for Stage 3:
+    - the map's unit is a **merged hidden component** (overlapping *or
+      adjacent* intervals unioned, keeping the earliest visible head), not a
+      fold — folds may cross, and an inner/later fold's own head can be hidden;
+    - instances are **per rendered window** and **per command/event
+      operation**, never per frame; a command's map follows the operation's
+      TARGET window (a wheel event names a pane without activating it);
+    - fold projection is **per-frontend** (`FrontendView.fold_projection`, set
+      at attach from the negotiated `semantic_render` bit) — shared
+      `EditorCore` motion would otherwise make a simultaneous unfolded GPU
+      session's cursor skip lines it still displays;
+    - a hidden cursor normalizes by **position**, not row, and `set_view_top`
+      clamps in the setter rather than being repaired at render time;
+    - the interactive-Lua unfold keys on the **post-intercept** edit site — a
+      managed buffer intercept may legally relocate the op.
+    No protocol bump. **Stage 3 (GPU) is next and has no framing yet**; its
+    named obligations are GPU collapse at TUI parity, caret/hit-test
+    fold-awareness, the `BufferSnapshot` **fold-mirror clear** (parent R2-4 —
+    the #120 trap class), CRDT-origin / GPU-optimistic interactive unfold
+    (parent R2-3), and flipping `FrontendView.fold_projection` to `true` for
+    semantic frontends.
 - **One-command GPU invocation LANDED — #141**
   (`docs/gpu-invocation-framing.md` rev 6; merge `63fbc66`; two implementation
   reviews). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;
@@ -440,8 +508,16 @@ commands, read `docs/active-work.md` immediately after this file.
     lexical resolution, settled per-layer facts, shared TUI/GPU
     local-predicate filtering, and a registry-wide locals-query invariant
     shipped without a protocol change.
-  - Remaining ranked arcs: 6 folding, 7 DAP, 8 GPU splits, plus the
-    `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
+  - **Arc 6 (folding) Stages 1 and 2 LANDED — #142 and #149** — the headless
+    fold engine (store, structural source, Lua `C-c @` surface, command-path
+    unfold, `FoldState` production), then the grid/daemon collapse (the
+    `VisibleLineMap` spine, fold-aware gutter/diagnostics/caret/selection/
+    presence/viewport/motion, and the interactive unfold widening). **Stage 3
+    (GPU) is next**, unframed.
+  - **Web grammars HTML+CSS LANDED — #146**, and **LaTeX Stage 1 — #144**
+    with its inline-math parent framing **#145**.
+  - Remaining ranked arcs: 6 folding Stage 3, 7 DAP, 8 GPU splits, plus
+    the `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
 ## 2. How we work (the part that must not drift)
 

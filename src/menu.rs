@@ -378,7 +378,7 @@ impl View for MenuView {
         "context-menu"
     }
 
-    fn render(&mut self, _buf: &Buffer, viewport: Viewport, cells: &mut CellGrid<'_>) {
+    fn render(&mut self, _buf: &Buffer, viewport: Viewport<'_>, cells: &mut CellGrid<'_>) {
         let guard = self.menu.lock().expect("menu mutex poisoned");
         let Some(menu) = guard.as_ref() else {
             return;

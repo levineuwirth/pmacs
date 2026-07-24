@@ -40,6 +40,7 @@
 
 use crate::buffer::{Buffer, BufferError, BufferId, EditOp};
 use crate::cell::{CellCoord, CellGrid, CellSize};
+use crate::fold_view::VisibleLineMap;
 use crate::rope::{Edit, Position};
 
 // ---------------------------------------------------------------------------
@@ -127,7 +128,7 @@ impl DisplayCoord {
 /// cell origin) and hands it to the view. The view fills cells inside that
 /// origin/size window.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct Viewport {
+pub struct Viewport<'a> {
     /// First byte in the buffer to consider rendering.
     pub buffer_start: Position,
     /// One past the last byte to consider.
@@ -142,6 +143,58 @@ pub struct Viewport {
     /// `cell_origin.col - gutter_w`; overlays that only touch the text area
     /// ignore it (the origin is already shifted past the gutter).
     pub gutter_w: u32,
+    /// The rendering window's collapsed regions (Arc 6 Stage 2, Q#FD12),
+    /// or `None` when this window's buffer has no folds — the unfolded
+    /// path then stays byte-identical to the pre-folding renderer.
+    ///
+    /// Borrowed rather than owned so `Viewport` stays [`Copy`]: the frame
+    /// builds **one map per rendered window** (never one per frame — a
+    /// split may show different buffers) and hands the same shared
+    /// reference to every painter of that window.
+    pub folds: Option<&'a VisibleLineMap>,
+}
+
+impl Viewport<'_> {
+    /// Row offset within this viewport for source `line`, given the
+    /// viewport's first (visible) source line.
+    ///
+    /// `None` when `line` is above `start_line` or collapsed away — a
+    /// hidden line simply has no row, so its painter skips it. Without a
+    /// map this is the identity `line - start_line` every consumer used
+    /// before folding.
+    ///
+    /// The result is monotonically non-decreasing in `line`, so a caller
+    /// that bounds its walk with `row_offset >= rows` may still `break`.
+    #[must_use]
+    pub fn row_offset_of(self, start_line: usize, line: usize) -> Option<u32> {
+        let raw = line.checked_sub(start_line)?;
+        let rows = match self.folds {
+            Some(map) if !map.is_identity() => {
+                if map.is_hidden(line) {
+                    return None;
+                }
+                map.visible_rows_between(start_line, line)
+            }
+            _ => raw,
+        };
+        u32::try_from(rows).ok()
+    }
+
+    /// The inverse of [`Self::row_offset_of`]: the source line rendered
+    /// at `row_offset`, given the viewport's first (visible) source line.
+    ///
+    /// Painters that walk rows rather than spans (the syntax and LSP
+    /// style views) use this; the result may exceed the buffer's line
+    /// count, which those callers already bound.
+    #[must_use]
+    pub fn line_at_row_offset(self, start_line: usize, row_offset: u32) -> usize {
+        match self.folds {
+            Some(map) if !map.is_identity() => {
+                map.nth_visible_from(start_line, row_offset as usize)
+            }
+            _ => start_line + row_offset as usize,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +262,7 @@ pub trait View {
     ///
     /// Default: no-op (used by views that participate in `on_edit` but not
     /// in rendering).
-    fn render(&mut self, _buf: &Buffer, _viewport: Viewport, _cells: &mut CellGrid<'_>) {}
+    fn render(&mut self, _buf: &Buffer, _viewport: Viewport<'_>, _cells: &mut CellGrid<'_>) {}
 
     /// Translate a buffer byte position to a display coordinate, if the
     /// view holds a meaningful mapping for that position.
@@ -277,8 +330,45 @@ mod tests {
     #[test]
     fn viewport_is_copy() {
         // Compile-time assertion: Viewport must be Copy so the frontend can
-        // hand the same descriptor to multiple views without ceremony.
+        // hand the same descriptor to multiple views without ceremony. Arc 6
+        // Stage 2 (Bet B7) keeps this true by borrowing the fold map — a
+        // shared reference is itself `Copy`.
         fn assert_copy<T: Copy>() {}
-        assert_copy::<Viewport>();
+        assert_copy::<Viewport<'_>>();
+    }
+
+    #[test]
+    fn row_offset_without_folds_is_the_identity_map() {
+        let vp = Viewport {
+            buffer_start: 0,
+            buffer_end: 0,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(10, 10),
+            gutter_w: 0,
+            folds: None,
+        };
+        assert_eq!(vp.row_offset_of(4, 4), Some(0));
+        assert_eq!(vp.row_offset_of(4, 9), Some(5));
+        assert_eq!(vp.row_offset_of(4, 3), None, "above the viewport");
+    }
+
+    #[test]
+    fn row_offset_skips_hidden_lines_and_compacts_rows() {
+        // Fold heading line 1, hiding lines 2..=4 (8-byte lines).
+        let map =
+            VisibleLineMap::build(&[pmacs_protocol::ByteRange { start: 15, end: 39 }], |off| {
+                (off / 8) as usize
+            });
+        let vp = Viewport {
+            buffer_start: 0,
+            buffer_end: 0,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(10, 10),
+            gutter_w: 0,
+            folds: Some(&map),
+        };
+        assert_eq!(vp.row_offset_of(0, 1), Some(1), "the head keeps its row");
+        assert_eq!(vp.row_offset_of(0, 3), None, "hidden lines have no row");
+        assert_eq!(vp.row_offset_of(0, 5), Some(2), "rows below shift up");
     }
 }

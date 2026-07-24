@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-23.** This file records volatile work that has not
+**Snapshot: 2026-07-24.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -14,9 +14,10 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `47581f4` (web grammars #146 atop folding Stage 1
-  #142, inline-math framing #145, and one-command GPU invocation #141;
-  protocol v19).
+  `githubsucks/main` @ `b168dca` (folding Stage 2 landed-doc refresh #150
+  atop folding Stage 2 #149, the ledger refresh #147, web grammars HTML+CSS
+  #146, and the LaTeX Stage 1 #144 / inline-math framing #145 pair; protocol
+  v19).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -50,7 +51,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `47581f4` or a newer intentional main.
+The `git log` command must expose `b168dca` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 ## Active lane: GPU initial target
@@ -61,21 +62,24 @@ If it does not, stop and repair the remote/fetch configuration.
 - Approved framing branch: `githubsucks/gpu-initial-target-framing`;
   Revision 2 checkpoint `71039d1`.
 - Original implementation base: canonical `githubsucks/main` @ `c49a8c7`
-  (folding Stage 1 #142); current canonical `main` @ `47581f4` is integrated
-  conflict-free by merge `d6d4be6`. Protocol was v19 before this work.
+  (folding Stage 1 #142); current canonical `main` @ `b168dca` is integrated
+  before publication of the second-review merge. Protocol was v19 before this
+  work.
 - State: implementation checkpoint `2dd30ec`; first review-fix checkpoint
-  `bef1c08`; second-review checkpoint `be8c67c`. Integrated, smoke-tested,
-  fully gated, and published at protocol v20. PR #148 remains open for user
-  review: `https://github.com/levineuwirth/pmacs/pull/148`.
+  `bef1c08`; second-review checkpoint `be8c67c`. Current `main` is integrated,
+  smoke-tested, and fully gated at protocol v20; merge publication is next.
+  PR #148 remains open for user review:
+  `https://github.com/levineuwirth/pmacs/pull/148`.
 - Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
   protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
   Unix path transport, pre-window target readiness, replica coherence, and the
   approved behavioral acceptance matrix.
-- Second-review verification: formatting and strict Clippy; 1,801 default +
-  1,978 CRDT library tests; target gate 1 default + 14 CRDT; M4 121; required
-  GPU 152; Vterm Stage 3 5 default + 7 CRDT; isolated-config workspace sweep
-  3,272 across 87 suites. The prior two-window Wayland/Vulkan isolation smoke
-  remains valid; this round changes only daemon failure/publication behavior.
+- Post-integration verification: formatting and strict Clippy; 1,815 default +
+  1,992 CRDT library tests; target and invocation gates 14 CRDT each; Folding
+  Stage 2 48 CRDT; M4 121; required GPU 152; Vterm Stage 3 5 default + 7 CRDT;
+  isolated-config workspace sweep 3,334 across 88 suites. The prior two-window
+  Wayland/Vulkan isolation smoke remains valid; this round changes only daemon
+  failure/publication behavior.
 - Deferred unchanged: automatic GUI selection, multiple files, general
   live-open commands, packaging, and remote GPU paths.
 
@@ -88,41 +92,25 @@ git worktree add --track \
   githubsucks/gpu-initial-target
 ```
 
-## Folding framing lane (Arc 6)
+## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
-- Portable branch: `githubsucks/folding`; worktree `../pmacs-folding`.
-- Base: **rebased onto canonical `main` @ `96d0bae`** at implementation
-  start (was `cac4961`; the earlier base fell behind the docs + tab-width
-  housekeeping).
-- Framing head: revision 5 of `docs/folding-framing.md` (rev 1 → … → rev 4
-  absorbed three review rounds; rev 5 records approval + the Q#FD4 binding
-  decision).
-- State: **Stage 1 (fold engine, headless) implemented; PR #142 OPEN**,
-  two review rounds landed on the branch. Bindings decided (Q#FD4 → Emacs
-  hideshow `C-c @` set); Bet B1 accepted as framed.
-  Load-bearing decision (Q#FD1): the bundled grammars ship no fold query and
-  no `folds.scm`, so the roadmap's "tree-sitter fold ranges" is not free; v1
-  is structural node folding (block-like node ≥2 source lines, derived head
-  line, closer-aware tail), with indentation fallback and curated queries
-  deferred. `FoldState` already exists in the protocol; Stage 1 starts
-  *producing* it (authoritative-empty), no protocol bump; gutter markers are
-  frontend-derived like the diagnostic sign bars, so no new wire type. Staged
-  like vterm: Stage 1 engine (headless), Stage 2 TUI, Stage 3 GPU.
-- PR: **#142** (`Arc 6 folding — Stage 1: instance fold engine`), open
-  against `main`. Round 1 (tail-boundary delete bug + buffer-kill cleanup +
-  close-all point-move) and round 2 (pin the kill-path + close-all through
-  the real command surface) are landed as fix commits on the branch.
-- Next: land Stage 1; Stages 2/3 are separate branches/PRs, each re-framed
-  in detail after the prior stage lands.
+Both shipped stages are on `main`; nothing in this arc is in flight. Stage 3
+has **no branch and no framing yet**.
 
-Recovery worktree:
-
-```sh
-git worktree add --track \
-  -b folding \
-  ../pmacs-folding \
-  githubsucks/folding
-```
+- Stage 1 (headless fold engine) merged as **#142**, Stage 2 (grid/daemon
+  collapse) as **#149** — both under "Closed since the last snapshot".
+- Retained, carrying nothing unmerged: branches `folding` / `folding-tui`
+  and worktrees `../pmacs-folding` / `../pmacs-folding-tui`. The framings
+  `docs/folding-framing.md` (rev 5) and `docs/folding-stage2-framing.md`
+  (rev 4) are the approved artifacts Stage 3 re-scouts against.
+- **Stage 3 (GPU) obligations, already named by the framings** — the
+  starting point for its own framing doc: GPU collapse at TUI parity;
+  caret/hit-test fold-awareness; the `BufferSnapshot` **fold-mirror clear**
+  (parent R2-4 — without it, empty-after-revert diff suppression leaves
+  stale folds on the GPU, the same trap class as #120); CRDT-origin and
+  GPU-optimistic interactive unfold (parent R2-3); and flipping
+  `FrontendView.fold_projection` to `true` for semantic frontends, which
+  Stage 2 deliberately left `false` (Q#FD21).
 
 ## Parked lane: kill-ring browser + persistence
 
@@ -159,6 +147,72 @@ git worktree add --track \
   so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
+
+- **Folding Stage 2 (grid/daemon collapse) — MERGED as #149** (`main` @
+  `6ed4fe9`, 2026-07-24, after **five** review rounds). The grid TUI now
+  renders collapses. Spine (Q#FD12): `src/fold_view.rs`'s `VisibleLineMap`,
+  derived from the fold store plus a window's line offsets and **never
+  stored**, threaded as `Option<&'a VisibleLineMap>` on a lifetime-bearing
+  `Viewport<'a>` that stays `Copy`. No wire schema or protocol change; the
+  GPU path is Stage 3. 48 acceptance tests on the real `paint_frame` grid,
+  every behavioral claim bite-verified. Durable design points, each a trap
+  Stage 3 inherits:
+  - the map's unit is a **merged hidden component** (overlapping *or
+    adjacent* intervals unioned, keeping the earliest visible head), not a
+    fold — folds may cross, and a later fold's own head can be hidden;
+  - instances are **per rendered window** and **per command/event
+    operation**, never per frame; a command's map follows the operation's
+    **target** window, since a wheel event names a pane without activating it;
+  - fold projection is **per-frontend** (`FrontendView.fold_projection`) —
+    shared `EditorCore` motion would otherwise make a simultaneous unfolded
+    GPU session's cursor skip lines it still displays;
+  - a hidden cursor normalizes by **position**, not row, and `set_view_top`
+    clamps in the setter rather than being repaired at render time;
+  - the interactive-Lua unfold keys on the **post-intercept** edit site — a
+    managed buffer intercept may legally relocate the op.
+
+  Process notes worth keeping: `main` moved under the arc, and the merge was
+  textually clean but **not semantically clean** (#146 added `Viewport`
+  literals the new `folds` field invalidated) — a clean `git merge-tree` does
+  not mean the merged tree compiles. CI was red at review on the macOS/luajit
+  `outline_5_level_100_entry_renders_within_100ms` budget flake and went
+  green on rerun.
+
+- **Documentation ledger refresh — MERGED as #147** (`main` @ `0a479ae`,
+  2026-07-24). The #142 housekeeping, expanded after review found the ledger
+  stale through four merges rather than one. Its own macOS/luajit red was the
+  vterm `VTERM_ALT_READY` PTY timeout; green on rerun.
+
+- **Web grammars HTML + CSS — MERGED as #146** (`main` @ `47581f4`,
+  2026-07-23). `.html/.htm/.xhtml` and `.css` highlight off the official
+  `tree-sitter-html` 0.23 / `tree-sitter-css` 0.25 crate query constants (no
+  in-repo overlay), and HTML's `INJECTIONS_QUERY` lights up `<script>` → js
+  and `<style>` → css. Durable lesson recorded in
+  `docs/web-grammars-html-css-framing.md`: the `highlight.rs` capture table
+  is **global**, so adding a capture name retro-paints every other language —
+  check the reverse direction and pin it.
+
+- **LaTeX Stage 1 — MERGED as #144**, with its parent inline-math framing
+  committed as **#145** (`main` @ `f09b0a1`, 2026-07-23).
+  `.tex/.latex/.sty/.cls` highlight via `codebook-tree-sitter-latex` 0.6 plus
+  the first in-repo query overlay (`builtin/queries/latex/highlights.scm`,
+  `include_str!`) — the reusable pattern for grammars whose crate ships no
+  usable queries. The crates.io `tree-sitter-latex` is provably broken (no
+  `scanner.c`). The math parser and Tiers 3–4 are deferred to the inline-math
+  arc.
+
+- **Folding Stage 1 (headless fold engine) — MERGED as #142** (`main` @
+  `c49a8c7`, 2026-07-23, after three review rounds; round 3 clean). The
+  instance-side fold store + translating/dropping `View`, the structural
+  source (derived head line, closer-aware tail), the Lua data API +
+  interactive `C-c @` commands, the command-path pre-edit unfold, and
+  authoritative-empty `FoldState` production landed with no protocol bump.
+  The `folding` branch and worktree (`../pmacs-folding`) are retained but
+  carry nothing unmerged; the `folding-framing.md` framing is preserved.
+  CI red at merge was an unrelated environmental perf flake
+  (`outline_5_level_100_entry_renders_within_100ms`, macOS/luajit only),
+  green on rerun. Stage 2 has since merged as **#149** (above); durable
+  substrate seams live in `docs/agent-handoff.md` §1.
 
 - **Vterm Stage 3 (protocol v19 + GPU terminal) — MERGED as #135** (`main`
   @ `cac4961`, 2026-07-22, after two review rounds). Arc 5's terminal stage

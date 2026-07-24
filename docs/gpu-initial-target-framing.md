@@ -628,13 +628,14 @@ and the complete #141 lifecycle fixture coverage together.
 Post-second-review verification on 2026-07-24:
 
 - `cargo fmt --check` and strict workspace Clippy passed.
-- Library gates passed 1,801 default and 1,978 CRDT tests.
+- Library gates passed 1,815 default and 1,992 CRDT tests.
 - The named initial-target gate passed 1 default and 14 CRDT tests; the
   underlying GPU invocation suite passed 14 CRDT tests.
+- Folding Stage 2 passed 48 CRDT tests after integrating current `main`.
 - M4 passed 121 tests with the documented basedpyright skip; required real-GPU
   tests passed 152.
 - Vterm Stage 3 passed 5 default and 7 CRDT tests.
-- The isolated-config workspace CRDT sweep passed 3,272 tests across 87 suites,
+- The isolated-config workspace CRDT sweep passed 3,334 tests across 88 suites,
   with 29 ignored and the documented basedpyright case filtered.
 - A coherent release build launched two concurrent real Wayland/Vulkan GPU
   windows on one daemon, targeting distinct `alpha` and `beta` files. Both

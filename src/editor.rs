@@ -41,7 +41,7 @@ use crate::protocol::{
 use crate::terminal::TerminalSnapshot;
 use crate::terminal::view::TerminalViewKey;
 use crate::view::{View, Viewport};
-use crate::window::{Rect, WindowId};
+use crate::window::{LineNumberMode, Rect, WindowId};
 
 /// Ephemeral authenticated origin for one interactive command invocation.
 ///
@@ -2230,8 +2230,20 @@ impl EditorState {
         core.set_active_window_id(win_id);
         let view_top = core.windows[&win_id].view_top;
         let buffer_id = core.windows[&win_id].buffer_id;
-        let display_row = view_top.saturating_add(local_row as usize);
-        let target = crate::view::DisplayCoord::new(display_row as u32, local_col);
+        // Arc 6 Stage 2 (Q#FD16/FD21): grid row `k` in this window shows
+        // its `k`-th VISIBLE line, so the inverse must walk the same way
+        // — a click can then never land on a collapsed line. The map is
+        // the CLICKED window's (round-3 F1), not the previously active
+        // one's.
+        let folds = core.fold_map_for_window(win_id);
+        let display_row = match folds.as_ref() {
+            Some(map) => map.nth_visible_from(view_top, local_row as usize),
+            None => view_top.saturating_add(local_row as usize),
+        };
+        let Ok(display_row) = u32::try_from(display_row) else {
+            return;
+        };
+        let target = crate::view::DisplayCoord::new(display_row, local_col);
         let pos = {
             let registry = core.registry.clone();
             let reg = registry.borrow();
@@ -2263,23 +2275,33 @@ impl EditorState {
     /// `mouse-wheel-mode` and every modern editor's wheel behaviour.
     fn scroll_window(&mut self, win_id: WindowId, delta: i32) {
         let mut core = self.core.borrow_mut();
+        // Arc 6 Stage 2 (Q#FD18/FD21, round-3 F1): a wheel event names
+        // the pane under the pointer and does NOT activate it, so the map
+        // must come from `win_id` — deriving the active window's would
+        // project a folded buffer onto an unfolded neighbour. The
+        // projection *policy* still comes from the acting frontend.
+        let folds = core.fold_map_for_window(win_id);
         let line_count = core.windows[&win_id].text_view.line_count();
         let max_top = line_count.saturating_sub(1);
         let old_top = core.windows[&win_id].view_top;
         let scroll_up = delta < 0;
         let magnitude = delta.unsigned_abs() as usize;
-        let new_top = if scroll_up {
-            old_top.saturating_sub(magnitude)
-        } else {
-            old_top.saturating_add(magnitude).min(max_top)
+        let new_top = match folds.as_ref() {
+            Some(map) if scroll_up => map.nth_visible_back(old_top, magnitude),
+            Some(map) => map
+                .nth_visible_from(old_top, magnitude)
+                .min(map.visible_head_of(max_top)),
+            None if scroll_up => old_top.saturating_sub(magnitude),
+            None => old_top.saturating_add(magnitude).min(max_top),
         };
         // Effective view delta — buffer-boundary clamping may shrink
         // the requested move, so the cursor only follows by however
-        // many lines the view actually shifted.
-        let view_shift = if scroll_up {
-            old_top.saturating_sub(new_top)
-        } else {
-            new_top.saturating_sub(old_top)
+        // many lines the view actually shifted (counted in VISIBLE
+        // lines once this window folds).
+        let view_shift = match folds.as_ref() {
+            Some(map) => map.visible_distance(old_top, new_top),
+            None if scroll_up => old_top.saturating_sub(new_top),
+            None => new_top.saturating_sub(old_top),
         };
         let buffer_id = core.windows[&win_id].buffer_id;
         let new_cursor = {
@@ -2289,10 +2311,13 @@ impl EditorState {
                 let aw = &core.windows[&win_id];
                 let cur = aw.text_view.pos_to_display(buf, aw.cursor)?;
                 let cur_row = cur.row as usize;
-                let target_row_usize = if scroll_up {
-                    cur_row.saturating_sub(view_shift)
-                } else {
-                    cur_row.saturating_add(view_shift).min(max_top)
+                let target_row_usize = match folds.as_ref() {
+                    Some(map) if scroll_up => map.nth_visible_back(cur_row, view_shift),
+                    Some(map) => map
+                        .nth_visible_from(cur_row, view_shift)
+                        .min(map.visible_head_of(max_top)),
+                    None if scroll_up => cur_row.saturating_sub(view_shift),
+                    None => cur_row.saturating_add(view_shift).min(max_top),
                 };
                 let target_row = u32::try_from(target_row_usize).ok()?;
                 aw.text_view
@@ -2315,6 +2340,12 @@ impl EditorState {
 /// Lines to scroll per mouse-wheel notch. Three matches the GNU
 /// readline / Emacs default and is what most terminal users expect.
 const SCROLL_LINES: i32 = 3;
+
+/// Gutter marker drawn on a collapsed region's head row (Arc 6 Stage 2,
+/// Q#FD20). Occupies the gutter's leading pad cell — the same cell the
+/// diagnostic sign uses — so it adds no column and changes no width; it
+/// therefore only appears when a line-number mode reserves a gutter.
+const FOLD_GUTTER_GLYPH: char = '▸';
 
 /// Shared outer/content geometry consumed by terminal paint and PTY resize.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2860,6 +2891,13 @@ pub fn paint_frame(
             && let Some(buf_id) = buf_id
             && let Ok(buf) = reg.get(buf_id)
         {
+            // Arc 6 Stage 2 (Q#FD18): the auto-scroll clamp reckons in
+            // VISIBLE lines. Built from the active window itself, before
+            // the mutable borrow below.
+            let folds = core
+                .windows
+                .get(&active)
+                .and_then(|w| crate::fold_view::map_for_window(&state.fold_registry, w));
             let aw = core.windows.get_mut(&active).expect(
                 "invariant: active_window_id always references a live window in core.windows",
             );
@@ -2867,10 +2905,31 @@ pub fn paint_frame(
                 .text_view
                 .pos_to_display(buf, aw.cursor)
                 .map_or(0, |d| d.row as usize);
-            if cursor_row < aw.view_top {
-                aw.view_top = cursor_row;
-            } else if inner_rows > 0 && cursor_row >= aw.view_top + inner_rows as usize {
-                aw.view_top = cursor_row + 1 - inner_rows as usize;
+            match folds.as_ref() {
+                // The logical cursor may sit on a hidden line (a shared
+                // fold, or goto-line into one); the row that actually
+                // renders — and so the row to scroll to — is its visible
+                // head (Q#FD16/FD18, framing acceptance 8).
+                Some(map) => {
+                    let anchor = map.visible_head_of(cursor_row);
+                    let top = map.clamp_view_top(aw.view_top);
+                    aw.view_top = if anchor < top {
+                        anchor
+                    } else if inner_rows > 0
+                        && map.visible_rows_between(top, anchor) >= inner_rows as usize
+                    {
+                        map.nth_visible_back(anchor, inner_rows as usize - 1)
+                    } else {
+                        top
+                    };
+                }
+                None => {
+                    if cursor_row < aw.view_top {
+                        aw.view_top = cursor_row;
+                    } else if inner_rows > 0 && cursor_row >= aw.view_top + inner_rows as usize {
+                        aw.view_top = cursor_row + 1 - inner_rows as usize;
+                    }
+                }
             }
         }
     }
@@ -2923,6 +2982,19 @@ pub fn paint_frame(
         let Ok(buf) = reg.get(window.buffer_id) else {
             continue;
         };
+        // Arc 6 Stage 2 (Q#FD12, round-2 F2): ONE visible-line map per
+        // rendered document window, keyed on that window's own buffer and
+        // line offsets. A split may show different buffers with only one
+        // folded, so a per-frame singleton would leak one pane's folds
+        // into the other. `None` when this buffer has no folds — the
+        // unfolded path then paints exactly as before.
+        let folds = crate::fold_view::map_for_window(&state.fold_registry, window);
+        // `view_top` stays a source-line index (Bet B5) but must never
+        // rest on a hidden line: clamp BACKWARD so a fold at the top of
+        // the viewport shows its head (Q#FD18, acceptance 8).
+        if let Some(map) = folds.as_ref() {
+            window.view_top = map.clamp_view_top(window.view_top);
+        }
         let viewport_buffer_start = window.text_view.line_offset(window.view_top).unwrap_or(0);
         // UX gutter (Q#UX2): reserve a left strip for line numbers and
         // shrink+shift the text area into the remainder, so every
@@ -2939,6 +3011,7 @@ pub fn paint_frame(
             cell_origin: CellCoord::new(rect.origin.row, rect.origin.col + gutter_w),
             cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
             gutter_w,
+            folds: folds.as_ref(),
         };
         // Composition (T M2.9): base text_view paints first, then the
         // gutter numbers — before the overlays, so a diagnostic overlay
@@ -2947,24 +3020,52 @@ pub fn paint_frame(
         // overlay in attach order. See [`crate::view::View`].
         window.text_view.render(buf, viewport, grid);
         if gutter_w > 0 {
-            paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, &theme);
+            paint_line_number_gutter(
+                grid,
+                window,
+                &rect,
+                inner_rows,
+                gutter_w,
+                folds.as_ref(),
+                &theme,
+            );
         }
         for overlay in &mut window.overlays {
             overlay.render(buf, viewport, grid);
         }
-        paint_local_selection(grid, buf, window, &rect, inner_rows, gutter_w, &theme);
+        paint_local_selection(
+            grid,
+            buf,
+            window,
+            &rect,
+            inner_rows,
+            gutter_w,
+            folds.as_ref(),
+            &theme,
+        );
         // Mode line for this window. Painted last so the line
         // itself is always visible regardless of overlay activity.
         let coord = window
             .text_view
             .pos_to_display(buf, window.cursor)
             .unwrap_or_default();
-        let scroll = format_scroll_indicator(
-            window.view_top,
-            inner_rows as usize,
-            window.text_view.line_count(),
-            coord.row as usize,
-        );
+        // Arc 6 Stage 2 (Q#FD18): All/Top/Bot/% are reckoned in
+        // VISIBLE-line space — a buffer whose remainder is collapsed
+        // reads "All", not "Top". The cursor's ordinal anchors on its
+        // visible head, since that is the row it renders on.
+        let (ind_top, ind_total, ind_cursor) = match folds.as_ref() {
+            Some(map) => (
+                map.visible_rows_between(0, window.view_top),
+                map.visible_line_count(window.text_view.line_count()),
+                map.visible_rows_between(0, map.visible_head_of(coord.row as usize)),
+            ),
+            None => (
+                window.view_top,
+                window.text_view.line_count(),
+                coord.row as usize,
+            ),
+        };
+        let scroll = format_scroll_indicator(ind_top, inner_rows as usize, ind_total, ind_cursor);
         // Lock scoped to the summary computation only: the overlay
         // renders above include `DiagnosticView`, which takes this
         // same mutex — holding the guard across the loop deadlocked
@@ -3030,9 +3131,31 @@ pub fn paint_frame(
     let aw = &core.windows[&active];
     let inner_rows = inner_rows(&active_rect);
     let buf = reg.get(aw.buffer_id).ok()?;
-    let disp = aw.text_view.pos_to_display(buf, aw.cursor)?;
-    if (disp.row as usize) < aw.view_top || (disp.row as usize) >= aw.view_top + inner_rows as usize
-    {
+    // Arc 6 Stage 2 (Q#FD16, round-2 F3): a logical cursor on a hidden
+    // line renders at its hidden component's head POSITION — the visible
+    // head row *and* that head's end-of-content column, i.e. exactly
+    // where Stage 1 moves point on a fold-at-cursor. Row-only clamping
+    // would leave the column unspecified; resolving through the merged
+    // component (rather than the innermost containing fold) also keeps a
+    // crossing overlap from landing on another hidden position.
+    let folds = crate::fold_view::map_for_window(&state.fold_registry, aw);
+    let cursor = match folds.as_ref() {
+        Some(map) => map.visible_position(aw.text_view.line_at_offset(aw.cursor), aw.cursor),
+        None => aw.cursor,
+    };
+    let disp = aw.text_view.pos_to_display(buf, cursor)?;
+    let row_offset = match folds.as_ref() {
+        Some(map) => {
+            let top = map.clamp_view_top(aw.view_top);
+            let row = disp.row as usize;
+            if row < top {
+                return None;
+            }
+            map.visible_rows_between(top, row)
+        }
+        None => (disp.row as usize).checked_sub(aw.view_top)?,
+    };
+    if row_offset >= inner_rows as usize {
         return None;
     }
     // UX gutter: the terminal caret sits in the text area, past the
@@ -3041,7 +3164,7 @@ pub fn paint_frame(
         let w = aw.gutter_width();
         if w >= active_rect.size.cols { 0 } else { w }
     };
-    let grid_row = active_rect.origin.row + (disp.row - aw.view_top as u32);
+    let grid_row = active_rect.origin.row + u32::try_from(row_offset).ok()?;
     let max_col = active_rect.origin.col + active_rect.size.cols.saturating_sub(1);
     let grid_col = (active_rect.origin.col + gutter_w + disp.col).min(max_col);
     Some(CellCoord::new(grid_row, grid_col))
@@ -3180,13 +3303,23 @@ fn paint_line_number_gutter(
     rect: &crate::window::Rect,
     inner_rows: u32,
     gutter_w: u32,
+    // Arc 6 Stage 2: this window's collapsed regions, or `None` when it
+    // has no folds (then every line below is the pre-folding walk).
+    folds: Option<&crate::fold_view::VisibleLineMap>,
     theme: &crate::highlight::Theme,
 ) {
     let line_count = window.text_view.line_count();
     // Relative/Hybrid measure distance from the cursor's buffer line;
     // Absolute ignores it. Computed once per frame (the gutter repaints on
     // cursor motion, so this stays current).
+    //
+    // Arc 6 Stage 2 (Q#FD14): the anchor is the cursor's **visible head**
+    // — a shared fold (or goto-line) can leave the logical cursor on a
+    // hidden line, and the distance must be measured from the row the
+    // caret actually renders on. With no folds this is `cursor_line`
+    // verbatim, so the unfolded gutter is unchanged.
     let cursor_line = window.text_view.line_at_offset(window.cursor);
+    let anchor = folds.map_or(cursor_line, |map| map.visible_head_of(cursor_line));
     // Themes Q#TH5: a set `ui.gutter` face owns the strip within its
     // {fg} mask; unset keeps the dim Indexed(8).
     let style = theme.face("ui.gutter").map_or(
@@ -3202,6 +3335,9 @@ fn paint_line_number_gutter(
     // The number's rightmost digit sits at `field - 1`; the last gutter
     // cell (`gutter_w - 1`) is a trailing pad separating it from the code.
     let field = gutter_w.saturating_sub(1);
+    // Row `r` shows the `r`-th VISIBLE line at or after `view_top`, the
+    // same walk `TextView::render` performs (Q#FD13/FD14).
+    let mut buffer_line = folds.map_or(window.view_top, |map| map.visible_head_of(window.view_top));
     for r in 0..inner_rows {
         let grid_row = rect.origin.row + r;
         // Blank + style the whole strip first, so a number that shrank a
@@ -3212,16 +3348,43 @@ fn paint_line_number_gutter(
             cell.style = style;
             cell.attachment = None;
         }
-        let buffer_line = window.view_top + r as usize;
         if buffer_line >= line_count {
             continue; // past end-of-buffer: blank gutter
         }
+        let this_line = buffer_line;
+        buffer_line = folds.map_or(this_line + 1, |map| map.next_visible(this_line));
+
+        // Fold marker (Q#FD20, round-1 F3): the col-0 sign cell only
+        // exists when a gutter does, so the glyph is conditional on it —
+        // with line numbers off the content-area ellipsis is the sole
+        // indicator. Painted here, before the overlays: `DiagnosticView`
+        // writes the same cell later in the frame, so a diagnostic
+        // clamped onto this head wins (an error inside the collapsed
+        // region is higher-signal than "this is collapsed").
+        if folds.is_some_and(|map| map.is_head(this_line)) {
+            grid.at(CellCoord::new(grid_row, rect.origin.col)).glyph =
+                crate::cell::Glyph::Char(FOLD_GUTTER_GLYPH);
+        }
+
         // The mode picks the number: absolute (`line+1`), relative
         // distance, or hybrid (absolute on the cursor line, else relative).
         // Written right-aligned, rightmost digit first, alloc-free.
         // `field >= digits(line_count)` by construction, so the leftmost
         // digit always leaves at least a leading pad cell.
-        let Some(mut val) = window.line_numbers.number_for(buffer_line, cursor_line) else {
+        //
+        // Arc 6 Stage 2 (Q#FD14): with folds present, Relative/Hybrid
+        // distance is counted in VISIBLE lines across the collapse;
+        // Absolute keeps the raw `line + 1` (hidden numbers simply do not
+        // appear, so the column jumps from the head's number to the first
+        // post-fold number). Without folds this is `number_for` verbatim.
+        let number = match (folds, window.line_numbers) {
+            (Some(map), LineNumberMode::Relative) => Some(map.visible_distance(anchor, this_line)),
+            (Some(map), LineNumberMode::Hybrid) if this_line != anchor => {
+                Some(map.visible_distance(anchor, this_line))
+            }
+            _ => window.line_numbers.number_for(this_line, anchor),
+        };
+        let Some(mut val) = number else {
             continue;
         };
         let mut col = field;
@@ -3238,6 +3401,10 @@ fn paint_line_number_gutter(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one window's already-resolved paint geometry; mirrors paint_selection_in_window"
+)]
 fn paint_local_selection(
     grid: &mut crate::cell::CellGrid<'_>,
     buf: &crate::buffer::Buffer,
@@ -3248,10 +3415,23 @@ fn paint_local_selection(
     // text-relative display column shifted right by this (Q#UX2). 0 when
     // the gutter is off, so this is a no-op then.
     gutter_w: u32,
+    // Arc 6 Stage 2: this window's collapsed regions, or `None`.
+    folds: Option<&crate::fold_view::VisibleLineMap>,
     theme: &crate::highlight::Theme,
 ) {
     let Some((sel_start, sel_end)) = window.region() else {
         return;
+    };
+    // Arc 6 Stage 2 (Q#FD16): each ENDPOINT on a hidden line projects to
+    // its component's head position; hidden interior cells simply have no
+    // row and drop. The visible portion then paints on the visible head
+    // row and the visible tail rows, contiguous on screen.
+    let (sel_start, sel_end) = match folds {
+        Some(map) => (
+            map.visible_position(window.text_view.line_at_offset(sel_start), sel_start),
+            map.visible_position(window.text_view.line_at_offset(sel_end), sel_end),
+        ),
+        None => (sel_start, sel_end),
     };
     // Themes Q#TH5: the selection is a wash — a set `ui.selection`
     // face replaces the default overlay wholesale within its {bg}
@@ -3272,9 +3452,11 @@ fn paint_local_selection(
     }
     let text_cols = rect.size.cols.saturating_sub(gutter_w);
 
-    let first_row = window.view_top;
-    let last_row = first_row.saturating_add(inner_rows as usize);
-    for display_row in first_row..last_row {
+    // Row `r` shows the `r`-th VISIBLE line at or after `view_top`.
+    let mut next_line = folds.map_or(window.view_top, |map| map.visible_head_of(window.view_top));
+    for row_offset in 0..inner_rows {
+        let display_row = next_line;
+        next_line = folds.map_or(display_row + 1, |map| map.next_visible(display_row));
         let Some(line_start) = window.text_view.line_offset(display_row) else {
             continue;
         };
@@ -3298,7 +3480,6 @@ fn paint_local_selection(
             continue;
         }
 
-        let row_offset = display_row.saturating_sub(first_row) as u32;
         let start_col = start_coord.col.min(text_cols);
         let end_col = end_coord.col.min(text_cols);
         if start_col >= end_col {
@@ -4028,6 +4209,7 @@ mod tests {
             &rect,
             rows,
             4,
+            None,
             &crate::highlight::Theme::empty(),
         );
 
@@ -6672,6 +6854,7 @@ mod tests {
             cell_origin: rect.origin,
             cell_size: CellSize::new(rect.size.rows, rect.size.cols),
             gutter_w: 0,
+            folds: None,
         };
         let mut grid = CellGrid {
             cells: &mut backing,
@@ -6806,6 +6989,7 @@ mod tests {
                 cell_origin: CellCoord::new(0, 0),
                 cell_size: CellSize::new(24, 80),
                 gutter_w: 0,
+                folds: None,
             };
 
             // Two no-op overlays: probe the dispatch cost only.
