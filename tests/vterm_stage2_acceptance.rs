@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::thread;
@@ -551,7 +552,33 @@ fn terminal_escape_gates_local_bindings_and_double_escape_sends_interrupt() {
     );
 }
 
-fn wait_for_output(pty: &PmacsPty, needle: &[u8], timeout: Duration) {
+/// How far pmacs actually got before a wait timed out.
+///
+/// Distinguishes the failure modes that the raw host-output tail cannot:
+/// pmacs died on startup, `init.lua` was never loaded (config resolution),
+/// `pmacs.terminal.open` raised, or the child spawned but produced nothing.
+/// `startup` is `(label, path)` breadcrumb pairs written by `init.lua`.
+fn describe_startup(pty: &mut PmacsPty, startup: &[(&str, &Path)]) -> String {
+    let mut out = match pty.wait_for_exit(Duration::from_millis(0)) {
+        Some(status) => format!("pmacs ALREADY EXITED (status {status:?})"),
+        None => "pmacs still running".to_string(),
+    };
+    for (label, path) in startup {
+        let state = match fs::read(path) {
+            Ok(bytes) => format!("{:?}", String::from_utf8_lossy(&bytes)),
+            Err(_) => "MISSING".to_string(),
+        };
+        let _ = write!(out, "; {label}={state}");
+    }
+    out
+}
+
+fn wait_for_output(
+    pty: &mut PmacsPty,
+    needle: &[u8],
+    timeout: Duration,
+    startup: &[(&str, &Path)],
+) {
     let deadline = Instant::now() + timeout;
     loop {
         if pty
@@ -562,10 +589,12 @@ fn wait_for_output(pty: &PmacsPty, needle: &[u8], timeout: Duration) {
             return;
         }
         if Instant::now() >= deadline {
+            let diagnosis = describe_startup(pty, startup);
             let output = pty.output();
             let start = output.len().saturating_sub(4_000);
             panic!(
-                "host output never contained {:?}; tail: {}",
+                "host output never contained {:?} after {timeout:?}\n  \
+                 startup: {diagnosis}\n  tail: {}",
                 String::from_utf8_lossy(needle),
                 output[start..].escape_ascii()
             );
@@ -598,6 +627,8 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
     let state_root = temp.path().join("state");
     let input_path = temp.path().join("child-input");
     let size_path = temp.path().join("child-size");
+    let init_path = temp.path().join("init-reached");
+    let open_path = temp.path().join("terminal-open");
     fs::create_dir_all(&config_dir).expect("config dir");
 
     let probe = format!(
@@ -627,15 +658,28 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
         input_path.to_str().expect("UTF-8 input path"),
         size_path.to_str().expect("UTF-8 size path")
     );
+    // Breadcrumbs (see `describe_startup`). This test spawns the REAL pmacs
+    // binary in a real PTY, so when the first wait below times out the only
+    // evidence is host escape bytes — which cannot distinguish "init.lua never
+    // loaded" from "terminal.open failed" from "the child produced nothing".
+    // That ambiguity has outlived several investigations of this exact
+    // failure, so the config records how far startup actually got.
     let init = format!(
         r#"
-        local terminal_buffer = pmacs.terminal.open {{
+        local function breadcrumb(path, text)
+          local f = io.open(path, "w")
+          if f then f:write(text) f:close() end
+        end
+        breadcrumb({:?}, "1")
+        local ok, terminal_buffer = pcall(pmacs.terminal.open, {{
           command = "/bin/sh",
           args = {{ "-c", "exec /usr/bin/python3 -c \"$1\"", "pmacs-vterm-probe", {} }},
           rows = 10,
           cols = 40,
           scrollback_rows = 200,
-        }}
+        }})
+        breadcrumb({:?}, ok and "ok" or ("ERROR: " .. tostring(terminal_buffer)))
+        assert(ok, terminal_buffer)
         local ticks = 0
         pmacs.hook.add("process.after-tick", function()
           ticks = ticks + 1
@@ -646,7 +690,9 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
           end
         end)
         "#,
-        lua_string(&probe)
+        init_path.to_str().expect("UTF-8 init breadcrumb path"),
+        lua_string(&probe),
+        open_path.to_str().expect("UTF-8 open breadcrumb path")
     );
     fs::write(config_dir.join("init.lua"), init).expect("write init.lua");
 
@@ -660,7 +706,16 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
         24,
         80,
     );
-    wait_for_output(&pty, b"VTERM_ALT_READY", Duration::from_secs(10));
+    let startup: &[(&str, &Path)] = &[
+        ("init.lua reached", init_path.as_path()),
+        ("terminal.open", open_path.as_path()),
+    ];
+    wait_for_output(
+        &mut pty,
+        b"VTERM_ALT_READY",
+        Duration::from_secs(10),
+        startup,
+    );
 
     pty.resize(30, 90).expect("resize host PTY");
     thread::sleep(Duration::from_millis(150));
@@ -672,7 +727,7 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
         .expect("terminal selection drag");
     pty.write_input(b"\x03\x1bw")
         .expect("escaped copy selection binding");
-    wait_for_output(&pty, b"\x1b]52;c;", Duration::from_secs(5));
+    wait_for_output(&mut pty, b"\x1b]52;c;", Duration::from_secs(5), startup);
     let input = wait_for_file(&input_path, Duration::from_secs(5));
     assert_eq!(input, b"VTERM_INPUT_SMOKE\n");
     pty.write_input(b"\x1b[200~PASTE_AFTER_EXIT\x1b[201~")
