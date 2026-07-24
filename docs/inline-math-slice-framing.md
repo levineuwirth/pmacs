@@ -545,8 +545,13 @@ something reaches the screen runs on a real device through
     and is distinct from the existing `fonts/OFL.txt`; a build with the MATH
     table absent or unparseable falls back to source and surfaces the error
     rather than failing silently (Q#MS7).
-17. **Feature declaration** — `cargo tree -e features` shows `ttf-parser`
-    without `std`, i.e. the declaration did not widen the shared feature set.
+17. **Feature declaration is differential, not absolute** — the `ttf-parser`
+    feature set from `cargo tree -e features` is **byte-identical with and
+    without this crate's dependency line**. Asserting "`std` is absent" would
+    be wrong and would fail a correct implementation: `std` is *already*
+    enabled upstream, because `fontdb` declares `std = ["ttf-parser/std"]`.
+    What the declaration must not do is *widen* the set, which only a
+    before/after comparison can show.
 18. Full gate suite per `CLAUDE.md`, including `PMACS_REQUIRE_GPU=1`.
 
 ## 6. Deferred (named)
