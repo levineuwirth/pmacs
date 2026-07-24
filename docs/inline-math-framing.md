@@ -1,5 +1,35 @@
 # Inline math rendering — framing
 
+**Revision 2 — framing only; no implementation. Ground truth re-scouted
+against canonical `main` @ `ddaa80d`, protocol v20, 2026-07-24; every
+anchor re-checked at `f07b75b` (the vterm PTY-flake fix #153, test-only,
+which moved no anchor here).**
+
+Revision 1 was written against protocol v18, before LaTeX Stage 1 (#144),
+web grammars (#146), folding Stages 1–2 (#142/#149) and the GPU initial
+target (#148) landed. **Revision 2 changes no design decision.** It
+corrects the ground truth those merges invalidated, and records the
+staging decision the sibling substrate framing already took. A reader who
+knows revision 1 can read §0 alone.
+
+## 0. What the landed-state re-scout corrected
+
+| # | Revision 1 said | Current state |
+| --- | --- | --- |
+| C1 | A MATH-table crate must be added; "neither is in the tree today" | **Both are already in `Cargo.lock`.** `ttf-parser` 0.25.1 reaches `pmacs-gpu` non-optionally via `fontdb` → `cosmic-text` → `glyphon`, and `pmacs-gpu` already calls `fontdb` directly in `build_font_system` (`pmacs-gpu/src/main.rs:217`). `read-fonts` 0.37.0, `skrifa`, `swash` and `font-types` are present too. The MATH module is feature-gated, so the declaration must name its features deliberately — see Tier 3 §A. |
+| C2 | Use "one of `ttf-parser` or `read-fonts`" | **Not interchangeable.** `ttf-parser` ships the MATH table (`tables/math.rs`: `Constants::axis_height`, `display_operator_min_height`, `script_percent_scale_down`, the `MathValue`/`MathValues` accessors Tier 3 names). `read-fonts` 0.37.0 exposes no MATH table. Only `ttf-parser` satisfies Tier 3. |
+| C3 | "Protocol is v18 … `SUPPORTED=[6..=18]`" (Q#IM1) | Protocol is **v20**, `SUPPORTED=[6..=20]`. v19 = the vterm terminal family; v20 = the GPU initial-target bootstrap. The Q#IM1 *decision* (query font size locally, no protocol change) is unaffected. |
+| C4 | `rebuild_code_slice()` at `pmacs-gpu/src/main.rs:4849` | Now `:6136`. The file grew through vterm Stage 3, tab-width parity and the initial-target work. |
+| C5 | Tier 1 must patch an upstream grammar or ship an overlay; "defers enumerating which grammars need this" | **Already available for `.tex`.** LaTeX Stage 1 (#144) bundles `codebook-tree-sitter-latex`, whose grammar exposes `math_delimiter` and `math_environment`, and the in-repo overlay `builtin/queries/latex/highlights.scm` already captures both. The overlay mechanism this tier proposed is proven, not speculative. Markdown still has no math capture. |
+| C6 | (silent on staging) | A sibling framing, `docs/latex-grammar-math-substrate-framing.md` (rev 3), names this note its parent and **decides Tier 2's staging in Q#LX5**: the parser lands *beside* its Tier 3 consumer, never ahead of it. Recorded in §Tier 2 below so it is not re-litigated. |
+| C7 | (silent on contention) | Tier 4's render path is contended. Folding Stage 2 (#149) landed fold projection in the paint path, and its **Stage 3 (GPU) is unframed**. The **bottom-panel arc** is implementing Stage 1 now; its Stage 2 claims both `pmacs-gpu/src/main.rs`'s render path and the next protocol version. Tier 4 must re-scout against whichever lands first. |
+
+Unchanged and re-verified: `InlineAdornment` (`pmacs-protocol/src/message.rs:1391`),
+`SquiggleRenderer` (`pmacs-gpu/src/main.rs:2825`), `TextView`
+(`src/text_view.rs:45`), and the three referenced framings
+(`multi-language-injections`, `pmacs-gpu-wavy-squiggles`,
+`semantic-frontend-protocol`) all exist as described.
+
 **Status: framing only; no implementation.**
 This note frames a feature that currently does not exist: rendering
 LaTeX math expressions as typed math (not raw source) in any buffer.
@@ -75,19 +105,31 @@ struct MathSpan { start: BytePos, end: BytePos, kind: MathKind }
 ```
 
 **Where it runs:**
-- For buffers with a tree-sitter grammar: a `(math_expression)` node in
-  the grammar signals scanned injection ranges (reuses the existing
-  `ParseTreeBundle` + `Layer` machinery from
+- For buffers with a tree-sitter grammar: a math node in the grammar
+  signals scanned injection ranges (reuses the existing `ParseTreeBundle`
+  + `Layer` machinery from
   `docs/multi-language-injections-framing.md`). Each grammar that can
-  contain LaTeX (markdown, org, raw TeX, etc.) needs a
-  `(math_expression) @math` capture rule added — either by patching the
-  upstream grammar or shipping an overlay `queries/math/highlights.scm`.
-  The framing defers enumerating which grammars need this until
-  adoption; markdown and LaTeX grammars are the obvious v0 targets.
+  contain LaTeX needs a math capture rule — either by patching the
+  upstream grammar or shipping an in-repo query overlay.
+
+  **This is no longer speculative for `.tex` (C5).** LaTeX Stage 1 (#144)
+  bundles `codebook-tree-sitter-latex`, whose grammar already exposes
+  `math_delimiter` and `math_environment`, and the in-repo overlay
+  `builtin/queries/latex/highlights.scm` already captures both (`:57`,
+  `:290`). The overlay pattern this tier proposed therefore exists and is
+  proven; adding a `@math` capture beside the existing highlight captures
+  is an edit to a file the repo already owns, not new machinery. The node
+  names are the grammar's own — `math_environment` / `math_delimiter`,
+  **not** the `(math_expression)` this framing originally guessed.
+
+  Markdown remains unaddressed: its grammar comes from the crate query
+  constants (the #146 web-grammars pattern, no in-repo overlay), so a
+  markdown math capture needs the overlay treatment first. Enumerating
+  further grammars stays deferred to adoption.
 - For buffers with no grammar: a fast byte-level scanner in Rust
   (two-pass: find `$` / `$$` / `\(` / `\[` boundaries, match pairs,
   handle escapes). Runs in the GPU frontend's `rebuild_code_slice()`
-  (`pmacs-gpu/src/main.rs:4849`) as a post-shape hook, not the edit
+  (`pmacs-gpu/src/main.rs:6136`) as a post-shape hook, not the edit
   path, so keystroke latency is unaffected. (The TUI's `src/text_view.rs`
   is a separate line-index view that does not participate.)
 
@@ -168,6 +210,22 @@ codepoints (the `\alpha` → `U+03B1` map is ~200 entries for Greek
 + Hebrew + arrows + operators). The parser does not handle macro
 definitions, preamble material, or LaTeX3 — only math-mode markup.
 
+**Staging: this tier lands beside Tier 3, never ahead of it (C6).**
+`docs/latex-grammar-math-substrate-framing.md` (rev 3) carved out the
+frontend-agnostic LaTeX substrate as its own lane and, in **Q#LX5**,
+deliberately excluded this parser from it. Reviewer and author concurred
+and recorded the decision "so it is not re-litigated". The rationale is
+that `MathNode`'s shape is only validated by a layout consumer, so
+building the parser first would fix an AST no one has exercised — the
+same no-build-ahead discipline folding applied to `BlockAdornments` and
+gpu-invocation applied to `FILE`.
+
+The practical consequence: **Tier 2 is not an independently shippable
+slice.** It is pure, dependency-free and conflict-free, which makes it
+tempting to land alone while other lanes hold the render path; that
+temptation is exactly what Q#LX5 refused. A PR that ships the parser
+must also ship enough of Tier 3 to exercise the AST.
+
 ### Tier 3: Layout
 
 This is the hard part and the place where pmacs would do something no
@@ -186,10 +244,41 @@ candidates, ranked:
 
 Bundled default: Latin Modern Math. The existing font-loading path
 (`build_font_system()` → `fontdb::Database::load_font_source()` in
-pmacs-gpu via cosmic-text) already handles .ttf/.otf; adding the MATH
-table means pulling in one of `ttf-parser` or `read-fonts` from
-fontations as a new dependency (neither is in the tree today — both are
-pure Rust, low-risk additions).
+`pmacs-gpu/src/main.rs:217`, via cosmic-text) already handles .ttf/.otf.
+
+**Reading the MATH table needs `ttf-parser`, and it is already in the
+build graph (C1, C2).** Revision 1 said a MATH crate must be added and
+that "neither is in the tree today"; both parts were wrong:
+
+- `ttf-parser` 0.25.1 already reaches `pmacs-gpu` through
+  `fontdb` → `cosmic-text` → `glyphon` — the same `fontdb` the frontend
+  already calls directly. It is not an optional or dev-only path. Adding
+  it to `pmacs-gpu/Cargo.toml` declares a dependency the build already
+  compiles, so it adds no new supply-chain surface.
+
+  **Declare the feature set deliberately, or the "no rebuild" part stops
+  being true.** The MATH module is gated: `ttf-parser` re-exports `math`
+  under `#[cfg(feature = "opentype-layout")]`. It is compiled today only
+  because `fontdb` asks for it — and `fontdb` asks with
+  `default-features = false`, features `["opentype-layout",
+  "apple-layout", "variable-fonts", "glyph-names", "no-std-float"]`,
+  which is **not** `ttf-parser`'s own default set (that one adds `std`
+  and drops `no-std-float`). A plain `ttf-parser = "0.25"` therefore
+  unions `std` in and forces a one-time rebuild of `ttf-parser`,
+  `fontdb`, `cosmic-text` and `glyphon`. The zero-rebuild spelling is
+  `default-features = false, features = ["opentype-layout"]` — a subset
+  of what `fontdb` already enables.
+- The choice is **not** "one of `ttf-parser` or `read-fonts`". Only
+  `ttf-parser` exposes the MATH table (`tables/math.rs`), and it supplies
+  exactly the constants this tier names below — `Constants::axis_height`,
+  `display_operator_min_height`, `script_percent_scale_down`, and the
+  `MathValue` / `MathValues` per-glyph accessors. `read-fonts` 0.37.0,
+  though present in the tree, has no MATH table; selecting it would be a
+  dead end.
+
+`skrifa`, `swash` and `font-types` are also present (via cosmic-text) but
+are not MATH-table providers either. The bundled font itself is still a
+real addition: ~200 KB for Latin Modern Math in `pmacs-gpu`.
 
 **B. Box model.** Each `MathNode` lays out into a `MathBox`:
 
@@ -268,7 +357,24 @@ for the rest.
 
 The GPU frontend (`pmacs-gpu/src/main.rs`) already renders text through
 cosmic-text + glyphon with per-span styling. Math expressions are a new
-layer inserted into the existing z-order:
+layer inserted into the existing z-order.
+
+**This tier is contended and must re-scout before it is scheduled (C7).**
+Revision 1 described this render path as though math were its only
+claimant. Two other arcs now converge on it:
+
+- **Folding Stage 3 (GPU)** — Stages 1–2 landed (#142/#149); Stage 3 is
+  the next ranked item and is **unframed**. It inherits a named
+  obligation on this path: the `BufferSnapshot` fold-mirror clear.
+- **The bottom-panel arc** — Stage 1 (core + TUI) is implementing now;
+  its **Stage 2 owns both** this render path (a projected panel cell grid
+  painted as a band) **and the next protocol version**.
+
+Neither blocks the design below, and this framing reserves no protocol
+version (see §Protocol surface). But Tier 4's anchors are the ones most
+likely to move, so whichever of the three lands second re-scouts against
+the first — the same rule the bottom-panel and folding framings already
+apply to each other.
 
 ```
 Backgrounds → Squiggles → Code Text → Math → Gutter → Caret → Minimap → Minibuffer → Completion → Context menu
@@ -329,12 +435,17 @@ frontends — the v0 approach pays the scan cost per frontend.
 
 | Component | Change | Risk |
 |-----------|--------|------|
-| `src/math_parse.rs` (new) | ~500-line recursive-descent parser | Low; pure fn, no deps |
-| `src/math_layout.rs` (new) | MATH-table loading + box layout | Medium; depends on font crate |
-| `Cargo.toml` | Add `read-fonts` or `ttf-parser` for MATH table | Low; both pure Rust |
-| `pmacs-gpu/Cargo.toml` | Add Latin Modern Math font bundling | Low; ~200 KB compressed |
-| `pmacs-gpu/src/main.rs` | Detect math spans in visible text, insert MathBox draw calls | Medium; touches main render path |
+| `src/math_parse.rs` (new) | ~500-line recursive-descent parser | Low; pure fn, no deps. **Ships with Tier 3, not alone (Q#LX5).** |
+| `src/math_layout.rs` (new) | MATH-table loading + box layout | Medium; depends on `ttf-parser` |
+| `pmacs-gpu/Cargo.toml` | Declare `ttf-parser` as `default-features = false, features = ["opentype-layout"]` (already transitive via `fontdb`); bundle Latin Modern Math | Low; no new crate enters the graph, ~200 KB font. Spelling the features matters — bare `ttf-parser = "0.25"` unions `std` in and rebuilds the font chain |
+| `pmacs-gpu/src/main.rs` | Detect math spans in visible text, insert MathBox draw calls | **High, and contended** — see C7: folding Stage 3 (GPU) is unframed and the bottom-panel arc's Stage 2 claims this same render path |
+| `builtin/queries/latex/highlights.scm` | Add a `@math` capture beside the existing `math_environment` / `math_delimiter` captures | Low; the overlay already exists |
 | `semantic_render.rs` | No changes (v0) | None by design |
+
+The row that changed most is `pmacs-gpu/src/main.rs`. Revision 1 rated it
+"Medium; touches main render path" when that path was uncontested. It now
+has two other arcs converging on it, so Tier 4 cannot be scheduled
+without knowing which of them lands first.
 
 ## Open questions
 
@@ -347,8 +458,10 @@ current font size? Via the existing `FontFacts` protocol message
 (`protocol v17`), or queried from the `State` fields directly?
 
 **Proposed:** query `self.font_size` directly in the GPU frontend, same
-as code text does. No protocol change. (Protocol is v18 at the time of
-this framing — `SUPPORTED=[6..=18]`.)
+as code text does. No protocol change. (Protocol is **v20** at revision 2
+— `SUPPORTED=[6..=20]`; v19 added the vterm terminal family and v20 the
+GPU initial-target bootstrap. The decision is version-independent: it
+holds precisely because it adds no wire surface. C3.)
 
 ### Q#IM2 — Color inheritance
 
@@ -550,3 +663,20 @@ exercises the LSP path.
   The face resolution chain (`face-attribute → color → fallback`)
   would extend naturally to a `math-face` or `math-display-face` for
   themed math colors.
+
+## Sibling lane (added in revision 2)
+
+`docs/latex-grammar-math-substrate-framing.md` (rev 3) names this note its
+parent and carves out the frontend-agnostic LaTeX substrate that can land
+without touching a contended file. Revision 1 did not reference it, which
+left the reader of this note unaware that part of its Tier 1 had already
+shipped (#144) and that its Tier 2 staging had already been decided.
+
+Read that lane before scheduling any tier here:
+
+- its **Q#LX5** governs Tier 2 (parser lands beside Tier 3, not ahead);
+- its landed portion supplies the `.tex` grammar and the query-overlay
+  precedent Tier 1 depends on;
+- it explicitly defers Tier 3 layout, Tier 4 GPU render, and
+  instance-side `(math_environment) @math` injection detection back to
+  this arc.
