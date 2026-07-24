@@ -713,8 +713,8 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
 
     assert_eq!(
         facts.get("server_protocol_version").copied(),
-        Some("19"),
-        "the real daemon negotiated v19 with the real client: {text}"
+        Some("20"),
+        "the real daemon negotiated v20 with the real client: {text}"
     );
     assert_eq!(
         facts.get("entered_terminal_mode").copied(),
@@ -789,8 +789,8 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
 #[test]
 fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
     use pmacs::protocol::{
-        AttachRequest, FrontendCapabilities, Hello, Key, KeyEvent, PROTOCOL_VERSION, read_message,
-        write_message,
+        AttachRequest, FrontendCapabilities, Hello, Key, KeyEvent, PROTOCOL_VERSION,
+        SessionBootstrapRequest, read_message, write_message,
     };
     use std::os::unix::net::UnixStream;
 
@@ -816,6 +816,10 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
             initial_size: CellSize::new(24, 80),
         };
         write_message(&mut stream, &req).expect("write AttachRequest");
+        if semantic {
+            write_message(&mut stream, &SessionBootstrapRequest::default())
+                .expect("write semantic bootstrap");
+        }
         (hello, stream)
     }
 
@@ -839,7 +843,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         panic!("timed out waiting for {what}");
     }
 
-    assert_eq!(PROTOCOL_VERSION, 19);
+    assert_eq!(PROTOCOL_VERSION, 20);
     let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
         &[
             ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),

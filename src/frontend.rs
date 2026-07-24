@@ -436,6 +436,9 @@ impl Frontend {
             // unexpected copy drops silently like the rest of the
             // family rather than being re-interpreted as cells.
             | InstanceMessage::TerminalFrame(_)
+            // Q#GT4 — this pre-window semantic bootstrap result cannot
+            // legitimately reach the grid TUI.
+            | InstanceMessage::InitialTargetResult(_)
             | InstanceMessage::ResourceOffer { .. }
             // T M11.6 — DispatchIdle is consumed by `attach.rs`'s
             // optimistic-apply gate; if any reaches this render path

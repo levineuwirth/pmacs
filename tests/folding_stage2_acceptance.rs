@@ -1443,19 +1443,14 @@ fn fold_range(s: &EditorState, start: u64, end: u64) {
 }
 
 // ---------------------------------------------------------------------------
-// 11. No wire / protocol change (framing acceptance 11, Bet B6)
+// 11. No Stage 2 wire requirement (framing acceptance 11, Bet B6)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn stage_2_bumps_no_protocol_version() {
-    assert_eq!(
-        pmacs::protocol::PROTOCOL_VERSION,
-        19,
-        "Stage 2 is entirely daemon-side: the TUI collapse ships no new wire data"
-    );
-    assert_eq!(
-        *pmacs::protocol::SUPPORTED_PROTOCOL_VERSIONS.last().unwrap(),
-        19
+fn stage_2_preserves_protocol_v19_compatibility() {
+    assert!(
+        pmacs::protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(&19),
+        "Stage 2 is entirely daemon-side: later protocol bumps must retain v19 compatibility"
     );
 }
 

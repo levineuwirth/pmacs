@@ -11,7 +11,7 @@ coroutine-based async surface are core primitives, not bolt-ons.
 
 The editor is partitioned into a long-lived **instance** (the daemon
 that owns buffers, processes, and language services) and thin
-**frontends** that attach over a typed protocol (currently v19). Two
+**frontends** that attach over a typed protocol (currently v20). Two
 frontends ship today:
 
 - a **TUI** (crossterm cell grid), attachable locally over a Unix
@@ -32,7 +32,7 @@ the same buffers concurrently with live cursor/selection presence.
 **v1.0.0 --- stable core, active development.** The v1.0 gate (the
 instance/frontend partition, the Lua surface, and a REPL package audited
 to use zero direct Rust core access) shipped some time ago. Development
-since has expanded the semantic frontend protocol from v6 through v19,
+since has expanded the semantic frontend protocol from v6 through v20,
 brought the GPU frontend near input/render parity with the TUI, and
 completed the LSP, editing, persistence, themes, and terminal arcs. Recent
 work added major modes and modeline detection, a typed configuration
@@ -102,16 +102,19 @@ pmacs [FILE]                 # TUI; -nw reserved for when a GUI default lands
 GPU frontend (one command; the root binary starts or reuses the daemon):
 
 ```sh
-pmacs --gpu                         # default instance
-pmacs --gpu --socket NAME           # named instance; bare NAME →
+pmacs --gpu                         # default instance; no initial file
+pmacs --gpu README.md               # default instance; open one file
+pmacs --gpu --socket NAME FILE      # named instance; bare NAME →
                                     #   <runtime>/pmacs/NAME.sock
+pmacs --gpu -- --leading-dash       # `--` ends option parsing
 ```
 
 `pmacs --gpu` requires the root `pmacs` binary to be built with the
 `crdt` feature. It discovers a sibling `pmacs-gpu` binary first, then
-falls back to `pmacs-gpu` on `PATH`. Closing the window detaches only
-that frontend; the daemon remains available for later GPU or TUI
-attaches.
+falls back to `pmacs-gpu` on `PATH`. When `FILE` is present, the daemon
+loads or creates it and completes startup hooks before the GPU window
+appears. Closing the window detaches only that frontend; the daemon
+remains available for later GPU or TUI attaches.
 
 Daemon + attached TUI frontends:
 
@@ -148,7 +151,7 @@ Builds on the toolchain pinned in `rust-toolchain.toml` (Rust
 # the separate pmacs-gpu package feature-free while enabling CRDT in pmacs.
 cargo build --release --workspace --features pmacs/crdt
 
-target/release/pmacs --gpu           # one-command managed GPU launch
+target/release/pmacs --gpu README.md # one-command managed GPU file launch
 cargo run --release -- --version     # default-run selects the pmacs binary
 cargo test --workspace              # unit + integration tests (all crates)
 cargo fmt --check

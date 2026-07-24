@@ -1,13 +1,13 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-24, after folding Stage 2 (#149, the grid/daemon
-collapse) landed with its ledger refresh (#147), following web grammars HTML+CSS
-(#146), the LaTeX Stage 1 / inline-math framing pair (#144/#145), folding
-Stage 1 (#142, the headless fold engine), one-command GPU invocation (#141), the
-documentation refresh (#140), Vterm Stage 3 (#135, protocol v19 and native GPU terminal),
-tab-width rendering parity (#137), locals-query processing (#134), modeline
-detection (#132), mode system wiring (#129), config registry (#127), Vterm
-Stages 1–2 (#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
+**Last updated: 2026-07-24, after GPU initial-target PR #148 second-review
+fixes were integrated with folding Stage 2 (#149) and its landed-doc refresh
+(#150), following web grammars HTML+CSS (#146), the LaTeX Stage 1 / inline-math
+framing pair (#144/#145), folding Stage 1 (#142), one-command GPU invocation
+(#141), the documentation refresh (#140), Vterm Stage 3 (#135), tab-width
+rendering parity (#137), locals-query processing (#134), modeline detection
+(#132), mode system wiring (#129), config registry (#127), Vterm Stages 1–2
+(#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
 This file is the
 bridge between development machines. If you are an agent reading
 this on a fresh clone: this document plus the `docs/*-framing.md`
@@ -21,11 +21,29 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-24)
 
-- `main` @ `6ed4fe9` (folding Stage 2 #149 + ledger refresh #147 atop web
-  grammars #146, LaTeX Stage 1 #144 / inline-math framing #145, and folding
-  Stage 1 #142), protocol **v19** (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`,
-  v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal
-  frames/events).
+- `main` @ `b168dca` (folding Stage 2 landed-doc refresh #150 atop folding
+  Stage 2 #149, ledger refresh #147, web grammars #146, LaTeX Stage 1 #144 /
+  inline-math framing #145, and folding Stage 1 #142), protocol **v19**
+  (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
+  `StatuslineSegments`, v19 = terminal frames/events).
+- **GPU INITIAL TARGET IMPLEMENTED — PR #148 under user review**
+  (`docs/gpu-initial-target-framing.md` rev 3; branch `gpu-initial-target`).
+  `pmacs --gpu [--socket NAME|PATH] FILE` now transports exact Unix path bytes
+  plus launcher cwd to the managed GPU client. Protocol v20 adds a
+  semantic-session `SessionBootstrapRequest` after `AttachRequest` and an
+  appended `InitialTargetResult` readiness barrier; v6–v19 wire encodings stay
+  pinned. The daemon resolves the path lexically, deduplicates or loads/creates
+  it in the authenticated frontend's view, runs the established load/switch
+  hooks, upgrades the buffer for CRDT, and publishes every target-side CRDT
+  upgrade to existing grid replicas before readiness. Semantic replicas receive
+  a publication only when displaying that buffer, so a second target launch
+  cannot switch an existing GPU window; one dead peer cannot fail the new
+  session. Failed bootstrap writes a bounded result, shuts down the socket,
+  removes provisional state, and restores the ambient active frontend. Any
+  stale event from an uninstalled session is dropped before state access.
+  Existing no-target managed launch, direct attach, TUI, and legacy protocol
+  behavior remain intact. See `docs/active-work.md` for the portable checkpoint
+  and verification.
 - **Folding Stage 1 (headless fold engine) LANDED — #142**
   (`docs/folding-framing.md` rev 5; merge `c49a8c7`; three review rounds,
   round 3 clean). Arc 6's engine — instance-side and headless; **no frontend
@@ -613,13 +631,14 @@ and `range` are three INDEPENDENT capabilities — gate each.
 buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
-**Protocol** — encoding-breaking bumps are deliberate and versioned
-(`SUPPORTED=[6..=19]`). v15 = `CompletionPopup` +
-`StatusFacts.message`; v16 = `ThemeFacts`; v17 = `FontFacts`; v18 =
-`StatuslineSegments`; v19 = the vterm terminal family. New wire surface ⇒
-bump + both-frontends support + acceptance. An APPENDED variant must be
-guarded by a byte pin on the PREVIOUS final variant — its own round-trip
-cannot detect a discriminant shift.
+**Protocol** — encoding-breaking bumps are deliberate and versioned. Canonical
+`main` remains `[6..=19]`; the active GPU initial-target branch is
+`[6..=20]`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
+`ThemeFacts`; v17 = `FontFacts`; v18 = `StatuslineSegments`; v19 = the vterm
+terminal family; v20 = semantic `SessionBootstrapRequest` plus appended
+`InitialTargetResult`. New wire surface ⇒ bump + both-frontends support +
+acceptance. An APPENDED variant must be guarded by a byte pin on the PREVIOUS
+final variant — its own round-trip cannot detect a discriminant shift.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),

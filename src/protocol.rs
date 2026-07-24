@@ -1683,7 +1683,7 @@ mod tests {
     // --- M5.5a handshake & postcard round-trips ---
 
     #[test]
-    fn protocol_version_is_nineteen_for_the_terminal_family() {
+    fn protocol_version_is_twenty_for_gpu_initial_targets() {
         // Pin the value: T M10.5 bumped 1→2 (v1.0 wire: CrdtOp /
         // PresenceUpdate). T M11.1 bumped 2→3 (v1.1 wire: the
         // SemanticFrame family + FrontendEvent::Viewport). T M11.6
@@ -1720,7 +1720,9 @@ mod tests {
         // frontend-gated — the first bump that gates in BOTH
         // directions; all three appended after their enum's final v18
         // variant, see the placement pins).
-        assert_eq!(PROTOCOL_VERSION, 19);
+        // GPU initial targets bump 19→20 with a semantic-only
+        // SessionBootstrapRequest and appended InitialTargetResult.
+        assert_eq!(PROTOCOL_VERSION, 20);
     }
 
     #[test]
@@ -1795,18 +1797,18 @@ mod tests {
         // regex/invalid), v11 (the context menu), v12 (the GUI
         // minibuffer), v13 (`LineNumbers`), v14 (`LineNumberMode`), v15
         // (`CompletionPopup`), v16 (`ThemeFacts`), v17 (`FontFacts`),
-        // v18 (`StatuslineSegments`), and v19 (the vterm terminal
-        // family) all interoperate.
-        for accepted in 6..=19 {
+        // v18 (`StatuslineSegments`), v19 (the vterm terminal family),
+        // and v20 (semantic initial-target bootstrap) all interoperate.
+        for accepted in 6..=20 {
             assert!(
                 is_supported_protocol_version(accepted),
                 "v{accepted} must be accepted"
             );
         }
-        for rejected in [0, 1, 2, 3, 4, 5, 20, u32::MAX] {
+        for rejected in [0, 1, 2, 3, 4, 5, 21, u32::MAX] {
             assert!(
                 !is_supported_protocol_version(rejected),
-                "v{rejected} must be rejected by a v19 binary"
+                "v{rejected} must be rejected by a v20 binary"
             );
         }
     }
@@ -2012,6 +2014,47 @@ mod tests {
             );
             let decoded: FrontendEvent = postcard::from_bytes(&bytes).expect("decode");
             assert_eq!(decoded, ev);
+        }
+    }
+
+    #[test]
+    fn initial_target_bootstrap_round_trips_and_appends_after_the_v19_terminal_frame() {
+        let request = SessionBootstrapRequest {
+            initial_target: Some(InitialTarget {
+                cwd: b"/launcher".to_vec(),
+                path: vec![b'n', b'o', b't', b'e', 0xff],
+            }),
+        };
+        let request_bytes = postcard::to_allocvec(&request).expect("encode bootstrap");
+        let decoded: SessionBootstrapRequest =
+            postcard::from_bytes(&request_bytes).expect("decode bootstrap");
+        assert_eq!(decoded, request);
+        let none = SessionBootstrapRequest::default();
+        assert_eq!(
+            postcard::from_bytes::<SessionBootstrapRequest>(
+                &postcard::to_allocvec(&none).expect("encode empty bootstrap")
+            )
+            .expect("decode empty bootstrap"),
+            none
+        );
+
+        for result in [
+            InitialTargetResult::Opened {
+                buffer_id: pmacs_protocol::BufferId::from_raw(9),
+            },
+            InitialTargetResult::Failed {
+                message: "cannot load target".to_owned(),
+            },
+        ] {
+            let message = InstanceMessage::InitialTargetResult(result);
+            let bytes = postcard::to_allocvec(&message).expect("encode target result");
+            assert_eq!(
+                bytes.first(),
+                Some(&27),
+                "InitialTargetResult must be appended after v19 TerminalFrame"
+            );
+            let decoded: InstanceMessage = postcard::from_bytes(&bytes).expect("decode result");
+            assert_eq!(decoded, message);
         }
     }
 

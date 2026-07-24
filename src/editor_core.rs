@@ -595,6 +595,9 @@ impl EditorCore {
     /// closing a window left others intact).
     pub fn unregister_frontend_view(&mut self, fid: FrontendId) {
         self.views.remove(&fid);
+        if self.active_frontend == fid {
+            self.active_frontend = FrontendId::LOCAL;
+        }
     }
 
     /// [`BufferId`] of the active window's buffer.
@@ -3374,7 +3377,7 @@ fn normalize_buffer_path(path: PathBuf) -> PathBuf {
 /// `~` becomes `$HOME`; `~/x` becomes `$HOME/x`. `~user` is left
 /// untouched (no passwd lookup). Returns the input unchanged if it
 /// has no leading `~`, isn't valid UTF-8, or `$HOME` is unset.
-fn expand_tilde(path: PathBuf) -> PathBuf {
+pub fn expand_tilde(path: PathBuf) -> PathBuf {
     let Some(s) = path.to_str() else {
         return path;
     };
@@ -3392,7 +3395,7 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
 /// Fold `.` and `..` components without touching the filesystem.
 /// `..` pops a preceding normal segment; against the root (or a
 /// Windows prefix) it is dropped, since you cannot ascend past it.
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut stack: Vec<Component> = Vec::new();
     for comp in path.components() {
@@ -3874,13 +3877,16 @@ mod tests {
         // we don't need a fresh window allocation in this test.
         let local_view = s.views[&FrontendId::LOCAL].clone();
         s.register_frontend_view(fid, local_view);
+        s.active_frontend = fid;
         assert!(s.active_window_for(fid).is_some());
 
         // Unregister drops the entry; explicit lookup returns None.
         s.unregister_frontend_view(fid);
         assert!(s.active_window_for(fid).is_none());
 
-        // LOCAL invariant survives unrelated register/unregister.
+        // Removing the selected frontend restores the always-registered
+        // LOCAL view as the ambient fallback.
+        assert_eq!(s.active_frontend, FrontendId::LOCAL);
         assert!(s.views.contains_key(&FrontendId::LOCAL));
     }
 

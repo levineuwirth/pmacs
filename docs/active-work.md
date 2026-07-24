@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-23.** This file records volatile work that has not
+**Snapshot: 2026-07-24.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -14,9 +14,10 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `6ed4fe9` (folding Stage 2 #149 atop the ledger
-  refresh #147, web grammars HTML+CSS #146, and the LaTeX Stage 1 #144 /
-  inline-math framing #145 pair; protocol v19).
+  `githubsucks/main` @ `b168dca` (folding Stage 2 landed-doc refresh #150
+  atop folding Stage 2 #149, the ledger refresh #147, web grammars HTML+CSS
+  #146, and the LaTeX Stage 1 #144 / inline-math framing #145 pair; protocol
+  v19).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -50,8 +51,45 @@ git worktree list
 git status --short --branch
 ```
 
-The first command must expose `6ed4fe9` or a newer intentional main.
+The `git log` command must expose `b168dca` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
+
+## Active lane: GPU initial target
+
+- Portable implementation branch: `githubsucks/gpu-initial-target` @
+  `6c06815` (second-review fixes integrated with current canonical `main`);
+  worktree `../pmacs-gpu-initial-target`.
+- Approved framing branch: `githubsucks/gpu-initial-target-framing`;
+  Revision 2 checkpoint `71039d1`.
+- Original implementation base: canonical `githubsucks/main` @ `c49a8c7`
+  (folding Stage 1 #142); current canonical `main` @ `b168dca` is integrated
+  by merge `6c06815`. Protocol was v19 before this work.
+- State: implementation checkpoint `2dd30ec`; first review-fix checkpoint
+  `bef1c08`; second-review checkpoint `be8c67c`; current-main integration
+  `6c06815`. Smoke-tested, fully gated, and published at protocol v20. PR #148
+  remains open for user review:
+  `https://github.com/levineuwirth/pmacs/pull/148`.
+- Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
+  protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
+  Unix path transport, pre-window target readiness, replica coherence, and the
+  approved behavioral acceptance matrix.
+- Post-integration verification: formatting and strict Clippy; 1,815 default +
+  1,992 CRDT library tests; target and invocation gates 14 CRDT each; Folding
+  Stage 2 48 CRDT; M4 121; required GPU 152; Vterm Stage 3 5 default + 7 CRDT;
+  isolated-config workspace sweep 3,334 across 88 suites. The prior two-window
+  Wayland/Vulkan isolation smoke remains valid; this round changes only daemon
+  failure/publication behavior.
+- Deferred unchanged: automatic GUI selection, multiple files, general
+  live-open commands, packaging, and remote GPU paths.
+
+Recovery worktree after the first push:
+
+```sh
+git worktree add --track \
+  -b gpu-initial-target \
+  ../pmacs-gpu-initial-target \
+  githubsucks/gpu-initial-target
+```
 
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 

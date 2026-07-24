@@ -1137,6 +1137,12 @@ pub enum InstanceMessage {
     /// Appended after [`Self::StatuslineSegments`], the final v18
     /// variant, so no existing postcard discriminant moves.
     TerminalFrame(crate::terminal::TerminalFrame),
+    /// GPU initial-target bootstrap result (protocol v20). Sent only to a
+    /// semantic session that supplied [`SessionBootstrapRequest::initial_target`].
+    ///
+    /// Appended after [`Self::TerminalFrame`], the final v19 variant, so no
+    /// legacy postcard discriminant moves.
+    InitialTargetResult(InitialTargetResult),
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -1553,7 +1559,13 @@ pub enum ResourceBody {
 /// with no terminal surface at all. This is the first bump to gate in
 /// BOTH directions at once, which is why criterion 28 pins the two
 /// send filters independently.
-pub const PROTOCOL_VERSION: u32 = 19;
+///
+/// GPU initial target (Q#GT4): bumped 19 → 20 for the semantic-session
+/// bootstrap envelope and [`InstanceMessage::InitialTargetResult`]. The
+/// handshake extension is read only from v20 semantic sessions; the result is
+/// sent only when such a session requested a target. v6–v19 handshakes and
+/// message discriminants remain unchanged.
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1627,8 +1639,12 @@ pub const PROTOCOL_VERSION: u32 = 19;
 /// additive in both directions — `TerminalFrame` is daemon-gated,
 /// `TerminalResize` / `TerminalPointer` are frontend-gated — so v18 and
 /// v19 binaries interoperate with terminal traffic simply absent.
+///
+/// GPU initial target (Q#GT4): extended to `[6, ..., 20]`. v20 semantic
+/// sessions send a bounded bootstrap envelope after `AttachRequest`; legacy
+/// and non-semantic sessions retain their existing handshake shape.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] =
-    &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+    &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].
@@ -2037,4 +2053,48 @@ pub struct AttachRequest {
     /// until the frontend sends a [`FrontendEvent::Resize`]. The
     /// instance uses this for the initial full-grid render.
     pub initial_size: CellSize,
+}
+
+/// Maximum byte length of either raw Unix path in an initial-target request.
+pub const MAX_INITIAL_TARGET_PATH_BYTES: usize = 32 * 1024;
+
+/// Maximum UTF-8 byte length of a daemon-produced initial-target error.
+pub const MAX_INITIAL_TARGET_ERROR_BYTES: usize = 4 * 1024;
+
+/// Raw local paths for a semantic session's pre-window initial target.
+///
+/// Both fields are Unix path bytes rather than display text. The daemon
+/// validates the byte bounds, absolute `cwd`, nonempty fields, and embedded
+/// NULs before constructing paths.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InitialTarget {
+    /// Absolute launcher working-directory bytes.
+    pub cwd: Vec<u8>,
+    /// Launcher-expanded target path bytes, absolute or relative to `cwd`.
+    pub path: Vec<u8>,
+}
+
+/// Protocol-v20 semantic-session bootstrap extension.
+///
+/// A v20 semantic frontend sends this immediately after [`AttachRequest`].
+/// `None` preserves ordinary attach behavior.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionBootstrapRequest {
+    /// Optional file that must be ready before the frontend creates a window.
+    pub initial_target: Option<InitialTarget>,
+}
+
+/// Pre-window outcome for a requested initial target.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum InitialTargetResult {
+    /// The target snapshot was written and the session is ready.
+    Opened {
+        /// Buffer identified by the immediately preceding target snapshot.
+        buffer_id: crate::BufferId,
+    },
+    /// Bootstrap failed; the provisional session has been removed.
+    Failed {
+        /// Bounded user-facing daemon detail.
+        message: String,
+    },
 }
