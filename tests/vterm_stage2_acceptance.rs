@@ -648,30 +648,29 @@ fn wait_for_output(
     startup: &[(&str, &Path)],
 ) {
     let deadline = Instant::now() + timeout;
-    // A needle carrying its own escape (e.g. the OSC 52 clipboard reply) is
-    // matched strictly; stripping would consume the very bytes under test.
-    let needle_is_plain_text = !needle.contains(&0x1b);
+    // Matching is STRICT, deliberately. An earlier revision also tried an
+    // escape-stripped match to tolerate a run the differ had split; that is
+    // unsound for painted CELLS, because `cell::diff` drops an already-matching
+    // cell entirely rather than merely interrupting the run, and no match
+    // strategy recovers a byte that was never sent. Assertions here are
+    // therefore limited to protocol escapes pmacs writes straight to the host
+    // (clipboard, mode resets), which the differ never touches. Content that
+    // must be seen on SCREEN is asserted in-process over `snapshot_text`.
     loop {
         let output = pty.output();
-        let contiguous = output.windows(needle.len()).any(|window| window == needle);
-        if contiguous
-            || (needle_is_plain_text && {
-                let visible = strip_ansi(&output);
-                visible.windows(needle.len()).any(|window| window == needle)
-            })
-        {
+        if output.windows(needle.len()).any(|window| window == needle) {
             return;
         }
         if Instant::now() >= deadline {
             let diagnosis = describe_startup(pty, startup);
             let output = pty.output();
             let start = output.len().saturating_sub(4_000);
-            // Both the contiguous and the escape-stripped match failed, so
-            // report how much of the needle rendered at all. The printed tail
-            // cannot answer that on its own: a settled screen emits empty
-            // diffs forever and pushes any real text out of the window. `0`
-            // means no child text ever reached the host — the serious case,
-            // pointing at the PTY/spawn path rather than at painting.
+            // Report how much of the needle reached the host at all. The
+            // printed tail cannot answer that on its own: a settled screen
+            // emits empty diffs forever and pushes any real text out of the
+            // window. A prefix strictly between 0 and the full length means
+            // the bytes arrived mutilated rather than never — which for cell
+            // content is the differ dropping an already-matching cell.
             let visible = strip_ansi(&output);
             let seen = longest_rendered_prefix(&visible, needle)
                 .max(longest_rendered_prefix(&output, needle));
@@ -691,6 +690,32 @@ fn wait_for_output(
                 tail = output[start..].escape_ascii()
             );
         }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// [`wait_for_file`] that reports startup breadcrumbs when it times out.
+///
+/// The plain helper panics with only the missing path, which is the least
+/// useful thing to know: a readiness file that never appears is exactly when
+/// "how far did startup get" decides where to look next.
+fn wait_for_published_file(
+    pty: &mut PmacsPty,
+    path: &Path,
+    timeout: Duration,
+    startup: &[(&str, &Path)],
+) -> Vec<u8> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(bytes) = fs::read(path) {
+            return bytes;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child never published {} within {timeout:?}\n  startup: {}",
+            path.display(),
+            describe_startup(pty, startup)
+        );
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -717,6 +742,8 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
     let config_root = temp.path().join("config");
     let config_dir = config_root.join("pmacs");
     let state_root = temp.path().join("state");
+    // Readiness is published as a FILE, not as host bytes. See the wait below.
+    let alt_ready_path = temp.path().join("alt-ready");
     let input_path = temp.path().join("child-input");
     let size_path = temp.path().join("child-size");
     let init_path = temp.path().join("init-reached");
@@ -748,6 +775,7 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
             "os.write(1, b'\\x1b[?1049h\\x1b[2J')\n",
             "for i in range(20): os.write(1, b'alt%02d\\r\\n' % i)\n",
             "os.write(1, b'VTERM_ALT_READY')\n",
+            "open({:?}, 'wb').write(b'1')\n",
             "read_until(b'ALT_GATE\\n')\n",
             "os.write(1, b'\\x1b[?1049l')\n",
             "for i in range(40): os.write(1, b'main%02d\\r\\n' % i)\n",
@@ -757,6 +785,7 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
             "size = os.get_terminal_size(0)\n",
             "open({:?}, 'w').write(f'{{size.lines}} {{size.columns}}\\n')\n"
         ),
+        alt_ready_path.to_str().expect("UTF-8 alt-ready path"),
         input_path.to_str().expect("UTF-8 input path"),
         size_path.to_str().expect("UTF-8 size path")
     );
@@ -812,11 +841,27 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
         ("init.lua reached", init_path.as_path()),
         ("terminal.open", open_path.as_path()),
     ];
-    wait_for_output(
-        &mut pty,
-        b"VTERM_ALT_READY",
-        Duration::from_secs(10),
-        startup,
+    // Gate on a file the child publishes, not on its text appearing in the
+    // host stream. Host bytes cannot carry this assertion: `cell::diff` splits
+    // a run at any cell where `prev == next` and NEVER TRANSMITS that cell
+    // (pinned by `cell::tests::diff_split_by_unchanged_cell_is_two_spans`), so
+    // whenever a character of the marker already happens to sit at its
+    // destination the host receives the marker with that byte missing. No
+    // matching strategy can recover a byte that was never sent — which is what
+    // the macOS failures were, reporting a stable `rendered prefix: 6/15`
+    // across two different child layouts.
+    //
+    // This is a synchronisation gate, not the assertion. That the child's
+    // output reaches the SCREEN is pinned in-process, at the layer that can
+    // see it, by `lua_surface_is_strict_...` asserting over `snapshot_text`.
+    // What this test uniquely owns is host lifecycle — the clipboard escape,
+    // geometry propagation, and terminal restore asserted below — and those
+    // are protocol escapes pmacs writes directly, never painted cells, so the
+    // differ cannot split them.
+    assert_eq!(
+        wait_for_published_file(&mut pty, &alt_ready_path, Duration::from_secs(10), startup),
+        b"1",
+        "alt-screen readiness breadcrumb was published but malformed"
     );
 
     pty.resize(30, 90).expect("resize host PTY");
@@ -864,11 +909,13 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
     );
 }
 
-/// `strip_ansi` joins a run the differ split, WITHOUT inventing text.
+/// `strip_ansi` joins a run interrupted by escapes, WITHOUT inventing text.
 ///
-/// This is the property that makes the loose match in [`wait_for_output`]
-/// safe: it rescues a marker that rendered across a cursor move, and still
-/// reports absent for a child that never wrote.
+/// It backs the failure diagnostic in [`wait_for_output`], not the match: it
+/// separates "arrived, interrupted by cursor moves" from "never arrived".
+/// It deliberately does NOT rescue a run the cell differ split, because that
+/// path drops the matching cell rather than escaping around it — the case
+/// pinned below and by `cell::tests::diff_split_by_unchanged_cell_is_two_spans`.
 #[test]
 fn strip_ansi_rejoins_a_split_run_but_never_invents_absent_text() {
     let needle = b"VTERM_ALT_READY";
@@ -893,6 +940,22 @@ fn strip_ansi_rejoins_a_split_run_but_never_invents_absent_text() {
     // OSC (clipboard) and two-byte escapes are consumed, payload text kept.
     assert_eq!(strip_ansi(b"a\x1b]52;c;Zm9v\x07b"), b"ab");
     assert_eq!(strip_ansi(b"x\x1b(By"), b"xy");
+
+    // The case that defeated two attempted fixes, kept here so the wrong
+    // remedy is not reached for again. `cell::diff` splits a run at an
+    // already-matching cell and never transmits it, so the host sees the
+    // marker with an interior byte MISSING, not merely escaped around.
+    // Stripping is powerless; the longest prefix stops at the hole, which is
+    // exactly the `6/15 ("VTERM_")` the macOS runs reported.
+    let dropped = b"\x1b[9;1HVTERM_\x1b[9;8HLT_READY".to_vec();
+    let visible = strip_ansi(&dropped);
+    assert_eq!(visible, b"VTERM_LT_READY", "the 'A' was never sent");
+    assert!(!visible.windows(needle.len()).any(|w| w == needle));
+    assert_eq!(
+        longest_rendered_prefix(&visible, needle),
+        6,
+        "a dropped interior cell caps the prefix at the hole"
+    );
 }
 
 /// The flake diagnostic's discriminator (see [`wait_for_output`]).
