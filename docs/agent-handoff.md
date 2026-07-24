@@ -1,12 +1,12 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-24, after GPU initial-target PR #148 second-review
-fixes were integrated with folding Stage 2 (#149) and its landed-doc refresh
-(#150), following web grammars HTML+CSS (#146), the LaTeX Stage 1 / inline-math
-framing pair (#144/#145), folding Stage 1 (#142), one-command GPU invocation
-(#141), the documentation refresh (#140), Vterm Stage 3 (#135), tab-width
-rendering parity (#137), locals-query processing (#134), modeline detection
-(#132), mode system wiring (#129), config registry (#127), Vterm Stages 1–2
+**Last updated: 2026-07-24, after GPU initial-target (#148, protocol v20)
+landed, following folding Stage 2 (#149) and its landed-doc refresh (#150),
+web grammars HTML+CSS (#146), the LaTeX Stage 1 / inline-math framing pair
+(#144/#145), folding Stage 1 (#142), one-command GPU invocation (#141), the
+documentation refresh (#140), Vterm Stage 3 (#135), tab-width rendering
+parity (#137), locals-query processing (#134), modeline detection (#132),
+mode system wiring (#129), config registry (#127), Vterm Stages 1–2
 (#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
 This file is the
 bridge between development machines. If you are an agent reading
@@ -21,15 +21,16 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-24)
 
-- `main` @ `b168dca` (folding Stage 2 landed-doc refresh #150 atop folding
-  Stage 2 #149, ledger refresh #147, web grammars #146, LaTeX Stage 1 #144 /
-  inline-math framing #145, and folding Stage 1 #142), protocol **v19**
-  (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
-  `StatuslineSegments`, v19 = terminal frames/events).
-- **GPU INITIAL TARGET IMPLEMENTED — PR #148 under user review**
-  (`docs/gpu-initial-target-framing.md` rev 3; branch `gpu-initial-target`).
-  `pmacs --gpu [--socket NAME|PATH] FILE` now transports exact Unix path bytes
-  plus launcher cwd to the managed GPU client. Protocol v20 adds a
+- `main` @ `0dd16a5` (GPU initial-target #148 atop folding Stage 2 landed-doc
+  refresh #150, folding Stage 2 #149, ledger refresh #147, web grammars #146,
+  LaTeX Stage 1 #144 / inline-math framing #145, and folding Stage 1 #142),
+  protocol **v20** (`SUPPORTED=[6..=20]`; v16 = `ThemeFacts`, v17 =
+  `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events, v20 =
+  the GPU initial-target semantic bootstrap family).
+- **GPU initial target LANDED — #148**
+  (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
+  rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
+  bytes plus launcher cwd to the managed GPU client. Protocol v20 adds a
   semantic-session `SessionBootstrapRequest` after `AttachRequest` and an
   appended `InitialTargetResult` readiness barrier; v6–v19 wire encodings stay
   pinned. The daemon resolves the path lexically, deduplicates or loads/creates
@@ -42,8 +43,15 @@ commands, read `docs/active-work.md` immediately after this file.
   removes provisional state, and restores the ambient active frontend. Any
   stale event from an uninstalled session is dropped before state access.
   Existing no-target managed launch, direct attach, TUI, and legacy protocol
-  behavior remain intact. See `docs/active-work.md` for the portable checkpoint
-  and verification.
+  behavior remain intact. Folding Stage 2 integration: fold projection at
+  attach is selected from the same negotiated `semantic_render` bit the target
+  bootstrap uses (grid collapses, semantic/GPU stays source-line pending
+  Folding Stage 3). Final gates: 1,815 default + 1,992 CRDT library tests;
+  target + invocation gates 14/14 CRDT each; Folding Stage 2 48 CRDT; M4 121;
+  required GPU 152; Vterm Stage 3 5 default + 7 CRDT; isolated-config workspace
+  sweep 3,334 across 88 suites; two concurrent real Wayland/Vulkan GPU windows
+  stayed on distinct target buffers after the second attach. All 12 CI checks
+  passed.
 - **Folding Stage 1 (headless fold engine) LANDED — #142**
   (`docs/folding-framing.md` rev 5; merge `c49a8c7`; three review rounds,
   round 3 clean). Arc 6's engine — instance-side and headless; **no frontend
@@ -632,8 +640,7 @@ buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
 **Protocol** — encoding-breaking bumps are deliberate and versioned. Canonical
-`main` remains `[6..=19]`; the active GPU initial-target branch is
-`[6..=20]`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
+`main` is `[6..=20]`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
 `ThemeFacts`; v17 = `FontFacts`; v18 = `StatuslineSegments`; v19 = the vterm
 terminal family; v20 = semantic `SessionBootstrapRequest` plus appended
 `InitialTargetResult`. New wire surface ⇒ bump + both-frontends support +
@@ -737,6 +744,30 @@ final variant — its own round-trip cannot detect a discriminant shift.
   `/var/folders/...` temp path while passing on Linux; size the grid for the
   longest supported fixture path (the mode-system test uses 160 columns per
   split).
+- **A provisional session that fails mid-bootstrap must actually close its
+  socket, not just drop its handle.** #148's dispatcher-side target-failure
+  paths wrote `InitialTargetResult::Failed` and dropped the write-half
+  `UnixStream` clone, but a clone shares the underlying FD — the per-attach
+  reader thread stayed alive with no installed session state. A client that
+  kept the socket open past `Failed` and sent any ordinary event hit an
+  `.expect` reachable only through the new failure path and panicked the
+  whole daemon. Fix: `shutdown(Shutdown::Both)` on every dispatcher-side
+  failure path, plus a defense-in-depth session-registry membership check
+  before any `FrontendEvent` touches render/size/editor state. Generalizes:
+  when a new failure path can leave a handle installed without its owning
+  session, dropping a handle is not the same as tearing down the connection.
+- **An upgrade decision must be tracked independently of the outcome that
+  triggered it.** #148 published a target's fresh `BufferSnapshot` to
+  existing grid replicas only when the buffer was `newly_loaded ||
+  newly_created` — but a target can dedup onto an already-existing,
+  not-yet-CRDT-backed buffer (e.g. one a startup hook created via
+  `find_or_open` and never activated), silently upgrading it without telling
+  pre-attached replicas. The later F29 lazy-upgrade sweep then saw an
+  already-backed buffer and never broadcast it, permanently stranding those
+  replicas on v0.1 round-trip for that buffer. Fix: have the upgrade helper
+  report whether it performed the upgrade, and OR that into the publish
+  decision rather than inferring it from the caller's own load/create
+  branch.
 
 
 ## 6. Named deferrals (the standing backlog, consolidated)

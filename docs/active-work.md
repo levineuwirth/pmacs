@@ -14,10 +14,10 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `b168dca` (folding Stage 2 landed-doc refresh #150
-  atop folding Stage 2 #149, the ledger refresh #147, web grammars HTML+CSS
-  #146, and the LaTeX Stage 1 #144 / inline-math framing #145 pair; protocol
-  v19).
+  `githubsucks/main` @ `0dd16a5` (GPU initial-target #148 atop folding Stage 2
+  landed-doc refresh #150, folding Stage 2 #149, the ledger refresh #147, web
+  grammars HTML+CSS #146, and the LaTeX Stage 1 #144 / inline-math framing
+  #145 pair; protocol v20).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -51,45 +51,8 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `b168dca` or a newer intentional main.
+The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
-
-## Active lane: GPU initial target
-
-- Portable implementation branch: `githubsucks/gpu-initial-target` @
-  `6c06815` (second-review fixes integrated with current canonical `main`);
-  worktree `../pmacs-gpu-initial-target`.
-- Approved framing branch: `githubsucks/gpu-initial-target-framing`;
-  Revision 2 checkpoint `71039d1`.
-- Original implementation base: canonical `githubsucks/main` @ `c49a8c7`
-  (folding Stage 1 #142); current canonical `main` @ `b168dca` is integrated
-  by merge `6c06815`. Protocol was v19 before this work.
-- State: implementation checkpoint `2dd30ec`; first review-fix checkpoint
-  `bef1c08`; second-review checkpoint `be8c67c`; current-main integration
-  `6c06815`. Smoke-tested, fully gated, and published at protocol v20. PR #148
-  remains open for user review:
-  `https://github.com/levineuwirth/pmacs/pull/148`.
-- Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
-  protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
-  Unix path transport, pre-window target readiness, replica coherence, and the
-  approved behavioral acceptance matrix.
-- Post-integration verification: formatting and strict Clippy; 1,815 default +
-  1,992 CRDT library tests; target and invocation gates 14 CRDT each; Folding
-  Stage 2 48 CRDT; M4 121; required GPU 152; Vterm Stage 3 5 default + 7 CRDT;
-  isolated-config workspace sweep 3,334 across 88 suites. The prior two-window
-  Wayland/Vulkan isolation smoke remains valid; this round changes only daemon
-  failure/publication behavior.
-- Deferred unchanged: automatic GUI selection, multiple files, general
-  live-open commands, packaging, and remote GPU paths.
-
-Recovery worktree after the first push:
-
-```sh
-git worktree add --track \
-  -b gpu-initial-target \
-  ../pmacs-gpu-initial-target \
-  githubsucks/gpu-initial-target
-```
 
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
@@ -146,6 +109,31 @@ git worktree add --track \
   so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
+
+- **GPU initial target — MERGED as #148** (`main` @ `0dd16a5`, 2026-07-24,
+  after two review rounds). `pmacs --gpu [--socket …] FILE` opens a target
+  before the GPU window appears. Protocol bumped 19 → 20: a semantic-session
+  `SessionBootstrapRequest` after `AttachRequest`, plus an appended
+  `InstanceMessage::InitialTargetResult` pre-window readiness barrier; v6–v19
+  wire encodings are unchanged. Root owns launcher tilde/cwd resolution and
+  exact raw-byte path transport; the daemon resolves/dedups/loads the target
+  and runs load/switch hooks inside one dispatcher transaction, then
+  publishes CRDT-upgraded targets to existing grid replicas (gated on
+  `upgraded_to_crdt`, independent of the load/create outcome, so a dedup onto
+  a hidden not-yet-backed buffer still reaches pre-attached replicas — round
+  2 finding). Semantic replicas receive a publication only when displaying
+  that buffer, so a second target launch cannot switch an existing GPU
+  window. Round 2 also closed a failure-containment gap: every dispatcher-side
+  bootstrap failure now shuts down the socket (a dropped write-half clone
+  does not close a shared FD), and the dispatcher drops any event from a
+  session that was never installed, rather than reaching absent render/size
+  state. Integrated cleanly with Folding Stage 2 (#149): fold projection at
+  attach is selected from the same negotiated `semantic_render` bit the
+  target bootstrap uses. Its lane, worktree (`../pmacs-gpu-initial-target`),
+  and branch (`gpu-initial-target`) are done; the `-framing` branch is kept.
+  Durable substrate facts and both review-round lessons live in
+  `docs/agent-handoff.md` §§1/5 and `docs/gpu-initial-target-framing.md`
+  rev 3.
 
 - **Folding Stage 2 (grid/daemon collapse) — MERGED as #149** (`main` @
   `6ed4fe9`, 2026-07-24, after **five** review rounds). The grid TUI now
