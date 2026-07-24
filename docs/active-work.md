@@ -56,16 +56,16 @@ If it does not, stop and repair the remote/fetch configuration.
 ## Active lane: GPU initial target
 
 - Portable implementation branch: `githubsucks/gpu-initial-target` @
-  `010a4b5` (verified implementation plus portable ledger); worktree
+  `bef1c08` (PR review fixes plus complete post-review verification); worktree
   `../pmacs-gpu-initial-target`.
 - Approved framing branch: `githubsucks/gpu-initial-target-framing`;
   Revision 2 checkpoint `71039d1`.
 - Original implementation base: canonical `githubsucks/main` @ `c49a8c7`
   (folding Stage 1 #142); current canonical `main` @ `47581f4` is integrated
   conflict-free by merge `d6d4be6`. Protocol was v19 before this work.
-- State: implementation checkpoint `2dd30ec`; integrated, smoke-tested, fully
-  gated, and published on 2026-07-23 at protocol v20. PR #148 review fixes are
-  complete locally and awaiting publication; PR:
+- State: implementation checkpoint `2dd30ec`; review-fix checkpoint `bef1c08`.
+  Integrated, smoke-tested, fully gated, and published on 2026-07-23 at
+  protocol v20. PR #148 remains open for user review:
   `https://github.com/levineuwirth/pmacs/pull/148`.
 - Scope delivered: one session-scoped `pmacs --gpu [--socket …] FILE` target,
   protocol-v20 semantic bootstrap, launcher-owned tilde/cwd resolution, exact
