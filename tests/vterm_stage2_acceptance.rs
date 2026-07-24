@@ -735,12 +735,22 @@ fn real_tui_terminal_smoke_restores_host_after_output_input_resize_scroll_copy_a
             "    data = b''\n",
             "    while marker not in data:\n",
             "        data += os.read(0, 4096)\n",
+            // CRLF, not bare LF. The supervisor's PTY trampoline runs
+            // `stty raw`, which clears OPOST, so a lone `\n` moves DOWN
+            // without returning to column 1 and every line staircases five
+            // columns right. Against this session's 40-column child that
+            // walks the readiness marker into the right margin, where it
+            // wraps mid-word and reaches the host as two pieces separated by
+            // other repainted cells — unmatchable, and intermittent because
+            // the column depends on whether pmacs has resized the PTY to the
+            // window width yet. Explicit carriage returns keep every write
+            // column-stable, so the markers below start at column 1.
             "os.write(1, b'\\x1b[?1049h\\x1b[2J')\n",
-            "for i in range(20): os.write(1, b'alt%02d\\n' % i)\n",
+            "for i in range(20): os.write(1, b'alt%02d\\r\\n' % i)\n",
             "os.write(1, b'VTERM_ALT_READY')\n",
             "read_until(b'ALT_GATE\\n')\n",
             "os.write(1, b'\\x1b[?1049l')\n",
-            "for i in range(40): os.write(1, b'main%02d\\n' % i)\n",
+            "for i in range(40): os.write(1, b'main%02d\\r\\n' % i)\n",
             "os.write(1, b'VTERM_MAIN_READY\\x07')\n",
             "data = read_exact(18)\n",
             "open({:?}, 'wb').write(data)\n",
