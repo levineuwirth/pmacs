@@ -1311,8 +1311,9 @@ fn run_buffer_edit(
     // Arc 6 Stage 2 (Q#FD19): the interactive-Lua-command unfold seam.
     // Hooked HERE — above both `run_managed_edit` and `run_bypass_edit` —
     // so an interactive command that passes `bypass_intercept` does not
-    // escape the widening.
-    unfold_before_interactive_lua_edit(lua, id);
+    // escape the widening. Keyed on where the edit LANDS, read before
+    // `op` is consumed below.
+    unfold_before_interactive_lua_edit(lua, id, edit_start_of(&op));
     if bypass_intercept {
         run_bypass_edit(lua, id, op)
     } else {
@@ -1320,7 +1321,16 @@ fn run_buffer_edit(
     }
 }
 
-/// Unfold at the point before an **interactive** Lua-mutator edit
+/// Where an [`EditOp`] lands — the `edit.range.start` Q#FD19 keys the
+/// interactive unfold on.
+fn edit_start_of(op: &EditOp<'_>) -> u64 {
+    match op {
+        EditOp::Insert { pos, .. } => *pos,
+        EditOp::Delete { range } | EditOp::Replace { range, .. } => range.start,
+    }
+}
+
+/// Unfold at the **edit site** before an **interactive** Lua-mutator edit
 /// (comment-toggle, yank-pop, and any other `pmacs.buffer.X` mutation a
 /// command body performs on the buffer the user is looking at).
 ///
@@ -1334,14 +1344,24 @@ fn run_buffer_edit(
 ///    and the guard clears even when the Lua command errors.
 /// 2. The edited buffer **is `f`'s active-window buffer**. An explicit
 ///    mutation of some *other*, inactive buffer stays programmatic — it
-///    is not an edit at the user's point.
-/// 3. A fold actually contains that point (handled by
-///    [`crate::fold::FoldRegistry::unfold_containing`], which is a no-op
+///    is not an edit the user can see land.
+/// 3. A fold actually contains **`edit_start`** (handled by
+///    [`crate::fold::FoldRegistry::unfold_containing`], a no-op
 ///    otherwise).
+///
+/// Condition 3 is the edit site, **not the point** (Q#FD19). A Lua
+/// command is free to edit somewhere other than where the cursor sits:
+/// keying on the cursor would open an unrelated fold when a command
+/// edits elsewhere, and — worse — leave the edit invisible when a
+/// command edits *into* a fold from an outside point. The six
+/// `EditorCore` primitives, yank, and query-replace all edit exactly at
+/// the point, so
+/// [`apply_active_edit`](crate::editor_core::EditorCore::apply_active_edit)'s
+/// funnel keys on the point; only this Lua path can diverge.
 ///
 /// Matches Stage 1's data-API exemption: `pmacs.buffer.insert` called
 /// from a plugin, a hook, or a bare Lua chunk unfolds nothing.
-fn unfold_before_interactive_lua_edit(lua: &Lua, id: BufferId) {
+fn unfold_before_interactive_lua_edit(lua: &Lua, id: BufferId, edit_start: u64) {
     let Some(origin) = lua
         .app_data_ref::<InteractiveCommandOrigin>()
         .and_then(|origin| origin.current())
@@ -1361,7 +1381,7 @@ fn unfold_before_interactive_lua_edit(lua: &Lua, id: BufferId) {
     if window.buffer_id != id {
         return; // an inactive-buffer mutation stays programmatic
     }
-    folds.unfold_containing(id, window.cursor);
+    folds.unfold_containing(id, edit_start);
 }
 
 fn run_bypass_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<crate::rope::Edit> {

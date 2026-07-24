@@ -708,9 +708,21 @@ impl EditorCore {
     /// clamped to the buffer's line count (Arc 3 Q#PS1 — desktop
     /// restore). A file that shrank since the desktop was saved can't
     /// scroll past its end.
+    /// Arc 6 Stage 2 (Q#FD12/Q#FD18, round-4 F3): `view_top` stays a
+    /// source-line index but must never *name* a hidden line, so a
+    /// fold-projecting frontend also clamps **backward** to the visible
+    /// head here. The render pass repairs a hidden `view_top` too, but
+    /// only at the next frame — until then [`Self::view_top`] would hand
+    /// out a collapsed line and command/event reckoning would start from
+    /// a non-visible origin. This setter is the contract's home (it is
+    /// what `saveplace` and `pmacs.editor.set_view_top` call), so the
+    /// invariant is established here rather than repaired downstream.
     pub fn set_view_top(&mut self, top: usize) {
         let lines = self.active_window().text_view.line_count();
         let clamped = top.min(lines.saturating_sub(1));
+        let clamped = self
+            .fold_map_active()
+            .map_or(clamped, |map| map.clamp_view_top(clamped));
         self.active_window_mut().view_top = clamped;
     }
 
@@ -1608,6 +1620,14 @@ impl EditorCore {
     /// raw-line motion until Stage 3.
     pub fn move_up(&mut self) {
         let folds = self.fold_map_active();
+        // Normalize FIRST and as a real mutation (round-4 F2): a hidden
+        // logical cursor moves to its component's head POSITION — head
+        // row *and* head end-of-content column — before any step is
+        // computed. Deriving the goal column from the hidden line would
+        // carry a column the head may not even have, and returning early
+        // at a buffer boundary (a fold headed on line 0) would leave the
+        // cursor hidden entirely.
+        self.normalize_cursor_to_visible(folds.as_ref());
         let id = self.active_buffer_id();
         let cursor = self.active_window().cursor;
         let goal_col = self.active_window().goal_col;
@@ -1619,9 +1639,7 @@ impl EditorCore {
                 .text_view
                 .pos_to_display(buffer, cursor)
                 .unwrap_or_default();
-            let from_row = folds.as_ref().map_or(coord.row as usize, |map| {
-                map.visible_head_of(coord.row as usize)
-            });
+            let from_row = coord.row as usize;
             if from_row == 0 {
                 return;
             }
@@ -1648,6 +1666,7 @@ impl EditorCore {
     /// Visible-line stepping mirrors [`Self::move_up`] (Q#FD17/FD21).
     pub fn move_down(&mut self) {
         let folds = self.fold_map_active();
+        self.normalize_cursor_to_visible(folds.as_ref());
         let id = self.active_buffer_id();
         let cursor = self.active_window().cursor;
         let goal_col = self.active_window().goal_col;
@@ -1659,9 +1678,7 @@ impl EditorCore {
                 .text_view
                 .pos_to_display(buffer, cursor)
                 .unwrap_or_default();
-            let from_row = folds.as_ref().map_or(coord.row as usize, |map| {
-                map.visible_head_of(coord.row as usize)
-            });
+            let from_row = coord.row as usize;
             let next_row = folds
                 .as_ref()
                 .map_or(from_row + 1, |map| map.next_visible(from_row));
@@ -1823,8 +1840,11 @@ impl EditorCore {
     /// frame has rendered.
     pub fn move_page_down(&mut self) {
         // Arc 6 Stage 2 (Q#FD18/FD21): a screenful is a screenful of
-        // VISIBLE lines, and `view_top` never lands hidden.
+        // VISIBLE lines, and `view_top` never lands hidden. Paging shares
+        // vertical motion's hidden-cursor normalization (round-4 F2) —
+        // the goal column must come from the head, not the hidden line.
         let folds = self.fold_map_active();
+        self.normalize_cursor_to_visible(folds.as_ref());
         let step = self.page_step();
         let cursor = self.active_window().cursor;
         let view_top = self.active_window().view_top;
@@ -1876,6 +1896,7 @@ impl EditorCore {
     /// [`Self::move_page_down`].
     pub fn move_page_up(&mut self) {
         let folds = self.fold_map_active();
+        self.normalize_cursor_to_visible(folds.as_ref());
         let step = self.page_step();
         let cursor = self.active_window().cursor;
         let view_top = self.active_window().view_top;
@@ -1961,6 +1982,34 @@ impl EditorCore {
     /// path and are hooked at `run_buffer_edit` in the Lua bindings; the
     /// remote/optimistic-CRDT apply path is deliberately excluded
     /// (Stage 3), as is undo/redo (deferred).
+    /// Move a hidden logical cursor to its component's visible head
+    /// **position** — the head row *and* that head's end-of-content
+    /// column, i.e. exactly where Stage 1 moves point on a fold-at-cursor
+    /// (Q#FD16/Q#FD17, round-4 F2).
+    ///
+    /// A cursor can be hidden without this frontend ever having moved it
+    /// there: another frontend folds through the shared store, or
+    /// goto-line targets a line inside a collapse. Vertical motion and
+    /// paging normalize through here *before* computing their step, so
+    /// the goal column is the head's — never a column of a line that
+    /// renders no row — and so a step that turns out to be a no-op at a
+    /// buffer boundary still leaves the cursor visible.
+    ///
+    /// The jump is discontinuous, so the sticky goal column is dropped
+    /// (the click/goto convention), and only when the cursor actually
+    /// was hidden: ordinary motion keeps its sticky column untouched.
+    fn normalize_cursor_to_visible(&mut self, folds: Option<&crate::fold_view::VisibleLineMap>) {
+        let Some(map) = folds else { return };
+        let aw = self.active_window();
+        let line = aw.text_view.line_at_offset(aw.cursor);
+        let projected = map.visible_position(line, aw.cursor);
+        if projected != aw.cursor {
+            let aw = self.active_window_mut();
+            aw.cursor = projected;
+            aw.goal_col = None;
+        }
+    }
+
     fn unfold_before_point_edit(&self) {
         let id = self.active_buffer_id();
         let point = self.active_window().cursor;

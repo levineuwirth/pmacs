@@ -215,6 +215,10 @@ fn type_str(s: &mut EditorState, text: &str) {
     }
 }
 
+fn cursor(s: &EditorState) -> u64 {
+    s.core.borrow().active_window().cursor
+}
+
 fn cursor_line(s: &EditorState) -> usize {
     s.core.borrow().cursor_line()
 }
@@ -492,6 +496,29 @@ fn nested_fold_with_a_deeply_hidden_cursor_resolves_outermost() {
 }
 
 #[test]
+fn set_view_top_clamps_before_any_frame_is_painted() {
+    // Round-4 F3: the SETTER establishes the invariant, not the renderer.
+    // Between a `saveplace` restore (or `pmacs.editor.set_view_top`) and
+    // the next frame, `view_top()` must never name a collapsed line and
+    // command/event reckoning must never start from one.
+    let (s, _id) = seeded();
+    fold_active(&s, 2, 5);
+    exec(&s, "pmacs.editor.set_view_top(4)"); // a hidden line
+    assert_eq!(
+        view_top(&s),
+        2,
+        "clamped backward to the visible head by the setter itself — \
+         read here BEFORE any paint_frame call"
+    );
+    // A visible target is untouched, and the raw line-count clamp still
+    // applies (Arc 3 Q#PS1).
+    exec(&s, "pmacs.editor.set_view_top(7)");
+    assert_eq!(view_top(&s), 7);
+    exec(&s, "pmacs.editor.set_view_top(9999)");
+    assert_eq!(view_top(&s), 12, "still clamped to the last line");
+}
+
+#[test]
 fn a_view_top_inside_a_nest_clamps_backward_to_the_head() {
     let (s, _id) = seeded();
     fold_active(&s, 0, 9);
@@ -638,9 +665,175 @@ fn a_peer_cursor_on_a_hidden_line_clamps_to_the_head_position() {
     }
 }
 
+/// Paint the presence pass for `presences` over a fresh grid.
+fn paint_presence(s: &EditorState, presences: &[pmacs::overlay_paint::OtherPresence]) -> Vec<Cell> {
+    let mut backing = vec![Cell::default(); (ROWS * COLS) as usize];
+    let mut grid = CellGrid {
+        cells: &mut backing,
+        stride: COLS,
+        size: CellSize::new(ROWS, COLS),
+    };
+    pmacs::overlay_paint::paint_other_frontend_overlays(
+        s,
+        &mut grid,
+        CellSize::new(ROWS, COLS),
+        presences,
+    );
+    backing
+}
+
+fn peer(
+    buffer_id: BufferId,
+    cursor: u64,
+    selection: Option<(u64, u64)>,
+) -> pmacs::overlay_paint::OtherPresence {
+    pmacs::overlay_paint::OtherPresence {
+        frontend_id: FrontendId(2),
+        snapshot: pmacs::presence::PresenceSnapshot {
+            buffer_id,
+            cursor,
+            selection: selection
+                .map(|(anchor, active)| pmacs::protocol::SelectionSnapshot { anchor, active }),
+        },
+        color_slot: 0,
+    }
+}
+
+#[test]
+fn peer_selection_endpoints_project_and_hidden_interiors_drop() {
+    let (s, id) = seeded();
+    fold_active(&s, 2, 5);
+    // A peer selects from the middle of line 1 through the middle of
+    // line 7 — straddling the whole collapse.
+    let cells = paint_presence(&s, &[peer(id, end_of(7) - 1, Some((5, end_of(7) - 1)))]);
+    let underlined = |row: u32| {
+        (0..COLS)
+            .filter(|c| at(&cells, row, *c).style.underline == pmacs::cell::UnderlineStyle::Single)
+            .count()
+    };
+    assert!(underlined(1) > 0, "row 1 (L01) is partly selected");
+    assert!(underlined(2) > 0, "row 2 (the visible head) is selected");
+    assert!(underlined(3) > 0, "row 3 (L06, shifted up) is selected");
+    assert!(underlined(4) > 0, "row 4 (L07) is selected");
+    assert_eq!(underlined(5), 0, "past the selection end");
+    // Rows 3 and 4 are L06/L07 — the hidden lines contributed no row at
+    // all, so nothing could have painted "through" them.
+    let frame = paint(&s);
+    assert_eq!(row_text(&frame, 3), "L06");
+    assert_eq!(row_text(&frame, 4), "L07");
+}
+
+#[test]
+fn a_peer_inside_crossing_folds_projects_to_the_first_visible_head() {
+    // Round-3 F2 repeated for the PEER path (framing acceptance 6):
+    // A hides 1..=3 (head 0); B is headed on hidden line 2 and hides
+    // 3..=5. A peer cursor and a peer selection endpoint on line 5 must
+    // both resolve to A's head position, never B's hidden `range.start`.
+    let (s, id) = seeded();
+    fold_active(&s, 0, 3);
+    fold_active(&s, 2, 5);
+
+    let cells = paint_presence(&s, &[peer(id, end_of(5), None)]);
+    assert!(
+        at(&cells, 0, 3).style.reverse,
+        "peer cursor on A's visible head row at its end-of-content column"
+    );
+    for row in 1..4u32 {
+        assert!(
+            (0..COLS).all(|c| !cells[(row * COLS + c) as usize].style.reverse),
+            "nothing on a row a hidden line would have owned ({row})"
+        );
+    }
+
+    // A selection whose START endpoint is hidden inside the crossing
+    // region projects the same way. Visible order is 0(head), 6, 7, 8…,
+    // so the projected start puts the selection's first cell on ROW 0 —
+    // and that row is the discriminator: projecting to B's hidden
+    // `range.start` (end of line 2) instead would paint nothing there.
+    let sel = paint_presence(
+        &s,
+        &[peer(id, end_of(7) - 1, Some((end_of(5), end_of(7) - 1)))],
+    );
+    let underlined = |row: u32| {
+        (0..COLS)
+            .filter(|c| at(&sel, row, *c).style.underline == pmacs::cell::UnderlineStyle::Single)
+            .count()
+    };
+    assert!(
+        underlined(0) > 0,
+        "the projected start lands on A's visible head row, not B's hidden one"
+    );
+    assert!(underlined(1) > 0, "L06, inside the projected span");
+    assert!(underlined(2) > 0, "the visible tail (L07)");
+    assert_eq!(underlined(3), 0, "L08 is past the selection end");
+}
+
 // ---------------------------------------------------------------------------
 // 7. Ordinary overlays across a fold (framing acceptance 7)
 // ---------------------------------------------------------------------------
+
+#[test]
+fn a_style_span_straddling_a_fold_paints_only_visible_rows() {
+    let (s, _id) = seeded();
+    fold_active(&s, 2, 5);
+    // One buffer-byte span from the start of line 1 through the end of
+    // line 7 — it covers three hidden lines on the way.
+    exec(
+        &s,
+        &format!(
+            "ov = pmacs.buffer.add_style_overlay(pmacs.window.buffer()); \
+             ov:add({}, {}, {{ bg = 4 }})",
+            LINE_BYTES,
+            end_of(7)
+        ),
+    );
+    let cells = paint(&s);
+    let washed = |row: u32| {
+        (0..COLS)
+            .filter(|c| at(&cells, row, *c).style.bg == pmacs::cell::Color::Indexed(4))
+            .count()
+    };
+    assert!(washed(1) > 0, "L01 is inside the span");
+    assert!(washed(2) > 0, "the visible head is inside the span");
+    assert!(washed(3) > 0, "L06 — correctly aligned on its SHIFTED row");
+    assert!(washed(4) > 0, "L07");
+    assert_eq!(washed(5), 0, "L08 is past the span's end");
+    assert_eq!(washed(0), 0, "L00 is before the span's start");
+    // The alignment claim: row 3 really is L06, so the wash landed on
+    // the row the collapse put that line on, not on a raw offset.
+    assert_eq!(row_text(&cells, 3), "L06");
+}
+
+#[test]
+fn a_completion_popup_below_a_fold_anchors_on_the_visible_row() {
+    let (s, _id) = seeded();
+    fold_active(&s, 2, 5);
+    let mut s = s;
+    // Cursor at the end of line 7 — three collapsed lines above it, so
+    // its VISIBLE row is 4 (0, 1, 2·head, 6, 7) though its raw line is 7.
+    set_cursor(&s, end_of(7));
+    // A separator first, so the word at point is the prefix itself.
+    type_str(&mut s, " L1"); // dabbrev prefix of L10 / L11
+    let visible: bool = eval(&s, "return pmacs.completion.popup_visible()");
+    assert!(visible, "the popup opened off dabbrev");
+    assert_eq!(fold_count(&s), 1, "typing below the fold left it closed");
+
+    let cells = paint(&s);
+    // Row 5 is where the popup's first row belongs. Without a fold-aware
+    // anchor the popup would have gone to raw row 8 and row 5 would still
+    // show source line 8.
+    assert_ne!(
+        row_text(&cells, 5),
+        "L08",
+        "the popup covers the row directly below the anchor's VISIBLE row"
+    );
+    assert!(
+        row_text(&cells, 5).contains("L1"),
+        "and that row holds a candidate: {:?}",
+        row_text(&cells, 5)
+    );
+    assert_eq!(row_text(&cells, 4), "L07 L1", "the anchor row itself");
+}
 
 #[test]
 fn a_search_wash_across_a_fold_paints_only_visible_rows_correctly() {
@@ -772,27 +965,98 @@ fn next_line_steps_across_a_collapsed_region_in_one_motion() {
     assert_eq!(cursor_line(&s), 2, "and one step back returns to the head");
 }
 
+/// Lines of deliberately UNEQUAL width, so a normalization that only
+/// clamps the row (carrying the hidden line's raw column 12) lands on a
+/// different byte than one that projects the whole position (head column
+/// 2) — in BOTH directions.
+///
+/// ```text
+/// line 0: "ab"                 bytes  0..=1   end  2
+/// line 1: "PQRSTUVWXY"  (10)   bytes  3..=12  end 13
+/// line 2: "ef"                 bytes 14..=15  end 16   <- head
+/// line 3: "0123456789ABCDEF"   bytes 17..=32  end 33   <- hidden
+/// line 4: "wxyz"               bytes 34..=37  end 38   <- hidden
+/// line 5: "ghijklmn"    (8)    bytes 39..=46  end 47
+/// ```
+const RAGGED: &str = "ab\nPQRSTUVWXY\nef\n0123456789ABCDEF\nwxyz\nghijklmn\n";
+
+fn ragged() -> (EditorState, BufferId) {
+    let s = editor();
+    let id = active_id(&s);
+    seed(&s, id, RAGGED);
+    (s, id)
+}
+
+/// Column 12 of hidden line 3.
+const DEEP: u64 = 17 + 12;
+
 #[test]
-fn motion_from_a_hidden_cursor_normalizes_to_the_visible_head_first() {
-    let (s, _id) = seeded();
-    fold_active(&s, 2, 5);
+fn motion_from_a_hidden_cursor_normalizes_the_whole_position() {
+    let (s, _id) = ragged();
+    // Head = line 2 ("ef", ends at byte 16); hidden = lines 3..=4.
+    fold_range(&s, 16, 38);
     let mut s = s;
-    // A shared fold left the logical cursor deep inside the collapse.
-    set_cursor(&s, end_of(4));
+
+    // A shared fold left the logical cursor at column 12 of hidden line
+    // 3 — a column line 2 does not even have.
+    set_cursor(&s, DEEP);
     press(&mut s, KeyCode::Down);
+    assert_eq!(cursor_line(&s), 5, "normalize to head 2, then step down");
     assert_eq!(
-        cursor_line(&s),
-        6,
-        "normalize to head 2, then step to the next visible line"
+        cursor(&s),
+        41,
+        "the goal column came from the HEAD's end of content (2), not the \
+         hidden line's raw column (12): line 5 is 8 wide, so a raw column \
+         would have clamped to its end (47)"
     );
 
-    set_cursor(&s, end_of(4));
+    set_cursor(&s, DEEP);
+    press(&mut s, KeyCode::Up);
+    assert_eq!(cursor_line(&s), 1, "normalize to head 2, then step up");
+    assert_eq!(
+        cursor(&s),
+        5,
+        "column 2 of line 1; a raw column 12 would have clamped to 13"
+    );
+}
+
+#[test]
+fn a_boundary_step_still_leaves_a_hidden_cursor_visible() {
+    // Round-4 F2: with the fold headed on line 0 there is nowhere to step
+    // up TO, but the normalization must still have happened — returning
+    // early would leave the logical cursor hidden.
+    let (s, _id) = ragged();
+    // Head = line 0 ("ab", ends at byte 2); hidden = lines 1..=4.
+    fold_range(&s, 2, 38);
+    let mut s = s;
+    set_cursor(&s, DEEP); // deep inside, on hidden line 3
+
     press(&mut s, KeyCode::Up);
     assert_eq!(
         cursor_line(&s),
-        1,
-        "normalize to head 2, then step to the previous visible line"
+        0,
+        "no step available, but still normalized"
     );
+    assert_eq!(cursor(&s), 2, "at the head's end of content");
+    let folds = s.fold_registry.folds(active_id(&s));
+    assert!(
+        !folds
+            .iter()
+            .any(|f| f.start < cursor(&s) && cursor(&s) <= f.end),
+        "the cursor is no longer inside any fold"
+    );
+}
+
+#[test]
+fn paging_from_a_hidden_cursor_normalizes_too() {
+    // Same class: paging shares the normalization, so a page from a
+    // hidden cursor also starts from the head's column.
+    let (s, _id) = ragged();
+    fold_range(&s, 16, 38);
+    set_cursor(&s, DEEP);
+    s.core.borrow_mut().move_page_up();
+    assert_eq!(cursor_line(&s), 0);
+    assert_eq!(cursor(&s), 2, "head column 2, not the hidden line's 12");
 }
 
 // ---------------------------------------------------------------------------
@@ -865,29 +1129,54 @@ fn m_x(s: &mut EditorState, name: &str) {
 }
 
 #[test]
-fn an_interactive_lua_mutator_unfolds_but_a_programmatic_one_does_not() {
+fn an_interactive_lua_mutator_unfolds_at_the_edit_site() {
     let (s, _id) = seeded();
     let mut s = s;
-    fold_active(&s, 2, 5);
-    set_cursor(&s, end_of(4)); // point inside the fold
+    fold_active(&s, 2, 5); // head 2, hidden 3..=5; fold range (11, 23]
 
-    // A PROGRAMMATIC data-API edit: no interactive command in scope.
-    // (Insert at 0 is before the fold, so it only translates it right.)
-    exec(&s, "pmacs.window.buffer():insert(0, 'x')");
+    // A PROGRAMMATIC data-API edit inside the fold: no interactive
+    // command in scope, so it stays hidden (Stage 1's exemption).
+    exec(
+        &s,
+        &format!("pmacs.window.buffer():insert({}, 'x')", end_of(4)),
+    );
     assert_eq!(
         fold_count(&s),
         1,
         "a bare data-API mutation stays programmatic — no unfold"
     );
 
-    // The same call from INSIDE an interactive command unfolds.
-    define(&s, "test.poke", "pmacs.window.buffer():insert(0, 'y')");
-    set_cursor(&s, end_of(4) + 1); // still inside the shifted fold
+    // The same edit from INSIDE an interactive command unfolds.
+    define(
+        &s,
+        "test.poke",
+        &format!("pmacs.window.buffer():insert({}, 'y')", end_of(4)),
+    );
+    set_cursor(&s, 0); // point OUTSIDE the fold — the edit site is what counts
     m_x(&mut s, "test.poke");
     assert_eq!(
         fold_count(&s),
         0,
-        "an interactive command's edit at the point unfolds (Q#FD19)"
+        "Q#FD19 keys on edit.range.start: a command editing INTO a fold \
+         from an outside point must reveal what it wrote"
+    );
+}
+
+#[test]
+fn an_interactive_edit_outside_the_fold_leaves_it_closed() {
+    // The other half of round-4 F1: keying on the POINT would open an
+    // unrelated fold whenever a command edits somewhere else.
+    let (s, _id) = seeded();
+    let mut s = s;
+    fold_active(&s, 2, 5);
+    set_cursor(&s, end_of(4)); // point INSIDE the fold …
+    define(&s, "test.elsewhere", "pmacs.window.buffer():insert(0, 'x')");
+    m_x(&mut s, "test.elsewhere"); // … but the edit lands at byte 0
+    assert_eq!(
+        fold_count(&s),
+        1,
+        "an edit outside the fold must not open it just because the \
+         cursor happens to sit inside"
     );
 }
 
@@ -898,11 +1187,14 @@ fn a_bypass_intercept_interactive_edit_also_unfolds() {
     let (s, _id) = seeded();
     let mut s = s;
     fold_active(&s, 2, 5);
-    set_cursor(&s, end_of(4));
+    set_cursor(&s, 0);
     define(
         &s,
         "test.bypass",
-        "pmacs.window.buffer():insert(0, 'z', { bypass_intercept = true })",
+        &format!(
+            "pmacs.window.buffer():insert({}, 'z', {{ bypass_intercept = true }})",
+            end_of(4)
+        ),
     );
     m_x(&mut s, "test.bypass");
     assert_eq!(
@@ -910,6 +1202,53 @@ fn a_bypass_intercept_interactive_edit_also_unfolds() {
         0,
         "a bypass_intercept interactive edit must not escape the widening"
     );
+}
+
+#[test]
+fn comment_toggle_inside_a_fold_unfolds_it() {
+    // The framing's named Q#FD19 case, through the REAL `M-;` path
+    // (comment-toggle is a Lua mutator, so it exercises the
+    // `run_buffer_edit` seam end to end rather than a synthetic stand-in).
+    let dir = std::env::temp_dir().join(format!("pmacs-fold-s2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fold_comment.rs");
+    let body = "fn a() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n}\n";
+    std::fs::write(&path, body).unwrap();
+
+    let s = editor();
+    let mut s = s;
+    exec(
+        &s,
+        &format!(
+            "pmacs.buffer.find_or_open({:?})",
+            path.display().to_string()
+        ),
+    );
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    // Hide the three `let` lines under the `fn a() {` head.
+    let head_end = body.find('\n').unwrap() as u64;
+    let last_hidden_end = body.rfind("let z = 3;").unwrap() as u64 + "let z = 3;".len() as u64;
+    fold_range(&s, head_end, last_hidden_end);
+    assert_eq!(fold_count(&s), 1);
+
+    // Point on a hidden line, then M-; — the toggle rewrites that line.
+    let y_line = body.find("    let y").unwrap() as u64;
+    set_cursor(&s, y_line + 4);
+    alt(&mut s, ';');
+    assert_eq!(
+        fold_count(&s),
+        0,
+        "comment-toggle's edit landed inside the fold, so it must reveal it"
+    );
+    let text: String = eval(
+        &s,
+        "local b = pmacs.window.buffer(); return b:slice(0, b:len())",
+    );
+    assert!(
+        text.contains("// "),
+        "the toggle actually commented a line: {text:?}"
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1252,6 +1591,42 @@ fn an_unfolded_pane_beside_a_folded_one_is_byte_identical_to_its_baseline() {
         }
     }
     assert_eq!(s.core.borrow().windows[&b_win].view_top, 0);
+}
+
+#[test]
+fn peer_presence_in_the_unfolded_pane_uses_that_windows_map() {
+    // Framing acceptance 14's presence clause: the recipient window's
+    // map, not the active (folded) buffer's — a peer in B must land on
+    // B's RAW row even while A is collapsed.
+    let (s, _id) = seeded();
+    let (_a_win, b_win) = split_two_buffers(&s);
+    fold_active(&s, 2, 5); // buffer A (active) folds; B does not
+    let b_buffer = s.core.borrow().windows[&b_win].buffer_id;
+    // B is "B0\nB1\n…B7\n" (3 bytes a line). Put the peer on B's line 6 —
+    // BELOW where A's collapse sits, so the two maps disagree: B's map
+    // (none) says row 6, while A's map — which hides lines 3..=5 — would
+    // shift it up to row 3.
+    let cells = paint_presence(&s, &[peer(b_buffer, 6 * 3, None)]);
+
+    let b_origin = COLS / 2;
+    let peer_cell =
+        |row: u32| (b_origin..COLS).any(|c| cells[(row * COLS + c) as usize].style.reverse);
+    assert!(
+        peer_cell(6),
+        "B has no folds, so its peer stays on raw row 6"
+    );
+    assert!(
+        !peer_cell(3),
+        "the recipient window's map is B's — projecting through the \
+         active (folded) buffer's map would have put it on row 3"
+    );
+    // And nothing painted into A's half for a peer in B's buffer.
+    for row in 0..TEXT_ROWS {
+        assert!(
+            (0..b_origin).all(|c| !cells[(row * COLS + c) as usize].style.reverse),
+            "a peer in buffer B must not paint into buffer A's pane (row {row})"
+        );
+    }
 }
 
 #[test]
