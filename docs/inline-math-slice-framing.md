@@ -1,8 +1,24 @@
 # Inline math — the first vertical slice (framing)
 
-**Revision 2 — pre-implementation, framing only. Ground truth scouted against
-canonical `main` @ `352bf0b`, protocol v20, 2026-07-24. Rev 2 closes review
-round 1 (F1–F9).**
+**Revision 3 — pre-implementation, framing only. Ground truth scouted against
+canonical `main` @ `352bf0b`, protocol v20, 2026-07-24. Rev 2 closed review
+round 1 (F1–F9); rev 3 closes round 2 (R2-1 – R2-4).**
+
+### Round 2 (rev 2 → rev 3)
+
+Verdict: converging — one deletion, one real gap, two nits.
+
+| # | Finding | Closed in |
+| --- | --- | --- |
+| R2-1 | The tree-sitter paragraph appeared **twice** in Q#MS3; the second was stale rev-1 text. Introduced by rev 2's own rewrite, which added a copy without removing the original | Q#MS3 |
+| R2-2 | The F7 italic fix stopped at ASCII, so `$\alpha x$` drew an **upright α beside an italic 𝑥** — mixed styles inside one expression, and Greek is the slice's second flagship | Q#MS2, acceptance 13 |
+| R2-3 | §9 sat between §6 and §7 | section order |
+| R2-4 | Q#MS11 said a wash "covers" a span; a search match can **partially overlap** (`2$ af` in `before $x^2$ after`), which "covers" leaves unspecified | Q#MS11 |
+
+Carried into acceptance from a round-2 non-finding: the Q#MS10 arithmetic puts
+`\frac{a}{b}` near 0.85 and suggests `\frac{x^2}{y}` also clears the 0.6
+floor, so criterion 12's fallback case must be **computed rather than guessed**
+or it will surprise-pass by rendering.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -160,15 +176,28 @@ kinds are more of the same; get them wrong and no amount of breadth helps.
 The symbol map ships as a **seed** (Greek letters only, ~50 entries), not the
 parent's full ~200. Growing it is mechanical and needs no design.
 
-**Math italic is in scope (F7).** Neither rev 1 nor the parent mentioned it,
-and without it `$x^2$` renders an upright roman `x` — which does not look like
-math, and would make the slice's flagship acceptance case visibly wrong.
-Variables map into the Mathematical Alphanumeric Symbols block
-(U+1D400–U+1D7FF): ASCII letters become math-italic, **with the U+210E hole
-for `h`** (that codepoint is Letterlike Symbols, not in the 1D4xx run) and
-with digits and operators left upright. Because the slice positions
-characters, this is a pure char→char mapping — the same mechanical class as
-the Greek seed, and it is what makes the output read as math at all.
+**Math italic is in scope, and it covers Greek too (F7, R2-2).** Neither rev 1
+nor the parent mentioned italics, and without them `$x^2$` renders an upright
+roman `x` — which does not look like math, and would make the slice's flagship
+acceptance case visibly wrong.
+
+Rev 2 fixed that for ASCII only, which reintroduced the same defect one symbol
+over: `\alpha` resolves to U+03B1 in the parser, so `$\alpha x$` would have
+drawn an upright α beside an italic 𝑥 — **mixed styles inside one
+expression**, with the Greek seed map being the slice's *second* flagship case.
+The mapping therefore follows TeX's actual convention:
+
+| Class | Treatment | Range |
+| --- | --- | --- |
+| ASCII letters | math italic | U+1D434–U+1D467, **with the U+210E hole for `h`** (Letterlike Symbols, not in the 1D4xx run) |
+| Lowercase Greek | math italic | U+1D6FC–U+1D714 |
+| Uppercase Greek | **upright** | left at U+0391–U+03A9 |
+| Digits, operators | upright | unchanged |
+
+Uppercase-Greek-upright is not an omission; it is what TeX does, and matching
+it is why the table is stated rather than left as "letters become italic".
+Because the slice positions characters, this stays a pure char→char mapping —
+the same mechanical class as the Greek seed itself.
 
 ### Q#MS3 — Detection is the frontend byte scanner, inline only, currency-guarded
 
@@ -199,12 +228,6 @@ instance-side, the substrate lane already deferred it to this arc, and the
 slice must work in the grammar-less buffers where most inline math is typed.
 It stays available as the natural upgrade — and it is the principled fix for
 currency false-positives, which guards only approximate.
-
-Tree-sitter injection detection is deliberately not used, even though #144
-gives us `math_environment` / `math_delimiter` for `.tex`: that path is
-instance-side, the substrate lane already deferred it to this arc, and the
-slice must work in the grammar-less buffers where most inline math is typed.
-It stays available as the natural upgrade.
 
 ### Q#MS4 — Suppression is a spacer chunk, width-quantized, layout-chosen (F2, F3)
 
@@ -392,10 +415,14 @@ overlay addressed in *source* bytes meets a span whose source is suppressed.
   generalised from the caret to any selection boundary: if the user is
   addressing bytes inside the math, they see the bytes. A selection that
   merely *spans* the region (both endpoints outside) leaves it rendered.
-- **A wash that covers a rendered span washes the whole reserved rectangle.**
-  Search hits and peer-presence highlights paint the projected box, not a
-  sub-range of it — the box has no interior byte map (Q#MS4), so partial
-  washes cannot be placed honestly.
+- **A wash that *intersects* a rendered span washes the whole reserved
+  rectangle.** Intersection, not containment (R2-4): for selections the
+  distinction is vacuous, since a contiguous selection with both endpoints
+  outside a span necessarily contains it — but a **search match can partially
+  overlap**, e.g. searching `2$ af` in `before $x^2$ after` matches from
+  inside the span to outside it. Search hits and peer highlights paint the
+  projected box, never a sub-range of it: the box has no interior byte map
+  (Q#MS4), so a partial wash cannot be placed honestly.
 - **Peer carets snap to the span start**, the same rule as hits.
 
 This keeps every overlay addressable without inventing a box→byte projection
@@ -494,12 +521,19 @@ something reaches the screen runs on a real device through
     fails. Suppression follows the **effective** caret, so it does not flap
     during an unconfirmed optimistic edit.
 12. **Height budget (F1)** — a plain `$\frac{a}{b}$` renders at default
-    metrics within the line box and does not paint outside it (B6). A
-    deliberately over-tall nested case falls back to source rather than
-    overlapping the line above.
-13. **Math italic (F7)** — `$x$` renders the math-italic glyph, not roman
-    `x`; `$h$` resolves through the U+210E hole rather than the 1D4xx run;
-    digits in `$x2$` stay upright.
+    metrics within the line box and does not paint outside it (B6). A case
+    that exceeds the 0.6× floor falls back to source rather than overlapping
+    the line above. **The fallback case must be chosen by computing its scale
+    against the real font, not guessed:** the round-2 arithmetic puts
+    `\frac{a}{b}` near 0.85 and suggests even `\frac{x^2}{y}` clears the
+    floor, so a singly-nested case would surprise-pass by rendering. Expect a
+    doubly-nested `$\frac{\frac{a}{b}}{c}$`, and pin the computed scale in the
+    test so the boundary is asserted rather than assumed.
+13. **Math italic (F7, R2-2)** — `$x$` renders the math-italic glyph, not
+    roman `x`; `$h$` resolves through the U+210E hole rather than the 1D4xx
+    run; digits in `$x2$` stay upright; **`$\alpha$` renders math-italic Greek
+    and `$\Gamma$` stays upright**, so `$\alpha x$` is uniformly italic rather
+    than mixed.
 14. **Overlays (Q#MS11)** — a selection endpoint inside a span unsuppresses
     it; a selection enclosing a rendered span leaves it rendered and washes
     the whole reserved rectangle; a peer caret inside a rendered span draws at
@@ -529,13 +563,6 @@ per-level MATH constants), for which Q#MS10's uniform fit-to-line scale is a
 deliberately cruder stand-in; **sub-range washes** inside a rendered box
 (Q#MS11 washes the whole rectangle).
 
-## 9. Follow-up outside this lane
-
-The parent framing (`docs/inline-math-framing.md`, rev 2, merged as #154)
-carries the same font error F6 found here: its table row reads "Latin Modern
-Math | Full | OFL (GUST)". It should be corrected to the GUST Font License,
-with the ~717 KiB size, in its own docs change rather than in this branch —
-the parent is a merged document and this lane should not quietly edit it.
 
 ## 7. Interaction with other work
 
@@ -566,3 +593,11 @@ hints (`ChunkSource::Adornment`) for interleaving non-source content and for
 the anchor-snapping hit rule; `headless_diag_face_recolors_band_counter…`
 (`:12022`) for asserting a rendering claim on real pixels; #144's query
 overlay for the eventual tree-sitter detection upgrade.
+
+## 9. Follow-up outside this lane
+
+The parent framing (`docs/inline-math-framing.md`, rev 2, merged as #154)
+carries the same font error F6 found here: its table row reads "Latin Modern
+Math | Full | OFL (GUST)". It should be corrected to the GUST Font License,
+with the ~717 KiB size, in its own docs change rather than in this branch —
+the parent is a merged document and this lane should not quietly edit it.
