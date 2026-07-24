@@ -1180,6 +1180,118 @@ fn an_interactive_edit_outside_the_fold_leaves_it_closed() {
     );
 }
 
+/// Attach a buffer intercept that relocates every `insert` to `to`.
+/// This is a supported, documented rewrite (`pos` / `start` / `end` may
+/// be overridden), and it is what makes the *requested* op's position an
+/// unreliable answer to "where will this edit land?".
+fn relocate_inserts_to(s: &EditorState, to: u64) {
+    exec(
+        s,
+        &format!(
+            r#"
+            pmacs.buffer.add_intercept(pmacs.window.buffer(), function(op)
+              if op.kind == "insert" then
+                return {{ kind = "insert", pos = {to} }}
+              end
+              return nil
+            end)
+            "#
+        ),
+    );
+}
+
+#[test]
+fn an_intercept_relocating_the_edit_into_a_fold_unfolds_it() {
+    // Round-5 F1. The command requests an edit OUTSIDE the fold; a
+    // managed intercept moves it INSIDE. Keying on the requested op
+    // would leave what the user just wrote invisible.
+    let (s, _id) = seeded();
+    let mut s = s;
+    fold_active(&s, 2, 5); // head 2, hidden 3..=5 — fold range (11, 23]
+    relocate_inserts_to(&s, end_of(4)); // 19, inside the fold
+    set_cursor(&s, 0);
+    define(
+        &s,
+        "test.relocate_in",
+        "pmacs.window.buffer():insert(0, 'y')",
+    );
+    m_x(&mut s, "test.relocate_in");
+
+    let text: String = eval(
+        &s,
+        "local b = pmacs.window.buffer(); return b:slice(0, b:len())",
+    );
+    assert!(
+        text.starts_with("L00\nL01\nL02\nL03\nL04y"),
+        "the intercept really relocated the insert: {text:?}"
+    );
+    assert_eq!(
+        fold_count(&s),
+        0,
+        "the EFFECTIVE edit site was inside the fold, so it must be revealed"
+    );
+}
+
+#[test]
+fn an_intercept_relocating_the_edit_out_of_a_fold_leaves_it_closed() {
+    // The other direction: requested INSIDE, intercept moves it OUTSIDE.
+    // Keying on the requested op would open a fold nothing was written to.
+    let (s, _id) = seeded();
+    let mut s = s;
+    fold_active(&s, 2, 5);
+    relocate_inserts_to(&s, 0); // outside the fold
+    set_cursor(&s, 0);
+    define(
+        &s,
+        "test.relocate_out",
+        &format!("pmacs.window.buffer():insert({}, 'y')", end_of(4)),
+    );
+    m_x(&mut s, "test.relocate_out");
+
+    let text: String = eval(
+        &s,
+        "local b = pmacs.window.buffer(); return b:slice(0, b:len())",
+    );
+    assert!(
+        text.starts_with("yL00"),
+        "the intercept really relocated the insert: {text:?}"
+    );
+    assert_eq!(
+        fold_count(&s),
+        1,
+        "nothing landed inside the fold, so it must stay closed"
+    );
+}
+
+#[test]
+fn a_rejected_intercept_chain_unfolds_nothing() {
+    // A chain that raises applies no edit at all, so there is nothing to
+    // reveal — the widening must not fire on a request that never lands.
+    let (s, _id) = seeded();
+    let mut s = s;
+    fold_active(&s, 2, 5);
+    exec(
+        &s,
+        r#"
+        pmacs.buffer.add_intercept(pmacs.window.buffer(), function(op)
+          if op.kind == "insert" then error("nope") end
+          return nil
+        end)
+        "#,
+    );
+    set_cursor(&s, 0);
+    define(
+        &s,
+        "test.rejected",
+        &format!(
+            "pcall(function() pmacs.window.buffer():insert({}, 'y') end)",
+            end_of(4)
+        ),
+    );
+    m_x(&mut s, "test.rejected");
+    assert_eq!(fold_count(&s), 1, "a rejected edit reveals nothing");
+}
+
 #[test]
 fn a_bypass_intercept_interactive_edit_also_unfolds() {
     // Pins the seam at `run_buffer_edit`, above the managed/bypass split:

@@ -1309,12 +1309,16 @@ fn run_buffer_edit(
     bypass_intercept: bool,
 ) -> mlua::Result<crate::rope::Edit> {
     // Arc 6 Stage 2 (Q#FD19): the interactive-Lua-command unfold seam.
-    // Hooked HERE — above both `run_managed_edit` and `run_bypass_edit` —
-    // so an interactive command that passes `bypass_intercept` does not
-    // escape the widening. Keyed on where the edit LANDS, read before
-    // `op` is consumed below.
-    unfold_before_interactive_lua_edit(lua, id, edit_start_of(&op));
+    // BOTH paths are covered — hooking only `run_managed_edit` would let
+    // an interactive `bypass_intercept` edit escape — but each keys on
+    // *its own* effective edit site (round-5 F1):
+    //
+    // - bypass applies `op` verbatim, so the site is known right here;
+    // - managed runs the intercept chain first, and an intercept may
+    //   legally relocate `pos` / `start` / `end`, so only the op the
+    //   chain settles on names where the edit will land.
     if bypass_intercept {
+        unfold_before_interactive_lua_edit(lua, id, edit_start_of(&op));
         run_bypass_edit(lua, id, op)
     } else {
         run_managed_edit(lua, id, op)
@@ -1358,6 +1362,12 @@ fn edit_start_of(op: &EditOp<'_>) -> u64 {
 /// the point, so
 /// [`apply_active_edit`](crate::editor_core::EditorCore::apply_active_edit)'s
 /// funnel keys on the point; only this Lua path can diverge.
+///
+/// "Edit site" means the **effective** one (round-5 F1). On the managed
+/// path a buffer intercept may legally rewrite `pos` / `start` / `end`
+/// before the op is applied, so [`run_managed_edit`] calls this *after*
+/// the intercept chain settles; only [`run_bypass_edit`], which applies
+/// its op verbatim, can name the site up front.
 ///
 /// Matches Stage 1's data-API exemption: `pmacs.buffer.insert` called
 /// from a plugin, a hook, or a bare Lua chunk unfolds nothing.
@@ -1434,6 +1444,19 @@ fn run_managed_edit(lua: &Lua, id: BufferId, op: EditOp<'_>) -> mlua::Result<cra
         }
         Ok(current)
     })();
+
+    // Arc 6 Stage 2 (Q#FD19, round-5 F1): the interactive unfold keys on
+    // the EFFECTIVE edit site, so it must run here — after the chain has
+    // settled, before the apply. An intercept may legally relocate `pos`
+    // / `start` / `end`, so widening on the *requested* op would leave a
+    // relocated-into-a-fold edit invisible, and would open an unrelated
+    // fold when the intercept moved the edit out of one. A rejected
+    // chain (`Err`) applies nothing, so it unfolds nothing. The registry
+    // borrow is released at this point; this reads `SharedCore` and the
+    // fold registry only.
+    if let Ok(final_op) = intercept_result.as_ref() {
+        unfold_before_interactive_lua_edit(lua, id, edit_start_of(final_op));
+    }
 
     // Phase 3: re-borrow, restore views, clear mid-edit flag, apply.
     // We restore views and clear the flag even on intercept error,
