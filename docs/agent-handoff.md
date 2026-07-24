@@ -1,8 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-23, after folding Stage 1 (#142, the headless fold
-engine) landed, following one-command GPU invocation (#141), the documentation
-refresh (#140), Vterm Stage 3 (#135, protocol v19 and native GPU terminal),
+**Last updated: 2026-07-23, after web grammars HTML+CSS (#146) landed,
+following the LaTeX Stage 1 / inline-math framing pair (#144/#145), folding
+Stage 1 (#142, the headless fold engine), one-command GPU invocation (#141), the
+documentation refresh (#140), Vterm Stage 3 (#135, protocol v19 and native GPU terminal),
 tab-width rendering parity (#137), locals-query processing (#134), modeline
 detection (#132), mode system wiring (#129), config registry (#127), Vterm
 Stages 1–2 (#126/#130), and completed Themes Arc 4 (#120/#124/#125).**
@@ -19,10 +20,10 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-23)
 
-- `main` @ `c49a8c7` (folding Stage 1 #142 atop one-command GPU invocation
-  #141 and documentation refresh #140), protocol **v19** (`SUPPORTED=[6..=19]`;
-  v16 = `ThemeFacts`, v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 =
-  terminal frames/events).
+- `main` @ `47581f4` (web grammars HTML+CSS #146 atop LaTeX Stage 1 #144 /
+  inline-math framing #145 and folding Stage 1 #142), protocol **v19**
+  (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
+  `StatuslineSegments`, v19 = terminal frames/events).
 - **Folding Stage 1 (headless fold engine) LANDED — #142**
   (`docs/folding-framing.md` rev 5; merge `c49a8c7`; three review rounds,
   round 3 clean). Arc 6's engine — instance-side and headless; **no frontend
@@ -57,14 +58,32 @@ commands, read `docs/active-work.md` immediately after this file.
   - Durable lesson (round 2): after wiring a cleanup into a production hook,
     PIN IT THROUGH THE REAL PATH — a direct-call unit test misses the wiring
     (falsify by revert).
-  - **Stage 2 (grid/daemon collapse) is in framing** on `folding-tui`
-    (`docs/folding-stage2-framing.md`, rev 2). Its load-bearing reframe: the
-    TUI has **no non-identity source-line↔display-row map** today (`view_top +
-    row` is baked into ~13 sites), so Stage 2's spine is one shared
-    visible-line-map primitive that the render loop, gutter, diagnostics,
-    caret, selection, peer presence, viewport/scroll/motion, and the mode-line
-    indicator all route through, plus the interactive-Lua unfold widening.
-    Stage 3 (GPU) follows.
+  - **Stage 2 (grid/daemon collapse) is IMPLEMENTED — PR #149 OPEN** on
+    `folding-tui` (`docs/folding-stage2-framing.md` rev 4, approved). Its
+    load-bearing reframe: the TUI had **no non-identity
+    source-line↔display-row map** (`view_top + row` was baked into ~13 sites),
+    so Stage 2's spine is `src/fold_view.rs`'s `VisibleLineMap` — derived from
+    the fold store plus a window's line offsets, never stored — that the render
+    loop, gutter, diagnostics, caret, selection, peer presence,
+    viewport/scroll/motion, and the mode-line indicator all route through, plus
+    the interactive-Lua unfold widening. Threaded as `Option<&'a
+    VisibleLineMap>` on a lifetime-bearing `Viewport<'a>` that stays `Copy`.
+    Design points the review rounds forced, each a trap for Stage 3:
+    - the map's unit is a **merged hidden component** (overlapping *or
+      adjacent* intervals unioned, keeping the earliest visible head), not a
+      fold — folds may cross, and an inner/later fold's own head can be hidden;
+    - instances are **per rendered window** and **per command/event
+      operation**, never per frame; a command's map follows the operation's
+      TARGET window (a wheel event names a pane without activating it);
+    - fold projection is **per-frontend** (`FrontendView.fold_projection`, set
+      at attach from the negotiated `semantic_render` bit) — shared
+      `EditorCore` motion would otherwise make a simultaneous unfolded GPU
+      session's cursor skip lines it still displays;
+    - a hidden cursor normalizes by **position**, not row, and `set_view_top`
+      clamps in the setter rather than being repaired at render time;
+    - the interactive-Lua unfold keys on the **post-intercept** edit site — a
+      managed buffer intercept may legally relocate the op.
+    No protocol bump. Stage 3 (GPU) follows.
 - **One-command GPU invocation LANDED — #141**
   (`docs/gpu-invocation-framing.md` rev 6; merge `63fbc66`; two implementation
   reviews). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;
@@ -466,8 +485,10 @@ commands, read `docs/active-work.md` immediately after this file.
     shipped without a protocol change.
   - **Arc 6 (folding) Stage 1 LANDED — #142** — the headless fold engine
     (store, structural source, Lua `C-c @` surface, command-path unfold,
-    `FoldState` production). Stage 2 (grid/daemon collapse) is in framing on
-    `folding-tui`; Stage 3 (GPU) follows.
+    `FoldState` production). Stage 2 (grid/daemon collapse) is implemented and
+    open as **PR #149** on `folding-tui`; Stage 3 (GPU) follows.
+  - **Web grammars HTML+CSS LANDED — #146**, and **LaTeX Stage 1 — #144**
+    with its inline-math parent framing **#145**.
   - Remaining ranked arcs: 6 folding Stages 2–3, 7 DAP, 8 GPU splits, plus
     the `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
