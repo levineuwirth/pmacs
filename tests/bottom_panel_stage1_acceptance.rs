@@ -1989,33 +1989,20 @@ fn acc32_terminal_panel_height_change_is_a_viewport_change() {
     let buffer: pmacs::lua_bindings::BufferIdLua = eval(&s, "return TERM_BUF");
     render(&s);
 
-    // Wait for output.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        s.tick_processes();
-        let has_output = s
-            .terminal_manager
-            .borrow()
-            .snapshot(buffer.0)
-            .is_some_and(|snap| !snap.cells.is_empty());
-        if has_output || std::time::Instant::now() > deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // Wait for the child's LAST line: `scroll_offset` is tail-relative,
+    // so comparing it across a height change is only meaningful once the
+    // tail has stopped moving.
+    wait_for_terminal_text(&mut s, buffer.0, "line200", Duration::from_secs(10));
 
     // Scroll back, then change the panel height. `top` is preserved
     // verbatim: a height change is a viewport change, never a scroll one.
     exec(&s, "pmacs.window.focus_next()");
     let key_before = pmacs::terminal::TerminalViewKey::new(FrontendId::LOCAL, panel, buffer.0);
+    let before_size = CellSize::new(11, COLS);
     s.terminal_manager
         .borrow_mut()
-        .scroll_view(key_before, CellSize::new(6, COLS), 5);
-    let offset_before = s
-        .terminal_manager
-        .borrow_mut()
-        .view_status(key_before)
-        .map(|status| status.scroll_offset);
+        .scroll_view(key_before, before_size, 5);
+    let top_before = first_visible_row(&s, key_before, before_size);
     exec(
         &s,
         &format!(
@@ -2025,14 +2012,46 @@ fn acc32_terminal_panel_height_change_is_a_viewport_change() {
     );
     render(&s);
     s.sync_terminal_layout(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
-    let offset_after = s
-        .terminal_manager
-        .borrow_mut()
-        .view_status(key_before)
-        .map(|status| status.scroll_offset);
+    // The ANCHOR is the invariant. `scroll_offset` is documented as the
+    // rows between this VIEWPORT and the live tail, so it necessarily
+    // tracks the viewport height; asserting it constant would either be
+    // vacuous or wrong. The first visible row is `top` itself.
     assert_eq!(
-        offset_before, offset_after,
+        top_before,
+        first_visible_row(&s, key_before, CellSize::new(9, COLS)),
         "a scrolled-back terminal panel keeps its top across a height change"
+    );
+    assert!(
+        !s.terminal_manager
+            .borrow_mut()
+            .view_status(key_before)
+            .expect("view status")
+            .at_bottom,
+        "…and a SHRINK cannot re-arm follow"
+    );
+
+    // Growth that reaches the live tail re-arms follow (Q#BP7 case 1),
+    // and later output then scrolls in.
+    exec(
+        &s,
+        &format!(
+            "pmacs.window.set_params({}, {{ fixed_rows = 23 }})",
+            panel.raw()
+        ),
+    );
+    render(&s);
+    s.sync_terminal_layout(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
+    s.terminal_manager
+        .borrow_mut()
+        .snapshot_for_view(key_before, CellSize::new(22, COLS))
+        .expect("snapshot at the grown size");
+    assert!(
+        s.terminal_manager
+            .borrow_mut()
+            .view_status(key_before)
+            .expect("view status")
+            .at_bottom,
+        "growth reaching the live tail re-arms follow when no selection is frozen"
     );
     exec(&s, "pmacs.terminal.terminate(TERM_BUF)");
 }
@@ -2132,6 +2151,46 @@ fn wait_for_file(path: &std::path::Path, timeout: Duration) -> Vec<u8> {
     }
 }
 
+/// Tick until the child's screen contains `needle`, so a test that
+/// compares tail-relative state is not racing further output.
+///
+/// `scroll_offset` is measured FROM THE LIVE TAIL: every row the child
+/// appends increases it by one while the anchor itself stays frozen. A
+/// test that snapshots the offset before the child is done therefore
+/// compares two different tails, not two different anchors.
+fn wait_for_terminal_text(s: &mut EditorState, buffer: BufferId, needle: &str, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        s.tick_processes();
+        let seen = s
+            .terminal_manager
+            .borrow()
+            .snapshot(buffer)
+            .is_some_and(|snapshot| {
+                let text: String = snapshot
+                    .cells
+                    .iter()
+                    .filter_map(|cell| match &cell.glyph {
+                        Glyph::Char(ch) => Some(*ch),
+                        Glyph::Cluster(_) => Some('?'),
+                        Glyph::Continuation => None,
+                    })
+                    .collect();
+                text.contains(needle)
+            });
+        if seen {
+            // One more drain so nothing is left in flight.
+            s.tick_processes();
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {needle:?} on the terminal screen"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn acc33_growth_with_a_historical_selection_keeps_the_anchor_frozen() {
     let mut s = editor();
@@ -2147,19 +2206,13 @@ fn acc33_growth_with_a_historical_selection_keeps_the_anchor_frozen() {
     let key_id = pmacs::terminal::TerminalViewKey::new(FrontendId::LOCAL, panel, buffer.0);
     let view_size = CellSize::new(5, COLS);
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        s.tick_processes();
-        let seen = s
-            .terminal_manager
-            .borrow_mut()
-            .snapshot_for_view(key_id, view_size)
-            .is_some();
-        if seen || std::time::Instant::now() > deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // Wait for the child's LAST line, so the tail is stable before the
+    // before/after comparison below.
+    wait_for_terminal_text(&mut s, buffer.0, "row59", Duration::from_secs(10));
+    s.terminal_manager
+        .borrow_mut()
+        .snapshot_for_view(key_id, view_size)
+        .expect("the view has a snapshot once output arrived");
 
     // Scroll back into history and start a selection there.
     {
@@ -2167,9 +2220,9 @@ fn acc33_growth_with_a_historical_selection_keeps_the_anchor_frozen() {
         assert!(manager.scroll_view(key_id, view_size, 10));
         assert!(manager.begin_selection(key_id, view_size, CellCoord::new(0, 0)));
     }
-    let before = s.terminal_manager.borrow_mut().view_status(key_id);
+    let top_before = first_visible_row(&s, key_id, view_size);
 
-    // Grow the panel enough that it would otherwise reach the live tail.
+    // Grow the panel enough that following the tail WOULD reach it.
     exec(
         &s,
         &format!(
@@ -2179,13 +2232,63 @@ fn acc33_growth_with_a_historical_selection_keeps_the_anchor_frozen() {
     );
     render(&s);
     s.sync_terminal_layout(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
-    let after = s.terminal_manager.borrow_mut().view_status(key_id);
+
+    let grown = CellSize::new(19, COLS);
+    let after = s
+        .terminal_manager
+        .borrow_mut()
+        .view_status(key_id)
+        .expect("view status");
+    // The anchor is what freezes — `scroll_offset` is documented as
+    // "physical retained rows between this VIEWPORT and the live tail",
+    // so it moves with the viewport height by construction even when
+    // `top` is preserved verbatim. Assert the anchor itself: the first
+    // visible row is still the same child line.
     assert_eq!(
-        before.map(|status| (status.scroll_offset, status.selection)),
-        after.map(|status| (status.scroll_offset, status.selection)),
-        "a historical selection freezes the anchor across a height change"
+        top_before,
+        first_visible_row(&s, key_id, grown),
+        "the anchor is frozen: growth is a viewport change, not a scroll"
     );
+    assert!(after.selection, "the historical selection survived");
+    assert!(
+        !after.at_bottom,
+        "follow is NOT re-armed while a selection is frozen"
+    );
+
+    // The contrast that makes this bite: clear the selection and the
+    // same geometry DOES re-arm follow.
+    s.terminal_manager.borrow_mut().clear_selection(key_id);
+    s.terminal_manager
+        .borrow_mut()
+        .snapshot_for_view(key_id, grown)
+        .expect("snapshot after clearing");
     exec(&s, "pmacs.terminal.terminate(TERM_BUF)");
+}
+
+/// Text of the view's first visible row — the anchor, read through the
+/// same per-view projection the painter uses.
+fn first_visible_row(
+    s: &EditorState,
+    key_id: pmacs::terminal::TerminalViewKey,
+    size: CellSize,
+) -> String {
+    let snapshot = s
+        .terminal_manager
+        .borrow_mut()
+        .snapshot_for_view(key_id, size)
+        .expect("view snapshot");
+    snapshot
+        .cells
+        .iter()
+        .take(size.cols as usize)
+        .filter_map(|cell| match &cell.glyph {
+            Glyph::Char(ch) => Some(*ch),
+            Glyph::Cluster(_) => Some('?'),
+            Glyph::Continuation => None,
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
 }
 
 #[test]

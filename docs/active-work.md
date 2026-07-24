@@ -84,21 +84,49 @@ If it does not, stop and repair the remote/fetch configuration.
   - Adopters: `listview.open`, `compile.run`, `pmacs.terminal.open` all
     take `display = "current" | "panel"` (Stage 1 default `"current"`);
     LSP/compile visits route through `display_file`.
+- **Review round 1 addressed.** The load-bearing finding: the Q#BP6
+  side-window split guard (`try_split_active`) had **no production
+  caller** — `pmacs.window.split_horizontal` / `split_vertical`, and so
+  `C-x 2` / `C-x 3`, still went through plain `split_active`. Splitting a
+  focused panel made the root wrapper's final child a split rather than
+  `Leaf(side)`, which both `Layout::compute`'s fixed pass and
+  `document_subtree` key on. It survived the first round because the
+  acceptance test called the core method **directly**; it now goes
+  through the real Lua binding. This is the folding-arc round-2 lesson
+  repeating exactly: *after wiring a guard into a production hook, pin it
+  through the real path — a direct-call test misses the wiring.*
+  Also fixed: the armed divider drag was not scoped to its arming
+  frontend (it could cancel and swallow a peer's mouse events); a
+  recompile carries no `display` and duplicated a panel-placed
+  `*compilation*` into the document window; and
+  `paint_mode_line_graphemes` had lost its doc block to an insertion.
+  Five bite-verified fixes (three via `scripts/bite`, two by manual
+  revert since their tests share `src/daemon.rs` with the production
+  code).
+- Two Stage-2 hazard pins now exist in `src/daemon.rs`, closing the gap
+  the review named: a fresh attach while `LOCAL` is focused in a panel
+  inherits `LOCAL`'s **document** buffer, and an initial-target bootstrap
+  whose `after-load` hook creates and selects a panel still reasserts
+  into a document window.
 - Verification on this branch: `cargo fmt --check` clean; strict
-  workspace Clippy clean; 1,815 default + 1,992 CRDT library tests;
-  `bottom_panel_stage1_acceptance` 42/42; M4 121; required GPU 152;
-  `gpu_initial_target_acceptance` 1 default + 14 CRDT; vterm Stage 2 4 /
+  workspace Clippy clean; 1,817 default + 1,994 CRDT library tests;
+  `bottom_panel_stage1_acceptance` 44/44; M4 121; required GPU 152;
+  `gpu_initial_target_acceptance` 14 CRDT; compile 67; vterm Stage 2 4 /
   Stage 3 5; folding Stage 2 48; statusline 7; listview 6; desktop 11;
-  workspace sweep 3,103 passed across 86 suites; `git diff --check`
+  **workspace sweep 3,128 passed, zero failures**; `git diff --check`
   clean.
-  - **The sweep's only red was the known parallel-load GPU flake**:
-    `font_facts_out_of_range_sizes_fail_closed`,
-    `built_in_only_overwide_readout_…`, and
-    `statusline_wire_validation_is_atomic_…` fail under a loaded
-    workspace run (wgpu device contention) and pass both isolated and in
-    the dedicated `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` gate.
-  - `compile_mode_acceptance` likewise needs `--test-threads=1` locally;
-    it is 67/67 there.
+  - Durable test lesson from this round: `TerminalViewStatus.scroll_offset`
+    is documented as the retained rows between **this viewport** and the
+    live tail, so it necessarily tracks the viewport height. Asserting it
+    constant across a panel height change is either vacuous or wrong —
+    the invariant Q#BP7 actually states is that the **anchor** is frozen,
+    which the acceptance now pins by comparing the first visible row's
+    text, plus `at_bottom` for the follow re-arm.
+  - `compile_mode_acceptance` needs `--test-threads=1` locally; it is
+    67/67 there. The `pmacs-gpu` bin tests have historically gone red
+    under a loaded sweep (wgpu device contention) — they were green in
+    the final run, but rerun isolated before treating one as a
+    regression.
 - Stage 2 (the GPU panel band, next available protocol version) has its
   own re-framing obligation before implementation; Stage 3 is the default
   placement flip.
