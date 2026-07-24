@@ -54,6 +54,55 @@ git status --short --branch
 The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
+## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
+
+- Portable branch: `githubsucks/bottom-panel`, worktree
+  `../pmacs-bottom-panel`, based on `githubsucks/main` @ `ddaa80d`.
+- Approved framing: `docs/bottom-panel-framing.md` revision 4, committed
+  as the branch's first commit (`c27f75a`).
+- **Stage 1 implemented; no wire change (protocol stays v20).** What
+  landed on the branch:
+  - `src/window.rs`: `WindowParams` (`side` / `fixed_rows` / `dedicated`
+    + implementation-owned `quit_action` and `origin_document`), `Side`,
+    a depth-bounded `QuitAction`, `MIN_WINDOW_OUTER_ROWS = 2`,
+    `Layout::compute(area, fixed)`, the `subtree_min_rows` /
+    `interactive_min_rows` recursions, `boundary_below`, and the three
+    new `FrontendView` fields (`panel_capable`, `frame_geometry`,
+    `panel_hidden`).
+  - `src/editor_core.rs`: `primary_document_window`, the non-side target
+    rule, `display_buffer` + the Q#BP3 placement policy, `quit_window`,
+    `reconcile_panel_layout_core`, `resize_boundary`, per-frontend
+    `JumpEntry`s, and the shared `resolve_target_buffer` seam that the
+    #148 initial-target bootstrap now routes through as well.
+  - `src/editor.rs`: the reconciliation transaction, geometry
+    declaration, the side-window `dispatch_idle_for` gate, the divider
+    paint, and the divider drag.
+  - `src/lua_bindings/window_panel.rs`: the whole `pmacs.window` panel
+    surface plus the shared adopter-placement helpers;
+    `builtin/runtime/window.lua` owns `window.panel-height` /
+    `window.min-height` and the resize commands.
+  - Adopters: `listview.open`, `compile.run`, `pmacs.terminal.open` all
+    take `display = "current" | "panel"` (Stage 1 default `"current"`);
+    LSP/compile visits route through `display_file`.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,815 default + 1,992 CRDT library tests;
+  `bottom_panel_stage1_acceptance` 42/42; M4 121; required GPU 152;
+  `gpu_initial_target_acceptance` 1 default + 14 CRDT; vterm Stage 2 4 /
+  Stage 3 5; folding Stage 2 48; statusline 7; listview 6; desktop 11;
+  workspace sweep 3,103 passed across 86 suites; `git diff --check`
+  clean.
+  - **The sweep's only red was the known parallel-load GPU flake**:
+    `font_facts_out_of_range_sizes_fail_closed`,
+    `built_in_only_overwide_readout_…`, and
+    `statusline_wire_validation_is_atomic_…` fail under a loaded
+    workspace run (wgpu device contention) and pass both isolated and in
+    the dedicated `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu` gate.
+  - `compile_mode_acceptance` likewise needs `--test-threads=1` locally;
+    it is 67/67 there.
+- Stage 2 (the GPU panel band, next available protocol version) has its
+  own re-framing obligation before implementation; Stage 3 is the default
+  placement flip.
+
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
 Both shipped stages are on `main`; nothing in this arc is in flight. Stage 3
