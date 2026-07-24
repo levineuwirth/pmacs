@@ -1838,12 +1838,15 @@ fn acc30c_an_armed_drag_does_not_swallow_another_frontends_mouse_events() {
         "the peer's click reached its own window instead of being swallowed"
     );
 
-    // …a peer press on a MODE-LINE row must not steal or clear the slot
-    // either — that press reaches the arming path, which a single global
-    // slot would let it overwrite.
+    // …a peer press on ITS OWN mode-line row must not steal or clear the
+    // slot either. That press reaches `arm_window_drag`, which a single
+    // global slot lets it overwrite — and the peer's lone window owns no
+    // boundary, so the write is an outright clear. The peer's mode line
+    // is the last row of its own single-window layout.
+    let peer_mode_line = u16::try_from(AREA_ROWS - 1).expect("row fits");
     s.dispatch_mouse(
         other,
-        mouse(MouseEventKind::Down(MouseButton::Left), divider_row, 4),
+        mouse(MouseEventKind::Down(MouseButton::Left), peer_mode_line, 4),
         CellSize::new(ROWS, COLS),
     );
 
