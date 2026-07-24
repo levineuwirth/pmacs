@@ -161,11 +161,16 @@ pub struct EditorState {
     /// Last left-button down event, used to synthesize terminal double
     /// clicks from crossterm's plain Down/Up mouse event stream.
     mouse_click: Option<MouseClickState>,
-    /// In-progress split-boundary drag (bottom-panel arc, Q#BP5), armed
+    /// In-progress split-boundary drags (bottom-panel arc, Q#BP5), armed
     /// by a left press on a mode-line row that is an exposed segment of a
-    /// horizontal boundary. Lives beside `mouse_click`; selection is
-    /// untouched for the whole gesture.
-    window_drag: Option<WindowDragState>,
+    /// horizontal boundary. Selection is untouched for the whole gesture.
+    ///
+    /// Keyed by frontend, unlike the older global `mouse_click` slot: the
+    /// daemon routes every attached grid frontend through one
+    /// `dispatch_mouse`, so a single slot would let one frontend's press
+    /// steal or clear another's in-flight gesture, and concurrent drags
+    /// are perfectly legal.
+    window_drag: HashMap<FrontendId, WindowDragState>,
 }
 
 #[derive(Default)]
@@ -220,7 +225,6 @@ struct MouseClickState {
 /// mutation mid-drag cannot move a boundary that no longer exists.
 #[derive(Copy, Clone)]
 struct WindowDragState {
-    frontend_id: FrontendId,
     owner: WindowId,
     last_row: u32,
 }
@@ -619,7 +623,7 @@ impl EditorState {
             snippets,
             statusline_registry,
             mouse_click: None,
-            window_drag: None,
+            window_drag: HashMap::new(),
         }
     }
 
@@ -875,6 +879,9 @@ impl EditorState {
     /// Drop one detached frontend's pending key and terminal escape state.
     pub fn detach_frontend_input(&mut self, frontend_id: FrontendId) {
         self.dispatchers.remove(&frontend_id);
+        // A detached frontend cannot finish a divider gesture, and its
+        // `owner` window is about to stop being live (Q#BP5).
+        self.window_drag.remove(&frontend_id);
         self.terminal_manager
             .borrow_mut()
             .detach_frontend(frontend_id);
@@ -1930,17 +1937,16 @@ impl EditorState {
         // grid frontend through this same dispatcher, so an unscoped
         // check would let one frontend's in-flight drag cancel and
         // swallow another frontend's clicks.
-        if self
-            .window_drag
-            .is_some_and(|drag| drag.frontend_id == frontend_id)
-        {
+        if self.window_drag.contains_key(&frontend_id) {
             match ev.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
                     self.drag_window_boundary(frontend_id, cell_row, term_size);
                 }
                 // Any other event — release, a different button, a
-                // wheel notch — ends the gesture.
-                _ => self.window_drag = None,
+                // wheel notch — ends THIS frontend's gesture only.
+                _ => {
+                    self.window_drag.remove(&frontend_id);
+                }
             }
             return;
         }
@@ -2076,11 +2082,20 @@ impl EditorState {
             .views
             .get(&frontend_id)
             .is_some_and(|view| view.layout.boundary_below(owner).is_some());
-        self.window_drag = is_divider.then_some(WindowDragState {
-            frontend_id,
-            owner,
-            last_row: cell_row,
-        });
+        // Only this frontend's slot is written, and only its own press
+        // can clear it — a peer pressing some other window's mode line
+        // must not disarm an in-flight gesture here.
+        if is_divider {
+            self.window_drag.insert(
+                frontend_id,
+                WindowDragState {
+                    owner,
+                    last_row: cell_row,
+                },
+            );
+        } else {
+            self.window_drag.remove(&frontend_id);
+        }
     }
 
     /// Continue an armed divider drag (Q#BP5).
@@ -2095,16 +2110,16 @@ impl EditorState {
         cell_row: u32,
         term_size: CellSize,
     ) {
-        let Some(drag) = self.window_drag else {
+        let Some(drag) = self.window_drag.get(&frontend_id).copied() else {
             return;
         };
-        if drag.frontend_id != frontend_id {
-            return;
-        }
-        self.window_drag = Some(WindowDragState {
-            last_row: cell_row,
-            ..drag
-        });
+        self.window_drag.insert(
+            frontend_id,
+            WindowDragState {
+                last_row: cell_row,
+                ..drag
+            },
+        );
         let delta = i64::from(cell_row) - i64::from(drag.last_row);
         let Ok(delta) = i32::try_from(delta) else {
             return;

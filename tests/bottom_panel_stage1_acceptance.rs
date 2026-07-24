@@ -1336,6 +1336,26 @@ fn acc19b_recompile_reuses_the_panel_instead_of_duplicating_into_the_document() 
         "…and did not duplicate itself into the document window"
     );
 
+    // An EXPLICIT `display = "current"` still wins over the inference:
+    // it is the documented user-facing opt-out from the Stage 3 default
+    // flip, so it must reach the raw switch even while the panel holds
+    // this buffer. The resulting duplicate presentation is the escape
+    // hatch's documented cost (R3-rp2).
+    s.core
+        .borrow_mut()
+        .focus_window(FrontendId::LOCAL, document);
+    exec(&s, "pmacs.compile.run(\"true\", { display = \"current\" })");
+    assert_eq!(
+        s.core.borrow().windows[&document].buffer_id,
+        compilation,
+        "explicit \"current\" reached the raw switch"
+    );
+    assert_eq!(
+        s.core.borrow().windows[&panel].buffer_id,
+        compilation,
+        "…and the panel still holds it too — the escape hatch's cost"
+    );
+
     // A compilation that is NOT in a panel keeps the pre-arc raw switch.
     let s = editor();
     exec(&s, "pmacs.compile.run(\"true\")");
@@ -1818,6 +1838,15 @@ fn acc30c_an_armed_drag_does_not_swallow_another_frontends_mouse_events() {
         "the peer's click reached its own window instead of being swallowed"
     );
 
+    // …a peer press on a MODE-LINE row must not steal or clear the slot
+    // either — that press reaches the arming path, which a single global
+    // slot would let it overwrite.
+    s.dispatch_mouse(
+        other,
+        mouse(MouseEventKind::Down(MouseButton::Left), divider_row, 4),
+        CellSize::new(ROWS, COLS),
+    );
+
     // …and LOCAL's gesture must still be armed and still work.
     s.dispatch_mouse(
         FrontendId::LOCAL,
@@ -1827,7 +1856,7 @@ fn acc30c_an_armed_drag_does_not_swallow_another_frontends_mouse_events() {
     assert_eq!(
         fixed_rows_of(&s, panel),
         Some(armed_rows.expect("armed rows") - 2),
-        "the peer's event did not cancel LOCAL's in-flight drag"
+        "the peer's events did not cancel or steal LOCAL's in-flight drag"
     );
 }
 
@@ -1981,8 +2010,14 @@ fn acc32_terminal_panel_height_change_is_a_viewport_change() {
     let mut s = editor();
     exec(
         &s,
+        // `printf '...\\r\\n'`, not `echo`: a PTY in the default mode
+        // does not translate LF to CRLF for us, so LF-only output
+        // staircases rightward and every row past the viewport width
+        // clips to blanks — which would make the anchor assertions below
+        // compare "" with "" and pass for any regression.
         "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
-           args = { \"-c\", \"for i in $(seq 1 200); do echo line$i; done; sleep 30\" }, \
+           args = { \"-c\", \"i=1; while [ $i -le 200 ]; do printf 'line%d\\\\r\\\\n' $i; \
+                             i=$((i+1)); done; sleep 30\" }, \
            display = \"panel\" }",
     );
     let panel = side_window(&s).expect("terminal panel");
@@ -2001,8 +2036,13 @@ fn acc32_terminal_panel_height_change_is_a_viewport_change() {
     let before_size = CellSize::new(11, COLS);
     s.terminal_manager
         .borrow_mut()
-        .scroll_view(key_before, before_size, 5);
+        .scroll_view(key_before, before_size, 30);
     let top_before = first_visible_row(&s, key_before, before_size);
+    assert!(
+        !top_before.is_empty(),
+        "the anchor row must carry real text, or the equality below \
+         cannot fail for the regression it names"
+    );
     exec(
         &s,
         &format!(
@@ -2029,9 +2069,65 @@ fn acc32_terminal_panel_height_change_is_a_viewport_change() {
             .at_bottom,
         "…and a SHRINK cannot re-arm follow"
     );
+    exec(&s, "pmacs.terminal.terminate(TERM_BUF)");
+}
 
-    // Growth that reaches the live tail re-arms follow (Q#BP7 case 1),
-    // and later output then scrolls in.
+/// Q#BP7 item 1 proper: **growth reaching the live tail re-arms follow**,
+/// so later output scrolls in.
+///
+/// `at_bottom` alone cannot pin this — it is the instantaneous geometric
+/// readout `scroll_offset == 0`, which a still-anchored view satisfies
+/// whenever it happens to be tall enough to reach the tail. The pin has
+/// to feed the child MORE output after the growth and assert the view
+/// moved with it.
+#[test]
+fn acc32b_growth_reaching_the_tail_re_arms_follow_and_later_output_scrolls_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gate = dir.path().join("gate");
+    // Inserted bare into the shell word: `tempfile` paths carry no
+    // spaces or quotes, and wrapping it would terminate the Lua string.
+    let gate_path = gate.display().to_string();
+    let mut s = editor();
+    // Two bursts with a filesystem gate between them, so "more output
+    // after the growth" is deterministic rather than a race.
+    exec(
+        &s,
+        &format!(
+            "TERM_BUF = pmacs.terminal.open {{ command = \"/bin/sh\", \
+               args = {{ \"-c\", \"i=1; while [ $i -le 60 ]; do printf 'first%02d\\\\r\\\\n' $i; \
+                                 i=$((i+1)); done; \
+                                 while [ ! -f {gate_path} ]; do sleep 0.02; done; \
+                                 i=1; while [ $i -le 40 ]; do printf 'second%02d\\\\r\\\\n' $i; \
+                                 i=$((i+1)); done; sleep 30\" }}, \
+               display = \"panel\" }}"
+        ),
+    );
+    let panel = side_window(&s).expect("terminal panel");
+    let buffer: pmacs::lua_bindings::BufferIdLua = eval(&s, "return TERM_BUF");
+    let key_id = pmacs::terminal::TerminalViewKey::new(FrontendId::LOCAL, panel, buffer.0);
+    render(&s);
+    wait_for_terminal_text(&mut s, buffer.0, "first60", Duration::from_secs(10));
+
+    // Scroll back into history at a short viewport.
+    let short = CellSize::new(6, COLS);
+    assert!(
+        s.terminal_manager
+            .borrow_mut()
+            .scroll_view(key_id, short, 20)
+    );
+    let anchored = first_visible_row(&s, key_id, short);
+    assert!(!anchored.is_empty(), "the anchor row carries real text");
+    assert!(
+        s.terminal_manager
+            .borrow_mut()
+            .view_status(key_id)
+            .expect("status")
+            .scroll_offset
+            > 0,
+        "the view really is anchored in history"
+    );
+
+    // Grow the panel until the viewport covers the tail.
     exec(
         &s,
         &format!(
@@ -2041,17 +2137,36 @@ fn acc32_terminal_panel_height_change_is_a_viewport_change() {
     );
     render(&s);
     s.sync_terminal_layout(FrontendId::LOCAL, CellSize::new(ROWS, COLS));
+    let grown = CellSize::new(40, COLS);
     s.terminal_manager
         .borrow_mut()
-        .snapshot_for_view(key_before, CellSize::new(22, COLS))
+        .snapshot_for_view(key_id, grown)
         .expect("snapshot at the grown size");
-    assert!(
-        s.terminal_manager
-            .borrow_mut()
-            .view_status(key_before)
-            .expect("view status")
-            .at_bottom,
-        "growth reaching the live tail re-arms follow when no selection is frozen"
+
+    // Release the second burst. A view that merely LOOKS at-bottom while
+    // still anchored gets pushed back into history here; a re-armed one
+    // follows.
+    std::fs::write(&gate, b"go").expect("open the gate");
+    wait_for_terminal_text(&mut s, buffer.0, "second40", Duration::from_secs(10));
+    s.terminal_manager
+        .borrow_mut()
+        .snapshot_for_view(key_id, grown)
+        .expect("snapshot after the second burst");
+
+    let status = s
+        .terminal_manager
+        .borrow_mut()
+        .view_status(key_id)
+        .expect("status");
+    assert_eq!(
+        status.scroll_offset, 0,
+        "the view followed the live tail through the new output"
+    );
+    assert!(status.at_bottom);
+    assert_ne!(
+        anchored,
+        first_visible_row(&s, key_id, grown),
+        "…and its first visible row moved off the old anchor"
     );
     exec(&s, "pmacs.terminal.terminate(TERM_BUF)");
 }
@@ -2197,7 +2312,7 @@ fn acc33_growth_with_a_historical_selection_keeps_the_anchor_frozen() {
     exec(
         &s,
         "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
-           args = { \"-c\", \"i=0; while [ $i -lt 60 ]; do printf 'row%02d\\\\n' $i; \
+           args = { \"-c\", \"i=0; while [ $i -lt 60 ]; do printf 'row%02d\\\\r\\\\n' $i; \
                              i=$((i+1)); done; sleep 30\" }, \
            display = \"panel\" }",
     );
@@ -2221,6 +2336,11 @@ fn acc33_growth_with_a_historical_selection_keeps_the_anchor_frozen() {
         assert!(manager.begin_selection(key_id, view_size, CellCoord::new(0, 0)));
     }
     let top_before = first_visible_row(&s, key_id, view_size);
+    assert!(
+        !top_before.is_empty(),
+        "the anchor row must carry real text, or the equality below \
+         cannot fail for the regression it names"
+    );
 
     // Grow the panel enough that following the tail WOULD reach it.
     exec(
@@ -2255,13 +2375,29 @@ fn acc33_growth_with_a_historical_selection_keeps_the_anchor_frozen() {
         "follow is NOT re-armed while a selection is frozen"
     );
 
-    // The contrast that makes this bite: clear the selection and the
-    // same geometry DOES re-arm follow.
-    s.terminal_manager.borrow_mut().clear_selection(key_id);
+    // The contrast that makes this bite: the freeze is owed to the
+    // SELECTION, so clearing it lets the next size declaration re-arm
+    // follow at the very same geometry. Without this, "no re-arm while
+    // selected" would also hold if the re-arm simply did not exist.
+    assert!(s.terminal_manager.borrow_mut().clear_selection(key_id));
     s.terminal_manager
         .borrow_mut()
         .snapshot_for_view(key_id, grown)
         .expect("snapshot after clearing");
+    let cleared = s
+        .terminal_manager
+        .borrow_mut()
+        .view_status(key_id)
+        .expect("view status after clearing");
+    assert!(
+        cleared.at_bottom && cleared.scroll_offset == 0,
+        "clearing the selection re-arms follow at the same geometry"
+    );
+    assert_ne!(
+        top_before,
+        first_visible_row(&s, key_id, grown),
+        "…and the view left the frozen anchor"
+    );
     exec(&s, "pmacs.terminal.terminate(TERM_BUF)");
 }
 

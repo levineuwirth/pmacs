@@ -189,7 +189,7 @@ fn parse_request(
 /// Not `active_window_id()`, which resolves through the ambient active
 /// frontend: every other id in this module is `fid`-scoped, and the two
 /// only coincide because dispatch happens to set `active_frontend` first.
-fn selected_window(core: &SharedCore, fid: FrontendId) -> mlua::Result<WindowId> {
+pub(crate) fn selected_window(core: &SharedCore, fid: FrontendId) -> mlua::Result<WindowId> {
     core.borrow()
         .views
         .get(&fid)
@@ -199,7 +199,11 @@ fn selected_window(core: &SharedCore, fid: FrontendId) -> mlua::Result<WindowId>
 
 /// Resolve a raw Lua window id, refusing one that is not live in the
 /// acting frontend's layout (Q#BP11).
-fn lookup_window(core: &SharedCore, fid: FrontendId, raw: u64) -> mlua::Result<WindowId> {
+pub(crate) fn lookup_window(
+    core: &SharedCore,
+    fid: FrontendId,
+    raw: u64,
+) -> mlua::Result<WindowId> {
     let core = core.borrow();
     let view = core
         .views

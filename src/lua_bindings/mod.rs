@@ -12365,30 +12365,23 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
         // panel" without first selecting the panel.
         win.set(
             "buffer",
-            lua.create_function(move |lua, target: Option<u64>| -> mlua::Result<BufferIdLua> {
-                let Some(raw) = target else {
-                    return Ok(BufferIdLua(cc.borrow().active_buffer_id()));
-                };
-                let fid = window_panel::acting_frontend(lua, &cc);
-                let core = cc.borrow();
-                let view = core.views.get(&fid).ok_or_else(|| {
-                    mlua::Error::runtime("pmacs.window.buffer: acting frontend has no layout")
-                })?;
-                let id = view
-                    .layout
-                    .iter_ids()
-                    .into_iter()
-                    .find(|id| id.raw() == raw)
-                    .ok_or_else(|| {
-                        mlua::Error::runtime(format!(
-                            "pmacs.window.buffer: window {raw} is not live in this frontend's layout"
-                        ))
-                    })?;
-                core.windows
-                    .get(&id)
-                    .map(|window| BufferIdLua(window.buffer_id))
-                    .ok_or_else(|| mlua::Error::runtime("pmacs.window.buffer: window not live"))
-            })?,
+            lua.create_function(
+                move |lua, target: Option<u64>| -> mlua::Result<BufferIdLua> {
+                    // Both arms resolve through the ACTING frontend, using
+                    // the same validator the rest of the window surface
+                    // does — no ambient `active_buffer_id()` asymmetry.
+                    let fid = window_panel::acting_frontend(lua, &cc);
+                    let id = match target {
+                        Some(raw) => window_panel::lookup_window(&cc, fid, raw)?,
+                        None => window_panel::selected_window(&cc, fid)?,
+                    };
+                    cc.borrow()
+                        .windows
+                        .get(&id)
+                        .map(|window| BufferIdLua(window.buffer_id))
+                        .ok_or_else(|| mlua::Error::runtime("pmacs.window.buffer: window not live"))
+                },
+            )?,
         )?;
     }
 

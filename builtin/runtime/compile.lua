@@ -836,7 +836,13 @@ local function start_run(slot, cmdline, opts)
   -- the selected DOCUMENT window while the panel still shows it — the
   -- duplicate presentation this arc removes elsewhere. Detect that the
   -- buffer already owns the panel slot and keep it there.
-  if display == "panel" or already_in_panel(slot.buf) then
+  --
+  -- Gated on OMISSION, never on an explicit value: `display = "current"`
+  -- is the documented user-facing opt-out from the Stage 3 default flip,
+  -- so it must reach the raw switch even when the previous run was
+  -- panel-placed. The duplicate presentation that produces is the
+  -- escape hatch's documented cost (R3-rp2).
+  if display == "panel" or (display == nil and already_in_panel(slot.buf)) then
     pmacs.window.display(slot.buf, { side = "bottom", select = false })
   else
     pmacs.window.switch_buffer(slot.buf)
