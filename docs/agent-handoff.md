@@ -1,7 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-23, after web grammars HTML+CSS (#146) landed,
-following the LaTeX Stage 1 / inline-math framing pair (#144/#145), folding
+**Last updated: 2026-07-24, after folding Stage 2 (#149, the grid/daemon
+collapse) landed with its ledger refresh (#147), following web grammars HTML+CSS
+(#146), the LaTeX Stage 1 / inline-math framing pair (#144/#145), folding
 Stage 1 (#142, the headless fold engine), one-command GPU invocation (#141), the
 documentation refresh (#140), Vterm Stage 3 (#135, protocol v19 and native GPU terminal),
 tab-width rendering parity (#137), locals-query processing (#134), modeline
@@ -18,12 +19,13 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-23)
+## 1. Where the project stands (2026-07-24)
 
-- `main` @ `47581f4` (web grammars HTML+CSS #146 atop LaTeX Stage 1 #144 /
-  inline-math framing #145 and folding Stage 1 #142), protocol **v19**
-  (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`, v17 = `FontFacts`, v18 =
-  `StatuslineSegments`, v19 = terminal frames/events).
+- `main` @ `6ed4fe9` (folding Stage 2 #149 + ledger refresh #147 atop web
+  grammars #146, LaTeX Stage 1 #144 / inline-math framing #145, and folding
+  Stage 1 #142), protocol **v19** (`SUPPORTED=[6..=19]`; v16 = `ThemeFacts`,
+  v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal
+  frames/events).
 - **Folding Stage 1 (headless fold engine) LANDED — #142**
   (`docs/folding-framing.md` rev 5; merge `c49a8c7`; three review rounds,
   round 3 clean). Arc 6's engine — instance-side and headless; **no frontend
@@ -58,8 +60,8 @@ commands, read `docs/active-work.md` immediately after this file.
   - Durable lesson (round 2): after wiring a cleanup into a production hook,
     PIN IT THROUGH THE REAL PATH — a direct-call unit test misses the wiring
     (falsify by revert).
-  - **Stage 2 (grid/daemon collapse) is IMPLEMENTED — PR #149 OPEN** on
-    `folding-tui` (`docs/folding-stage2-framing.md` rev 4, approved). Its
+  - **Stage 2 (grid/daemon collapse) LANDED — #149** (merge `6ed4fe9`; five
+    review rounds; `docs/folding-stage2-framing.md` rev 4). Its
     load-bearing reframe: the TUI had **no non-identity
     source-line↔display-row map** (`view_top + row` was baked into ~13 sites),
     so Stage 2's spine is `src/fold_view.rs`'s `VisibleLineMap` — derived from
@@ -83,7 +85,12 @@ commands, read `docs/active-work.md` immediately after this file.
       clamps in the setter rather than being repaired at render time;
     - the interactive-Lua unfold keys on the **post-intercept** edit site — a
       managed buffer intercept may legally relocate the op.
-    No protocol bump. Stage 3 (GPU) follows.
+    No protocol bump. **Stage 3 (GPU) is next and has no framing yet**; its
+    named obligations are GPU collapse at TUI parity, caret/hit-test
+    fold-awareness, the `BufferSnapshot` **fold-mirror clear** (parent R2-4 —
+    the #120 trap class), CRDT-origin / GPU-optimistic interactive unfold
+    (parent R2-3), and flipping `FrontendView.fold_projection` to `true` for
+    semantic frontends.
 - **One-command GPU invocation LANDED — #141**
   (`docs/gpu-invocation-framing.md` rev 6; merge `63fbc66`; two implementation
   reviews). The additive public path is `pmacs --gpu [--socket NAME|PATH]`;
@@ -483,13 +490,15 @@ commands, read `docs/active-work.md` immediately after this file.
     lexical resolution, settled per-layer facts, shared TUI/GPU
     local-predicate filtering, and a registry-wide locals-query invariant
     shipped without a protocol change.
-  - **Arc 6 (folding) Stage 1 LANDED — #142** — the headless fold engine
-    (store, structural source, Lua `C-c @` surface, command-path unfold,
-    `FoldState` production). Stage 2 (grid/daemon collapse) is implemented and
-    open as **PR #149** on `folding-tui`; Stage 3 (GPU) follows.
+  - **Arc 6 (folding) Stages 1 and 2 LANDED — #142 and #149** — the headless
+    fold engine (store, structural source, Lua `C-c @` surface, command-path
+    unfold, `FoldState` production), then the grid/daemon collapse (the
+    `VisibleLineMap` spine, fold-aware gutter/diagnostics/caret/selection/
+    presence/viewport/motion, and the interactive unfold widening). **Stage 3
+    (GPU) is next**, unframed.
   - **Web grammars HTML+CSS LANDED — #146**, and **LaTeX Stage 1 — #144**
     with its inline-math parent framing **#145**.
-  - Remaining ranked arcs: 6 folding Stages 2–3, 7 DAP, 8 GPU splits, plus
+  - Remaining ranked arcs: 6 folding Stage 3, 7 DAP, 8 GPU splits, plus
     the `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
 
 ## 2. How we work (the part that must not drift)
