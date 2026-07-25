@@ -1,11 +1,13 @@
 # Dired — framing
 
-**Revision 5 — 2026-07-25. Status: APPROVED; Stage 0 MERGED as #162.**
+**Revision 6 — 2026-07-25. Status: APPROVED; Stage 0 MERGED as #162;
+Stage 1 IN REVIEW as PR #165.**
 Rev 1 passed a ground-truth review; rev 2 fixed round 1's seven findings;
 rev 3 fixed round 2's six and was approved; rev 4 recorded what Stage 0's
 implementation falsified in the approved text (§0); rev 5 adds the
 **coherence impact** statement now required of every framing
-(`CLAUDE.md`, `COHERENCE.md` §20) — see §0.5. Deliberately
+(`CLAUDE.md`, `COHERENCE.md` §20) — see §0.5; rev 6 records what Stage
+1's implementation falsified (§0, S1-1…S1-9). Deliberately
 unnumbered: the roadmap's Arc 8 is GPU
 structural parity but `docs/lean4-mode-framing.md` also claims Arc 8, so
 the arc space is already forked in uncommitted work. (Rev 2 also cited
@@ -202,6 +204,94 @@ the correction belongs here rather than only in the code.
   load is the better fix and is now a named deferral** (§13) — it is the
   same normalize-before-lookup family as Q#DR5's `apply_resource_op`
   correction.
+
+### Stage 1 implementation notes (rev 5 → rev 6)
+
+Implementing Stage 1 (PR #165) falsified four things the approved text
+asserted and settled five it left open. Recorded here rather than only
+in the code, per the rev-4 precedent.
+
+- **S1-1. The normalizer is EXPOSED, not mirrored — so B2 is partly
+  false, in the direction Q#DR2 preferred.** Q#DR2 made the mirror
+  conditional (`Stage 1 may still mirror if exposure turns out to drag
+  in EditorCore borrow plumbing it does not otherwise need`).
+  `normalize_buffer_path` is a **free function** (`editor_core.rs`), so
+  exposure drags in nothing: it is now `pub` and reachable as
+  `pmacs.path.canonicalize`. Consequences, all deliberate: B2 ("tolerant
+  `read_dir` is the only Rust change Stage 1 needs") is false by one
+  small binding; acceptance 3b degenerates to the round-trip form the
+  framing described; and the Stage 2 mirror-removal follow-up **is not
+  owed** — there is no second canonical form to remove. The parity
+  acceptance is still carried, now as "the Lua binding and the Rust
+  function agree over one shared edge list", which is exactly the claim
+  a future re-mirroring would break.
+- **S1-2. R2-3's dedication claim is falsified by the substrate.** It
+  read "a dedicated dired panel stays dedicated across descent and the
+  new dired buffer inherits it". `display_buffer` never replaces the
+  buffer in a slot dedicated to another one: it discards every
+  side-specific parameter and falls back to the document window (Q#BP3
+  2.iii), and the exact-window arm errors outright. Dired therefore does
+  **not** try to unpin the user's panel — which is also what Emacs's
+  `display-buffer` does with a dedicated window. Acceptance 3c is split:
+  a non-dedicated panel keeps the descent, and a dedicated one keeps its
+  buffer *and* its pin while the new directory appears in the document
+  window.
+- **S1-3. Acceptance 3c cannot pin the descent ROUTING, and the test now
+  says so.** Dired holds the focus in its own panel, so a raw
+  `switch_buffer` lands in that same window and every 3c assertion holds
+  either way — the mutation is *vacuous* against it. Dedication is the
+  only thing that distinguishes `display { side = … }` from the raw
+  switch, so the dedicated-panel test is the discriminating pin. Found
+  by running the bite rather than by reading the test; the vacuity is
+  documented at the assertion instead of being left to be believed.
+- **S1-4. Dired is the first builtin to bind a mode-scoped key, and one
+  pre-existing lib test assumed none existed.**
+  `describe_key_identifies_every_default_binding` iterated *every*
+  binding in the stack and asserted `pmacs.describe.key` resolves it
+  context-free, which held only while the modes table was empty. It now
+  sets the effective context per binding — and explicitly *clears* the
+  mode for a global one, because a mode left over from a previous
+  iteration legitimately shadows a global chord of the same name
+  (dired's `RET` shadows `edit.newline-and-indent`, which is the point
+  of the mode).
+- **S1-5. `C-x d` deliberately takes NO completion source.** It is the
+  direct consequence of S0-1/S0-4: with a `files` source, RET on an
+  empty field opens whatever sorts first (the minibuffer selects
+  candidate 0 whenever the list is non-empty, and a selected candidate
+  shadows typed text), and RET-on-the-directory-you-are-in is exactly
+  the gesture `C-x d` exists for. The field is **prefilled** with the
+  current directory instead — Emacs's own shape here — and free text
+  always reaches `on_accept` because `CompletionSource::None` bypasses
+  candidate resolution entirely. Directory-name completion is what dired
+  itself replaces.
+- **S1-6. Ownership is the handle table ALONE**, narrower than Q#DR2's
+  "present in dired's handle table, or `major_mode(buf) == "dired"`". A
+  foreign buffer that carries the mode *is* the case the check exists to
+  refuse, and a builtin's handle table cannot be lost the way a
+  reloadable package's can. Acceptance 4 sets the mode on the foreign
+  buffer to pin the stronger reading.
+- **S1-7. The mark column ships in Stage 1, rendered blank.** Q#DR4 is a
+  Stage 2 decision, but reserving the two columns now means Stage 2 does
+  not move every offset and Stage 3's column-classifying intercept can
+  be written against constants that did not shift under it. The
+  constants are computed from the widths (the fixture hardcoded
+  `NAME_START = 39` and paid for it in every wdired test) and exported
+  as `pmacs.dired._layout` so acceptance cannot drift from them.
+- **S1-8. A symlinked directory needs a probe, because kinds are
+  lstat-based.** Both `read_dir` and `stat` report a link as
+  `"symlink"`, so nothing in the entry says whether it points at a
+  directory. `RET` on a symlink therefore *tries* to list the target
+  (one extra syscall, on symlink lines only) and descends if that
+  succeeds, else visits it as a file. Q#DR10 specified only the
+  dir/file arms; this is the third.
+- **S1-9. Interactive origin does not survive the await.** Every listing
+  is worker-dispatched, so the work after the first `:await()` resumes
+  inside `tick_async`, where `InteractiveCommandOrigin` is empty and
+  `pmacs.window.*` falls back to the **ambient** active frontend. Single
+  frontend: correct. Multi-frontend: a dired opened from peer B while A
+  is ambient would display for A. Not fixable from Lua (the display
+  surface takes no frontend argument) and named here rather than
+  discovered later.
 
 ## 0.5. Coherence impact (`COHERENCE.md` §20)
 

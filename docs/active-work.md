@@ -14,10 +14,11 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `0dd16a5` (GPU initial-target #148 atop folding Stage 2
-  landed-doc refresh #150, folding Stage 2 #149, the ledger refresh #147, web
-  grammars HTML+CSS #146, and the LaTeX Stage 1 #144 / inline-math framing
-  #145 pair; protocol v20).
+  `githubsucks/main` @ `8c86d34` (the dired framing #164 atop find-file
+  #162, COHERENCE.md #163, Lean 4 Stage 1 #160, the minimap blank-slab fix
+  #159, bottom-panel Stage 1 #155, the inline-math re-scout #154, the vterm
+  PTY-flake fix #153, and the GPU initial-target doc refresh #152; protocol
+  v20).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -51,7 +52,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `0dd16a5` or a newer intentional main.
+The `git log` command must expose `8c86d34` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 ## Lean 4 lane (Arc 8) — Stage 1 IN REVIEW (PR #160)
@@ -124,44 +125,108 @@ If it does not, stop and repair the remote/fetch configuration.
   or markerless scratch files fragment into one server per directory for
   every language.
 
-## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
+## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)
 
-- Approved framing: `docs/dired-framing.md` (revision 5), landing as its
-  own docs PR off `githubsucks/main` @ `2af1ab3`, branch
-  `githubsucks/dired-framing`, worktree `../pmacs-dired-framing`. The
-  repo's `-framing`-branch convention (`vterm-framing`,
-  `gpu-initial-target-framing`, `tab-width-parity-framing`).
+- Approved framing: `docs/dired-framing.md` **revision 6** — rev 5 is the
+  approved text (merged as its own docs PR #164), rev 6 adds §0's Stage 1
+  implementation notes (S1-1…S1-9). Stages 2 (marks and operations) and 3
+  (wdired) each get their own detailed framing after the prior stage lands.
 - **Stage 0 (`C-x C-f` find-file) MERGED as #162** (`main` @ `2af1ab3`,
   2026-07-25, one review round, 12/12 CI green). Durable facts moved to
   `docs/agent-handoff.md` §1 per rule 3 below.
-- **Stage 1 (the dired view) is next and unstarted.** Branch `dired`
-  (worktree `../pmacs-dired-arc`) carries the framing commits only and is
-  based on the now-superseded `0827dd1`; **rebase it onto the `main`
-  resulting from the framing PR before implementing**, or cut a fresh
-  branch — its framing commits become redundant once the docs PR lands.
-- Stage 1's scope, from the framing §10: `builtin/runtime/dired.lua`; the
-  `dired` major mode + mode keymap; buffer-per-directory with lexical
-  canonicalization and the ownership check; read-only intercept +
-  `set_round_trip_input`; visit routing through `window.display_file`;
-  parent/sort/revert/quit; `C-x d` (with the `display` opt) / `C-x C-j`;
-  cursor preservation by basename; the `dired.kill-when-opening` config
-  key; **and the tolerant `read_dir` opt** — the only Rust in the stage.
-- The one Rust change is load-bearing and is why Stage 1 is not
-  pure-Lua: `read_dir_blocking` (`src/fs.rs:201`) fails the **entire
-  listing** on any of five per-entry conditions, and the tolerant wrapper
-  its own module doc delegates to package authors **cannot be written in
-  Lua** — the primitive returns one error and no partial vec.
-- Coherence (framing §0.5, required since #163): serves `COHERENCE.md`
-  §20 Priority 1, which names this work explicitly; journey steps 7 and
-  (partially) 3; **adds no interaction island** — keys are a mode-scoped
-  keymap, and wdired is a mode swap; adopts `pmacs.config` for
-  `dired.kill-when-opening`; inherits §9's worker-attribution gap for its
-  `read_dir` jobs without worsening it.
+- **Stage 1 branch: `githubsucks/dired-stage1`**, worktree
+  `../pmacs-dired-stage1`, based on `githubsucks/main` @ `8c86d34` (the
+  framing merge #164). **A fresh cut, not a rebase:** the older `dired`
+  branch (`ffdd642`, worktree `../pmacs-dired-arc`) was based on the
+  superseded `0827dd1` and carried only the framing content #164 already
+  put on `main`, so merging it would have reconciled two histories of one
+  document. It is left untouched and carries nothing unmerged.
+- **Stage 1 implemented; no wire change (protocol stays v20).** What
+  landed on the branch:
+  - `builtin/runtime/dired.lua`: one buffer per directory named
+    `*dired:<canonical path>*` with the handle-table ownership check;
+    read-only intercept + `set_round_trip_input`; the `dired` major mode
+    and its mode-scoped keymap (`RET`/`f`, `^`, `n`/`p`, `g`, `q`, `s`);
+    basename cursor re-seating across every wholesale repaint;
+    `display_file` for file visits and same-window reuse for directory
+    descent; `C-x d` / `C-x C-j`; the `dired.kill-when-opening` setting.
+    Loaded after `window.lua`.
+  - `src/fs.rs`: `ReadDirTolerance`, `FsDirEntryError`, `FsDirListing`,
+    and one walk that either fails on a per-entry condition or records it
+    (Q#DR6). `src/async_runtime.rs` carries the listing in
+    `ReplyKind::ReadDir` / `JobResult::ReadDir`; `src/lua_bindings/mod.rs`
+    keys the Lua result **shape** on `errors.is_some()`, so the bare array
+    the frozen M8.2 fixture consumes with `ipairs` is untouched;
+    `builtin/runtime/fs.lua` validates read-op opts and **rejects unknown
+    keys** (a typo'd `tolerant` used to degrade silently to fatal).
+  - `src/editor_core.rs` + `src/lua_bindings/mod.rs`:
+    `normalize_buffer_path` is `pub` and exposed as
+    `pmacs.path.canonicalize` — Q#DR2's preferred end state, so no Lua
+    mirror exists and Stage 2 owes no mirror removal. This makes B2
+    ("tolerant `read_dir` is the only Rust change") false by one small
+    binding, deliberately.
+  - `tests/dired_acceptance.rs`: 22 tests over framing items 1–16,
+    dispatch-driven; item 17 is the m8_1/m8_2/m8_3 additivity gate.
+- **The framing claim the substrate falsified (S1-2):** R2-3 expected a
+  dedicated dired panel to carry its dedication across a descent.
+  `display_buffer` never replaces the buffer in a slot dedicated to
+  another one — it discards every side-specific parameter and falls back
+  to the document window (Q#BP3 2.iii), and the exact-window arm errors.
+  Dired does not unpin the user's panel; both arms are pinned.
+- **The vacuity the bites found (S1-3):** acceptance 3c cannot pin the
+  descent *routing*. Dired holds focus in its own panel, so a raw
+  `switch_buffer` lands in the same window and every 3c assertion holds
+  either way. Dedication is the only discriminator, so the
+  dedicated-panel test is the real pin — and the vacuity is documented at
+  the assertion rather than relabelled.
+- **The pre-existing test dired's first mode-scoped binding broke
+  (S1-4):** `describe_key_identifies_every_default_binding` asserted every
+  binding in the stack resolves through `describe.key` context-free, which
+  held only while the modes table was empty. It now sets the effective
+  context per binding and explicitly *clears* the mode for global ones,
+  because a leaked mode legitimately shadows a global chord of the same
+  name (dired's `RET` shadows `edit.newline-and-indent`).
+- Durable substrate facts, independent of this arc:
+  - `pmacs.buffer.kill` (not `remove`) redirects windows off a doomed
+    buffer before removal, so `kill-when-opening` kills **after** the
+    replacement is displayed.
+  - Interactive origin does **not** survive an await: work resumed in
+    `tick_async` sees no `InteractiveCommandOrigin`, so `pmacs.window.*`
+    acts for the *ambient* active frontend (S1-9).
+  - Kinds are lstat-based in both `read_dir` and `stat`, so nothing in an
+    entry says whether a symlink points at a directory; `RET` probes by
+    trying to list it (S1-8).
+  - A path-backed buffer's *name* is its full path, not its basename —
+    worth knowing before writing any name assertion.
+  - `C-x d` takes **no** completion source on purpose (S1-5): with one,
+    RET on an empty field opens whatever sorts first, and
+    RET-on-where-you-are is the gesture the binding exists for. The field
+    is prefilled instead.
+- **Bite verification:** 15 claims, each mutated in place and required to
+  fail the test that names it. `dired.lua` is new, so `scripts/bite`'s
+  file swap does not apply; every mutation was applied and reverted with
+  `git checkout --`. One came back VACUOUS and is recorded above.
+- Verification on this branch: `cargo fmt --check` clean; strict workspace
+  Clippy clean; 1,829 default + 2,006 CRDT library tests; dired acceptance
+  22 default + 22 CRDT; m8_1 10 / m8_2 15 / m8_3 32 unchanged; M4 121;
+  required GPU 155; **isolated-`XDG_CONFIG_HOME` workspace sweep 3,186
+  passed across 92 suites, zero failures**; `git diff --check` clean. The
+  sweep needs the isolated config for the reason recorded in the
+  bottom-panel lane below.
+- Coherence (framing §0.5, required since #163): serves `COHERENCE.md` §20
+  Priority 1, which names this work explicitly; journey step 7's file half
+  goes from no surface to a surface; **adds no interaction island** — keys
+  are a mode-scoped keymap, and wdired will be a mode swap; adopts
+  `pmacs.config` for `dired.kill-when-opening`; inherits §9's
+  worker-attribution gap for its `read_dir` jobs without worsening it. The
+  audited claims this changes are updated in `COHERENCE.md` itself, per its
+  §25.
 - **Boundary with the Journey Stage 1 arc** (`COHERENCE.md` §20 arc-cut
   1): CLI directory-argument handling (`pmacs .` exits 1) belongs there,
-  not here. The two meet at `resolve_target_buffer`; dired supplies the
-  buffer a directory should resolve *to*, and `pmacs .` should route into
-  it rather than growing a second directory surface.
+  not here — Stage 1 does **not** fix it. The two meet at
+  `resolve_target_buffer`; dired supplies the buffer a directory should
+  resolve *to*, and `pmacs .` should route into it rather than growing a
+  second directory surface.
 
 ## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
 

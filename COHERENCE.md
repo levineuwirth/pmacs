@@ -119,10 +119,10 @@ detailed in §1.1–§1.3: **substrate without surface**, **the silence
 asymmetry**, and **per-arc coherence debt**.
 
 Coherence-shaped work already in flight at audit time: find-file /
-dired Stage 0 (`C-x C-f`, PR #162, `docs/dired-framing.md`), bottom
-panel Stage 1 (merged #155), multi-root LSP affinity (branch
-`lsp-multi-root-affinity`), the config registry foundation (merged
-#127).
+dired Stage 0 (`C-x C-f`, merged #162, `docs/dired-framing.md`) and its
+Stage 1 directory view (PR #165), bottom panel Stage 1 (merged #155),
+multi-root LSP affinity (branch `lsp-multi-root-affinity`), the config
+registry foundation (merged #127).
 
 ---
 
@@ -192,9 +192,13 @@ working, unreachable capability:
   is Lua-bound; no builtin command opens `*lsp*` (§2, §9).
 - **Interactive file opening.** `pmacs.buffer.find_or_open`
   (`src/lua_bindings/mod.rs:3103`) had no interactive caller at audit
-  time; a complete 1,384-line dired exists as a frozen test fixture
-  (`tests/fixtures/pmacs-dired/init.lua`). Being fixed now: dired Stage
-  0 (PR #162).
+  time; a complete 1,384-line dired existed only as a frozen test
+  fixture (`tests/fixtures/pmacs-dired/init.lua`). **Fixed:** dired
+  Stage 0 opens a path (`C-x C-f`, merged #162) and Stage 1 ships the
+  browsing view as a builtin (`C-x d` / `C-x C-j`, PR #165). The fixture
+  stays frozen — its `install_local` + `require` routing *is* the M8
+  package-universality proof (Q#DR1) — and shrinking it is scheduled
+  after Stage 3.
 
 The strategic consequence: **most coherence gaps in pmacs are doors,
 not engines** — deliberately deferred surface, not design error. That is
@@ -331,11 +335,11 @@ Full verdict table:
 |---|---|---|---|
 | 1 | Install | **Partial** | Source build only: `cargo build --release --workspace --features pmacs/crdt` (`README.md`). No binaries, no packaging. Runtime deps (`/bin/sh`, git, tar, coreutils) documented, never checked at runtime |
 | 2 | Launch unconfigured | **Works** | `EditorState::new()` → empty `*scratch*`; missing config is not an error (`src/config.rs:7-9`); recentf/saveplace/autosave default-on |
-| 3 | Open real project | **Missing** | `pmacs .` exits 1 (above). No directory handling anywhere |
+| 3 | Open real project | **Missing at the CLI** | `pmacs .` still exits 1 (above): `load_file` does `File::open` (which succeeds on a directory) then `read_to_end` → EISDIR, which is not `NotFound`, so `resolve_target_buffer`'s create-a-`[new file]` arm never fires. Dired Stage 1 (PR #165) supplies the buffer a directory should resolve *to*; routing `pmacs .` into it is Journey Stage 1's work, which must not invent a second directory surface |
 | 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments; but no welcome text (`EditorCore::new` sets `status: String::new()`), no cheat sheet, and `C-h` deletes a word (§18) |
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
-| 7 | Find symbol / file | **File: missing → in flight (PR #162). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit; `M-.`/`M-?`/`C-c o` bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
+| 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing PR #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
 | 8 | Open terminal | **Works but undiscoverable** | Full PTY with scrollback + modeline segment — reachable only as `M-x terminal`, no keybinding |
 | 9 | Build / test | **Partial** | `M-x compile.run` works, defaults cwd to detected project root, parses Rust `-->` errors — but no keybinding, an **empty first prompt** (`initial = last and last.cmdline or ""`, `builtin/runtime/compile.lua:1134-1138`), and no `cargo build`/`cargo test` suggestion despite `ProjectKind::Cargo` existing (`src/project.rs:77`) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
@@ -428,7 +432,8 @@ level is the one missing. Audited level-by-level:
 **Beginner** (should see: files, buffers, search, diagnostics, terminal,
 build actions, menus, missing-tool guidance):
 
-- files ✗ (no find-file at audit; PR #162 in flight) · buffers ✓ (`C-x
+- files ✓ since #162 / PR #165 (`C-x C-f` opens a path, `C-x d` browses;
+  neither is advertised anywhere but the keymap) · buffers ✓ (`C-x
   b`, `*buffer-list*`) · search ✓ (`C-s`/`C-r`/`C-M-s`; project.search
   is M-x-only) · diagnostics ✓ once a server runs · terminal ✓ but
   M-x-only · build ✓ but M-x-only with empty prompt · menus △
@@ -1139,7 +1144,11 @@ Primitive-by-primitive against the list above:
   hierarchy, package dependency graph, worker trees, git status) will
   each need it; building it once *before* dired's directory view and
   the workers tree harden their own conventions is exactly this
-  section's point.
+  section's point. Dired Stage 1 (PR #165) landed **without** inventing
+  one: its listing is flat (Emacs parity), and the recursive
+  in-buffer case — `i` insert-subdirectory — is a named deferral in
+  `docs/dired-framing.md` §13, which is where a shared tree primitive
+  would land.
 - **Structured table / inspector / diff view** ✗ — none. (`describe.*`
   tables are the inspector's data model without a view; the
   wire-declared `ResourceOffer` family was reserved for diff/blame
@@ -1346,8 +1355,10 @@ missing runtime entity — a real arc).
 
 Establish the end-to-end workflow; treat regressions as release
 blockers. **State: broken at step 3 (§2). Mostly wiring, and unusually
-cheap:** directory-argument handling; a find-file surface (in flight,
-PR #162); surfacing the LSP spawn failure with guidance (§1.2); a
+cheap:** directory-argument handling (the remaining half of step 3 —
+dired Stage 1 landed the buffer it should resolve to); a find-file
+surface (**done**: #162 open-by-path, PR #165 browsing); surfacing the
+LSP spawn failure with guidance (§1.2); a
 compile keybinding + `cargo build`/`test` default from the existing
 `ProjectKind::Cargo`; a terminal keybinding; a welcome buffer. The
 journey acceptance suite (§19) is the ratchet that keeps it fixed.
