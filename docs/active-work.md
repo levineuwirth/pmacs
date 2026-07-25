@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-24.** This file records volatile work that has not
+**Snapshot: 2026-07-25.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -123,6 +123,45 @@ If it does not, stop and repair the remote/fetch configuration.
   affinity key must be the root only when a root was actually *detected*,
   or markerless scratch files fragment into one server per directory for
   every language.
+
+## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
+
+- Approved framing: `docs/dired-framing.md` (revision 5), landing as its
+  own docs PR off `githubsucks/main` @ `2af1ab3`, branch
+  `githubsucks/dired-framing`, worktree `../pmacs-dired-framing`. The
+  repo's `-framing`-branch convention (`vterm-framing`,
+  `gpu-initial-target-framing`, `tab-width-parity-framing`).
+- **Stage 0 (`C-x C-f` find-file) MERGED as #162** (`main` @ `2af1ab3`,
+  2026-07-25, one review round, 12/12 CI green). Durable facts moved to
+  `docs/agent-handoff.md` §1 per rule 3 below.
+- **Stage 1 (the dired view) is next and unstarted.** Branch `dired`
+  (worktree `../pmacs-dired-arc`) carries the framing commits only and is
+  based on the now-superseded `0827dd1`; **rebase it onto the `main`
+  resulting from the framing PR before implementing**, or cut a fresh
+  branch — its framing commits become redundant once the docs PR lands.
+- Stage 1's scope, from the framing §10: `builtin/runtime/dired.lua`; the
+  `dired` major mode + mode keymap; buffer-per-directory with lexical
+  canonicalization and the ownership check; read-only intercept +
+  `set_round_trip_input`; visit routing through `window.display_file`;
+  parent/sort/revert/quit; `C-x d` (with the `display` opt) / `C-x C-j`;
+  cursor preservation by basename; the `dired.kill-when-opening` config
+  key; **and the tolerant `read_dir` opt** — the only Rust in the stage.
+- The one Rust change is load-bearing and is why Stage 1 is not
+  pure-Lua: `read_dir_blocking` (`src/fs.rs:201`) fails the **entire
+  listing** on any of five per-entry conditions, and the tolerant wrapper
+  its own module doc delegates to package authors **cannot be written in
+  Lua** — the primitive returns one error and no partial vec.
+- Coherence (framing §0.5, required since #163): serves `COHERENCE.md`
+  §20 Priority 1, which names this work explicitly; journey steps 7 and
+  (partially) 3; **adds no interaction island** — keys are a mode-scoped
+  keymap, and wdired is a mode swap; adopts `pmacs.config` for
+  `dired.kill-when-opening`; inherits §9's worker-attribution gap for its
+  `read_dir` jobs without worsening it.
+- **Boundary with the Journey Stage 1 arc** (`COHERENCE.md` §20 arc-cut
+  1): CLI directory-argument handling (`pmacs .` exits 1) belongs there,
+  not here. The two meet at `resolve_target_buffer`; dired supplies the
+  buffer a directory should resolve *to*, and `pmacs .` should route into
+  it rather than growing a second directory surface.
 
 ## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
 

@@ -1,7 +1,12 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-24, after GPU initial-target (#148, protocol v20)
-landed, following folding Stage 2 (#149) and its landed-doc refresh (#150),
+**Last updated: 2026-07-25, after find-file (#162) landed — the dired
+arc's Stage 0 — following COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
+minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
+inline-math re-scout (#154), the vterm PTY-flake fix (#153), and the
+GPU initial-target doc refresh (#152); and before that GPU
+initial-target (#148, protocol v20),
+following folding Stage 2 (#149) and its landed-doc refresh (#150),
 web grammars HTML+CSS (#146), the LaTeX Stage 1 / inline-math framing pair
 (#144/#145), folding Stage 1 (#142), one-command GPU invocation (#141), the
 documentation refresh (#140), Vterm Stage 3 (#135), tab-width rendering
@@ -19,9 +24,55 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-24)
+## 1. Where the project stands (2026-07-25)
 
-- `main` @ `0dd16a5` (GPU initial-target #148 atop folding Stage 2 landed-doc
+- `main` @ `2af1ab3` (find-file #162 atop COHERENCE.md #163, Lean 4 Stage 1
+  #160, minimap blank-slab #159, bottom-panel Stage 1 #155, inline-math
+  re-scout #154, vterm PTY-flake #153, and doc refresh #152). Protocol
+  unchanged at **v20**. The bullets below describe the arcs in their own
+  terms; this line is the head-of-`main` anchor.
+- **`COHERENCE.md` is now required reading and a required framing input
+  — #163.** It carries the product-coherence thesis, an audited
+  scorecard, per-concern gaps, and §20's priority order, and it is the
+  standard new work is evaluated against. Per `CLAUDE.md`, **every new
+  framing doc must state its coherence impact** — journey steps touched,
+  interaction islands added, config-registry adoption, background-work
+  attribution. Its §2 grades the golden journey **broken at step 3**
+  (`pmacs .` exits 1).
+- **find-file LANDED — #162** (`docs/dired-framing.md` §10, Q#DR11; merge
+  `2af1ab3`; one review round). `C-x C-f` is the dired arc's **Stage 0**:
+  pmacs previously had no discoverable way to open a file by path — no
+  such command existed and `pmacs.buffer.find_or_open` had no interactive
+  caller. Pure Lua in `builtin/commands/default.lua`, one keymap line, an
+  8-test dispatch-driven acceptance suite; no Rust, no protocol change.
+  Two substrate facts it documents, both worth knowing before touching
+  any minibuffer prompt:
+  - **Completion over files is flat and cannot be made hierarchical from
+    Lua.** A custom `source` function is called with **zero arguments**
+    (`minibuffer.rs:591`) and runs synchronously outside any coroutine,
+    where `Handle:await()` raises — so it can neither see the input to
+    re-root on nor list a directory. Only the Rust
+    `CompletionSource::Files { root }` can list, and it is
+    single-directory and 1024-capped.
+  - **A selected candidate SHADOWS typed text.** `recompute_candidates`
+    sets `selected = Some(0)` whenever the list is non-empty
+    (`minibuffer.rs:372-377`) and `resolve_accepted_value` returns the
+    candidate over the typed contents (`:564-574`). So free-text accept
+    fires only when the input filters every candidate away — for
+    basename candidates under a subsequence filter, when it contains a
+    `/`. This applies to `M-x` and `switch-buffer` too. Consequences are
+    pinned as decisions, including the hole where a new bare name that is
+    a subsequence of an existing entry opens the existing file, and the
+    empty-input case (`fuzzy_score` gives `Some(0)` for an empty needle
+    and ties break lexicographically, so dotfiles lead).
+  - Also: `get_or_load_buffer` computes a normalized path but **loads
+    from the raw one** (`editor_core.rs:842-856`), so a `~/…` path dedups
+    against an open buffer yet fails to load one that is not open —
+    find-file expands the tilde Lua-side. Loading through the normalized
+    path is a named deferral.
+- **GPU initial target LANDED — #148**
+  (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
+  rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
   refresh #150, folding Stage 2 #149, ledger refresh #147, web grammars #146,
   LaTeX Stage 1 #144 / inline-math framing #145, and folding Stage 1 #142),
   protocol **v20** (`SUPPORTED=[6..=20]`; v16 = `ThemeFacts`, v17 =
