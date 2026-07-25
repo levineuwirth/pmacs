@@ -336,16 +336,22 @@ fn acc33_raising_response_handler_does_not_stop_the_drain() {
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance 32 — the one-shot is removed BEFORE invocation.
+// Acceptance 32 — the one-shot is removed exactly once, whether or not
+// the handler raises.
 //
-// Observed rather than asserted structurally: the handler raises, and
-// the server is then stopped. If removal happened only on a clean
-// return — or not at all — the purge below would invoke the same handler
-// a second time with an error. The count is what pins it.
+// Named for what it pins rather than for the framing's wording. Q#LN9
+// specifies removal *before* invocation, and the implementation does
+// that — but bite-testing showed the before/after ordering is not
+// observable on its own: `pcall` catches the raise either way, so
+// removal after the call is behaviorally identical unless a handler
+// re-enters the drain, which nothing does. What IS observable, and what
+// this pins, is that removal is **unconditional**: the bite that moves
+// it inside `if ok then` fails here 2 != 1, because the surviving
+// registration gets invoked a second time by the purge.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn acc32_response_one_shot_is_removed_before_invocation() {
+fn acc32_response_one_shot_is_removed_even_when_the_handler_raises() {
     let fx = Fixture::new();
     let mut state = editor();
     attached_rust(&mut state, &fx);
@@ -375,8 +381,8 @@ fn acc32_response_one_shot_is_removed_before_invocation() {
     assert_eq!(
         eval::<i64>(&state, "return _G.calls"),
         1,
-        "a delivered one-shot must not be re-invoked by the purge — it \
-         was removed before the raising handler ran, not after"
+        "a delivered one-shot must not be re-invoked by the purge — \
+         removal is unconditional, not gated on a clean return"
     );
 }
 

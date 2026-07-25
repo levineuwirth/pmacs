@@ -1683,6 +1683,18 @@ local function purge_dead_pending()
     for rid, entry in pairs(pend) do
       -- Absent or terminal, or the same sid running a NEW generation:
       -- in every case the request this entry awaits is unanswerable.
+      --
+      -- The generation half is **defensive and not covered by the
+      -- acceptance suite**, stated plainly rather than left to look
+      -- tested. Reaching it requires a crash and its restart to both
+      -- fall inside a gap with no `_async.tick` — the crash backoff is
+      -- 500ms (`src/lsp.rs:1007`), so any tick during that window sees
+      -- `crashed` and the absent-or-terminal test above fires first. A
+      -- stalled or idle editor can produce such a gap, and then this is
+      -- the only thing standing between a one-shot and waiting forever
+      -- on a reply the dead generation owed. Every attempt to stage it
+      -- deterministically ended up exercising the `crashed` path
+      -- instead, so it is kept as insurance and labelled as such.
       if attempt == nil or attempt ~= entry.attempt then
         dead[#dead + 1] = rid
       end
