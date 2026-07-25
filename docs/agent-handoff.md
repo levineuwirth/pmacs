@@ -745,6 +745,15 @@ final variant — its own round-trip cannot detect a discriminant shift.
 
 ## 5. Hard-won ops lessons
 
+- **A daemon-side fix is not deployed until the daemon is restarted from a
+  tree that contains it.** #166's reporter rebuilt and saw no change: the
+  running daemon had been started from a shared checkout still on a pre-fix
+  branch, and `pmacs --gpu` attaches to whatever process already owns the
+  socket. Rebuilding a binary does nothing to a running process. When
+  validating a daemon-side fix by hand, check the running process's binary
+  path and start time against the tree you think you fixed —
+  `ps -eo pid,lstart,args | grep '[p]macs --daemon'` — before concluding the
+  fix failed.
 - **Two operations that must be alternatives are not made alternatives by
   being adjacent.** The dispatcher applied its grid and semantic
   terminal-layout syncs to every attached frontend; a semantic session

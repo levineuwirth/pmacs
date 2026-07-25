@@ -1674,6 +1674,48 @@ GPU assertions remain in `pmacs-protocol` and `pmacs-gpu` respectively.
 - **37:** one real-daemon/real-PTY/headless-wgpu acceptance path; it is not
   replaced by a decoded-message fixture.
 
+### 0.12 As-framed audit, 2026-07-25 (after #166)
+
+Prompted by a GPU terminal input defect that shipped in Stage 3 and was fixed
+in #166. The arc is structurally complete — all 37 criteria have
+implementations, and every test named in the Stage 2 verification map exists —
+but the audit found two gaps worth recording against the criteria themselves.
+
+**Criterion 22's "without thrash" was never pinned.** The criterion reads
+"unchanged, zero, passive, and failed resize cases preserve prior geometry
+*without thrash*". The word appears nowhere in `src/` or `tests/`. The suite
+pinned the four enumerated single-arm cases and never the cross-arm
+interaction — which is exactly where the thrash lived: the daemon applied
+both the grid and the semantic terminal-layout sync to every attached
+frontend, so a semantic session's PTY was resized twice per tick forever.
+Criterion 31's "only the exact durable controller changes PTY geometry" was
+violated in the same event, in spirit rather than letter: the controller was
+the right frontend, but the geometry came from the grid projection. #166 adds
+the settle pins; the gap was open from #135 (2026-07-22) until then.
+
+**Why the Stage 3 suite could not see it.** Of its nine tests, only three
+drive a real daemon; the other six construct `EditorState` directly and never
+execute the dispatcher loop where the defect lived. `a31`, which is about two
+semantic frontends sharing one session, therefore passes on the broken tree.
+The same structural blindness explains why `bottom_panel_stage1_acceptance`
+was unaffected. A criterion about *dispatcher* behavior needs a test that
+runs the dispatcher.
+
+**Four of the nine Stage 3 tests do not run in CI at all**, because they are
+`#[cfg(feature = "crdt")]` and the workflow never enables that feature:
+`a37`, the two added by #166, and
+`terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret` — which
+is Stage 3 review round 1's own regression guard. Stage 1's
+`read_only_empty_crdt_bootstrap_is_immutable_against_remote_content`, the CRDT
+half of criterion 14, is dark for the same reason. Stage 2 is fully covered
+(6/6). This is not a vterm problem: 264 tests workspace-wide are dark,
+including 177 in the library. It has its own lane in `docs/active-work.md`.
+
+**Not audited:** §11's blanket claim that "deferral means graceful ignore or
+documented absence, never escape leakage, panic, unbounded allocation, or
+child leak". That covers roughly twenty deferred items and none were
+spot-checked. It remains an unproven claim rather than a known gap.
+
 ## 10. Gates and bite verification
 
 Every PR runs the standing full gates from `AGENTS.md`, sequentially, plus its

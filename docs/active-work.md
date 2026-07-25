@@ -227,32 +227,68 @@ If it does not, stop and repair the remote/fetch configuration.
   buffer a directory should resolve *to*, and `pmacs .` should route into
   it rather than growing a second directory surface.
 
-## Stage 3 acceptance is dark in CI — NEEDS A LANE
+## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
-- **No branch, no framing yet.** Found while gating #166; deliberately kept
-  out of it so a CI change would not arrive after review approval.
-- `.github/workflows/ci.yml` **never enables the `crdt` feature** (grep the
-  workflow directory: zero hits). Every `#[cfg(feature = "crdt")]` acceptance
-  test is therefore not merely skipped in CI — it is **not compiled**.
-- That covers the whole Vterm Stage 3 real-path acceptance, including `a37`
-  (real daemon + real PTY + real wgpu), which has been dark since #135, and
-  the two tests #166 added beside it.
-- The `gpu-render` job is the only one with lavapipe and
-  `PMACS_REQUIRE_GPU=1`, and it runs `cargo test -p pmacs-gpu`, which never
-  reaches the `pmacs` crate's acceptance suites.
-- The shape of the fix is one step on the `gpu-render` job:
-  `cargo test --features crdt --test vterm_stage3_acceptance -- --test-threads=1`.
-  It needs its own lane rather than a drive-by because it would run `a37`
-  under lavapipe **for the first time**, and neither its timing budgets nor
-  its wgpu path have ever been exercised on that adapter or on macOS CI.
-- Worth auditing at the same time: which *other* `crdt`-gated acceptance
-  suites are dark for the same reason. This is a coverage question about the
-  gate list itself, not about any one suite.
+- **No branch, no framing yet.** Found while gating #166, then measured
+  properly during the vterm as-framed audit. Deliberately kept out of #166 so
+  a CI change would not arrive after review approval.
+- **Root cause:** `.github/workflows/ci.yml` never enables the `crdt` feature
+  anywhere — zero hits across the workflow directory. The `test` job runs
+  `cargo test --all-targets --no-default-features --features luajit|lua54`.
+  Every `#[cfg(feature = "crdt")]` test is therefore **not compiled** in CI,
+  not merely skipped.
+- **Measured, `--list` under CI's exact flags versus the same flags plus
+  `crdt`: 3,024 vs 3,288 — 264 tests dark.** Per target:
+
+  | dark | CI | full | target |
+  |---:|---:|---:|---|
+  | 177 | 1,832 | 2,009 | **the library itself** (`src/lib.rs`) |
+  | 21 | 15 | 36 | `m5_5_acceptance` |
+  | 13 | 1 | 14 | `gpu_invocation_acceptance` |
+  | 13 | 1 | 14 | `gpu_initial_target_acceptance` |
+  | 8 | 0 | 8 | `m10_11_acceptance` |
+  | 6 | 0 | 6 | `auto_pair_crdt_acceptance` |
+  | 6 | 0 | 6 | `m10_2_perf` |
+  | 4 | 5 | 9 | `vterm_stage3_acceptance` |
+  | 4 | 0 | 4 | `m10_10_perf` |
+  | 3 | 0 | 3 | `compile_mode_crdt_acceptance` |
+  | 2 | 22 | 24 | `theme_faces_acceptance` |
+  | 2 | 0 | 2 | `m11_5_semantic_acceptance` |
+  | 1 | 9 | 10 | `vterm_stage1_acceptance` |
+  | 1 | 7 | 8 | `statusline_segments_acceptance` |
+  | 1 | 10 | 11 | `gpu_font_acceptance` |
+  | 1 | 0 | 1 | `auto_indent_crdt_acceptance` |
+  | 1 | 0 | 1 | `m10_11_perf` |
+
+- **The single worst line is the library.** `cargo test --lib --features crdt`
+  is a REQUIRED local gate in `CLAUDE.md`, and CI has never run it. 177
+  library tests — the whole CRDT half — are developer-machine-only.
+- **Ten suites run zero or one test in CI**, including `gpu_initial_target`
+  (#148's entire acceptance, 1/14), `gpu_invocation` (#141's, 1/14), and
+  `a37`, the Vterm Stage 3 real-daemon/real-PTY/real-wgpu path that #135
+  built specifically because "a decoded-message fixture would prove none of
+  the three fit together".
+- **Sort deliberate from accidental before proposing a fix.** Some of the 264
+  are perf suites that are `#[ignore]`d by default and belong to their own
+  jobs (`m10_2_perf` 6, `m10_11_perf` 1). `m10_10_perf` has **no** `#[ignore]`
+  and no CI job naming it, so it looks accidental. This classification is not
+  finished and is the lane's first task.
+- **Fix shape, two parts** (the flag combination is verified to work:
+  `--no-default-features --features luajit,crdt` lists 10 vterm Stage 1 tests
+  versus 9 without):
+  1. a `crdt` leg on the `test` job for the non-GPU suites and the library;
+  2. the GPU-requiring `crdt` suites onto the existing `gpu-render` job, which
+     already has lavapipe and `PMACS_REQUIRE_GPU=1` —
+     `vterm_stage3_acceptance`, `gpu_invocation_acceptance`,
+     `gpu_initial_target_acceptance`, `gpu_font_acceptance`.
+- **Expect first-run failures, and budget for them.** These would execute in
+  CI for the first time ever: real PTY timing on CI runners, wgpu under
+  lavapipe, and daemon-socket tests at unfamiliar concurrency. Start
+  ubuntu-only and decide about macOS from evidence. A red first run is the
+  lane working, not the lane failing.
 - Mitigating fact, verified rather than assumed: #166's three unit pins are
-  **not** `crdt`-gated and do run under CI's exact flags
-  (`--no-default-features --features luajit|lua54`), including the
+  **not** `crdt`-gated and do run under CI's exact flags, including the
   controller-release pin whose only job is catching the plausible wrong fix.
-  The regression protection is live; the real-daemon evidence is local-only.
 
 ## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
 
