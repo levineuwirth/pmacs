@@ -12,7 +12,7 @@ use ttf_parser::Face;
 
 /// Bundled math font (GUST Font License — see `fonts/GUST-FONT-LICENSE.txt`).
 ///
-/// Distinct from `fonts/OFL.txt`, which covers JetBrains Mono only: Latin
+/// Distinct from `fonts/OFL.txt`, which covers `JetBrains` Mono only: Latin
 /// Modern Math is GFL, an LPPL-derived licence, not the SIL OFL (framing F6).
 pub const LATIN_MODERN_MATH: &[u8] = include_bytes!("../fonts/latinmodern-math.otf");
 
@@ -36,6 +36,10 @@ pub struct MathConstants {
     pub subscript_shift_down: i16,
     /// Thickness of the fraction rule.
     pub fraction_rule_thickness: i16,
+    /// Minimum gap between the numerator and the rule.
+    pub fraction_numerator_gap_min: i16,
+    /// Minimum gap between the rule and the denominator.
+    pub fraction_denominator_gap_min: i16,
 }
 
 /// Why the bundled font could not supply math metrics.
@@ -51,6 +55,12 @@ pub enum MathFontError {
     NoMathTable,
     /// MATH table present but missing a constant the subset needs.
     MissingConstant(&'static str),
+    /// The math font cannot draw this codepoint (F3). Q#MS8's rule is
+    /// "failure is always show the source", so layout REFUSES rather than
+    /// emitting a zero-width item that would render tofu over its neighbour.
+    /// Layout is fallible for this reason alone; the draw pass needs a
+    /// refusal signal, and it must exist before that pass consumes the API.
+    UncoverableGlyph(char),
 }
 
 impl MathConstants {
@@ -72,6 +82,8 @@ impl MathConstants {
             superscript_shift_up: constants.superscript_shift_up().value,
             subscript_shift_down: constants.subscript_shift_down().value,
             fraction_rule_thickness: constants.fraction_rule_thickness().value,
+            fraction_numerator_gap_min: constants.fraction_numerator_gap_min().value,
+            fraction_denominator_gap_min: constants.fraction_denominator_gap_min().value,
         })
     }
 
@@ -118,6 +130,12 @@ pub fn math_italic(ch: char) -> char {
         'a'..='z' => 0x1D44E + (ch as u32 - 'a' as u32),
         // Lowercase Greek α..ω → MATHEMATICAL ITALIC SMALL ALPHA..OMEGA.
         '\u{3B1}'..='\u{3C9}' => 0x1D6FC + (ch as u32 - 0x3B1),
+        // The SYMBOL forms TeX's \epsilon and \phi resolve to sit OUTSIDE
+        // that run, so they need explicit italic mappings — without them the
+        // seed map's correction would render them upright beside italic
+        // neighbours, which is the defect it was fixing.
+        '\u{3F5}' => 0x1D716, // ϵ lunate epsilon
+        '\u{3D5}' => 0x1D719, // ϕ phi symbol
         // Uppercase Greek, digits, operators: upright, per TeX.
         _ => return ch,
     };
@@ -243,6 +261,26 @@ impl MathBox {
     }
 }
 
+/// The line-box height budget a math box must fit (Q#MS10), as
+/// `(above_baseline, below_baseline)` pixels.
+///
+/// Extracted rather than left inside a test: the draw pass must compute the
+/// SAME split the acceptance test asserts, and a duplicated derivation is
+/// exactly how a renderer and its test drift apart while both stay green.
+///
+/// The baseline is placed by the CODE font, not the math font — using the
+/// math font's own metrics understates the descent budget badly enough to
+/// make a plain fraction appear not to fit.
+#[must_use]
+pub fn line_box_budget(code_font: &Face<'_>, font_size_px: f32, line_height_px: f32) -> (f32, f32) {
+    const MARGIN_PX: f32 = 1.0;
+    let upem = f32::from(code_font.units_per_em().max(1));
+    let baseline_from_top = f32::from(code_font.ascender()) * font_size_px / upem;
+    let above = (baseline_from_top - MARGIN_PX).max(0.0);
+    let below = (line_height_px - baseline_from_top - MARGIN_PX).max(0.0);
+    (above, below)
+}
+
 /// The smallest uniform scale the slice will apply before giving up (Q#MS10).
 pub const MIN_FIT_SCALE: f32 = 0.6;
 
@@ -296,8 +334,15 @@ impl<'a> MathLayout<'a> {
     }
 
     /// Lay `node` out at `size_px`.
-    #[must_use]
-    pub fn layout(&self, node: &crate::math_parse::MathNode, size_px: f32) -> MathBox {
+    ///
+    /// # Errors
+    /// [`MathFontError::UncoverableGlyph`] when the math font has no glyph
+    /// for a character, so the caller can fall back to source (Q#MS8).
+    pub fn layout(
+        &self,
+        node: &crate::math_parse::MathNode,
+        size_px: f32,
+    ) -> Result<MathBox, MathFontError> {
         use crate::math_parse::MathNode;
         match node {
             MathNode::Char(ch) => self.layout_char(*ch, size_px),
@@ -305,19 +350,21 @@ impl<'a> MathLayout<'a> {
                 let mut out = MathBox::empty();
                 let mut pen = 0.0;
                 for child in children {
-                    let child_box = self.layout(child, size_px);
+                    let child_box = self.layout(child, size_px)?;
                     out.absorb(&child_box, pen, 0.0);
                     pen += child_box.width;
                 }
                 out.width = pen;
-                out
+                Ok(out)
             }
-            MathNode::Script { base, sub, sup } => self.layout_script(base, sub, sup, size_px),
+            MathNode::Script { base, sub, sup } => {
+                self.layout_script(base, sub.as_deref(), sup.as_deref(), size_px)
+            }
             MathNode::Fraction { num, den } => self.layout_fraction(num, den, size_px),
         }
     }
 
-    fn layout_char(&self, ch: char, size_px: f32) -> MathBox {
+    fn layout_char(&self, ch: char, size_px: f32) -> Result<MathBox, MathFontError> {
         let presented = math_italic(ch);
         let upem = f32::from(self.constants.units_per_em.max(1));
         let (advance, ascent, descent) = self
@@ -347,8 +394,10 @@ impl<'a> MathLayout<'a> {
                 );
                 (adv, asc.max(0.0), desc.max(0.0))
             })
-            .unwrap_or((0.0, 0.0, 0.0));
-        MathBox {
+            // F3: no glyph means no honest box. Emitting a zero-width item
+            // would draw tofu on top of the next character.
+            .ok_or(MathFontError::UncoverableGlyph(ch))?;
+        Ok(MathBox {
             width: advance,
             ascent,
             descent,
@@ -358,23 +407,23 @@ impl<'a> MathLayout<'a> {
                 baseline: 0.0,
                 size_px,
             }],
-        }
+        })
     }
 
     fn layout_script(
         &self,
         base: &crate::math_parse::MathNode,
-        sub: &Option<Box<crate::math_parse::MathNode>>,
-        sup: &Option<Box<crate::math_parse::MathNode>>,
+        sub: Option<&crate::math_parse::MathNode>,
+        sup: Option<&crate::math_parse::MathNode>,
         size_px: f32,
-    ) -> MathBox {
-        let base_box = self.layout(base, size_px);
+    ) -> Result<MathBox, MathFontError> {
+        let base_box = self.layout(base, size_px)?;
         let script_px = size_px * self.constants.script_scale();
         let mut out = MathBox::empty();
         out.absorb(&base_box, 0.0, 0.0);
         let mut widest = base_box.width;
         if let Some(sup) = sup {
-            let sup_box = self.layout(sup, script_px);
+            let sup_box = self.layout(sup, script_px)?;
             let shift = self
                 .constants
                 .to_px(self.constants.superscript_shift_up, size_px);
@@ -382,7 +431,7 @@ impl<'a> MathLayout<'a> {
             widest = widest.max(base_box.width + sup_box.width);
         }
         if let Some(sub) = sub {
-            let sub_box = self.layout(sub, script_px);
+            let sub_box = self.layout(sub, script_px)?;
             let shift = self
                 .constants
                 .to_px(self.constants.subscript_shift_down, size_px);
@@ -390,7 +439,7 @@ impl<'a> MathLayout<'a> {
             widest = widest.max(base_box.width + sub_box.width);
         }
         out.width = widest;
-        out
+        Ok(out)
     }
 
     fn layout_fraction(
@@ -398,25 +447,36 @@ impl<'a> MathLayout<'a> {
         num: &crate::math_parse::MathNode,
         den: &crate::math_parse::MathNode,
         size_px: f32,
-    ) -> MathBox {
+    ) -> Result<MathBox, MathFontError> {
         // TeX sets an inline \frac's operands one style down, which is also
         // what the parent framing's Tier 3 specifies (70%). It is load-bearing
         // for Q#MS10: full-size operands would not fit the line at all.
         let operand_px = size_px * self.constants.script_scale();
-        let num_box = self.layout(num, operand_px);
-        let den_box = self.layout(den, operand_px);
+        let num_box = self.layout(num, operand_px)?;
+        let den_box = self.layout(den, operand_px)?;
         let axis = self.constants.to_px(self.constants.axis_height, size_px);
         let thickness = self
             .constants
             .to_px(self.constants.fraction_rule_thickness, size_px)
             .max(1.0);
-        let gap = thickness * 2.0;
+        // F4: the gaps come from the MATH table, not a guess. An earlier
+        // revision used `thickness * 2.0`, which made fractions roughly twice
+        // as airy as the font specifies and inflated the height budget the
+        // fit-to-line scale is measured against.
+        let num_gap = self
+            .constants
+            .to_px(self.constants.fraction_numerator_gap_min, size_px)
+            .max(thickness);
+        let den_gap = self
+            .constants
+            .to_px(self.constants.fraction_denominator_gap_min, size_px)
+            .max(thickness);
 
         let width = num_box.width.max(den_box.width);
         let mut out = MathBox::empty();
         // Numerator sits above the bar, denominator below it.
-        let num_baseline = axis + thickness / 2.0 + gap + num_box.descent;
-        let den_baseline = axis - thickness / 2.0 - gap - den_box.ascent;
+        let num_baseline = axis + thickness / 2.0 + num_gap + num_box.descent;
+        let den_baseline = axis - thickness / 2.0 - den_gap - den_box.ascent;
         out.absorb(&num_box, (width - num_box.width) / 2.0, num_baseline);
         out.absorb(&den_box, (width - den_box.width) / 2.0, den_baseline);
         out.items.push(MathItem::Rule {
@@ -428,7 +488,7 @@ impl<'a> MathLayout<'a> {
         out.ascent = out.ascent.max(axis + thickness / 2.0);
         out.descent = out.descent.max(-(axis - thickness / 2.0));
         out.width = width;
-        out
+        Ok(out)
     }
 }
 
@@ -455,6 +515,22 @@ mod tests {
     use super::*;
 
     use crate::math_parse::parse;
+
+    #[test]
+    fn tex_symbol_greek_forms_are_italicised_too() {
+        // F5's trap: correcting the seed map alone leaves these upright,
+        // because they sit outside the U+03B1..03C9 run.
+        assert_eq!(math_italic('\u{3F5}'), '\u{1D716}');
+        assert_eq!(math_italic('\u{3D5}'), '\u{1D719}');
+        let face = Face::parse(LATIN_MODERN_MATH, 0).expect("face");
+        for ch in ['\u{3F5}', '\u{3D5}'] {
+            assert!(
+                face.glyph_index(math_italic(ch)).is_some(),
+                "no glyph for the italic form of U+{:04X}",
+                ch as u32
+            );
+        }
+    }
 
     #[test]
     fn spacer_quantizes_up_to_whole_advances() {
@@ -496,7 +572,21 @@ mod tests {
 
     fn lay(src: &str, size: f32) -> MathBox {
         let node = parse(src).expect("parses");
-        engine().layout(&node, size)
+        engine().layout(&node, size).expect("lays out")
+    }
+
+    /// F3 — a codepoint the math font cannot draw REFUSES, so the caller can
+    /// fall back to source (Q#MS8) instead of drawing tofu at zero advance
+    /// on top of the next character.
+    #[test]
+    fn an_uncoverable_character_refuses_layout_instead_of_emitting_a_void() {
+        let node = parse("x日").expect("parses — coverage is layout's problem");
+        assert_eq!(
+            engine().layout(&node, 16.0),
+            Err(MathFontError::UncoverableGlyph('日'))
+        );
+        // The covered neighbour on its own still lays out.
+        assert!(engine().layout(&parse("x").unwrap(), 16.0).is_ok());
     }
 
     /// Framing acceptance 3, including its bite: the MATH constant must be
@@ -517,11 +607,11 @@ mod tests {
             .iter()
             .find_map(|i| match *i {
                 MathItem::Glyph {
-                    ch,
+                    ch: '2',
                     baseline,
                     size_px,
                     ..
-                } if ch == '2' => Some((baseline, size_px)),
+                } => Some((baseline, size_px)),
                 _ => None,
             })
             .expect("the 2 is emitted");
@@ -613,11 +703,11 @@ mod tests {
         // (JetBrains Mono at BASE_CODE_FONT_SIZE inside BASE_CODE_LINE_HEIGHT),
         // NOT where the math font's own metrics would.
         let code = Face::parse(crate::JETBRAINS_MONO, 0).expect("code face");
-        let code_upem = f32::from(code.units_per_em());
-        let baseline_from_top = f32::from(code.ascender()) * crate::BASE_CODE_FONT_SIZE / code_upem;
-        let margin = 1.0;
-        let asc_budget = baseline_from_top - margin;
-        let desc_budget = crate::BASE_CODE_LINE_HEIGHT - baseline_from_top - margin;
+        let (asc_budget, desc_budget) = line_box_budget(
+            &code,
+            crate::BASE_CODE_FONT_SIZE,
+            crate::BASE_CODE_LINE_HEIGHT,
+        );
         assert!(
             asc_budget > 0.0 && desc_budget > 0.0,
             "budget must be positive: {asc_budget} / {desc_budget}"

@@ -529,13 +529,20 @@ something reaches the screen runs on a real device through
     | expression | ascent | descent | scale |
     | --- | --- | --- | --- |
     | `x^2`, `\alpha x` | 13.27 | 0.18 | 1.000 |
-    | `\frac{a}{b}` | 11.57 | 6.40 | **0.732** |
-    | `\frac{x^2}{y}` | 15.91 | 5.75 | 0.814 |
-    | nesting depth 2 | — | — | 0.744 |
-    | nesting depth 3 | — | — | **0.580** |
+    | `\frac{a}{b}` | 10.57 | 5.40 | **0.867** |
+    | `\frac{x^2}{y}` | 14.91 | 4.75 | 0.986 |
+    | nesting depth 2 | — | — | 0.872 |
+    | nesting depth 4 | — | — | 0.613 |
+    | nesting depth 5 | — | — | **0.540** |
 
-    So **B6 holds** — the flagship fraction renders at 0.732 — and the
-    fallback case is **depth 3**, not the doubly-nested one rev 3 guessed.
+    So **B6 holds** — the flagship fraction renders at 0.867 — and the
+    fallback case is **depth 5**. Rev 3 guessed depth 2; the first
+    measurement said depth 3 while the fraction gap was still a hardcoded
+    `2 × thickness` guess; reading the MATH table's real
+    `FractionNumeratorGapMin` / `FractionDenominatorGapMin` (round-3 F4)
+    moved the flagship from 0.732 to 0.867 and the boundary to depth 5. The
+    round-2 hand-arithmetic estimate of ~0.85 was right all along; the 0.732
+    was inflated by the guessed gap.
     Round 2 predicted exactly this trap. Two things worth keeping: depth 2
     scores *higher* than depth 1 because the binding constraint flips from
     descent to ascent as nesting grows asymmetrically, so "deeper is always

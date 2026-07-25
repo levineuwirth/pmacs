@@ -60,7 +60,8 @@ const GREEK: &[(&str, char)] = &[
     ("beta", 'β'),
     ("gamma", 'γ'),
     ("delta", 'δ'),
-    ("epsilon", 'ε'),
+    // TeX's \epsilon is LUNATE (U+03F5); U+03B5 is \varepsilon.
+    ("epsilon", '\u{3F5}'),
     ("zeta", 'ζ'),
     ("eta", 'η'),
     ("theta", 'θ'),
@@ -75,7 +76,8 @@ const GREEK: &[(&str, char)] = &[
     ("sigma", 'σ'),
     ("tau", 'τ'),
     ("upsilon", 'υ'),
-    ("phi", 'φ'),
+    // TeX's \phi is U+03D5; U+03C6 is \varphi.
+    ("phi", '\u{3D5}'),
     ("chi", 'χ'),
     ("psi", 'ψ'),
     ("omega", 'ω'),
@@ -229,7 +231,19 @@ impl Parser {
     fn parse_scripts(&mut self, base: MathNode) -> Result<MathNode, MathParseError> {
         let mut sub: Option<Box<MathNode>> = None;
         let mut sup: Option<Box<MathNode>> = None;
-        while let Some(marker @ ('^' | '_')) = self.peek() {
+        loop {
+            // Whitespace is insignificant, here too: without this skip
+            // `x^2 _i` builds a nested Script instead of one merged double
+            // script (drawing the subscript displaced right by the
+            // superscript's width), and `x^2 ^3` parses where TeX errors.
+            let resume = self.pos;
+            while self.peek().is_some_and(char::is_whitespace) {
+                self.pos += 1;
+            }
+            let Some(marker @ ('^' | '_')) = self.peek() else {
+                self.pos = resume;
+                break;
+            };
             self.pos += 1;
             let slot = self.parse_script_operand()?;
             match marker {
@@ -256,9 +270,9 @@ impl Parser {
             self.pos += 1;
         }
         match self.peek() {
-            None => Err(MathParseError::MalformedScript("script with no operand")),
-            Some('^' | '_') => Err(MathParseError::MalformedScript("script with no operand")),
-            Some('}') => Err(MathParseError::MalformedScript("script with no operand")),
+            None | Some('^' | '_' | '}') => {
+                Err(MathParseError::MalformedScript("script with no operand"))
+            }
             Some(_) => self.parse_atom(),
         }
     }
@@ -438,6 +452,27 @@ mod tests {
         // A real inline span beside display math is still found.
         let mixed = detect_math_spans("$a$ then $$b$$");
         assert_eq!(mixed.len(), 1, "{mixed:?}");
+    }
+
+    #[test]
+    fn whitespace_before_a_script_marker_still_merges_the_scripts() {
+        // F2: without skipping whitespace in `parse_scripts`, `x^2 _i` built
+        // a NESTED script and drew the subscript displaced right.
+        assert_eq!(parse("x^2 _i"), parse("x^2_i"));
+        assert_eq!(parse("x _i ^2"), parse("x_i^2"));
+        // And a doubled script is still an error with space between.
+        assert!(matches!(
+            parse("x^2 ^3"),
+            Err(MathParseError::MalformedScript(_))
+        ));
+    }
+
+    #[test]
+    fn the_greek_seed_uses_tex_letter_forms() {
+        // F5: TeX's \epsilon is lunate and \phi is the symbol form; the
+        // U+03B5 / U+03C6 glyphs are \varepsilon / \varphi.
+        assert_eq!(parse(r"\epsilon"), Ok(group(vec![ch('\u{3F5}')])));
+        assert_eq!(parse(r"\phi"), Ok(group(vec![ch('\u{3D5}')])));
     }
 
     #[test]

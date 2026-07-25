@@ -7743,9 +7743,6 @@ struct ProjectedRun {
     source: ChunkSource,
 }
 
-/// Build the projected→source run map plus the projected text's line
-/// start table (cosmic-text reports hits as line + byte-within-line).
-
 #[cfg(test)]
 mod math_chunk_tests {
     use super::*;
@@ -7812,11 +7809,36 @@ mod math_chunk_tests {
         ];
         assert_eq!(source_to_projected(&chunks, 0), Some(0));
         assert_eq!(source_to_projected(&chunks, 2), Some(2));
-        // Interior source bytes collapse onto the left edge.
+        // Interior source bytes collapse onto the left edge. `end` (7) is
+        // EXCLUSIVE and therefore NOT interior — an earlier revision of this
+        // test asserted Some(2) for it and pinned the bug.
         assert_eq!(source_to_projected(&chunks, 4), Some(2));
-        assert_eq!(source_to_projected(&chunks, 7), Some(2));
-        // The first byte after the span lands past the reserved width.
+        assert_eq!(source_to_projected(&chunks, 6), Some(2));
+        assert_eq!(source_to_projected(&chunks, 7), Some(5), "end is exclusive");
         assert_eq!(source_to_projected(&chunks, 8), Some(6));
+    }
+
+    /// A box at the END of a line has no following chunk to catch the
+    /// trailing boundary, which is exactly where the interior-snap rule used
+    /// to send a click back to the span start.
+    #[test]
+    fn a_line_final_math_box_maps_its_trailing_boundary_after_the_span() {
+        let chunks = vec![
+            RichChunk {
+                text: "ab".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 0 },
+            },
+            spacer_chunk(2, 7, 3),
+        ];
+        let (runs, _) = build_hit_runs(&chunks);
+        assert_eq!(projected_to_source(&runs, 2), Some(2), "interior snaps");
+        assert_eq!(projected_to_source(&runs, 4), Some(2), "interior snaps");
+        assert_eq!(
+            projected_to_source(&runs, 5),
+            Some(7),
+            "the trailing boundary lands after the span, not on its start"
+        );
     }
 
     /// A math chunk carries generated spacer text, so tab expansion must
@@ -7834,6 +7856,8 @@ mod math_chunk_tests {
     }
 }
 
+/// Build the projected→source run map plus the projected text's line
+/// start table (cosmic-text reports hits as line + byte-within-line).
 fn build_hit_runs(chunks: &[RichChunk]) -> (Vec<ProjectedRun>, Vec<u64>) {
     let mut runs = Vec::with_capacity(chunks.len());
     let mut line_starts = vec![0u64];
@@ -7872,9 +7896,11 @@ fn projected_to_source(runs: &[ProjectedRun], projected: u64) -> Option<u64> {
         ChunkSource::Source { start } => Some(start + within),
         ChunkSource::SourceTab { start } => Some(start + u64::from(within > 0)),
         ChunkSource::Adornment { anchor } => Some(anchor),
-        // Q#MS4: the box has no interior byte map, so every boundary inside
-        // it snaps to the span start rather than inventing a sub-position.
-        ChunkSource::MathBox { start, .. } => Some(start),
+        // Q#MS4: interior boundaries snap to the span start, since the box
+        // has no interior byte map. The TRAILING boundary is not interior —
+        // it maps after the span, matching `SourceTab`'s rule and keeping a
+        // click past a line-final box off the span start.
+        ChunkSource::MathBox { start, end } => Some(if within >= run.len { end } else { start }),
     }
 }
 
@@ -7910,14 +7936,16 @@ fn source_to_projected(chunks: &[RichChunk], source: u64) -> Option<u64> {
                 }
             }
             ChunkSource::MathBox { start, end } => {
-                // Anywhere within the suppressed range maps to the box's
-                // left edge; past it, the box's full reserved width applies.
-                if source <= start {
+                // `end` is EXCLUSIVE: it is the first byte AFTER the span, so
+                // it must NOT claim the box's left edge. Letting it fall
+                // through gives it the position past the reserved width —
+                // which also keeps caret geometry continuous and stops a
+                // search match starting at `end` from washing a box it does
+                // not intersect (Q#MS11).
+                if source < end {
                     return Some(projected);
                 }
-                if source <= end {
-                    return Some(projected);
-                }
+                let _ = start;
             }
         }
         projected += len;
