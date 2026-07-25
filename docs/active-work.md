@@ -389,28 +389,42 @@ If it does not, stop and repair the remote/fetch configuration.
   **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
   `git diff --check` clean. Gates were run against the committed tree.
 
-## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 (GPU band) is next
+## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 IN FRAMING
 
-Stage 1 is on `main`; nothing in this arc is in flight. Stage 2 has **no
-branch and no framing yet** — the approved parent framing
-`docs/bottom-panel-framing.md` (rev 4) is what it re-scouts against.
+Stage 1 is on `main`. **Stage 2 is in framing**, no implementation in
+flight.
 
 - Stage 1 merged as **#155** (`main` @ `e745068`, 2026-07-24, after two
   review rounds). No protocol change. Durable substrate facts live in
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
+- Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
+  2026-07-25).
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 2**,
+  on branch `githubsucks/bottom-panel-stage2-framing`, worktree
+  `../pmacs-bp-stage2`, based on `githubsucks/main` @ `d152120`. Round 1
+  closed 2 blocking + 3 high findings; awaiting round 2. The approved
+  parent framing `docs/bottom-panel-framing.md` (rev 4) remains
+  authoritative, **including its acceptance criteria 37–55**.
 - Retained, carrying nothing unmerged: branch `bottom-panel` and worktree
   `../pmacs-bottom-panel`.
-- **Stage 2 obligations, already named by the framing** — the starting
-  point for its own framing doc: `InstanceMessage::PanelFrame` plus
-  `FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`
-  at the next available protocol version, gated in both directions and
-  each extended enum byte-pinned on its own previous final variant;
-  extracting `paint_frame`'s per-window body *together with* the
-  active-window auto-scroll preparation; routing every consumer in the
-  framing's §1.3 census of 23 transitive active-context reads through
-  `primary_document_window`; the focus-chrome surface matrix (Q#BP14b);
-  and Q#BP17's fold-projection parameter plus the stale invariant comment
-  at `src/window.rs`. Stage 3 is the adopter default flip.
+- **Stage 2 ships as two serial slices**, 2A landing before 2B branches:
+  **2A** = classified §1.3 census routing + `paint_frame` per-window
+  painter extraction (with the active-window auto-scroll preparation), no
+  protocol change; **2B** = protocol **v21**
+  (`InstanceMessage::PanelFrame` plus
+  `FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`,
+  gated both directions, each extended enum byte-pinned on its own
+  previous final variant), daemon panel projection, the GPU band, and the
+  negotiated `panel_capable` flip. Stage 3 is the adopter default flip.
+- **Correction — this entry previously mis-stated the census contract.**
+  It is **not** "route every consumer through `primary_document_window`".
+  Q#BP14 classifies the 23 reads into four classes and routes only the
+  **Projection** class that way; focus/input (#13–#15, #23), focus chrome
+  and surface-routed (#16–#19), and focus/session (#20) keep their own
+  authorities. Rerouting them would break remote-op validation and
+  application, `DispatchIdle`, presence, focused search/menu/completion
+  routing, and terminal bell ownership. The Stage 2 framing carries the
+  full table.
 - **Folding Stage 3 and this arc's Stage 2 both touch the semantic
   projection.** Whichever is framed second re-scouts the other's landed
   state.

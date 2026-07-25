@@ -1,326 +1,485 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
-**Revision 1 — pre-implementation. Ground truth: canonical `main` @
-`5aa9044`, protocol v20, 2026-07-25.**
+**Revision 2 — pre-implementation. Ground truth: canonical `main` @
+`d152120`, protocol v20, 2026-07-25.**
 
 Stage 1 (#155, merge `e745068`) gave pmacs window placement, window
 parameters, TUI side windows, the divider, and the adopter `display`
 opt-in. It deliberately set `FrontendView::panel_capable = false` for
 every semantic session, so a GPU frontend silently falls back to the
-non-side target. **Stage 2 flips that bit and earns the right to.**
+non-side target. **Stage 2 flips that bit, under an exact negotiated
+rule, and earns the right to.**
 
 This document is the re-framing `docs/bottom-panel-framing.md` (rev 4)
 §2 requires before Stage 2 is implemented. It does **not** restate the
-parent's decisions. It records what the re-scout against current `main`
-found: which anchors moved, which parent claims survived, which did
-not, and the four questions the parent framing cannot answer without a
-decision from the user.
+parent's decisions or replace its acceptance criteria. It records the
+re-scout against current `main`, closes the four scout obligations
+review round 1 required, and fixes what round 1 found wrong.
 
-Read the parent framing's Q#BP8, Q#BP9, Q#BP14b, Q#BP15, Q#BP15a,
-Q#BP16, and Q#BP17 alongside this. Those decisions stand except where
-§4 below revises them.
+**Inherited reading, all of which remains authoritative:** parent
+Q#BP8 (the band), Q#BP9 (protocol), **Q#BP14 (the primary-document
+projection contract and its census classification)**, **Q#BP14a (panel
+input gating is per-window)**, Q#BP14b (focus chrome and per-window
+overlay routing), Q#BP15 (`PanelFrame` lifecycle), Q#BP15a (three
+geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
+**parent acceptance criteria 37–55**.
 
-## 0. Why the re-scout was required
+## 0. Revision history
 
-The parent framing's Stage 2 sections were written against `main` @
-`0dd16a5` and last re-scouted at `47581f4`. Since then eleven PRs have
-merged: #149/#150 (folding Stage 2), #152–#155 (through bottom-panel
-Stage 1), #158–#166 (inline math, minimap, Lean 4 Stages 1–2,
-COHERENCE.md, find-file, the dired framing and Stage 1, the GPU
-terminal input fix). Every source anchor Stage 2 depends on has moved.
+### 0.1 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
 
-Two things did **not** change, and both are load-bearing:
-
-- **Protocol is still v20.** `PROTOCOL_VERSION` is `20`
-  (`pmacs-protocol/src/message.rs:1568`); no intervening PR bumped it.
-  Q#BP9's conditional resolves: **Stage 2 is v21**.
-- **Both byte pins are still the final variants.**
-  `InstanceMessage::InitialTargetResult` is last in its enum
-  (`message.rs:577` within the enum at `:569`), and
-  `FrontendEvent::TerminalPointer` is last in its own. Q#BP9's
-  append-plus-pin instruction applies verbatim, with no re-derivation.
+- **R1-1 (blocker).** Rev 1 said all 23 census reads route through
+  `primary_document_window`. That contradicts Q#BP14, which routes only
+  the **Projection** class (#1–#12, #21–#22) that way and leaves focus,
+  input, chrome, and bell consumers on their own authorities. Rev 1's
+  rule would have broken remote-op validation, `DispatchIdle`,
+  presence, focused search/menu/completion routing, and bell ownership.
+  §3.2 now restores all four classes; §7's criterion pins them
+  separately. The inherited-reading list above gains Q#BP14 and Q#BP14a.
+- **R1-2 (blocker).** Rev 1 treated the three `src/statusline.rs`
+  active reads as one disposition. Only `:644` selects the wrong
+  window; `:629` and `:675` must keep tracking **actual focus**. §3.3
+  is rewritten and the criterion states the required behavior instead
+  of routing focus away.
+- **R1-3 (high).** The `panel_capable` flip needed an exact attach
+  rule, not "for semantic sessions". §3.5 states it: **v21-or-later
+  negotiated authenticated semantic session only**.
+- **R1-4 (high).** Option 1 accepted, but the epoch needed a state
+  machine, split APIs, and a fail-closed allocator. §3.1 now carries
+  the transition table and the API split. Rev 1's phrasing "rejects a
+  lower-or-equal epoch carrying different data" was itself wrong — a
+  lower epoch carrying *identical* data is still stale.
+- **R1-5 (high).** Rev 1's eleven draft criteria silently omitted
+  parent 37–55. §7 now declares the parent list authoritative, maps it
+  to 2A/2B, and adds only refinements. The painter-extraction criterion
+  pins cursor, `view_top`, and passive-window state, not just cells.
+- **R1-6.** All four scout obligations are closed in §5.
+- **R1-7.** The coherence statement understated journey impact and
+  overclaimed on background work. §6 names journey steps 7–10 and
+  narrows the §9 claim.
+- **R1-8.** Factual corrections in §1 and §3.2.
 
 ## 1. Anchor re-scout
 
-Every line reference Stage 2 inherits, re-verified. "Claim" is the
-parent framing's assertion about that site; "verdict" is what the code
-at `5aa9044` actually says.
+| Parent anchor | Now at | Verdict |
+| --- | --- | --- |
+| `paint_frame` returns cursor separately (`editor.rs:2833`) | `src/editor.rs:3171` | Holds |
+| Cursor-visible prep (`editor.rs:2883-2935`) | `src/editor.rs:3249+` | Holds; Stage 1 inserted work above it (§2) |
+| Per-window paint body (`editor.rs:2937-3040`) | after `src/editor.rs:3260` | Holds |
+| `fold_map_for_window` gates on the **active** frontend (`editor_core.rs:566`) | `src/editor_core.rs:734`, gate at `:738` | Holds |
+| Stale "semantic session never enters `paint_frame`" (`window.rs:339`) | `src/window.rs:562` | Holds, still stale; now embedded in a longer `fold_projection` doc block, so the edit is a paragraph rewrite |
+| `Mouse` is contractually the grid path (`daemon.rs:3122-3130`) | `src/daemon.rs:3123` | Holds |
+| Permanent `24×80` placeholder (`attach.rs:420-429`, `:573-577`) | `pmacs-gpu/src/attach.rs:577`, single site | Holds |
+| Byte pin `InstanceMessage::InitialTargetResult` | `pmacs-protocol/src/message.rs:1145` | Holds — still the enum's final variant |
+| Byte pin `FrontendEvent::TerminalPointer` | final variant of its enum | Holds |
 
-| Parent anchor | Now at | Claim | Verdict |
-| --- | --- | --- | --- |
-| `src/editor.rs:2833` `paint_frame` returns cursor separately | `src/editor.rs:3171` | cells alone lose the caret | **Holds.** Signature still returns `Option<CellCoord>` |
-| `src/editor.rs:2883-2935` cursor-visible prep | `src/editor.rs:3249+` | extract with the per-window body | **Holds**, but see §3.1 — Stage 1 inserted work *above* it |
-| `src/editor.rs:2937-3040` per-window paint body | after `:3260` | origin-agnostic `Viewport<'a>`, extractable | **Holds** |
-| `src/editor_core.rs:566` `fold_map_for_window` | `src/editor_core.rs:734` | gates on the **active** frontend | **Holds** — `:738` is `if !self.fold_projection_active()` |
-| `src/window.rs:339` stale invariant comment | `src/window.rs:562` | "a semantic session never enters `paint_frame`" | **Holds, still stale.** Updating it remains a Stage 2 obligation |
-| `src/statusline.rs:634` indirect `view.active` read | `src/statusline.rs:629`, `:644`, `:675` | one read to close | **Revised: three sites**, not one |
-| `src/daemon.rs:3122-3130` grid-only `Mouse` | `src/daemon.rs:3123` | `Mouse` is contractually the grid path | **Holds** |
-| `pmacs-gpu/src/attach.rs:420-429`, `:573-577` | `pmacs-gpu/src/attach.rs:577` | permanent `24×80` placeholder | **Holds**, single site now |
+**Protocol is still v20** (`pmacs-protocol/src/message.rs:1568`); no
+intervening PR bumped it. Q#BP9's conditional resolves: **Stage 2 is
+v21**, no reservation was taken and none was needed.
 
-Nothing in the parent's mechanical model was falsified by the
-re-scout. The decisions in §4 come from what Stage 1 *added*, not from
-anything Stage 2 got wrong.
+Fifteen PRs merged between the parent's last re-scout (`47581f4`) and
+this one: #149, #150, #152–#155, #158–#166. Nothing in the parent's
+mechanical model was falsified by any of them.
 
 ## 2. What Stage 1 already built for Stage 2
 
-More than the parent framing anticipated, which shrinks Stage 2 and
-changes one of its wire contracts.
+- `DeclaredFrameGeometry { geometry_epoch: u64, total: CellSize }`
+  (`src/window.rs:522-528`), held as
+  `FrontendView::frame_geometry: Option<_>` (`:589`) where `None` means
+  **unknown** — Q#BP15a's "unknown is first-class", already landed.
+- `EditorState::sync_frame_geometry` (`src/editor.rs:877-882`) →
+  `declare_frame_geometry` + `reconcile_panel_layout`, driven from two
+  daemon sites gated on `panel_capable_for` (`src/daemon.rs:1882-1883`
+  attach, `:1972-1973` resize).
+- `paint_frame` declares geometry itself (`src/editor.rs:3187`), before
+  the statusline fan-out and before the long mutable core borrow.
+- `StatuslineEvaluationTarget` (`src/statusline.rs:212-226`) is already
+  a two-variant enum, so Q#BP8's fan-out generalization is an added
+  variant, not a refactor.
+- `primary_document_window` (`src/editor_core.rs:2830`) and
+  `primary_document_buffer` (`:2845`).
 
-- **`DeclaredFrameGeometry { geometry_epoch: u64, total: CellSize }`
-  exists** (`src/window.rs:522-528`), stored as
-  `FrontendView::frame_geometry: Option<_>` (`:589`) with `None`
-  meaning **unknown** — exactly Q#BP15a's "unknown is first-class".
-- **The declaration path exists.**
-  `EditorState::sync_frame_geometry` (`src/editor.rs:877-882`) calls
-  `EditorCore::declare_frame_geometry` then `reconcile_panel_layout`.
-  Two daemon sites already drive it, both gated on
-  `panel_capable_for` (`src/daemon.rs:1882-1883` at attach,
-  `:1972-1973` on resize).
-- **`paint_frame` itself declares geometry** (`src/editor.rs:3187`),
-  before the statusline fan-out and before the long mutable core
-  borrow, with a comment naming Q#BP2b/Q#BP15a.
-- **`StatuslineEvaluationTarget`** (`src/statusline.rs:212-226`) is
-  already a two-variant enum — `Grid { frontend_id }` and `Semantic {
-  frontend_id, declared_buffer }`. Q#BP8's "generalize the fan-out"
-  is an added variant, not a refactor of a concrete type.
-- **`primary_document_window`** exists (`src/editor_core.rs:2830`).
+## 3. Findings and decisions
 
-## 3. What the re-scout found
+### 3.1 Q#BP2S1 — epoch ownership, resolved: frontend-owned, with an exact state machine
 
-### 3.1 The geometry epoch is allocated daemon-side; the wire contract says frontend-side
+**Decision: option 1.** The epoch is owned by the frontend for
+negotiated semantic-panel sessions. The deciding argument is one rev 1
+missed: **a font or scale transaction can require invalidating an old
+`PanelFrame` even when the derived `CellSize` is identical.** Daemon
+value dedup cannot detect that case, because the cell totals it
+compares are unchanged while the pixels behind them are not.
 
-This is the one genuine conflict between landed Stage 1 and framed
-Stage 2, and it needs a decision before implementation.
+The landed allocator conflicts in three ways
+(`src/editor_core.rs:3155-3172`): it allocates the id itself, it
+early-returns when `total` is unchanged (value dedup), and it uses
+`saturating_add`, which is neither wrapping nor fail-closed — it pins
+at `u64::MAX`, after which two different geometries share one id.
 
-`declare_frame_geometry` (`src/editor_core.rs:3155-3172`) **allocates
-the epoch itself**:
+**Acceptance rules for a semantic declaration:**
 
-```rust
-let next = view
-    .frame_geometry
-    .map_or(1, |geometry| geometry.geometry_epoch.saturating_add(1));
-```
+| Incoming declaration | Result |
+| --- | --- |
+| epoch **greater** than stored | Accept, store **verbatim**, even if `total` is unchanged |
+| same epoch, same `total` | Idempotent no-op |
+| same epoch, **different** `total` | Reject |
+| **lower** epoch, any `total` | Reject |
 
-Q#BP15a specifies the opposite: `FrontendEvent::FrontendCellGeometry {
-frontend_id, geometry_epoch, total }` carries a **frontend-owned**
-declaration id, and `PanelResizeRows` / `PanelPointer` / every
-`Present` echo it. Under the landed code the daemon would have to
-either ignore the wire epoch (breaking the echo contract the GPU
-validates against) or overwrite its own allocator for panel-capable
-semantic frontends only (two allocation regimes for one field).
+The last row is deliberate and corrects rev 1: a lower epoch carrying
+identical data is still stale and must not be accepted.
 
-Two further details of the landed allocator matter:
+**API split.** Two methods, not one method with an optional epoch:
 
-- **It dedups on value.** The function returns early when `total` is
-  unchanged, so the epoch advances only on an actual size change. For
-  a grid frontend that is correct — cells are the unit, and an
-  unchanged grid means an old `PanelFrame` is still valid under the new
-  metrics. For a frontend that *owns* its epoch, the daemon cannot
-  dedup by value without discarding a declaration the frontend already
-  considers current.
-- **`saturating_add` is neither wrapping nor fail-closed.** Q#BP15a
-  requires exhaustion to "fail closed rather than wrap". Saturation
-  pins the epoch at `u64::MAX`, after which two different geometries
-  share one id — the exact staleness confusion the epoch exists to
-  prevent. Unreachable in practice; wrong as a contract, and free to
-  fix.
+- `declare_frame_geometry(fid, total)` — the **grid/LOCAL** allocator.
+  Keeps value dedup (correct there: cells are the unit, and an
+  unchanged grid means an old frame is still valid under unchanged
+  metrics). Changes from `saturating_add` to **checked** allocation
+  with an explicit fail-closed exhaustion arm.
+- `accept_frame_geometry(fid, geometry_epoch, total) -> bool` — the
+  **semantic** path. No value dedup; applies the table above verbatim;
+  returns whether the declaration was accepted so the caller can drop
+  a stale event before any reconciliation.
 
-**Q#BP2S1 (new, needs a decision).** Three candidate resolutions:
+An ambiguous single method with an `Option<u64>` epoch is rejected
+explicitly: it would let a future caller silently take the wrong regime.
 
-1. **Frontend-owned, as framed.** `FrontendCellGeometry` carries the
-   epoch; the daemon stores it verbatim for semantic panel-capable
-   frontends and rejects a lower-or-equal epoch carrying different
-   data. Grid/LOCAL keep the local allocator, which never collides
-   because those frontends never send the event. Cost: one field, two
-   provenances, documented.
-2. **Daemon-owned, GPU echoes.** `FrontendCellGeometry` carries only
-   `total`; the daemon allocates and the GPU learns its current epoch
-   from the next `PanelFrame`. Simpler invariant, but it reintroduces a
-   first-open ordering problem — the GPU must send `PanelResizeRows`
-   and `PanelPointer` carrying an epoch it has not been told yet, so
-   the first gesture after a resize is unvalidatable and must be
-   dropped.
-3. **Frontend-owned everywhere.** Grid/LOCAL synthesize an epoch at
-   their existing declaration sites and the allocator moves out of
-   `EditorCore` entirely. Most uniform; largest Stage 1 churn, and it
-   touches code #155 just stabilized.
+**Initial epoch and exhaustion.** The frontend's first declaration
+after attach acceptance carries epoch `1`; `0` is reserved as "never
+declared" and is rejected on the wire. Frontend-side allocation is
+checked; on exhaustion the frontend stops declaring and **hides its
+panel** rather than reusing or wrapping an id — it sends no further
+geometry, so the daemon's last accepted declaration stands and no new
+`Present` can claim a fresh identity. Daemon-side exhaustion on the
+grid path fails closed the same way: no new declaration, panel stays
+at its last valid geometry or hides under Q#BP2b.
 
-**Recommendation: option 1.** It preserves the parent framing's
-validation chain intact, and the "two provenances" cost is one doc
-comment on a field that already carries three.
+### 3.2 The census is classified, and it is mostly unrouted
 
-### 3.2 The §1.3 census is essentially unrouted
+**Correction to rev 1.** Q#BP14 routes only the **Projection** class
+through `primary_document_window`. Rev 1's "all 23 reads" was wrong and
+would have broken five subsystems. The four classes, restored:
 
-The parent framing's §1.3 lists 23 transitive active-context reads that
-must route through `primary_document_window` before a panel can hold
-focus without corrupting the document mirror. Stage 1 created the seam
-but routed almost nothing through it: `primary_document_window` has
-**three** references in `src/`, one of which is its own definition and
-one a doc-comment link. The single production caller is
-`src/daemon.rs:1639`.
+| Class | Census items | Authority |
+| --- | --- | --- |
+| **Projection** | #1–#7, #9, #10, #12, #21, #22 | `primary_document_window` / `primary_document_buffer` |
+| **Projection + focus** | #8 (document `Pointer`), #11 (full-window `TerminalPointer`) | Align the primary document window **and then activate it** — the one place the two legitimately move together |
+| **Focus / input** | #13 (remote-op validation), #14 (`dispatch_idle_for`), #15 (presence), #23 (remote-op application) | The frontend's **actually focused** window. Q#BP14a: gating is per-window, never per-buffer |
+| **Focus chrome / surface-routed** | #16–#19 (search, menu, minibuffer, completion) | Q#BP14b's routing table — the currently owned surface, with authoritative clears for the other |
+| **Focus / session** | #20 (terminal bell drain) | Per-session counter; the **focused** window chooses which session may drain |
 
-For scale, `src/*.rs` still contains ~80 non-test direct `.active`
-reads (excluding `active_frontend`, setters, and predicates), on top of
-the `active_window*` / `active_buffer*` helper family at
-`src/editor_core.rs:663-967`.
+Rerouting any of the last three classes to the document is a defect,
+not a simplification: it would break remote-op validation and
+application, `DispatchIdle`, presence, focused search/menu/completion
+routing, and bell ownership.
 
-This is not a defect in Stage 1 — with `panel_capable = false` for
-every semantic session, no semantic frontend can hold a side window, so
-the unrouted reads are unreachable from the GPU. It does mean **the
-census is the bulk of Stage 2's work**, not a tidy-up at the end, and
-the stage plan in §5 sequences it first.
+**How much is already routed.** `primary_document_window` has **four**
+references in `src/` and **two production paths**: directly at
+`src/daemon.rs:1639` (#148's initial-target bootstrap, Q#BP11b), and
+through `primary_document_buffer` at `src/daemon.rs:2998`, which is
+census **#22** and carries a comment naming it. So one census item is
+routed and the Projection class is otherwise open. For scale, `src/*.rs`
+still holds ~80 non-test direct `.active` reads on top of the
+`active_window*` / `active_buffer*` helper family
+(`src/editor_core.rs:663-967`).
 
-### 3.3 The statusline read is three sites, not one
+This is not a Stage 1 defect — with `panel_capable = false` no semantic
+frontend can hold a side window, so the unrouted Projection reads are
+unreachable from the GPU. It does mean **classified census routing is
+the bulk of Stage 2**, which is why it is Stage 2A.
 
-Q#BP8 says closing the indirect `view.active` read at
-`src/statusline.rs:634` falls out of the target generalization. There
-are three: `:629` and `:675` compute `active: window_id ==
-view.active`, and `:644` does `.get(&view.active)`. They are the same
-concern, but a fix that closes one and leaves two is a live risk, and
-the acceptance criterion should name all three.
+### 3.3 The three statusline reads have two dispositions, not one
 
-### 3.4 Scout obligations still open
+All three sites are real, but only one is wrong:
 
-Stated plainly rather than papered over. These were not re-verified in
-this pass and must be before the doc leaves revision 1:
+- `src/statusline.rs:644` — `.get(&view.active)` **selects the wrong
+  window** when a panel is focused. This is the Projection read (#12).
+- `src/statusline.rs:629` and `:675` — `active: window_id ==
+  view.active` **must continue tracking actual focus**. Three reasons:
+  grid contexts need a truthful `active`; post-callback revalidation
+  must notice a focus change; and parent acceptance 42 explicitly
+  requires that a document provider may observe `active = false` while
+  the panel is focused.
 
-- `pmacs-protocol/src/terminal.rs`'s validator internals, which Q#BP15
-  asks to factor into a shared parameterized wire-cell-grid validator
-  (the `MAX_TERMINAL_ROWS/COLS = 512` split).
-- `pmacs-gpu/src/attach.rs`'s bounded outbox policy and its existing
-  tail-coalescing classes, which Q#BP15a asks to extend with two new
-  classes and Q#BP16 with two more.
-- The GPU-side band renderer and where it clips against the status
-  band — Q#BP15a's pixel formula is stated but its inputs
-  (`status_band_height_px`, `TEXT_TOP_px`, `code_line_height_px`,
-  `resolved_monospace_advance_px`) were not located in this pass.
-- Whether folding Stage 3 lands first. Both stages touch the semantic
-  projection, and the ledger's standing rule is that whichever is
-  framed second re-scouts the other's landed state.
+**The new semantic-layout target** therefore captures the **primary
+document window plus the visible side window**, marks each context
+`active` iff its `window_id == view.active`, invokes each provider
+**exactly once**, and **invalidates the entire evaluation** if a
+callback mutates layout or focus. Unprojected document splits run no
+callbacks (Q#BP8). Route the primary-document result to semantic
+`StatuslineSegments` and the side result to the panel mode line.
+
+### 3.4 Fold projection
+
+Unchanged from Q#BP17, with the anchor corrected: the extracted painter
+takes the map as a **parameter**; the panel path passes `None` when the
+owning frontend's `fold_projection` is false and must never call
+`fold_map_for_window`, which gates on the **active** frontend
+(`src/editor_core.rs:734`, gate at `:738`) — right for command-time
+reckoning, wrong for painting another frontend's panel. The stale
+comment is at `src/window.rs:562`.
+
+### 3.5 The `panel_capable` flip needs a negotiated rule
+
+Not "true for semantic sessions". Exactly:
+
+> `panel_capable = true` **only** for an authenticated semantic session
+> that negotiated **v21 or later**.
+
+A v6–v20 semantic frontend stays non-panel-capable and takes the
+existing Stage 1 fallback: the non-side target with **every
+side-specific parameter discarded**, leaving the document window
+undedicated (Q#BP2c). "It receives no new events" is insufficient — if
+the daemon nevertheless places that frontend's window in a side panel
+it cannot render, the window becomes invisible. The gate is on
+placement, not only on transport. Parent acceptance 51 pins the mixed
+session.
 
 ## 4. Revisions to the parent framing
 
-Only these. Everything else in Q#BP8/9/14b/15/15a/16/17 stands.
+Only these; everything else stands.
 
-- **Q#BP9 resolves to v21.** No reservation was taken; none was needed.
-- **Q#BP15a's epoch ownership is reopened as Q#BP2S1** (§3.1).
-- **Q#BP8's statusline criterion names three sites** (§3.3).
-- **Q#BP17's stale comment is at `src/window.rs:562`**, and its text is
-  now embedded in a longer `fold_projection` doc block that also
-  explains the Stage 2/Stage 3 split — the edit is a paragraph rewrite,
-  not a one-line correction.
+- **Q#BP9 resolves to v21.**
+- **Q#BP15a's epoch ownership is specified** by §3.1's table and API
+  split, replacing the parent's one-line "frontend-owned" statement.
+- **Q#BP8's statusline criterion splits** per §3.3: one read reroutes,
+  two keep tracking focus.
+- **Q#BP17's stale comment is at `src/window.rs:562`**, and parent
+  acceptance 52's reference to `:339` should be read against that.
 
-## 5. What ships, in order
+## 5. The four scout obligations, closed
 
-Sequenced so each step is independently gateable and the census — the
-riskiest part — lands before anything depends on it.
+### 5.1 The shared cell-grid validator boundary
 
-1. **Route the census.** Every §1.3 read through
-   `primary_document_window`, with `panel_capable` still `false`. No
-   wire change, no behavior change for any existing frontend; pure
-   seam adoption, falsifiable by revert.
-2. **Extract the per-window painter.** Lift `paint_frame`'s per-window
-   body plus the active-window cursor-visible preparation into a
-   function taking the fold map as a **parameter** (Q#BP17), leaving
-   `sync_frame_geometry` and the statusline fan-out where Stage 1 put
-   them. Grid rendering must be byte-identical.
-3. **Protocol v21.** Append `InstanceMessage::PanelFrame` and
-   `FrontendEvent::{FrontendCellGeometry, PanelResizeRows,
-   PanelPointer}`, each with a byte pin on the current final variant.
-   Factor the shared cell-grid validator. Gated both directions.
-4. **Daemon-side panel projection.** `PanelFrame` production,
-   presentation epochs, `Absent` authority, the third statusline
-   target, the focus-chrome pass (Q#BP14b).
-5. **GPU band.** Geometry declaration, band paint, divider chrome,
-   document clip, pointer transport, and the `panel_capable = true`
-   flip for semantic sessions — the flip is last, and it is what makes
-   the whole stage observable.
+`TerminalFrame::validate` (`pmacs-protocol/src/terminal.rs:226`)
+currently interleaves both concerns. The exact split:
 
-Steps 1 and 2 are reviewable without any protocol change and could ship
-as a separate PR if the user prefers a smaller first review. **That is
-one of the questions in §8.**
+- **Factored into the shared parameterized wire-cell-grid validator:**
+  checked area (the `checked_mul` + `usize::try_from` guard), the
+  `MAX_TERMINAL_VISIBLE_CELLS = 262,144` aggregate cap, cell-count
+  equality against declared area, cursor-in-bounds, and
+  `validate_cells`'s glyph width / continuation topology and aggregate
+  glyph-byte checks.
+- **Stays terminal-only:** the `MAX_TERMINAL_ROWS/COLS = 512` per-axis
+  caps in `checked_area`, `validate_metadata` for title/signal/crash
+  text, `validate_selection`, and the `at_bottom == (scroll_offset ==
+  0)` coupling.
+
+`PanelFrame` takes the shared half plus its own presence/epoch rules
+and does **not** inherit the 512 per-axis cap (Bet B5'), so a 4K
+small-font panel wider than 512 columns is legal while the shared area
+budget still binds. Parent acceptance 39 pins exactly this.
+
+### 5.2 The GPU outbox needs four more tags
+
+`coalesce_kind` (`pmacs-gpu/src/attach.rs:331`) today returns four
+tail-only tags: `Viewport` → 0, `Pointer{Drag}` → 1,
+`TerminalPointer{Move}` → 2, `TerminalPointer{Drag}` → 3. Everything
+else is `None` = lossless, counting against `OUTBOX_MAX = 8192`.
+
+Stage 2 adds **four distinct tags**: `FrontendCellGeometry` → 4,
+`PanelResizeRows` → 5, `PanelPointer{Move}` → 6, `PanelPointer{Drag}`
+→ 7. Geometry is latest-wins (epochs need only increase, not be
+consecutive); resize drag is latest-wins over the complete event
+including its epochs. `PanelPointer` `Down`/`Up`/wheel/context stay
+lossless and ordered — repeated left `Down`s are what the daemon click
+state reads as a multi-click, and `Down(Right)` is the context-menu
+gesture. Tail-only replacement preserves ordering across an
+intervening event of any other class.
+
+### 5.3 The pixel formula's inputs — and one trap
+
+The formula in Q#BP15a is contract-level, not an implementation
+detail, because its inputs are not all safe to adopt:
+
+| Input | Source | Note |
+| --- | --- | --- |
+| `status_band_height_px` | `FontMetrics::status_band_height` (`pmacs-gpu/src/main.rs:137`) = `BASE_STATUS_BAND_HEIGHT * scale` | Safe |
+| `TEXT_TOP_px` | `const TEXT_TOP: f32 = 16.0` (`main.rs:352`) | Safe; unscaled today |
+| `code_line_height_px` | `FontMetrics::code_line_height` (`main.rs:131`) = `BASE_CODE_LINE_HEIGHT * scale` | Safe |
+| `resolved_monospace_advance_px` | `State::mono_advance` (`main.rs:4899`) | **Unsafe to adopt blindly** |
+| `divider_height_px` | `BASE_DIVIDER_HEIGHT` | **Does not exist yet** |
+
+**The `mono_advance` trap.** `State::mono_advance` returns
+`measured_mono_advance` when a `FontFacts` probe has been applied, but
+otherwise falls back to **the first shaped glyph of the document
+buffer** (`main.rs:4903+`). Panel column count would therefore become
+**document-dependent**: two GPU frontends showing different files could
+derive different `total.cols` from identical metrics, and the same
+frontend's panel width could change when the document's first glyph
+changes.
+
+**Decision.** The panel geometry declaration uses a **stable normal-face
+probe**, never the document sample. `probe_mono_advance(font_system,
+family, metrics)` (`main.rs:323`) already exists and is exactly this: it
+shapes `ADVANCE_PROBE` in a scratch buffer, independent of document
+contents, dividing total run width by logical cells so ligature
+substitution survives. The declaration resolves its advance from that
+probe for the current family/metrics. If the probe returns `None` (the
+family shapes no width), the frontend declares **zero usable geometry**
+under a new epoch — the panel hides — rather than falling back to a
+document sample.
+
+**`BASE_DIVIDER_HEIGHT` must be decided before implementation**, because
+the document-bottom seam it defines is depended on by caret placement,
+hit testing, the minimap, terminal geometry, clipping, and edge
+scrolling. Two sub-decisions:
+
+- **Value and scaling.** It joins the `BASE_*` family and scales as
+  `BASE_DIVIDER_HEIGHT * scale`, matching `status_band_height` — a
+  divider that does not scale with the font would misalign at non-1.0
+  scale. The concrete base value is an open item for review round 2.
+- **One seam, not several.** Today the document bottom is computed
+  from `status_band_height` at several sites
+  (`main.rs:3175`, `:3185`, `:6601`, `:6607`, `:8491`, and the
+  status-band rect at `:5910`). Stage 2 must introduce **one**
+  document-bottom accessor that subtracts status band **plus** the
+  installed band and divider, and route every one of those sites
+  through it. A second, unrouted seam is the exact shape of Stage 1's
+  `Layout::compute` two-caller defect, where `src/overlay_paint.rs`
+  derived its own rect and painted peer cursors at unfixed rows.
+
+Note the asymmetry Q#BP15a already requires: `divider_height_px` is
+subtracted **for sizing purposes even while the panel is absent**, to
+break the first-open cycle, while the document renderer does not
+actually lose those pixels until a `Present` panel is painted.
+
+### 5.4 Ordering against folding Stage 3
+
+Settled by review round 1: **bottom-panel Stage 2 first, through the
+landed GPU band.** Folding Stage 3 then re-scouts the extracted
+painter, the panel projection, clipping, and `fold_projection` behavior
+exactly once.
 
 ## 6. Coherence impact (per `COHERENCE.md` §20)
 
-- **Journey steps touched:** none directly. Stage 2 does not add a
-  journey step; it removes a frontend-dependent *hole* in one. Today a
-  user who runs `pmacs --gpu` and triggers compile, grep, references,
-  or a terminal gets the non-side fallback — the panel silently becomes
-  a stolen window. Every journey step that ends in an output surface
+- **Journey steps touched: four, on the GPU frontend — steps 7–10**
+  (find symbol / find file, terminal, build and test, error
+  inspection). Rev 1 said "none directly", which contradicted its own
+  next sentence. Today a GPU user who triggers references, project
+  search, a terminal, compile, or error inspection gets the Stage 1
+  non-side fallback: the output surface steals a document window
+  instead of opening a panel. Every one of those steps therefore
   behaves differently on GPU than on TUI, and Stage 2 is what closes
-  that.
+  the divergence.
 - **Interaction islands added: none, and this is a reduction.** §6
   grades islands "weak, and growing by one island per modal feature".
-  The panel is the opposite move: `display = "panel"` is one adopted
-  policy across listview, compile, and terminal, and Stage 2 extends
-  the existing policy to a second frontend rather than adding a
-  parallel GPU-only surface. The focus-chrome routing table (Q#BP14b)
-  deliberately reuses the existing `SearchPrompt` / `MenuPrompt` /
-  `CompletionPopup` messages instead of minting panel-specific ones.
-- **Config registry adoption:** inherited, not extended. Stage 1's
+  Stage 2 extends one already-adopted policy (`display = "panel"`,
+  used by listview, compile, and terminal) to a second frontend rather
+  than minting a GPU-only surface. Q#BP14b deliberately reuses the
+  existing `SearchPrompt` / `MenuPrompt` / `CompletionPopup` messages
+  instead of panel-specific twins.
+- **Config registry adoption: inherited, not extended.** Stage 1's
   `window.panel-height` and `window.min-height` already live in the
-  registry; Stage 2 adds no new user-facing option. If the GPU needs a
-  band-specific preference, it enters the registry — no new
-  configuration mechanism.
-- **Background-work attribution:** unchanged. Stage 2 introduces no
-  worker, task, or process. It does, however, make §9's "✓ mechanics /
-  ✗ visibility" gap materially cheaper to close on the GPU: a terminal
-  PTY appearing in no user-visible activity view (§9) is partly a
-  *placement* problem, and after Stage 2 both frontends have a place to
-  put one.
-- **Section this serves:** `COHERENCE.md` §14, which already records
-  the panel primitive as landed for Stage 1 and names "Stage 2 (GPU
-  band) pending its own framing" as the open item. This is that doc.
+  registry. Stage 2 adds no new user-facing option; if the band needs
+  one, it enters the registry.
+- **Background-work attribution: unchanged, and this stage does not
+  advance it.** Rev 1 implied Stage 2 helps §9's activity-view gap. It
+  does not. A panel gives output a coherent *placement*; it does not
+  make terminal PTYs, LSP servers, or workers appear in the
+  activity/ownership view §9 describes, and it adds no join key across
+  the four disjoint activity planes. The §9 gap is untouched.
+- **Section this serves:** `COHERENCE.md` §14, which records the panel
+  primitive as landed for Stage 1 and names "Stage 2 (GPU band)
+  pending its own framing" as the open item.
 
-## 7. Acceptance criteria (draft)
+## 7. Acceptance
 
-Numbered for review; each must be falsifiable by revert, per the
-standing lesson that a guard with no production caller passes every
-direct-call test.
+**Parent criteria 37–55 remain authoritative and are not replaced.**
+This section maps them to the two slices and adds only refinements.
 
-1. Every §1.3 census read resolves through `primary_document_window`;
-   asserted at the outermost user-reachable seam, not by direct call.
-2. All three `src/statusline.rs` active reads route through the new
-   frontend-layout target.
-3. Grid `paint_frame` output is byte-identical across the extraction.
-4. A semantic frontend with `fold_projection = false` painting a panel
-   over a folded buffer shows **every** source line (Q#BP17), and the
-   panel path never calls `fold_map_for_window`.
-5. v21 round-trips; v20 peers negotiate without the panel events; each
-   extended enum's previous final variant is byte-pinned.
-6. `Absent` is emitted on both close and hide, and clears input
-   authority before any later event validates.
-7. A `PanelPointer` failing any of Q#BP16's six checks mutates no view,
-   controller, selection, menu, or PTY.
-8. A geometry epoch change makes an older `PanelFrame` non-painted and
-   non-hit-testable until a matching `Present` arrives.
-9. A panel wider than 512 columns is legal; a panel exceeding the
-   shared wire budget fails closed to `Absent`, not to a partial frame.
-10. Panel focus does not disturb the document mirror
-    (`BufferSnapshot`, `CursorByte`, `Viewport`).
-11. Native popups clear on document→panel focus change and panel
-    popups clear on panel→document, per Q#BP14b's ordering.
+### 7.1 Stage 2A — classified census routing + painter extraction
 
-## 8. Questions for the user
+No protocol change. Parent criteria that apply in full: **42, 43, 44,
+51 (the `LOCAL`-panel inheritance half), 52**.
 
-1. **Q#BP2S1 epoch ownership** (§3.1) — recommendation is option 1,
-   frontend-owned with the daemon storing verbatim. Confirm or pick
-   another.
-2. **One PR or two?** Steps 1–2 (census + extraction) are protocol-free
-   and independently valuable; steps 3–5 are the wire and the band.
-   Splitting gives two small reviews instead of one very large one, at
-   the cost of a second round-trip.
-3. **Ordering against folding Stage 3.** Both touch the semantic
-   projection. Framing bottom-panel Stage 2 first means folding Stage 3
-   re-scouts against a landed band. Confirm that order.
-4. **Scout obligations in §3.4** — should revision 2 close all four
-   before implementation, or is the GPU-side pixel formula (the largest
-   of them) allowed to be settled during implementation?
+Refinements 2A adds:
 
-## 9. Gates
+- **A2A-1 (replaces rev 1's criterion 1).** Every **Projection** census
+  item (#1–#7, #9, #10, #12, #21, #22) resolves through
+  `primary_document_window` / `primary_document_buffer`; #8 and #11
+  align **and then activate**; **#13, #14, #15, #23 continue to resolve
+  the actually focused window**; #16–#19 follow Q#BP14b's routing
+  table; #20 keeps its per-session counter with focus choosing the
+  eligible terminal. Each class is asserted separately, at the
+  outermost user-reachable seam, and falsified by revert. A test that
+  only proves "the document is used" would pass with the focus classes
+  wrongly rerouted, so the focus-class assertions are the load-bearing
+  half.
+- **A2A-2 (replaces rev 1's criterion 2).** `src/statusline.rs:644`
+  resolves the primary document window, while `:629` and `:675`
+  continue to report **actual focus** — pinned by a document provider
+  truthfully observing `active = false` while the panel is focused
+  (parent 42). The semantic-layout target captures primary document +
+  visible side window, invokes each provider exactly once, and
+  invalidates the whole evaluation when a callback mutates layout or
+  focus.
+- **A2A-3 (replaces rev 1's criterion 3).** The painter extraction
+  preserves, for grid frontends: the painted **cells**, the **returned
+  cursor**, the **focused window's `view_top` mutation** from the
+  auto-scroll clamp, and **passive windows' untouched `view_top` and
+  scroll state**. Byte-identical cells alone would not catch a clamp
+  that silently moved to the wrong window.
 
-The standing suite, plus `bottom_panel_stage1_acceptance` and a new
-`bottom_panel_stage2_acceptance`, the three vterm suites (the panel
-hosts terminals), folding Stage 2's 48 (shared projection), and
-`PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`. Protocol round-trip and
-byte-pin tests ride step 3.
+### 7.2 Stage 2B — v21 protocol + daemon projection + GPU band
+
+Parent criteria that apply in full: **37, 38, 39, 40, 41, 45, 46, 47,
+48, 49, 50, 51, 53, 54, 55**, plus re-assertion of 42/43/44 **through
+the actual negotiated capability flip** rather than through a
+test-only panel-capable semantic view.
+
+Refinements 2B adds:
+
+- **A2B-1.** The epoch state machine of §3.1 is pinned row by row,
+  including the lower-epoch-identical-data rejection and the
+  same-epoch-different-total rejection. Grid allocation is checked with
+  a fail-closed exhaustion arm; the semantic path performs no value
+  dedup. Epoch `0` is rejected on the wire.
+- **A2B-2.** A font or scale change that leaves `CellSize` **identical**
+  still produces a new `geometry_epoch`, and the older `PanelFrame`
+  neither paints nor hit-tests until a matching `Present` arrives. This
+  is the case daemon value dedup cannot see and is why option 1 was
+  chosen.
+- **A2B-3.** Panel columns are derived from the **stable normal-face
+  probe**, not `State::mono_advance`'s document-glyph fallback: two GPU
+  frontends with identical metrics and different documents derive
+  identical `total.cols`, and a probe returning `None` declares zero
+  usable geometry rather than falling back to a document sample.
+- **A2B-4.** Every document-bottom consumer — caret, hit test, minimap,
+  terminal geometry, clipping, edge scrolling — routes through the one
+  document-bottom accessor. Falsified by introducing a band and
+  asserting each consumer moves; a second unrouted seam is the Stage 1
+  `Layout::compute` defect class.
+- **A2B-5.** `panel_capable` is true only for a v21+ negotiated
+  authenticated semantic session; a v20 semantic session is never
+  **placed** in a side window, not merely denied the events.
+
+## 8. Open items for review round 2
+
+1. The concrete `BASE_DIVIDER_HEIGHT` value (§5.3). Scaling and the
+   single-seam rule are decided; the number is not.
+2. Whether `TEXT_TOP` should scale. It is an unscaled constant today
+   and the formula consumes it as-is; that is pre-existing behavior
+   Stage 2 inherits rather than fixes, but it is worth a decision
+   before the conversion is pinned by acceptance.
+
+## 9. Slices, branches, and gates
+
+Per review round 1: **two serial implementation PRs**, each a named
+slice under this framing so one-feature/one-branch/one-PR holds. **2A
+lands before 2B branches** — not stacked.
+
+- **Stage 2A** — classified census routing + per-window painter
+  extraction. Branch `bottom-panel-stage2a`. No protocol change.
+- **Stage 2B** — v21 protocol, daemon panel projection, GPU band, and
+  the negotiated `panel_capable` flip. Branch `bottom-panel-stage2b`,
+  cut from `main` after 2A merges. Repeats 2A's relevant census
+  assertions through the real capability flip.
+
+Gates for both: the standing suite, plus
+`bottom_panel_stage1_acceptance`, the new
+`bottom_panel_stage2a_acceptance` / `bottom_panel_stage2b_acceptance`,
+the three vterm suites (the panel hosts terminals), folding Stage 2's
+48 (shared projection), and `PMACS_REQUIRE_GPU=1 cargo test -p
+pmacs-gpu`. Protocol round-trip and byte-pin tests ride 2B. Parent
+criterion 54's `--headless-probe` run — one real daemon, real PTY, real
+wgpu, through a panel-hosted terminal — is a 2B gate.
