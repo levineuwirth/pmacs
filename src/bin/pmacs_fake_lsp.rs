@@ -1083,6 +1083,39 @@ fn main() {
                 });
                 write_frame(&mut stdout, &resp);
             }
+            ("textDocument/waitForDiagnostics", Some(idv)) => {
+                // Arc 8 Stage 3b: Lean's `WaitForDiagnosticsParams` is
+                // `{ uri, version }` (v4.9.0
+                // `src/Lean/Data/Lsp/Extra.lean`). Validated here rather
+                // than echoed, because the generic echo arm below
+                // accepts anything — which is exactly how a client
+                // sending only `uri` shipped looking correct. A client
+                // that omits `version`, or sends a non-integer, gets an
+                // InvalidParams error the way a real server would.
+                let uri_ok = params
+                    .get("uri")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some();
+                let version_ok = params
+                    .get("version")
+                    .and_then(serde_json::Value::as_i64)
+                    .is_some();
+                let resp = if uri_ok && version_ok {
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": idv, "result": serde_json::Value::Null
+                    })
+                } else {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": idv,
+                        "error": {
+                            "code": -32602,
+                            "message": "waitForDiagnostics requires { uri, version }"
+                        }
+                    })
+                };
+                write_frame(&mut stdout, &resp);
+            }
             (_, Some(idv)) => {
                 // Generic echo response.
                 let resp = serde_json::json!({

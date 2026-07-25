@@ -347,11 +347,84 @@ fn acc26_did_open_carries_the_lean4_language_id() {
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance 28 (probe) — the version predicate.
+// Acceptance 27 / 28 / 35 / 36 — the probe and the fallback latch.
 //
-// The parse is unit-tested directly because the spawn path is timing-
-// bound; the latch's *effect* is pinned separately below.
+// **Driven through the production path**, not by calling internals.
+// Round 1's versions poked `_fire_latch` directly and asserted on config
+// mutation, which proved nothing about whether a server ever starts —
+// and acceptance 36 went further and asserted every server was terminal,
+// pinning the ABSENCE of the fallback it claimed to test. These go
+// `buffer.after-load` -> ticks -> probe drain -> latch -> re-attach, and
+// assert the originally opened buffer ends up on a LIVE server.
+//
+// The stubs are real executables the fixture writes. `M.fallback` is a
+// table precisely so it can point at `pmacs_fake_lsp` here.
 // ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// An executable shell stub. `serve` sleeps (so the "server" does not
+    /// die and only the named failure mode is under test); `--version`
+    /// prints `version_line`.
+    fn lake_stub(&self, rel: &str, version_line: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = self.root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo '{version_line}'\n  exit 0\nfi\nexec sleep 300\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+}
+
+/// Point `command` at `lake_cmd` and the latch's fallback at the fake
+/// LSP server, so a fallback that fires produces a server that works.
+fn with_fallback(state: &EditorState, lake_cmd: &Path) {
+    exec(
+        state,
+        &format!(
+            r#"
+            pmacs.lsp.config.lean4.command = "{}"
+            pmacs.lsp.config.lean4.args = {{ "serve" }}
+            pmacs.lean.fallback = {{ command = "{}", args = {{}} }}
+            "#,
+            lua_str(lake_cmd),
+            fake_lsp_path()
+        ),
+    );
+}
+
+/// The active buffer's attached server id, or "none".
+fn attached_sid(state: &EditorState) -> String {
+    eval(
+        state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        return rec and tostring(rec.server) or "none"
+        "#,
+    )
+}
+
+/// State kind of the active buffer's attached server, or "none".
+fn attached_state(state: &EditorState) -> String {
+    eval(
+        state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.state and s.state.kind)
+          end
+        end
+        return "gone"
+        "#,
+    )
+}
 
 #[test]
 fn acc28_version_predicate_triggers_only_below_3_1() {
@@ -374,36 +447,156 @@ fn acc28_version_predicate_triggers_only_below_3_1() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Acceptance 27 / 35 / 36 — the fallback latch.
-// ---------------------------------------------------------------------------
+#[test]
+fn acc28_an_old_lake_falls_back_and_the_buffer_lands_on_a_live_server() {
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let old_lake = fx.lake_stub("bin/lake", "Lake version 3.0.0");
+    let mut state = editor(&fx);
+    with_fallback(&state, &old_lake);
+
+    open(&state, &file);
+    settle(&mut state);
+    // The stub's `serve` sleeps rather than dying, so ONLY the probe can
+    // have caused a fallback here. That isolation is the point.
+    for _ in 0..40 {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(5));
+        if attached_state(&state) == "initialized" {
+            break;
+        }
+    }
+
+    assert_eq!(
+        attached_state(&state),
+        "initialized",
+        "an old lake must leave the buffer on a LIVE fallback server, not \
+         merely rewrite the config"
+    );
+    let cmd: String = eval(&state, "return pmacs.lsp.config.lean4.command");
+    assert_eq!(cmd, fake_lsp_path(), "the fallback command is in effect");
+}
+
+#[test]
+fn acc28_a_current_lake_does_not_trigger_the_fallback() {
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let new_lake = fx.lake_stub("bin/lake", "Lake version 3.1.0");
+    let mut state = editor(&fx);
+    with_fallback(&state, &new_lake);
+
+    open(&state, &file);
+    for _ in 0..20 {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Non-vacuity against the test above: same harness, same stub shape,
+    // only the version differs — so a latch that fired unconditionally
+    // would be caught here.
+    let cmd: String = eval(&state, "return pmacs.lsp.config.lean4.command");
+    assert_eq!(
+        cmd,
+        new_lake.display().to_string(),
+        "a current lake keeps its command; the probe must not fall back"
+    );
+    let latched: bool = eval(&state, "return pmacs.lean._probe.latched");
+    assert!(!latched, "the latch did not arm");
+}
+
+#[test]
+fn acc27_a_missing_lake_falls_back_and_the_buffer_lands_on_a_live_server() {
+    // The case round 1 could not see at all: `ensure_server` swallows a
+    // synchronous ENOENT and returns nil, so there is no attachment to
+    // key off. This is also the most likely real-world failure — a user
+    // with `lean` but no `lake`.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/no-such-lake");
+    let mut state = editor(&fx);
+    with_fallback(&state, &absent);
+
+    open(&state, &file);
+    for _ in 0..40 {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(5));
+        if attached_state(&state) == "initialized" {
+            break;
+        }
+    }
+
+    assert_eq!(
+        attached_state(&state),
+        "initialized",
+        "a missing `lake` must fall back to a live server and re-attach \
+         the buffer that was already open"
+    );
+    let status = state.core.borrow().status.clone();
+    assert!(
+        status.contains("lean4"),
+        "and it says so on the status line; saw {status:?}"
+    );
+}
+
+#[test]
+fn acc27_the_latch_is_one_shot_and_does_not_re_arm() {
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/no-such-lake");
+    let mut state = editor(&fx);
+    with_fallback(&state, &absent);
+
+    open(&state, &file);
+    settle(&mut state);
+    let after_first: String = eval(&state, "return pmacs.lsp.config.lean4.command");
+    assert_eq!(after_first, fake_lsp_path(), "the fallback fired once");
+
+    // A user who deliberately sets something else after the fallback must
+    // not have it silently replaced by a second firing.
+    exec(&state, "pmacs.lsp.config.lean4.command = \"user-choice\"");
+    exec(&state, "pmacs.lean._fire_latch(nil, \"a second failure\")");
+    assert_eq!(
+        eval::<String>(&state, "return pmacs.lsp.config.lean4.command"),
+        "user-choice",
+        "the latch never re-arms within a session"
+    );
+}
 
 #[test]
 fn acc35_latch_preserves_user_config_and_swaps_only_command_and_args() {
     let fx = Fixture::new();
-    let state = editor(&fx);
-    // A user's init.lua settings, on the shipped shape.
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/no-such-lake");
+    let mut state = editor(&fx);
+    with_fallback(&state, &absent);
     exec(
         &state,
-        r#"
-        pmacs.lsp.config.lean4.command = "lake"
-        pmacs.lsp.config.lean4.args = { "serve" }
-        pmacs.lsp.config.lean4.env = { MYVAR = "1" }
+        r"
         pmacs.lsp.config.lean4.settings = { lean = { verbose = true } }
         pmacs.lsp.config.lean4.init_options = { hasWidgets = false }
         _G.root_before = pmacs.lsp.config.lean4.root
-        pmacs.lean._fire_latch(nil, "test")
-        "#,
+        ",
     );
+
+    open(&state, &file);
+    settle(&mut state);
 
     let after: String = eval(
         &state,
         r#"
         local c = pmacs.lsp.config.lean4
         return table.concat({
-          tostring(c.command),
-          tostring(c.args and c.args[1]),
-          tostring(c.env and c.env.MYVAR),
           tostring(c.settings and c.settings.lean and c.settings.lean.verbose),
           tostring(c.init_options and c.init_options.hasWidgets),
           tostring(c.root == _G.root_before),
@@ -411,78 +604,70 @@ fn acc35_latch_preserves_user_config_and_swaps_only_command_and_args() {
         "#,
     );
     assert_eq!(
-        after, "lean|--server|1|true|false|true",
-        "only command/args change; env, settings, init_options and root \
-         survive the swap"
-    );
-}
-
-#[test]
-fn acc27_the_latch_is_one_shot_and_does_not_re_arm() {
-    let fx = Fixture::new();
-    let state = editor(&fx);
-    exec(
-        &state,
-        r#"
-        pmacs.lsp.config.lean4.command = "lake"
-        pmacs.lsp.config.lean4.args = { "serve" }
-        pmacs.lean._fire_latch(nil, "first failure")
-        _G.after_first = pmacs.lsp.config.lean4.command
-        -- A second failure must not rewrite the command again; if it did,
-        -- a user who deliberately set something else after the fallback
-        -- would have it silently replaced.
-        pmacs.lsp.config.lean4.command = "user-choice"
-        pmacs.lean._fire_latch(nil, "second failure")
-        _G.after_second = pmacs.lsp.config.lean4.command
-        "#,
-    );
-    assert_eq!(eval::<String>(&state, "return _G.after_first"), "lean");
-    assert_eq!(
-        eval::<String>(&state, "return _G.after_second"),
-        "user-choice",
-        "the latch never re-arms within a session"
+        after, "true|false|true",
+        "settings, init_options and root survive the swap; only \
+         command/args change"
     );
 }
 
 #[test]
 fn acc36_latch_stops_the_failing_server_before_spawning_the_fallback() {
+    // A stub whose `serve` exits immediately: the server dies before
+    // `initialize` completes, which is the failure the latch polls for.
+    // `RestartPolicy::OnCrash` would otherwise respawn it forever
+    // underneath the latch, with no attempt ceiling.
+    use std::os::unix::fs::PermissionsExt as _;
     let fx = Fixture::new();
     fx.toolchain("pkg", "v4.9.0\n");
     let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let dying = fx.root.join("bin/dying-lake");
+    std::fs::create_dir_all(dying.parent().unwrap()).unwrap();
+    std::fs::write(
+        &dying,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Lake version 9.9.9'; exit 0; fi\nexit 3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&dying, std::fs::Permissions::from_mode(0o755)).unwrap();
+
     let mut state = editor(&fx);
+    with_fallback(&state, &dying);
     open(&state, &file);
-    settle(&mut state);
-    assert_eq!(rows(&state).len(), 1, "precondition: one server is up");
+    for _ in 0..60 {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(5));
+        if attached_state(&state) == "initialized" {
+            break;
+        }
+    }
 
-    // Fire the latch against the live server, exactly as `poll_latch`
-    // would. `pmacs.lsp.stop` sets `restart = Never` on the way out —
-    // which is what prevents `RestartPolicy::OnCrash` from respawning the
-    // broken command underneath the latch, forever, with no attempt cap.
-    exec(
-        &state,
-        r#"
-        pmacs.lsp.config.lean4.command = "lake"
-        pmacs.lsp.config.lean4.args = { "serve" }
-        pmacs.lean._fire_latch(pmacs.lsp.list()[1].id, "failed to start")
-        "#,
+    // The load-bearing assertion: the buffer ends up on a LIVE server.
+    assert_eq!(
+        attached_state(&state),
+        "initialized",
+        "the failing server is stopped and the buffer re-attached to the \
+         fallback — not left terminal"
     );
-    settle(&mut state);
-
-    let terminal: bool = eval(
+    // And the dead one really is stopped, so nothing is respawning it.
+    let dying_still_running: bool = eval(
         &state,
         r#"
+        local live = tostring(pmacs.lsp.active_attachment().server)
         for _, s in ipairs(pmacs.lsp.list()) do
-          local k = s.state and s.state.kind
-          if k ~= "stopped" and k ~= "crashed" then return false end
+          if tostring(s.id) ~= live then
+            local k = s.state and s.state.kind
+            if k ~= "stopped" and k ~= "crashed" then return true end
+          end
         end
-        return true
+        return false
         "#,
     );
     assert!(
-        terminal,
-        "the failing server is stopped, not left to be respawned under \
-         the latch"
+        !dying_still_running,
+        "the failing server is not respawning underneath the latch"
     );
+    assert_ne!(attached_sid(&state), "none");
 }
 
 // ---------------------------------------------------------------------------
@@ -492,23 +677,24 @@ fn acc36_latch_stops_the_failing_server_before_spawning_the_fallback() {
 #[test]
 fn acc36a_latch_leaves_a_status_line_trace() {
     let fx = Fixture::new();
-    let state = editor(&fx);
-    exec(
-        &state,
-        r#"
-        pmacs.lsp.config.lean4.command = "lake"
-        pmacs.lsp.config.lean4.args = { "serve" }
-        pmacs.lean._fire_latch(nil, "`lake serve` failed to start")
-        "#,
-    );
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/no-such-lake");
+    let mut state = editor(&fx);
+    with_fallback(&state, &absent);
+
+    open(&state, &file);
+    settle(&mut state);
+
     let status = state.core.borrow().status.clone();
     assert!(
-        status.contains("lean4") && status.contains("lean --server"),
-        "the fallback names itself and what it fell back to; saw {status:?}"
+        status.contains("lean4") && status.contains("falling back"),
+        "the fallback names the language and says it fell back; saw {status:?}"
     );
     // The channel assertion is the point (COHERENCE §1.2): a report made
     // only through `pmacs.error` — undefined in production — would leave
-    // this empty while every other assertion here still passed.
+    // this empty while the fallback itself still worked, so the user
+    // would silently be on a different server than they configured.
     assert!(!status.is_empty());
 }
 
@@ -550,7 +736,7 @@ fn acc37_wait_for_diagnostics_resolves_through_the_response_seam() {
         r#"
         _G.settled = "never"
         local rec = pmacs.lsp.active_attachment()
-        pmacs.lean.wait_for_diagnostics(rec.server, rec.uri, function(err)
+        pmacs.lean.wait_for_diagnostics(rec.server, rec.uri, rec.version, function(err)
           _G.settled = tostring(err)
         end)
         "#,

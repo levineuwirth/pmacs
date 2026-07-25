@@ -893,6 +893,24 @@ function pmacs.lsp.active_attachment()
   return attachments[tostring(buf)]
 end
 
+-- Re-run the attach for the ACTIVE buffer, rebuilding it against the
+-- current `pmacs.lsp.config`.
+--
+-- Exists for the Arc 8 Stage 3b fallback latch (Q#LN7): after that latch
+-- stops a server that failed to start and rewrites `config.lean4`,
+-- something has to actually spawn the replacement and re-point the
+-- buffer at it. Nothing else does — `attach_buffer` early-returns for a
+-- live attachment, and no hook re-fires on a config change, so without
+-- this the buffer stays bound to the stopped server and the "fallback"
+-- is a config edit with no effect.
+--
+-- Deliberately keyed on the active buffer, matching `attach_buffer`'s
+-- own use of `active_buffer_path()`; it is not a general re-attach for
+-- arbitrary buffers and must not be used as one.
+function pmacs.lsp._attach_buffer()
+  return attach_buffer(pmacs.window.buffer())
+end
+
 -- Arc 4 stage 3: pure modeline projection.  This reads the private
 -- per-buffer attachment map directly so passive split windows report their
 -- own buffer instead of the focused window.  It never attaches, flushes

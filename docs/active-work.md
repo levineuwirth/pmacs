@@ -256,12 +256,17 @@ If it does not, stop and repair the remote/fetch configuration.
 
 - Same worktree `../pmacs-lean-stage3`, **branched off
   `lean4-stage3a-seams`, not off `main`** — 3b consumes 3a's response
-  seam and `pmacs.fs.canonicalize`, so it is strictly sequential and its
-  PR must be retargeted to `main` only after #167 merges. (Kill-ring
-  lesson: retarget stacked child PRs BEFORE merging the parent.)
+  seam and `pmacs.fs.canonicalize`, so it is strictly sequential.
+  **Retarget PR #170 to `main` BEFORE merging #167, not after** — the
+  kill-ring lesson exactly. (Round 1 of this ledger entry stated the
+  reverse in its first sentence and the correct rule in the next; the
+  review caught it. A safety rule written twice with opposite senses is
+  worse than not written.)
 - Ships `builtin/runtime/lean.lua` (new), one `include_str!` line in
-  `src/editor.rs`, a `leanprogress` mode on `pmacs_fake_lsp`, and
-  `tests/lean4_server_acceptance.rs` (17 tests). No protocol change.
+  `src/editor.rs`, `pmacs.lsp._attach_buffer` exported from `lsp.lua`,
+  a `leanprogress` mode plus `waitForDiagnostics` validation on
+  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (20 tests).
+  No protocol change.
 - **Stage 1's acceptance 12 is half superseded and was rewritten, not
   deleted.** It asserted `pmacs.lsp.config.lean4 == nil` to catch a
   Stage-3 front-run; 3b is that stage. What survives is the restraint
@@ -274,10 +279,29 @@ If it does not, stop and repair the remote/fetch configuration.
   an EMPTY `lean-toolchain` (a legitimate marker — existence semantics,
   not content). Discriminator is `read`'s SECOND return; decline only on
   a non-nil err. Probed on LuaJIT 2.1.
-- Four bites recorded, each against the committed tree: bare `io.open`
+- Seven bites recorded, each against the committed tree: bare `io.open`
   → 24a fails / 24b passes; require-non-nil → 24b fails / 24a passes;
-  no canonicalization → symlinked open spawns two servers; no stop
-  before fallback → acc36 fails.
+  no canonicalization → symlinked open spawns two servers; no re-attach
+  after the swap → three latch tests fail; hook keyed on the attachment
+  → the missing-`lake` case fails; `waitForDiagnostics` without
+  `version` → acc37 fails with the server's InvalidParams.
+- **SUBSTRATE BUG FOUND, not fixed here (framing §6).**
+  `LspManager::stop` on an ALREADY-terminal server takes its
+  not-initialized branch, terminates the dead process and sets
+  `ShuttingDown { .. None }` on the premise that "the next exit
+  observation cleans up" — but the exit already happened, which is what
+  made it `Crashed`. No further event arrives, so the client is stuck in
+  `ShuttingDown` **forever**: `server_is_live` reads it as LIVE, so
+  `attach_buffer` never rebuilds, and `forget` refuses it for not being
+  terminal. **Stopping a dead server is what makes it un-replaceable.**
+  Lean works around it by checking the state before stopping.
+- Round-1 review found four P1s, all real: the latch swapped the config
+  but never spawned or re-attached (and acc36 *asserted every server was
+  terminal*, pinning the absence of the fallback); a missing `lake`
+  bypassed probe and latch entirely because the hook keyed on an
+  attachment that ENOENT prevents; `waitForDiagnostics` omitted the
+  `version` Lean requires; and the ledger stated the dangerous stacking
+  order.
 - The probe's non-zero exit is deliberately NOT a fallback trigger —
   §2.9's elan shim makes `lake --version` fail where `lake serve` still
   works. Only a parseable version below 3.1.0 triggers it; the
