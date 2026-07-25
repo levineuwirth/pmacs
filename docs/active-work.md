@@ -399,10 +399,11 @@ flight.
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
 - Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
   2026-07-25).
-- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 2**,
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 3**,
   on branch `githubsucks/bottom-panel-stage2-framing`, worktree
-  `../pmacs-bp-stage2`, based on `githubsucks/main` @ `d152120`. Round 1
-  closed 2 blocking + 3 high findings; awaiting round 2. The approved
+  `../pmacs-bp-stage2`, based on `githubsucks/main` @ `ccf29e3`. Round 1
+  closed 2 blocking + 3 high; round 2 closed 1 blocking + 2 high + 1
+  medium and decided both open items. No open items remain. The approved
   parent framing `docs/bottom-panel-framing.md` (rev 4) remains
   authoritative, **including its acceptance criteria 37–55**.
 - Retained, carrying nothing unmerged: branch `bottom-panel` and worktree
@@ -425,6 +426,14 @@ flight.
   application, `DispatchIdle`, presence, focused search/menu/completion
   routing, and terminal bell ownership. The Stage 2 framing carries the
   full table.
+- **The GPU document bottom is three boundaries, not one.**
+  `text_area_bottom` (`pmacs-gpu/src/main.rs:8490`) is today
+  `status_band_top`, `geometry_capacity_bottom`, and
+  `document_text_bottom` at once. Once a band is installed they diverge:
+  the status chrome must stay pixel-identical at the physical window
+  bottom while document consumers move. A blanket rewrite of that helper
+  moves both together and passes an "everything moved" assertion, so the
+  Stage 2 criterion asserts **both directions in one scenario**.
 - **Folding Stage 3 and this arc's Stage 2 both touch the semantic
   projection.** Whichever is framed second re-scouts the other's landed
   state.

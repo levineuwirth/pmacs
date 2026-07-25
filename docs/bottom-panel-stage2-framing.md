@@ -1,7 +1,7 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
-**Revision 2 — pre-implementation. Ground truth: canonical `main` @
-`d152120`, protocol v20, 2026-07-25.**
+**Revision 3 — pre-implementation. Ground truth: canonical `main` @
+`ccf29e3`, protocol v20, 2026-07-25.**
 
 Stage 1 (#155, merge `e745068`) gave pmacs window placement, window
 parameters, TUI side windows, the divider, and the adopter `display`
@@ -25,6 +25,33 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 **parent acceptance criteria 37–55**.
 
 ## 0. Revision history
+
+### 0.0 Round 2 (rev 2 → rev 3) — 1 blocking, 2 high, 1 medium, all closed
+
+- **R2-1 (blocker).** Rev 2's "one document-bottom seam" conflated two
+  boundaries that must **diverge** once a panel exists. Several sites it
+  named are not document-bottom consumers at all: the status-band
+  background (`main.rs:5908`) must stay at the physical window bottom,
+  the status text buffers (`:3175`, `:3185`, `:6601`, `:6607`) consume a
+  *height* and never a bottom coordinate, and status text placement
+  (`:7134`) sits inside an unchanged band. §5.3 now splits the single
+  value into **three** named boundaries, classifies every existing
+  `text_area_bottom` call site, and adds the contrast assertion that
+  catches a uniformly-wrong implementation moving both together.
+- **R2-2 (high).** `accept_frame_geometry -> bool` cannot distinguish
+  *advanced* from *accepted duplicate* from *rejected*. It now returns an
+  explicit three-valued result. The exhaustion wording also permitted
+  retaining stale geometry, which is not fail-closed: §3.1 now clears the
+  authoritative declaration and reconciles to hidden, and adds the
+  frontend-side terminal latch.
+- **R2-3 (high).** Parent acceptance 52 was assigned wholly to 2A, but
+  2A has no semantic panel projection — it can only prove the extracted
+  painter accepts an explicit `None`. 52 is now also reasserted in 2B,
+  where the contract becomes production-reachable.
+- **R2-4 (medium).** §9 names the four touched acceptance suites
+  explicitly rather than relying on "standing suite".
+- Both §8 open items are decided (§5.3): `BASE_DIVIDER_HEIGHT = 4.0` at
+  scale 1.0, and `TEXT_TOP` stays unscaled.
 
 ### 0.1 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
 
@@ -135,23 +162,58 @@ identical data is still stale and must not be accepted.
   unchanged grid means an old frame is still valid under unchanged
   metrics). Changes from `saturating_add` to **checked** allocation
   with an explicit fail-closed exhaustion arm.
-- `accept_frame_geometry(fid, geometry_epoch, total) -> bool` — the
-  **semantic** path. No value dedup; applies the table above verbatim;
-  returns whether the declaration was accepted so the caller can drop
-  a stale event before any reconciliation.
+- `accept_frame_geometry(fid, geometry_epoch, total) -> GeometryUpdate`
+  — the **semantic** path. No value dedup; applies the table above
+  verbatim.
 
 An ambiguous single method with an `Option<u64>` epoch is rejected
 explicitly: it would let a future caller silently take the wrong regime.
 
-**Initial epoch and exhaustion.** The frontend's first declaration
-after attach acceptance carries epoch `1`; `0` is reserved as "never
-declared" and is rejected on the wire. Frontend-side allocation is
-checked; on exhaustion the frontend stops declaring and **hides its
-panel** rather than reusing or wrapping an id — it sends no further
-geometry, so the daemon's last accepted declaration stands and no new
-`Present` can claim a fresh identity. Daemon-side exhaustion on the
-grid path fails closed the same way: no new declaration, panel stays
-at its last valid geometry or hides under Q#BP2b.
+**The result is three-valued, not a boolean.** A boolean cannot
+distinguish the three outcomes the caller must act on differently:
+
+```rust
+enum GeometryUpdate {
+    /// Epoch advanced: stored verbatim. Run panel reconciliation.
+    Advanced,
+    /// Same epoch, same total: already current. Do no work.
+    Duplicate,
+    /// Same epoch with different total, or a lower epoch: stale or
+    /// conflicting. Drop the event before any reconciliation.
+    Rejected,
+}
+```
+
+`Advanced` reconciles, `Duplicate` returns without touching panel
+state, and `Rejected` drops the event. Collapsing `Duplicate` into
+either neighbour is a defect in one direction or the other: folded into
+`Advanced` it reconciles on every repeated declaration, folded into
+`Rejected` it would log or surface a stale-event condition that never
+happened. (If a boolean is kept for a narrower internal caller, it must
+be named `advanced`, never `accepted` — `Duplicate` *is* accepted.)
+
+**Initial epoch.** The frontend's first declaration after attach
+acceptance carries epoch `1`. `0` is reserved as "never declared" and
+is rejected on the wire.
+
+**Exhaustion fails closed on both sides, and rev 2's wording did not.**
+Saying the panel "stays at its last valid geometry" is not fail-closed:
+if the real frame resizes after the allocator is exhausted, the daemon
+would keep painting a panel sized to geometry that no longer describes
+the frontend.
+
+- **Grid/LOCAL path.** On checked-allocation exhaustion, **clear** the
+  authoritative `frame_geometry` (back to `None` = unknown) and
+  reconcile. Unknown is already non-presentable under Q#BP2b, so the
+  panel hides. Stale geometry is never retained.
+- **Frontend path.** On exhaustion the frontend sets a **terminal
+  latch** for the life of the session: it sends no further geometry,
+  and — critically — an old matching `Present` **cannot** make the band
+  reappear, because the latch suppresses paint and hit-testing
+  independently of frame validity. Only a fresh session (reconnect)
+  clears it. Without the latch, a retained `Present` whose epoch still
+  matches the last declaration would resurrect a band under geometry
+  the frontend has disowned.
 
 ### 3.2 The census is classified, and it is mostly unrouted
 
@@ -319,29 +381,81 @@ family shapes no width), the frontend declares **zero usable geometry**
 under a new epoch — the panel hides — rather than falling back to a
 document sample.
 
-**`BASE_DIVIDER_HEIGHT` must be decided before implementation**, because
-the document-bottom seam it defines is depended on by caret placement,
-hit testing, the minimap, terminal geometry, clipping, and edge
-scrolling. Two sub-decisions:
+**`BASE_DIVIDER_HEIGHT = 4.0`** at scale 1.0, scaled by
+`FontMetrics::scale` like `status_band_height`. A 1–2 px rule is
+adequate decoration but too fragile as the drag hit strip; 4 px still
+reads as a rule while giving the pointer a usable target. **The entire
+strip is painted with `ui.divider`, and that exact rectangle is the
+hover/drag hit region** — paint geometry and hit geometry are the same
+rect, so they cannot drift apart.
 
-- **Value and scaling.** It joins the `BASE_*` family and scales as
-  `BASE_DIVIDER_HEIGHT * scale`, matching `status_band_height` — a
-  divider that does not scale with the font would misalign at non-1.0
-  scale. The concrete base value is an open item for review round 2.
-- **One seam, not several.** Today the document bottom is computed
-  from `status_band_height` at several sites
-  (`main.rs:3175`, `:3185`, `:6601`, `:6607`, `:8491`, and the
-  status-band rect at `:5910`). Stage 2 must introduce **one**
-  document-bottom accessor that subtracts status band **plus** the
-  installed band and divider, and route every one of those sites
-  through it. A second, unrouted seam is the exact shape of Stage 1's
-  `Layout::compute` two-caller defect, where `src/overlay_paint.rs`
-  derived its own rect and painted peer cursors at unfixed rows.
+**`TEXT_TOP` stays `16.0`, unscaled.** It is a fixed surface inset
+today, like `TEXT_LEFT` and the other paddings, while
+`FontMetrics::scale` governs font-derived metrics and row chrome.
+Scaling it only inside the declaration formula would disagree with the
+actual renderer; scaling every renderer and hit-test occurrence is a
+wholesale inset/DPI change and is **named here as separate work**, not
+smuggled into Stage 2. The formula is pinned to the real unscaled inset.
 
-Note the asymmetry Q#BP15a already requires: `divider_height_px` is
-subtracted **for sizing purposes even while the panel is absent**, to
-break the first-open cycle, while the document renderer does not
-actually lose those pixels until a `Present` panel is painted.
+Accordingly, **Q#BP15a's "all quantities use the frontend's current
+scale" is narrowed**: font-derived metrics and the divider scale; fixed
+surface insets keep their current units.
+
+#### The seam is three boundaries, not one
+
+Rev 2 asked for a single document-bottom accessor. That was wrong:
+once a panel is installed, today's single value must **diverge into
+three**, because some of its consumers must not move at all.
+
+```
+status_band_top          = surface_height - status_band_height
+
+geometry_capacity_bottom = status_band_top - reserved_divider_height
+                           // divider reserved even while absent
+
+document_text_bottom     = status_band_top
+                           - (installed_panel_height + divider_height
+                              if Present, else 0)
+```
+
+`geometry_capacity_bottom` is what Q#BP15a's asymmetry already
+requires: the divider is subtracted **for sizing purposes even while
+the panel is absent**, which is what breaks the first-open cycle, while
+the document renderer does not actually lose those pixels until a
+`Present` panel is painted.
+
+**Today `text_area_bottom` (`pmacs-gpu/src/main.rs:8490`) is all three
+at once**, and its doc comment calls it "the single source for every
+bottom-of-text computation" (Q#S3). Its ~19 call sites split into three
+classes:
+
+| Class | Boundary | Sites |
+| --- | --- | --- |
+| **Status-owned** — must stay pixel-identical at the window bottom | `status_band_top` | Status-band background rect `:5908`; band tops `:6003`, `:6027`, `:6140`; status text placement `:7134`, `:7922`; global minibuffer chrome |
+| **Document-owned** — must move when a band is installed | `document_text_bottom` | Code/terminal clips `:7174`, `:7195`, `:7212`, `:7242`, `:7273`, `:7351`, `:7421`; caret visibility and code height `:4566`, `:6118`, `:6581`; document completion placement `:8077`; minimap `:8497`; visible-line estimate `:8501` |
+| **Geometry declaration** | `geometry_capacity_bottom` | The Q#BP15a conversion only |
+
+**Sites that consume no bottom coordinate at all** and must not be
+touched: `:3175`, `:3185`, `:6601`, `:6607` size the status text
+buffers to `status_band_height` directly. Rev 2 listed them as seam
+consumers; they are not.
+
+Each call site is classified individually. A blanket rewrite of
+`text_area_bottom` to subtract the band would move the status chrome
+with the document and is the defect this section exists to prevent.
+
+**The contrast assertion (A2B-4).** "Every document consumer moved" is
+only half a test — a uniformly wrong implementation that moves
+everything passes it. The criterion must assert **both directions in
+one scenario**: installing a panel moves every document-owned consumer
+**while the status band stays pixel-identical** at the physical window
+bottom. That is the assertion a blanket rewrite fails.
+
+The one-accessor-per-boundary rule still holds within each class: a
+second, unrouted derivation of any of the three is the exact shape of
+Stage 1's `Layout::compute` two-caller defect, where
+`src/overlay_paint.rs` derived its own rect and painted peer cursors at
+unfixed rows.
 
 ### 5.4 Ordering against folding Stage 3
 
@@ -390,7 +504,17 @@ This section maps them to the two slices and adds only refinements.
 ### 7.1 Stage 2A — classified census routing + painter extraction
 
 No protocol change. Parent criteria that apply in full: **42, 43, 44,
-51 (the `LOCAL`-panel inheritance half), 52**.
+51 (the `LOCAL`-panel inheritance half)**, plus the extraction half of
+**52**.
+
+**52 splits across the slices.** 2A has no semantic panel projection
+and no `PanelFrame`, so all it can prove is that the extracted painter
+honors an explicitly supplied `None` fold map and that the stale
+`src/window.rs:562` comment is corrected. The actual contract — *a
+semantic panel with `fold_projection = false` never collapses folds and
+never calls `fold_map_for_window`* — is production-reachable only once
+2B lands the projection and the capability flip. It is therefore
+reasserted in 2B (§7.2).
 
 Refinements 2A adds:
 
@@ -423,17 +547,26 @@ Refinements 2A adds:
 ### 7.2 Stage 2B — v21 protocol + daemon projection + GPU band
 
 Parent criteria that apply in full: **37, 38, 39, 40, 41, 45, 46, 47,
-48, 49, 50, 51, 53, 54, 55**, plus re-assertion of 42/43/44 **through
-the actual negotiated capability flip** rather than through a
-test-only panel-capable semantic view.
+48, 49, 50, 51, 53, 54, 55**, plus re-assertion of **42, 43, 44, and
+52** **through the actual negotiated capability flip** rather than
+through a test-only panel-capable semantic view. 52's 2B form is the
+production one: a real semantic frontend with `fold_projection = false`
+displaying a folded buffer in a panel shows every source line, and the
+panel path never reaches `fold_map_for_window`.
 
 Refinements 2B adds:
 
 - **A2B-1.** The epoch state machine of §3.1 is pinned row by row,
   including the lower-epoch-identical-data rejection and the
-  same-epoch-different-total rejection. Grid allocation is checked with
-  a fail-closed exhaustion arm; the semantic path performs no value
-  dedup. Epoch `0` is rejected on the wire.
+  same-epoch-different-total rejection, and each row's
+  `Advanced`/`Duplicate`/`Rejected` result is asserted — a `Duplicate`
+  performs no reconciliation and a `Rejected` mutates nothing. Epoch
+  `0` is rejected on the wire. **Exhaustion is pinned on both sides**:
+  grid exhaustion clears `frame_geometry` to unknown and the panel
+  hides (a subsequent real resize must not paint a stale-geometry
+  panel), and a frontend that exhausts latches — a retained `Present`
+  whose epoch still matches cannot make the band reappear, and only a
+  fresh session clears the latch.
 - **A2B-2.** A font or scale change that leaves `CellSize` **identical**
   still produces a new `geometry_epoch`, and the older `PanelFrame`
   neither paints nor hit-tests until a matching `Present` arrives. This
@@ -444,23 +577,33 @@ Refinements 2B adds:
   frontends with identical metrics and different documents derive
   identical `total.cols`, and a probe returning `None` declares zero
   usable geometry rather than falling back to a document sample.
-- **A2B-4.** Every document-bottom consumer — caret, hit test, minimap,
-  terminal geometry, clipping, edge scrolling — routes through the one
-  document-bottom accessor. Falsified by introducing a band and
-  asserting each consumer moves; a second unrouted seam is the Stage 1
-  `Layout::compute` defect class.
+- **A2B-4 (contrast assertion).** Installing a panel moves **every**
+  document-owned consumer — code and terminal clips, caret visibility,
+  document completion placement, gutter/math clipping, minimap,
+  visible-line estimate, hit testing, edge scrolling — by exactly
+  `installed_panel_height + divider_height`, **while the status band
+  stays pixel-identical** at the physical window bottom (background
+  rect, band top, and status text placement all unchanged). Both halves
+  are asserted in one scenario: a uniformly wrong implementation that
+  moves the status band too would pass the "everything moved" half
+  alone. The geometry declaration separately reserves the divider while
+  the panel is `Absent`, and the document loses no pixels until a
+  `Present` is painted.
 - **A2B-5.** `panel_capable` is true only for a v21+ negotiated
   authenticated semantic session; a v20 semantic session is never
   **placed** in a side window, not merely denied the events.
 
-## 8. Open items for review round 2
+## 8. Open items
 
-1. The concrete `BASE_DIVIDER_HEIGHT` value (§5.3). Scaling and the
-   single-seam rule are decided; the number is not.
-2. Whether `TEXT_TOP` should scale. It is an unscaled constant today
-   and the formula consumes it as-is; that is pre-existing behavior
-   Stage 2 inherits rather than fixes, but it is worth a decision
-   before the conversion is pinned by acceptance.
+**None.** Both round-1 open items are decided in §5.3:
+`BASE_DIVIDER_HEIGHT = 4.0` at scale 1.0 (scaled, whole strip painted
+`ui.divider` and used as the hit rect), and `TEXT_TOP` stays unscaled
+with wholesale inset/DPI scaling named as separate work.
+
+One deferral is recorded rather than resolved: **wholesale surface-inset
+scaling** (`TEXT_TOP`, `TEXT_LEFT`, and the sibling paddings under
+`FontMetrics::scale`) is pre-existing behavior Stage 2 pins rather than
+fixes. It belongs to a spacing-system change of its own.
 
 ## 9. Slices, branches, and gates
 
@@ -475,11 +618,22 @@ lands before 2B branches** — not stacked.
   cut from `main` after 2A merges. Repeats 2A's relevant census
   assertions through the real capability flip.
 
-Gates for both: the standing suite, plus
-`bottom_panel_stage1_acceptance`, the new
-`bottom_panel_stage2a_acceptance` / `bottom_panel_stage2b_acceptance`,
-the three vterm suites (the panel hosts terminals), folding Stage 2's
-48 (shared projection), and `PMACS_REQUIRE_GPU=1 cargo test -p
-pmacs-gpu`. Protocol round-trip and byte-pin tests ride 2B. Parent
-criterion 54's `--headless-probe` run — one real daemon, real PTY, real
-wgpu, through a panel-hosted terminal — is a 2B gate.
+Gates for both: the standing suite from `CLAUDE.md`, plus the **touched
+acceptance suites named explicitly** — the standing rule is to run the
+suites a change touches, and "standing suite" does not name them:
+
+- `bottom_panel_stage1_acceptance` — the substrate both slices build on.
+- `bottom_panel_stage2a_acceptance` / `bottom_panel_stage2b_acceptance`
+  — new, one per slice.
+- `statusline_segments_acceptance` — the fan-out target change (§3.3).
+- `m11_5_semantic_acceptance` — the semantic census (§3.2).
+- `gpu_initial_target_acceptance` — parent criterion 55.
+- `gpu_font_acceptance` — font/scale geometry refresh (§5.3), including
+  the normal-face probe and the unscaled-`TEXT_TOP` decision.
+- The three vterm suites — the panel hosts terminals.
+- Folding Stage 2's 48 — shared projection.
+- `PMACS_REQUIRE_GPU=1 cargo test -p pmacs-gpu`.
+
+Protocol round-trip and byte-pin tests ride 2B. Parent criterion 54's
+`--headless-probe` run — one real daemon, real PTY, real wgpu, through a
+panel-hosted terminal — is a 2B gate.
