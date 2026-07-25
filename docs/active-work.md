@@ -327,6 +327,58 @@ If it does not, stop and repair the remote/fetch configuration.
   resolve *to*, and `pmacs .` should route into it rather than growing a
   second directory surface.
 
+## GPU terminal input lane — IN REVIEW
+
+- Portable branch: `githubsucks/gpu-terminal-input`, worktree
+  `../pmacs-gui-term-input`, based on `githubsucks/main` @ `46a1b8f`.
+- Approved framing: `docs/gpu-terminal-input-framing.md` revision 2,
+  committed as the branch's first commit (`9a0df21`). Bug fix, not a
+  feature; **no protocol change (stays v20)**.
+- Reported as "text input within the terminal doesn't work on GUI, this is
+  fine in TUI". Root cause: the dispatcher applied **both** terminal-layout
+  syncs to **every** attached frontend, and a semantic session satisfies both
+  conditions (a `term_sizes` entry from `AttachRequest` *and* a terminal
+  declaration). Its PTY was resized twice per tick forever — grid arm installs
+  the TUI placement size, semantic arm installs the declared content
+  rectangle, each arm's idempotence guard seeing only what the other just
+  wrote — so the child took a `SIGWINCH` storm at tick cadence.
+- **The fix is a split, not a guard.** The grid arm is also the only per-tick
+  controller-liveness release a semantic frontend gets, and
+  `sync_semantic_terminal_layout` cannot take that over: the buffer-follow
+  snapshot clears the viewport declaration (`on_buffer_snapshot_sent`), so
+  that arm stops running in exactly the switch-away case that needs the
+  release. `sync_terminal_layout` is therefore split into a
+  frontend-kind-neutral half (panel reconcile + liveness) and a grid-only
+  geometry half, with the loop body extracted to
+  `sync_terminal_layouts_for_tick` so the exclusivity is structural and tests
+  drive the real thing.
+- **Trap for anyone touching this again:** the release at the "no
+  `window_placements` entry" arm reads like liveness and is grid geometry. A
+  semantic frontend has no placement entry at all, so moving it into the
+  neutral half releases a GPU controller every tick.
+- Bite-verified against **two** pre-images, because the naive guard fixes the
+  storm and introduces the leak:
+
+  | pin | `main` | naive guard | the split |
+  |---|---|---|---|
+  | settle (acc 2+3) | FAIL | pass | pass |
+  | controller release (acc 6) | pass | FAIL | pass |
+  | grid still resizes (acc 5) | pass | pass | pass |
+
+- Real-path evidence: a quiet child trapping `SIGWINCH` reports **144 frames
+  in 4 s and `WINCH 1..12` on screen** against the pre-fix tree, versus a
+  settled screen with the fix.
+- **Deliberately out of scope, named:** interactive-shell echo on a raw-mode
+  PTY (Q#GT5 — reproduces in-process too, so it is not the GUI/TUI
+  asymmetry), and a geometry change appearing to clear the visible screen
+  (reproduces pre-fix; why acceptance 4 latches its observation across
+  frames).
+- Verification on this branch: `cargo fmt --check` clean; strict workspace
+  Clippy clean; 1,829 default + 2,006 CRDT library tests; vterm Stage 1/2/3
+  10 / 6 / 9 CRDT; bottom-panel Stage 1 46; M4 121; required GPU 155;
+  **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
+  `git diff --check` clean. Gates were run against the committed tree.
+
 ## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
 
 - Portable branch: `githubsucks/bottom-panel`, worktree
