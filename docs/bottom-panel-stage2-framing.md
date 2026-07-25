@@ -1,6 +1,6 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
-**Revision 3 — pre-implementation. Ground truth: canonical `main` @
+**Revision 4 — pre-implementation. Ground truth: canonical `main` @
 `ccf29e3`, protocol v20, 2026-07-25.**
 
 Stage 1 (#155, merge `e745068`) gave pmacs window placement, window
@@ -26,7 +26,35 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 
 ## 0. Revision history
 
-### 0.0 Round 2 (rev 2 → rev 3) — 1 blocking, 2 high, 1 medium, all closed
+### 0.0 Round 3 (rev 3 → rev 4) — 1 blocking, 1 high, 1 medium, all closed
+
+- **R3-1 (blocker).** Rev 3's three-boundary model was right but its
+  call-site table was wrong in five places, and each error was a real
+  defect: `:6140` is **document completion placement** (classified
+  status-owned, which would let completion overlap the panel);
+  `:7195`/`:7212` are the two **status text bounds** (classified
+  document-owned); `:7351` clips **global minibuffer candidate glyphs**
+  to the dropdown's band anchor (classified document-owned, which would
+  clip them against the document boundary); `:8561` (**document edge
+  scrolling**) was missing entirely, leaving it tied to the old bottom;
+  and `:8077` was described as completion placement when it is **caret
+  clipping** (its class was right, its label wrong). §5.3's table is
+  rebuilt from the full census and every row is verified against the
+  source.
+  **Root cause worth recording:** rev 3's table was built from a
+  `grep | head -20` over 29 matches. The truncation is exactly why
+  `:8561` vanished. The census is now stated as 20 production sites +
+  1 definition + 8 test sites = 29, so a future reader can check the
+  arithmetic instead of trusting the list.
+- **R3-2 (high).** The three equations permitted negative coordinates
+  on a surface shorter than its chrome, where today's
+  `text_area_bottom` clamps with `.max(0.0)`. All three are now
+  explicitly clamped, preserving the current helper's behavior.
+- **R3-3 (medium).** §5.1's "exact split" omitted `validate_cells`'s
+  `cell.attachment.is_some()` rejection. It is now classified — and
+  **shared**, with the reasoning pinned.
+
+### 0.1 Round 2 (rev 2 → rev 3) — 1 blocking, 2 high, 1 medium, all closed
 
 - **R2-1 (blocker).** Rev 2's "one document-bottom seam" conflated two
   boundaries that must **diverge** once a panel exists. Several sites it
@@ -53,7 +81,7 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 - Both §8 open items are decided (§5.3): `BASE_DIVIDER_HEIGHT = 4.0` at
   scale 1.0, and `TEXT_TOP` stays unscaled.
 
-### 0.1 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
+### 0.2 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
 
 - **R1-1 (blocker).** Rev 1 said all 23 census reads route through
   `primary_document_window`. That contradicts Q#BP14, which routes only
@@ -326,6 +354,20 @@ currently interleaves both concerns. The exact split:
   text, `validate_selection`, and the `at_bottom == (scroll_offset ==
   0)` coupling.
 
+**Attachment rejection is shared, not terminal-only.** `validate_cells`
+also rejects `cell.attachment.is_some()`
+(`pmacs-protocol/src/terminal.rs:305`), and its error text reads "A
+cell carries a frontend attachment, which terminals never use"
+(`:190-191`) — phrased as a terminal-specific fact, which is why rev 3
+missed it. **Stage 2 classifies it shared**: panels implement no
+attachment rendering, so a `PanelFrame` carrying one describes a
+surface the GPU would silently not draw. Shared rejection fails closed
+on the producer side rather than shipping an invisible cell. The error
+message is reworded away from "which terminals never use" to a
+grid-neutral phrasing when it moves. If a later stage gives panels
+attachment rendering, this rejection moves back to terminal-only as a
+deliberate, reviewed change — not by default.
+
 `PanelFrame` takes the shared half plus its own presence/epoch rules
 and does **not** inherit the 512 per-axis cap (Bet B5'), so a 4K
 small-font panel wider than 512 columns is legal while the shared area
@@ -407,15 +449,20 @@ Rev 2 asked for a single document-bottom accessor. That was wrong:
 once a panel is installed, today's single value must **diverge into
 three**, because some of its consumers must not move at all.
 
-```
-status_band_top          = surface_height - status_band_height
+All three clamp at zero, preserving today's `text_area_bottom`
+`.max(0.0)` behavior — without the clamps a surface shorter than its
+own chrome yields negative coordinates, and the "exact formula" stops
+being exact precisely where it matters most:
 
-geometry_capacity_bottom = status_band_top - reserved_divider_height
+```
+status_band_top          = max(0, surface_height - status_band_height)
+
+geometry_capacity_bottom = max(0, status_band_top - divider_height)
                            // divider reserved even while absent
 
-document_text_bottom     = status_band_top
-                           - (installed_panel_height + divider_height
-                              if Present, else 0)
+document_text_bottom     = max(0, status_band_top
+                                  - installed_panel_height
+                                  - installed_divider_height)
 ```
 
 `geometry_capacity_bottom` is what Q#BP15a's asymmetry already
@@ -426,19 +473,66 @@ the document renderer does not actually lose those pixels until a
 
 **Today `text_area_bottom` (`pmacs-gpu/src/main.rs:8490`) is all three
 at once**, and its doc comment calls it "the single source for every
-bottom-of-text computation" (Q#S3). Its ~19 call sites split into three
-classes:
+bottom-of-text computation" (Q#S3).
 
-| Class | Boundary | Sites |
-| --- | --- | --- |
-| **Status-owned** — must stay pixel-identical at the window bottom | `status_band_top` | Status-band background rect `:5908`; band tops `:6003`, `:6027`, `:6140`; status text placement `:7134`, `:7922`; global minibuffer chrome |
-| **Document-owned** — must move when a band is installed | `document_text_bottom` | Code/terminal clips `:7174`, `:7195`, `:7212`, `:7242`, `:7273`, `:7351`, `:7421`; caret visibility and code height `:4566`, `:6118`, `:6581`; document completion placement `:8077`; minimap `:8497`; visible-line estimate `:8501` |
-| **Geometry declaration** | `geometry_capacity_bottom` | The Q#BP15a conversion only |
+The census is **29 matches: 20 production call sites, 1 definition
+(`:8490`), and 8 test sites** (`:12887`, `:12937`, `:12997`, `:13109`,
+`:13793`, `:14013`, `:15306`, `:15386`). Every production site,
+classified individually against the source:
+
+**Status-owned — must stay pixel-identical at the physical window
+bottom, using `status_band_top`** (8 sites):
+
+| Site | What it is |
+| --- | --- |
+| `:5908` | Status-band background rect `y` |
+| `:6003` | `mb_visible_window` — rows that fit **above the band** |
+| `:6027` | `mb_dropdown_window` origin — dropdown grows up from the band |
+| `:7134` | `status_top` for the right status group |
+| `:7195` | `status_buffer` `TextBounds.top` — status text bound |
+| `:7212` | `status_left_buffer` `TextBounds.top` — status text bound |
+| `:7351` | Minibuffer **candidate glyph** clip, anchored to the dropdown's band origin |
+| `:7922` | `status_top`, second site |
+
+The minibuffer is **global, bufferless chrome anchored to the status
+band** (Q#BP14b keeps `MinibufferPrompt` global), so all four of its
+sites — `:6003`, `:6027`, `:7351`, and its `status_left_buffer` bound
+`:7212` — stay status-owned. Clipping candidate glyphs at
+`document_text_bottom` would clip the dropdown against a boundary it
+does not sit above.
+
+**Document-owned — must move when a band is installed, using
+`document_text_bottom`** (12 sites):
+
+| Site | What it is |
+| --- | --- |
+| `:4566` | `terminal_cell_viewport` — drawable height for the cell grid |
+| `:6118` | `completion_anchor_px` — anchor visibility bottom |
+| `:6140` | `completion_dropdown_layout` — **document completion placement**; `band_top - (line_top + line_h)` is the space below the anchor line |
+| `:6581` | `code_height` |
+| `:7174` | Code text clip bottom |
+| `:7242` | Math text clip bottom |
+| `:7273` | Gutter clip bottom |
+| `:7421` | Terminal clip bottom |
+| `:8077` | `code_caret_rect_in_clip` — **caret clipping** |
+| `:8497` | Minimap drawable height |
+| `:8501` | Visible-line estimate |
+| `:8561` | `edge_scroll_direction` — **document edge scrolling** |
+
+**Geometry declaration** uses `geometry_capacity_bottom`, and is the
+Q#BP15a conversion only.
 
 **Sites that consume no bottom coordinate at all** and must not be
 touched: `:3175`, `:3185`, `:6601`, `:6607` size the status text
 buffers to `status_band_height` directly. Rev 2 listed them as seam
 consumers; they are not.
+
+Three of these classifications are the ones a plausible implementation
+gets wrong, and each has a visible symptom: document completion
+(`:6140`) anchored to `status_band_top` **overlaps the panel**;
+minibuffer candidates (`:7351`) clipped at `document_text_bottom` are
+**cut off**; and edge scrolling (`:8561`) left on the old bottom
+**auto-scrolls from inside the panel**.
 
 Each call site is classified individually. A blanket rewrite of
 `text_area_bottom` to subtract the band would move the status chrome
@@ -577,18 +671,21 @@ Refinements 2B adds:
   frontends with identical metrics and different documents derive
   identical `total.cols`, and a probe returning `None` declares zero
   usable geometry rather than falling back to a document sample.
-- **A2B-4 (contrast assertion).** Installing a panel moves **every**
-  document-owned consumer — code and terminal clips, caret visibility,
-  document completion placement, gutter/math clipping, minimap,
-  visible-line estimate, hit testing, edge scrolling — by exactly
-  `installed_panel_height + divider_height`, **while the status band
-  stays pixel-identical** at the physical window bottom (background
-  rect, band top, and status text placement all unchanged). Both halves
-  are asserted in one scenario: a uniformly wrong implementation that
-  moves the status band too would pass the "everything moved" half
-  alone. The geometry declaration separately reserves the divider while
-  the panel is `Absent`, and the document loses no pixels until a
-  `Present` is painted.
+- **A2B-4 (contrast assertion).** Installing a panel moves **all twelve
+  document-owned consumers** of §5.3 by exactly
+  `installed_panel_height + divider_height`, **while all eight
+  status-owned sites stay pixel-identical** at the physical window
+  bottom. Both halves are asserted in one scenario: a uniformly wrong
+  implementation that moves the status band too passes the "everything
+  moved" half alone. Three rows carry their own named symptom because
+  they are the ones a plausible implementation misclassifies —
+  **document completion (`:6140`) must not overlap the band**,
+  **minibuffer candidates (`:7351`) must not be clipped by it**, and
+  **edge scrolling (`:8561`) must not trigger from inside it**. The
+  geometry declaration separately reserves the divider while the panel
+  is `Absent`, and the document loses no pixels until a `Present` is
+  painted. All three boundaries clamp at zero on a surface shorter than
+  its chrome.
 - **A2B-5.** `panel_capable` is true only for a v21+ negotiated
   authenticated semantic session; a v20 semantic session is never
   **placed** in a side window, not merely denied the events.
@@ -612,7 +709,9 @@ slice under this framing so one-feature/one-branch/one-PR holds. **2A
 lands before 2B branches** — not stacked.
 
 - **Stage 2A** — classified census routing + per-window painter
-  extraction. Branch `bottom-panel-stage2a`. No protocol change.
+  extraction. Branch `bottom-panel-stage2a`. No protocol change. The
+  three-boundary GPU split is **2B**, not 2A: it is only observable
+  once a band can be installed.
 - **Stage 2B** — v21 protocol, daemon panel projection, GPU band, and
   the negotiated `panel_capable` flip. Branch `bottom-panel-stage2b`,
   cut from `main` after 2A merges. Repeats 2A's relevant census

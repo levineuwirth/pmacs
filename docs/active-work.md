@@ -399,11 +399,13 @@ flight.
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
 - Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
   2026-07-25).
-- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 3**,
-  on branch `githubsucks/bottom-panel-stage2-framing`, worktree
-  `../pmacs-bp-stage2`, based on `githubsucks/main` @ `ccf29e3`. Round 1
-  closed 2 blocking + 3 high; round 2 closed 1 blocking + 2 high + 1
-  medium and decided both open items. No open items remain. The approved
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 4**,
+  on branch `githubsucks/bottom-panel-stage2-framing` (three commits,
+  one per revision), worktree `../pmacs-bp-stage2`, based on
+  `githubsucks/main` @ `ccf29e3`. Round 1 closed 2 blocking + 3 high;
+  round 2 closed 1 blocking + 2 high + 1 medium and decided both open
+  items; round 3 closed 1 blocking + 1 high + 1 medium. No open items
+  remain. The approved
   parent framing `docs/bottom-panel-framing.md` (rev 4) remains
   authoritative, **including its acceptance criteria 37–55**.
 - Retained, carrying nothing unmerged: branch `bottom-panel` and worktree
@@ -433,7 +435,12 @@ flight.
   the status chrome must stay pixel-identical at the physical window
   bottom while document consumers move. A blanket rewrite of that helper
   moves both together and passes an "everything moved" assertion, so the
-  Stage 2 criterion asserts **both directions in one scenario**.
+  Stage 2 criterion asserts **both directions in one scenario**. The
+  census is 20 production sites (8 status-owned, 12 document-owned) + 1
+  definition + 8 test sites = 29 matches; the framing carries the
+  per-site table. The three easiest to misclassify are document
+  completion `:6140`, minibuffer candidates `:7351`, and edge scrolling
+  `:8561` — each with its own visible symptom.
 - **Folding Stage 3 and this arc's Stage 2 both touch the semantic
   projection.** Whichever is framed second re-scouts the other's landed
   state.
