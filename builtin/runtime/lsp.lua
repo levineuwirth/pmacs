@@ -540,7 +540,7 @@ end
 -- resolver can never serve a root the previous one computed.
 local root_resolver_memo = setmetatable({}, { __mode = "k" })
 
-local function resolve_root_fn(resolver, path)
+local function resolve_root_fn(language, resolver, path)
   local dir = dir_of(path)
   if not dir then return nil end
   local memo = root_resolver_memo[resolver]
@@ -555,7 +555,36 @@ local function resolve_root_fn(resolver, path)
     return hit or nil
   end
   local ok, resolved = pcall(resolver, path)
-  if not ok or type(resolved) ~= "string" then resolved = nil end
+  -- COHERENCE §1.2: background wiring must not DISCARD a failure. A
+  -- resolver that raises, or that returns something other than a string
+  -- or nil, is a config bug — and the memo below would otherwise bury
+  -- it permanently for this directory, so it is never observed again.
+  -- Returning nil is the documented decline and stays silent.
+  local failure
+  if not ok then
+    failure = "raised: " .. tostring(resolved)
+  elseif resolved ~= nil and type(resolved) ~= "string" then
+    failure = "returned a " .. type(resolved) .. "; want string or nil"
+  end
+  if failure then
+    local msg = string.format(
+      "LSP: %s root resolver for %s %s", language, dir, failure)
+    -- Report on the channel that EXISTS. `pmacs.error` is referenced by
+    -- fifteen guarded call sites across the runtime and is defined
+    -- nowhere in production (only by a test stub in `src/editor.rs`), so
+    -- `if pmacs.error then ...` alone would be a sixteenth report that
+    -- never fires — the unwired-guard shape, not a fix for it. The
+    -- status line is what lsp.lua already uses for every other LSP
+    -- error. The `pmacs.error` arm rides along so this upgrades for free
+    -- if that channel is ever built.
+    --
+    -- Both reports are pcall'd: a broken reporting channel must not turn
+    -- a declined root into a failed attach.
+    pcall(pmacs.editor.set_status, msg)
+    if pmacs.error then pcall(pmacs.error, msg) end
+    resolved = nil
+  end
+  if type(resolved) ~= "string" then resolved = nil end
   memo[dir] = resolved or false
   return resolved
 end
@@ -570,7 +599,7 @@ local function project_root_for(language, path)
   end
   if not path then return nil, nil end
   if configured then
-    local resolved = resolve_root_fn(configured, path)
+    local resolved = resolve_root_fn(language, configured, path)
     if resolved then return resolved, "config" end
   end
   local ok, det = pcall(pmacs.project.detect, path)

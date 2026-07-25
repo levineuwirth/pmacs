@@ -156,6 +156,10 @@ fn rows(state: &EditorState) -> Vec<String> {
     }
 }
 
+fn status(state: &EditorState) -> String {
+    state.core.borrow().status.clone()
+}
+
 fn count(state: &EditorState) -> usize {
     let n: i64 = eval(state, "return #pmacs.lsp.list()");
     usize::try_from(n).expect("server count is non-negative")
@@ -611,5 +615,90 @@ fn config_root_false_reads_as_unset_and_detection_still_wins() {
         rows[0].split('|').nth(1).unwrap(),
         file_uri(&fx.dir("proj")),
         "`false` must not become a root; detection still wins"
+    );
+}
+
+/// COHERENCE §1.2: background wiring must leave an attributed trace
+/// rather than discard a failure. A throwing root resolver is a config
+/// bug, and the per-directory memo would otherwise bury it permanently.
+///
+/// The bite: drop the reporting arm and `*errors*` stays empty while the
+/// attach still succeeds — the exact silence §1.2 names as the canonical
+/// anti-pattern, in the function it cites.
+#[test]
+fn a_throwing_root_resolver_leaves_an_attributed_trace() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\n");
+    let mut state = editor();
+    fx.bind(&state);
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.rust = {{
+              command = "{}",
+              root = function(_) error("resolver blew up") end,
+            }}
+            "#,
+            fake_lsp_path()
+        ),
+    );
+    open(&state, &file);
+    settle(&mut state);
+
+    let msg = status(&state);
+    assert!(
+        msg.contains("root resolver"),
+        "a raising resolver must leave an attributed trace; got: {msg:?}"
+    );
+    assert!(
+        msg.contains("rust"),
+        "the trace must name the language that owns it; got: {msg:?}"
+    );
+    assert!(
+        msg.contains("resolver blew up"),
+        "the underlying error text must survive; got: {msg:?}"
+    );
+
+    // ...and the failure must degrade to a decline, not a failed attach:
+    // detection still wins and the buffer still gets its server.
+    let rows = rows(&state);
+    assert_eq!(rows.len(), 1, "the attach must still succeed: {rows:?}");
+    assert_eq!(
+        rows[0].split('|').nth(1).unwrap(),
+        file_uri(&fx.dir("proj")),
+        "a declining resolver falls through to the marker walk"
+    );
+}
+
+/// The decline path stays silent. Without this, "report failures" could
+/// be satisfied by reporting *every* resolution, which would spam
+/// `*errors*` on every attach in a Lean project.
+#[test]
+fn a_resolver_returning_nil_declines_silently() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\n");
+    let mut state = editor();
+    fx.bind(&state);
+    exec(
+        &state,
+        &format!(
+            "pmacs.lsp.config.rust = {{ command = \"{}\", root = function(_) return nil end }}",
+            fake_lsp_path()
+        ),
+    );
+    open(&state, &file);
+    settle(&mut state);
+
+    let msg = status(&state);
+    assert!(
+        !msg.contains("root resolver"),
+        "returning nil is the documented decline, not a failure; got: {msg:?}"
+    );
+    assert_eq!(
+        rows(&state)[0].split('|').nth(1).unwrap(),
+        file_uri(&fx.dir("proj"))
     );
 }
