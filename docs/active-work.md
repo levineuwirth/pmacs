@@ -227,57 +227,32 @@ If it does not, stop and repair the remote/fetch configuration.
   buffer a directory should resolve *to*, and `pmacs .` should route into
   it rather than growing a second directory surface.
 
-## GPU terminal input lane — IN REVIEW
+## Stage 3 acceptance is dark in CI — NEEDS A LANE
 
-- Portable branch: `githubsucks/gpu-terminal-input`, worktree
-  `../pmacs-gui-term-input`, based on `githubsucks/main` @ `46a1b8f`.
-- Approved framing: `docs/gpu-terminal-input-framing.md` revision 2,
-  committed as the branch's first commit (`9a0df21`). Bug fix, not a
-  feature; **no protocol change (stays v20)**.
-- Reported as "text input within the terminal doesn't work on GUI, this is
-  fine in TUI". Root cause: the dispatcher applied **both** terminal-layout
-  syncs to **every** attached frontend, and a semantic session satisfies both
-  conditions (a `term_sizes` entry from `AttachRequest` *and* a terminal
-  declaration). Its PTY was resized twice per tick forever — grid arm installs
-  the TUI placement size, semantic arm installs the declared content
-  rectangle, each arm's idempotence guard seeing only what the other just
-  wrote — so the child took a `SIGWINCH` storm at tick cadence.
-- **The fix is a split, not a guard.** The grid arm is also the only per-tick
-  controller-liveness release a semantic frontend gets, and
-  `sync_semantic_terminal_layout` cannot take that over: the buffer-follow
-  snapshot clears the viewport declaration (`on_buffer_snapshot_sent`), so
-  that arm stops running in exactly the switch-away case that needs the
-  release. `sync_terminal_layout` is therefore split into a
-  frontend-kind-neutral half (panel reconcile + liveness) and a grid-only
-  geometry half, with the loop body extracted to
-  `sync_terminal_layouts_for_tick` so the exclusivity is structural and tests
-  drive the real thing.
-- **Trap for anyone touching this again:** the release at the "no
-  `window_placements` entry" arm reads like liveness and is grid geometry. A
-  semantic frontend has no placement entry at all, so moving it into the
-  neutral half releases a GPU controller every tick.
-- Bite-verified against **two** pre-images, because the naive guard fixes the
-  storm and introduces the leak:
-
-  | pin | `main` | naive guard | the split |
-  |---|---|---|---|
-  | settle (acc 2+3) | FAIL | pass | pass |
-  | controller release (acc 6) | pass | FAIL | pass |
-  | grid still resizes (acc 5) | pass | pass | pass |
-
-- Real-path evidence: a quiet child trapping `SIGWINCH` reports **144 frames
-  in 4 s and `WINCH 1..12` on screen** against the pre-fix tree, versus a
-  settled screen with the fix.
-- **Deliberately out of scope, named:** interactive-shell echo on a raw-mode
-  PTY (Q#GT5 — reproduces in-process too, so it is not the GUI/TUI
-  asymmetry), and a geometry change appearing to clear the visible screen
-  (reproduces pre-fix; why acceptance 4 latches its observation across
-  frames).
-- Verification on this branch: `cargo fmt --check` clean; strict workspace
-  Clippy clean; 1,829 default + 2,006 CRDT library tests; vterm Stage 1/2/3
-  10 / 6 / 9 CRDT; bottom-panel Stage 1 46; M4 121; required GPU 155;
-  **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
-  `git diff --check` clean. Gates were run against the committed tree.
+- **No branch, no framing yet.** Found while gating #166; deliberately kept
+  out of it so a CI change would not arrive after review approval.
+- `.github/workflows/ci.yml` **never enables the `crdt` feature** (grep the
+  workflow directory: zero hits). Every `#[cfg(feature = "crdt")]` acceptance
+  test is therefore not merely skipped in CI — it is **not compiled**.
+- That covers the whole Vterm Stage 3 real-path acceptance, including `a37`
+  (real daemon + real PTY + real wgpu), which has been dark since #135, and
+  the two tests #166 added beside it.
+- The `gpu-render` job is the only one with lavapipe and
+  `PMACS_REQUIRE_GPU=1`, and it runs `cargo test -p pmacs-gpu`, which never
+  reaches the `pmacs` crate's acceptance suites.
+- The shape of the fix is one step on the `gpu-render` job:
+  `cargo test --features crdt --test vterm_stage3_acceptance -- --test-threads=1`.
+  It needs its own lane rather than a drive-by because it would run `a37`
+  under lavapipe **for the first time**, and neither its timing budgets nor
+  its wgpu path have ever been exercised on that adapter or on macOS CI.
+- Worth auditing at the same time: which *other* `crdt`-gated acceptance
+  suites are dark for the same reason. This is a coverage question about the
+  gate list itself, not about any one suite.
+- Mitigating fact, verified rather than assumed: #166's three unit pins are
+  **not** `crdt`-gated and do run under CI's exact flags
+  (`--no-default-features --features luajit|lua54`), including the
+  controller-release pin whose only job is catching the plausible wrong fix.
+  The regression protection is live; the real-daemon evidence is local-only.
 
 ## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
 
@@ -482,6 +457,24 @@ git worktree add --track \
   so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
+
+- **GPU terminal input (the double terminal-layout sync) — MERGED as #166**
+  (`main` @ `b889873`, 2026-07-25, one review round, all twelve checks green
+  after a macOS PTY-timing rerun). The dispatcher applied **both**
+  terminal-layout syncs to **every** attached frontend; a semantic session
+  satisfies both conditions, so its PTY was resized twice per tick forever and
+  the child took a `SIGWINCH` storm that made a GPU terminal untypable while
+  output still flowed. `sync_terminal_layout` is now split into a
+  frontend-kind-neutral half (panel reconcile + controller liveness) and a
+  grid-only geometry half, with the loop body extracted to
+  `sync_terminal_layouts_for_tick` so the exclusivity is structural. No
+  protocol change (v20). Durable lessons are in `docs/agent-handoff.md` §5;
+  the framing (`docs/gpu-terminal-input-framing.md` rev 2) carries three
+  falsified hypotheses, the two-pre-image bite matrix, and two named
+  out-of-scope items (Q#GT5 interactive-shell echo on a raw PTY, which
+  reproduces in-process and so is not the GUI/TUI asymmetry; and a geometry
+  change appearing to clear the visible screen, which reproduces pre-fix).
+  Branch `gpu-terminal-input` and worktree `../pmacs-gui-term-input` retained.
 
 - **GPU initial target — MERGED as #148** (`main` @ `0dd16a5`, 2026-07-24,
   after two review rounds). `pmacs --gpu [--socket …] FILE` opens a target

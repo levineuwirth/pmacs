@@ -1,6 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-25, after find-file (#162) landed — the dired
+**Last updated: 2026-07-25, after the GPU terminal input fix (#166) landed —
+the double terminal-layout sync that made a GPU terminal untypable — following
+Lean 4 Stage 2 (#161), the dired framing pair (#163/#164), find-file (#162) —
+the dired
 arc's Stage 0 — following COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
 minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
 inline-math re-scout (#154), the vterm PTY-flake fix (#153), and the
@@ -577,6 +580,44 @@ commands, read `docs/active-work.md` immediately after this file.
     with its inline-math parent framing **#145**.
   - Remaining ranked arcs: 6 folding Stage 3, 7 DAP, 8 GPU splits, plus
     the `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
+
+- **GPU terminal input LANDED — #166** (`main` @ `b889873`;
+  `docs/gpu-terminal-input-framing.md` rev 2; one review round). The
+  dispatcher applied **both** terminal-layout syncs to **every** attached
+  frontend each tick. A semantic session satisfies both conditions — a
+  `term_sizes` entry from `AttachRequest` *and* a terminal declaration — so
+  its PTY was resized twice per tick forever: the grid arm installed the TUI
+  placement size, the semantic arm the declared content rectangle, each arm's
+  `old_size == size` guard seeing only what the other had just written. The
+  child took a `SIGWINCH` storm at tick cadence, which made typing into a GPU
+  terminal impossible while output kept flowing. TUI was structurally
+  unaffected.
+  - `EditorInstance::sync_terminal_layout` is split into
+    `sync_terminal_controller_liveness` (frontend-kind **neutral**: panel
+    reconcile + release of a controller whose window moved away — reads only
+    views/windows/controller, never a grid size) and
+    `sync_terminal_grid_geometry` (**grid only**: TUI placement + resize).
+    `sync_terminal_layout` survives as the composition, so `editor::run` and
+    `LOCAL` are byte-identical.
+  - `daemon::sync_terminal_layouts_for_tick` is the extracted loop body:
+    liveness for every frontend once per tick, then **exactly one** geometry
+    arm keyed on `semantic_states` membership — the same fact session
+    establishment uses, so the arms cannot both fire.
+  - **The trap, kept in a comment:** the release on a missing
+    `window_placements` entry reads like liveness and is grid geometry. A
+    semantic frontend has no placement entry at all, so moving it into the
+    neutral half would release a GPU controller every tick.
+  - Why not the one-line guard: the grid arm was also the **only** per-tick
+    controller-liveness release a semantic frontend got, and
+    `sync_semantic_terminal_layout` cannot take it over — the buffer-follow
+    snapshot clears the viewport declaration, so that arm stops running in
+    exactly the switch-away case that needs the release.
+  - No protocol change (v20). Gates: 1,829 default + 2,006 CRDT library
+    tests; vterm Stage 1/2/3 10/6/9 CRDT; bottom-panel 46; M4 121; required
+    GPU 155; isolated-config workspace sweep 3,177 across 92 suites.
+  - **Known gap, its own lane:** CI never enables `crdt`, so the Stage 3
+    real-path acceptance (including `a37`) is not compiled there. #166's unit
+    pins are not `crdt`-gated and do run. See `docs/active-work.md`.
 
 ## 2. How we work (the part that must not drift)
 
