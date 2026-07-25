@@ -93,7 +93,10 @@ fn editor_in(dir: &std::path::Path) -> EditorState {
     let state = EditorState::new();
     state.lua_host.reopen_init_phase_for_testing();
     let anchor_str = anchor.display().to_string();
-    exec(&state, &format!("pmacs.buffer.find_or_open({anchor_str:?})"));
+    exec(
+        &state,
+        &format!("pmacs.buffer.find_or_open({anchor_str:?})"),
+    );
     state
 }
 
