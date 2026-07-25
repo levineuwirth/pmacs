@@ -12357,9 +12357,9 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
 
     {
         let cc = core.clone();
-        // With no argument: the selected window's buffer (unchanged).
-        // With an explicit window id: that window's buffer, validated
-        // against the acting frontend's layout like every other
+        // With no argument: the ambient active buffer, exactly as before
+        // this arc. With an explicit window id: that window's buffer,
+        // validated against the acting frontend's layout like every other
         // `WindowId`-taking operation (bottom-panel arc, Q#BP11) — an
         // adopter has to be able to ask "is my buffer the one in the
         // panel" without first selecting the panel.
@@ -12367,14 +12367,24 @@ fn install_window_module(lua: &Lua, core: &SharedCore) -> mlua::Result<Table> {
             "buffer",
             lua.create_function(
                 move |lua, target: Option<u64>| -> mlua::Result<BufferIdLua> {
-                    // Both arms resolve through the ACTING frontend, using
-                    // the same validator the rest of the window surface
-                    // does — no ambient `active_buffer_id()` asymmetry.
-                    let fid = window_panel::acting_frontend(lua, &cc);
-                    let id = match target {
-                        Some(raw) => window_panel::lookup_window(&cc, fid, raw)?,
-                        None => window_panel::selected_window(&cc, fid)?,
+                    // The no-arg arm deliberately stays on ambient
+                    // `active_buffer_id()`, and stays INFALLIBLE. This is not
+                    // the asymmetry it looks like: dispatch sets
+                    // `active_frontend` to the acting frontend before running a
+                    // command, so the two agree on every real path — while
+                    // `acting_frontend` can additionally name a frontend that
+                    // has no registered view, where a `views`-keyed lookup
+                    // raises instead of answering. `killring`, `syntax`,
+                    // `autosave`, `pair`, `indent` and `comment` all call this
+                    // on ordinary edits without `pcall`, so a raise here does
+                    // not surface as an error — it silently drops the
+                    // operation (it lost a whole kill in `kill_ring_acceptance`
+                    // when this arm was routed through `selected_window`).
+                    let Some(raw) = target else {
+                        return Ok(BufferIdLua(cc.borrow().active_buffer_id()));
                     };
+                    let fid = window_panel::acting_frontend(lua, &cc);
+                    let id = window_panel::lookup_window(&cc, fid, raw)?;
                     cc.borrow()
                         .windows
                         .get(&id)

@@ -137,13 +137,52 @@ If it does not, stop and repair the remote/fetch configuration.
      the viewport width, so any text equality over it is vacuously true.
      Emit `\r\n`, and guard text comparisons with a non-empty assertion
      the way the daemon pin guards on `!panel_hidden`.
+- **Round-2 self-review caught a regression the round-2 commit
+  introduced**, in the change it labelled "minor": routing
+  `pmacs.window.buffer()`'s **no-argument** arm through the fid-scoped
+  `selected_window` validator made it **fallible**, and
+  `acting_frontend` can name a frontend with **no registered view** (a
+  bare `dispatch_key` from an unattached peer does exactly that). The
+  runtime calls that function on ordinary edits from `killring`,
+  `syntax`, `autosave`, `pair`, `indent` and `comment` **without
+  `pcall`**, so the raise never surfaced as an error — it silently
+  dropped the operation. `kill_ring_acceptance` went 30/30 → 25/5
+  (`frontend_detached_drops_per_frontend_state`: "B has kill state").
+  The no-arg arm is back on ambient `active_buffer_id()` and documented
+  as deliberately infallible; the explicit-window arm keeps its Q#BP11
+  validation. New **acc19c** pins it through the real path (a
+  `buffer.after-edit` subscriber during a viewless peer's `dispatch_key`)
+  and bites against the regressing commit.
+  Generalizes: **a "uniformity" cleanup that changes a function's
+  fallibility is not minor** — check every caller's error discipline
+  first, and remember that an ambient resolver's fallback IS its
+  contract.
 - Verification on this branch: `cargo fmt --check` clean; strict
   workspace Clippy clean; 1,817 default + 1,994 CRDT library tests;
-  `bottom_panel_stage1_acceptance` 45/45; vterm Stage 1 9; M4 121; required GPU 152;
-  `gpu_initial_target_acceptance` 14 CRDT; compile 67; vterm Stage 2 4 /
-  Stage 3 5; folding Stage 2 48; statusline 7; listview 6; desktop 11;
-  **workspace sweep 3,128 passed, zero failures**; `git diff --check`
-  clean.
+  `bottom_panel_stage1_acceptance` 46/46; kill ring 30 default + 30 CRDT;
+  vterm Stage 1 9 default + 10 CRDT; M4 121; required GPU 152;
+  compile 67; vterm Stage 2 4 / Stage 3 5 (7 CRDT); folding Stage 2 48;
+  statusline 7; listview 6;
+  **isolated-config workspace sweep 3,130 passed across 89 suites, zero
+  failures**; `git diff --check` clean.
+  - **Run the sweep with an isolated `XDG_CONFIG_HOME`.** The real
+    `~/.config/pmacs/init.lua` on this desktop calls
+    `pmacs.packages.install_local(...)`, so every editor the sweep builds
+    races on one shared install root; a losing race sets a status message
+    that leaks into the mode line and breaks
+    `folding_stage2_acceptance::unfolded_frame_is_identical_to_the_pre_folding_baseline`,
+    which compares whole painted frames. Standalone it is 48/48. This
+    generalizes the known `compile_mode_acceptance` real-config trap:
+    any suite that paints the status area inherits it.
+  - **A latent pre-existing `main` bug surfaced while gating and is NOT
+    this branch's**: `buffer::tests::proptests::rope_matches_crdt_projection_after_arbitrary_edits`
+    fails on `main` @ `352bf0b` with `ops = [Insert(0,"a"),
+    Insert(0,"aaa"), Replace(0,1,"a"), Undo]` — undo of a textually-null
+    `Replace` returns a no-op edit result still carrying `crdt_op =
+    Some`, violating the suite's own shape invariant. `src/buffer.rs` is
+    byte-identical here, and the seed was deliberately **not** committed
+    (it would make an unrelated failure deterministically red on this
+    PR). Needs its own lane.
   - Durable test lesson from this round: `TerminalViewStatus.scroll_offset`
     is documented as the retained rows between **this viewport** and the
     live tail, so it necessarily tracks the viewport height. Asserting it

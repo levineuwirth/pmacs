@@ -1369,6 +1369,58 @@ fn acc19b_recompile_reuses_the_panel_instead_of_duplicating_into_the_document() 
     );
 }
 
+/// `pmacs.window.buffer()` with NO argument must stay **infallible**.
+///
+/// The optional window argument this arc added is validated against the
+/// acting frontend's layout, and it is tempting to make the no-arg arm
+/// symmetric by resolving it the same way. That silently breaks the
+/// runtime: `acting_frontend` follows the interactive origin, which can
+/// name a frontend with **no registered view** (as a bare
+/// `dispatch_key` from a peer does), where a `views`-keyed lookup raises
+/// instead of answering — and `killring`, `syntax`, `autosave`, `pair`,
+/// `indent` and `comment` all call this on ordinary edits without
+/// `pcall`, so the raise does not surface as an error, it just drops the
+/// operation. Routing it through `selected_window` lost an entire kill in
+/// `kill_ring_acceptance`.
+#[test]
+fn acc19c_window_buffer_stays_infallible_for_an_acting_frontend_without_a_view() {
+    let mut s = editor();
+    let ambient = s.core.borrow().active_buffer_id();
+    exec(
+        &s,
+        // A `buffer.after-edit` subscriber is the real shape: this is
+        // where syntax.lua, pair.lua and comment.lua each call
+        // `pmacs.window.buffer()` on every ordinary edit.
+        "SEEN = nil; ERR = nil \
+         pmacs.hook.add(\"buffer.after-edit\", function() \
+           local ok, got = pcall(pmacs.window.buffer) \
+           if ok then SEEN = got else ERR = tostring(got) end \
+         end)",
+    );
+
+    // A peer that never registered a view — the shape `dispatch_key`
+    // produces for an unattached frontend, and what the kill-ring suite
+    // drives with `ctrl_as`.
+    let viewless = FrontendId(9);
+    assert!(
+        !s.core.borrow().views.contains_key(&viewless),
+        "the premise: this frontend really has no view"
+    );
+    s.dispatch_key(viewless, key(KeyCode::Char('z'), KeyModifiers::NONE));
+
+    let err: Option<String> = eval(&s, "return ERR");
+    assert_eq!(
+        err, None,
+        "pmacs.window.buffer() must not raise for a viewless acting frontend"
+    );
+    let seen: Option<pmacs::lua_bindings::BufferIdLua> = eval(&s, "return SEEN");
+    assert_eq!(
+        seen.expect("the command observed a buffer").0,
+        ambient,
+        "…it answers with the ambient active buffer"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 20 / 23 — quit: delete, restore chains, revalidation, and the cap
 // ---------------------------------------------------------------------------
