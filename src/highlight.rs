@@ -1737,7 +1737,8 @@ mod tests {
             Color::Indexed(4),
             "a called variant keeps @function, not @constructor"
         );
-        // Lua tags the table-constructor BRACES, not a name: `{` at col 8.
+        // Lua tags the table-constructor BRACES, not a name: `{` at col 10
+        // of `local t = {}`.
         assert_eq!(
             painted_fg_at("lua", "a.lua", "local t = {}\n", 10),
             Color::Indexed(11),

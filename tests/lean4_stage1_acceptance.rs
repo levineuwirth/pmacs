@@ -305,16 +305,36 @@ fn acc11b_an_unknown_fence_name_still_injects_nothing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn acc12_stage1_spawns_no_process_and_needs_no_lean_toolchain() {
+fn acc12_stage1_ships_no_lsp_config_and_spawns_no_process() {
     // Stage 1 is grammar + Lua tables only. Opening a Lean file must not
     // reach for `lake`, `lean`, or `elan` — the LSP arrives in Stage 3, and
     // even then it is fallible by design (Q#LN7).
-    //
-    // Asserted through the process supervisor rather than by inspection:
-    // opening the file leaves the child-process list exactly as it was.
+
+    // The load-bearing assertion, and it must run against a PRISTINE editor.
+    // The shared `editor()` helper wipes `pmacs.lsp.config` before any
+    // buffer opens, so an assertion about the server list under that harness
+    // holds for every language regardless of what Stage 1 ships — it could
+    // not fail for the regression it names. This checks the real claim
+    // directly: no builtin runtime file defines a Lean server config. A
+    // Stage-3 front-run adding `pmacs.lsp.config.lean4` fails here.
+    let pristine = EditorState::new();
+    let no_lean_config: bool = eval(&pristine, "return pmacs.lsp.config.lean4 == nil");
+    assert!(
+        no_lean_config,
+        "Stage 1 defines no `pmacs.lsp.config.lean4`; the LSP is Stage 3"
+    );
+    // Non-vacuity: the same lookup finds the configs that DO ship, so this
+    // is not passing because `pmacs.lsp.config` is empty or absent.
+    let rust_config_exists: bool = eval(&pristine, "return pmacs.lsp.config.rust ~= nil");
+    assert!(
+        rust_config_exists,
+        "the config table is populated, so the lean4 absence above is meaningful"
+    );
+
+    // And nothing is spawned by opening the file. This half retains its
+    // value under the wiped config: a direct probe spawn from `lean.lua`
+    // would show up here whatever `pmacs.lsp.config` contains.
     let s = editor_visiting("Basic.lean", "def x : Nat := 1\n");
     let procs: i64 = eval(&s, "return #pmacs.process.list()");
     assert_eq!(procs, 0, "opening a Lean buffer spawns no child process");
-    let servers: i64 = eval(&s, "return #pmacs.lsp.list()");
-    assert_eq!(servers, 0, "Stage 1 attaches no language server");
 }
