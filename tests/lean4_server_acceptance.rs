@@ -1069,3 +1069,174 @@ fn r2_an_unconfigured_lean_server_is_disabled_not_failed() {
         "and the session is not poisoned: a later config must still work"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Round-3 review findings — asynchronous correlation.
+//
+// Both fail against 3377db0, where the suite was 25/25.
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A `lake` whose `serve` really works (it execs the fake LSP) but
+    /// whose `--version` answers slowly with an old version. This is the
+    /// ordering the previous fixtures could not produce: the primary
+    /// INITIALIZES before the version verdict arrives.
+    fn slow_version_lake(&self, rel: &str, server: &str, version_line: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = self.root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  sleep 0.6\n  echo '{version_line}'\n  exit 0\nfi\nexec '{server}'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+}
+
+/// The command backing the active buffer's attached server.
+fn attached_command(state: &EditorState) -> String {
+    eval(
+        state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.command)
+          end
+        end
+        return "gone"
+        "#,
+    )
+}
+
+#[test]
+fn r3_a_late_version_verdict_still_retires_an_initialized_primary() {
+    // `probe.watching` is cleared the moment the server initializes. A
+    // verdict arriving after that used to call `fire_latch(nil)`, which
+    // retires nothing — `_attach_buffer` then returns the still-live
+    // primary and the retry calls it success. Status and config would
+    // say "fell back" while the buffer stayed put.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let lake = fx.slow_version_lake("bin/lake", &fake_lsp_path(), "Lake version 3.0.0");
+    let mut state = editor(&fx);
+    with_fallback(&state, &lake);
+
+    open(&state, &file);
+    // Let the primary initialize first — the ordering that matters.
+    tick_for(&mut state, 300);
+    assert_eq!(
+        attached_state(&state),
+        "initialized",
+        "precondition: the primary really did come up before the verdict"
+    );
+    assert_eq!(
+        attached_command(&state),
+        lake.display().to_string(),
+        "precondition: and the buffer is on it"
+    );
+
+    // Now let the slow `--version` land and the fallback complete.
+    tick_for(&mut state, 1200);
+
+    assert_eq!(
+        attached_command(&state),
+        fake_lsp_path(),
+        "a late version verdict must actually move the buffer to the \
+         fallback, not just rewrite the config and claim it did"
+    );
+    // And the retired primary is not left running or respawning.
+    let stale: i64 = eval(
+        &state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        local live = rec and tostring(rec.server) or ""
+        local n = 0
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) ~= live then
+            local k = s.state and s.state.kind
+            if k ~= "stopped" and k ~= "crashed" then n = n + 1 end
+          end
+        end
+        return n
+        "#,
+    );
+    assert_eq!(stale, 0, "the initialized primary was retired, not left up");
+}
+
+#[test]
+fn r3_a_second_lean_buffer_does_not_steal_the_rebuild_target() {
+    // `buf_key` was written on every Lean `buffer.after-load`, so a
+    // second Lean file opened before the verdict became the rebuild
+    // target while the latch still watched the FIRST buffer's server.
+    //
+    // Both files live in the SAME Lake package, so they share one server
+    // and one root — which is what makes the mis-targeting observable as
+    // a stranded buffer rather than as two independent servers.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let first = fx.write("pkg/A.lean", "def a := 1\n");
+    let second = fx.write("pkg/B.lean", "def b := 2\n");
+    let lake = fx.lake_stub("bin/lake", "Lake version 3.0.0");
+    let mut state = editor(&fx);
+    with_fallback(&state, &lake);
+
+    open(&state, &first);
+    exec(&state, "_G.first_buf = pmacs.window.buffer()");
+    // A second Lean buffer, opened before the probe's verdict lands.
+    open(&state, &second);
+    tick_for(&mut state, 500);
+
+    // The armed target must still be the FIRST buffer.
+    let target_is_first: bool = eval(
+        &state,
+        "return pmacs.lean._probe.buf_key == tostring(_G.first_buf)",
+    );
+    assert!(
+        target_is_first,
+        "the rebuild target is captured once, when the latch arms — a \
+         later Lean buffer must not silently become the target"
+    );
+
+    // And the first buffer really does end up on the fallback.
+    exec(&state, "pmacs.window.switch_buffer(_G.first_buf)");
+    tick_for(&mut state, 600);
+    assert_eq!(
+        attached_command(&state),
+        fake_lsp_path(),
+        "the originating buffer is the one repaired"
+    );
+}
+
+#[test]
+fn r3_a_failing_wrapper_is_named_truthfully_not_as_lake_serve() {
+    // The failure latch is command-agnostic, so its message must be too.
+    // Telling a user that `lake serve` failed when they configured
+    // `my-lean-wrapper` sends them to debug the wrong thing.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/my-lean-wrapper");
+    let mut state = editor(&fx);
+    with_fallback(&state, &absent);
+
+    open(&state, &file);
+    settle(&mut state);
+
+    let status = state.core.borrow().status.clone();
+    assert!(
+        status.contains("my-lean-wrapper"),
+        "the status names the command the user actually configured; saw \
+         {status:?}"
+    );
+    assert!(
+        !status.contains("lake serve"),
+        "and does not attribute the failure to `lake serve`; saw {status:?}"
+    );
+}

@@ -127,9 +127,27 @@ local probe = {
   proc = nil,        -- process id of the running probe
   out = "",          -- accumulated probe stdout
   buf_key = nil,     -- tostring() of the buffer that started this
-  watching = nil,    -- sid we are waiting to see fail before initialize
+  watching = nil,    -- sid still being polled for die-before-initialize
+  primary = nil,     -- sid the probe's verdict applies to; NOT cleared
+                     -- when the server initializes, because a late
+                     -- version verdict still has to retire it
+  armed = false,     -- the target buffer + primary have been captured
   saw_initialized = false,
 }
+
+-- The command as configured, for status text. Hardcoding "lake serve"
+-- was untruthful the moment the failure latch became command-agnostic:
+-- a user whose `my-lean-wrapper` failed was told `lake serve` did.
+local function configured_command()
+  local cfg = pmacs.lsp.config.lean4
+  local cmd = cfg and cfg.command
+  if not cmd then return "the Lean server" end
+  local args = cfg.args or {}
+  if #args > 0 then
+    return "`" .. tostring(cmd) .. " " .. table.concat(args, " ") .. "`"
+  end
+  return "`" .. tostring(cmd) .. "`"
+end
 
 local function report(msg)
   -- COHERENCE §1.2: background work must leave an attributed trace.
@@ -327,9 +345,19 @@ local function drain_probe()
       -- case, and covers it better. The probe answers only the ONE
       -- question failure detection would otherwise answer slowly: an
       -- old-but-working lake that starts a useless server.
+      -- **`probe.primary`, NOT `probe.watching`.** `watching` is
+      -- failure-polling state and is cleared the moment the server
+      -- initializes. A slow `--version` that lands after a successful
+      -- initialize would then arrive with nil, and `fire_latch(nil)`
+      -- retires nothing: `_attach_buffer` finds the still-live primary
+      -- attachment, early-returns it, and the retry calls that success.
+      -- Status and config would say "fell back" while the buffer stayed
+      -- on the old server — the same silent no-op as round 1, reached
+      -- through a different event ordering. Initializing must stop the
+      -- failure poll, not erase the server the verdict has to retire.
       if ev.kind == "exited" and ev.code == 0
           and version_below_3_1(probe.out) then
-        fire_latch(probe.watching, "lake is older than 3.1.0")
+        fire_latch(probe.primary, "lake is older than 3.1.0")
       end
     end
   end
@@ -393,18 +421,20 @@ local function poll_latch()
     if tostring(info.id) == skey then
       local kind = info.state and info.state.kind
       if kind == "initialized" then
+        -- Stop polling for failure; `probe.primary` deliberately
+        -- survives, because a later version verdict still needs it.
         probe.saw_initialized = true
         probe.watching = nil
         return
       end
       if kind == "crashed" or kind == "stopped" then
-        fire_latch(sid, "`lake serve` failed to start")
+        fire_latch(sid, configured_command() .. " failed to start")
       end
       return
     end
   end
   -- Gone from the manager entirely without ever initializing.
-  fire_latch(nil, "`lake serve` failed to start")
+  fire_latch(nil, configured_command() .. " failed to start")
 end
 
 -- Q#LN16 — `textDocument/waitForDiagnostics` --------------------------
@@ -488,11 +518,6 @@ pmacs.hook.add("buffer.after-load", function()
   local ok_lang, lang = pcall(pmacs.lsp.buffer_language, buf)
   if not ok_lang or lang ~= "lean4" then return end
 
-  -- The buffer that started this, remembered for the asynchronous
-  -- rebuild: `_attach_buffer` acts on whatever is active when the
-  -- verdict lands, which may be a different buffer entirely.
-  probe.buf_key = tostring(buf)
-
   if not probe.started then
     local path = pmacs.editor.file_path()
     start_probe(path and M.root_for(path) or nil)
@@ -500,9 +525,18 @@ pmacs.hook.add("buffer.after-load", function()
 
   local rec = pmacs.lsp.active_attachment()
   if rec and rec.language == "lean4" then
-    -- Watch only the FIRST Lean server: the latch is per session.
-    if not probe.latched and not probe.saw_initialized
-        and probe.watching == nil then
+    -- **Arm ONCE, capturing buffer and server together.** Setting
+    -- `buf_key` on every Lean load meant a second Lean buffer opened
+    -- before the verdict silently became the rebuild target while the
+    -- latch still watched the FIRST buffer's server — so the rebuild
+    -- either repaired the wrong buffer or accepted the second buffer's
+    -- unrelated live server as success, stranding the first. The pair
+    -- (target buffer, primary server) is one fact and is captured as
+    -- one.
+    if not probe.armed and not probe.latched and not probe.saw_initialized then
+      probe.armed = true
+      probe.buf_key = tostring(buf)
+      probe.primary = rec.server
       probe.watching = rec.server
     end
     return
@@ -522,7 +556,13 @@ pmacs.hook.add("buffer.after-load", function()
   -- already swallowed upstream. That is not something to wait for; it
   -- is the failure itself, and the only place it is still observable.
   if not probe.latched then
-    fire_latch(nil, "`" .. tostring(cfg.command) .. "` could not be started")
+    -- No server was ever created, so there is no primary to retire —
+    -- but the rebuild still needs a target buffer.
+    if not probe.armed then
+      probe.armed = true
+      probe.buf_key = tostring(buf)
+    end
+    fire_latch(nil, configured_command() .. " could not be started")
   end
 end)
 
