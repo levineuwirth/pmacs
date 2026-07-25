@@ -1,6 +1,7 @@
 # Dired Stage 2 — marks and operations — framing
 
-**Revision 1 — 2026-07-25. Status: PROPOSED, awaiting review.**
+**Revision 2 — 2026-07-25. Status: PROPOSED; review round 1 addressed
+(seven findings, two blocking).**
 Continues `docs/dired-framing.md` (rev 7, approved; Stage 0 merged as
 #162, Stage 1 as #165). That document's §6 and §7 carry the *approved*
 shape of marks and operations; this one re-verifies every claim in them
@@ -17,7 +18,67 @@ references for everything Stage 2 touches.**
 
 ---
 
-## 0. What changed from the parent framing
+## 0. Revision history
+
+### Review round 1 (rev 1 → rev 2)
+
+Every checkable claim in the review was verified against `c8ec8f3`
+before being acted on; all seven held.
+
+- **F1 (blocking) — the rename contract reached only one path owner.**
+  Rev 1 rebound `Buffer.file_path` and stopped. Verified: `Buffer::set_name`
+  documents itself as "used by save-as and **rename operations**"
+  (`src/buffer.rs:452`) and `set_buffer_path` never calls it, so the
+  statusline and buffer list keep the old filename; `rec.uri` is cached
+  per attachment in `lsp.lua` and read at ~20 sites (didChange `:418`,
+  semantic tokens `:776-790`, diagnostics `:953`, signature `:1016`,
+  definition `:1648`, references `:1757`); dired's own buffers are
+  **pathless** so no buffer-keyed rebind can ever reach them; and the
+  workspace-edit path captures `origin = active_buffer_path()`
+  (`lsp.lua:1252`) then calls `find_or_open(origin)` (`:1266`), which for
+  a since-renamed path does not fail gracefully — `resolve_target_buffer`
+  turns `NotFound` into "an empty path-backed buffer"
+  (`editor_core.rs:876-878`), i.e. it **materializes a phantom buffer at
+  the obsolete path and selects it**. Rev 2 replaces the rebind with a
+  shared reconciliation transaction plus a `resource.renamed` hook (§5).
+- **F2 (blocking) — deletion of visited paths had no policy.** Correct,
+  and rev 1 simply did not consider it. §6 is new and decides all four
+  cases; the modified-buffer case blocks rather than orphans.
+- **F3 (high) — the key table silently changed approved scope.** Verified
+  against the parent's table (`dired-framing.md:963-966`): it lists `w`
+  (copy filename to the kill ring) in Stage 2 and contains **no** `M`.
+  Rev 1 dropped `w` and added `M` without saying so. Worse, the parent
+  states at `:543-546` that the fixture "rejects symlink perms edits at
+  intercept time ... **that decision carries over unchanged**", and rev 1's
+  `M` chose to chmod the symlink's target with a warning — a direct
+  contradiction of approved text. `w` is restored (§8, Q#DR20) and `M`
+  is now an explicit new decision that **refuses symlinks** (Q#DR19).
+- **F4 (high) — Q#DR13 contradicted the `R` contract.** It did: "every
+  operation targets the marked set ... except `x`", then `R` point-only.
+  Q#DR13 is narrowed to name the set-based operations explicitly, with
+  `R` and `w` as point-based by construction (§4), plus acceptance for
+  `R` with unrelated marks present.
+- **F5 (high) — load-bearing decisions lacked falsifying acceptance.**
+  All five additions taken; see §13 items 14, 24, 33, 34, and 35.
+- **F6 (medium) — `take_settled_renames()` was underspecified.** Correct:
+  a no-argument drain either needs a second queue or a scan of every
+  settled entry, neither of which rev 1 named. Rev 2 takes the reviewer's
+  preferred shape — `tick` returns a structured outcome so settle
+  identity and rename metadata stay in one transaction (§5).
+- **F7 (2b) — overwrite and recursive-delete safety were incomplete.**
+  §8 now defines the `C` command flow including per-collision handling in
+  a multi-source batch, pins `remove_dir_all`'s lstat safety at the
+  primitive, and states `dired.recursive-deletes` as boolean, default
+  **false**.
+
+One thing the review asked for that rev 2 does **not** do: it does not
+widen `R` to the marked set. Multi-file rename needs a target-directory
+concept that does not exist, so `R` stays point-based and is *named* as
+such rather than being an unstated exception. §11 keeps it deferred.
+
+---
+
+### Corrections to the parent framing (rev 1, unchanged)
 
 Five corrections, one of them load-bearing.
 
@@ -55,14 +116,14 @@ Five corrections, one of them load-bearing.
 - **C4.** The parent's `y_or_n` claim is confirmed stronger than stated:
   grep across `builtin/` and `src/` finds **no** `y_or_n`, `yes_or_no`,
   or `yes-or-no` anywhere, and there is no `builtin/runtime/minibuffer.lua`
-  at all — `pmacs.minibuffer` is entirely Rust-provided. §6 decides where
+  at all — `pmacs.minibuffer` is entirely Rust-provided. §7 decides where
   the helper lives.
 - **C5.** The parent's list of three missing primitives is correct, and
   `remove` covers more than it implies: `remove_blocking`
   (`src/fs.rs:561-583`) already deletes **files and empty directories**,
   and correctly unlinks a symlink-to-a-directory rather than following it.
   So `remove_dir_all` is needed only for **non-empty** directories. This
-  is what makes the staging cut in §9 possible.
+  is what makes the staging cut in §10 possible.
 
 ---
 
@@ -78,7 +139,7 @@ Five corrections, one of them load-bearing.
   command is an ordinary `pmacs.command.define`, so all of it is reachable
   from `M-x` and describable by `describe.key`. The confirmation prompt
   uses the existing minibuffer rather than a new modal surface — that is
-  the *reason* §6 spends a section on it.
+  the *reason* §7 spends a section on it.
 - **Config registry.** Stage 2a adds no keys. Stage 2b adds
   `dired.recursive-deletes` (Emacs's `dired-recursive-deletes`), through
   `pmacs.config.define` like `dired.kill-when-opening`.
@@ -118,18 +179,24 @@ The Emacs dired working loop: select a set of files, then act on it.
 | `d` | `dired.flag-delete` | Flag `D`, advance |
 | `x` | `dired.execute-flags` | Delete every `D`-flagged entry, after confirming |
 | `D` | `dired.do-delete` | Delete the marked set (or entry at point) now, after confirming |
-| `R` | `dired.do-rename` | Rename the entry at point |
-| `M` | `dired.do-chmod` | Change mode bits on the marked set (or entry at point) |
+| `R` | `dired.do-rename` | Rename the entry **at point** (§4) |
+| `w` | `dired.copy-filename` | Copy the filename at point to the kill ring |
+| `M` | `dired.do-chmod` | Mode bits on the marked set; **refuses symlinks** (NEW — Q#DR19) |
 | `+` | `dired.create-directory` | Create a subdirectory (**2b**) |
 | `C` | `dired.do-copy` | Copy the marked set (or entry at point) (**2b**) |
 
-Plus, invisibly: **`pmacs.fs.rename` starts rebinding open buffers**
-(§5) — a correctness fix to shared substrate that is the reason `R` is
-safe on a directory.
+`w` is carried forward from the parent's approved table; **`M` is new
+scope** and needs explicit approval, since the parent listed neither it
+nor any chmod surface for Stage 2 (F3).
+
+Plus, invisibly: **renaming a path starts reconciling every consumer that
+holds it** — buffer path *and* name, LSP attachments, and dired's own
+handles (§5). That is a correctness fix to shared substrate, and it is
+the reason `R` is safe on a directory at all.
 
 Not in Stage 2: `wdired` (Stage 3), subdirectory insertion (`i`),
 shell commands on marks (`!`), regexp marking (`% m`), and
-compress/symlink/hardlink ops. §10 names them.
+compress/symlink/hardlink ops. §11 names them.
 
 ---
 
@@ -156,12 +223,12 @@ Everything below was read or executed on this tree, not inferred.
   states the reason (a cancelled mutation may still have completed) and
   the prescribed alternative: *"If a package needs at-most-one-pending
   semantics for mutations, it should serialize on the package side (await
-  each op before dispatching the next)."* §8 takes that instruction
+  each op before dispatching the next)."* §9 takes that instruction
   literally.
 - `chmod` **follows symlinks** (`fs.lua:145-153`) while `read_dir`/`stat`
   lstat. So `M` on a symlink line changes the *target's* mode and a
   refresh shows the link's own, unchanged mode. This is documented
-  substrate behavior, not a bug to fix here; §7 decides what `M` does
+  substrate behavior, not a bug to fix here; §8 decides what `M` does
   about it.
 - `read_opts` (`:82-105`) rejects unknown keys. Any new op that takes
   opts must go through it or repeat that discipline.
@@ -223,9 +290,9 @@ PROBE is_complete=true snapshot_active=0 snapshot_completed=1
 Two consequences. Good: **the settled job is still in `pending` when the
 harvest runs**, so §5's design is sound. Bad: this is a real leak, it is
 **pre-existing and not Stage 2's to fix**, and Stage 2 must not make it
-routine. §8's serialize-and-await contract means dired's own ops reap
+routine. §9's serialize-and-await contract means dired's own ops reap
 every entry they create; the rebind exists for *other* callers, who leak
-today regardless. Named as a deferral (§10) with the note that
+today regardless. Named as a deferral (§11) with the note that
 `pending_len` is the observable.
 
 ### Marks: the precedent already in the tree
@@ -247,7 +314,7 @@ before the candidate branch is reached.**
 So: **a prompt with no `source` returns typed text verbatim, always.**
 Every Stage 2 free-text prompt (a new name, an octal mode, a directory
 name) omits `source` and is immune. A prompt that *wants* candidates
-re-enters the trap deliberately — which is what §6 is about.
+re-enters the trap deliberately — which is what §7 is about.
 
 There is no `builtin/runtime/minibuffer.lua`; `pmacs.minibuffer` is
 Rust-only. The nearest existing confirm is `autosave.lua:219-224`, a
@@ -307,100 +374,189 @@ behavior, and the alternative silently converts flags into marks.
 
 ---
 
-## 4. Batch semantics: what "the marked set" means (Q#DR13)
+## 4. Target sets: which operations are set-based (Q#DR13)
 
-Every operation resolves its target set the same way, and this is the
-one rule that makes the whole surface predictable:
+Rev 1 stated one rule with one exception and then contradicted it (F4).
+Operations fall into **three** classes, and the class is a property of
+the command, not a special case:
 
-> **The marked set, or — if nothing is marked — the entry at point.**
+**Set-based** — `D` (delete), `M` (chmod), and `C` (copy, 2b) target:
 
-Emacs's rule, and it is why `D` and `M` need no separate "at point"
-binding. `x` is the exception: it consumes **`D` flags only**, never
-`*` marks, and never falls back to point. A `d`-then-`x` sequence and a
-`m`-then-`D` sequence are two different gestures and collapsing them
-would make `x` unpredictable after a stray `m`.
+> **the marked set, or — if nothing is marked — the entry at point.**
 
-A basename in the set that has vanished from disk since it was marked is
+Emacs's rule, and it is why none of them needs a separate at-point
+binding.
+
+**Flag-based** — `x` alone. It consumes **`D` flags only**, never `*`
+marks, and **never falls back to point**: with nothing flagged, `x` does
+nothing and says so. A `d`-then-`x` sequence and an `m`-then-`D` sequence
+are different gestures, and collapsing them makes `x` unpredictable after
+a stray `m`.
+
+**Point-based** — `R` (rename) and `w` (copy filename). Both act on the
+entry at point **regardless of what is marked**, and marks are left
+untouched. For `R` this is a real limitation, not a preference:
+renaming a *set* means renaming into a target directory, which needs a
+concept Stage 2 does not build (§11). Naming it here is the point —
+rev 1 left it as an unstated exception to a rule that claimed to have
+only one.
+
+A basename in a set that has vanished from disk since it was marked is
 **dropped from the batch and reported**, not silently skipped and not
-fatal to the rest — the parent framing's §6 rule, kept.
+fatal to the rest — the parent framing's §6 rule, kept. Note this is a
+distinct event from a revert pruning the mark (§3): a target can vanish
+*between* the last revert and the operation, and §13 item 35 pins that
+the batch reports it rather than silently shrinking.
 
 ---
 
-## 5. The rename rebind (Q#DR14, continuing Q#DR5)
+## 5. Rename reconciliation (Q#DR14, superseding Q#DR5's rebind)
 
-The decision is the parent's: rebind **at the primitive**, in the
-main-thread drain, unconditionally on success, because the fs ops are
-fire-and-forget-capable and a rebind hung off result-consumption would
-miss every rename whose handle is never taken. What this framing adds is
-where it can actually live and what it must be careful about.
+The parent's decision — fix it at the primitive, in the main-thread
+drain, unconditionally on success — is kept. Rev 1's *scope* was wrong:
+it updated `Buffer.file_path` and nothing else, leaving four other owners
+of the same path stale (F1). A rename is not a buffer-field update; it is
+a **transaction across every consumer that holds the path**.
 
-### The split (C1)
+### The owners, all verified
 
-**`AsyncRuntime` harvests; the Lua binding rebinds.**
+| Owner | Held as | Stale after a rev-1 rebind |
+|---|---|---|
+| Buffer path | `Buffer.file_path` | fixed |
+| Buffer **name** | `Buffer.name` | **yes** — `set_buffer_path` never calls `set_name`, which documents itself as for "save-as and rename operations" (`buffer.rs:452`). Statusline and buffer list keep the old filename |
+| LSP attachment | `rec.uri`, cached per buffer (`lsp.lua:826-833`) | **yes** — didChange (`:418`), semantic tokens (`:776-790`), diagnostics (`:953`), signature (`:1016`), definition (`:1648`), references (`:1757`) all keep firing at the old URI |
+| dired handles | `handle.path` in Lua; the buffers are **pathless** | **yes, and unreachable** — no buffer-keyed rebind can ever find them |
+| Workspace-edit origin | `origin = active_buffer_path()` (`lsp.lua:1252`) | **yes, and it materializes a phantom** — `find_or_open(origin)` (`:1266`) on a renamed-away path hits `resolve_target_buffer`'s `NotFound` arm, which creates "an empty path-backed buffer" (`editor_core.rs:876-878`) and selects it |
 
-1. `PendingJob` gains `rename_paths: Option<(PathBuf, PathBuf)>`, set
-   only by `dispatch_fs_rename`, which currently moves both paths into
-   the worker closure and must clone them for the field.
-2. `AsyncRuntime` gains `take_settled_renames(&self) -> Vec<(PathBuf,
-   PathBuf)>`, which drains the paths of jobs that settled
-   `PendingState::Complete` this tick. It **takes** (leaving `None`), so
-   a rebind can never be applied twice, and it filters on success —
-   a failed or cancelled rename rebinds nothing. The natural
-   implementation collects during the existing `:1074-1108` post-loop
-   block, which already borrows `pending` and reads `job.kind`.
-3. `pmacs._async._tick` (`mod.rs:6911-6924`) calls it after `rt.tick()`,
-   resolves `SharedCore` via `lua.app_data_ref::<SharedCore>()` the way
-   `apply_resource_op` does (`:3251`), and applies the rebind.
+### One transaction, two callers, one notification
 
-This keeps `AsyncRuntime` free of buffer knowledge — it returns paths,
-not decisions — and puts the editor-side effect in the layer that
-already has the editor.
+**`EditorCore::reconcile_rename(old, new) -> Vec<RenameRebind>`**, where
+`RenameRebind { buffer_id, old_path, new_path }`:
 
-### What the rebind does
+- walks the **whole** registry, not `find_by_path`'s first match — a
+  directory rename has many affected buffers by construction, and two
+  buffers can visit one path;
+- matches normalized stored paths against normalized `old` by **equality
+  or path-component prefix** (`/foo` must not match `/foobar`);
+- sets the new path **and** sets the name, but only when the buffer's
+  name still equals its old path — a path-backed buffer is named by its
+  full path (Stage 1's finding), while a user-renamed buffer keeps the
+  name it was given;
+- returns every rebind it performed.
 
-- **Path-component prefix, not string prefix.** Renaming `/tmp/foo` to
-  `/tmp/bar` rebinds `/tmp/foo` and `/tmp/foo/a.txt`, and must **not**
-  touch `/tmp/foobar`. This is the whole point of the widening — `R` on
-  a directory is an ordinary dired operation and `find_by_path` strands
-  every buffer beneath it today.
-- **Normalize before lookup**, through `find_buffer_for_path`
-  (`editor_core.rs:864-867`) rather than a raw `find_by_path`, because
-  stored paths are normalized on write (`:819`).
-- **Every match, not the first.** `find_by_path` returns one id; the
-  rebind needs to walk the registry, because a directory rename has many
-  affected buffers by construction.
-- **`apply_resource_op`'s raw first-match lookup (`mod.rs:3249`) is
-  fixed in the same change.** It is the same bug one call site away, on
-  the LSP-facing path, and leaving it is how the trap survives a fix
-  aimed at it.
+**Both rename paths call it**: the async harvest below, and
+`apply_resource_op`'s rename arm (`mod.rs:3234-3255`), whose raw
+first-match lookup at `:3249` is deleted in favour of it. One function,
+two callers — so the two can no longer drift, which is how the trap
+survived being "fixed" once already.
 
-### The acceptance that makes this real
+**Then one hook, fired once per rename:
+`resource.renamed(old_path, new_path)`.** The mechanism exists —
+`run_hook_if_defined` (`mod.rs:1596`) fires Rust-side, `pmacs.hook.run`
+(`:5883`) fires Lua-side — but **no rename or delete hook exists today**;
+the whole set is `buffer.{after-edit,after-load,after-save,after-switch,
+before-save,save,self-insert}`, `editor.before-quit`,
+`frontend.detached`, `process.after-tick`. Stage 2 adds this one.
 
-An acceptance that awaits the rename would pass against a rebind wired
-anywhere, including the wrong place. So Stage 2 pins:
+The hook carries the **paths**, not the rebind list, precisely because
+dired's buffers are pathless: a path-keyed consumer must be able to
+reconcile from `(old, new)` alone. Subscribers:
 
-- **a no-await rename** — dispatch, never take the result, pump, assert
-  the open buffer's path moved. This is the test that fails if the
-  rebind is hung off `_take_result`.
-- **a directory rename with an open child buffer** — the prefix case.
-- **a `/tmp/foobar` sibling** — the false-prefix case, which a naive
-  `starts_with` on strings passes and must not.
-- **a failed rename** — nothing rebinds.
+- **`lsp.lua`** recomputes `rec.uri`, and issues `didClose` on the old
+  URI followed by `didOpen` on the new — the LSP-correct sequence, since
+  a server has no rename notion for an open document. **It must also
+  re-run `ensure_server`**: since #161, server affinity keys on the
+  detected project root, so a rename *across roots* needs a different
+  server, not merely a different URI. Same-root renames reuse.
+- **`dired.lua`** updates any handle whose `path` equals or is under
+  `old`, renames its buffer, and reverts it.
 
-Bite target: move the rebind from the drain to `_take_result` and the
-no-await test must fail.
+### Ordering, which is already guaranteed
+
+The reconciliation must complete **before any awaiting coroutine
+resumes**, or a coroutine that renamed and then inspects a buffer sees
+the pre-rename state. Verified: `pmacs._async.tick` calls
+`async_mod._tick()` first and only then walks the settled ids firing
+`on_complete` callbacks and resuming parked coroutines
+(`async.lua:389-391`). So doing the work inside `_tick`'s Rust closure is
+correctly ordered by construction, not by luck.
+
+### The harvest (F6)
+
+Rev 1 proposed a no-argument `take_settled_renames()` that drains "this
+tick's" renames, which — as the review notes — needs either a second
+queue or a scan of every settled entry. Neither was named, and both are
+the one-off side channel `COHERENCE.md` §9 objects to.
+
+Instead, **`tick` returns a structured outcome**:
+
+```rust
+pub struct TickOutcome {
+    pub settled: Vec<JobId>,
+    pub renames: Vec<(PathBuf, PathBuf)>,
+}
+```
+
+Settle identity and rename metadata come out of **one** transaction, from
+the loop at `:1074-1108` that already borrows `pending` and reads
+`job.kind`. `renames` carries only jobs that settled
+`PendingState::Complete` — a failed or cancelled rename reconciles
+nothing. The ~17 in-crate `let _ = rt.tick();` call sites are unaffected;
+`_tick` reads `.settled` for the Lua table it already builds and
+`.renames` for the reconciliation.
+
+`PendingJob` still gains `rename_paths: Option<(PathBuf, PathBuf)>`,
+since `dispatch_fs_rename` currently **moves** both paths into the worker
+closure (`:871-879`) and nothing retains them. §0.5 states why that field
+is the coherent choice over a side map, and that a general
+`purpose`/`owner` should later subsume it.
 
 ### Additivity
 
-`ReplyKind` and the wire between worker and main are untouched; the new
-field is main-thread-only state. `pmacs-protocol` is **not** involved and
-does not bump — Stage 1 set that precedent by adding `ReadDir` without
-one. The frozen `m8_1`/`m8_3` suites must stay at their current counts,
-and `m8_3`'s monkeypatch means it never reaches the Rust path at all.
+`ReplyKind` and the worker↔main wire are untouched; the new field and the
+outcome struct are main-thread-only. `pmacs-protocol` is **not** involved
+and does not bump — Stage 1 set that precedent by adding `ReadDir`
+without one. `m8_3` **monkeypatches the Lua `pmacs.fs.rename`**
+(`m8_3_acceptance.rs:182-184`), so it never reaches the Rust path and its
+count must not move; the fixture's two-phase temp-name rename
+(`init.lua:1197-1215`) will reconcile twice, real→temp→final, landing
+correctly.
 
 ---
 
-## 6. Confirmation (Q#DR15)
+## 6. Deleting a path something is holding (Q#DR18)
+
+New in rev 2 (F2). `pmacs.fs.remove` changes disk and nothing else, so
+without a policy a deleted file's buffer stays bound to a path that no
+longer exists — and **saving it recreates the file the user just
+deleted**. Four cases, decided:
+
+| Case | Policy |
+|---|---|
+| Unmodified visited file | Delete, then kill the buffer |
+| **Modified** visited file | **Refuse that entry.** Report it; the rest of the batch proceeds |
+| Open buffers *under* a deleted directory | Same two rules, applied to every buffer whose path is under it |
+| Open dired handles on the path or under it | Killed, via the `resource.deleted` hook |
+
+**Refusing on modified is a deliberate divergence from Emacs**, which
+deletes and leaves an orphaned buffer. The reasoning: the orphan is
+indistinguishable from a normal buffer, and the next `C-x C-s` silently
+resurrects the file. A refusal is visible, recoverable, and the user can
+save-or-discard and retry. It is also consistent with §9's rule that a
+per-entry failure never aborts the batch.
+
+`buf:is_modified()` is exposed to Lua (`mod.rs:1234`), so dired can
+decide this itself before dispatching any removal — the check happens
+**before** the confirm, so the prompt can say
+`Delete 3 entries? (1 has unsaved changes and will be skipped) (y/n) `
+rather than surprising the user afterwards.
+
+Symmetrically with §5, deletion fires **`resource.deleted(path)`** once
+per successfully removed path, and dired subscribes to close handles on
+it or under it. Two hooks, one mechanism, covering both destructive
+resource operations.
+
+## 7. Confirmation (Q#DR15)
 
 Destructive operations confirm: `x`, `D`, and (in 2b) a recursive delete
 and an overwriting copy. There is no helper to do it with (C4).
@@ -436,55 +592,80 @@ The prompt states the count and the operation — `Delete 3 marked
 entries? (y/n) ` — because a confirmation that does not say what it is
 confirming is decoration.
 
-**Migrating `autosave.lua` to the helper is a named follow-up (§10), not
+**Migrating `autosave.lua` to the helper is a named follow-up (§11), not
 part of this stage.** Both shapes already answer "no" to an empty `RET`,
 so the migration is behavior-preserving; it still touches the
 crash-recovery prompt, which does not belong in a dired PR.
 
 ---
 
-## 7. The operations, individually
+## 8. The operations, individually
 
 **`d` / `x` (flag and execute).** `d` sets `D` and advances. `x` collects
-`D`-flagged basenames, confirms with the count, then deletes them
-serially (§8) via `pmacs.fs.remove`, which handles files and empty
-directories (C5). A non-empty directory fails with the kernel's
-`ENOTEMPTY`, which is **reported as such** in 2a and is what 2b's
-`remove_dir_all` plus `dired.recursive-deletes` addresses. Then revert.
+`D`-flagged basenames, applies §6's visited-path policy, confirms with the
+count, then deletes serially (§9) via `pmacs.fs.remove`, which handles
+files and empty directories (C5). A non-empty directory fails with the
+kernel's `ENOTEMPTY`, **reported as such** in 2a; 2b's `remove_dir_all`
+plus `dired.recursive-deletes` addresses it. Then revert once.
 
-**`D` (delete now).** Same deletion path, targeting the §4 set rather
-than the flags.
+**`D` (delete now).** Same deletion path and same §6 policy, targeting
+the §4 set rather than the flags.
 
-**`R` (rename).** Single entry at point only — a multi-file
-rename-into-a-directory needs a target-directory concept Stage 2 does
-not build (§10). Prompts with `initial` = the current basename and **no
-source**, so the typed name comes through verbatim. A bare name resolves
-against `handle.path`; a name containing `/` is taken as a path, relative
-to `handle.path` if not absolute. Refuses an existing target rather than
-clobbering it — `rename(2)` would silently replace a file, and dired must
-not. Rebinds open buffers by §5, including on a directory.
+**`R` (rename).** The entry **at point**, regardless of marks (§4).
+Prompts with `initial` = the current basename and **no source**, so the
+typed name arrives verbatim (`minibuffer.rs:565-567`). A bare name
+resolves against `handle.path`; a name containing `/` is a path, relative
+to `handle.path` unless absolute. **Refuses an existing target** rather
+than clobbering it — `rename(2)` would silently replace a file, and dired
+must not. Reconciles every path owner by §5, including on a directory.
 
-**`M` (chmod).** Prompts for an **octal** mode string, no source,
-validated to `[0, 07777]` before dispatch to match `fs.chmod`'s own guard
-(`fs.lua:181-183`). Applies to the §4 set. On a symlink the change lands
-on the target and the refreshed listing shows the link's own unchanged
-mode (`fs.lua:145-153`); the status line says so once per batch that
-included a symlink, because a silent no-op-looking result is the
-confusing case. Symbolic modes (`u+x`) are deferred (§10).
+**`w` (copy filename).** Carried forward from the parent's approved
+table. Pushes the entry at point's name onto the kill ring; with a set
+marked, Emacs copies the marked names, but since `w` is point-based here
+(§4) it copies one. Non-destructive, no confirm.
+
+**`M` (chmod). New scope — needs explicit approval (F3).** Prompts for an
+**octal** mode string, no source, validated to `[0, 07777]` before
+dispatch to match `fs.chmod`'s own guard (`fs.lua:181-183`). Applies to
+the §4 set.
+
+> **It refuses symlink entries.** `chmod` follows symlinks
+> (`fs.lua:145-153`) while the listing is lstat-based, so chmodding a
+> symlink line silently changes a *different file's* mode and the
+> refreshed listing shows the link's own unchanged bits — the change
+> appears to have done nothing. The parent framing already decided this
+> for the wdired surface: the fixture "rejects symlink perms edits at
+> intercept time for exactly this reason", and that decision "carries
+> over unchanged" (`dired-framing.md:543-546`). Rev 1 proposed warning
+> after the fact instead, which is materially different and contradicted
+> approved text. A refusal is reported per entry and does not abort the
+> batch.
 
 **`+` (create directory, 2b).** Prompts for a name, no source, resolved
 against `handle.path`. `opts.parents` for `create_dir_all`.
 
-**`C` (copy, 2b).** Targets the §4 set. A single source prompts for a
-destination; multiple sources require the destination to be an existing
-directory. **A directory source is refused** rather than shallow-copied
-— the parent's decision, and the honest one given there is no recursive
-copy primitive. Preserves mode bits. `opts.overwrite` defaults false and
-an existing target is refused otherwise.
+**`C` (copy, 2b) — full command flow (F7).** Targets the §4 set.
 
----
+1. **Destination prompt.** One source prompts for a destination path;
+   **several sources require an existing directory** and the command
+   refuses before dispatching anything if the answer is not one.
+2. **Collision scan, before any copy.** Resolve every source to its
+   destination path and stat each. This happens up front so the user is
+   asked once, not once per file mid-batch.
+3. **Confirm.** With no collisions and one source, no prompt — a copy
+   onto free space is not destructive. With collisions, **one** confirm
+   naming the count: `Overwrite 2 existing files? (y/n) `. Declining
+   **skips the colliding entries and copies the rest**, rather than
+   abandoning the batch, which matches §9's per-entry failure rule.
+4. **Dispatch** with `opts.overwrite` set only for the entries the user
+   confirmed. The primitive still refuses an existing target without it,
+   so the guard is enforced at both layers.
+5. **A directory source is refused** — the parent's decision, and the
+   honest one while no recursive-copy primitive exists.
 
-## 8. Execution: serialize, report, then revert (Q#DR16)
+Mode bits are preserved.
+
+## 9. Execution: serialize, report, then revert (Q#DR16)
 
 `fs.lua:155-165` instructs packages needing at-most-one-pending
 mutation semantics to *"await each op before dispatching the next"*.
@@ -512,21 +693,21 @@ The contract:
 
 ---
 
-## 9. Staging: 2a then 2b (Q#DR17)
+## 10. Staging: 2a then 2b (Q#DR17)
 
 **Recommendation: split, and cut it at "needs a new Rust primitive".**
 
 | | 2a | 2b |
 |---|---|---|
-| Keys | `m u U t d x D R M` | `+ C`, recursive delete |
+| Keys | `m u U t d x D R w M` | `+ C`, recursive delete |
 | New `pmacs.fs` ops | **none** | `mkdir`, `copy`, `remove_dir_all` |
 | New `JobKind` variants | none | 3 (12 → 15) |
-| Rust | rename rebind + `apply_resource_op` fix | three primitives |
+| Rust | rename **transaction** + two hooks + `apply_resource_op` fix | three primitives |
 | Config keys | none | `dired.recursive-deletes` |
 
 The cut works because of C5: `remove` already deletes files and empty
 directories, so 2a's whole surface runs on the five ops that exist. That
-makes 2a *"the mark-and-operate layer, plus one substrate correctness
+makes 2a *"the mark-and-operate layer, plus the resource-reconciliation
 fix"* and 2b *"three additive primitives and the two ops that need
 them"* — two PRs a reviewer can hold one at a time.
 
@@ -548,7 +729,7 @@ applies; §12's acceptance is already labelled by stage.
 
 ---
 
-## 10. Deferred (named)
+## 11. Deferred (named)
 
 - **`wdired`** — Stage 3, with the frozen fixture as its reference (C3).
 - **The fire-and-forget pending-entry leak** (§2). Pre-existing, verified,
@@ -559,7 +740,8 @@ applies; §12's acceptance is already labelled by stage.
   `COHERENCE.md` §9, which should subsume §5's `rename_paths`.
 - **Migrating `autosave.lua` to `pmacs.minibuffer.confirm`** (§6).
 - **Multi-file `R` into a target directory**, and `%`-regexp marking —
-  both need a target/pattern concept Stage 2 does not build.
+  both need a target/pattern concept Stage 2 does not build. This is why
+  `R` is point-based in §4 rather than an unstated exception.
 - **Symbolic chmod** (`u+x`), needing a mode-expression parser.
 - **`i` (insert subdirectory)** — the recursive in-buffer case, already a
   named deferral in `docs/dired-framing.md` §13, and the place a shared
@@ -570,18 +752,30 @@ applies; §12's acceptance is already labelled by stage.
 
 ---
 
-## 11. Bets
+## 12. Bets
 
 - **B1.** 2a needs **no** new `pmacs.fs` op. Falsified if any of
-  `m u U t d x D R M` cannot be built on the existing five. *(Rests on
+  `m u U t d x D R w M` cannot be built on the existing five. *(Rests on
   C5, which was read off `remove_blocking` directly.)*
+- **B1b.** The two new hooks need no new hook machinery —
+  `run_hook_if_defined` (`mod.rs:1596`) and `pmacs.hook.run` (`:5883`)
+  already exist, and `resource.renamed`/`resource.deleted` are ordinary
+  names in that registry. Falsified if firing a hook from the reconcile
+  path needs a new dispatch mechanism.
 - **B2.** The rename rebind needs **no** protocol bump and leaves the
   worker↔main wire untouched. Falsified by any change to `ReplyKind` or
   `SUPPORTED`.
 - **B3.** The frozen `m8_1`/`m8_2`/`m8_3` counts are unchanged by the
-  rebind. *Not obvious:* the fixture renames files it lists, so a test
-  holding a buffer on a renamed path would newly see its path move. The
-  additivity gate is a real check, not a formality.
+  reconciliation. *Not obvious, and less obvious in rev 2:* the fixture
+  renames files it lists, so a test holding a buffer on a renamed path
+  would newly see its path **and now its name** move, and `m8_3`
+  monkeypatches the Lua `rename` so it never reaches the Rust path at
+  all. The additivity gate is a real check, not a formality.
+- **B3b.** No existing LSP test changes behavior. *Not obvious:* the
+  `resource.renamed` subscriber issues didClose/didOpen and may re-run
+  `ensure_server`, so any suite that renames a file with a server
+  attached is in the blast radius. `m4`/`lsp_multi_root` counts are
+  gated for exactly this reason.
 - **B4.** No GPU or TUI frontend change. Marks are buffer text and the
   keymap is mode-scoped; `set_round_trip_input` is already set by Stage 1.
 - **B5.** `describe_key_identifies_every_default_binding` stays green
@@ -590,7 +784,7 @@ applies; §12's acceptance is already labelled by stage.
 
 ---
 
-## 12. Acceptance
+## 13. Acceptance
 
 **Stage 2a — marks**
 
@@ -605,57 +799,115 @@ applies; §12's acceptance is already labelled by stage.
    absent from the next batch.
 5. Marks are per-buffer: two dired buffers on two directories keep
    independent sets.
+6. **`R` with unrelated marks present** renames the entry at point, not
+   the marked set, and **leaves every mark intact** (F4 — pins that §4's
+   point-based class is real and not an accident).
 
 **Stage 2a — operations**
 
-6. `d` then `x` deletes the flagged file, after a confirm; declining
+7. `d` then `x` deletes the flagged file, after a confirm; declining
    deletes nothing.
-7. `x` consumes `D` flags **only** — a `*`-marked entry survives it.
-8. `D` with nothing marked targets the entry at point (§4).
-9. `x` on an empty directory succeeds; on a **non-empty** directory it
-   fails, the message names the entry, and **the rest of the batch still
-   runs**.
-10. A batch with one failure reports both counts in one status line, and
+8. `x` consumes `D` flags **only** — a `*`-marked entry survives it —
+   and with nothing flagged it is a reported no-op.
+9. `D` with nothing marked targets the entry at point (§4).
+10. `x` on an empty directory succeeds; on a **non-empty** directory it
+    fails, the message names the entry, and **the rest of the batch still
+    runs**.
+11. A batch with one failure reports both counts in one status line, and
     the failed entry **keeps its mark** while the successful one loses it.
-11. `R` renames; a bare name resolves against the listing's directory;
+12. `R` renames; a bare name resolves against the listing's directory;
     an **existing target is refused**.
-12. `M` applies an octal mode to the marked set; an out-of-range mode is
+13. `M` applies an octal mode to the marked set; an out-of-range mode is
     refused before dispatch.
-13. The listing reverts **once** after a batch, not per entry.
+14. **`M` refuses a symlink entry** (Q#DR19, F3/F5): the mode is
+    reported unchanged, the target file's mode is **asserted untouched**,
+    and the batch continues. *(A warning-after-the-fact implementation
+    fails this.)*
+15. `w` copies the entry at point's filename to the kill ring.
+16. The listing reverts **once** after a batch, not per entry.
 
-**Stage 2a — the rename rebind (§5)**
+**Stage 2a — deletion policy (§6, F2)**
 
-14. **No-await rename**: dispatch `pmacs.fs.rename`, never take the
-    result, pump — the open buffer's path has moved. *(The pin that
-    fails if the rebind lives at result-consumption.)*
-15. **Directory rename**: a buffer open on `dir/child.txt` follows
+17. Deleting an **unmodified** visited file kills its buffer.
+18. Deleting a **modified** visited file is **refused**; the buffer
+    survives with its contents, and the file is still on disk.
+19. The confirm prompt **states the skip before the user answers**, not
+    after.
+20. Deleting a directory kills buffers on its **descendants**.
+21. An open dired handle on a deleted directory is closed
+    (`resource.deleted`).
+
+**Stage 2a — rename reconciliation (§5, F1)**
+
+22. **No-await rename**: dispatch `pmacs.fs.rename`, never take the
+    result, pump — the open buffer's path has moved. *(Fails if the
+    reconciliation lives at result-consumption.)*
+23. **Directory rename**: a buffer open on `dir/child.txt` follows
     `dir` → `newdir`.
-16. **False prefix**: renaming `/…/foo` does **not** rebind a buffer on
+24. **Every match, not the first** (F5): **two** descendant buffers under
+    the renamed directory **and two buffers visiting the same exact
+    path** all move. *(One child buffer does not defeat a first-match
+    implementation; this does.)*
+25. **False prefix**: renaming `/…/foo` does **not** rebind a buffer on
     `/…/foobar`.
-17. A **failed** rename rebinds nothing.
-18. `apply_resource_op`'s rename finds a buffer whose stored path is
+26. **Buffer name** follows the path, so the buffer list and statusline
+    show the new filename — and a buffer the user renamed by hand keeps
+    its own name.
+27. **An attached LSP buffer** ends up with the new URI, and a rename
+    **across project roots** re-runs `ensure_server` rather than only
+    swapping the URI (#161's affinity key).
+28. **An open dired buffer on the renamed directory** follows it —
+    the pathless case no buffer-keyed rebind can reach.
+29. **The workspace-edit origin path**: renaming the *active* file
+    through the full `apply_workspace_edit` path leaves **no phantom
+    empty buffer** at the obsolete path. *(Today `find_or_open(origin)`
+    creates one.)*
+30. `apply_resource_op`'s rename finds a buffer whose stored path is
     normalized but whose op names it un-normalized (the `:3249` fix).
-19. Additivity: `m8_1`, `m8_2`, `m8_3` at unchanged counts.
+31. A **failed** rename reconciles nothing.
+32. Additivity: `m8_1`, `m8_2`, `m8_3` at unchanged counts.
+
+**Stage 2a — the shared helpers**
+
+33. **`pmacs.minibuffer.confirm`** (Q#DR15, F5): an **empty `RET` does
+    not call `on_yes`**; `y`, `Y`, `yes`, `YES` all do; `n` and arbitrary
+    text do not. *(A typed-`n` test alone would not catch a completion
+    source being reintroduced — the empty-`RET` arm is the one that
+    detects it.)*
+34. **Serialization** (Q#DR16, F5): in a batch of N mutations, the second
+    is **not dispatched until the first has settled**. Asserted by
+    observing at most one in-flight fs job at any pump step — *not* by
+    the end state, which is identical if all N were dispatched at once
+    and awaited afterwards.
+35. A marked target that vanishes **between the last revert and the
+    operation** is **reported**, not silently dropped (F5 — distinct from
+    item 4's revert-time pruning).
 
 **Stage 2b**
 
-20. `+` creates a subdirectory, which appears on the next listing.
-21. `C` copies a file and preserves mode bits; refuses an existing
-    target without `overwrite`; **refuses a directory source**.
-22. `C` with several marked entries requires an existing directory
-    destination.
-23. Recursive delete happens only with `dired.recursive-deletes` enabled
+36. `+` creates a subdirectory, which appears on the next listing.
+37. `C` copies a file and preserves mode bits; refuses a directory
+    source.
+38. `C` with several marked entries requires an existing directory
+    destination and refuses otherwise **before copying anything**.
+39. `C` onto existing targets confirms **once** with the collision count;
+    **declining copies the non-colliding entries and skips the rest**
+    (F7).
+40. `remove_dir_all` **unlinks a symlink-to-a-directory rather than
+    traversing it** — pinned at the primitive, mirroring
+    `remove_blocking`'s lstat guard (F7).
+41. Recursive delete happens only with `dired.recursive-deletes` enabled
     **and** a confirm; disabled, the non-empty directory still fails.
 
-**Bite obligations.** Each of 14, 16, and 7 must fail against a stated
-mutation: the rebind moved to `_take_result`; a string `starts_with`
-instead of a component prefix; `x` widened to consume `*`. `dired.lua`
-is an existing file now, so `scripts/bite`'s swap-over-`git show` mode
+**Bite obligations.** Each of 8, 14, 22, 24, 33, and 34 must fail against
+a stated mutation: `x` widened to consume `*`; `M`'s refusal downgraded
+to a warning; the reconciliation moved to `_take_result`; a string
+`starts_with` instead of a component prefix; a completion source added to
+`confirm`; the batch changed to dispatch-all-then-await. `dired.lua` is
+an existing file now, so `scripts/bite`'s swap-over-`git show` mode
 applies — but per #165's lesson, **commit before biting**.
 
----
-
-## 13. Gates (per PR)
+## 14. Gates (per PR)
 
 The standard suite from `CLAUDE.md`, plus what this work touches:
 `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D
@@ -668,36 +920,61 @@ crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
 
 ---
 
-## 14. Numbered decisions
+## 15. Numbered decisions
 
 - **Q#DR12** Marks are a per-handle table **keyed by basename**, values
   `*` or `D`, pruned on every re-read following `*buffer-list*`'s
   precedent. `render_entry` takes the mark as a second argument. (§3)
-- **Q#DR13** Every operation targets **the marked set, or the entry at
-  point when nothing is marked** — except `x`, which consumes `D` flags
-  only and never falls back to point. A vanished basename is dropped and
-  reported. (§4)
-- **Q#DR14** The rename rebind is **harvested in `AsyncRuntime`, applied
-  in `pmacs._async._tick`**: `PendingJob` retains `rename_paths`,
-  `take_settled_renames` drains successful ones once, and the binding
-  rebinds through `find_buffer_for_path` over **every** buffer matching a
-  **path-component** prefix. `apply_resource_op`'s raw first-match lookup
-  is fixed in the same change. Pinned by a **no-await** rename. (§5, C1)
+- **Q#DR13** *(narrowed in rev 2, F4)* Operations fall into three
+  classes: **set-based** (`D`, `M`, `C`) target the marked set or the
+  entry at point; **flag-based** (`x`) consumes `D` flags only and never
+  falls back to point; **point-based** (`R`, `w`) act at point
+  regardless of marks and leave marks untouched. A vanished basename is
+  dropped and reported. (§4)
+- **Q#DR14** *(widened in rev 2, F1)* A rename is a **transaction across
+  every path owner**, not a buffer-field update.
+  `EditorCore::reconcile_rename` walks the whole registry, matches by
+  equality or **path-component** prefix, and updates both `file_path`
+  **and** `name`; **both** `pmacs.fs.rename`'s drain and
+  `apply_resource_op` call it, so they cannot drift. A new
+  **`resource.renamed(old, new)`** hook then lets path-keyed Lua
+  consumers reconcile — `lsp.lua` recomputes `rec.uri`, re-runs
+  `ensure_server` for a cross-root move, and issues didClose/didOpen;
+  `dired.lua` follows its handles. `tick` returns a **structured
+  `TickOutcome`** so settle identity and rename metadata stay in one
+  transaction (F6). Ordering is guaranteed: `_tick` runs before any
+  coroutine resumes. Pinned by a **no-await** rename. (§5)
 - **Q#DR15** Confirmation is `pmacs.minibuffer.confirm` in a new
   `builtin/runtime/minibuffer.lua`, with **no completion source**;
   affirmative is `y`/`yes` case-insensitively and everything else —
-  including empty `RET` — is no. (§6)
+  including empty `RET` — is no. (§7)
 - **Q#DR16** Batches **serialize** (await each op), a per-entry failure
   does not abort, successful marks clear while failed marks persist, and
-  the listing reverts **once** at the end. (§8)
+  the listing reverts **once** at the end. (§9)
 - **Q#DR17** Stage 2 **splits into 2a and 2b** at the "needs a new Rust
-  primitive" line: 2a is the mark layer plus `d x D R M` on the existing
-  five ops plus the rename fix; 2b adds `mkdir`/`copy`/`remove_dir_all`
-  and `+ C` and recursive delete. (§9)
+  primitive" line: 2a is the mark layer plus `d x D R w M` on the
+  existing five ops plus the rename transaction; 2b adds
+  `mkdir`/`copy`/`remove_dir_all` and `+ C` and recursive delete. (§10)
+- **Q#DR18** *(new in rev 2, F2)* Deleting a path something holds:
+  an unmodified visited buffer is **killed** after the delete; a
+  **modified** one **refuses the entry** and the batch continues;
+  descendants of a deleted directory follow the same two rules; dired
+  handles on or under it close via a new **`resource.deleted(path)`**
+  hook. The modified check runs **before** the confirm so the prompt can
+  state the skip. Deliberately diverges from Emacs, which orphans the
+  buffer and lets the next save resurrect the file. (§6)
+- **Q#DR19** *(new in rev 2, F3)* `M` (chmod) is **new scope** beyond the
+  parent's approved table and needs explicit approval. It **refuses
+  symlink entries**, because `chmod` follows links while the listing is
+  lstat-based, so the operation would change a different file and appear
+  to do nothing — the same reasoning the parent already applied to the
+  fixture's wdired perms edits and said "carries over unchanged". (§8)
+- **Q#DR20** *(restored in rev 2, F3)* `w` (copy filename to the kill
+  ring) is carried forward from the parent's approved Stage 2 table,
+  which rev 1 dropped without saying so. Point-based, non-destructive.
+  (§8)
 
----
-
-## 15. Branch and PR plan
+## 16. Branch and PR plan
 
 Framing on `dired-stage2-framing`, kept after merge per the repo's
 `-framing` convention. Implementation on `dired-stage2a` cut fresh from
