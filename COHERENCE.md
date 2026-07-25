@@ -363,7 +363,7 @@ Full verdict table:
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
 | 7 | Find symbol / file | **File: missing → in flight (PR #162). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit; `M-.`/`M-?`/`C-c o` bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
-| 8 | Open terminal | **Works but undiscoverable** | Full PTY with scrollback + modeline segment — reachable only as `M-x terminal`, no keybinding |
+| 8 | Open terminal | **Works but undiscoverable** | Full PTY with scrollback + modeline segment — reachable only as `M-x terminal`, no keybinding. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Partial** | `M-x compile.run` works, defaults cwd to detected project root, parses Rust `-->` errors — but no keybinding, an **empty first prompt** (`initial = last and last.cmdline or ""`, `builtin/runtime/compile.lua:1134-1138`), and no `cargo build`/`cargo test` suggestion despite `ProjectKind::Cargo` existing (`src/project.rs:77`) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
 | 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
@@ -671,9 +671,18 @@ Facts that define the gap:
   optimistic-apply correctness), and `dispatch_paste`
   (`editor.rs:1129-1140`).
 - Off-path hardcodes: client-side **F12 detach** (`is_detach_key`,
-  `src/attach.rs:997-1006`) and the GPU **optimistic key classifier**
-  (`crate::optimistic::classify_key`) — the latter is classification,
-  not routing, and is kept honest by `dispatch_idle_for`.
+  `src/attach.rs:997-1006`) and the replica frontends' **optimistic key
+  classifiers** — classification, not routing, and kept honest by
+  `dispatch_idle_for`. There are **two, one per replica frontend**, and the
+  original audit named only one: `crate::optimistic::classify_key` belongs to
+  the **`pmacs --attach` TUI** replica (`src/attach.rs:843` is its only
+  consumer), while `pmacs-gpu` has its own, unrelated
+  `optimistic_insert_text` / `optimistic_crdt_insert`
+  (`pmacs-gpu/src/main.rs:2694`/`3306`). The "kept honest by
+  `dispatch_idle_for`" claim was **verified for both** while investigating the
+  GPU terminal input defect: a focused terminal buffer is in
+  `round_trip_buffers` (`src/terminal/session.rs:338`), so `dispatch_idle_for`
+  reports false and neither classifier can fire there.
 
 **The counter-example that proves the idiom:** the entire picker/panel
 family — listview (references, outline), project-search, buffer-list,
@@ -1245,6 +1254,14 @@ its asks are already practiced.**
   selected from the negotiated `semantic_render` bit) so a grid
   frontend collapses folds while a simultaneous GPU session does not
   skip lines (#149/#148).
+  - **But it is enforced by convention, not by structure.** The GPU terminal
+    input defect was a per-frontend-kind operation applied to *both* kinds:
+    the dispatcher's grid and semantic terminal-layout syncs were written as
+    twins and executed as siblings, so a GPU session's PTY was resized twice
+    per tick forever. `sync_terminal_layouts_for_tick` now makes that one
+    exclusive by construction; every other per-frontend-kind pair in the
+    dispatcher remains two adjacent `if`s that a reader must notice are
+    alternatives.
 - The GPU frontend exceeds the TUI (minimap, squiggles, typography)
   without the TUI losing the model — the "no privileged frontend" rule
   is holding under real divergence pressure.

@@ -766,7 +766,22 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL | Modifiers::ALT);
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // Quiet-observation mode. `PMACS_GPU_PROBE_OBSERVE_MS` makes the probe
+    // send NO input and request NO resize, and observe for exactly that long
+    // instead of stopping at its usual condition.
+    //
+    // This exists because the ordinary probe cannot see a frame storm: it
+    // stops as soon as it has watched a resize land, so a session emitting a
+    // frame every tick and one emitting three in total both satisfy it. A
+    // fixed window over a child that produces no output turns "how many
+    // frames did the daemon send?" into a number worth asserting on.
+    let observe_window = std::env::var("PMACS_GPU_PROBE_OBSERVE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis);
+    let quiet = observe_window.is_some();
+    let deadline = std::time::Instant::now()
+        + observe_window.unwrap_or_else(|| std::time::Duration::from_secs(20));
     let mut sent_input = false;
     let mut sent_resize = false;
     while std::time::Instant::now() < deadline {
@@ -816,13 +831,17 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     if pixels.iter().any(|&b| b != first) {
                         facts.rendered_nonuniform_frames += 1;
                     }
-                    if !sent_input && facts.frames >= 1 {
+                    if facts.last_frame_text.contains(PROBE_INPUT_CHAR) {
+                        facts.input_echo_observed = true;
+                    }
+                    if !quiet && !sent_input && facts.frames >= 1 {
                         sent_input = true;
                         // Real child input over the real wire.
-                        let _ = client.send_key(ProtocolKey::Char('x'), Modifiers::NONE);
+                        let _ =
+                            client.send_key(ProtocolKey::Char(PROBE_INPUT_CHAR), Modifiers::NONE);
                         let _ = client.send_key(ProtocolKey::Enter, Modifiers::NONE);
                     }
-                    if !sent_resize && facts.frames >= 2 {
+                    if !quiet && !sent_resize && facts.frames >= 2 {
                         sent_resize = true;
                         state.resize(700, 500);
                         if let Some((buffer_id, size)) = state.terminal_declaration_if_changed()
@@ -838,7 +857,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                         facts.observed_resized_frame = true;
                     }
                 }
-                if facts.observed_resized_frame && facts.rendered_nonuniform_frames >= 2 {
+                if !quiet && facts.observed_resized_frame && facts.rendered_nonuniform_frames >= 2 {
                     break;
                 }
             }
@@ -870,6 +889,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let _ = writeln!(out, "resized_cols={}", facts.resized_cols);
     let _ = writeln!(out, "last_title={}", facts.last_title.unwrap_or_default());
     let _ = writeln!(out, "last_frame_text={}", facts.last_frame_text);
+    let _ = writeln!(out, "input_echo_observed={}", facts.input_echo_observed);
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
         eprintln!(
@@ -1075,8 +1095,19 @@ struct ProbeFacts {
     resized_cols: u32,
     last_title: Option<String>,
     last_frame_text: String,
+    /// Whether any frame carried the probe's own typed character back.
+    ///
+    /// Latched ACROSS frames, not read off the final one: a later geometry
+    /// change reflows the screen, so "the echo arrived" and "the echo is
+    /// still on the last frame" are different questions and only the first
+    /// one is about input reaching the child.
+    input_echo_observed: bool,
     disconnect: Option<String>,
 }
+
+/// The character the probe types into the child. Distinct from anything the
+/// acceptance children print themselves, so its appearance is unambiguous.
+const PROBE_INPUT_CHAR: char = 'x';
 
 /// One-line printable text of a terminal frame, for probe reporting.
 fn frame_probe_text(frame: &TerminalFrame) -> String {

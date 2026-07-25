@@ -704,6 +704,42 @@ final variant — its own round-trip cannot detect a discriminant shift.
 
 ## 5. Hard-won ops lessons
 
+- **Two operations that must be alternatives are not made alternatives by
+  being adjacent.** The dispatcher applied its grid and semantic
+  terminal-layout syncs to every attached frontend; a semantic session
+  satisfies both conditions, so its PTY was resized twice per tick forever
+  and the child took a `SIGWINCH` storm that made a GPU terminal untypable
+  while output still flowed. Each arm had a correct `old_size == size`
+  idempotence guard — **individually sound, jointly useless**, because each
+  saw only the size the other had just written. Write mutually exclusive
+  per-frontend-kind work as one `if`/`else` keyed on the same fact session
+  establishment uses, and extract the loop body so a test can drive the real
+  thing.
+- **Bite against every pre-image the fix could plausibly have taken, not just
+  `main`.** For the same defect, the obvious one-line guard (skip the grid arm
+  for semantic frontends) *does* fix the storm — and silently introduces a
+  controller leak, because that arm was also the only per-tick
+  controller-liveness release a semantic frontend got. A single revert would
+  have scored the fix complete. The pin that catches it (`acc 6`) deliberately
+  **passes on `main`** and fails only against the naive guard: today's defect
+  supplies the release by the accident of running an arm it should not.
+- **A quiet child is an instrument.** A frame storm is invisible against a
+  fixture that legitimately emits hundreds of frames, and an assertion like
+  `frames >= 2` cannot see one. The same applies to geometry: a
+  "did a frame at the new width arrive" readout is satisfied by a geometry
+  *oscillating through* that width. Assert upper bounds over a fixed window
+  against a child that produces nothing, and let the child self-report the
+  signal you care about (a `SIGWINCH` trap printing a **fresh distinct**
+  breadcrumb per signal — repeated identical markers paint nothing, because
+  `cell::diff` skips already-matching cells).
+- **`TerminalMode::Raw` makes `sh`-based input fixtures useless.** There is no
+  `ICRNL`, so Enter delivers CR and a `read -r` loop waits forever for a LF
+  that never comes — the test then "proves" input never arrived. Use
+  `exec cat`, which copies stdin to stdout byte by byte. It is also the right
+  echo instrument for the opposite reason people assume: termios `ECHO` is
+  *off* in raw mode, so nothing double-echoes and one keystroke yields exactly
+  one cell.
+
 - **The checkout may be shared with the user.** Check `git status` for
   foreign uncommitted work before any stash/checkout/branch surgery;
   never assume dirty files are yours. (Their uncommitted fix was nearly
