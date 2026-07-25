@@ -105,8 +105,19 @@ If it does not, stop and repair the remote/fetch configuration.
   `XDG_CONFIG_HOME`). Superseded by the post-integration run below —
   those numbers describe a tree 28 commits behind.
 - Verification **post-integration** (the merge commit; this is the set
-  that describes what the PR now proposes): recorded when the gate suite
-  finishes.
+  that describes what the PR now proposes): `cargo fmt --check` clean;
+  strict workspace Clippy clean; 1,826 default + 2,003 CRDT library
+  tests; **202 `pmacs-gpu` tests under `PMACS_REQUIRE_GPU=1`**; M4 121;
+  **isolated-`XDG_CONFIG_HOME` `--no-fail-fast` workspace sweep 3,208
+  across 91 suites, zero failures**; `git diff --check` clean.
+- **The GPU count is the integration proof, not just a pass.** It went
+  199 → **202**, and `e547a90` added exactly **3** tests to `pmacs-gpu`
+  — the whole delta on main since the merge base. So both sides' tests
+  are present and running; neither was dropped by the auto-merge.
+  Spot-checked structurally too: main's fix survives as
+  `(count > 0).then(|| MinimapLineShape {` (the deferred closure, **not**
+  the eager `then_some`) with its regression test, alongside this lane's
+  37 math references in the same file.
 - Remaining: the user's review pass.
   Named v0 approximations: the peer-caret half of acceptance 14 is
   pinned at the mapping level (unit tests), not pixels; a soft-wrapped
