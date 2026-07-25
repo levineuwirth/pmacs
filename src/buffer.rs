@@ -2790,6 +2790,88 @@ mod tests {
             }
         }
 
+        /// Deterministic reduction of a `rope_matches_crdt_projection_
+        /// after_arbitrary_edits` failure found by raising the case
+        /// count (`PROPTEST_CASES=2000`) on `main` @ `e745068`.
+        ///
+        /// **What happens.** Replacing a byte range with *identical*
+        /// bytes is a textual no-op but a real CRDT operation (a delete
+        /// plus an insert). Undoing it therefore advances the CRDT
+        /// version while leaving the materialized text unchanged, so
+        /// `undo_crdt_mode` derives an EMPTY replacement edit — and
+        /// still attaches the `crdt_op` that `crdt.undo()` produced.
+        /// That trips the proptest's `crdt_op` shape invariant, "a
+        /// no-op edit must have `crdt_op = None`".
+        ///
+        /// **What was verified about the consequences**, so the next
+        /// reader does not have to redo it:
+        ///
+        /// * content stays correct — rope and CRDT projection agree
+        ///   before and after (asserted below);
+        /// * replicas stay converged — both `crdt_op` consumers
+        ///   (`EditorCore::queue_daemon_origin_crdt_op` and the remote-op
+        ///   path) read `edit.crdt_op` unconditionally and do **not**
+        ///   short-circuit on an empty range, so the op is broadcast;
+        /// * the cursor does not jump — `EditorCore::undo` only clamps
+        ///   to buffer length and never seeks `edit.range.start`.
+        ///
+        /// **The open question** is therefore whether the *invariant* is
+        /// simply mis-scoped rather than the behavior being wrong. It
+        /// was written for the FORWARD `apply_edit` short-circuit, which
+        /// returns before ever producing an op; CRDT-mode undo/redo
+        /// never reach that path. One artifact is genuinely arbitrary
+        /// either way: `derive_replacement_edit` reports the empty range
+        /// at the buffer END rather than at the edit site.
+        ///
+        /// Ignored, not deleted: it documents a real, reproducible
+        /// asymmetry that nothing else on `main` records, and un-ignoring
+        /// it is the first step of whichever resolution wins.
+        #[test]
+        #[ignore = "known pre-existing main behavior; see the doc comment \
+                    for the verified consequences and the open question"]
+        fn crdt_undo_of_an_identity_replace_reports_a_no_op_edit_carrying_an_op() {
+            let mut buffer =
+                Buffer::new_with_crdt(BufferId::next(), "*identity-undo*", 1).expect("crdt");
+            buffer
+                .apply_edit(EditOp::Insert {
+                    pos: 0,
+                    bytes: b"hello",
+                })
+                .expect("seed insert");
+
+            // Replace one byte with the SAME byte.
+            let forward = buffer
+                .apply_edit(EditOp::Replace {
+                    range: Range::new(1, 2),
+                    bytes: b"e",
+                })
+                .expect("identity replace");
+            assert_eq!(forward.range, Range::new(1, 2));
+            assert_eq!(forward.inserted_len, 1);
+
+            let undone = buffer.undo().expect("undo");
+            assert!(
+                undone.range.is_empty() && undone.inserted_len == 0,
+                "the undo produced no textual change: {:?}/{}",
+                undone.range,
+                undone.inserted_len
+            );
+            assert!(
+                undone.crdt_op.is_some(),
+                "…yet it carries a version-advancing CRDT op — the invariant \
+                 the proptest trips on"
+            );
+
+            // Content is unharmed in both projections.
+            let mut bytes = vec![0u8; buffer.len() as usize];
+            buffer.snapshot_rope().slice(0, buffer.len(), &mut bytes);
+            assert_eq!(String::from_utf8(bytes).expect("utf8"), "hello");
+            assert_eq!(
+                buffer.crdt_state().expect("crdt").materialize_string(),
+                "hello"
+            );
+        }
+
         proptest! {
             // Smaller proptest case count than the default (64) to keep
             // CI overhead modest; the per-op invariant check is the
