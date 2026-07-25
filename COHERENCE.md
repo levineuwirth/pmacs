@@ -121,8 +121,8 @@ asymmetry**, and **per-arc coherence debt**.
 Coherence-shaped work already in flight at audit time: find-file /
 dired Stage 0 (`C-x C-f`, merged #162, `docs/dired-framing.md`) and its
 Stage 1 directory view (PR #165), bottom panel Stage 1 (merged #155),
-multi-root LSP affinity (branch `lsp-multi-root-affinity`), the config
-registry foundation (merged #127).
+multi-root LSP affinity (merged #161), the config registry foundation
+(merged #127).
 
 ---
 
@@ -234,9 +234,37 @@ This directly contradicts the product thesis (§23): the "without
 freezing" half is delivered; the "without becoming opaque" half is
 currently false for exactly the failures a new user will hit first.
 
+**The reporting channel the runtime believes it has does not exist.**
+Fifteen call sites — `async.lua` (5), `syntax.lua` (4), and one each in
+`lsp.lua`, `mcp.lua`, `fs.lua`, `editops.lua`, `autosave.lua`, and
+`commands/default.lua` — report background failures through
+`pmacs.error`, each guarded as `if pmacs.error then pmacs.error(...)`.
+**`pmacs.error` is never defined in production** — the only assignment
+in the tree is a test stub (`src/editor.rs:9881`), and
+`type(pmacs.error)` is `nil` in a fresh `EditorState`. So every one of
+those fifteen reports is dead: the guard makes the silence look
+deliberate and keeps it from ever being noticed. `pmacs.errors` (plural,
+`builtin/runtime/compile.lua:45`) is an unrelated namespace and is not
+it. This is the silence asymmetry one level deeper than §1.2 first
+recorded — not "the failure isn't surfaced" but "the surface was
+written, guarded, and never built." Found while landing PR #161, which
+nearly added a sixteenth; that one reports via
+`pmacs.editor.set_status` (which exists) with the `pmacs.error` arm
+riding along for when the channel is built.
+
 **Rule to adopt:** anything that fails automatically must leave a
 user-visible trace with a named owner. A `pcall` around background
-wiring must log attributed failure, never discard it.
+wiring must log attributed failure, never discard it. Corollary from the
+above: report through a channel with a **test that observes it**, or the
+guard is indistinguishable from the silence it was meant to fix.
+
+**Frequency note (PR #161):** per-root server affinity means the
+preconfigured-but-missing-server failure now fires **once per project
+root** rather than once per language per session. The silence is
+unchanged in kind; it is strictly more frequent. Surfacing it stays
+Priority 1 work with its own framing — it is a user-visible product
+behavior (what message, where, with what guidance), not a substrate fix
+to smuggle into an affinity PR.
 
 ### 1.3 Ground truth: coherence debt compounds per-arc
 
@@ -731,12 +759,14 @@ per-subsystem conventions.**
   nil/`"."`. Nothing owns the set {roots, servers, terminals, tasks,
   layout} — which is why desktop-save under a daemon had nothing
   principled to attach to (Q#DS9, §2 step 12).
-- **First slice in flight**: the multi-root LSP server-affinity work
-  (branch `lsp-multi-root-affinity`) makes *(language, found-root)* the
-  server identity — the first time a root functions as an identity key
-  rather than a spawn parameter. Note it is again per-subsystem: LSP
-  learns roots; compile, search, index, and trust do not share the
-  object.
+- **First slice landed (PR #161)**: the multi-root LSP server-affinity
+  work makes *(language, found-root)* the server identity — the first
+  time a root functions as an identity key rather than a spawn
+  parameter. It also establishes the rule that a *fallback* root (the
+  file's own directory, when no marker was found) is deliberately **not**
+  an identity, so markerless files keep sharing one server per language.
+  Note it is again per-subsystem: LSP learns roots; compile, search,
+  index, and trust do not share the object.
 
 A workspace entity is a **model gap** (real arc), not wiring. It is also
 the prerequisite that keeps §8 (locations), §9 (task ownership), §11

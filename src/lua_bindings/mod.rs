@@ -10011,12 +10011,26 @@ pub fn install_lsp(
                 let ids: Vec<LspServerId> = mgr.ids().collect();
                 let out = lua.create_table_with_capacity(ids.len(), 0)?;
                 for (i, id) in ids.iter().enumerate() {
-                    let row = lua.create_table_with_capacity(0, 5)?;
+                    let row = lua.create_table_with_capacity(0, 7)?;
                     row.set("id", LspServerIdLua(*id))?;
                     if let Some(spec) = mgr.spec(*id) {
                         row.set("label", spec.label.as_str())?;
                         row.set("language_id", spec.language_id.as_str())?;
                         row.set("command", spec.command.as_str())?;
+                        // Server *affinity* fields. `root_uri` is the spec
+                        // field verbatim — deliberately NOT the URI the
+                        // server was initialized with, which `build_initialize`
+                        // derives from `cwd` when the field is `None`. Lua's
+                        // `ensure_server` matches on this exact value, so a
+                        // server that never asked for a specific root must
+                        // read back as nil rather than as its cwd; see the
+                        // affinity-key comment in `builtin/runtime/lsp.lua`.
+                        if let Some(root_uri) = spec.root_uri.as_deref() {
+                            row.set("root_uri", root_uri)?;
+                        }
+                        if let Some(cwd) = spec.cwd.as_deref() {
+                            row.set("cwd", cwd.display().to_string())?;
+                        }
                     }
                     if let Some(state) = mgr.state(*id) {
                         row.set("state", lsp_state_to_lua(lua, state)?)?;
