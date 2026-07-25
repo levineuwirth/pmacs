@@ -54,7 +54,7 @@ git status --short --branch
 The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Lean 4 lane (Arc 8) — Stages 1+2 MERGED; Stage 3a IN REVIEW
+## Lean 4 lane (Arc 8) — Stages 1+2 MERGED; 3a IN REVIEW (#167); 3b STACKED
 
 - Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
   round, all twelve checks green). Branch `githubsucks/lean4-stage1`
@@ -251,6 +251,43 @@ If it does not, stop and repair the remote/fetch configuration.
      ("Illegal byte sequence") before the code under test is reached.
      `#[cfg(unix)]` is NOT sufficient for such a fixture —
      `#[cfg(target_os = "linux")]` is. Cost one red CI round to learn.
+
+### Stage 3b — the Lean language server (branch `lean4-stage3b-server`)
+
+- Same worktree `../pmacs-lean-stage3`, **branched off
+  `lean4-stage3a-seams`, not off `main`** — 3b consumes 3a's response
+  seam and `pmacs.fs.canonicalize`, so it is strictly sequential and its
+  PR must be retargeted to `main` only after #167 merges. (Kill-ring
+  lesson: retarget stacked child PRs BEFORE merging the parent.)
+- Ships `builtin/runtime/lean.lua` (new), one `include_str!` line in
+  `src/editor.rs`, a `leanprogress` mode on `pmacs_fake_lsp`, and
+  `tests/lean4_server_acceptance.rs` (17 tests). No protocol change.
+- **Stage 1's acceptance 12 is half superseded and was rewritten, not
+  deleted.** It asserted `pmacs.lsp.config.lean4 == nil` to catch a
+  Stage-3 front-run; 3b is that stage. What survives is the restraint
+  half — constructing an editor spawns nothing though the config now
+  names `lake`, and opening a Lean buffer with no server configured
+  spawns nothing — which is what holds Q#LN7's "not at init" promise.
+- **The marker test is wrong in two opposite directions if done naively**
+  and both are pinned: `io.open` SUCCEEDS on a directory (so truthiness
+  accepts a `lean-toolchain` dir), but requiring a non-nil read rejects
+  an EMPTY `lean-toolchain` (a legitimate marker — existence semantics,
+  not content). Discriminator is `read`'s SECOND return; decline only on
+  a non-nil err. Probed on LuaJIT 2.1.
+- Four bites recorded, each against the committed tree: bare `io.open`
+  → 24a fails / 24b passes; require-non-nil → 24b fails / 24a passes;
+  no canonicalization → symlinked open spawns two servers; no stop
+  before fallback → acc36 fails.
+- The probe's non-zero exit is deliberately NOT a fallback trigger —
+  §2.9's elan shim makes `lake --version` fail where `lake serve` still
+  works. Only a parseable version below 3.1.0 triggers it; the
+  server-failure latch covers the rest.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
+  lean4 server 17/17; lean4 stage 1 9/9; dispatch seams 15/15;
+  multi-root 13/13; M4 121; required GPU 155; **isolated-config
+  workspace sweep 3,206 across 94 suites, zero failures**;
+  `git diff --check` clean.
 
 ## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
 
