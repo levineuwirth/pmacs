@@ -58,26 +58,46 @@ If it does not, stop and repair the remote/fetch configuration.
 
 - Portable branch: `githubsucks/inline-math-slice`; worktree
   `../pmacs-math-slice`. **PR #158**, base `main`.
-- **Canonical `main` @ `8c86d34` merged into the lane** (2026-07-25),
-  28 commits behind at the time. Merged rather than rebased, per the
-  #135/#137 precedent: the PR is awaiting review rounds and a rebase
-  would break every review anchor. The only conflict was this ledger —
-  both sides' lanes were kept — and it was **pre-existing**, not
-  introduced by the dired (#164) or Lean 4 ledger commits; it already
-  conflicted against `main` @ `e745068`.
-- **Integration surface** (derived from `git diff <merge-base>..main`,
-  not from another PR's file list): `pmacs-gpu/src/main.rs` gained 72
-  lines on main from `e547a90` — the minimap all-blank-slab
-  divide-by-zero fix — and this lane rewrites large parts of the same
-  file. Git auto-merged it **textually**; a clean auto-merge is not
-  evidence the tree compiles (the folding-arc lesson), so the full gate
-  suite below is what actually discharges it.
-- **CI had never run on this branch** — zero workflow runs since the PR
-  opened on 2026-07-24, while every other open PR has a full 12-check
-  run. Not a fork and not a trigger-config issue (the workflow fires on
-  all `pull_request` events); cause unidentified. The integration push
-  is what gets it its first run, so treat that run as the branch's
-  first real CI evidence.
+- **Canonical `main` merged into the lane twice on 2026-07-25**, both
+  times merged rather than rebased, per the #135/#137 precedent: the PR
+  is awaiting review rounds and a rebase would break every review anchor.
+  - First at `8c86d34` (28 commits behind). The conflict was
+    **pre-existing**, not introduced by the dired (#164) or Lean 4
+    ledger commits; it already conflicted against `main` @ `e745068`.
+  - Then at `46a1b8f`, after Lean 4 Stage 2 (#161) landed while this
+    branch's CI was still running. Same single conflict, same shape,
+    same resolution.
+- **Both conflicts were this ledger and nothing else** — both sides'
+  lanes kept verbatim each time. That is the standing cost of a
+  long-lived PR here: every merge to `main` edits this file, so a branch
+  awaiting review re-conflicts on it and only on it. It is a docs
+  collision, never a code one, and it says nothing about integration
+  risk — do not read a `CONFLICTING` badge on this PR as a code signal
+  without checking which file `git merge-tree` names.
+- **First integration's surface** (derived from `git diff
+  <merge-base>..main`, not from another PR's file list):
+  `pmacs-gpu/src/main.rs` gained 72 lines on main from `e547a90` — the
+  minimap all-blank-slab divide-by-zero fix — and this lane rewrites
+  large parts of the same file. Git auto-merged it **textually**; a
+  clean auto-merge is not evidence the tree compiles (the folding-arc
+  lesson), so the full gate suite below is what actually discharges it.
+- **Second integration's surface is code-disjoint.** #161 touched
+  `COHERENCE.md`, `builtin/runtime/lsp.lua`, `src/lua_bindings/mod.rs`,
+  and a new `tests/lsp_multi_root_acceptance.rs`; intersecting that
+  against this lane's own changed-file set leaves exactly one entry,
+  `docs/active-work.md`. No source file is touched by both sides, so
+  this one carries none of the first integration's semantic risk.
+- **CI ran on this branch for the first time on 2026-07-25 and passed
+  all twelve** (Format, both Lints, GPU Render headless, all four Test
+  matrix jobs, M1/M4/M5/M6 gates) at `8b457de` — the first-integration
+  tip. Before that there were zero workflow runs since the PR opened on
+  2026-07-24, while every other open PR had a full run; not a fork and
+  not a trigger-config issue (the workflow fires on all `pull_request`
+  events), cause never identified. So the green run **validates the
+  first integration, including the `pmacs-gpu/src/main.rs` auto-merge,
+  on macOS and Linux both** — the platforms local gating could not
+  cover. The second integration is not yet CI-covered, but its surface
+  is the ledger alone.
 - Framing: `docs/inline-math-slice-framing.md` rev 3, approved after two
   review rounds; parent arc framing merged as #154.
 - State: parser, font bundle (GUST licence), MATH-table layout with the
@@ -124,10 +144,11 @@ If it does not, stop and repair the remote/fetch configuration.
   spacer draws its box whole at the first run's origin; the fit budget
   reads the bundled code face even under a custom `set_font` family
   (the draw anchors to the real shaped baseline either way).
-## Lean 4 lane (Arc 8) — Stage 1 IN REVIEW (PR #160)
+## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
 
-- Portable branch: `githubsucks/lean4-stage1`, worked in the shared
-  checkout (no sibling worktree), based on `githubsucks/main` @ `e745068`.
+- Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
+  round, all twelve checks green). Branch `githubsucks/lean4-stage1`
+  retained; it was worked in the shared checkout (no sibling worktree).
 - Approved framing: `docs/lean4-mode-framing.md` revision 4, committed as
   the branch's first commit (`a382965`) after three review rounds. **Seven
   stages**, 19 decisions (Q#LN1–19), 64 acceptance criteria. North star:
@@ -183,16 +204,79 @@ If it does not, stop and repair the remote/fetch configuration.
   152; **isolated-config workspace sweep 3,150 across 90 suites**;
   `git diff --check` clean. The sweep needs an isolated `XDG_CONFIG_HOME`
   for the reason recorded in the bottom-panel lane below.
-- **Stage 2 is multi-root LSP server affinity** — pure substrate, no Lean
-  content, and it changes `ensure_server`, which every LSP language
-  shares. It is sequenced next because Lean is the language that makes its
-  absence a correctness failure rather than an inconvenience. Two
-  corrections the framing already carries for it: `root` is computed at
-  `lsp.lua:537`, **after** the reuse loop, so the fix must hoist it; and
-  `project_root_for` never returns nil for a file with a path, so the
-  affinity key must be the root only when a root was actually *detected*,
-  or markerless scratch files fragment into one server per directory for
-  every language.
+### Stage 2 — multi-root LSP server affinity (Q#LN15)
+
+- Portable branch: `githubsucks/lsp-multi-root-affinity`, shared checkout,
+  based on `githubsucks/main` @ `0827dd1`. Named for the substrate, not
+  for Lean: **the diff contains no Lean content**, because `ensure_server`
+  is the one server-affinity function every LSP language shares and a
+  cross-cutting change to it must not be reviewable only as a Lean
+  feature.
+- Three files, no protocol change: `src/lua_bindings/mod.rs` (the
+  `lsp.list()` row builder gains `root_uri` + `cwd`),
+  `builtin/runtime/lsp.lua` (`project_root_for` returns `root, source`;
+  `ensure_server` hoists it above the reuse loop and matches on it),
+  `tests/lsp_multi_root_acceptance.rs` (9 tests, acceptance 13–21).
+- **The rule that keeps this from regressing every other language: the
+  affinity key is the root only when a root was actually FOUND.**
+  `project_root_for` never returns nil for a file with a path — its last
+  resort is the file's own directory — so a naive `(language_id, root)`
+  key gives every directory of loose scratch files its own server, for
+  every language. `source` is `"config" | "detected" | "fallback"` and
+  only the first two become a key.
+- **Wire-identical for the fallback case, and that is provable rather
+  than hoped.** Matching is on the spawned spec's `root_uri` (nil matching
+  nil), so the fallback spawn passes `root_uri = nil`; `cwd` still carries
+  the directory and `build_initialize` derives the identical `rootUri`
+  from `cwd` when the field is None, using a percent-encoder with the same
+  allowed set as Lua's `file_uri_for`. `build_initialize` (`src/lsp.rs`)
+  is the **only** reader of `spec.root_uri` in the tree.
+- Deliberate behavior change, asserted not discovered: a server
+  hand-spawned from `init.lua` with only `cwd` set also reads back nil, so
+  a root-bearing attach will not adopt it.
+- `config[language].root` may now be a `function(path) -> string|nil`,
+  memoized per directory — needed because the hoist puts root resolution
+  on every attach rather than every spawn. The memo is keyed **weakly by
+  the resolver function itself**, so replacing `config[lang].root` cannot
+  serve a root the previous resolver computed. This is Q#LN8's
+  generalization landing early; the Lean resolver that uses it is Stage 3.
+- Bite-verified three ways: 5/9 fail against the pre-change `lsp.lua`,
+  8/9 against the pre-change `mod.rs`, and — the one that matters most —
+  installing the naive always-key-on-root variant fails acceptance 20 and
+  21 exactly as Q#LN15 part 2 predicts. The four that survive the first
+  bite (13, 15, 16, 19) are the regression pins; passing on both sides is
+  their job.
+- Every fixture sets `pmacs.project.set_search_boundary` at its own
+  tempdir root. Without it the marker walk climbs to the filesystem root
+  and a stray `.git` above the temp directory turns the markerless cases
+  into detected ones — the assertions would still pass while testing
+  nothing.
+- **Found but not fixed here (pre-existing, own lane):** `ensure_server`
+  never forwards `cfg.restart` to `pmacs.lsp.spawn`, so a
+  `restart = "never"` in `pmacs.lsp.config[lang]` is silently dropped on
+  the auto-attach path. At least one existing test sets it believing it
+  takes effect. Out of scope for a PR whose acceptance 16 pins existing
+  attach behavior as unchanged.
+- **Review round 1 addressed.** The blocker was process, not design: the
+  test file was committed *before* `cargo fmt` ran, so the fix sat
+  uncommitted in the working tree and the branch as pushed failed the
+  first gate. The reported "fmt clean" described the worktree, not the
+  branch — gate results are only meaningful when run against the pushed
+  tree. Also added the two pins review asked for (a **string** `config
+  .root` as an affinity key — acc17 only covered the function form; and
+  `root = false` reading as unset), each bite-verified against exactly
+  the mutation it targets and neither against the other. And documented
+  the canonicalization obligation: the `"detected"` arm is canonicalized
+  for free, a **configured** root is not, so on macOS a resolver
+  returning `/var/…` and a detected `/private/var/…` are different keys
+  for one directory. Stage 3's Lean resolver is the first real consumer,
+  so the obligation is written at the point of use.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
+  multi-root 11/11; M4 121; statusline 7; completion popup 9; auto-pair
+  45; required GPU 155; **isolated-config workspace sweep 3,164 across 91
+  suites**; `git diff --check` clean. The sweep needs an isolated
+  `XDG_CONFIG_HOME` and `-- --skip basedpyright`.
 
 ## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
 

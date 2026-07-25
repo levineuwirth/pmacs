@@ -30,9 +30,13 @@ pmacs.lsp = pmacs.lsp or {}
 --   env           (table)   extra environment
 --   init_options  (table)   `initializationOptions`
 --   settings      (table)   answered to `workspace/configuration`
---   root          (string)  optional explicit project root; overrides
+--   root  (string|function) optional explicit project root; overrides
 --                           the `pmacs.project.detect` marker walk used
---                           to set `rootUri`/`cwd` (see project_root_for)
+--                           to set `rootUri`/`cwd`. A `function(path) ->
+--                           string|nil` is resolved per file and
+--                           memoized per directory; returning nil
+--                           declines and falls through to the marker
+--                           walk (see project_root_for)
 pmacs.lsp.config = pmacs.lsp.config or {}
 
 -- Default rust-analyzer config. Users replace any field from init.lua
@@ -507,34 +511,144 @@ end
 --      the rest of the editor uses, honoring set_search_boundary,
 --   3. the file's own directory (a lone file still gets a sane root
 --      rather than leaking the editor cwd).
--- This is single-root: it fixes which root the one per-language server
--- uses, NOT one-server-per-root scoping (still deferred post-v0.1).
+-- Returns `root, source`, where `source` is "config", "detected", or
+-- "fallback" — and nil alongside a nil root. The source matters because
+-- only the first two mean a root was actually *found*; `ensure_server`
+-- keys server affinity on those and treats the fallback as rootless.
+--
+-- `config[language].root` may be a `function(path) -> string|nil` as
+-- well as a plain string, for languages whose root rule the shared
+-- marker walk cannot express (an innermost-wins walk cannot find an
+-- *outermost* marker). A resolver that returns nil declines, and
+-- resolution falls through to the marker walk.
+--
+-- **A configured root — string or resolver return — MUST be a canonical
+-- absolute path.** The `"detected"` arm is canonicalized for free
+-- (`pmacs.project.detect` canonicalizes before walking), but a
+-- configured one is fed to `file_uri_for` exactly as written, and the
+-- affinity key is that URI. On macOS a resolver returning `/var/…` and
+-- a detected `/private/var/…` are different keys for the same
+-- directory, which silently yields two servers for one project. There
+-- is no Lua-side canonicalizer to normalize this for you.
+--
+-- Resolver results are memoized per directory, because `ensure_server`
+-- resolves the root on the *reuse* path as well as the spawn path — so
+-- an unmemoized filesystem-walking resolver would re-walk on every
+-- attach rather than once per project. The memo is keyed by the
+-- resolver function itself, weakly: replacing `config[lang].root`
+-- installs a new key and the old memo is collected, so a swapped
+-- resolver can never serve a root the previous one computed.
+local root_resolver_memo = setmetatable({}, { __mode = "k" })
+
+local function resolve_root_fn(language, resolver, path)
+  local dir = dir_of(path)
+  if not dir then return nil end
+  local memo = root_resolver_memo[resolver]
+  if not memo then
+    memo = {}
+    root_resolver_memo[resolver] = memo
+  end
+  local hit = memo[dir]
+  -- `false` is the memoized form of "this resolver declined"; nil means
+  -- "not yet asked", so the two must stay distinguishable.
+  if hit ~= nil then
+    return hit or nil
+  end
+  local ok, resolved = pcall(resolver, path)
+  -- COHERENCE §1.2: background wiring must not DISCARD a failure. A
+  -- resolver that raises, or that returns something other than a string
+  -- or nil, is a config bug — and the memo below would otherwise bury
+  -- it permanently for this directory, so it is never observed again.
+  -- Returning nil is the documented decline and stays silent.
+  local failure
+  if not ok then
+    failure = "raised: " .. tostring(resolved)
+  elseif resolved ~= nil and type(resolved) ~= "string" then
+    failure = "returned a " .. type(resolved) .. "; want string or nil"
+  end
+  if failure then
+    local msg = string.format(
+      "LSP: %s root resolver for %s %s", language, dir, failure)
+    -- Report on the channel that EXISTS. `pmacs.error` is referenced by
+    -- fifteen guarded call sites across the runtime and is defined
+    -- nowhere in production (only by a test stub in `src/editor.rs`), so
+    -- `if pmacs.error then ...` alone would be a sixteenth report that
+    -- never fires — the unwired-guard shape, not a fix for it. The
+    -- status line is what lsp.lua already uses for every other LSP
+    -- error. The `pmacs.error` arm rides along so this upgrades for free
+    -- if that channel is ever built.
+    --
+    -- Both reports are pcall'd: a broken reporting channel must not turn
+    -- a declined root into a failed attach.
+    pcall(pmacs.editor.set_status, msg)
+    if pmacs.error then pcall(pmacs.error, msg) end
+    resolved = nil
+  end
+  if type(resolved) ~= "string" then resolved = nil end
+  memo[dir] = resolved or false
+  return resolved
+end
+
 local function project_root_for(language, path)
   local cfg = pmacs.lsp.config[language]
-  if cfg and cfg.root then return cfg.root end
-  if not path then return nil end
+  local configured = cfg and cfg.root
+  -- Truthiness, not `~= nil`: `root = false` has always read as "unset",
+  -- and a `false` leaking through as a root would reach `file_uri_for`.
+  if configured and type(configured) ~= "function" then
+    return configured, "config"
+  end
+  if not path then return nil, nil end
+  if configured then
+    local resolved = resolve_root_fn(language, configured, path)
+    if resolved then return resolved, "config" end
+  end
   local ok, det = pcall(pmacs.project.detect, path)
-  if ok and det and det.root then return det.root end
-  return dir_of(path)
+  if ok and det and det.root then return det.root, "detected" end
+  return dir_of(path), "fallback"
 end
 
 local function ensure_server(language, path)
   local cfg = pmacs.lsp.config[language]
   if not cfg or not cfg.command then return nil end
-  -- Reuse an existing same-language server if one is up. Multi-root
-  -- scoping (one server per project root) ships post-v0.1, so the
-  -- first file that attaches a given language fixes that server's
-  -- root; later files of the same language reuse it regardless of
-  -- their own project (known, documented limitation).
+  -- Reuse an existing same-language server *serving the same root*.
+  -- One server per project root: `lake serve` is bound to one Lake
+  -- package and rust-analyzer/gopls to one workspace, so handing the
+  -- second project's files to the first project's server yields
+  -- unresolvable imports and empty diagnostics.
+  --
+  -- The affinity key is the root only when a root was actually FOUND
+  -- (config override or marker walk). `project_root_for` never returns
+  -- nil for a file that has a path — its last resort is the file's own
+  -- directory — so keying on the fallback would give every directory
+  -- of loose scratch files its own server, for every language: two
+  -- stray .py files in different directories would spawn two pyrights
+  -- where today they share one. The fallback therefore keys on nil.
+  --
+  -- Matching is on the spawned spec's `root_uri`, nil matching nil, so
+  -- the fallback spawn must pass `root_uri = nil` for the key and the
+  -- stored spec to agree. `cwd` still carries the directory and
+  -- `build_initialize` derives the identical `rootUri` from it when the
+  -- field is None (src/lsp.rs), so the initialize payload is unchanged
+  -- for that case — only what this loop matches on changes.
+  --
+  -- Consequence, deliberate: a server hand-spawned from `init.lua` with
+  -- only `cwd` set also reads back nil, so a root-bearing attach will
+  -- not adopt it. We cannot know which root it was meant to serve, and
+  -- guessing wrongly routes a project's files to the wrong server.
+  local root, source = project_root_for(language, path)
+  local key_uri = nil
+  if source == "config" or source == "detected" then
+    key_uri = file_uri_for(root)
+  end
   for _, info in ipairs(pmacs.lsp.list()) do
-    if info.language_id == language and info.state then
+    if info.language_id == language and info.state
+        and info.root_uri == key_uri then
       local kind = info.state.kind
       if kind ~= "crashed" and kind ~= "stopped" then
         return info.id
       end
     end
   end
-  local root = project_root_for(language, path)
   local ok, sid = pcall(pmacs.lsp.spawn, {
     label = "default-" .. language,
     language_id = language,
@@ -544,7 +658,7 @@ local function ensure_server(language, path)
     init_options = cfg.init_options,
     settings = cfg.settings,
     cwd = root,
-    root_uri = root and file_uri_for(root) or nil,
+    root_uri = key_uri,
   })
   if ok then return sid end
   return nil
