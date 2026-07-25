@@ -14,10 +14,10 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `0dd16a5` (GPU initial-target #148 atop folding Stage 2
-  landed-doc refresh #150, folding Stage 2 #149, the ledger refresh #147, web
-  grammars HTML+CSS #146, and the LaTeX Stage 1 #144 / inline-math framing
-  #145 pair; protocol v20).
+  `githubsucks/main` @ `e745068` (bottom-panel Stage 1 #155 atop GPU
+  initial-target #148, folding Stage 2 landed-doc refresh #150, folding
+  Stage 2 #149, the ledger refresh #147, web grammars HTML+CSS #146, and
+  the LaTeX Stage 1 #144 / inline-math framing #145 pair; protocol v20).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -51,156 +51,34 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `0dd16a5` or a newer intentional main.
+The `git log` command must expose `e745068` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
+## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 (GPU band) is next
 
-- Portable branch: `githubsucks/bottom-panel`, worktree
-  `../pmacs-bottom-panel`, based on `githubsucks/main` @ `ddaa80d`.
-- Approved framing: `docs/bottom-panel-framing.md` revision 4, committed
-  as the branch's first commit (`c27f75a`).
-- **Stage 1 implemented; no wire change (protocol stays v20).** What
-  landed on the branch:
-  - `src/window.rs`: `WindowParams` (`side` / `fixed_rows` / `dedicated`
-    + implementation-owned `quit_action` and `origin_document`), `Side`,
-    a depth-bounded `QuitAction`, `MIN_WINDOW_OUTER_ROWS = 2`,
-    `Layout::compute(area, fixed)`, the `subtree_min_rows` /
-    `interactive_min_rows` recursions, `boundary_below`, and the three
-    new `FrontendView` fields (`panel_capable`, `frame_geometry`,
-    `panel_hidden`).
-  - `src/editor_core.rs`: `primary_document_window`, the non-side target
-    rule, `display_buffer` + the Q#BP3 placement policy, `quit_window`,
-    `reconcile_panel_layout_core`, `resize_boundary`, per-frontend
-    `JumpEntry`s, and the shared `resolve_target_buffer` seam that the
-    #148 initial-target bootstrap now routes through as well.
-  - `src/editor.rs`: the reconciliation transaction, geometry
-    declaration, the side-window `dispatch_idle_for` gate, the divider
-    paint, and the divider drag.
-  - `src/lua_bindings/window_panel.rs`: the whole `pmacs.window` panel
-    surface plus the shared adopter-placement helpers;
-    `builtin/runtime/window.lua` owns `window.panel-height` /
-    `window.min-height` and the resize commands.
-  - Adopters: `listview.open`, `compile.run`, `pmacs.terminal.open` all
-    take `display = "current" | "panel"` (Stage 1 default `"current"`);
-    LSP/compile visits route through `display_file`.
-- **Review round 1 addressed.** The load-bearing finding: the Q#BP6
-  side-window split guard (`try_split_active`) had **no production
-  caller** — `pmacs.window.split_horizontal` / `split_vertical`, and so
-  `C-x 2` / `C-x 3`, still went through plain `split_active`. Splitting a
-  focused panel made the root wrapper's final child a split rather than
-  `Leaf(side)`, which both `Layout::compute`'s fixed pass and
-  `document_subtree` key on. It survived the first round because the
-  acceptance test called the core method **directly**; it now goes
-  through the real Lua binding. This is the folding-arc round-2 lesson
-  repeating exactly: *after wiring a guard into a production hook, pin it
-  through the real path — a direct-call test misses the wiring.*
-  Also fixed: the armed divider drag was not scoped to its arming
-  frontend (it could cancel and swallow a peer's mouse events); a
-  recompile carries no `display` and duplicated a panel-placed
-  `*compilation*` into the document window; and
-  `paint_mode_line_graphemes` had lost its doc block to an insertion.
-  Five bite-verified fixes (three via `scripts/bite`, two by manual
-  revert since their tests share `src/daemon.rs` with the production
-  code).
-- Two Stage-2 hazard pins now exist in `src/daemon.rs`, closing the gap
-  the review named: a fresh attach while `LOCAL` is focused in a panel
-  inherits `LOCAL`'s **document** buffer, and an initial-target bootstrap
-  whose `after-load` hook creates and selects a panel still reasserts
-  into a document window.
-- **Review round 2 addressed.** The load-bearing finding: **Q#BP7 item 1
-  — "growth reaching the live tail re-arms follow" — was never
-  implemented.** `at_bottom` is the instantaneous geometric readout
-  `scroll_offset == 0`, which a still-anchored view satisfies whenever it
-  is momentarily tall enough to reach the tail, so the round-1 assertion
-  could not see the gap: the next rows the child printed pushed the
-  anchored view back into history. `src/terminal/view.rs` now has
-  `rearm_follow_on_growth`, reached by one shared `declare_view_size`
-  helper from every size-declaring path (`snapshot_for_view`,
-  `record_view_size`, `view_status_for_size`) so grid and semantic
-  declarations cannot disagree.
-  Also fixed: the PTY fixtures emitted LF-only output, which staircases
-  until every row clips to blanks — so the anchor assertions compared
-  `""` with `""` and could not fail (now CRLF, each guarded by
-  `assert!(!top_before.is_empty())`); acc33's contrast case asserted
-  nothing; `start_run` let `already_in_panel` override an **explicit**
-  `display = "current"`, which is the documented opt-out from the Stage 3
-  flip (now gated on omission); and `window_drag` was a daemon-global
-  slot that a peer's mode-line press could clear.
-- Durable test lessons from this round, both the same class:
-  1. **A geometric readout is not a state predicate.** `at_bottom` says
-     "the viewport currently reaches the tail", not "this view follows
-     the tail". Pinning follow requires feeding MORE output and asserting
-     the view moved (acc32b uses a filesystem gate between two bursts).
-  2. **A PTY in the default mode does not translate LF to CRLF.** An
-     `echo`-driven fixture staircases rightward and clips to blanks past
-     the viewport width, so any text equality over it is vacuously true.
-     Emit `\r\n`, and guard text comparisons with a non-empty assertion
-     the way the daemon pin guards on `!panel_hidden`.
-- **Round-2 self-review caught a regression the round-2 commit
-  introduced**, in the change it labelled "minor": routing
-  `pmacs.window.buffer()`'s **no-argument** arm through the fid-scoped
-  `selected_window` validator made it **fallible**, and
-  `acting_frontend` can name a frontend with **no registered view** (a
-  bare `dispatch_key` from an unattached peer does exactly that). The
-  runtime calls that function on ordinary edits from `killring`,
-  `syntax`, `autosave`, `pair`, `indent` and `comment` **without
-  `pcall`**, so the raise never surfaced as an error — it silently
-  dropped the operation. `kill_ring_acceptance` went 30/30 → 25/5
-  (`frontend_detached_drops_per_frontend_state`: "B has kill state").
-  The no-arg arm is back on ambient `active_buffer_id()` and documented
-  as deliberately infallible; the explicit-window arm keeps its Q#BP11
-  validation. New **acc19c** pins it through the real path (a
-  `buffer.after-edit` subscriber during a viewless peer's `dispatch_key`)
-  and bites against the regressing commit.
-  Generalizes: **a "uniformity" cleanup that changes a function's
-  fallibility is not minor** — check every caller's error discipline
-  first, and remember that an ambient resolver's fallback IS its
-  contract.
-- Verification on this branch: `cargo fmt --check` clean; strict
-  workspace Clippy clean; 1,817 default + 1,994 CRDT library tests;
-  `bottom_panel_stage1_acceptance` 46/46; kill ring 30 default + 30 CRDT;
-  vterm Stage 1 9 default + 10 CRDT; M4 121; required GPU 152;
-  compile 67; vterm Stage 2 4 / Stage 3 5 (7 CRDT); folding Stage 2 48;
-  statusline 7; listview 6;
-  **isolated-config workspace sweep 3,130 passed across 89 suites, zero
-  failures**; `git diff --check` clean.
-  - **Run the sweep with an isolated `XDG_CONFIG_HOME`.** The real
-    `~/.config/pmacs/init.lua` on this desktop calls
-    `pmacs.packages.install_local(...)`, so every editor the sweep builds
-    races on one shared install root; a losing race sets a status message
-    that leaks into the mode line and breaks
-    `folding_stage2_acceptance::unfolded_frame_is_identical_to_the_pre_folding_baseline`,
-    which compares whole painted frames. Standalone it is 48/48. This
-    generalizes the known `compile_mode_acceptance` real-config trap:
-    any suite that paints the status area inherits it.
-  - **A latent pre-existing `main` bug surfaced while gating and is NOT
-    this branch's**: `buffer::tests::proptests::rope_matches_crdt_projection_after_arbitrary_edits`
-    fails on `main` @ `352bf0b` with `ops = [Insert(0,"a"),
-    Insert(0,"aaa"), Replace(0,1,"a"), Undo]` — undo of a textually-null
-    `Replace` returns a no-op edit result still carrying `crdt_op =
-    Some`, violating the suite's own shape invariant. `src/buffer.rs` is
-    byte-identical here, and the seed was deliberately **not** committed
-    (it would make an unrelated failure deterministically red on this
-    PR). Needs its own lane.
-  - Durable test lesson from this round: `TerminalViewStatus.scroll_offset`
-    is documented as the retained rows between **this viewport** and the
-    live tail, so it necessarily tracks the viewport height. Asserting it
-    constant across a panel height change is either vacuous or wrong —
-    the invariant Q#BP7 actually states is that the **anchor** is frozen,
-    which the acceptance now pins by comparing the first visible row's
-    text, plus `at_bottom` for the follow re-arm.
-  - `compile_mode_acceptance` needs `--test-threads=1` locally; it is
-    67/67 there. Under default parallelism it fails roughly 1 run in 3,
-    with a *different* test each time (acc14/acc25a, then acc24) —
-    **verified pre-existing** by swapping in `githubsucks/main`'s
-    `builtin/runtime/compile.lua` and reproducing the same rate. The
-    `pmacs-gpu` bin tests have historically gone red under a loaded sweep
-    (wgpu device contention). Rerun isolated before treating either as a
-    regression.
-- Stage 2 (the GPU panel band, next available protocol version) has its
-  own re-framing obligation before implementation; Stage 3 is the default
-  placement flip.
+Stage 1 is on `main`; nothing in this arc is in flight. Stage 2 has **no
+branch and no framing yet** — the approved parent framing
+`docs/bottom-panel-framing.md` (rev 4) is what it re-scouts against.
+
+- Stage 1 merged as **#155** (`main` @ `e745068`, 2026-07-24, after two
+  review rounds). No protocol change. Durable substrate facts live in
+  `docs/agent-handoff.md` §1; the two round lessons are in §5.
+- Retained, carrying nothing unmerged: branch `bottom-panel` and worktree
+  `../pmacs-bottom-panel`.
+- **Stage 2 obligations, already named by the framing** — the starting
+  point for its own framing doc: `InstanceMessage::PanelFrame` plus
+  `FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`
+  at the next available protocol version, gated in both directions and
+  each extended enum byte-pinned on its own previous final variant;
+  extracting `paint_frame`'s per-window body *together with* the
+  active-window auto-scroll preparation; routing every consumer in the
+  framing's §1.3 census of 23 transitive active-context reads through
+  `primary_document_window`; the focus-chrome surface matrix (Q#BP14b);
+  and Q#BP17's fold-projection parameter plus the stale invariant comment
+  at `src/window.rs`. Stage 3 is the adopter default flip.
+- **Folding Stage 3 and this arc's Stage 2 both touch the semantic
+  projection.** Whichever is framed second re-scouts the other's landed
+  state.
 
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
@@ -257,6 +135,34 @@ git worktree add --track \
   so its diff against `main` is documentation only.
 
 ## Closed since the last snapshot
+
+- **Bottom panel Stage 1 — MERGED as #155** (`main` @ `e745068`,
+  2026-07-24, after two review rounds). Window placement, window
+  parameters, TUI side windows, the divider, and the adopter `display`
+  opt-in, with no protocol change. Both rounds found the same class of
+  defect and are worth keeping:
+  - **Round 1**: the Q#BP6 side-window split guard had *no production
+    caller* — `C-x 2` still reached plain `split_active` — and survived
+    because the acceptance test called the core method directly.
+  - **Round 2**: Q#BP7's terminal growth re-arm had *never been
+    implemented*, and the assertion meant to pin it (`at_bottom`) is a
+    geometric readout that a still-anchored view satisfies; the anchor
+    assertions beside it compared `""` with `""` because the PTY fixture
+    emitted LF-only output.
+  - **Post-round-2 self-review**, caught by CI going red on all four Test
+    jobs: resolving `pmacs.window.buffer()`'s no-argument arm through the
+    acting frontend made a total function partial, and six runtime modules
+    silently dropped operations (`kill_ring_acceptance` 30/30 → 25/5).
+    Fixed in `9110f9f` before merge.
+  - Gating fact found on the way: **the workspace sweep must run with an
+    isolated `XDG_CONFIG_HOME`**, because the real user `init.lua`
+    installs a local package and the losing race leaks a status message
+    into painted-frame comparisons. There is also a latent pre-existing
+    `main` bug in the buffer CRDT undo path, unrelated to this arc.
+  - `compile_mode_acceptance` is load-sensitive under default
+    parallelism (~1 run in 3, a different test each time); verified
+    pre-existing by swapping in `main`'s `compile.lua`. It is 67/67 at
+    `--test-threads=1`.
 
 - **GPU initial target — MERGED as #148** (`main` @ `0dd16a5`, 2026-07-24,
   after two review rounds). `pmacs --gpu [--socket …] FILE` opens a target

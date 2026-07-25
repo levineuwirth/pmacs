@@ -1,7 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-24, after GPU initial-target (#148, protocol v20)
-landed, following folding Stage 2 (#149) and its landed-doc refresh (#150),
+**Last updated: 2026-07-24, after bottom-panel Stage 1 (#155) landed,
+following GPU initial-target (#148, protocol v20),
+folding Stage 2 (#149) and its landed-doc refresh (#150),
 web grammars HTML+CSS (#146), the LaTeX Stage 1 / inline-math framing pair
 (#144/#145), folding Stage 1 (#142), one-command GPU invocation (#141), the
 documentation refresh (#140), Vterm Stage 3 (#135), tab-width rendering
@@ -21,12 +22,81 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-24)
 
-- `main` @ `0dd16a5` (GPU initial-target #148 atop folding Stage 2 landed-doc
-  refresh #150, folding Stage 2 #149, ledger refresh #147, web grammars #146,
+- `main` @ `e745068` (bottom-panel Stage 1 #155 atop GPU initial-target #148,
+  folding Stage 2 landed-doc refresh #150, folding Stage 2 #149, ledger
+  refresh #147, web grammars #146,
   LaTeX Stage 1 #144 / inline-math framing #145, and folding Stage 1 #142),
   protocol **v20** (`SUPPORTED=[6..=20]`; v16 = `ThemeFacts`, v17 =
   `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events, v20 =
   the GPU initial-target semantic bootstrap family).
+- **Bottom panel Stage 1 (window placement + TUI side windows) LANDED —
+  #155** (`docs/bottom-panel-framing.md` rev 4; merge `e745068`; two review
+  rounds). **No protocol change (still v20).** Arc 7's substrate: pmacs now
+  has Emacs's `display-buffer` + window parameters, and a buffer can be
+  displayed in a fixed-height window pinned to the bottom of the frame that
+  feature code targets **by policy** instead of by stealing the selected
+  window.
+  - `src/window.rs`: `WindowParams { side, fixed_rows, dedicated }` plus
+    implementation-owned `quit_action` / `origin_document` (Lua reads them,
+    `set_params` refuses them); `MIN_WINDOW_OUTER_ROWS = 2`;
+    `Layout::compute(area, fixed)` subtracts fixed children before dividing
+    the remainder by weight, preserving last-flexible-takes-the-remainder, so
+    a tree with no fixed leaves computes byte-identically to before.
+  - **`Layout::compute` has TWO production callers**, and both must feed the
+    same shared `panel_fixed_rows` map: `window_placements` and
+    `src/overlay_paint.rs`'s peer-presence pass, which derives its own
+    text-area `Rect` and never routes through the first. Leaving the second
+    on unfixed geometry paints every peer cursor at the row it would occupy
+    with no panel open.
+  - **The minimum is recursive** (`subtree_min_rows`: horizontal splits sum,
+    vertical splits max). "Two rows at the root" does not give each nested
+    leaf two rows. `interactive_min_rows` is the same recursion over the
+    user's `window.min-height` preference, and applies to drag/keyboard
+    resize ONLY — the layout pass and frame-resize reconciliation use the
+    structural floor, so changing a preference can never invalidate an
+    existing layout.
+  - **Hiding a panel is a durable state transition, not a per-frame effect**
+    (`EditorState::reconcile_panel_layout`): it moves focus out and releases
+    the terminal controller, because the terminal resize path merely returns
+    on zero content without releasing. It runs after attach/resize/display/
+    close and defensively before input dispatch, terminal sync, and paint.
+  - `FrontendView` gains `panel_capable`, `frame_geometry`
+    (`None` = **unknown**, never the GPU attach request's permanent 24×80
+    placeholder), and derived `panel_hidden` — each spelled explicitly at
+    every construction site, preserving folding's non-`Default` discipline.
+  - `EditorCore::primary_document_window` is the Q#BP14 projection seam;
+    `display_buffer` is Phase 1 of the display transaction (exact target →
+    side affinity → ordinary reuse, with option-valued height/dedication);
+    the Lua layer owns Phase 2 (activate → hook → reconcile → revalidate →
+    final-focus matrix).
+  - **Optimistic input is gated per WINDOW, not per buffer**:
+    `dispatch_idle_for` returns `false` whenever the acting frontend's active
+    window is a side window. Marking the panel's BUFFER round-trip would be
+    wrong — `round_trip_buffers` is global by `BufferId`, so it would disable
+    optimistic apply for another frontend editing that buffer as its document.
+  - Jump entries are per frontend and carry their origin `WindowId`; a stale
+    **side** origin is SKIPPED, because degrading it to an active-window
+    switch is exactly the duplicate-panel corruption the arc removes.
+  - `pmacs.window.display / display_file / quit / panel / params /
+    set_params / resize / display_target`, plus `builtin/runtime/window.lua`
+    (`window.panel-height`, `window.min-height`, `C-x ^` / `C-x C-^`).
+    Adopters take `display = "current" | "panel"`; **Stage 1 default is
+    `"current"`** and Stage 3 flips it.
+  - The divider is the upper subtree's existing mode-line row — no row added
+    or consumed, `ui.divider` restyles every exposed segment of one boundary,
+    and drag state is `HashMap<FrontendId, _>` so frontends cannot steal each
+    other's gestures.
+  - `open_initial_target` now shares one `resolve_target_buffer` +
+    exact-window install seam with `display_file`, and reasserts into a
+    document window after hooks (a startup hook can now create a panel).
+  - Final gates: 1,817 default + 1,994 CRDT library tests; the new
+    `bottom_panel_stage1_acceptance` 46; kill ring 30; compile 67; M4 121;
+    required GPU 152; initial-target 14 CRDT; all three vterm suites; folding
+    Stage 2 48. All 12 CI checks green at merge.
+  - **Stage 2 (the GPU panel band) needs its own re-framing** before
+    implementation and takes the next available protocol version; the
+    framing's §1.3 census of 23 transitive active-context reads is its map.
+    Stage 3 is the adopter default flip.
 - **GPU initial target LANDED — #148**
   (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
@@ -524,8 +594,14 @@ commands, read `docs/active-work.md` immediately after this file.
     (GPU) is next**, unframed.
   - **Web grammars HTML+CSS LANDED — #146**, and **LaTeX Stage 1 — #144**
     with its inline-math parent framing **#145**.
-  - Remaining ranked arcs: 6 folding Stage 3, 7 DAP, 8 GPU splits, plus
-    the `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
+  - **Arc 7 (bottom panel) Stage 1 LANDED — #155** — window placement,
+    window parameters, TUI side windows, the divider, and the adopter
+    `display` opt-in. **Stage 2 (the GPU band) is next and needs its own
+    re-framing**; Stage 3 is the default flip. DAP was parked awaiting
+    exactly this arc's Stage 1 and can now re-baseline its touch census.
+  - Remaining ranked arcs: 6 folding Stage 3, 7 bottom-panel Stages 2–3,
+    DAP, 8 GPU splits, plus the `.ipynb` arc (its JSON-grammar
+    prerequisite shipped in #123).
 
 ## 2. How we work (the part that must not drift)
 
@@ -756,6 +832,44 @@ final variant — its own round-trip cannot detect a discriminant shift.
   before any `FrontendEvent` touches render/size/editor state. Generalizes:
   when a new failure path can leave a handle installed without its owning
   session, dropping a handle is not the same as tearing down the connection.
+- **A guard with no production caller passes every direct-call test.**
+  #155 round 1: `EditorCore::try_split_active` implemented the side-window
+  split refusal, but `pmacs.window.split_horizontal` / `split_vertical` — and
+  therefore `C-x 2` / `C-x 3` — still called plain `split_active`. The
+  acceptance test called the core method directly, so reverting the guard
+  entirely would have left every test green. Same shape as folding #142
+  round 2. Assert through the outermost user-reachable seam
+  (`try_exec(&s, "pmacs.window.split_horizontal()")`), then falsify by
+  revert. When the test shares a file with the code it pins, `scripts/bite`
+  cannot swap it — break the production line by hand and `git checkout --`.
+- **A geometric readout is not a state predicate.**
+  `TerminalViewStatus::at_bottom` is defined as `scroll_offset == 0` — "the
+  viewport currently reaches the tail", not "this view follows the tail". A
+  still-anchored view satisfies it whenever it happens to be tall enough, so
+  asserting it could not detect that Q#BP7's growth re-arm had never been
+  implemented (#155 round 2): the next rows the child printed pushed the
+  anchored view back into history. Pinning *following* requires advancing the
+  world — feed more child output through a filesystem gate — and asserting the
+  view came along. Related: `scroll_offset` is viewport-relative, so
+  "unchanged across a height change" is vacuous or wrong; the invariant is
+  the frozen ANCHOR.
+- **A PTY in the default mode does not translate LF to CRLF.** An
+  `echo`-driven test fixture staircases rightward, and past the viewport
+  width every row clips to blanks — so `assert_eq!(top_before, top_after)`
+  compares `"" == ""` and passes for any regression (#155 round 2). Emit
+  `printf '...\r\n'`, and guard text comparisons with
+  `assert!(!observed.is_empty())` the same way the panel daemon pin guards on
+  `!panel_hidden`.
+- **Widening an ambient resolver into a scoped one can make a total function
+  partial.** #155 round 2 resolved both arms of `pmacs.window.buffer()`
+  through the acting frontend "for uniformity". `acting_frontend` follows the
+  interactive origin, which can name a frontend with no registered view (a
+  bare `dispatch_key` from an unattached peer), so the no-argument arm began
+  raising instead of answering. No runtime caller `pcall`s it, so killring,
+  syntax, autosave, pair, indent and comment silently dropped operations —
+  `kill_ring_acceptance` went 30/30 to 25/5 on every CI platform. The ambient
+  resolver's fallback is what makes it *total*; keep it, and document that as
+  deliberate. Uniformity is not free when the paths have different totality.
 - **An upgrade decision must be tracked independently of the outcome that
   triggered it.** #148 published a target's fresh `BufferSnapshot` to
   existing grid replicas only when the buffer was `newly_loaded ||
@@ -836,6 +950,14 @@ setup (reader → editable → kernel execution) now has its JSON grammar
 prerequisite, but remains a real arc, not a one-shot.
 GPU: auto-reconnect after daemon restart, splits/multi-buffer, gutter
 riders (whitespace guides, folding, git markers).
+Bottom panel (SHIPPED Stage 1, #155; full list in its framing "Deferred"):
+left/right/top side windows, multiple slots per side, rehoming a leaf across
+the tree, the whole `no_other_window` parameter, manual panel hide/show and
+`window.toggle-panel`, `display-buffer-alist`-style user rules, panel
+persistence (blocked on settings persistence), `OSC 22` pointer shape in the
+TUI, per-panel statusline segments on the wire, proportional-font panels,
+`window-configuration` registers, atomic windows, panel-local keymaps, and
+horizontal (`C-x {`/`}`) resize.
 Themes (full list in theme-faces framing rev 9 "Deferred (named)"):
 popup/menu/dropdown bg + selected-row faces, `ui.background` /
 `ui.caret`, `ui.modeline.inactive`, minimap chrome, peer-cursor
