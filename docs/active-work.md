@@ -286,13 +286,32 @@ If it does not, stop and repair the remote/fetch configuration.
     with `git checkout --`, which reverts to **HEAD** — so a fix must be
     committed *before* it is bitten. Round 1's fixes were briefly wiped by
     exactly that.
-- Verification on this branch: `cargo fmt --check` clean; strict workspace
-  Clippy clean; 1,829 default + 2,006 CRDT library tests; dired acceptance
-  **25 default + 25 CRDT**; m8_1 10 / m8_2 15 / m8_3 32 unchanged; M4 121;
-  required GPU 155; **isolated-`XDG_CONFIG_HOME` workspace sweep 3,189
-  passed across 92 suites, zero failures**; `git diff --check` clean. The
-  sweep needs the isolated config for the reason recorded in the
-  bottom-panel lane below.
+- **Canonical main integrated at `46a1b8f`** (multi-root LSP affinity
+  #161), merged rather than rebased per the #135/#137 precedent so the
+  review anchors stay addressable. Two things worth carrying:
+  - **A conflicting PR silently stops running CI.** GitHub builds
+    `pull_request` runs against the merge ref, which does not exist while
+    the PR conflicts, so no run is created and nothing reports a
+    failure — the checks list simply stays as it was. Three pushes to
+    this branch produced no CI at all before the cause was found. Watch
+    `mergeable` on a long-lived lane, not just the check list.
+  - #161's own COHERENCE finding **falsified a claim in this lane's
+    module doc**: `pmacs.error` is never defined in production, so an
+    uncaught raise inside a `pmacs.async` coroutine does not reach
+    `*errors*` as the comment said. It reaches a bare `error()` inside
+    `pmacs._async.tick()`, whose result `tick_async` discards with
+    `let _ =` — i.e. nowhere. That makes dired's per-coroutine `pcall` +
+    `set_status` load-bearing rather than tidy, and the comment now says
+    so.
+- Verification on the merged tree: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,829 default + 2,006 CRDT library tests; dired
+  acceptance **25 default + 25 CRDT**; m8_1 10 / m8_2 15 / m8_3 32
+  unchanged; multi-root 13 (main's new suite, green under this lane's
+  `mod.rs` changes); M4 121; required GPU 155;
+  **isolated-`XDG_CONFIG_HOME` workspace sweep 3,202 passed across 93
+  suites, zero failures**; `git diff --check` clean. The sweep needs the
+  isolated config for the reason recorded in the bottom-panel lane
+  below.
 - Coherence (framing §0.5, required since #163): serves `COHERENCE.md` §20
   Priority 1, which names this work explicitly; journey step 7's file half
   goes from no surface to a surface; **adds no interaction island** — keys

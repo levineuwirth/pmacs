@@ -48,11 +48,28 @@
 -- 3. EVERY LISTING IS ASYNC. `pmacs.fs.read_dir` is worker-dispatched,
 --    so each command spawns a coroutine and the work after the first
 --    `:await()` resumes on a later tick --- outside interactive
---    dispatch. Two consequences: errors must be `pcall`ed and reported
---    here (an uncaught raise inside `pmacs.async` goes to *errors*, not
---    the status line), and `pmacs.window.*` calls made after the await
---    act for the *ambient* active frontend, since interactive origin
---    does not survive the tick boundary.
+--    dispatch. Three consequences:
+--
+--    * Errors MUST be `pcall`ed and reported here, and that is
+--      load-bearing rather than tidy. An uncaught raise inside a
+--      `pmacs.async` coroutine reaches `step()`, which reports through
+--      `pmacs.error` --- a channel that **is never defined in
+--      production** (`COHERENCE.md` §1.1) --- and so falls through to a
+--      bare `error()` inside `pmacs._async.tick()`, whose result
+--      `EditorState::tick_async` discards with `let _ =`. The failure
+--      would not reach the status line, the `*errors*` buffer, or a log:
+--      it would reach nowhere, and dired would look like it silently did
+--      nothing.
+--    * Reporting therefore goes through `pmacs.editor.set_status`, which
+--      exists and which the acceptance suite observes --- the corollary
+--      COHERENCE draws from that dead channel: report through a surface
+--      a test can see, or the guard is indistinguishable from the
+--      silence it was meant to fix.
+--    * `pmacs.window.*` calls made after the await act for the *ambient*
+--      active frontend, since interactive origin does not survive the
+--      tick boundary; and `pmacs.editor.move_to_line` acts on the
+--      ambient *buffer*, which is why every post-await re-seat is
+--      guarded (see `seat_cursor`).
 
 -- Emacs 28's dired-kill-when-opening-new-dired-buffer, as a setting
 -- rather than a hardcoded policy: buffer-per-directory accumulates
