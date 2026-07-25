@@ -37,6 +37,11 @@ similar_names = "allow"
 multiple_crate_versions = "allow"
 
 [dependencies]
+# OpenType MATH table reader for inline math layout (Q#MS7). Already in the
+# build graph via fontdb -> cosmic-text -> glyphon, so this declares a crate
+# the build compiles anyway. The feature set is a SUBSET of fontdb's; a bare
+# `ttf-parser = "0.25"` would union `std` in and rebuild the whole font chain.
+ttf-parser = { version = "0.25", default-features = false, features = ["opentype-layout"] }
 # OS clipboard for cut/copy/paste (Q#CM6). `wayland-data-control` adds
 # the zwlr_data_control backend so the clipboard works under Wayland
 # without a window handle; the default X11 backend covers X sessions.
