@@ -54,7 +54,7 @@ git status --short --branch
 The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #TBD)
+## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
 
 - Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
   round, all twelve checks green). Branch `githubsucks/lean4-stage1`
@@ -167,6 +167,26 @@ If it does not, stop and repair the remote/fetch configuration.
   the auto-attach path. At least one existing test sets it believing it
   takes effect. Out of scope for a PR whose acceptance 16 pins existing
   attach behavior as unchanged.
+- **Review round 1 addressed.** The blocker was process, not design: the
+  test file was committed *before* `cargo fmt` ran, so the fix sat
+  uncommitted in the working tree and the branch as pushed failed the
+  first gate. The reported "fmt clean" described the worktree, not the
+  branch — gate results are only meaningful when run against the pushed
+  tree. Also added the two pins review asked for (a **string** `config
+  .root` as an affinity key — acc17 only covered the function form; and
+  `root = false` reading as unset), each bite-verified against exactly
+  the mutation it targets and neither against the other. And documented
+  the canonicalization obligation: the `"detected"` arm is canonicalized
+  for free, a **configured** root is not, so on macOS a resolver
+  returning `/var/…` and a detected `/private/var/…` are different keys
+  for one directory. Stage 3's Lean resolver is the first real consumer,
+  so the obligation is written at the point of use.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
+  multi-root 11/11; M4 121; statusline 7; completion popup 9; auto-pair
+  45; required GPU 155; **isolated-config workspace sweep 3,164 across 91
+  suites**; `git diff --check` clean. The sweep needs an isolated
+  `XDG_CONFIG_HOME` and `-- --skip basedpyright`.
 
 ## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
 

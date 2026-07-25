@@ -522,6 +522,15 @@ end
 -- *outermost* marker). A resolver that returns nil declines, and
 -- resolution falls through to the marker walk.
 --
+-- **A configured root — string or resolver return — MUST be a canonical
+-- absolute path.** The `"detected"` arm is canonicalized for free
+-- (`pmacs.project.detect` canonicalizes before walking), but a
+-- configured one is fed to `file_uri_for` exactly as written, and the
+-- affinity key is that URI. On macOS a resolver returning `/var/…` and
+-- a detected `/private/var/…` are different keys for the same
+-- directory, which silently yields two servers for one project. There
+-- is no Lua-side canonicalizer to normalize this for you.
+--
 -- Resolver results are memoized per directory, because `ensure_server`
 -- resolves the root on the *reuse* path as well as the spawn path — so
 -- an unmemoized filesystem-walking resolver would re-walk on every

@@ -181,8 +181,16 @@ fn acc13_list_rows_carry_root_uri_and_cwd() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     let fields: Vec<&str> = rows[0].split('|').collect();
     assert_eq!(fields[0], "rust");
-    assert_eq!(fields[1], file_uri(&proj), "root_uri must be the project root");
-    assert_eq!(fields[2], proj.display().to_string(), "cwd must be the root");
+    assert_eq!(
+        fields[1],
+        file_uri(&proj),
+        "root_uri must be the project root"
+    );
+    assert_eq!(
+        fields[2],
+        proj.display().to_string(),
+        "cwd must be the root"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +215,14 @@ fn acc14_two_project_roots_of_one_language_spawn_two_servers() {
     let rows = rows(&state);
     assert_eq!(rows.len(), 2, "one server per project root: {rows:?}");
     let roots: Vec<&str> = rows.iter().map(|r| r.split('|').nth(1).unwrap()).collect();
-    assert!(roots.contains(&file_uri(&fx.dir("a")).as_str()), "{roots:?}");
-    assert!(roots.contains(&file_uri(&fx.dir("b")).as_str()), "{roots:?}");
+    assert!(
+        roots.contains(&file_uri(&fx.dir("a")).as_str()),
+        "{roots:?}"
+    );
+    assert!(
+        roots.contains(&file_uri(&fx.dir("b")).as_str()),
+        "{roots:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +246,10 @@ fn acc15_two_files_in_one_root_reuse_a_single_server() {
 
     let rows = rows(&state);
     assert_eq!(rows.len(), 1, "same root must reuse: {rows:?}");
-    assert_eq!(rows[0].split('|').nth(1).unwrap(), file_uri(&fx.dir("proj")));
+    assert_eq!(
+        rows[0].split('|').nth(1).unwrap(),
+        file_uri(&fx.dir("proj"))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +280,11 @@ fn acc16_shipped_languages_are_unchanged_for_the_single_root_case() {
         settle(&mut state);
 
         let rows = rows(&state);
-        assert_eq!(rows.len(), 1, "{language}: expected one server, got {rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "{language}: expected one server, got {rows:?}"
+        );
         let fields: Vec<&str> = rows[0].split('|').collect();
         assert_eq!(fields[0], language, "{language}: language_id");
         assert_eq!(
@@ -377,7 +398,10 @@ fn acc18_hand_spawned_server_without_root_uri_is_not_adopted() {
     let rows = rows(&state);
     assert_eq!(rows.len(), 2, "the attach must not adopt it: {rows:?}");
     let roots: Vec<&str> = rows.iter().map(|r| r.split('|').nth(1).unwrap()).collect();
-    assert!(roots.contains(&""), "hand-spawned reads back nil: {roots:?}");
+    assert!(
+        roots.contains(&""),
+        "hand-spawned reads back nil: {roots:?}"
+    );
     assert!(
         roots.contains(&file_uri(&proj).as_str()),
         "the attach's own server carries the root: {roots:?}"
@@ -507,5 +531,85 @@ fn acc21_detected_root_and_markerless_file_get_different_servers() {
         fallback.split('|').nth(2).unwrap(),
         fx.dir("loose").display().to_string(),
         "the markerless server keeps the fallback directory as cwd"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review-round-1 pins. Neither is a numbered acceptance criterion; both
+// cover a branch the nine above leave untested.
+// ---------------------------------------------------------------------------
+
+/// A *string* `config.root` is an affinity key. acc17 covers the function
+/// form; without this the `return configured, "config"` arm has no test.
+///
+/// The bite: both files sit in their own marked project, so if the config
+/// arm were dropped they would key on their own detected roots and spawn
+/// two servers. One server keyed on the configured root is only possible
+/// if the override wins.
+#[test]
+fn config_string_root_overrides_detection_as_the_affinity_key() {
+    let fx = Fixture::new();
+    fx.write("a/Cargo.toml", "[package]\nname = \"a\"\n");
+    fx.write("b/Cargo.toml", "[package]\nname = \"b\"\n");
+    let first = fx.write("a/src/main.rs", "fn main() {}\n");
+    let second = fx.write("b/src/main.rs", "fn main() {}\n");
+    let shared = fx.dir("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let mut state = editor();
+    fx.bind(&state);
+    exec(
+        &state,
+        &format!(
+            "pmacs.lsp.config.rust = {{ command = \"{}\", root = \"{}\" }}",
+            fake_lsp_path(),
+            lua_str(&shared)
+        ),
+    );
+    open(&state, &first);
+    settle(&mut state);
+    open(&state, &second);
+    settle(&mut state);
+
+    let rows = rows(&state);
+    assert_eq!(
+        rows.len(),
+        1,
+        "a configured root outranks both detected roots: {rows:?}"
+    );
+    let fields: Vec<&str> = rows[0].split('|').collect();
+    assert_eq!(fields[1], file_uri(&shared), "keyed on the configured root");
+    assert_eq!(fields[2], shared.display().to_string());
+}
+
+/// `root = false` reads as unset, as it always has. Defended in
+/// `project_root_for` by a truthiness check rather than `~= nil`; this
+/// pins the behavior instead of trusting the comment.
+///
+/// The bite: under a `~= nil` test the config arm would return
+/// `false, "config"`, and `file_uri_for(false)` returns nil — so the file
+/// would land on a rootless server instead of its detected project.
+#[test]
+fn config_root_false_reads_as_unset_and_detection_still_wins() {
+    let fx = Fixture::new();
+    fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
+    let file = fx.write("proj/src/main.rs", "fn main() {}\n");
+    let mut state = editor();
+    fx.bind(&state);
+    exec(
+        &state,
+        &format!(
+            "pmacs.lsp.config.rust = {{ command = \"{}\", root = false }}",
+            fake_lsp_path()
+        ),
+    );
+    open(&state, &file);
+    settle(&mut state);
+
+    let rows = rows(&state);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].split('|').nth(1).unwrap(),
+        file_uri(&fx.dir("proj")),
+        "`false` must not become a root; detection still wins"
     );
 }
