@@ -700,6 +700,14 @@ fn dired_canonicalization_is_the_cores_own_normalizer() {
 /// side window (Q#DR10): the next directory is the same kind of thing as
 /// the current one and belongs in the same slot. Neither replaced by a
 /// document window nor duplicated.
+///
+/// **This test does not pin the routing itself, and says so rather than
+/// implying otherwise:** dired holds the focus in its own panel here, so
+/// a raw `switch_buffer` lands in that same window and the assertions
+/// below hold either way (verified — the mutation is VACUOUS against
+/// this test). What distinguishes `display { side = … }` from the raw
+/// switch is dedication, so the discriminating pin is
+/// `dired_descent_from_a_dedicated_panel_leaves_the_pin_alone` below.
 #[test]
 fn dired_directory_descent_stays_in_its_side_window() {
     let td = fixture_dir();
