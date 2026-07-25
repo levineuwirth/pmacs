@@ -286,9 +286,13 @@ If it does not, stop and repair the remote/fetch configuration.
     with `git checkout --`, which reverts to **HEAD** — so a fix must be
     committed *before* it is bitten. Round 1's fixes were briefly wiped by
     exactly that.
-- **Canonical main integrated at `46a1b8f`** (multi-root LSP affinity
-  #161), merged rather than rebased per the #135/#137 precedent so the
-  review anchors stay addressable. Two things worth carrying:
+- **Canonical main integrated twice** — at `46a1b8f` (multi-root LSP
+  affinity #161) and again at `b889873` (GPU terminal input #166), both
+  merged rather than rebased per the #135/#137 precedent so the review
+  anchors stay addressable. Each conflict was a single doc hunk resolved
+  as the union: this lane owns COHERENCE's journey step 7 file half, #161
+  owns the in-flight list, #166 owns step 8's GPU-terminal addendum.
+  Three things worth carrying:
   - **A conflicting PR silently stops running CI.** GitHub builds
     `pull_request` runs against the merge ref, which does not exist while
     the PR conflicts, so no run is created and nothing reports a
@@ -303,12 +307,18 @@ If it does not, stop and repair the remote/fetch configuration.
     `let _ =` — i.e. nowhere. That makes dired's per-coroutine `pcall` +
     `set_status` load-bearing rather than tidy, and the comment now says
     so.
-- Verification on the merged tree: `cargo fmt --check` clean; strict
-  workspace Clippy clean; 1,829 default + 2,006 CRDT library tests; dired
-  acceptance **25 default + 25 CRDT**; m8_1 10 / m8_2 15 / m8_3 32
-  unchanged; multi-root 13 (main's new suite, green under this lane's
-  `mod.rs` changes); M4 121; required GPU 155;
-  **isolated-`XDG_CONFIG_HOME` workspace sweep 3,202 passed across 93
+  - **A lane in review against a fast-moving `main` needs its gates rerun
+    per integration, not per push.** Main advanced twice inside this
+    review round, and the second time landed while the first
+    integration's sweep was still running. The numbers below describe the
+    twice-merged tree.
+- Verification on the twice-merged tree (`main` @ `b889873`):
+  `cargo fmt --check` clean; strict workspace Clippy clean; **1,832
+  default + 2,009 CRDT** library tests; dired acceptance **25 default +
+  25 CRDT**; m8_1 10 / m8_2 15 / m8_3 32 unchanged; multi-root 13 and
+  vterm Stage 3 5 (both suites main added, green under this lane's
+  `mod.rs` and `editor.rs` changes); M4 121; required GPU 155;
+  **isolated-`XDG_CONFIG_HOME` workspace sweep 3,205 passed across 93
   suites, zero failures**; `git diff --check` clean. The sweep needs the
   isolated config for the reason recorded in the bottom-panel lane
   below.
