@@ -206,10 +206,26 @@ If it does not, stop and repair the remote/fetch configuration.
   fail the test that names it. `dired.lua` is new, so `scripts/bite`'s
   file swap does not apply; every mutation was applied and reverted with
   `git checkout --`. One came back VACUOUS and is recorded above.
+- **Review round 1 addressed** (framing rev 7, S1-10…S1-12). Three
+  behavioral fixes, each bite-verified: `dired.revert`'s re-seat is
+  guarded on the active buffer (an ambient `move_to_line` after an await
+  moved an unrelated buffer's cursor — the buffer-level instance of
+  S1-9); `fmt_size` keeps the column width past ten digits, because
+  `_layout` is a contract Stage 3 is planned against; and the symlink
+  descent dropped its probe, since `open_directory`'s
+  changed-nothing-on-failure invariant *is* the probe (it was listing the
+  target directory twice). Plus a consecutive-`readdir`-error cap, because
+  **nothing cancels a dired listing** — it carries no supersede key, so
+  cancellation was never the backstop the tolerant loop implicitly relied
+  on. Naming/comment findings taken as-is.
+  - Durable process lesson, hit twice now: a mutation-bite helper restores
+    with `git checkout --`, which reverts to **HEAD** — so a fix must be
+    committed *before* it is bitten. Round 1's fixes were briefly wiped by
+    exactly that.
 - Verification on this branch: `cargo fmt --check` clean; strict workspace
   Clippy clean; 1,829 default + 2,006 CRDT library tests; dired acceptance
-  22 default + 22 CRDT; m8_1 10 / m8_2 15 / m8_3 32 unchanged; M4 121;
-  required GPU 155; **isolated-`XDG_CONFIG_HOME` workspace sweep 3,186
+  **25 default + 25 CRDT**; m8_1 10 / m8_2 15 / m8_3 32 unchanged; M4 121;
+  required GPU 155; **isolated-`XDG_CONFIG_HOME` workspace sweep 3,189
   passed across 92 suites, zero failures**; `git diff --check` clean. The
   sweep needs the isolated config for the reason recorded in the
   bottom-panel lane below.

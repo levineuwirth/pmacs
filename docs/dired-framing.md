@@ -1,13 +1,14 @@
 # Dired — framing
 
-**Revision 6 — 2026-07-25. Status: APPROVED; Stage 0 MERGED as #162;
-Stage 1 IN REVIEW as PR #165.**
+**Revision 7 — 2026-07-25. Status: APPROVED; Stage 0 MERGED as #162;
+Stage 1 IN REVIEW as PR #165, review round 1 addressed.**
 Rev 1 passed a ground-truth review; rev 2 fixed round 1's seven findings;
 rev 3 fixed round 2's six and was approved; rev 4 recorded what Stage 0's
 implementation falsified in the approved text (§0); rev 5 adds the
 **coherence impact** statement now required of every framing
 (`CLAUDE.md`, `COHERENCE.md` §20) — see §0.5; rev 6 records what Stage
-1's implementation falsified (§0, S1-1…S1-9). Deliberately
+1's implementation falsified (§0, S1-1…S1-9); rev 7 adds what its first
+review round found (§0, S1-10…S1-12). Deliberately
 unnumbered: the roadmap's Arc 8 is GPU
 structural parity but `docs/lean4-mode-framing.md` also claims Arc 8, so
 the arc space is already forked in uncommitted work. (Rev 2 also cited
@@ -292,6 +293,47 @@ in the code, per the rev-4 precedent.
   is ambient would display for A. Not fixable from Lua (the display
   surface takes no frontend argument) and named here rather than
   discovered later.
+
+### Stage 1 review round 1 (rev 6 → rev 7)
+
+Three findings changed behavior; the rest were naming and comments. Each
+fix is bite-verified against the test that names it.
+
+- **S1-10. An ambient re-seat is not safe after an await.** `dired.revert`
+  painted its own buffer by name (safe) and then re-seated through
+  `pmacs.editor.move_to_line`, which moves whatever window is
+  **active** — so a user who switched buffers while the re-read was in
+  flight had an unrelated buffer's cursor moved to a line index
+  meaningful only in the dired listing. This is the buffer-level instance
+  of the hazard S1-9 named at the frontend level, and it generalizes: in
+  this codebase, *painting takes a buffer and seating takes the world*.
+  Any post-await cursor operation needs an active-buffer guard;
+  `open_directory` is exempt only because it displays the buffer first.
+- **S1-11. The rendered columns are a contract, so precision yields to
+  width.** `%10d` overflowed at 10 GB (VM images, core dumps), widening
+  the size field and shifting mtime and name right on that line alone.
+  Cosmetically harmless today, but `_layout` is exported and Stage 3's
+  column-classifying intercept is planned against it, so a
+  contract-violating line now is a Stage 3 trap. `fmt_size` took
+  `fmt_mtime`'s shape: exact bytes while they fit, else a fixed-width
+  magnitude. Not the deferred human-readable column (§13) — the exact
+  count still renders right up to the point where it cannot.
+- **S1-12. `open_directory`'s "changed nothing on failure" invariant is
+  reusable as a PROBE.** S1-8's symlink descent originally listed the
+  target to learn its kind and then opened it — two full listings of the
+  same directory. Because a failed open touches no editor state
+  (acceptance 15), the open itself is the probe: try the descent, fall
+  back to `display_file`. One read. The comment that claimed "one
+  syscall" for a full `read_dir` is corrected rather than left as a
+  cost claim nobody would re-check.
+
+Also, on the tolerant channel (Q#DR6): a `readdir` iterator may keep
+yielding errors without terminating, and **cancellation is not a backstop
+for a dired listing** — it carries no supersede key, so nothing cancels
+it. A consecutive-error cap now fails the listing the way an unopenable
+directory fails, rather than accumulating error rows on a worker thread.
+It is deliberately untested: faking a failing iterator would need the
+walk generic over it, a refactor with no other consumer.
 
 ## 0.5. Coherence impact (`COHERENCE.md` §20)
 
