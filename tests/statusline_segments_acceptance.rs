@@ -465,6 +465,9 @@ fn a05_08_evaluator_latches_reentrancy_contexts_and_mutation_guards() {
                 layout: pmacs::window::Layout::single(window_id),
                 active: window_id,
                 fold_projection: true,
+                panel_capable: true,
+                frame_geometry: None,
+                panel_hidden: false,
             },
         );
     }

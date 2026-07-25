@@ -132,8 +132,7 @@ impl TerminalManager {
             last_bell_count: bell_count,
             ..TerminalViewState::default()
         });
-        normalize_state(state, projection);
-        state.viewport_size = Some(viewport_size);
+        declare_view_size(state, projection, viewport_size);
         Some(project_snapshot(
             key.buffer_id,
             viewport_size,
@@ -234,8 +233,7 @@ impl TerminalManager {
             last_bell_count: bell_count,
             ..TerminalViewState::default()
         });
-        normalize_state(state, projection);
-        state.viewport_size = Some(viewport_size);
+        declare_view_size(state, projection, viewport_size);
         let rows = retained_rows(projection);
         let geometry = view_geometry(&rows, state, viewport_size.rows);
         Some(TerminalViewStatus {
@@ -289,8 +287,7 @@ impl TerminalManager {
             last_bell_count: bell_count,
             ..TerminalViewState::default()
         });
-        normalize_state(state, projection);
-        state.viewport_size = Some(viewport_size);
+        declare_view_size(state, projection, viewport_size);
         true
     }
 
@@ -593,6 +590,56 @@ fn clamp_or_clear(rows: &RetainedRows<'_>, anchor: LogicalCellAnchor) -> Option<
         || (anchor.logical_line_id == first.logical_line_id
             && anchor.cell_offset < first.cell_offset))
         .then(|| row_lead(first))
+}
+
+/// The shared viewport-size declaration path (bottom-panel arc, Q#BP7).
+///
+/// Normalize, then re-arm live-tail following when the newly declared
+/// viewport reaches the tail, then record the size. Every path that
+/// *declares* a size routes through here so grid and semantic
+/// declarations cannot disagree; `scroll_view` and `begin_selection`
+/// deliberately do not, because they write `top` themselves.
+fn declare_view_size(
+    state: &mut TerminalViewState,
+    projection: BorrowedScreenProjection<'_>,
+    viewport_size: CellSize,
+) {
+    normalize_state(state, projection);
+    rearm_follow_on_growth(state, projection, viewport_size.rows);
+    state.viewport_size = Some(viewport_size);
+}
+
+/// Q#BP7 item 1: **growth reaching the live tail re-arms follow.**
+///
+/// A height change is a viewport change, never a scroll change — `top`
+/// is preserved verbatim — but once a taller viewport covers the tail,
+/// staying anchored would leave the view frozen just short of the live
+/// output while `at_bottom` reported `true`: `at_bottom` is the
+/// instantaneous geometric readout `scroll_offset == 0`, so it cannot
+/// distinguish "following" from "anchored, and currently tall enough to
+/// reach". The next rows the child prints would then push the anchored
+/// view back into history with nothing to explain it.
+///
+/// **Only when no selection is active** (R1-8): a historical selection
+/// froze this anchor on purpose, and growth must not yank the user's
+/// region out from under them. `scroll_view` already handles the
+/// scroll-driven arm (`next == tail_start`), so during ordinary
+/// scrolling `scroll_offset == 0` implies follow is already armed —
+/// which makes this rule fire on exactly the growth (and shrink-back)
+/// case it names, and be idempotent everywhere else.
+fn rearm_follow_on_growth(
+    state: &mut TerminalViewState,
+    projection: BorrowedScreenProjection<'_>,
+    viewport_rows: u32,
+) {
+    if state.top.is_none() || state.selection.is_some() || viewport_rows == 0 {
+        return;
+    }
+    let rows = retained_rows(projection);
+    if view_geometry(&rows, state, viewport_rows).scroll_offset == 0 {
+        state.top = None;
+        state.selection_froze_top = false;
+    }
 }
 
 fn normalize_state(state: &mut TerminalViewState, projection: BorrowedScreenProjection<'_>) {

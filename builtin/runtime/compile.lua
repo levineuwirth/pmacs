@@ -732,8 +732,29 @@ end)
 
 -- Start a run in `slot`. Shared by compile and shell-command; grep
 -- has its own worker path.
+-- Whether `buf` is currently the acting frontend's side-window buffer
+-- (bottom-panel arc). Used so a recompile re-displays into the panel it
+-- is already in rather than duplicating itself into the document window.
+local function already_in_panel(buf)
+  if not buf then return false end
+  local panel = pmacs.window.panel()
+  if not panel then return false end
+  local ok, shown = pcall(pmacs.window.buffer, panel)
+  return ok and shown == buf
+end
+
 local function start_run(slot, cmdline, opts)
   opts = opts or {}
+  -- Bottom-panel arc (Q#BP11b): validate placement BEFORE the run
+  -- supersedes anything, rewrites the buffer, or spawns a process, so
+  -- an unknown value leaves no half-started run behind. In Stages 1-2
+  -- omission means "current"; Stage 3 flips the default.
+  local display = opts.display
+  if display ~= nil and display ~= "current" and display ~= "panel" then
+    error(string.format(
+      "compile.run: unknown display %q (expected \"current\" or \"panel\")",
+      tostring(display)))
+  end
   -- q-target discipline (Q#CM11): capture only when coming from a
   -- non-generated buffer, so `g` reruns don't re-capture and
   -- compile → g → q restores the original buffer.
@@ -805,7 +826,27 @@ local function start_run(slot, cmdline, opts)
   -- attach here stacked a duplicate render view per run (round-5
   -- finding 1; translation itself is buffer-level and unaffected by
   -- attachment count).
-  pmacs.window.switch_buffer(slot.buf)
+  -- The FIRST display of this run is the side-affine one (Q#BP3): a
+  -- persistent *compilation* already visible in a document window must
+  -- not preempt the requested panel. Compile output is passive, so it
+  -- takes `select = false` explicitly.
+  --
+  -- A recompile reaches here with NO `display` (only cmdline/cwd are
+  -- stored in `_last`), so the raw switch below would put this buffer in
+  -- the selected DOCUMENT window while the panel still shows it — the
+  -- duplicate presentation this arc removes elsewhere. Detect that the
+  -- buffer already owns the panel slot and keep it there.
+  --
+  -- Gated on OMISSION, never on an explicit value: `display = "current"`
+  -- is the documented user-facing opt-out from the Stage 3 default flip,
+  -- so it must reach the raw switch even when the previous run was
+  -- panel-placed. The duplicate presentation that produces is the
+  -- escape hatch's documented cost (R3-rp2).
+  if display == "panel" or (display == nil and already_in_panel(slot.buf)) then
+    pmacs.window.display(slot.buf, { side = "bottom", select = false })
+  else
+    pmacs.window.switch_buffer(slot.buf)
+  end
   if not ok then
     emit_text_raw(slot, string.format("[%s spawn failed: %s]\n", slot.label, tostring(proc)))
     slot.expected_rev = buf:revision()
@@ -866,7 +907,9 @@ local function visit_error(slot, idx)
   if not e then return end
   local path = resolve_error_path(slot, e.file)
   pmacs.editor.push_jump()
-  local ok, err = pcall(pmacs.buffer.find_or_open, path)
+  -- Bottom-panel arc (Q#BP11b): RET from a compilation PANEL opens the
+  -- source in the document target, leaving the panel where it is.
+  local ok, err = pcall(pmacs.window.display_file, path, { select = true })
   if not ok then
     pmacs.editor.jump_back()
     pmacs.editor.set_status(slot.label .. ": failed to open " .. path .. ": " .. tostring(err))
@@ -995,6 +1038,15 @@ pmacs.command.define {
   fn = function()
     local slot = slot_for_buffer(pmacs.window.buffer())
     if not slot then return end
+    -- Bottom-panel arc (Q#BP11b): in a side window, `q` deletes or
+    -- restores the PRESENTATION rather than leaving a source buffer
+    -- stranded in the panel slot. Capability fallback and pre-arc
+    -- placement keep today's previous-buffer restore below.
+    local params = pmacs.window.params()
+    if params and params.side and params.quit_action then
+      pmacs.window.quit()
+      return
+    end
     local target = slot.prev
     if not (target and target:is_valid()) then
       target = buffer_named("*scratch*") or pmacs.buffer.create("*scratch*")

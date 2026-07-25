@@ -264,6 +264,14 @@ pub fn snapshot(core: &EditorCore, session_key: String) -> Option<SavedDesktop> 
 
     let resolve = |wid: WindowId| -> Option<SavedLeaf> {
         let win = core.windows.get(&wid)?;
+        // Bottom-panel arc (Q#BP10): side windows are transient display
+        // policy, never desktop state. Dropping the leaf here makes the
+        // existing single-surviving-child collapse remove the root
+        // wrapper too, so the saved tree is the document tree exactly —
+        // no `SavedLeaf` shape change and no `DESKTOP_VERSION` bump.
+        if win.is_side() {
+            return None;
+        }
         let path = reg.get(win.buffer_id).ok()?.file_path()?;
         Some(SavedLeaf {
             path: path.display().to_string(),
@@ -437,6 +445,12 @@ pub fn restore_into(
                 active,
                 // Desktop restore rebuilds LOCAL's grid view (Q#FD21).
                 fold_projection: true,
+                // …which renders side windows natively (Q#BP13). Every
+                // field is spelled explicitly, preserving folding's
+                // non-`Default` discipline.
+                panel_capable: true,
+                frame_geometry: None,
+                panel_hidden: false,
             },
         );
         active
