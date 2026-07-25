@@ -1272,9 +1272,16 @@ its asks are already practiced.**
     exclusive by construction; every other per-frontend-kind pair in the
     dispatcher remains two adjacent `if`s that a reader must notice are
     alternatives.
-- The GPU frontend exceeds the TUI (minimap, squiggles, typography)
-  without the TUI losing the model — the "no privileged frontend" rule
-  is holding under real divergence pressure.
+- The GPU frontend exceeds the TUI (minimap, squiggles, typography,
+  and since #158 rendered inline math) without the TUI losing the
+  model — the "no privileged frontend" rule is holding under real
+  divergence pressure. Inline math is the sharpest case so far: the
+  GPU shapes `$…$` spans through a bundled MATH-table font while the
+  TUI shows the LaTeX source unchanged, and the TUI's distinct-face
+  fallback is a **named deferral rather than an oversight**. What
+  keeps it inside the rule is that the slice reserves no protocol
+  version and adds no wire surface — the divergence is presentational
+  only, and the semantic model both frontends read is identical.
 
 Remaining, honestly small relative to the section's ambition: capability
 negotiation is per-bit rather than a first-class declared capability

@@ -14,11 +14,11 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `8c86d34` (the dired framing #164 atop find-file
-  #162, COHERENCE.md #163, Lean 4 Stage 1 #160, the minimap blank-slab fix
-  #159, bottom-panel Stage 1 #155, the inline-math re-scout #154, the vterm
-  PTY-flake fix #153, and the GPU initial-target doc refresh #152; protocol
-  v20).
+  `githubsucks/main` @ `d152120` (the bottom-panel landed-doc refresh #156
+  atop the inline-math slice #158, dired Stage 1 #165, the GPU terminal
+  input fix #166, Lean 4 Stage 2 #161, the dired framing #164,
+  COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160, and the minimap
+  blank-slab fix #159; protocol v20).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -52,137 +52,9 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `8c86d34` or a newer intentional main.
+The `git log` command must expose `d152120` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Inline-math slice lane — PR #158 OPEN, main integrated
-
-- Portable branch: `githubsucks/inline-math-slice`; worktree
-  `../pmacs-math-slice`. **PR #158**, base `main`.
-- **Canonical `main` merged into the lane three times on 2026-07-25**,
-  every time merged rather than rebased, per the #135/#137 precedent: the
-  PR is awaiting review rounds and a rebase would break every review
-  anchor.
-  - First at `8c86d34` (28 commits behind). The conflict was
-    **pre-existing**, not introduced by the dired (#164) or Lean 4
-    ledger commits; it already conflicted against `main` @ `e745068`.
-  - Then at `46a1b8f`, after Lean 4 Stage 2 (#161) landed while this
-    branch's CI was still running. Same single conflict, same shape,
-    same resolution.
-  - Then at `b889873`, after the GPU terminal input fix (#166) landed.
-    **No conflict at all this time** — and that is exactly why it still
-    needed a real integration, see below.
-- **The first two conflicts were this ledger and nothing else** — both
-  sides' lanes kept verbatim each time. That is the standing cost of a
-  long-lived PR here: every merge to `main` edits this file, so a branch
-  awaiting review re-conflicts on it and only on it. It is a docs
-  collision, never a code one, and it says nothing about integration
-  risk — do not read a `CONFLICTING` badge on this PR as a code signal
-  without checking which file `git merge-tree` names.
-- **The inverse trap matters more, and #166 is the case in point: a
-  CLEAN `git merge-tree` is not a reason to skip integrating.** #166
-  landed 41 lines in `pmacs-gpu/src/main.rs`, the same heavily-rewritten
-  file as the first integration, and git merged it without a murmur
-  because the two edits sit in different regions (#166 is entirely in the
-  headless probe — `PMACS_GPU_PROBE_OBSERVE_MS`, `PROBE_INPUT_CHAR`,
-  `input_echo_observed` — while this lane rewrites the render path).
-  Merging the PR on the strength of that clean auto-merge would have
-  shipped a combination no gate had ever run. **Decide whether to
-  integrate from the shared-FILE set, not from whether git complained.**
-- **First integration's surface** (derived from `git diff
-  <merge-base>..main`, not from another PR's file list):
-  `pmacs-gpu/src/main.rs` gained 72 lines on main from `e547a90` — the
-  minimap all-blank-slab divide-by-zero fix — and this lane rewrites
-  large parts of the same file. Git auto-merged it **textually**; a
-  clean auto-merge is not evidence the tree compiles (the folding-arc
-  lesson), so the full gate suite below is what actually discharges it.
-- **Second integration's surface is code-disjoint.** #161 touched
-  `COHERENCE.md`, `builtin/runtime/lsp.lua`, `src/lua_bindings/mod.rs`,
-  and a new `tests/lsp_multi_root_acceptance.rs`; intersecting that
-  against this lane's own changed-file set leaves exactly one entry,
-  `docs/active-work.md`. No source file is touched by both sides, so
-  this one carries none of the first integration's semantic risk.
-- **CI ran on this branch for the first time on 2026-07-25 and passed
-  all twelve** (Format, both Lints, GPU Render headless, all four Test
-  matrix jobs, M1/M4/M5/M6 gates) at `8b457de` — the first-integration
-  tip. Before that there were zero workflow runs since the PR opened on
-  2026-07-24, while every other open PR had a full run; not a fork and
-  not a trigger-config issue (the workflow fires on all `pull_request`
-  events), cause never identified. So the green run **validates the
-  first integration, including the `pmacs-gpu/src/main.rs` auto-merge,
-  on macOS and Linux both** — the platforms local gating could not
-  cover. The second and third integrations get their own CI run on the
-  push that carries them.
-- Framing: `docs/inline-math-slice-framing.md` rev 3, approved after two
-  review rounds; parent arc framing merged as #154.
-- State: parser, font bundle (GUST licence), MATH-table layout with the
-  measured height budget, currency-guarded detection, and the
-  `ChunkSource::MathBox` spacer substrate are implemented and
-  round-3-reviewed (review fixes at `cbf7782`: the exclusive-`end`
-  mapping bug its own test had pinned, script-marker whitespace, fallible
-  layout via `UncoverableGlyph`, real fraction gap-min constants —
-  flagship scale 0.867, fallback depth 5).
-- Caret-driven suppression (the Q#MS5 gate over the effective caret and
-  Q#MS11 selection endpoints, chunk substitution before tab expansion,
-  the line-reuse predicate's third input, and the CursorByte /
-  optimistic-edit / Decorations refresh triggers), the draw pass
-  (per-glyph mini-buffers positioned by each shaped line's real
-  baseline, fraction-rule quads over the washes, the F8b family pin),
-  the Q#MS11 whole-rectangle wash widening, and the pixel acceptance
-  battery (criteria 5–11, 14–16; 17 discharged by the differential
-  `cargo tree -e features` check — byte-identical with and without the
-  dependency line) are implemented on the branch tip.
-- Clippy is CLEAN on the whole workspace at `-D warnings` — the draw
-  pass consumed every formerly-dead item.
-- Verification **pre-integration** (at `14c1c01`, against the old base):
-  199 `pmacs-gpu` tests under `PMACS_REQUIRE_GPU=1`; 1,815 default +
-  1,992 CRDT library tests; M4 121; full workspace sweep green (isolated
-  `XDG_CONFIG_HOME`). Superseded by the post-integration run below —
-  those numbers describe a tree 28 commits behind.
-- Verification after the **first** integration: `cargo fmt --check`
-  clean; strict workspace Clippy clean; 1,826 default + 2,003 CRDT
-  library tests; **202 `pmacs-gpu` tests under `PMACS_REQUIRE_GPU=1`**;
-  M4 121; isolated-`XDG_CONFIG_HOME` `--no-fail-fast` workspace sweep
-  3,208 across 91 suites, zero failures; `git diff --check` clean.
-- Verification after the **third** integration (this is the set that
-  describes what the PR now proposes): fmt clean; `git diff --check`
-  clean; strict workspace Clippy clean; **1,829 default + 2,006 CRDT**
-  library tests; **202 `pmacs-gpu`** under `PMACS_REQUIRE_GPU=1`; M4 121;
-  **isolated-`XDG_CONFIG_HOME` `--no-fail-fast` sweep 3,224 across 92
-  suites, zero failures**.
-- **Test-count reconciliation is the integration proof, not the pass.**
-  Run it against what the other side actually added, per merge:
-  - First: GPU 199 → **202**, and `e547a90` added exactly **3**
-    `pmacs-gpu` tests — the whole delta on main since the merge base.
-    Structurally spot-checked too: main's fix survives as
-    `(count > 0).then(|| MinimapLineShape {` (the deferred closure,
-    **not** the eager `then_some`) with its regression test.
-  - Third: #166 adds **3** library tests, **2** to
-    `vterm_stage3_acceptance`, and **0** to `pmacs-gpu`. Predicted lib
-    1,826 → 1,829, CRDT 2,003 → 2,006, GPU unchanged at 202 — and that
-    is exactly what ran. Suite count 91 → **92** is #161's new
-    `tests/lsp_multi_root_acceptance.rs` binary. All three sides'
-    markers confirmed live in `pmacs-gpu/src/main.rs`: #166's probe
-    symbols, this lane's `math_plan_for_line` / `math_gates_match` /
-    `cached_math_subs_for_slice` / `widen_over_math_chunks` / 21
-    `MathBox` references, and the first integration's minimap fix.
-- **Ops trap, cost hours: `m4_5_basedpyright_initializes_and_negotiates_
-  encoding` does not time out — it hangs forever.** A `--workspace`
-  sweep parks on `m4_acceptance` with a live
-  `basedpyright/langserver.index.js` child and never advances (observed
-  stuck at 38 of 92 suites for 2h26m). The per-suite M4 gate already
-  carries `-- --skip basedpyright`; **the workspace sweep needs the same
-  flag** — `cargo test --workspace --no-fail-fast -- --skip
-  basedpyright` (libtest filters apply to every binary; verify it bit by
-  checking the run reports exactly 1 filtered out). Do not read a
-  long-running sweep as "slow": check whether the suite count is
-  advancing.
-- Remaining: the user's review pass.
-  Named v0 approximations: the peer-caret half of acceptance 14 is
-  pinned at the mapping level (unit tests), not pixels; a soft-wrapped
-  spacer draws its box whole at the first run's origin; the fit budget
-  reads the bundled code face even under a custom `set_font` family
-  (the draw anchors to the real shaped baseline either way).
 ## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
 
 - Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
@@ -599,6 +471,46 @@ git worktree add --track \
 
 ## Closed since the last snapshot
 
+- **Inline-math slice — MERGED as #158** (`main` @ `5aa9044`,
+  2026-07-25). Detect → parse → layout → draw for `$…$`, entirely inside
+  `pmacs-gpu`, no protocol change. Verified by the user's manual pass on
+  a real paper after the landing. What is worth carrying forward:
+  - **The v0 subset is 34 Greek symbols, sub/superscript, and `\frac`.**
+    An unsupported command fails the **whole span** back to source, so on
+    a real document most inline spans still show LaTeX. Widening the
+    symbol map is the highest-value next increment — ahead of display
+    math, which is also deferred.
+  - **A stale frontend binary is invisible from the source tree.** The
+    slice lives only in `pmacs-gpu`, so after it merged the feature was
+    absent until `cargo build --release -p pmacs-gpu` and a client
+    restart; the daemon needs neither. Diagnose with `strings` on the
+    binary (`Latin Modern Math`, `MathBox`) rather than by re-reading the
+    checkout, which was already current.
+  - **Main was integrated three times in one day** (`8c86d34`,
+    `46a1b8f`, `b889873`), merged not rebased to preserve review anchors.
+    Two conflicts, both this ledger and nothing else. **The dangerous
+    case was the one that did NOT conflict**: #166 auto-merged into
+    `pmacs-gpu/src/main.rs`, the file this lane rewrites, because the two
+    edits sat in different regions of it. Decide whether to integrate
+    from the shared-**file** set, never from whether git complained.
+  - **Integration was proved by test-count reconciliation**, not by a
+    green run: predict what the other side adds, then check the deltas.
+    GPU 199→202 matched `e547a90`'s 3; later lib 1,826→1,829 and CRDT
+    2,003→2,006 matched #166's 3, with GPU unchanged because #166 adds
+    none. Suites 91→92 was #161's new binary.
+  - **Why the branch had no CI for a day**: a conflicting PR builds no
+    merge ref, so no `pull_request` run is created. The ledger previously
+    recorded this cause as unidentified; it is not. Check `mergeable` and
+    confirm a run exists for the current head SHA.
+  - **`m4_5_basedpyright` has no timeout and hangs forever**, parking a
+    `--workspace` sweep (observed 2h26m at 38 of 92 suites). It is
+    **intermittent**, so an earlier clean sweep proves nothing. Sweep with
+    `cargo test --workspace --no-fail-fast -- --skip basedpyright` and
+    judge progress by whether the suite count advances.
+  - Named v0 approximations: the peer-caret half of acceptance 14 is
+    pinned at the mapping level, not pixels; a soft-wrapped spacer draws
+    its box whole at the first run's origin; the fit budget reads the
+    bundled code face even under a custom `set_font` family.
 - **Bottom panel Stage 1 — MERGED as #155** (`main` @ `e745068`,
   2026-07-24, after two review rounds). Window placement, window
   parameters, TUI side windows, the divider, and the adopter `display`
