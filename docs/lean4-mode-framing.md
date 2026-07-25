@@ -241,11 +241,26 @@ Confirmations, recorded because each was load-bearing and unverified:
    narrowing is load-bearing.** `handle_server_requests` builds its sid
    list from `attachments`, and `push_event` appends with no cap. So a
    subscriber fires only for a server with a live attachment, and an
-   unattached server's event queue grows unboundedly. This bites
-   acceptance 34 directly: kill the buffer with a request outstanding
-   and the pending purge never runs — the leak that criterion exists to
-   prevent. Q#LN9 now states the contract and acceptance 34 drives it
-   through the buffer-kill path rather than the server-death path alone.
+   unattached server's event queue grows unboundedly.
+
+   *Corrected during implementation (rev 5, round 2).* Rev 5 first
+   claimed the reachable leak was a killed buffer. **That was wrong.**
+   The Rust core fires exactly five hooks — `buffer.after-edit`,
+   `buffer.after-load`, `buffer.after-switch`, `frontend.detached`,
+   `process.after-tick` — and **there is no buffer-kill hook at all**,
+   so `lsp.lua` never tears an attachment down and the drain keeps
+   reaching that server. The premise was right and the inference was
+   not: it needed attachments to be removed on kill, and nothing
+   removes them.
+
+   The reachable leak is a different path with the same root cause.
+   `attach_buffer` drops a sid from `attachments` the moment
+   `server_is_live` reports false, rebuilding against a fresh server —
+   so the `crashed` / `stopped` event that should trigger a purge is
+   **precisely the one most likely to go undrained**. An event-driven
+   purge leaks exactly when it matters. Q#LN9 therefore drives the
+   purge off `pmacs.lsp.list()`, which enumerates the manager directly
+   and is unaffected by attachment bookkeeping.
 7. **The `cfg.restart` gap is still open** (recorded landing #161):
    `ensure_server` never forwards `pmacs.lsp.config[lang].restart` to
    `pmacs.lsp.spawn`, so the field is silently dropped on auto-attach.
@@ -264,9 +279,9 @@ rather than a bare root), `ensure_server` 527 → **610**,
 12798 → **12827**, `pair.lua` 213 → **229**, and `compile.lua`
 264 → **266**. Verified good and left alone: `listview.lua:138`,
 `src/lsp.rs:264`, `src/diag.rs:50`, `src/process.rs:193`,
-`src/project.rs:145`, and the `mod.rs` binding-block citations. The pre-#161 line numbers inside Q#LN15 are
-left as written: that stage has landed and its citations are historical
-record, not navigation.
+`src/project.rs:145`, and the `mod.rs` binding-block citations. The
+pre-#161 line numbers inside Q#LN15 are left as written: that stage has
+landed and its citations are historical record, not navigation.
 
 ## 1. What ships
 
@@ -1018,13 +1033,24 @@ attachment.** `handle_server_requests` builds its sid list from
 `attachments`, so a server with no attached buffer is never drained — and
 `push_event` appends with no cap, so that server's queue grows
 unboundedly. Both facts are pre-existing and neither is Stage 3a's to
-fix, but the second one turns the first into a leak with a name: **a
-buffer killed while a request is outstanding never runs the purge**,
-because the purge rides the drain that the attachment was gating. That is
-the exact failure acceptance 34 exists to prevent, reachable through the
-ordinary `C-x k`. So the purge is driven from both edges — the server-death
-transition *and* attachment teardown — and acceptance 34 exercises the
-buffer-kill path, which is the one a user can actually reach.
+fix. What they change is where the purge may be wired.
+
+**The purge must not ride the drain.** `attach_buffer` removes a sid
+from `attachments` as soon as `server_is_live` reports false and rebuilds
+the attachment against a fresh server, so a `crashed` / `stopped` event
+is the event *least* likely to be drained — the drain stops visiting
+that server at almost exactly the moment the event is queued. A purge
+triggered by observing that event therefore leaks in the case it exists
+to handle.
+
+So the purge polls **`pmacs.lsp.list()`** after each drain instead. That
+call enumerates the manager directly and is unaffected by attachment
+bookkeeping, which is what makes it the right authority: a sid that is
+absent, terminal, or running a new generation settles its pending
+one-shots with an error, whether or not anything ever drained it.
+Acceptance 34's second half exercises a server that is in **no**
+attachment, because that is the shape an event-driven purge fails and a
+polled one survives.
 
 The uncapped queue is recorded as a named deferral (§6) rather than fixed
 here: bounding it is a policy question about which events may be dropped,
@@ -1629,14 +1655,16 @@ the blast radius.
   registered, `workspace/applyEdit` in the same drain is still handled;
   a raising response handler does not stop later events in that drain.
   Mirrors the notification-side pins above.
-- **34.** **Pending-purge pin, both edges.** A server that dies with a response
-  outstanding invokes the pending one-shot with an error and clears it.
-  **And** — the case round 4 found reachable and rev 4 missed — killing
-  the *buffer* with a request outstanding does the same, rather than
-  stranding the registration behind a drain that no longer runs for
-  that server. The second half must be shown to fail against a
-  purge wired only to the server-death transition; otherwise this
-  criterion is satisfied by the implementation that leaks.
+- **34.** **Pending-purge pin, both edges.** A server that dies with a
+  response outstanding invokes the pending one-shot with an error and
+  clears it. **And** a server that is in **no attachment** does the
+  same, rather than stranding the registration behind a drain that never
+  visits it. The second half must be shown to fail against a purge
+  wired to a death event seen in the drain; otherwise this criterion is
+  satisfied by the implementation that leaks. (Rev 5 first worded the
+  second edge as a killed buffer; there is no buffer-kill hook, so
+  nothing removes the attachment and that path does not leak. Corrected
+  in round 2 — see §0.1 finding 6.)
 - **34a.** **Canonicalizer pin (Q#LN20).** `pmacs.fs.canonicalize` resolves a
   symlinked and dot-segmented path to the same string as the real path,
   and returns nil for a nonexistent one. Fixture builds the symlink

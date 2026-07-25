@@ -54,7 +54,7 @@ git status --short --branch
 The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
+## Lean 4 lane (Arc 8) — Stages 1+2 MERGED; Stage 3a IN REVIEW
 
 - Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
   round, all twelve checks green). Branch `githubsucks/lean4-stage1`
@@ -187,6 +187,58 @@ If it does not, stop and repair the remote/fetch configuration.
   45; required GPU 155; **isolated-config workspace sweep 3,164 across 91
   suites**; `git diff --check` clean. The sweep needs an isolated
   `XDG_CONFIG_HOME` and `-- --skip basedpyright`.
+
+### Stage 3a — dispatch seams + `pmacs.fs.canonicalize` (branch `lean4-stage3a-seams`)
+
+- Worktree `../pmacs-lean-stage3`, branched off `githubsucks/main` @
+  `46a1b8f`. Carries framing **rev 5** (the Stage 3 split) as its first
+  two commits, then the implementation, then a bite-driven correction.
+- **Stage 2 merged as #161** (`main` @ `46a1b8f`, 2026-07-25, two review
+  rounds). COHERENCE.md §7 records the slice; §1.2 records the dead
+  `pmacs.error` channel found landing it.
+- **Framing rev 5 splits Stage 3 into 3a and 3b** because rev 4 broke its
+  own §4 rule — the row read "two `lsp.lua` generalizations" under prose
+  claiming Stage 3 was Lean-only. One generalization shipped as Stage 2;
+  the other (Q#LN9's seams) is the shared event drain, so it is now its
+  own substrate stage. 3a and 3b are **strictly sequential** — 3b's
+  subscriber is written against 3a's seam and both touch `lsp.lua`.
+- Ships: `pmacs.lsp.on_notification` / `on_response`, two arms in
+  `handle_server_requests`, a pending-response purge, and
+  `pmacs.fs.canonicalize` (Q#LN20). No protocol change, no Lean content.
+- **Two framing claims were corrected during implementation**, both
+  recorded in §0.1 finding 6 and in the round-2 commit:
+  1. The reachable leak is **not** a killed buffer. The Rust core fires
+     exactly five hooks (`buffer.after-edit`, `buffer.after-load`,
+     `buffer.after-switch`, `frontend.detached`, `process.after-tick`) —
+     **there is no buffer-kill hook**, so nothing tears an attachment
+     down and the drain keeps reaching that server. The real path is
+     `attach_buffer` dropping a dead sid from `attachments` and
+     rebuilding against a fresh server, which makes `crashed`/`stopped`
+     the event *least* likely to be drained. Hence the purge polls
+     `pmacs.lsp.list()` rather than riding the drain.
+  2. Acceptance 32 does **not** pin "removed before invocation" —
+     `pcall` catches the raise either way, so before/after is
+     unobservable without a re-entrant drain. It pins removal being
+     **unconditional**; renamed accordingly.
+- **`pmacs._fs` is installed from `install_async`, not `install_project`**,
+  purely for load order: `make_workspace` runs *after* `fs.lua` is
+  evaluated, so a canonicalizer placed there reads nil. This cost one
+  failing run to discover and is the kind of thing to check first.
+- Bites recorded (all against the committed tree): removal gated on a
+  clean return → acc32 fails 2 != 1; an event-driven purge → the
+  no-attachment case fails "never called" while the attached case still
+  passes; a resolver without `canonicalize` → two servers (34b's own
+  falsification, which ships as a test).
+- **Known unpinned:** the purge's generation (`attempt`) check. Reaching
+  it needs a crash *and* its restart to fall in a gap with no
+  `_async.tick`; the backoff is 500ms, so any tick sees `crashed` first
+  and the absent-or-terminal arm fires. Labelled as defensive in the
+  code rather than left looking covered.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
+  dispatch seams 14/14; multi-root 13/13; M4 121; required GPU 155;
+  **isolated-config workspace sweep 3,188 across 93 suites, zero
+  failures**; `git diff --check` clean.
 
 ## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
 
