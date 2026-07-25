@@ -894,6 +894,21 @@ fn peer_declared_terminal_support(
         .is_some_and(|state| state.negotiated_protocol_version >= 19)
 }
 
+/// Whether a session can **render** a side window (bottom-panel arc,
+/// Q#BP13).
+///
+/// Grid sessions paint the whole cell grid the daemon composes, so a side
+/// window is just another leaf for them. A semantic session needs the
+/// Stage 2 `PanelFrame` band, which does not exist yet — so Stage 1
+/// answers `false` for every semantic peer, whatever it declares. No
+/// client-asserted standalone boolean is trusted: the answer is derived
+/// from the daemon's own negotiated state, and Stage 2 turns the version
+/// arm on (`semantic_render && negotiated_protocol_version >=
+/// PANEL_MIN_VERSION`).
+fn peer_declared_panel_support(session_state: crate::presence::SessionState) -> bool {
+    !session_state.negotiated_capabilities.semantic_render
+}
+
 /// The same belt-and-braces write-loop gate for the additive
 /// protocol-v19 terminal frame. The semantic producer skips construction
 /// for an older peer; this filter independently prevents an unknown
@@ -1628,38 +1643,40 @@ fn open_initial_target(
     target: InitialTarget,
 ) -> Result<OpenedInitialTarget, String> {
     let path = resolve_initial_target(target);
-    let display_path = path.display().to_string();
-    let (buffer_id, newly_loaded, newly_created) = {
+    // Bottom-panel arc (Q#BP11b, R4-B4): capture the fresh view's
+    // ORIGINAL document window before any I/O. A startup hook may now
+    // create and select a side window, and bootstrap must reassert the
+    // requested buffer in a document window rather than overwriting a
+    // panel merely because it became `view.active`.
+    let (origin_window, buffer_id, fire) = {
         let mut core = editor.core.borrow_mut();
         core.active_frontend = frontend_id;
-        let (buffer_id, newly_loaded, newly_created) = match core.get_or_load_buffer(&path) {
-            Ok((buffer_id, newly_loaded)) => (buffer_id, newly_loaded, false),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                let buffer_id = core.registry.borrow_mut().create(display_path.clone());
-                core.set_buffer_path(buffer_id, Some(path.clone()));
-                "[new file]".clone_into(&mut core.status);
-                (buffer_id, false, true)
-            }
-            Err(error) => {
-                return Err(format!("cannot open {}: {error}", path.display()));
-            }
-        };
-        core.switch_active_buffer_for(frontend_id, buffer_id)
+        let origin_window = core
+            .primary_document_window(frontend_id)
+            .ok_or_else(|| "attaching frontend has no document window".to_string())?;
+        let (buffer_id, fire) = core.resolve_target_buffer(&path)?;
+        core.install_buffer_in_window(origin_window, buffer_id)
             .map_err(|error| format!("cannot select {}: {error}", path.display()))?;
-        (buffer_id, newly_loaded, newly_created)
+        core.focus_window(frontend_id, origin_window);
+        (origin_window, buffer_id, fire)
     };
 
-    if newly_loaded {
-        editor
-            .lua_host
-            .run_hook("buffer.after-load", mlua::MultiValue::new());
-    } else if !newly_created {
+    match fire {
+        crate::editor_core::HookKind::AfterLoad => {
+            editor
+                .lua_host
+                .run_hook("buffer.after-load", mlua::MultiValue::new());
+        }
         // Dedup is a logical switch even when the fresh view already shares
         // this BufferId; configuration must observe it exactly once.
-        editor
-            .lua_host
-            .run_hook("buffer.after-switch", mlua::MultiValue::new());
+        crate::editor_core::HookKind::AfterSwitch => {
+            editor
+                .lua_host
+                .run_hook("buffer.after-switch", mlua::MultiValue::new());
+        }
+        crate::editor_core::HookKind::None => {}
     }
+    editor.reconcile_panel_layout(frontend_id);
 
     let mut core = editor.core.borrow_mut();
     core.active_frontend = frontend_id;
@@ -1669,11 +1686,28 @@ fn open_initial_target(
             path.display()
         ));
     }
-    core.switch_active_buffer_for(frontend_id, buffer_id)
+    // Reassert into the original document window when it is still live;
+    // if a hook closed it, rehome to an eligible non-side window in the
+    // same frontend WITHOUT firing a second hook.
+    let destination = if core
+        .views
+        .get(&frontend_id)
+        .is_some_and(|view| view.layout.iter_ids().contains(&origin_window))
+    {
+        origin_window
+    } else {
+        core.non_side_target(frontend_id)
+            .map_err(|error| format!("cannot reselect {}: {error}", path.display()))?
+    };
+    core.install_buffer_in_window(destination, buffer_id)
         .map_err(|error| format!("cannot reselect {}: {error}", path.display()))?;
+    core.focus_window(frontend_id, destination);
     Ok(OpenedInitialTarget {
         buffer_id,
-        publish_to_replicas: newly_loaded || newly_created,
+        publish_to_replicas: matches!(
+            fire,
+            crate::editor_core::HookKind::AfterLoad | crate::editor_core::HookKind::None
+        ),
     })
 }
 
@@ -1766,9 +1800,15 @@ fn handle_session_established(
     // `RenderState` vs a `SemanticRenderState` below — a grid session
     // collapses folds, a semantic one keeps raw-line reckoning until
     // Stage 3.
+    // Bottom-panel arc (Q#BP13): panel capability comes from the SAME
+    // negotiated bit in this same transaction. Stage 1 ships the TUI
+    // side windows only, so a semantic session is not panel-capable and
+    // a `side` request falls back to its document target with every
+    // side-specific parameter discarded.
     let fresh_view = build_fresh_frontend_view(
         editor,
         !session_state.negotiated_capabilities.semantic_render,
+        peer_declared_panel_support(session_state),
     );
     {
         let mut core = editor.core.borrow_mut();
@@ -1850,6 +1890,14 @@ fn handle_session_established(
     }
     streams.insert(frontend_id, write_stream);
     term_sizes.insert(frontend_id, initial_size);
+    // Bottom-panel arc (Q#BP2b): a grid session's real attach size IS its
+    // authoritative geometry declaration, cached BEFORE any input can
+    // reach it. A semantic session deliberately stays UNKNOWN — Stage 2's
+    // authenticated `FrontendCellGeometry` fills it, and the permanent
+    // 24x80 attach placeholder is never consulted for panel layout.
+    if editor.core.borrow().panel_capable_for(frontend_id) {
+        editor.sync_frame_geometry(frontend_id, initial_size);
+    }
 
     if let Some(opened) = opened_target {
         last_active_buffer_sent.insert(frontend_id, opened.buffer_id);
@@ -1932,6 +1980,13 @@ fn handle_dispatcher_event(
                     }
                     if let Some(ts) = term_sizes.get_mut(&source) {
                         *ts = size;
+                    }
+                    // Bottom-panel arc (Q#BP2b): a frame that can no
+                    // longer satisfy the panel hides it, moves focus out,
+                    // and releases its terminal controller here — before
+                    // the next drained event dispatches.
+                    if editor.core.borrow().panel_capable_for(source) {
+                        editor.sync_frame_geometry(source, size);
                     }
                 }
                 #[cfg(feature = "crdt")]
@@ -2938,6 +2993,10 @@ fn build_fresh_frontend_view(
     // collapses folds. Passed explicitly from the negotiated
     // selected-render bit at the call site — never inferred here.
     fold_projection: bool,
+    // Bottom-panel arc (Q#BP13): whether this session can RENDER a side
+    // window. Same explicit-at-the-call-site discipline as
+    // `fold_projection`; never inferred from a `FrontendId` here.
+    panel_capable: bool,
 ) -> crate::window::FrontendView {
     use crate::text_view::TextView;
     use crate::window::{FrontendView, Layout, Window, WindowId};
@@ -2946,16 +3005,14 @@ fn build_fresh_frontend_view(
     // scratch). M10.8's fresh-scratch behavior made overlays
     // never fire because attaching frontends were in distinct
     // buffers.
-    let local_view = core
-        .views
-        .get(&FrontendId::LOCAL)
-        .expect("LOCAL view present");
-    let local_active_win_id = local_view.active;
+    //
+    // Bottom-panel arc (§1.3 #22): clone LOCAL's PRIMARY DOCUMENT
+    // buffer, not `local_view.active`. A TUI panel may own focus at
+    // attach time, and panel content must never become a newly attached
+    // frontend's full-window document.
     let buffer_id = core
-        .windows
-        .get(&local_active_win_id)
-        .expect("LOCAL's active window present in core.windows")
-        .buffer_id;
+        .primary_document_buffer(FrontendId::LOCAL)
+        .expect("LOCAL always retains a document window");
     let text_view = {
         let reg = core.registry.borrow();
         let buf = reg.get(buffer_id).expect("shared buffer present");
@@ -2968,6 +3025,13 @@ fn build_fresh_frontend_view(
         layout: Layout::single(id),
         active: id,
         fold_projection,
+        panel_capable,
+        // Grid sessions cache their real attach/resize size; a semantic
+        // session stays UNKNOWN until Stage 2's authenticated
+        // declaration, and must never be sized against the attach
+        // request's permanent 24×80 placeholder (Q#BP15a).
+        frame_geometry: None,
+        panel_hidden: false,
     }
 }
 
@@ -3233,7 +3297,7 @@ mod tests {
         let semantic_peer = FrontendId(20);
         let live_grid_peer = FrontendId(21);
         let dead_grid_peer = FrontendId(22);
-        let semantic_view = build_fresh_frontend_view(&mut editor, false);
+        let semantic_view = build_fresh_frontend_view(&mut editor, false, false);
         editor
             .core
             .borrow_mut()
@@ -3885,6 +3949,9 @@ mod tests {
                     layout: Layout::single(wid),
                     active: wid,
                     fold_projection: true,
+                    panel_capable: true,
+                    frame_geometry: None,
+                    panel_hidden: false,
                 },
             );
         }
@@ -4017,7 +4084,7 @@ mod tests {
         let fid = FrontendId(99);
         // Both these fixtures model a SEMANTIC session (Q#FD21: no fold
         // projection until Stage 3).
-        let view = build_fresh_frontend_view(&mut editor, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
         editor.core.borrow_mut().register_frontend_view(fid, view);
 
         let before = editor
@@ -4080,7 +4147,7 @@ mod tests {
         let fid = FrontendId(99);
         // Both these fixtures model a SEMANTIC session (Q#FD21: no fold
         // projection until Stage 3).
-        let view = build_fresh_frontend_view(&mut editor, false);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
         editor.core.borrow_mut().register_frontend_view(fid, view);
         assert_eq!(
             editor
@@ -4121,6 +4188,135 @@ mod tests {
             editor.core.borrow().active_window_for(fid).unwrap().cursor,
             1,
             "key must self-insert into the displayed buffer, not the attach-time scratch"
+        );
+    }
+
+    /// Bottom-panel arc, §1.3 #22 (framing acceptance 51's Stage-1 half).
+    ///
+    /// A fresh no-target attach clones `LOCAL`'s **primary document**
+    /// buffer, not `local_view.active`. Stage 1 makes a TUI panel a real
+    /// focus target, so `LOCAL` can legitimately own focus in a panel at
+    /// attach time — and panel content must never become a newly attached
+    /// frontend's full-window document.
+    #[test]
+    fn fresh_attach_inherits_locals_document_buffer_not_its_focused_panel() {
+        let mut editor = EditorState::new();
+        let document_buffer = editor.core.borrow().active_buffer_id();
+        let panel_buffer = editor.core.borrow().registry.borrow_mut().create("*panel*");
+        // Open a bottom panel on LOCAL and focus it.
+        let panel = {
+            let mut core = editor.core.borrow_mut();
+            let mut request = crate::editor_core::DisplayRequest::new(panel_buffer);
+            request.side = Some(crate::window::Side::Bottom);
+            request.height = Some(5);
+            request.select = Some(true);
+            let outcome = core
+                .display_buffer(FrontendId::LOCAL, &request)
+                .expect("panel placement");
+            core.focus_window(FrontendId::LOCAL, outcome.target);
+            outcome.target
+        };
+        assert_eq!(
+            editor.core.borrow().views[&FrontendId::LOCAL].active,
+            panel,
+            "LOCAL really is focused in the panel"
+        );
+
+        let fid = FrontendId(123);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        assert_eq!(
+            editor
+                .core
+                .borrow()
+                .active_window_for(fid)
+                .expect("fresh view window")
+                .buffer_id,
+            document_buffer,
+            "the new frontend inherited LOCAL's DOCUMENT buffer; inheriting \
+             `local_view.active` would have made the panel its document"
+        );
+        assert_ne!(document_buffer, panel_buffer);
+    }
+
+    /// Bottom-panel arc, Q#BP11b / R4-B4 (framing acceptance 55's
+    /// Stage-1 half).
+    ///
+    /// Stage 1 lets a startup hook create and select a side window. The
+    /// initial-target bootstrap must still reassert the requested buffer
+    /// in — and activate — a **non-side** document window, rather than
+    /// overwriting the panel merely because it became `view.active`.
+    #[test]
+    fn initial_target_reasserts_a_document_window_when_a_hook_selects_a_panel() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, b"target contents\n").expect("write target");
+
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .lua()
+            .load(
+                r#"
+                pmacs.lsp.config = {}
+                pmacs.hook.add("buffer.after-load", function()
+                  if HOOK_RAN then return end
+                  HOOK_RAN = true
+                  HOOK_PANEL = pmacs.window.display(
+                    pmacs.buffer.create("*hook-panel*"),
+                    { side = "bottom", height = 4, select = true })
+                end)
+                "#,
+            )
+            .exec()
+            .expect("install hook");
+
+        // A GRID session (panel-capable), which is the realistic shape
+        // for a hook-created panel in Stage 1 — and real geometry, so
+        // the panel is genuinely VISIBLE and focused when the reassert
+        // runs. Without the declaration, reconciliation would hide the
+        // panel and move focus out on its own, and the assertions below
+        // would pass without exercising the reassert at all.
+        let fid = FrontendId(124);
+        let view = build_fresh_frontend_view(&mut editor, true, true);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        editor.sync_frame_geometry(fid, CellSize::new(24, 80));
+
+        let opened = open_initial_target(
+            &mut editor,
+            fid,
+            InitialTarget {
+                path: target.as_os_str().as_bytes().to_vec(),
+                cwd: dir.path().as_os_str().as_bytes().to_vec(),
+            },
+        )
+        .expect("bootstrap succeeds despite the panel-creating hook");
+
+        let core = editor.core.borrow();
+        assert!(
+            !core.views[&fid].panel_hidden,
+            "the hook's panel is visible, so focus really was on it when \
+             the reassert ran"
+        );
+        let active = core.views[&fid].active;
+        let active_window = core.windows.get(&active).expect("active window live");
+        assert!(
+            !active_window.is_side(),
+            "bootstrap activated a DOCUMENT window, not the hook's panel"
+        );
+        assert_eq!(
+            active_window.buffer_id, opened.buffer_id,
+            "…showing the requested target"
+        );
+        let panel = core
+            .side_window_for(fid)
+            .expect("the hook's panel survived");
+        assert_ne!(
+            core.windows[&panel].buffer_id, opened.buffer_id,
+            "the panel was not overwritten with the target"
         );
     }
 }

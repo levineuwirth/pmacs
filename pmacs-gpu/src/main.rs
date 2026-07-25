@@ -8741,7 +8741,17 @@ fn dominant_line_shape(
         indent_sum += shape.indent_cols;
         content_sum += shape.content_cols;
     }
-    (count > 0).then_some(MinimapLineShape {
+    // `then`, NOT `then_some`: `bool::then_some` takes its argument by
+    // value, so the struct literal --- and with it `indent_sum / count`
+    // --- is evaluated before the guard is ever consulted. A slab of
+    // all-blank source lines makes `count` zero and panics the frontend
+    // on the division. `bool::then` defers the body into a closure, so
+    // the zero case short-circuits to `None`.
+    //
+    // Clippy's `unnecessary_lazy_evaluations` lint pushes in exactly the
+    // wrong direction here; it does not fire on a body that can panic,
+    // but do not "simplify" this back.
+    (count > 0).then(|| MinimapLineShape {
         indent_cols: indent_sum / count,
         content_cols: content_sum.div_ceil(count),
     })
@@ -11431,6 +11441,66 @@ mod tests {
             rects.len() <= pixel_rows + 4,
             "minimap must bucket by visible rows, not emit per source line"
         );
+    }
+
+    #[test]
+    fn minimap_downsampling_survives_a_slab_of_blank_lines() {
+        // Regression: `dominant_line_shape` counted only lines with
+        // content, then built its average with `then_some` --- which
+        // evaluates its argument eagerly, so `indent_sum / count`
+        // divided by zero whenever a downsampled pixel row covered
+        // nothing but blank lines. Reachable on any long file with a
+        // run of blank lines, which is precisely when the bucketing
+        // branch runs at all.
+        let red = style_with_fg(CellColor::Rgb(255, 0, 0));
+        let lines = vec![red; 10_000];
+        // Every line blank: `minimap_line_shape("")` yields
+        // `content_cols == 0`, so `has_content()` is false throughout
+        // and every bucket counts zero contentful lines.
+        let shapes = vec![
+            MinimapLineShape {
+                indent_cols: 0,
+                content_cols: 0,
+            };
+            lines.len()
+        ];
+
+        let rects = minimap_rects(&lines, &shapes, 240, 120, 0, 30, FontMetrics::default());
+
+        // The strokes are all suppressed (no content to draw), but the
+        // thumb still paints --- the point is that this returns at all.
+        assert!(
+            rects.len() <= 8,
+            "blank slabs must emit no line strokes, got {}",
+            rects.len()
+        );
+    }
+
+    #[test]
+    fn minimap_downsampling_averages_only_contentful_lines() {
+        // Guards the other half: a bucket that mixes blank and
+        // contentful lines must average over the contentful ones only,
+        // so the fix cannot regress into `count = slice.len()`.
+        let blank = MinimapLineShape {
+            indent_cols: 0,
+            content_cols: 0,
+        };
+        let solid = MinimapLineShape {
+            indent_cols: 4,
+            content_cols: 20,
+        };
+        let shapes = [blank, solid, solid, blank];
+
+        let shape = dominant_line_shape(&shapes, 0, 4).expect("bucket has contentful lines");
+
+        assert_eq!(shape.indent_cols, 4, "blank lines must not dilute indent");
+        assert_eq!(shape.content_cols, 20, "blank lines must not dilute length");
+    }
+
+    #[test]
+    fn minimap_dominant_line_shape_is_none_for_an_empty_bucket() {
+        let shape = dominant_line_shape(&[], 0, 0);
+        assert!(shape.is_none(), "an empty bucket has no shape");
     }
 
     #[test]

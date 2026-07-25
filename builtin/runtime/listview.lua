@@ -123,7 +123,23 @@ function pmacs.listview.open(spec)
     p.prev = active
   end
   render(p, spec.rows or {})
-  pmacs.window.switch_buffer(p.buffer)
+  -- Bottom-panel arc (Q#BP11b): the placement opt-in. `seat_cursor` and
+  -- `listview.refresh` are active-window-only, so an interactive panel
+  -- MUST take `select = true` or it would silently seat the wrong
+  -- window. In Stages 1-2 omitting `display` keeps today's raw switch;
+  -- Stage 3 flips the default. An unknown value errors before anything
+  -- is displayed.
+  local display = spec.display
+  if display ~= nil and display ~= "current" and display ~= "panel" then
+    error(string.format(
+      "listview.open: unknown display %q (expected \"current\" or \"panel\")",
+      tostring(display)))
+  end
+  if display == "panel" then
+    pmacs.window.display(p.buffer, { side = "bottom", select = true })
+  else
+    pmacs.window.switch_buffer(p.buffer)
+  end
   seat_cursor(p, 1)
 end
 
@@ -160,6 +176,15 @@ pmacs.command.define {
   fn = function()
     local p = panel_for_current_buffer()
     if not p then return end
+    -- Bottom-panel arc (Q#BP11b): `q` keeps its name and its
+    -- user-visible behavior, delegating to `window.quit` only when the
+    -- listview really is in a side window. Capability fallback (and any
+    -- pre-arc placement) keeps the previous-buffer switch below.
+    local params = pmacs.window.params()
+    if params and params.side and params.quit_action then
+      pmacs.window.quit()
+      return
+    end
     local target = p.prev
     if not (target and target:is_valid()) then
       target = find_buffer_by_name("*scratch*") or pmacs.buffer.create("*scratch*")

@@ -241,6 +241,24 @@ codebook-tree-sitter-latex = "0.6"
 # engine (see `crate::syntax::BUILTIN_LANGUAGES`).
 tree-sitter-html = "0.23"
 tree-sitter-css = "0.25"
+# Lean 4 (`.lean`) — Arc 8 Stage 1 (`docs/lean4-mode-framing.md`, Q#LN1).
+# `leanprover` ships no tree-sitter grammar (Lean parses with its own
+# kernel), so both candidates are third-party. The obvious-looking
+# `tree-sitter-lean4` is NOT usable: it depends on `tree-sitter = "0.25"`
+# DIRECTLY rather than the shared `tree-sitter-language` ABI crate, which
+# `^0.25` makes incompatible with our 0.26 and would fork the graph (the
+# same defect that rules out `tree-sitter-dockerfile` above); it exports
+# only `pub fn language()` while its README advertises a `LANGUAGE` const
+# that does not exist; and its package `include` omits `queries/`, so it
+# ships no highlights at all. `arborium-lean` is a republish from the
+# arborium grammar collection that does it correctly: `tree-sitter-language
+# 0.1` as its sole runtime dep, a pre-generated ABI-15 `parser.c` plus
+# `scanner.c` (no CLI at build time), and `HIGHLIGHTS_QUERY` /
+# `INJECTIONS_QUERY` / `LOCALS_QUERY` constants. Note the shape: it exports
+# `const fn language() -> LanguageFn`, so the entry in
+# `crate::syntax::BUILTIN_LANGUAGES` reads `arborium_lean::language().into()`
+# rather than the `LANGUAGE.into()` every other entry uses.
+arborium-lean = "2.18"
 # T M4.4 process supervisor: signal sending without `unsafe`. Keep
 # the feature surface tight to keep build time low. `poll` feeds the
 # compile-mode group readers (cancellable poll-based reads, Q#CM3).

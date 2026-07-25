@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-24.** This file records volatile work that has not
+**Snapshot: 2026-07-25.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -54,10 +54,30 @@ git status --short --branch
 The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Inline-math slice lane — IN FLIGHT
+## Inline-math slice lane — PR #158 OPEN, main integrated
 
 - Portable branch: `githubsucks/inline-math-slice`; worktree
-  `../pmacs-math-slice`.
+  `../pmacs-math-slice`. **PR #158**, base `main`.
+- **Canonical `main` @ `8c86d34` merged into the lane** (2026-07-25),
+  28 commits behind at the time. Merged rather than rebased, per the
+  #135/#137 precedent: the PR is awaiting review rounds and a rebase
+  would break every review anchor. The only conflict was this ledger —
+  both sides' lanes were kept — and it was **pre-existing**, not
+  introduced by the dired (#164) or Lean 4 ledger commits; it already
+  conflicted against `main` @ `e745068`.
+- **Integration surface** (derived from `git diff <merge-base>..main`,
+  not from another PR's file list): `pmacs-gpu/src/main.rs` gained 72
+  lines on main from `e547a90` — the minimap all-blank-slab
+  divide-by-zero fix — and this lane rewrites large parts of the same
+  file. Git auto-merged it **textually**; a clean auto-merge is not
+  evidence the tree compiles (the folding-arc lesson), so the full gate
+  suite below is what actually discharges it.
+- **CI had never run on this branch** — zero workflow runs since the PR
+  opened on 2026-07-24, while every other open PR has a full 12-check
+  run. Not a fork and not a trigger-config issue (the workflow fires on
+  all `pull_request` events); cause unidentified. The integration push
+  is what gets it its first run, so treat that run as the branch's
+  first real CI evidence.
 - Framing: `docs/inline-math-slice-framing.md` rev 3, approved after two
   review rounds; parent arc framing merged as #154.
 - State: parser, font bundle (GUST licence), MATH-table layout with the
@@ -79,15 +99,276 @@ If it does not, stop and repair the remote/fetch configuration.
   dependency line) are implemented on the branch tip.
 - Clippy is CLEAN on the whole workspace at `-D warnings` — the draw
   pass consumed every formerly-dead item.
-- Verification at the tip: 199 `pmacs-gpu` tests under
-  `PMACS_REQUIRE_GPU=1`; 1,815 default + 1,992 CRDT library tests; M4
-  121; full workspace sweep green (isolated `XDG_CONFIG_HOME`).
-- Remaining before PR: nothing known; awaiting the user's review pass.
+- Verification **pre-integration** (at `14c1c01`, against the old base):
+  199 `pmacs-gpu` tests under `PMACS_REQUIRE_GPU=1`; 1,815 default +
+  1,992 CRDT library tests; M4 121; full workspace sweep green (isolated
+  `XDG_CONFIG_HOME`). Superseded by the post-integration run below —
+  those numbers describe a tree 28 commits behind.
+- Verification **post-integration** (the merge commit; this is the set
+  that describes what the PR now proposes): recorded when the gate suite
+  finishes.
+- Remaining: the user's review pass.
   Named v0 approximations: the peer-caret half of acceptance 14 is
   pinned at the mapping level (unit tests), not pixels; a soft-wrapped
   spacer draws its box whole at the first run's origin; the fit budget
   reads the bundled code face even under a custom `set_font` family
   (the draw anchors to the real shaped baseline either way).
+## Lean 4 lane (Arc 8) — Stage 1 IN REVIEW (PR #160)
+
+- Portable branch: `githubsucks/lean4-stage1`, worked in the shared
+  checkout (no sibling worktree), based on `githubsucks/main` @ `e745068`.
+- Approved framing: `docs/lean4-mode-framing.md` revision 4, committed as
+  the branch's first commit (`a382965`) after three review rounds. **Seven
+  stages**, 19 decisions (Q#LN1–19), 64 acceptance criteria. North star:
+  match or exceed VS Code's Lean support.
+- **Stage 1 implemented; no wire change (protocol stays v20), no LSP, no
+  frontend change.** Four commits: framing, grammar, theme captures,
+  editing surface + acceptance.
+  - `Cargo.toml` + `src/syntax.rs`: `arborium-lean` 2.18 and one
+    `BUILTIN_LANGUAGES` entry named **`lean4`** (Q#LN2 — the name becomes
+    the `didOpen` language_id), claiming `.lean` only.
+  - `src/highlight.rs`: four capture entries — `constructor`, `character`,
+    `keyword.conditional`, `warning`.
+  - `builtin/runtime/{comment,pair,syntax}.lua`: `--` comments, the
+    `⟨⟩ ⦃⦄ ⟮⟯` pair set, the `lean` → `lean4` modeline alias.
+  - `tests/lean4_stage1_acceptance.rs` plus unit tests in `syntax.rs` /
+    `highlight.rs`: 12 criteria, 17 tests.
+- **Q#LN1's open obligation is discharged.** `tree-sitter-lean4` is
+  unusable (depends on `tree-sitter ^0.25` directly against our 0.26,
+  exports no `LANGUAGE` const despite its README, packages no queries);
+  `arborium-lean` rides `tree-sitter-language 0.1` with a pre-generated
+  ABI-15 parser. `cargo tree -d` shows no duplicate core. The parse smoke
+  pins the failure mode that matters: `→`/`∀`/`≥` must produce
+  `(arrow)`/`(forall)`/`(comparison)`, since a mismatched-core build
+  degrades silently on exactly those characters rather than failing loudly.
+- **Q#LN4 is a deliberate retro-paint of seven language entries**, not
+  four: `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
+  base-first into javascriptreact/typescript/typescriptreact. Its shape is
+  "every capitalized identifier" (`#match? "^[A-Z]"`) plus every Lua table
+  brace — not "constructors". Pinned in both directions per #146.
+- Implementation findings not in the framing:
+  - `warning` had to move from bold red to bold **bright** red: `number`
+    is plain `fg(1)`, so `sorry` and an adjacent numeric literal were the
+    same colour. Found by writing the test.
+  - `Some(1)` is **not** `@constructor` — in call position a narrower
+    `@function` pattern wins. Only bare or pattern-position capitalized
+    identifiers reach it. Pinned so the blast-radius claim stays honest.
+  - Lean node kinds nest: `module > declaration > def|theorem`.
+  - `pmacs.parse.injection_aliases` is a documented **write-only** Lua
+    proxy (canonical map is Rust-side), so fence tests must drive
+    `_parse_now` and inspect layer languages, never read the table back.
+- **Review round 1 addressed.** The finding: acc12's server-list assertion
+  could not fail for the regression it named — the shared `editor()`
+  helper wipes `pmacs.lsp.config` before any buffer opens, so
+  `#pmacs.lsp.list() == 0` holds for every language regardless of what
+  Stage 1 ships. It now asserts against a **pristine** `EditorState` that
+  `pmacs.lsp.config.lean4` is nil, with a non-vacuity check that the same
+  lookup finds `rust`; bite-verified by adding a `lean4` config to
+  `lsp.lua` and watching it fail. Also fixed a stale column in a
+  `highlight.rs` comment.
+- Verification on this branch: `cargo fmt --check` clean; strict workspace
+  Clippy clean; 1,826 default + 2,003 CRDT library tests; lean4 Stage 1
+  9/9; comment toggle 14; auto-pair 45; injection 4; M4 121; required GPU
+  152; **isolated-config workspace sweep 3,150 across 90 suites**;
+  `git diff --check` clean. The sweep needs an isolated `XDG_CONFIG_HOME`
+  for the reason recorded in the bottom-panel lane below.
+- **Stage 2 is multi-root LSP server affinity** — pure substrate, no Lean
+  content, and it changes `ensure_server`, which every LSP language
+  shares. It is sequenced next because Lean is the language that makes its
+  absence a correctness failure rather than an inconvenience. Two
+  corrections the framing already carries for it: `root` is computed at
+  `lsp.lua:537`, **after** the reuse loop, so the fix must hoist it; and
+  `project_root_for` never returns nil for a file with a path, so the
+  affinity key must be the root only when a root was actually *detected*,
+  or markerless scratch files fragment into one server per directory for
+  every language.
+
+## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
+
+- Approved framing: `docs/dired-framing.md` (revision 5), landing as its
+  own docs PR off `githubsucks/main` @ `2af1ab3`, branch
+  `githubsucks/dired-framing`, worktree `../pmacs-dired-framing`. The
+  repo's `-framing`-branch convention (`vterm-framing`,
+  `gpu-initial-target-framing`, `tab-width-parity-framing`).
+- **Stage 0 (`C-x C-f` find-file) MERGED as #162** (`main` @ `2af1ab3`,
+  2026-07-25, one review round, 12/12 CI green). Durable facts moved to
+  `docs/agent-handoff.md` §1 per rule 3 below.
+- **Stage 1 (the dired view) is next and unstarted.** Branch `dired`
+  (worktree `../pmacs-dired-arc`) carries the framing commits only and is
+  based on the now-superseded `0827dd1`; **rebase it onto the `main`
+  resulting from the framing PR before implementing**, or cut a fresh
+  branch — its framing commits become redundant once the docs PR lands.
+- Stage 1's scope, from the framing §10: `builtin/runtime/dired.lua`; the
+  `dired` major mode + mode keymap; buffer-per-directory with lexical
+  canonicalization and the ownership check; read-only intercept +
+  `set_round_trip_input`; visit routing through `window.display_file`;
+  parent/sort/revert/quit; `C-x d` (with the `display` opt) / `C-x C-j`;
+  cursor preservation by basename; the `dired.kill-when-opening` config
+  key; **and the tolerant `read_dir` opt** — the only Rust in the stage.
+- The one Rust change is load-bearing and is why Stage 1 is not
+  pure-Lua: `read_dir_blocking` (`src/fs.rs:201`) fails the **entire
+  listing** on any of five per-entry conditions, and the tolerant wrapper
+  its own module doc delegates to package authors **cannot be written in
+  Lua** — the primitive returns one error and no partial vec.
+- Coherence (framing §0.5, required since #163): serves `COHERENCE.md`
+  §20 Priority 1, which names this work explicitly; journey steps 7 and
+  (partially) 3; **adds no interaction island** — keys are a mode-scoped
+  keymap, and wdired is a mode swap; adopts `pmacs.config` for
+  `dired.kill-when-opening`; inherits §9's worker-attribution gap for its
+  `read_dir` jobs without worsening it.
+- **Boundary with the Journey Stage 1 arc** (`COHERENCE.md` §20 arc-cut
+  1): CLI directory-argument handling (`pmacs .` exits 1) belongs there,
+  not here. The two meet at `resolve_target_buffer`; dired supplies the
+  buffer a directory should resolve *to*, and `pmacs .` should route into
+  it rather than growing a second directory surface.
+
+## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
+
+- Portable branch: `githubsucks/bottom-panel`, worktree
+  `../pmacs-bottom-panel`, based on `githubsucks/main` @ `ddaa80d`.
+- Approved framing: `docs/bottom-panel-framing.md` revision 4, committed
+  as the branch's first commit (`c27f75a`).
+- **Stage 1 implemented; no wire change (protocol stays v20).** What
+  landed on the branch:
+  - `src/window.rs`: `WindowParams` (`side` / `fixed_rows` / `dedicated`
+    + implementation-owned `quit_action` and `origin_document`), `Side`,
+    a depth-bounded `QuitAction`, `MIN_WINDOW_OUTER_ROWS = 2`,
+    `Layout::compute(area, fixed)`, the `subtree_min_rows` /
+    `interactive_min_rows` recursions, `boundary_below`, and the three
+    new `FrontendView` fields (`panel_capable`, `frame_geometry`,
+    `panel_hidden`).
+  - `src/editor_core.rs`: `primary_document_window`, the non-side target
+    rule, `display_buffer` + the Q#BP3 placement policy, `quit_window`,
+    `reconcile_panel_layout_core`, `resize_boundary`, per-frontend
+    `JumpEntry`s, and the shared `resolve_target_buffer` seam that the
+    #148 initial-target bootstrap now routes through as well.
+  - `src/editor.rs`: the reconciliation transaction, geometry
+    declaration, the side-window `dispatch_idle_for` gate, the divider
+    paint, and the divider drag.
+  - `src/lua_bindings/window_panel.rs`: the whole `pmacs.window` panel
+    surface plus the shared adopter-placement helpers;
+    `builtin/runtime/window.lua` owns `window.panel-height` /
+    `window.min-height` and the resize commands.
+  - Adopters: `listview.open`, `compile.run`, `pmacs.terminal.open` all
+    take `display = "current" | "panel"` (Stage 1 default `"current"`);
+    LSP/compile visits route through `display_file`.
+- **Review round 1 addressed.** The load-bearing finding: the Q#BP6
+  side-window split guard (`try_split_active`) had **no production
+  caller** — `pmacs.window.split_horizontal` / `split_vertical`, and so
+  `C-x 2` / `C-x 3`, still went through plain `split_active`. Splitting a
+  focused panel made the root wrapper's final child a split rather than
+  `Leaf(side)`, which both `Layout::compute`'s fixed pass and
+  `document_subtree` key on. It survived the first round because the
+  acceptance test called the core method **directly**; it now goes
+  through the real Lua binding. This is the folding-arc round-2 lesson
+  repeating exactly: *after wiring a guard into a production hook, pin it
+  through the real path — a direct-call test misses the wiring.*
+  Also fixed: the armed divider drag was not scoped to its arming
+  frontend (it could cancel and swallow a peer's mouse events); a
+  recompile carries no `display` and duplicated a panel-placed
+  `*compilation*` into the document window; and
+  `paint_mode_line_graphemes` had lost its doc block to an insertion.
+  Five bite-verified fixes (three via `scripts/bite`, two by manual
+  revert since their tests share `src/daemon.rs` with the production
+  code).
+- Two Stage-2 hazard pins now exist in `src/daemon.rs`, closing the gap
+  the review named: a fresh attach while `LOCAL` is focused in a panel
+  inherits `LOCAL`'s **document** buffer, and an initial-target bootstrap
+  whose `after-load` hook creates and selects a panel still reasserts
+  into a document window.
+- **Review round 2 addressed.** The load-bearing finding: **Q#BP7 item 1
+  — "growth reaching the live tail re-arms follow" — was never
+  implemented.** `at_bottom` is the instantaneous geometric readout
+  `scroll_offset == 0`, which a still-anchored view satisfies whenever it
+  is momentarily tall enough to reach the tail, so the round-1 assertion
+  could not see the gap: the next rows the child printed pushed the
+  anchored view back into history. `src/terminal/view.rs` now has
+  `rearm_follow_on_growth`, reached by one shared `declare_view_size`
+  helper from every size-declaring path (`snapshot_for_view`,
+  `record_view_size`, `view_status_for_size`) so grid and semantic
+  declarations cannot disagree.
+  Also fixed: the PTY fixtures emitted LF-only output, which staircases
+  until every row clips to blanks — so the anchor assertions compared
+  `""` with `""` and could not fail (now CRLF, each guarded by
+  `assert!(!top_before.is_empty())`); acc33's contrast case asserted
+  nothing; `start_run` let `already_in_panel` override an **explicit**
+  `display = "current"`, which is the documented opt-out from the Stage 3
+  flip (now gated on omission); and `window_drag` was a daemon-global
+  slot that a peer's mode-line press could clear.
+- Durable test lessons from this round, both the same class:
+  1. **A geometric readout is not a state predicate.** `at_bottom` says
+     "the viewport currently reaches the tail", not "this view follows
+     the tail". Pinning follow requires feeding MORE output and asserting
+     the view moved (acc32b uses a filesystem gate between two bursts).
+  2. **A PTY in the default mode does not translate LF to CRLF.** An
+     `echo`-driven fixture staircases rightward and clips to blanks past
+     the viewport width, so any text equality over it is vacuously true.
+     Emit `\r\n`, and guard text comparisons with a non-empty assertion
+     the way the daemon pin guards on `!panel_hidden`.
+- **Round-2 self-review caught a regression the round-2 commit
+  introduced**, in the change it labelled "minor": routing
+  `pmacs.window.buffer()`'s **no-argument** arm through the fid-scoped
+  `selected_window` validator made it **fallible**, and
+  `acting_frontend` can name a frontend with **no registered view** (a
+  bare `dispatch_key` from an unattached peer does exactly that). The
+  runtime calls that function on ordinary edits from `killring`,
+  `syntax`, `autosave`, `pair`, `indent` and `comment` **without
+  `pcall`**, so the raise never surfaced as an error — it silently
+  dropped the operation. `kill_ring_acceptance` went 30/30 → 25/5
+  (`frontend_detached_drops_per_frontend_state`: "B has kill state").
+  The no-arg arm is back on ambient `active_buffer_id()` and documented
+  as deliberately infallible; the explicit-window arm keeps its Q#BP11
+  validation. New **acc19c** pins it through the real path (a
+  `buffer.after-edit` subscriber during a viewless peer's `dispatch_key`)
+  and bites against the regressing commit.
+  Generalizes: **a "uniformity" cleanup that changes a function's
+  fallibility is not minor** — check every caller's error discipline
+  first, and remember that an ambient resolver's fallback IS its
+  contract.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,817 default + 1,994 CRDT library tests;
+  `bottom_panel_stage1_acceptance` 46/46; kill ring 30 default + 30 CRDT;
+  vterm Stage 1 9 default + 10 CRDT; M4 121; required GPU 152;
+  compile 67; vterm Stage 2 4 / Stage 3 5 (7 CRDT); folding Stage 2 48;
+  statusline 7; listview 6;
+  **isolated-config workspace sweep 3,130 passed across 89 suites, zero
+  failures**; `git diff --check` clean.
+  - **Run the sweep with an isolated `XDG_CONFIG_HOME`.** The real
+    `~/.config/pmacs/init.lua` on this desktop calls
+    `pmacs.packages.install_local(...)`, so every editor the sweep builds
+    races on one shared install root; a losing race sets a status message
+    that leaks into the mode line and breaks
+    `folding_stage2_acceptance::unfolded_frame_is_identical_to_the_pre_folding_baseline`,
+    which compares whole painted frames. Standalone it is 48/48. This
+    generalizes the known `compile_mode_acceptance` real-config trap:
+    any suite that paints the status area inherits it.
+  - **A latent pre-existing `main` bug surfaced while gating and is NOT
+    this branch's**: `buffer::tests::proptests::rope_matches_crdt_projection_after_arbitrary_edits`
+    fails on `main` @ `352bf0b` with `ops = [Insert(0,"a"),
+    Insert(0,"aaa"), Replace(0,1,"a"), Undo]` — undo of a textually-null
+    `Replace` returns a no-op edit result still carrying `crdt_op =
+    Some`, violating the suite's own shape invariant. `src/buffer.rs` is
+    byte-identical here, and the seed was deliberately **not** committed
+    (it would make an unrelated failure deterministically red on this
+    PR). Needs its own lane.
+  - Durable test lesson from this round: `TerminalViewStatus.scroll_offset`
+    is documented as the retained rows between **this viewport** and the
+    live tail, so it necessarily tracks the viewport height. Asserting it
+    constant across a panel height change is either vacuous or wrong —
+    the invariant Q#BP7 actually states is that the **anchor** is frozen,
+    which the acceptance now pins by comparing the first visible row's
+    text, plus `at_bottom` for the follow re-arm.
+  - `compile_mode_acceptance` needs `--test-threads=1` locally; it is
+    67/67 there. Under default parallelism it fails roughly 1 run in 3,
+    with a *different* test each time (acc14/acc25a, then acc24) —
+    **verified pre-existing** by swapping in `githubsucks/main`'s
+    `builtin/runtime/compile.lua` and reproducing the same rate. The
+    `pmacs-gpu` bin tests have historically gone red under a loaded sweep
+    (wgpu device contention). Rerun isolated before treating either as a
+    regression.
+- Stage 2 (the GPU panel band, next available protocol version) has its
+  own re-framing obligation before implementation; Stage 3 is the default
+  placement flip.
 
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 

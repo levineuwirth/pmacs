@@ -227,6 +227,11 @@ local default_modeline_aliases = {
   yml = "yaml",
   makefile = "make",
   docker = "dockerfile",
+  -- Lean 4 (framing Q#LN2). The grammar entry is named `lean4` because that
+  -- name becomes the `didOpen` language_id, but an Emacs `-*- mode: lean -*-`
+  -- or a Vim `ft=lean` line is what people actually write, so neither
+  -- spelling strands a file.
+  lean = "lean4",
 }
 for name, language in pairs(default_modeline_aliases) do
   if pmacs.parse.modeline_aliases[name] == nil then

@@ -62,6 +62,22 @@ pmacs.pair.sets = {
   markdown = { "()", "[]", "{}", '""', "``" },
   sh = { "()", "[]", "{}", '""', "''" },
   bash = { "()", "[]", "{}", '""', "''" },
+  -- Lean 4 (framing Q#LN6). `⟨⟩` (anonymous constructor) is among the
+  -- most-typed constructs in Lean and omitting it would make the pair set
+  -- feel broken; `⦃⦄` (strict implicit binder) and `⟮⟯` ride along because
+  -- the Stage 4 input method can produce them (`\{{}}`, `\([])'`) and a
+  -- bracket the pair set does not understand is worse than one it does.
+  --
+  -- All three are OUTSIDE the nine built-in pair chars, so per Q#AP1 their
+  -- opener is a source-peer op and their closer a daemon-peer op: their undo
+  -- is cross-peer-degraded. That is the documented, pre-existing limitation
+  -- of user-extended pairs, whose general fix is chronological cross-peer
+  -- undo arbitration (named substrate work).
+  --
+  -- No `''`: Lean uses `'` as a primed-identifier suffix (`h'`, `foo'`), so
+  -- pairing it would fight the user constantly. Same reasoning that excludes
+  -- it for Rust.
+  lean4 = { "()", "[]", "{}", "⟨⟩", "⦃⦄", "⟮⟯", '""' },
 }
 
 -- Length of the well-formed UTF-8 sequence starting at `s[i]`, or nil

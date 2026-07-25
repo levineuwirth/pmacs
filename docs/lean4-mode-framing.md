@@ -1,0 +1,1467 @@
+# Lean 4 mode — framing (Arc 8)
+
+pmacs has no Lean support of any kind: `grep -rin lean` over `*.rs`,
+`*.lua`, `*.toml`, `*.md` returns zero hits outside the words "clean",
+"boolean", and "leans on". A `.lean` file today opens as a pathless-ish
+plain buffer — no grammar, no major mode, no comment syntax, no pair set,
+no server.
+
+This lane closes that in seven stages. Stage boundaries are drawn where
+the *substrate* changes, not where the feature list does — see §4.
+
+## 0. Why this lane, why now
+
+- Arc 5 (terminal), Arc 4 (themes), the config registry, and the mode
+  system are all complete, and Arc 7 Stage 1 (bottom panel) merged as #155
+  at `e745068`. The goal view in Stage 5 is the first real consumer of the
+  panel placement API outside listview/compile/terminal, which is a useful
+  forcing function for it.
+- The language-support pattern is well worn and cheap: #123 (JSON/YAML),
+  #144 (LaTeX), #146 (HTML+CSS). Stage 1 is that pattern almost exactly.
+- Stages 2 and 4–6 are **not** that pattern, and none should be mistaken
+  for a one-liner. Stage 2 changes `ensure_server`, shared by every LSP
+  language. Stage 4 builds the editor's first input method. Stage 5 is the
+  first consumer of a non-standard LSP method family. Stage 6 adds a
+  severity-routing policy to `LspServerSpec`.
+- The user's stated north star is **matching or exceeding what VS Code
+  does with Lean**. §5's bet 6 scores honestly how close seven stages get
+  and names precisely what is still missing.
+
+Parallel-safety: Stage 1 touches `Cargo.toml`, `src/syntax.rs`,
+`src/highlight.rs`, and four runtime Lua files. Stage 2 touches
+`src/lua_bindings/mod.rs` and `builtin/runtime/lsp.lua` only. Folding
+Stage 3 (the other open lane) touches `pmacs-gpu/*` and
+`src/semantic_render.rs`. None of the three footprints overlap; the only
+file Stage 1 shares with anything is `Cargo.toml`, at one line.
+
+Stages 1 and 2 are independent of each other and **can** run as sibling
+worktrees — they share no file. Per the #126/#127 lesson, that split is
+recorded here, before either starts, rather than discovered during a
+rebase.
+
+## 0.1 Revision history
+
+Revision 1 — initial.
+
+### Round 1 (rev 1 → rev 2)
+
+Five findings, all revision edits — no re-scout was required. The reviewer
+independently reproduced both crate teardowns, every file:line citation,
+the blast-radius greps, and the Lean server facts.
+
+1. **Acceptance 8 contradicted the change it pinned.** The negative pin
+   named Lua and Python as "byte-identical" fixtures, but both are among
+   the languages `constructor` retro-paints — so a fixture that didn't
+   move would have been exactly the vacuous-assertion shape from the #155
+   R2 lesson. Acceptance 7/8 redrawn: Lua and Python moved to the positive
+   side with asserted deltas, and the negative pin now uses languages
+   verified to emit none of the four names.
+2. **The retro-paint is broader than rev 1 stated, and differently
+   shaped.** `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
+   into the `javascriptreact`, `typescript`, and `typescriptreact`
+   entries (`src/syntax.rs:1009`–`1056`), so `constructor` reaches
+   **seven** language entries, not four. More importantly the *shape* is
+   not "constructors": rust/python/javascript tag **every capitalized
+   identifier** (`#match? "^[A-Z]"`), and lua tags **every
+   table-constructor brace**. §2.3 and Q#LN4 now state this, because it
+   is what the ruling is actually about.
+3. **The goal view's refresh loop had no seam.** There is no motion hook.
+   Named the real mechanism (debounced polling off `process.after-tick`)
+   in Q#LN13 rather than letting it grow a polling loop or new hook
+   substrate unframed.
+
+*(Round-1 findings are stated against the features, not stage numbers:
+round 2 renumbered the stages, so a rev-1 "Stage 4" is now Stage 5.)*
+4. **Q#LN10's ordering example didn't motivate the ordering.** `<` is not
+   in the proposed pair set, so `\<>` is safe under either order. Replaced
+   with the real collisions (64 abbreviation keys contain a pair-set
+   character), and stated the contract that finding exposes: the
+   abbreviation consumer must claim self-inserts that *extend an open
+   pending abbreviation*, not only completed expansions.
+5. **Q#LN8's resolver must honor the search boundary.** A Lua
+   `lean-toolchain` walk that ignores `pmacs.project.search_boundary()`
+   breaks the contract `detect_project_within` exists to enforce and makes
+   the Stage 3 outermost-root test non-hermetic.
+
+### Round 2 (rev 2 → rev 3) — scope expansion
+
+Not review findings: the user pulled seven items out of §6 and into scope,
+with the stated north star that **the arc should eventually match or
+exceed what VS Code does with Lean**. Folded in, with two designs
+corrected against ground truth the expansion request assumed differently:
+
+- **Lake version probe** (was deferred) → Q#LN7, rewritten. **Corrected:
+  there is no blocking process run in pmacs.** `pmacs.process` is
+  `spawn`/`write_stdin`/`terminate`/`list`/`status`/`events_take`/
+  `forget`/`resize_pty`, all drained asynchronously off
+  `process.after-tick`; nothing returns output synchronously. A lazy
+  probe therefore cannot gate the first attach, so the design is
+  probe-plus-fallback-latch rather than probe-then-configure. Second
+  correction: **`lake` being on PATH does not mean Lean works** — see
+  §2.9, where the scouting machine's own `lake --version` fails.
+- **Multi-root Lake scoping** (was deferred) → Q#LN15, and promoted to
+  its own stage. **Corrected: `root` is computed at
+  `builtin/runtime/lsp.lua:537`, *after* the reuse loop at `:529`–`:536`,
+  not before it.** The fix therefore hoists the computation above the
+  loop, which makes `project_root_for` run on the reuse path where it
+  previously did not — a real consequence for Q#LN8's function-valued
+  resolver, handled there.
+- **`⦃⦄` / `⟮⟯` pairs** → folded into Q#LN6.
+- **Lean in markdown fences** → Q#LN17.
+- **`textDocument/waitForDiagnostics`** → Q#LN16.
+- **Abbreviation table upkeep** → Q#LN11, as a documented process rather
+  than a deferral.
+- **`#eval` / `#check` output channel** → Q#LN18, its own stage.
+- **Module hierarchy** → Q#LN19, its own stage.
+
+Deliberately still deferred: the interactive infoview (`$/lean/rpc/*`) —
+named as the arc's eventual destination, not its scope; the GPU goal band
+(blocked on bottom-panel Stage 2); a `cursor.after-move` hook; `.olean` /
+`.ilean`; and block-comment toggle, which the user confirmed belongs to
+the comment arc's framing rather than this one.
+
+Nits corrected in round 1: the ledger-drift note (`agent-handoff.md`
+omits the panel lane rather than describing it as in-review); Q#LN12's
+layering (`_request_*_raw` are the Lua bindings in
+`src/lua_bindings/mod.rs`; `src/lsp.rs` has `request_hover` — Stage 5
+touches both files); §2.2's chain step is
+`pmacs.parse.language_from_filename`; §2.3 no longer calls
+`Style::default()` entries "styled"; and bet 1's grammar count.
+
+### Round 3 (rev 3 → rev 4)
+
+Six findings against the round-2 expansion. All revision edits.
+
+1. **The response half of the seam was never designed** (the real hole).
+   Q#LN16 and Q#LN19 both awaited replies "through the Q#LN9 seam", and
+   acceptance pinned it — but Q#LN9 defined only `on_notification` and a
+   notification arm. Confirmed: **no Lua anywhere consumes
+   `ev.kind == "response"`**, so a `send_request` reply is drained and
+   dropped; `send_request` is effectively write-only from Lua. Q#LN9 now
+   specifies both halves, including one-shot removal-before-invoke and a
+   pending-response purge on server death, with acceptance mirroring the
+   notification-side integrity pins.
+2. **The affinity key silently fragmented loose files for every
+   language.** `project_root_for`'s last fallback is `dir_of(path)`, so it
+   **never returns nil for a file with a path** — a naive
+   `(language_id, root)` key would give every directory of markerless
+   scratch files its own server, in Python and Go and TypeScript, caused
+   by a change made for Lean. Q#LN15 now rules: the affinity key is the
+   root only when a root was actually *detected*, and nil for the
+   fallback. Two acceptance cases pin it.
+3. **An acceptance criterion was unimplementable.** `pmacs.hook` exposes
+   `add` / `define` / `list` / `run` and **no `remove`**, so "leaves no
+   `process.after-tick` subscription" could not be satisfied or tested.
+   Reworded to the observable: after teardown, ticks issue no request and
+   write nothing.
+4. **Four stale cross-references survived the round-2 renumber**, despite
+   that round claiming reconciliation: the opening "four stages"; §2.5
+   still calling multi-root a §6 deferral; Q#LN12's "only Rust in Stages
+   2–4", broken three ways; and §4's row 7 omitting Stage 7's typed
+   request. Q#LN12 now carries a per-stage Rust table instead of a prose
+   claim, which is harder to get wrong on the next renumber.
+5. **Q#LN7's latch had no named observation mechanism.** Added: it polls
+   `pmacs.lsp.list()` state on the `process.after-tick` cadence (there is
+   no event for "died before initialize"), it calls `pmacs.lsp.stop`
+   before spawning the fallback so `RestartPolicy` cannot respawn the
+   broken command underneath it, and it updates `command`/`args` only,
+   preserving user-supplied `env`/`settings`/`init_options`/`root`.
+6. Wording: `\{}` expands to `{$CURSOR}`; `⦃⦄` comes from `\{{}}`.
+
+
+## 1. What ships
+
+Seven stages. The north star is VS Code parity; the honest statement of
+where that lands is in §5, bet 6.
+
+**Stage 1 — grammar, mode, and the editing table stakes.** `.lean` files
+highlight, carry a `lean4` major mode, and get comment-toggle and
+auto-pairing (including `⟨⟩`, `⦃⦄`, `⟮⟯`). Lean fenced blocks in markdown
+highlight too. No LSP, no protocol change, no frontend change.
+
+**Stage 2 — multi-root LSP server affinity.** Pure substrate, no Lean
+content: `ensure_server` stops reusing a server across project roots.
+Independently valuable for every language pmacs supports; a prerequisite
+for Lean being usable across more than one Lake package. Split out
+precisely *because* it is cross-cutting — see §4.
+
+**Stage 3 — the Lean language server.** `pmacs.lsp.config.lean4` drives
+`lake serve` with a Lake-aware outermost root, a lazy toolchain probe and
+a one-shot `lean --server` fallback, and a notification-subscription seam
+so `$/lean/fileProgress` has an owner. Adds
+`textDocument/waitForDiagnostics`. Diagnostics, hover, completion,
+goto-definition, document symbols, and semantic tokens all arrive through
+the existing typed surfaces.
+
+**Stage 4 — the Unicode input method.** Typing `\alpha` produces `α`,
+`\to` produces `→`, `\<>` produces `⟨⟩` with the point between them.
+1,855 abbreviations vendored from vscode-lean4. This is the stage that
+makes Lean actually typable in pmacs.
+
+**Stage 5 — the goal view.** A `*lean-goal*` panel that renders
+`$/lean/plainGoal` at the point, refreshed on a debounced tick and on
+file-progress completion, displayed through #155's
+`pmacs.window.display(buf, { side = "bottom" })`.
+
+**Stage 6 — the `#eval` / `#check` output channel.** Lean reports command
+output as *information*-severity diagnostics, which pmacs currently
+squiggles and counts in the modeline. Routes them to a `*lean-output*`
+panel instead, via a per-server severity policy that changes nothing for
+any other language.
+
+**Stage 7 — module hierarchy.** `$/lean/prepareModuleHierarchy` and
+`$/lean/moduleHierarchy/{imports,importedBy}` into the existing listview
+panel.
+
+## 2. Ground truth (scouted 2026-07-24, `main` @ `e745068`)
+
+### 2.1 Crate facts (external, verified by downloading and reading both)
+
+Two candidate grammar crates exist. They are not close in quality.
+
+**`tree-sitter-lean4` 0.3.0** (`wvhulle/tree-sitter-lean`) — **rejected**:
+
+- Depends on `tree-sitter = "0.25"` **directly**, not on the shared
+  `tree-sitter-language 0.1` ABI crate. The workspace is on
+  `tree-sitter = "0.26"`, and `^0.25` excludes it, so this forks the graph
+  and its `Language` is a different type from ours. This is the exact
+  failure mode already documented for `tree-sitter-dockerfile` in
+  `Cargo.toml`'s comments.
+- `src/lib.rs` exports only `pub fn language() -> Language`. Its README
+  advertises `tree_sitter_lean4::LANGUAGE.into()`, which **does not
+  exist** — the README is stale.
+- Its `include` list is `["build.rs", "src/*", "grammar.js", "grammar/*",
+  "tree-sitter.json"]`. **No `queries/`.** It ships no highlights query at
+  all; the upstream repo's queries target Helix.
+- Its `build.rs` shells out to a `tree-sitter` CLI when `src/parser.c` is
+  absent. `parser.c` *is* in the package, so this would not fire — but it
+  is a live hazard in a crate we would otherwise depend on.
+
+**`arborium-lean` 2.18.1** (`bearcove/arborium`) — **selected**:
+
+- `[dependencies] tree-sitter-language = "0.1"` and nothing else at
+  runtime. No second `tree-sitter` in the graph.
+- `grammar/src/parser.c` declares `#define LANGUAGE_VERSION 15` and
+  `.abi_version = LANGUAGE_VERSION`. ABI 15 is current for tree-sitter
+  0.25/0.26. Pre-generated; no CLI at build time. A 1,150-byte
+  `grammar/scanner.c` supplies one external token (`NEWLINE`).
+- Exports `pub const fn language() -> LanguageFn`, plus
+  `HIGHLIGHTS_QUERY` (`include_str!("../queries/highlights.scm")`, 213
+  lines), `INJECTIONS_QUERY` (empty string), and `LOCALS_QUERY` (empty
+  string).
+- `edition = "2024"`, `rust-version = "1.85"`. The workspace is edition
+  2024 / MSRV 1.95 on rustc 1.95.0. Compatible.
+- **Two things to verify at implementation, not assumed here.** (a) Every
+  existing entry in `BUILTIN_LANGUAGES` is spelled
+  `tree_sitter_foo::LANGUAGE.into()` — a `LanguageFn` const. arborium
+  exposes a `const fn` instead, so the entry reads
+  `arborium_lean::language().into()`, a shape no current entry uses.
+  (b) arborium's README shows usage against a
+  `tree_sitter_patched_arborium` crate. That crate is *not* in the
+  dependency graph and the `LanguageFn` ABI is the shared one, so this
+  should be cosmetic — but the loader gets a real parse smoke test against
+  `tree-sitter 0.26` before the entry is trusted.
+
+Neither crate is first-party. `leanprover` ships no tree-sitter grammar;
+Lean's own tooling parses with the Lean kernel. The upstream README of the
+rejected crate says so plainly: *"Lean is a very extensible language.
+Therefore, the Tree-Sitter grammar is of limited use."* That is true and it
+bounds what Stage 1 can promise — see the bets in §5.
+
+### 2.2 The grammar table and the detection chain
+
+`src/syntax.rs:816` `BUILTIN_LANGUAGES` is a `&[LanguageEntry]` of
+`{ name, extensions, loader, highlights_query, locals_query,
+injections_query }`. Adding a grammar is one entry plus one `Cargo.toml`
+line; the doc comment at `src/syntax.rs:756` says exactly this and it has
+held for every grammar since.
+
+`builtin/runtime/syntax.lua:452` `detect_buffer_language` resolves, in
+order: modeline → `pmacs.parse.language_for_path` (the grammar extension
+table) → `pmacs.lsp.filetypes[ext]` → `pmacs.parse.language_from_filename`
+→ shebang. A grammar entry claiming `lean` therefore resolves `.lean`
+without any `pmacs.lsp.filetypes` entry; adding one would be dead weight.
+
+**`LanguageEntry.name` is the LSP `language_id`.** `ensure_server` at
+`builtin/runtime/lsp.lua:540` passes `language_id = language` straight
+into `pmacs.lsp.spawn`, and the surrounding comments (lines 70, 86, 122)
+record that `c`/`cpp` and the four TS/JS entries exist as separate entries
+*only* so that id is accurate. This makes the entry name a wire-visible
+decision, not a label — see Q#LN2.
+
+### 2.3 The global capture table (the #146 trap)
+
+`Theme::default_dark()` at `src/highlight.rs:143` is a single flat
+`&[(&str, Style)]` shared by **every** language and by LSP semantic-token
+type names. `lookup()` walks dotted prefixes right-to-left, so
+`@function.definition` falls back to `function`.
+
+Resolving arborium's Lean query against the current table:
+
+| Lean capture | Resolves to | Effect |
+|---|---|---|
+| `@comment` `@string` `@number` `@operator` `@constant` | themselves | distinct style |
+| `@constant.builtin` `@property` `@attribute` | themselves | distinct style |
+| `@function.definition` `@function.call` `@function.builtin` | `function` | distinct style |
+| `@type.definition` | `type` | distinct style |
+| `@string.special` | `string` | distinct style |
+| `@keyword.conditional` `.function` `.import` `.modifier` | `keyword` | styled, but flattened |
+| `@variable` | `variable` | **entry exists but is `Style::default()`** — visually plain |
+| `@punctuation.special` `.bracket` `.delimiter` | `punctuation` | **`Style::default()`** — visually plain |
+| `@constructor` | — | **unstyled** |
+| `@character` | — | **unstyled** |
+| `@warning` | — | **unstyled** |
+
+Blast radius of adding each name, measured over every `.scm` in the
+workspace's actual dependency graph (crates confirmed present in
+`Cargo.lock`):
+
+- **`constructor` — seven language entries, not four grammars.** The
+  emitting crates are `tree-sitter-javascript`, `-lua`, `-python`, and
+  `-rust`, but `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
+  base-first into `javascriptreact`, `typescript`, and `typescriptreact`
+  as well (`src/syntax.rs:1009`–`1056`), so the reachable set is
+  `rust`, `lua`, `python`, `javascript`, `javascriptreact`, `typescript`,
+  `typescriptreact`.
+
+  **And the shape is not "constructors".** Verified against the crate
+  queries:
+
+  ```scheme
+  ; rust, python, javascript — every capitalized identifier
+  ((identifier) @constructor (#match? @constructor "^[A-Z]"))
+
+  ; lua — every table-constructor brace
+  (table_constructor [ "{" "}" ] @constructor)
+  ```
+
+  So adding `constructor` recolors **every capitalized identifier** in
+  five entries (in Rust that is `Some`/`None`/`Ok`/`Err` and every
+  class-cased name; in Python/JS/TS every class-cased name) and **every
+  `{`/`}` of a Lua table literal.** That is the change being ruled on in
+  Q#LN4 — not a narrow constructor-only recolor.
+- `character` — `tree-sitter-zig` only.
+- `keyword.conditional` — `tree-sitter-cmake` and `-zig` only. Both
+  currently flatten to `keyword`.
+- `warning` — used by **no** grammar in the graph.
+
+Verified clean of all four names (usable as negative-pin fixtures):
+markdown, json, yaml, html, css, c, cpp, go, containerfile, make, toml,
+bash.
+
+This is the #146 lesson verbatim: *the capture table is global, so adding a
+capture name retro-paints every other language; check the reverse direction
+and pin it.*
+
+### 2.4 The LSP substrate
+
+- `pmacs.lsp` already exposes generic `send_request(id, method, params)`
+  → request id and `send_notification(id, method, params)`
+  (`src/lua_bindings/mod.rs:9342`, `:9361`). Non-standard methods need no
+  new Rust to *send*.
+- `LspEventKind` (`src/lsp.rs:264`) has generic `Notification { method,
+  params }` and `Response { id, result, error, method }` variants. Unknown
+  server methods are delivered, not dropped.
+- **But `events_take` has exactly one consumer**: `handle_server_requests`
+  at `builtin/runtime/lsp.lua:1448`, driven off `pmacs._async.tick`. It
+  `take`s — a drain. Its `if/elseif` chain handles five `request` methods
+  and `initialized`, and **ignores every `notification` and every
+  `response`**. A second module calling `events_take` would steal events
+  from it. Any new consumer must extend that loop, not open a second one.
+- **`_request_*_raw` helpers route outbound positions through
+  `outbound_position` (byte → negotiated encoding); a raw `send_request`
+  does not.** This is handoff §4's standing invariant, and it is sharper
+  for Lean than for any language pmacs already supports: Lean source is
+  saturated with non-ASCII (`α`, `→`, `⟨⟩`, `∀`), the Lean server
+  negotiates UTF-16 by default, and a raw byte column is wrong on
+  essentially every interesting line. This is why Stage 5 is not
+  "just call `send_request` from Lua" — see Q#LN12.
+
+### 2.5 Project-root detection
+
+`project_root_for` (`builtin/runtime/lsp.lua:513`) resolves:
+`pmacs.lsp.config[language].root` → `pmacs.project.detect` → the file's own
+directory. Two gaps for Lean:
+
+1. **No Lean marker, and no way to add one.** `default_markers()`
+   (`src/project.rs:145`) is `Cargo.toml`, `.luarc.json`, `pyproject.toml`,
+   `go.mod`, `deno.json`, `deno.jsonc`, `package.json`, `.git`. The
+   `pmacs.project` Lua surface is `detect`, `set_search_boundary`,
+   `search_boundary` — **there is no marker-registration binding.**
+2. **`detect_project` returns the innermost match; Lean needs the
+   outermost.** `walk_for_marker` returns the first ancestor that matches.
+   `lean4-mode` deliberately does the opposite:
+
+   ```elisp
+   (while-let ((dir (locate-dominating-file file-name "lean-toolchain")))
+     (setq root dir
+           file-name (file-name-directory (directory-file-name dir))))
+   ```
+
+   It keeps walking *past* each hit and takes the topmost. This matters
+   concretely: Lake vendors dependencies under `<pkg>/.lake/packages/*`,
+   and each vendored package carries its own `lean-toolchain`. Opening
+   `<pkg>/.lake/packages/batteries/Batteries/Data/List.lean` must serve
+   from `<pkg>`, not from `batteries`. Innermost-wins gets this backwards
+   every time, and the symptom is a server that starts, initializes, and
+   then reports import errors for the whole file.
+
+Third, and the reason Stage 2 exists: `ensure_server`
+(`builtin/runtime/lsp.lua:527`) reuses any live server with a matching
+`language_id` regardless of the new file's project, so **the first `.lean`
+file opened fixes the root for every later `.lean` file.** For most
+languages that is an inconvenience; for Lean, where `lake serve` is bound
+to one package, it is a correctness failure. Rev 1 carried this as a
+deferral. **It is now Stage 2 / Q#LN15.**
+
+One property of `project_root_for` matters for that fix and is easy to
+miss: its final fallback is `dir_of(path)`, so **it never returns nil for
+a file with a path.** A markerless scratch file's "root" is its own
+directory. Q#LN15's affinity rule has to account for that or it silently
+changes loose-file behavior for every language.
+
+### 2.6 Typed-edit provenance — the only input-method-shaped seam
+
+`builtin/runtime/pair.lua` is the whole precedent for "react to a typed
+character": subscribe to `buffer.after-edit`, gate on
+`ed.this_command() == "buffer.self-insert"` (`pair.lua:213`), then take the
+exact provenance record.
+
+`pmacs.editor.take_typed_edit()` (`src/lua_bindings/mod.rs:12798`) returns
+`{ buffer, window, codepoint, char, requested_start, requested_end,
+effective_start, effective_end, inserted_len, post_cursor, clean }` — or
+nil. Its doc comment is explicit:
+
+> Consuming clears the slot: later callbacks and nested manual hook runs
+> see nil, and the producer clears any untaken record when the fan-out
+> returns. Per-frontend — one frontend can never take another's record.
+
+**It is one-shot and first-come-first-served.** `pair.lua` already consumes
+it on every self-insert. A Lean abbreviation expander that independently
+calls `take_typed_edit()` in the same `buffer.after-edit` fan-out gets nil
+or steals it from auto-pairing, depending on hook order — and hook order is
+not a contract. This is the single load-bearing constraint on Stage 4 and
+the reason Stage 4 is its own PR rather than a rider on Stage 1.
+
+Related, from `pair.lua:30`'s Q#AP1 note: only the nine built-in pair chars
+`()[]{}"'` and backtick are excluded from the frontends' optimistic
+classifiers. A pair char outside that set still pairs, but its opener is a
+source-peer op and its closer a daemon-peer op, so **its undo is
+cross-peer-degraded**. Lean's `⟨⟩` is outside that set.
+
+### 2.7 Panels and generated read-only buffers
+
+- #155 landed on `main` at `e745068`. `pmacs.window.display(buf, { side =
+  "bottom", select = true })` is the placement call; `listview.lua:138`
+  shows the adopter shape, gated on `spec.display == "panel"`.
+  `pmacs.window.params()` and `pmacs.window.quit()` complete the surface.
+- Read-only generated buffers use the listview idiom, documented at
+  `builtin/runtime/compile.lua:264`: an erroring `pmacs.buffer.add_intercept`
+  for user edits, with module writes passing `{ bypass_intercept = true }`.
+- **Note for whoever picks this up on another machine:** the ledgers are
+  stale about this. `docs/active-work.md:57` still heads the lane "Stage 1
+  IN REVIEW"; `docs/agent-handoff.md` §1 is stamped at #148 and **omits
+  the bottom-panel lane entirely**. It merged at `e745068`. That drift is
+  #156's business, not this lane's, but do not scout Stage 5 off either
+  file.
+
+### 2.8 Lean server facts (external, verified against `leanprover/lean4`)
+
+From `src/Lean/Server/FileWorker/RequestHandling.lean` and
+`src/Lean/Data/Lsp/Extra.lean`:
+
+- `$/lean/plainGoal` — params extend `TextDocumentPositionParams`; result
+  is `PlainGoal { rendered : String, goals : Array String }` or null.
+- `$/lean/plainTermGoal` — result `PlainTermGoal { goal : String,
+  range : Range }` or null.
+- `$/lean/fileProgress` — a server→client **notification**, params
+  `{ textDocument : VersionedTextDocumentIdentifier, processing : Array
+  { range : Range, kind : "processing" | "fatalError" } }`. This is the
+  "orange bar": which regions are still elaborating.
+- Also present, all deferred here: `$/lean/rpc/{connect,call,release,
+  keepAlive}` (the interactive widget/infoview stack),
+  `$/lean/prepareModuleHierarchy`, `$/lean/moduleHierarchy/{imports,
+  importedBy}`, `$/lean/waitForILeans`, `textDocument/waitForDiagnostics`.
+- From `src/Lean/Data/Lsp/InitShutdown.lean`:
+  `InitializationOptions { hasWidgets? : Option Bool, logCfg? : Option
+  LogConfig }`. `hasWidgets?` **defaults to false**, and its documented
+  meaning is: when true, the server may *omit* information from standard
+  LSP messages because the client will fetch it interactively. A
+  plain-goal client wants the default. Omitting `initializationOptions`
+  entirely is accepted (`FromJson` maps missing/null to `none`).
+- Server launch, from `lean4-mode`'s `lean4--server-cmd`: `lake serve` when
+  Lake ≥ 3.1.0 is found, else `lean --server`.
+
+### 2.9 There is no blocking process run — and `lake` on PATH proves nothing
+
+The complete `pmacs.process` Lua surface is `spawn`, `write_stdin`,
+`terminate`, `list`, `status`, `events_take`, `forget`, `resize_pty`,
+`_tick`. `ProcessSpec` (`src/process.rs:193`) carries no
+wait-for-output mode, and there is no `wait_with_output` anywhere in
+`src/process.rs`. Everything is asynchronous and drained off
+`process.after-tick`, which is how compile mode streams.
+
+**Consequence: any toolchain probe is async, and cannot gate the attach
+that triggered it.** A design that reads "probe, then set
+`pmacs.lsp.config.lean4.command`, then attach" cannot be written against
+this substrate.
+
+Second, and sharper — scouted on this machine:
+
+```
+$ elan --version
+elan 4.2.1 (3d5138e15 2026-03-18)
+$ lake --version
+error: no default toolchain configured. run `elan default stable` to ...
+$ lean --version
+error: no default toolchain configured. run `elan default stable` to ...
+```
+
+`elan` installs `lake` and `lean` as **toolchain shims**. Both are on
+PATH, both are executable, and both fail. So:
+
+- A version probe must parse a *failure*, not just a version string —
+  `lake --version` returning non-zero is a normal, common state.
+- `command -v lake` is worthless as a capability check.
+- The failure modes a Lean client must survive are: lake absent, lake
+  present but shimmed with no toolchain, lake present and working but too
+  old, and lake working but the directory is not a Lake package. Only the
+  third is a *version* question.
+- **Acceptance cannot assume a working Lean toolchain exists.** Every
+  Stage 3+ test runs against the fake LSP server; a live `lake serve`
+  smoke is PATH-gated *and* success-gated, following the #123 JSON/YAML
+  provider-smoke pattern.
+
+### 2.10 Information-severity diagnostics are squiggled and counted
+
+`src/diag.rs:50` defines `DiagnosticSeverity` with `Information` mapped
+from LSP severity `3` (`:103`). Information diagnostics get the
+`ui.diag.info` face (`:408`), a `UnderlineStyle::Single` squiggle
+(`:426`), and a slot in the severity count tuple (`:223`) that feeds the
+modeline.
+
+Lean reports every `#eval`, `#check`, `#print`, and `example` result as an
+information-severity diagnostic at the command's position. Under the
+current surface those render as underlined "problems" with a gutter sign
+and a modeline count — which is why rev 1 called them noise. The claim is
+now specific: they are not merely unstyled, they are **actively
+mis-rendered as defects**, and the count misleads.
+
+The publish path absorbs into the Rust store *and* still delivers the
+notification to `events_take`, so Lua can observe them; but suppressing
+them from the store needs a Rust-side policy, not a Lua filter. Q#LN18.
+
+## 3. Decisions
+
+### Q#LN1 — Bundle `arborium-lean` 2.18; reject `tree-sitter-lean4`
+
+Per §2.1. The decision is forced by the dependency graph, not by taste:
+`tree-sitter-lean4`'s `tree-sitter ^0.25` cannot coexist with the
+workspace's 0.26. Its missing queries and stale README are secondary.
+
+Risk accepted: `arborium-lean` is a third-party republish from a grammar
+collection, not the grammar's upstream. `codebook-tree-sitter-latex` (#144)
+set this precedent for exactly the same reason — no usable first-party
+crate exists. The mitigation is the same: pin a real parse + highlight
+smoke test so a bad republish fails our suite, not a user's file.
+
+### Q#LN2 — Name the entry `lean4`, not `lean`
+
+`LanguageEntry.name` becomes the `didOpen` `language_id` (§2.2), and the
+Lean ecosystem's id is `lean4` (vscode-lean4 uses it; `lean` is Lean 3).
+The grammar's C symbol is `tree_sitter_lean`, but that is arborium's
+business — the entry name is ours to choose.
+
+Consequences, all deliberate: `pmacs.comment.strings.lean4`,
+`pmacs.pair.sets.lean4`, `pmacs.lsp.config.lean4`, and a mode line reading
+`lean4`. An Emacs `-*- mode: lean -*-` or a Vim `ft=lean` modeline is
+normalized to `lean4` through `pmacs.parse.modeline_aliases`, so neither
+spelling strands a file.
+
+### Q#LN3 — Extensions: `lean` only
+
+Not `.olean` (compiled binary artifacts — opening one as text is never
+what the user wants) and not `.ilean` (JSON metadata; if anything it
+belongs to the `json` entry).
+
+### Q#LN4 — Add four capture entries and pin the retro-paint in both directions
+
+**Ruled (round 1): add to the global table.** The alternative is an in-repo
+overlay, and there is no partial option — see below.
+
+Add to `Theme::default_dark()`: `constructor`, `character`,
+`keyword.conditional`, and `warning`.
+
+Rationale, per name:
+
+- **`constructor`** is the consequential one. Per §2.3 it reaches seven
+  language entries and its real effect is *"recolor every capitalized
+  identifier in five entries and every `{}` in Lua"*. That is stated
+  bluntly because it is the decision, not a side effect. It is
+  nevertheless the right call: capitalized-identifier-as-constructor is
+  the mainstream editor convention (it is what nvim-treesitter, Helix, and
+  Zed all render off these same queries), those tokens are currently
+  *unstyled* rather than deliberately plain, and Lua's braces gaining a
+  colour is a cosmetic difference on a token that today renders as default
+  text. The cost of avoiding it is owning a forked 213-line query forever.
+- `character` — `tree-sitter-zig` only, currently unstyled.
+- `keyword.conditional` currently flattens to `keyword`. Giving it
+  `keyword.control`'s brighter style makes Lean's `if`/`then`/`else`/
+  `match`/`do` read the way Rust's already do, and reaches cmake and zig
+  the same way.
+- `warning` has zero blast radius and gives Lean's `(sorry)` — an
+  unproved goal, the single most important thing to see in a proof file —
+  a visible style.
+
+All four are pinned in the reverse direction exactly as #146 required —
+acceptance 7 asserts the retro-paint *happened* on each affected language,
+acceptance 8 asserts it did not leak into languages that emit none of the
+four names.
+
+**Rejected alternative:** an in-repo query overlay
+(`builtin/queries/lean4/highlights.scm`) rewriting the capture names into
+the existing vocabulary, the #144 LaTeX pattern. It avoids touching the
+global table, but it forks a 213-line query we would then own and
+hand-merge on every arborium bump. Overlays are for grammars whose crate
+ships *no* usable query; arborium ships one.
+
+**There is no middle option.** Styling Lean's constructors without
+touching the other seven entries requires renaming the capture, which
+requires the overlay, which forks the query. The choice is binary: accept
+the retro-paint, or own the fork.
+
+### Q#LN5 — Comments: `--` only in Stage 1
+
+`pmacs.comment.strings.lean4 = "--"`. Lean's block comment is `/- ... -/`
+and its docstring is `/-- ... -/`; block-comment toggling is an existing
+named deferral of the comment arc (`docs/comment-toggle-framing.md`) and
+this lane does not front-run it.
+
+### Q#LN6 — Pair set includes `⟨⟩`, and the degradation is named
+
+`pmacs.pair.sets.lean4 = { "()", "[]", "{}", "⟨⟩", "⦃⦄", "⟮⟯", '""' }`.
+
+`⟨⟩` (anonymous constructor) is among the most-typed constructs in Lean and
+omitting it would make the pair set feel broken. It is outside the nine
+built-in pair chars, so per §2.6 its undo is cross-peer-degraded. That is a
+documented, pre-existing limitation of user-extended pairs whose general
+fix is chronological cross-peer undo arbitration — already on the standing
+backlog. Ship it; name it in the module comment.
+
+`''` is excluded: Lean uses `'` as a primed-identifier suffix (`h'`,
+`foo'`), so pairing it would fight the user constantly. Same reasoning that
+excludes it for Rust.
+
+`⦃⦄` (strict implicit binder) and `⟮⟯` ride along — one list entry each,
+same degradation, and both have abbreviation keys (`\{{}}`, `\([])'`) so
+omitting them would make the input method produce brackets the pair set
+does not understand.
+
+### Q#LN7 — `lake serve` by default, with a lazy probe **and** a failure latch
+
+```lua
+pmacs.lsp.config.lean4 = pmacs.lsp.config.lean4 or {
+  command = "lake",
+  args = { "serve" },
+}
+```
+
+`lean4-mode` probes Lake's version and falls back to `lean --server` below
+3.1.0. This lane does the same, but **lazily and asynchronously**, and
+pairs it with a failure latch — because §2.9 makes probe-alone
+insufficient in two independent ways.
+
+**Where the probe runs.** Not at init: `pmacs.lsp.config` is a declarative
+table, and spawning a process at startup for every user, Lean-using or
+not, is the cost rev 1 refused. It runs on the first `.lean` attach, in
+`builtin/runtime/lean.lua`, cached for the session.
+
+**Why the probe cannot gate the first attach.** There is no blocking
+process run (§2.9). `pmacs.process.spawn` + `events_take` off
+`process.after-tick` is the only shape available, so the probe's verdict
+arrives *after* `ensure_server` has already had to decide. This is the
+correction to the round-2 request, which assumed the verdict could be
+consulted before configuring.
+
+**The design that follows:**
+
+1. First `.lean` attach spawns `lake serve` optimistically and fires
+   `lake --version` alongside it, with `cwd` at the resolved Lake root.
+2. If the probe reports a version below 3.1.0, or the server dies before
+   `initialize` completes, a **one-shot latch** swaps in `lean --server`
+   and restarts once. The latch is per session and never re-arms.
+
+   **How the latch observes failure.** There is no event for "exited
+   before initialize" — the drain ignores state events. The latch polls
+   `pmacs.lsp.list()` for the server's `state.kind` on the same
+   `process.after-tick` cadence Q#LN13 uses, and treats
+   `crashed`/`stopped` reached without an intervening `initialized` as
+   the trigger. (Q#LN9's pending-response purge fires on the same
+   transition, so anything already awaiting a reply fails cleanly rather
+   than hanging.)
+
+   **Interplay with `RestartPolicy`.** The manager will otherwise respawn
+   the same broken command underneath the latch, producing a loop the
+   latch cannot see the end of. So the latch calls `pmacs.lsp.stop` on
+   the failing server *first*, then swaps the config, then spawns — the
+   fallback is a fresh server, not a restart of the old one.
+
+   **The swap is a field update, not a table replacement.** It rewrites
+   only `command` and `args`, preserving any user-supplied `env`,
+   `settings`, `init_options`, and `root` on `pmacs.lsp.config.lean4`. A
+   wholesale table replacement would silently discard a user's
+   `init.lua` configuration at exactly the moment they are least likely
+   to notice.
+3. If `lean --server` also fails, the error surfaces through the ordinary
+   `pmacs.lsp.last_error` path. pmacs does not attempt to install a
+   toolchain.
+
+**Why a latch and not just a probe.** Per §2.9 the failure modes are lake
+absent, lake shimmed-with-no-toolchain, lake too old, and
+not-a-Lake-package. **Only the third is a version question**, and the
+scouting machine exhibits the second — `lake --version` there exits
+non-zero with `error: no default toolchain configured`. Since the failure
+path must exist regardless, the probe's job shrinks to the one case
+failure detection would otherwise handle slowly (an old-but-working lake
+that starts a useless server). Probe and latch are complements, not
+alternatives.
+
+**Named risk.** The optimistic first spawn means a user on a
+lake-less-but-lean-ful toolchain sees one failed spawn before the
+fallback. That is a one-line status message, once per session, and it
+buys not blocking every other user's first attach behind a process
+round-trip.
+
+No `init_options`. Per §2.8, `hasWidgets?` defaults to false and that is
+the correct value for a client that reads plain goals out of standard
+messages.
+
+### Q#LN8 — Lake-aware root via a **function-valued** `config.root`
+
+Generalize `project_root_for` (`builtin/runtime/lsp.lua:513`) so
+`pmacs.lsp.config[lang].root` may be a `function(path) -> string|nil` as
+well as a string, and implement Lean's resolver in
+`builtin/runtime/lean.lua`: walk up from the file's directory collecting
+every ancestor containing `lean-toolchain`, and return the **outermost**;
+fall back to `pmacs.project.detect`, then the file's directory.
+
+**The walk stops at `pmacs.project.search_boundary()`.** This is not
+optional politeness: `detect_project_within` (`src/project.rs:213`) exists
+precisely so a stray marker above a temp fixture cannot leak into
+detection, and a Lua walk that ignores the boundary breaks that contract —
+including for acceptance 23, whose outermost-root assertion is otherwise
+non-hermetic against any `lean-toolchain` that happens to sit in an
+ancestor of the test's tempdir.
+
+Why this and not the two alternatives:
+
+- *Adding `lean-toolchain` to Rust's `default_markers()`* does not work —
+  `detect_project` is innermost-wins by construction (§2.5), and inverting
+  it globally would change Rust/Go/Node root detection for every user.
+- *A `pmacs.project.add_marker` Lua binding* is a bigger new surface than
+  this lane needs and still leaves the innermost/outermost problem.
+
+The function-valued `root` is ~3 lines in `lsp.lua`, is a strict
+generalization (a string still works), and puts the Lean-specific rule in
+the Lean module where it belongs.
+
+### Q#LN9 — Notification **and response** subscription seams in the existing dispatch
+
+Per §2.4 there is exactly one `events_take` consumer, and its `if/elseif`
+chain handles five `request` methods plus `initialized`. It ignores
+notifications **and responses** — and no Lua anywhere in the runtime
+consumes `ev.kind == "response"`. So today a `send_request` reply is
+drained and dropped on the floor: **`send_request` is effectively a
+write-only API from Lua.**
+
+Rev 2 specified only the notification half. That was a hole, since
+Q#LN16 (`waitForDiagnostics`), Q#LN19 (`imports` / `importedBy`), and
+Q#LN12's typed goal request all await replies. Both halves ship in
+Stage 3.
+
+```lua
+pmacs.lsp.on_notification(method, fn)          -- fn(sid, params); persistent
+pmacs.lsp.on_response(sid, request_id, fn)     -- fn(result, err); ONE-SHOT
+```
+
+Routed from two new arms of the existing loop:
+
+- `elseif ev.kind == "notification"` → every subscriber registered for
+  `ev.method`.
+- `elseif ev.kind == "response"` → the one-shot registered for
+  `(sid, ev.id)`, **removed before it is invoked** so a raising handler
+  cannot be re-entered.
+
+Each handler is `pcall`ed, so one raising subscriber cannot stall the
+drain or starve the `request` arms that share it.
+
+**Pending-response lifetime.** A one-shot whose server dies never fires on
+its own, leaking the registration and hanging whatever awaits it. On
+`crashed` / `stopped` / `restarting` for a `sid`, every pending one-shot
+for that `sid` is invoked with an error and cleared. This is what lets
+Stage 5's in-flight tracking (acceptance 52) be honest rather than
+optimistic, and it is what Q#LN7's latch observes (below).
+
+Explicitly **not** a second `events_take` caller — a second drain would
+steal events from `handle_server_requests`. The tests pin that in both
+directions: a Lean subscriber must not cause `workspace/applyEdit` to be
+missed, and a raising subscriber must not stop later events in the same
+drain.
+
+Stage 3 registers `$/lean/fileProgress` on the notification seam and
+`waitForDiagnostics` on the response seam; stages 5 and 7 use the response
+seam for `plainGoal` and the hierarchy calls.
+
+### Q#LN10 — Stage 4 mechanism: one shared provenance read, not two
+
+The hazard is §2.6 — `take_typed_edit()` is one-shot and `pair.lua`
+already consumes it.
+
+Decision: **`pair.lua` stops being the sole consumer.** Extract the
+provenance read into a single `buffer.after-edit` subscriber owned by a
+small shared module, which takes the record once and passes it to an
+ordered list of typed-edit consumers (auto-pair, Lean abbreviation).
+Consumers return whether they handled the edit; the first that does stops
+the chain.
+
+Two consequences worth stating up front:
+
+- This touches `pair.lua`, which is load-bearing for auto-pairing
+  acceptance. The full pairing suite is a required gate for Stage 4, and
+  the refactor lands *first*, as its own commit with no behavior change,
+  so a regression bisects cleanly.
+- Ordering is a contract, not an accident, and the collision is real:
+  **64 of the 1,855 abbreviation keys contain a character in the proposed
+  `lean4` pair set** — `\[[]]` → `⟦⟧`, `\(())` → `⸨⸩`, `\{{}}` → `⦃⦄`,
+  `\{}` → `{$CURSOR}`. With pairing first, typing `\[` inserts `[]`
+  with the point between, so the pending key is corrupted to `\[]` before
+  the second `[` is ever typed and `\[[]]` becomes unreachable. The
+  abbreviation consumer runs first.
+
+  (Rev 1 justified this with `\<>`, which was wrong: `<` is not in the
+  pair set per Q#LN6, so that key is safe under either order.)
+
+**The contract that collision exposes:** the abbreviation consumer must
+claim a self-insert that **extends an open pending abbreviation**, not
+only one that completes an expansion. A consumer that only claims
+completed expansions hands every intermediate keystroke to auto-pairing,
+which is exactly how `\[` gets corrupted. "Claimed" here means the chain
+stops, not that an edit was made.
+
+Expansion semantics (matching vscode-lean4 and `lean4-input`):
+
+- `\` opens a pending abbreviation, tracked per buffer with its start
+  offset. Every subsequent self-insert that extends it is claimed. The
+  pending state is abandoned on any non-self-insert command, buffer
+  switch, or cursor move away from the pending region.
+- Expansion fires on a unique complete match that no longer key extends,
+  or on an explicit terminator (space, tab, RET, or a second `\`).
+- The vendored table's `$CURSOR` placeholder becomes the point position
+  after the replace — this is how `\<>` yields `⟨|⟩`.
+- The whole expansion is **one `buf:replace`** — one undo step, one CRDT
+  op, one effective-edit verification. Same discipline as
+  `comment.lua`'s Q#CT5.
+- Gated by `pmacs.config.define{ name = "lean.abbrev", type = "boolean",
+  default = true, mutability = "live" }`, read against the *source* buffer
+  of the typed edit — the `editing.auto-pair` precedent (`pair.lua:44`),
+  including its round-2 correction to resolve `rec.buffer` rather than
+  `pmacs.window.buffer()`.
+
+### Q#LN11 — Stage 4 data: vendor the table, generated, attributed
+
+`abbreviations.json` in `leanprover/vscode-lean4` is a flat
+`string → string` object of **1,855 entries** (counted, not estimated),
+of which **64 contain a character in the `lean4` pair set** — the
+collision Q#LN10's ordering exists to handle. vscode-lean4 is Apache-2.0.
+
+Vendor it as a generated `builtin/runtime/lean_abbrev.lua` with a header
+recording source repo, commit, license, and the regeneration command —
+the `builtin/queries/latex/highlights.scm` precedent (#144) for
+third-party data, extended with provenance because this is a much larger
+artifact under a named license.
+
+Not fetched at runtime, not a package-manager dependency: the input method
+must work offline and on first launch.
+
+**Upkeep is a documented manual process, not code.** There is no automatic
+sync and none is wanted — an editor that silently re-downloads its input
+method has a supply-chain problem, not a feature. The generator script
+lives at `scripts/regen-lean-abbrev`, takes a vscode-lean4 commit as its
+argument, and rewrites the file including its provenance header. The
+header records source commit, license, entry count, and the regeneration
+command, so the file is self-describing to whoever next touches it. A
+refresh is an ordinary PR with a visible diff — which is the point: the
+diff is the review.
+
+### Q#LN12 — Stage 5 sends `$/lean/plainGoal` through a typed Rust request
+
+Per §2.4, `send_request` does **not** route positions through
+`outbound_position`. Lean negotiates UTF-16 and Lean source is
+overwhelmingly non-ASCII, so a Lua-built byte column would be wrong
+wherever it matters most.
+
+Stage 5 therefore adds a typed request that reuses `outbound_position`
+unchanged. It spans **two files**, because the `_raw` naming is a layer
+boundary, not a module:
+
+- `src/lsp.rs` — `request_plain_goal`, alongside `request_hover`
+  (`src/lsp.rs:1690`) and `request_definition` (`:1733`), which is where
+  `outbound_position` is actually applied.
+- `src/lua_bindings/mod.rs` — the `_request_plain_goal_raw` binding,
+  alongside the `_request_hover_raw` family (`:9501`–`:9823`).
+
+It is a thin builder — the result is passed through as JSON and parsed in
+Lua, since `PlainGoal` is two fields and does not warrant a typed store.
+
+It exists specifically to honor handoff §4's standing invariant rather
+than quietly reintroduce the bug it was written to prevent.
+
+**Where the arc's Rust actually lives** (rev 2 stated this in pre-renumber
+stage numbers and was wrong three ways):
+
+| Stage | Rust |
+|---|---|
+| 1 | `Cargo.toml` + `BUILTIN_LANGUAGES` entry + Q#LN4's four capture entries |
+| 2 | `lsp.list()` row builder (`mod.rs:9919`) |
+| 3 | **none** — Lua only |
+| 4 | **none** — Lua only |
+| 5 | `request_plain_goal` + its binding |
+| 6 | `LspServerSpec` severity-policy field and its publish-path honoring |
+| 7 | `request_prepare_module_hierarchy` + its binding |
+
+Stages 3 and 4 — the two largest Lean-specific stages — are entirely Lua.
+
+### Q#LN13 — Stage 5 goal panel shape
+
+- `*lean-goal*`, read-only via the erroring-intercept idiom, module writes
+  with `{ bypass_intercept = true }` (§2.7).
+- Displayed with `pmacs.window.display(buf, { side = "bottom", select =
+  false })`. `select = false`: a goal view that steals focus on every
+  cursor move is unusable.
+- **Refresh mechanism, named explicitly because there is no motion hook.**
+  The complete hook inventory is `buffer.{after-edit,after-load,
+  after-save,after-switch,before-save}`, `editor.before-quit`,
+  `frontend.detached`, and `process.after-tick`. Nothing fires on cursor
+  movement. Stage 5 therefore refreshes from a **debounced poll off
+  `pmacs.hook.add("process.after-tick", …)`** — the cadence pattern
+  autosave (`autosave.lua:139`) and compile (`compile.lua:687`) already
+  use — comparing the point against the last position it queried and
+  issuing at most one in-flight `$/lean/plainGoal` at a time.
+
+  This is written down so Stage 5 cannot quietly grow either an
+  unframed polling loop or new hook substrate. A `cursor.after-move` hook
+  would be the better long-term answer; it is out of scope here and is
+  named in §6.
+- Also refreshed on a `$/lean/fileProgress` notification whose
+  `processing` array no longer covers the point's range.
+- Content: `PlainGoal.rendered` when present, "no goals" when the result is
+  null with the file elaborated, "elaborating…" when file-progress still
+  covers the point. The three states are distinct and the middle one is the
+  one users actually need to trust.
+- Keys under `pmacs.keymap.bind { scope = "mode", mode = "lean4", … }`
+  (#129's mode-scoped keymaps).
+
+### Q#LN14 — No protocol change in any stage
+
+Stages 1–4 and 7 touch no wire surface at all. Stage 5's panel rides #155
+Stage 1, which is grid-only and bumped nothing; Stage 6 adds a field to
+the in-process `LspServerSpec`, which is not wire. A GPU-rendered goal band
+needs bottom-panel Stage 2, which is itself unframed — so the GPU half is
+deferred, not attempted. Protocol stays v20.
+
+### Q#LN15 — Multi-root server affinity (Stage 2, substrate)
+
+Today `ensure_server` reuses any live server whose `language_id` matches,
+**regardless of project root** (`builtin/runtime/lsp.lua:524`–`536`, whose
+own comment documents this as a known limitation). For Lean this is not a
+rough edge but a correctness failure: `lake serve` is bound to one Lake
+package, so the second package a user opens gets a server that cannot
+resolve its imports.
+
+The change is small and spans two files:
+
+- **`src/lua_bindings/mod.rs:9919`** — the `lsp.list()` row builder sets
+  `id`/`label`/`language_id`/`command`/`state`/`attempt`. Add `root_uri`
+  from `spec.root_uri` (already `Option<String>` on `LspServerSpec`,
+  `src/lsp.rs:125`) and `cwd`. Bump the `create_table_with_capacity`
+  hint.
+- **`builtin/runtime/lsp.lua:521`–`551`** — hoist `local root =
+  project_root_for(language, path)` **above** the reuse loop and match on
+  the `(language_id, root_uri)` pair.
+
+**Correcting the round-2 request:** `root` is currently computed at
+`:537`, *after* the loop, not before it. Hoisting is therefore part of the
+change, and it has a consequence: `project_root_for` begins running on the
+reuse path, where it previously ran only on spawn. For Q#LN8's
+function-valued Lean resolver — which walks the filesystem — that means
+once per attach rather than once per spawn. The resolver memoizes per
+directory for the session.
+
+**Comparison rule, part 1 — hand-spawned servers.** Compare
+`info.root_uri` against the request's affinity key, with nil matching nil.
+A server spawned directly from `init.lua` with only `cwd` set has
+`root_uri = nil` and will therefore *not* match a root-bearing request —
+it gets a new server rather than being silently adopted. Conservative and
+deliberate, but a behavior change, so acceptance asserts it.
+
+**Comparison rule, part 2 — markerless files must not fragment.** Per
+§2.5, `project_root_for` **never returns nil for a file with a path**: its
+last fallback is `dir_of(path)`. A naive `(language_id, root)` key
+therefore gives *every directory of markerless scratch files its own
+server*, for **every language** — two loose `.py` files in different
+directories would spawn two pyrights where today they share one. That is a
+silent regression for Python, Go, TypeScript and everyone else, caused by
+a change made for Lean.
+
+Ruling: **the affinity key is the root only when a root was actually
+detected.** `project_root_for` returns `(root, source)` with `source` one
+of `"config"`, `"detected"`, or `"fallback"`; the affinity key is `root`
+for the first two and **`nil` for `"fallback"`**. The directory is still
+passed as `cwd` / `rootUri` exactly as today — only the *matching* key
+changes.
+
+Consequences, both intended:
+
+- Files in a real project (Cargo/Lake/go.mod/…) get one server per root —
+  the fix.
+- Markerless loose files keep today's single shared server per language —
+  no change, which is the point.
+
+**Rejected alternative:** keying on the fallback directory anyway and
+accepting per-directory servers. It fragments the common scratch-file case
+for every language in the editor to buy nothing for Lean, whose files are
+essentially always in a Lake package.
+
+**Blast radius, stated plainly.** This is the central server-affinity
+function for *every* LSP language in pmacs. A bug here routes a file to
+the wrong server: diagnostics land on the wrong buffer, or a redundant
+server spawns. This is why it is Stage 2 and its own PR, with no Lean
+content in the diff — a cross-cutting change to every language's server
+affinity must not be reviewable only as a Lean feature.
+
+**Named risk: unbounded server growth.** Per-root affinity means opening
+files across N Lake packages spawns N `lake serve` processes, and Lean
+elaboration is memory-hungry. rust-analyzer has the same property and no
+editor caps it by default. No cap ships here; `pmacs.lsp.stop` is the
+manual escape, and an LRU reaping policy is named in §6.
+
+### Q#LN16 — `textDocument/waitForDiagnostics` (Stage 3)
+
+A plain request (no position, so no `outbound_position` concern — Q#LN12
+does not apply). It resolves when the server has finished elaborating the
+document.
+
+Two uses, in order of importance:
+
+1. **Deterministic acceptance.** Lean elaboration is slow and
+   asynchronous; a test that sleeps is flaky and a test that polls is
+   slow. This is the seam that makes a live `lake serve` smoke
+   deterministic when a toolchain happens to be present.
+2. A `M-x lean-wait-for-diagnostics` command, and a gate for the goal
+   panel's "elaborating" state (Q#LN13) that is cheaper than parsing
+   `$/lean/fileProgress` ranges.
+
+Sent through `pmacs.lsp.send_request` and awaited through the Q#LN9
+notification/response seam. ~20 lines.
+
+### Q#LN17 — Lean in markdown fences (Stage 1)
+
+The injection engine (#122) resolves fence names through
+`pmacs.parse.injection_aliases`, a case-folded, Lua-extensible map
+snapshotted into `ParseRequest`. Register `lean` and `lean4` → `lean4`.
+
+Two lines, and it is the one place where the Lean 3 spelling is
+deliberately *not* normalized away: a ` ```lean ` fence is overwhelmingly
+Lean 4 in practice, and mapping it to the `lean4` grammar is right.
+
+`lean4-mode` does the equivalent through `markdown-code-lang-modes`. Being
+in Stage 1 means Lean blocks in this repo's own docs highlight from the
+first PR.
+
+### Q#LN18 — `#eval` / `#check` output channel (Stage 6)
+
+Per §2.10, Lean's command output arrives as information-severity
+diagnostics and pmacs squiggles them, signs them in the gutter, and counts
+them in the modeline. VS Code shows them in the infoview instead. This
+stage routes them.
+
+Decision: **a per-server severity policy on the spec, not a Lua filter.**
+The publish path absorbs into the Rust `DiagnosticStore` before Lua sees
+the notification, so a Lua-side filter would suppress the *display* while
+leaving the store's counts wrong. Add an optional
+`diagnostic_severity_policy` to `LspServerSpec` — default "all severities
+to the store", which is a no-op for every existing language — and have the
+Lean config route `Information` to the output channel only.
+
+The channel itself is a `*lean-output*` buffer using the same read-only
+generated-buffer idiom as Q#LN13, appended to in position order and
+cleared per publish for the owning document.
+
+Deliberately *not* merged into the goal panel: a goal is a property of the
+point, output is a property of the file, and the two refresh on different
+triggers. Merging them is what makes VS Code's infoview complicated.
+
+### Q#LN19 — Module hierarchy (Stage 7)
+
+`$/lean/prepareModuleHierarchy` at the point returns hierarchy items;
+`$/lean/moduleHierarchy/imports` and `.../importedBy` expand one in either
+direction. Rendered with `pmacs.listview.open{ name, header, rows,
+on_visit, on_refresh, display = "panel" }` (`listview.lua:111`) — the same
+panel the LSP references/outline views already use.
+
+`prepareModuleHierarchy` is position-bearing, so it goes through the
+Q#LN12 typed-request path; the two expansion calls take an item, not a
+position, and can use `send_request` directly.
+
+Last stage because it is the least load-bearing: it is navigation
+convenience, and nothing else in the arc depends on it.
+
+## 4. Stage boundaries and why this order
+
+Each stage is one branch, one PR, and is independently useful if the next
+never lands.
+
+| Stage | Ships | Substrate risk | Depends on |
+|---|---|---|---|
+| 1 | grammar, mode, comments, pairs, md fences | new crate; **global capture table** | — |
+| 2 | multi-root server affinity | **`ensure_server`, shared by every language** | — |
+| 3 | `lake serve` + probe/latch, Lake root, notification seam, `waitForDiagnostics` | two `lsp.lua` generalizations | 1, 2 |
+| 4 | Unicode input method | **refactors `pair.lua`'s provenance read** | 1 |
+| 5 | goal panel | new typed LSP request; panel adopter | 3 |
+| 6 | `#eval` / `#check` output channel | **new `LspServerSpec` policy field** | 3, 5 |
+| 7 | module hierarchy | listview adopter + one typed Rust request | 3 |
+
+Three of the seven carry risk that is *not* about Lean — stages 1, 2, and
+6 each change something every language touches. That is the organizing
+principle of the split: **no PR in this arc mixes a cross-cutting
+substrate change with Lean feature content.** A reviewer looking at Stage
+2 sees only `ensure_server`; a reviewer looking at Stage 3 sees only Lean.
+
+Ordering notes:
+
+- **Stage 2 has no Lean in it and could ship independently of this arc.**
+  It is sequenced here because Lean is the language that makes its absence
+  a correctness bug rather than an inconvenience, and because Stage 3's
+  acceptance would otherwise have to encode the broken behavior.
+- **Stage 4 does not depend on stages 2–3** and could run in parallel, but
+  should not: both touch `lsp.lua`/`pair.lua`-adjacent runtime files, and
+  the #126/#127 lesson is that parallel-safety requires the file split be
+  agreed *before* either lane starts. Sequential is cheaper.
+- **Stage 6 depends on Stage 5** only for the read-only generated-buffer
+  and panel machinery, which Stage 5 establishes. If Stage 5 slips, Stage
+  6 can carry that machinery itself at the cost of duplicating it.
+
+Stage 1 is deliberately shippable alone. If the arborium grammar turns out
+to be worse in practice than its query suggests (see §5, bet 3), that is
+discovered at Stage 1 for the cost of Stage 1 — and stages 2 through 7 are
+almost entirely independent of grammar quality, since they are driven by
+the language server rather than the parse tree.
+
+## 5. Categorical bets
+
+Stated so they can be scored, per house style.
+
+1. **`arborium-lean`'s ABI-15 parser loads under `tree-sitter 0.26` with a
+   single `tree-sitter` in the graph.** Falsified by `cargo tree -d`
+   showing a duplicate, or by the loader failing `Parser::set_language`.
+   Confidence: high — `tree-sitter-language 0.1` exists precisely for this
+   and roughly fifteen shipped grammars already rely on it.
+2. **No protocol change in any stage.** Falsified by any new wire variant.
+   Confidence: high.
+3. **The grammar is good enough that highlighting reads as correct on
+   ordinary Lean, including Mathlib-style files.** This is the weakest bet
+   in the lane, and the upstream author's own warning is the reason: Lean's
+   syntax is user-extensible via macros, so a static grammar necessarily
+   mis-parses custom notation. Scored against a real fixture set at Stage 1
+   acceptance. If it fails, Stage 1 still ships — degraded highlighting on
+   exotic notation is strictly better than none — but the framing is
+   revised to say so plainly rather than overselling it.
+4. **`$/lean/plainGoal` alone is a useful goal view, without the
+   `$/lean/rpc/*` widget stack.** Confidence: medium-high — it is exactly
+   what `lean4-mode` shipped for years before infoview widgets, and
+   `hasWidgets? = false` is a supported client posture, not a hack.
+5. **The abbreviation expander needs no Rust.** Falsified if the one-shot
+   provenance refactor (Q#LN10) cannot be done in Lua, or if `buf:replace`
+   inside `buffer.after-edit` re-enters the hook in a way pairing does not
+   already survive. Confidence: medium — pairing does the same thing, but
+   over a single codepoint rather than a multi-byte span.
+6. **These seven stages reach rough VS Code parity for everything except
+   the interactive infoview.** Scored honestly rather than aspirationally.
+   What lands: highlighting, goal view, Unicode input, diagnostics,
+   hover, completion, goto-definition, symbols, semantic tokens, `#eval`
+   output, module hierarchy, correct multi-package roots. What does
+   **not**: interactive/collapsible goals, `Try this` code-action
+   suggestions, widgets, the term-mode goal on hover, and the
+   `$/lean/rpc/*` session that powers all of them. That gap is real and
+   is the arc's eventual destination (§6) — a framing that claimed parity
+   without it would be overselling.
+7. **Stage 2's affinity change breaks no existing language.** Falsified by
+   any regression in the Rust/Python/Go/TS acceptance suites, or by a
+   user's hand-spawned server no longer being adopted in a way they
+   relied on. Confidence: medium-high for the suites, deliberately lower
+   for hand-spawned servers — Q#LN15's comparison rule changes that case
+   on purpose, and the acceptance pins it rather than hiding it.
+
+## 6. Deferred (named)
+
+Pruned in round 2 — seven former entries are now stages 1–7 (see §0.1).
+What remains deferred:
+
+- **Interactive infoview** — `$/lean/rpc/{connect,call,release,keepAlive}`,
+  widgets, collapsible goal trees, `Try this` code actions, term-mode goal
+  on hover. **This is the arc's eventual destination, not a rejection.**
+  It needs `hasWidgets? = true`, a real RPC session lifecycle with
+  keep-alive, and a rendering surface for structured rather than plain
+  goals — plausibly its own multi-stage arc once stages 1–7 are in. Bet 6
+  scores what its absence costs.
+- **GPU goal band** — blocked on bottom-panel Stage 2 (Q#LN14). The panel
+  is grid-only until then.
+- **A `cursor.after-move` hook** — there is none (Q#LN13), so Stage 5
+  polls off `process.after-tick`. A real motion hook would serve the goal
+  view, `completion.lua`'s cursor-delta heuristic, and the outline/hover
+  panels alike; it is substrate work that should not be invented inside a
+  language lane.
+- **LSP server reaping / LRU** — Q#LN15's per-root affinity makes
+  unbounded `lake serve` growth possible. No editor caps this by default
+  and pmacs will not either in this arc, but the policy question is now
+  live in a way it was not before.
+- **Block-comment toggle** (`/- -/`) and **docstring awareness**
+  (`/-- -/`) — confirmed as owned by the comment arc's framing, not this
+  one.
+- **`.olean` / `.ilean` handling** (Q#LN3).
+- **Lean 3 support** — `.lean` files predating Lean 4 will mis-parse.
+  Out of scope permanently; Lean 3 is end-of-life.
+
+## 7. Acceptance
+
+**Stage 1**
+
+1. `cargo tree -d` shows exactly one `tree-sitter` version after adding
+   `arborium-lean`.
+2. A `.lean` fixture parses: the loader produces a tree whose root node is
+   `module` and which is not all-ERROR.
+3. Opening `foo.lean` sets `pmacs.buffer.major_mode` to `lean4`.
+4. An Emacs `-*- mode: lean -*-` modeline and a Vim `ft=lean` modeline both
+   resolve to `lean4`.
+5. Highlighting produces non-default styles for a comment, a `def` name, a
+   `theorem` name, a string, and a numeric literal in the fixture.
+6. `(sorry)` picks up the `warning` style.
+7. **Reverse-direction positive pin (#146).** Every language the four new
+   capture entries reach asserts its *expected delta* — not that nothing
+   moved, since these languages necessarily move:
+   - `rust`, `python`, `javascript`, `javascriptreact`, `typescript`,
+     `typescriptreact`: a capitalized identifier (`Some`, `MyClass`) picks
+     up the `constructor` style. All seven entries are covered because
+     `HIGHLIGHT_QUERY` composition means the JS-family entries inherit the
+     rule rather than restating it — a regression in composition would
+     otherwise go unseen.
+   - `lua`: a table literal's `{` and `}` pick up the `constructor` style.
+   - `zig`: a character literal picks up `character`; a conditional picks
+     up `keyword.conditional`.
+   - `cmake`: a conditional picks up `keyword.conditional`.
+8. **Reverse-direction negative pin.** Fixtures in languages verified to
+   emit **none** of the four capture names render byte-identically to
+   their pre-change baseline: `markdown`, `json`, `yaml`, `html`, `css`,
+   `c`, `cpp`, `go`, `toml`, `bash`.
+
+   Rev 1 named Lua and Python here, which was a self-contradiction: both
+   are retro-painted by `constructor`, so a fixture that did not move
+   would have been vacuous — the #155 R2 assertion shape. Whichever
+   fixtures ship, the negative pin must be shown non-vacuous by
+   confirming it *fails* when a capture the language does emit is added.
+9. `M-;` comments and uncomments a Lean line with `--`.
+10. Typing `⟨` inserts `⟨⟩` with the point between; likewise `⦃` and `⟮`.
+    Typing `'` after an identifier does **not** pair.
+11. A ` ```lean ` fence and a ` ```lean4 ` fence in a markdown buffer both
+    highlight as Lean (Q#LN17); a fence with an unknown name still does
+    not.
+12. **No live toolchain required.** The whole Stage 1 suite passes on a
+    machine with no `lean`, no `lake`, and no configured elan toolchain
+    (§2.9) — Stage 1 touches no process at all.
+
+**Stage 2 — multi-root affinity (no Lean content)**
+
+13. `pmacs.lsp.list()` rows carry `root_uri` and `cwd`.
+14. Two files of the **same language in different project roots** spawn
+    **two** servers, each with its own `rootUri`. Exercised with the fake
+    server so it is toolchain-free.
+15. Two files of the same language in the **same** root reuse **one**
+    server — the pre-change behavior, pinned so the fix does not become
+    "always spawn".
+16. **Regression pin, per language:** the existing Rust, Python, Go, and
+    TypeScript attach paths behave unchanged for the single-root case
+    that is all they exercised before.
+17. **Hoist pin:** `project_root_for` is called on the reuse path, and a
+    function-valued `root` is invoked at most once per directory per
+    session (Q#LN15's memoization) rather than once per attach.
+18. **Hand-spawned server pin:** a server spawned from `init.lua` with
+    `cwd` but no `root_uri` is *not* adopted by a root-bearing attach —
+    the deliberate behavior change, asserted rather than discovered.
+19. A crashed or stopped server in the matching root is not reused; a new
+    one spawns.
+20. **Loose-file pin (Q#LN15 part 2).** Two **markerless** files of the
+    same language in **different** directories still share **one** server.
+    This is the no-change case, and it is the one a naive `(language_id,
+    root)` key breaks — `project_root_for` never returns nil for a file
+    with a path, so it must be asserted, not assumed.
+21. **Fallback-vs-detected pin.** A file under a real project marker and a
+    markerless file of the same language get **different** servers, and
+    the markerless one's server carries the fallback directory as `cwd`
+    while matching on a nil affinity key.
+
+**Stage 3 — the Lean language server**
+
+22. Opening a `.lean` file inside a Lake package spawns one server with
+    `cwd` and `rootUri` at the package root.
+23. **Outermost-root pin:** a file under
+    `<pkg>/.lake/packages/dep/…` whose ancestor chain contains two
+    `lean-toolchain` files resolves to `<pkg>`, not to `dep`. Run with
+    `pmacs.project.set_search_boundary` at the fixture root so the
+    assertion is hermetic.
+24. **Boundary pin:** with the search boundary set at the fixture root, a
+    `lean-toolchain` planted in an ancestor *above* the boundary is not
+    reached — the resolver stops at the boundary rather than walking past
+    it.
+25. A string-valued `pmacs.lsp.config.lean4.root` still works — the Q#LN8
+    generalization is strictly additive.
+26. `didOpen` carries `languageId = "lean4"`.
+27. **Fallback-latch pin (Q#LN7):** a `lake` stub that exits non-zero —
+    reproducing §2.9's shimmed-elan state — causes exactly **one** restart
+    against `lean --server`, and a second failure surfaces an error rather
+    than looping. The latch does not re-arm within the session.
+28. **Probe pin:** a `lake` stub reporting version 3.0.0 triggers the
+    fallback; one reporting 3.1.0 does not. A stub that never exits does
+    not block the attach — the optimistic `lake serve` spawn proceeds.
+29. A `$/lean/fileProgress` notification delivered through the fake server
+    reaches a registered `on_notification` subscriber.
+30. **Dispatch-integrity pin:** with a Lean subscriber registered, a
+    `workspace/applyEdit` request in the same drain is still handled — no
+    event is stolen.
+31. A subscriber that raises does not prevent later events in the same
+    drain from being processed.
+32. **Response-seam pin (Q#LN9).** A `send_request` reply reaches its
+    registered `on_response` one-shot, and the one-shot is **removed
+    before** invocation — a raising handler is not re-entered. Bites
+    against rev 2, where no Lua consumed `ev.kind == "response"` at all
+    and the reply was dropped.
+33. **Response dispatch-integrity pin.** With a response subscriber
+    registered, `workspace/applyEdit` in the same drain is still handled;
+    a raising response handler does not stop later events in that drain.
+    Mirrors the notification-side pins above.
+34. **Pending-purge pin.** A server that dies with a response outstanding
+    invokes the pending one-shot with an error and clears it — the
+    registration does not leak and the awaiting caller does not hang.
+35. **Config-preservation pin (Q#LN7).** After the fallback latch fires,
+    user-supplied `env` / `settings` / `init_options` / `root` on
+    `pmacs.lsp.config.lean4` survive; only `command` and `args` change.
+36. **No-respawn-loop pin.** The latch stops the failing server before
+    spawning the fallback, so `RestartPolicy` does not respawn the broken
+    command underneath it.
+37. `textDocument/waitForDiagnostics` resolves through the response seam
+    (Q#LN16). **PATH-and-success-gated live smoke:** if `lake serve`
+    starts successfully a real elaboration completes and diagnostics
+    arrive; skipped otherwise, never failed.
+
+**Stage 4 — the Unicode input method**
+
+38. `\alpha` + space yields `α`; the whole expansion is a single undo step.
+39. `\<>` yields `⟨⟩` with the point between them, from the `$CURSOR`
+    placeholder.
+40. **Pair-collision pin (Q#LN10).** `\[[]]` yields `⟦⟧`: each `[` is
+    claimed as an extension of the pending abbreviation, so auto-pairing
+    never inserts a closing `]` into the pending key. Bites against an
+    ordering where pairing runs first, and against a consumer that claims
+    only completed expansions rather than pending extensions — **both
+    failure modes must be shown**, since they are distinct bugs with the
+    same symptom.
+41. `\to` yields `→` eagerly on uniqueness, with no terminator typed.
+42. A prefix with no match (`\zzzz` + space) is left as literal text; no
+    edit is made.
+43. Moving the cursor out of a pending abbreviation abandons it.
+44. `pmacs.config.set("lean.abbrev", false)` disables expansion; the
+    setting is read against the typed edit's **source** buffer.
+45. Expansion does not fire in a non-`lean4` buffer — including that a
+    pending abbreviation is never opened there, so `\[` in a Rust buffer
+    still pairs normally.
+46. **Provenance-refactor pin:** the full auto-pairing acceptance suite
+    passes unchanged, and a bite against the pre-refactor `pair.lua`
+    confirms the shared-consumer commit is behavior-preserving.
+
+**Stage 5 — the goal view**
+
+47. `$/lean/plainGoal` is sent with a position encoded through
+    `outbound_position` — pinned with a UTF-16 fake server and a
+    non-ASCII Lean line, which fails against a raw byte column.
+48. A non-null `PlainGoal` renders `rendered` into `*lean-goal*`.
+49. A null result with the file elaborated renders "no goals".
+50. A point inside a range still covered by `$/lean/fileProgress` renders
+    the elaborating state, not "no goals".
+51. **Refresh pin (Q#LN13).** Moving the point to a new position and
+    driving `process.after-tick` past the debounce issues exactly one new
+    `$/lean/plainGoal`; ticking again with the point unmoved issues none.
+52. **In-flight pin.** A second point move while a request is outstanding
+    does not issue a concurrent request, and the panel ends on the result
+    for the *latest* position — a stale response for an abandoned
+    position never wins.
+53. The panel opens at the bottom without stealing focus.
+54. `*lean-goal*` rejects a user edit and accepts a module write.
+55. **Teardown pin.** After the Lean buffer is killed or the frontend
+    detaches, driving `process.after-tick` issues **no** further
+    `$/lean/plainGoal` and writes **nothing** to the panel, and any
+    outstanding request's one-shot has been purged.
+
+    Worded as an observable because it must be: `pmacs.hook` exposes
+    `add` / `define` / `list` / `run` and **no `remove`**. A subscription
+    cannot be torn down, only made inert — so "leaves no subscription"
+    (rev 2's wording) is untestable and, taken literally, unimplementable.
+
+**Stage 6 — the output channel**
+
+56. An information-severity diagnostic from the **Lean** server lands in
+    `*lean-output*` and **not** in the diagnostic store: no squiggle, no
+    gutter sign, and the modeline info count stays zero.
+57. Warning- and error-severity diagnostics from the Lean server are
+    unaffected and still reach the store.
+58. **Cross-language pin:** an information-severity diagnostic from a
+    **non-Lean** server still squiggles and still counts — the
+    `LspServerSpec` policy defaults to a no-op.
+59. Output is cleared per publish for the owning document, so a
+    re-elaborated file does not accumulate stale `#eval` results.
+60. Output rows appear in source-position order regardless of publish
+    order.
+
+**Stage 7 — module hierarchy**
+
+61. `$/lean/prepareModuleHierarchy` is sent through the Q#LN12 typed path
+    (position-bearing), pinned against a UTF-16 fake server.
+62. `imports` and `importedBy` each render into the listview panel and are
+    navigable through the existing `on_visit`.
+63. An empty result renders an empty panel with its header, not an error.
+64. The panel's `q` returns to the originating buffer, not to another
+    panel (`listview.lua:118`'s existing rule).
+
+## 8. Prior art in pmacs
+
+- **#144 (LaTeX)** — the third-party-republish grammar decision and the
+  vendored-artifact-with-provenance pattern.
+- **#146 (HTML+CSS)** — the global capture table, and the requirement to
+  pin retro-paint in both directions. Q#LN4 is that lesson applied.
+- **#123 (JSON/YAML)** — declarative `pmacs.lsp.config` entries with a
+  fake-server delivery proof plus PATH-gated live smokes. Stage 3 follows
+  it, with the extra success-gate §2.9 forces.
+- **#110 (auto-pairing)** — `take_typed_edit()` provenance, the fail-closed
+  discipline on transformed source edits, and Q#AP1's optimistic-classifier
+  limitation. Stage 4 is built on all three.
+- **#127 (config registry)** — `pmacs.config.define` and the
+  source-buffer-resolution correction. Q#LN10's gate follows
+  `editing.auto-pair` exactly.
+- **#129 (mode system)** — mode-scoped keymaps for Stage 5.
+- **#155 (bottom panel)** — `pmacs.window.display` and the panel adopter
+  shape, for stages 5–7.
+- **#113 (compile mode)** — the erroring-intercept read-only generated
+  buffer idiom (stages 5 and 6), and `process.after-tick` as a debounced
+  cadence source (Q#LN13).
+- **#122 (multi-language injections)** — `pmacs.parse.injection_aliases`,
+  which Q#LN17 registers into.
+- **#94/#95 (LSP panels)** — `pmacs.listview.open` and the
+  references/outline panel shape that Stage 7 reuses wholesale.

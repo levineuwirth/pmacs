@@ -251,6 +251,12 @@ pub fn default_injection_aliases() -> HashMap<String, String> {
         ("golang", "go"),
         ("yml", "yaml"),
         ("md", "markdown"),
+        // Lean 4 (framing Q#LN17). A ```lean fence is overwhelmingly Lean 4
+        // in practice, so the Lean 3 spelling is deliberately mapped forward
+        // rather than left unresolved. `lean4` needs no alias — it is the
+        // entry name. `lean4-mode` does the equivalent through
+        // `markdown-code-lang-modes`.
+        ("lean", "lean4"),
     ]
     .into_iter()
     .map(|(a, b)| (a.to_owned(), b.to_owned()))
@@ -1127,6 +1133,33 @@ pub const BUILTIN_LANGUAGES: &[LanguageEntry] = &[
         extensions: &["css"],
         loader: || tree_sitter_css::LANGUAGE.into(),
         highlights_query: &[tree_sitter_css::HIGHLIGHTS_QUERY],
+        locals_query: &[],
+        injections_query: &[],
+    },
+    // Lean 4 (framing `docs/lean4-mode-framing.md`, Arc 8 Stage 1).
+    //
+    // The entry is named `lean4`, not `lean` (Q#LN2): this name becomes the
+    // `language_id` sent in `didOpen` — `ensure_server` at
+    // `builtin/runtime/lsp.lua:540` passes it straight through — and the
+    // Lean ecosystem's id is `lean4` (`lean` is Lean 3, which is
+    // end-of-life). The grammar's own C symbol is `tree_sitter_lean`; that
+    // is arborium's business, not ours. Stage 3 adds
+    // `pmacs.lsp.config.lean4` against this name.
+    //
+    // Note the loader shape: `arborium-lean` exports `const fn language() ->
+    // LanguageFn` rather than a `LANGUAGE` const, so this is the one entry
+    // that calls a function to get the `LanguageFn` before `.into()`.
+    //
+    // `.olean` (compiled artifacts) and `.ilean` (JSON metadata) are
+    // deliberately unclaimed (Q#LN3). Locals and injections are empty
+    // because the crate ships both as empty strings — Lean has no embedded
+    // sublanguage worth injecting, and its scoping is far beyond what a
+    // tree-sitter locals query could model.
+    LanguageEntry {
+        name: "lean4",
+        extensions: &["lean"],
+        loader: || arborium_lean::language().into(),
+        highlights_query: &[arborium_lean::HIGHLIGHTS_QUERY],
         locals_query: &[],
         injections_query: &[],
     },
@@ -2390,6 +2423,149 @@ mod tests {
                 reg.language_name_for_path(path).as_deref(),
                 Some("latex"),
                 "{path} resolves to latex"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_languages_include_lean4() {
+        // Framing acceptance 1/3 (`docs/lean4-mode-framing.md`). The entry is
+        // named `lean4` because that name becomes the `didOpen` language_id
+        // (Q#LN2), and it claims `.lean` ONLY: `.olean` is a compiled binary
+        // artifact and `.ilean` is JSON metadata (Q#LN3).
+        let lean = BUILTIN_LANGUAGES
+            .iter()
+            .find(|l| l.name == "lean4")
+            .expect("`lean4` language entry must be present");
+        assert!(lean.extensions.contains(&"lean"), "`lean4` claims `.lean`");
+        for unclaimed in ["olean", "ilean"] {
+            assert!(
+                !lean.extensions.contains(&unclaimed),
+                "`lean4` must not claim `.{unclaimed}`"
+            );
+        }
+        assert!(
+            lean.highlights_query
+                .contains(&arborium_lean::HIGHLIGHTS_QUERY),
+            "`lean4` drives highlighting from the crate's query constant, not an overlay"
+        );
+        assert!(
+            lean.locals_query.is_empty() && lean.injections_query.is_empty(),
+            "`lean4` ships neither locals nor injections (Q#LN1)"
+        );
+    }
+
+    #[test]
+    fn lean4_grammar_loads_and_parses() {
+        // Framing acceptance 2 and the open half of Q#LN1: `arborium-lean`
+        // exports `const fn language() -> LanguageFn` (not the `LANGUAGE`
+        // const every other entry uses) over `tree-sitter-language 0.1`, and
+        // its README demonstrates usage against a `tree_sitter_patched_
+        // arborium` core. Neither is supposed to matter — the LanguageFn ABI
+        // is shared — but "supposed to" is not evidence, so this pins that
+        // OUR `tree-sitter` 0.26 core accepts it and produces a real tree.
+        //
+        // The fixture exercises the grammar's external scanner (`scanner.c`
+        // supplies a NEWLINE token, so layout-sensitive `def`/`theorem`
+        // bodies depend on it) and the Unicode operators that make Lean
+        // Lean — `→`, `∀`, `≥` — which a byte-oriented misbuild would shred.
+        let reg = SyntaxRegistry::new();
+        let language = reg
+            .language("lean4")
+            .expect("`lean4` language loads from BUILTIN_LANGUAGES");
+        let mut buf = fresh_buffer("Basic.lean");
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: "-- a comment\n\
+                    def fibonacci : Nat → Nat\n\
+                    \x20 | 0 => 0\n\
+                    \x20 | n + 1 => n\n\
+                    \n\
+                    theorem fib_nonneg : ∀ n, fibonacci n ≥ 0 := by\n\
+                    \x20 intro n\n\
+                    \x20 exact Nat.zero_le _\n"
+                .as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, "lean4".to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let bundle = parse_synchronously(&handle);
+        assert_eq!(
+            bundle.root_tree().root_node().kind(),
+            "module",
+            "Lean grammar roots at module"
+        );
+        let sexp = bundle.root_tree().root_node().to_sexp();
+        // This specific committed fixture parses cleanly. The claim is
+        // scoped to the fixture on purpose: Lean's syntax is user-extensible
+        // via macros, so a static grammar necessarily mis-parses some legal
+        // input (the upstream grammar says so itself, and the framing scores
+        // it as bet 3). What a clean parse HERE proves is that the crate is
+        // wired correctly, not that Lean is fully parseable.
+        assert!(
+            !bundle.root_tree().root_node().has_error(),
+            "the fixture parses without error; got {sexp}"
+        );
+        // `def` and `theorem` sit under a `declaration` wrapper, not directly
+        // under `module`.
+        for expected in ["(comment)", "(def ", "(theorem "] {
+            assert!(
+                sexp.contains(expected),
+                "expected `{expected}` in the tree; got {sexp}"
+            );
+        }
+        // The load-bearing part of this test. A grammar built against a
+        // mismatched core, or one whose scanner mis-handles multibyte input,
+        // does not fail loudly — it produces a tree that silently degrades on
+        // exactly the characters Lean is made of. `→` must become an `arrow`,
+        // `∀` a `forall`, and `≥` a `comparison`; if these three hold, the
+        // UTF-8 path through the parser is sound.
+        for expected in ["(arrow ", "(forall ", "(comparison "] {
+            assert!(
+                sexp.contains(expected),
+                "Unicode operator did not produce `{expected}`; got {sexp}"
+            );
+        }
+    }
+
+    #[test]
+    fn lean4_highlights_resolve() {
+        // The crate's 213-line query must COMPILE against the grammar it
+        // ships with — the node-name compatibility gate. A query referencing
+        // a node this grammar version lacks fails here rather than silently
+        // producing no spans at runtime.
+        let reg = SyntaxRegistry::new();
+        let query = reg
+            .highlights_query("lean4")
+            .expect("lean4 highlights compile against the grammar");
+        let names = query.capture_names();
+        // The four capture names Q#LN4 adds to the GLOBAL theme table are
+        // present here — this is the forward direction of that decision; the
+        // reverse direction (what they do to other languages) is pinned in
+        // `highlight.rs`.
+        for expected in ["constructor", "character", "keyword.conditional", "warning"] {
+            assert!(
+                names.contains(&expected),
+                "lean4 query uses `@{expected}`, which Q#LN4 adds to the theme; got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn language_for_path_resolves_lean_extension() {
+        let reg = SyntaxRegistry::new();
+        assert_eq!(
+            reg.language_name_for_path("Mathlib/Data/Nat/Basic.lean")
+                .as_deref(),
+            Some("lean4"),
+            "`.lean` resolves to the lean4 grammar"
+        );
+        for unclaimed in ["Basic.olean", "Basic.ilean"] {
+            assert_ne!(
+                reg.language_name_for_path(unclaimed).as_deref(),
+                Some("lean4"),
+                "{unclaimed} must not resolve to lean4"
             );
         }
     }
