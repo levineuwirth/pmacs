@@ -493,12 +493,6 @@ fn acc34_purge_reaches_a_server_that_is_in_no_attachment() {
     );
     settle(&mut state);
 
-    let attached: i64 = eval(
-        &state,
-        "local n = 0 for _ in pairs(_G) do n = n + 1 end return n",
-    );
-    assert!(attached > 0, "lua globals are readable");
-
     exec(
         &state,
         r#"
@@ -528,6 +522,7 @@ fn acc34_purge_reaches_a_server_that_is_in_no_attachment() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(unix)]
 fn acc34a_canonicalize_resolves_symlinks_and_dot_segments() {
     let fx = Fixture::new();
     fx.write("pkg/sub/a.txt", "x\n");
@@ -576,6 +571,7 @@ fn server_count(state: &EditorState) -> i64 {
 }
 
 #[test]
+#[cfg(unix)]
 fn acc34b_canonicalizing_resolver_reuses_one_server_across_a_symlink() {
     let fx = Fixture::new();
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
@@ -627,6 +623,7 @@ fn acc34b_canonicalizing_resolver_reuses_one_server_across_a_symlink() {
 }
 
 #[test]
+#[cfg(unix)]
 fn acc34b_falsified_by_a_resolver_that_skips_canonicalization() {
     let fx = Fixture::new();
     fx.write("proj/Cargo.toml", "[package]\nname = \"p\"\n");
@@ -669,5 +666,49 @@ fn acc34b_falsified_by_a_resolver_that_skips_canonicalization() {
         2,
         "without canonicalization the two spellings key differently and \
          spawn two servers — this is what 34b's positive case rules out"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance 34a, non-UTF-8 arm — an unrepresentable resolution declines
+// rather than returning a lossy string.
+//
+// Review finding on PR #167: `display().to_string()` substitutes U+FFFD,
+// which would hand back a path that does not exist on disk. That is
+// strictly worse than nil here, because the value becomes a
+// server-affinity key via `file_uri_for` and would silently fail to
+// round-trip. Bites against the `display()` form, which returns a
+// non-nil string for this fixture.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg(unix)]
+fn acc34a_canonicalize_declines_a_non_utf8_resolution() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let fx = Fixture::new();
+    // 0xFF is not valid UTF-8 in any position.
+    let raw = OsStr::from_bytes(b"bad-\xffname");
+    let target = fx.root.join(raw);
+    std::fs::write(&target, "x\n").unwrap();
+    // Reached through an ASCII symlink, so the *input* is representable
+    // and only the resolved output is not — which is the case
+    // `to_str()` has to catch and a UTF-8-only input check would miss.
+    let link = fx.dir("ascii-link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let state = editor();
+    let got: String = eval(
+        &state,
+        &format!(
+            "return tostring(pmacs.fs.canonicalize(\"{}\"))",
+            lua_str(&link)
+        ),
+    );
+    assert_eq!(
+        got, "nil",
+        "a resolution that lands on non-UTF-8 bytes must decline, not \
+         return a U+FFFD-substituted path that exists nowhere"
     );
 }

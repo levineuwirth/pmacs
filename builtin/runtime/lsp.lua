@@ -1584,10 +1584,10 @@ local function server_attempt(sid)
   local skey = tostring(sid)
   for _, info in ipairs(pmacs.lsp.list()) do
     if tostring(info.id) == skey then
-      return info.attempt or 0, info.state and info.state.kind
+      return info.attempt or 0
     end
   end
-  return nil, nil
+  return nil
 end
 
 -- fn(sid, params); persistent, fires for every server.
@@ -1605,6 +1605,15 @@ end
 
 -- fn(result, err); ONE-SHOT, keyed to the exact request.
 -- `request_id` is what `pmacs.lsp.send_request` returned.
+--
+-- **Register only against a server with an attached buffer.** The drain
+-- that delivers replies visits only sids present in `attachments`, so a
+-- one-shot on an unattached server will not fire on its reply — the
+-- reply sits in that server's queue and the handler is invoked only when
+-- the purge below decides the server is gone. That is fire-on-death, not
+-- fire-on-reply, and it looks exactly like a hung request while
+-- debugging. The attach path is the ordinary way to get a sid; a
+-- hand-spawned one from `init.lua` is the case to watch.
 function pmacs.lsp.on_response(sid, request_id, fn)
   if not sid or type(request_id) ~= "number" or type(fn) ~= "function" then
     error("pmacs.lsp.on_response(sid, request_id, fn): want sid, number, function")
@@ -1641,8 +1650,13 @@ local function deliver_response(sid, ev)
   if not pend then return end
   local entry = pend[ev.request_id]
   if not entry then return end
-  -- Removed BEFORE invocation: a handler that raises must not be
-  -- re-entered by a later event carrying the same id.
+  -- Removed UNCONDITIONALLY, so a handler that raises is still retired
+  -- and cannot be invoked a second time by the purge. Removing first is
+  -- the defensive order and costs nothing, but it is not what defends
+  -- against re-invocation: `pcall` catches the raise either way, so
+  -- before-vs-after is unobservable without a re-entrant drain. The
+  -- reachable bug is gating removal on a clean return, which acceptance
+  -- 32 bites (2 != 1).
   pend[ev.request_id] = nil
   if next(pend) == nil then pending_responses[skey] = nil end
   local ok, err = pcall(entry.fn, ev.result, ev.error)

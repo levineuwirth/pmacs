@@ -6550,9 +6550,18 @@ pub fn install_async(
                 // symlink is ordinary, and raising would surface through
                 // `resolve_root_fn`'s pcall as a config bug, which it is
                 // not.
+                //
+                // `to_str`, NOT `display()`. A resolution that lands on
+                // non-UTF-8 bytes has no faithful string form, and
+                // `display()` would substitute U+FFFD and hand back a
+                // path that does not exist on disk — strictly worse than
+                // nil here, because this value becomes a server-affinity
+                // key via `file_uri_for` and would silently fail to
+                // round-trip. Unrepresentable is a decline, matching how
+                // the fs layer already treats non-UTF-8 symlink targets.
                 Ok(std::fs::canonicalize(&path)
                     .ok()
-                    .map(|p| p.display().to_string()))
+                    .and_then(|p| p.to_str().map(str::to_owned)))
             })?,
         )?;
         pmacs.set("_fs", fs_priv)?;
