@@ -3574,6 +3574,13 @@ impl UserData for AnsiParserLua {
 /// an edge (`//tmp`, `~` with `HOME` unset, a `..` that would escape
 /// root) would mint two buffers for one directory with no error
 /// anywhere.
+///
+/// The result crosses the boundary through `to_string_lossy`, so a
+/// non-UTF-8 `$HOME` (or a non-UTF-8 argument) can yield a Lua string
+/// that no longer names the `PathBuf` the registry keys on. That is the
+/// same limit `pmacs.fs` already documents — byte-preserving paths are
+/// post-v0.1 work that widens every path in the API — and it is recorded
+/// here so this binding is not read as an exception to it.
 fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
     let path = lua.create_table()?;
     path.set(

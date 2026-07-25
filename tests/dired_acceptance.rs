@@ -417,6 +417,75 @@ fn dired_renders_a_header_and_one_line_per_entry() {
     );
 }
 
+/// The columns are a CONTRACT, not a formatting preference: `_layout` is
+/// exported and Stage 3's column-classifying intercept is planned
+/// against it. A size that does not fit ten digits (10 GB and up — VM
+/// images, core dumps) must therefore yield precision rather than width,
+/// the way `fmt_mtime` already does. Without that, one line's mtime and
+/// name shift right and nothing notices until Stage 3.
+#[test]
+fn dired_keeps_its_columns_when_a_size_exceeds_the_field() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::write(td.path().join("small.txt"), b"x").expect("write small");
+    let huge = td.path().join("huge.img");
+    // Sparse: `set_len` allocates nothing on any filesystem pmacs
+    // supports. If one refuses, the premise cannot be established.
+    let file = std::fs::File::create(&huge).expect("create huge");
+    if file.set_len(12_000_000_000).is_err() {
+        eprintln!("filesystem refused a sparse 12 GB file; skipping");
+        return;
+    }
+    drop(file);
+    let reported = std::fs::metadata(&huge).expect("stat huge").len();
+    assert!(
+        reported > 9_999_999_999,
+        "fixture premise: the size must exceed ten digits, got {reported}"
+    );
+
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    let size_start = layout(&s, "SIZE_START");
+    let mtime_start = layout(&s, "MTIME_START");
+    let name_start = layout(&s, "NAME_START");
+
+    let lines = active_lines(&s);
+    for name in ["huge.img", "small.txt"] {
+        let line = &lines[line_of(&s, name)];
+        let size = &line[size_start..mtime_start - 1];
+        assert_eq!(
+            size.len(),
+            10,
+            "the size field must stay ten columns wide: {line:?}"
+        );
+        let stamp = &line[mtime_start..name_start - 1];
+        assert!(
+            stamp.starts_with("20") && stamp.contains(':'),
+            "so the mtime still starts where the layout says: {line:?}"
+        );
+        assert_eq!(
+            line_name(&s, line),
+            name,
+            "and the name still starts at NAME_START"
+        );
+    }
+
+    // The oversized value degrades to a magnitude rather than a
+    // placeholder, so the listing still says how big the file is.
+    let huge_line = &lines[line_of(&s, "huge.img")];
+    let size = huge_line[size_start..mtime_start - 1].trim();
+    assert!(
+        size.ends_with('G') || size.ends_with('T'),
+        "an oversized size keeps its magnitude: {size:?}"
+    );
+    // A size that DOES fit stays exact.
+    let small_line = &lines[line_of(&s, "small.txt")];
+    assert_eq!(
+        small_line[size_start..mtime_start - 1].trim(),
+        "1",
+        "a size that fits is still the exact byte count"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2 --- visit dispatches on kind, through the panel-safe primitive
 // ---------------------------------------------------------------------------
@@ -471,6 +540,54 @@ fn dired_visit_dispatches_on_entry_kind() {
         eval::<String>(&s, "return pmacs.window.buffer():slice(0, 4)"),
         "deep",
         "the file's real contents load"
+    );
+}
+
+/// A symlink's kind is `"symlink"` in both `read_dir` and `stat` (both
+/// are lstat-based), so nothing in the entry says what it points at.
+/// `RET` therefore tries the descent and falls back to a file visit —
+/// one read, since `open_directory` reads before touching any editor
+/// state and its failure *is* the "not a directory" answer.
+#[test]
+fn dired_visit_follows_a_symlink_to_the_kind_of_its_target() {
+    let td = fixture_dir();
+    std::os::unix::fs::symlink("subdir", td.path().join("linkdir")).expect("symlink to dir");
+
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+
+    // A symlink to a directory descends. The path is NOT resolved
+    // (canonicalization is lexical), so the buffer names the way the user
+    // navigated — Emacs parity.
+    seat_on(&s, "linkdir");
+    press(&mut s, KeyCode::Enter);
+    pump(&mut s);
+    assert_eq!(
+        active_name(&s),
+        format!("*dired:{}*", canon(&td.path().join("linkdir"))),
+        "a symlinked directory descends under the path we walked"
+    );
+    assert_eq!(
+        line_name(&s, &active_lines(&s)[1]),
+        "inner.txt",
+        "and shows the target directory's contents"
+    );
+
+    // A symlink to a file opens the file.
+    type_char(&mut s, '^');
+    pump(&mut s);
+    seat_on(&s, "link");
+    press(&mut s, KeyCode::Enter);
+    pump(&mut s);
+    let path = active_path(&s).expect("a file must be open");
+    assert!(
+        path.ends_with("/link"),
+        "the visit keeps the link's own path; got {path}"
+    );
+    assert_eq!(
+        eval::<String>(&s, "return pmacs.window.buffer():slice(0, 5)"),
+        "hello",
+        "with the target's contents"
     );
 }
 
@@ -1015,6 +1132,68 @@ fn dired_revert_reseats_the_cursor_by_basename() {
         cursor_line(&s),
         vanished_line.min(active_lines(&s).len() - 1),
         "it lands on the nearest surviving line"
+    );
+}
+
+/// A revert settles a tick or more later, and the user may have left in
+/// the meantime. `pmacs.editor.move_to_line` is **ambient** — it moves
+/// whatever window is active — so an unguarded re-seat moves an
+/// unrelated buffer's cursor to a line index that only means something
+/// in the dired listing. The paint is safe either way because it names
+/// its buffer; this pins the half that does not.
+#[test]
+fn dired_revert_does_not_seat_a_buffer_the_user_switched_to() {
+    let td = tempfile::tempdir().expect("tempdir");
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        std::fs::write(td.path().join(name), b"x").expect("write");
+    }
+    let notes = td.path().join("notes.txt");
+    std::fs::write(&notes, b"one\ntwo\nthree\nfour\nfive\nsix\n").expect("write notes");
+
+    let mut s = editor();
+    open_ok(&mut s, td.path(), "nil");
+    exec(&s, "_G.DIRED_BUF = pmacs.window.buffer()");
+    // A late line, so a stale seat would be visible in the other buffer.
+    seat_on(&s, "e.txt");
+    let dired_line = cursor_line(&s);
+    assert!(
+        dired_line >= 4,
+        "fixture premise: a late line, got {dired_line}"
+    );
+
+    // Start the revert, then leave BEFORE the read settles.
+    type_char(&mut s, 'g');
+    exec(
+        &s,
+        &format!(
+            "pmacs.buffer.find_or_open({:?})",
+            notes.display().to_string()
+        ),
+    );
+    assert_eq!(cursor_line(&s), 0, "a freshly opened file starts at line 0");
+    pump(&mut s);
+
+    assert_eq!(
+        active_path(&s).map(PathBuf::from),
+        Some(PathBuf::from(canon(&notes))),
+        "the switch stands: the revert must not pull the user back"
+    );
+    assert_eq!(
+        cursor_line(&s),
+        0,
+        "and it must not move the cursor of the buffer they moved to"
+    );
+
+    // The revert itself still happened: the dired buffer is repainted,
+    // and returning to it seats normally on the next command.
+    std::fs::write(td.path().join("f.txt"), b"x").expect("write f");
+    exec(&s, "pmacs.window.switch_buffer(_G.DIRED_BUF)");
+    type_char(&mut s, 'g');
+    pump(&mut s);
+    assert!(
+        active_text(&s).contains("f.txt"),
+        "the dired buffer still reverts when it is the active one: {:?}",
+        active_text(&s)
     );
 }
 

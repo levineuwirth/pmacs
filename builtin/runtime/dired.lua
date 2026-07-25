@@ -224,6 +224,11 @@ end
 -- `rwxr-xr-x`, without the leading kind char (rendered separately so a
 -- symlink shows `l` and a directory `d`). Arithmetic rather than bit
 -- ops: this file has to run on LuaJIT (5.1) as well as Lua 5.4.
+--
+-- The nine basic bits only: setuid / setgid / sticky are deliberately
+-- not surfaced as Emacs's `s` / `t`, matching the M8.3 fixture's
+-- `parse_perm_string`, which edits exactly these nine. Rendering a bit
+-- Stage 3 could not accept back would be worse than omitting it.
 local function fmt_perms(mode)
   local function tri(bits)
     local r = (bits >= 4) and "r" or "-"
@@ -244,8 +249,33 @@ local function kind_char(kind)
   end
 end
 
+-- Exact bytes while they fit the column; a magnitude past that.
+--
+-- `%10d` holds ten digits, so a file of 10 GB or more (VM images, core
+-- dumps --- ordinary things) widens the field and shifts mtime and name
+-- right on that line alone. That is only cosmetic today, but
+-- `_layout.NAME_START` is exported as a contract and Stage 3's
+-- column-classifying intercept is planned against these constants, so a
+-- line that violates them now is a Stage 3 trap. Same discipline as
+-- `fmt_mtime`: the width is the invariant, and precision yields to it.
+--
+-- This is NOT the deferred human-readable size column (§13): the exact
+-- byte count is still what a listing shows, right up to the point where
+-- it cannot be shown at all.
+local SIZE_UNITS = { "K", "M", "G", "T", "P", "E" }
+
 local function fmt_size(n)
-  return string.format("%" .. SIZE_BYTES .. "d", n)
+  local exact = string.format("%" .. SIZE_BYTES .. "d", n)
+  if #exact <= SIZE_BYTES then return exact end
+  local value, unit = n, SIZE_UNITS[#SIZE_UNITS]
+  for _, suffix in ipairs(SIZE_UNITS) do
+    value = value / 1024
+    unit = suffix
+    if value < 1024 then break end
+  end
+  local scaled = string.format("%.1f%s", value, unit)
+  if #scaled > SIZE_BYTES then scaled = scaled:sub(1, SIZE_BYTES) end
+  return string.rep(" ", SIZE_BYTES - #scaled) .. scaled
 end
 
 local function fmt_mtime(secs)
@@ -348,6 +378,13 @@ end
 -- Re-seat by BASENAME (Q#DR9), falling back to the nearest surviving
 -- line. Every repaint is wholesale, so without this a revert, a sort,
 -- or any Stage 2 operation would drop the cursor to the header.
+--
+-- `move_to_line` is AMBIENT --- it moves the active window's cursor, not
+-- `handle.buf`'s --- so every caller that can run after an `:await()`
+-- has to check that dired is still the active buffer first. Painting is
+-- safe either way (it names the buffer); seating is not. Callers that
+-- activate the buffer themselves (an open, which displays first) are
+-- unconditionally in the right place.
 local function seat_cursor(handle, name, fallback_line)
   local count = #handle.entries
   if count == 0 then
@@ -416,7 +453,8 @@ end
 -- Buffer ownership
 -- ---------------------------------------------------------------------------
 
-local READ_ONLY_LIMIT = 99
+-- How far the `<2>`, `<3>`, ... disambiguation walks before giving up.
+local NAME_VARIANT_LIMIT = 99
 
 -- `pmacs.buffer.create` takes any caller-chosen name, so a foreign
 -- buffer may already be called `*dired:/tmp*`. Painting into it through
@@ -435,7 +473,7 @@ local function claim_handle(path)
   local name = buffer_name(path)
   if buffer_named(name) then
     local unique = nil
-    for i = 2, READ_ONLY_LIMIT do
+    for i = 2, NAME_VARIANT_LIMIT do
       local candidate = string.format("%s<%d>", name, i)
       if buffer_named(candidate) == nil then
         unique = candidate
@@ -680,19 +718,20 @@ pmacs.command.define {
       return
     end
     if entry.kind == "symlink" then
-      -- `read_dir`/`stat` are lstat-based, so the only way to learn
-      -- whether a link points at a directory is to try to list it. A
-      -- symlinked directory is an ordinary thing to walk into, and the
-      -- probe costs one syscall on symlink lines only.
+      -- `read_dir` and `stat` are both lstat-based, so nothing in the
+      -- entry says whether the link points at a directory --- the only
+      -- way to find out is to try to list it. A symlinked directory is
+      -- an ordinary thing to walk into, so try the descent and fall back
+      -- to a file visit.
+      --
+      -- `open_directory` is the try: it reads before touching any editor
+      -- state and raises having changed nothing (acceptance 15), so its
+      -- failure IS the "not a directory" answer. An explicit probe
+      -- followed by the real open would list the whole directory TWICE
+      -- --- opendir plus one lstat per child, each time.
       pmacs.async(function()
-        local ok = pcall(function()
-          return pmacs.fs.read_dir(target, { tolerant = true }):await()
-        end)
-        if ok then
-          local descended, err = pcall(open_directory, target, nil, handle)
-          if not descended then report("dired", err) end
-          return
-        end
+        local descended = pcall(open_directory, target, nil, handle)
+        if descended then return end
         local visited, err = pcall(pmacs.window.display_file, target, { select = true })
         if not visited then report("dired", err) end
       end)
@@ -742,7 +781,14 @@ pmacs.command.define {
       handle.entries = entries
       handle.errors = errors
       paint(handle)
-      seat_cursor(handle, name, line)
+      -- The re-read settles a tick or more later, and the user may have
+      -- left (a buffer switch, or `q`) in the meantime. The paint names
+      -- its buffer and is safe; seating is ambient, so a stale seat here
+      -- would move an unrelated buffer's cursor to a line index that
+      -- only means something in this listing.
+      if pmacs.window.buffer() == handle.buf then
+        seat_cursor(handle, name, line)
+      end
     end)
   end,
 }

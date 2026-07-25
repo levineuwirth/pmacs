@@ -42,6 +42,28 @@ use crate::worker::CancellationToken;
 /// directories.
 const READDIR_CANCEL_POLL_EVERY: usize = 32;
 
+/// How many *consecutive* `readdir` iterator errors a tolerant listing
+/// records before giving up and failing (dired Q#DR6).
+///
+/// [`std::fs::ReadDir`] is not obliged to terminate after yielding an
+/// `Err`: a directory pulled out from under a stalled network mount can
+/// keep producing them. Tolerant mode records-and-continues, so without
+/// a bound that is an unbounded error vector on a worker thread.
+///
+/// Cancellation is **not** an adequate backstop here, which is the
+/// reason this constant exists rather than a comment saying it is: a
+/// dired listing carries no supersede key and nothing cancels it, so the
+/// only thing that would stop the loop is the directory itself. A
+/// directory whose iterator produces nothing but errors has no partial
+/// answer worth rendering, so the listing fails with the last error the
+/// way an unopenable directory does.
+///
+/// Deliberately untested: forcing a real `readdir` to yield errors
+/// repeatedly is not portable, and faking it would need the walk to be
+/// generic over its iterator — a refactor with no other consumer. The
+/// counter resets on any entry that materializes.
+const READDIR_MAX_CONSECUTIVE_ENTRY_ERRORS: usize = 1024;
+
 /// One directory entry as returned by [`read_dir_blocking`].
 ///
 /// The shape is what `dired` / `magit-class` / `outline-class`
@@ -277,6 +299,7 @@ pub fn read_dir_blocking(
     let mut errors: Option<Vec<FsDirEntryError>> =
         matches!(tolerance, ReadDirTolerance::PerEntry).then(Vec::new);
     let parent_str = path.display().to_string();
+    let mut consecutive_entry_errors = 0usize;
     for (i, entry_result) in iter.enumerate() {
         if i % READDIR_CANCEL_POLL_EVERY == 0 && cancel.is_cancelled() {
             return Err(FsError::Cancelled);
@@ -286,17 +309,19 @@ pub fn read_dir_blocking(
             Err(source) => {
                 // R2-2: the entry never materialized, so there is no
                 // name to report and the error names the parent.
-                record_entry_error(
-                    &mut errors,
-                    None,
-                    FsError::Io {
-                        path: parent_str.clone(),
-                        source,
-                    },
-                )?;
+                let error = FsError::Io {
+                    path: parent_str.clone(),
+                    source,
+                };
+                consecutive_entry_errors += 1;
+                if consecutive_entry_errors > READDIR_MAX_CONSECUTIVE_ENTRY_ERRORS {
+                    return Err(error);
+                }
+                record_entry_error(&mut errors, None, error)?;
                 continue;
             }
         };
+        consecutive_entry_errors = 0;
         let entry_path = entry.path();
         // Resolved first so a later per-entry failure can name it.
         let name = path_to_utf8_string(&entry.file_name(), &parent_str)?;

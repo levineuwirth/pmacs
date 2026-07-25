@@ -207,10 +207,10 @@ fn format_outcome(outcome: &JobOutcome) -> String {
             // tolerant listing that dropped half a directory is not the
             // same observable outcome as a clean one.
             match listing.errors.as_deref() {
-                Some([_, ..]) => format!(
+                Some(errors @ [_, ..]) => format!(
                     "ok ({} entries, {} unreadable)",
                     listing.entries.len(),
-                    listing.errors.as_ref().map_or(0, Vec::len)
+                    errors.len()
                 ),
                 _ => format!("ok ({} entries)", listing.entries.len()),
             }
