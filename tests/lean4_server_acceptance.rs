@@ -1010,9 +1010,19 @@ fn r2_a_failing_fallback_is_reported_once_and_does_not_retry_forever() {
         "a failing fallback surfaces rather than retrying silently; saw \
          {status:?}"
     );
-    // And the retry state is cleared, so it is not looping.
-    let pending: String = eval(&state, "return tostring(pmacs.lean._probe.reattach_from)");
-    assert_eq!(pending, "nil", "the retry is retired, not spinning");
+    // And the repair was ATTEMPTED and recorded, so it is bounded rather
+    // than spinning. Asserting on a field that no longer exists would
+    // read as nil and pass for nothing — the vacuity shape this branch
+    // keeps producing, so the assertion is on a positive count.
+    let attempted: i64 = eval(
+        &state,
+        "local n = 0 for _ in pairs(pmacs.lean._probe.repaired) do n = n + 1 end return n",
+    );
+    assert_eq!(
+        attempted, 1,
+        "exactly one repair attempt was made and recorded, so a failing \
+         fallback cannot retry every tick forever"
+    );
 }
 
 #[test]
@@ -1238,5 +1248,126 @@ fn r3_a_failing_wrapper_is_named_truthfully_not_as_lake_serve() {
     assert!(
         !status.contains("lake serve"),
         "and does not attribute the failure to `lake serve`; saw {status:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-4 review — the config swap is GLOBAL, so one repaired buffer is
+// not a fallback. Both fail against 73587b0.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r4_every_open_lean_buffer_is_repaired_not_just_the_armed_one() {
+    // `pmacs.lsp.config.lean4` is a single entry; swapping its command
+    // invalidates every buffer attached to the old one. Round 3 repaired
+    // exactly `probe.buf_key` and cleared the retry, leaving every other
+    // open Lean buffer on the retired server while status and config
+    // both said "fell back".
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let first = fx.write("pkg/A.lean", "def a := 1\n");
+    let second = fx.write("pkg/B.lean", "def b := 2\n");
+    let lake = fx.lake_stub("bin/lake", "Lake version 3.0.0");
+    let mut state = editor(&fx);
+    with_fallback(&state, &lake);
+
+    open(&state, &first);
+    exec(&state, "_G.first_buf = pmacs.window.buffer()");
+    open(&state, &second);
+    exec(&state, "_G.second_buf = pmacs.window.buffer()");
+    tick_for(&mut state, 700);
+
+    // The armed (first) buffer.
+    exec(&state, "pmacs.window.switch_buffer(_G.first_buf)");
+    tick_for(&mut state, 500);
+    assert_eq!(
+        attached_command(&state),
+        fake_lsp_path(),
+        "the armed buffer is repaired"
+    );
+
+    // And the OTHER one, which round 3 stranded.
+    exec(&state, "pmacs.window.switch_buffer(_G.second_buf)");
+    tick_for(&mut state, 500);
+    assert_eq!(
+        attached_command(&state),
+        fake_lsp_path(),
+        "every open Lean buffer ends up on the fallback — repairing only \
+         the armed target leaves this one on the retired server"
+    );
+}
+
+#[test]
+fn r4_a_second_project_roots_server_is_also_retired() {
+    // Q#LN15 gives one server per project root, so a swap can invalidate
+    // several. `probe.primary` names only the first; retiring only that
+    // leaves the second root's server live on a command the config no
+    // longer names.
+    let fx = Fixture::new();
+    fx.toolchain("one", "v4.9.0\n");
+    fx.toolchain("two", "v4.9.0\n");
+    let a = fx.write("one/A.lean", "def a := 1\n");
+    let b = fx.write("two/B.lean", "def b := 2\n");
+    let lake = fx.lake_stub("bin/lake", "Lake version 3.0.0");
+    let mut state = editor(&fx);
+    with_fallback(&state, &lake);
+
+    open(&state, &a);
+    open(&state, &b);
+    // Two roots, two servers, before any verdict lands.
+    let before: i64 = eval(&state, "return #pmacs.lsp.list()");
+    assert_eq!(before, 2, "precondition: one server per root");
+
+    tick_for(&mut state, 900);
+
+    // No server may still be running the retired command.
+    let stale_live: i64 = eval(
+        &state,
+        &format!(
+            r#"
+            local n = 0
+            for _, s in ipairs(pmacs.lsp.list()) do
+              if tostring(s.command) == "{}" then
+                local k = s.state and s.state.kind
+                if k ~= "stopped" and k ~= "crashed" then n = n + 1 end
+              end
+            end
+            return n
+            "#,
+            lua_str(&lake)
+        ),
+    );
+    assert_eq!(
+        stale_live, 0,
+        "every Lean server spawned from the old command is retired, not \
+         just the one the probe happened to name"
+    );
+}
+
+#[test]
+fn r4_attribution_names_the_exact_command_and_its_arguments() {
+    // Round 3 implemented argument-inclusive attribution but pinned only
+    // "contains my-lean-wrapper" and "does not contain lake serve" — a
+    // mutation dropping every argument still passed.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/my-lean-wrapper");
+    let mut state = editor(&fx);
+    with_fallback(&state, &absent);
+    exec(
+        &state,
+        "pmacs.lsp.config.lean4.args = { \"serve\", \"--quiet\" }",
+    );
+
+    open(&state, &file);
+    settle(&mut state);
+
+    let status = state.core.borrow().status.clone();
+    let expected = format!("`{} serve --quiet`", absent.display());
+    assert!(
+        status.contains(&expected),
+        "the status names the exact configured command AND its arguments;\n  \
+         want substring: {expected}\n  saw: {status:?}"
     );
 }

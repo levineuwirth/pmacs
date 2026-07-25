@@ -265,7 +265,7 @@ If it does not, stop and repair the remote/fetch configuration.
 - Ships `builtin/runtime/lean.lua` (new), one `include_str!` line in
   `src/editor.rs`, `pmacs.lsp._attach_buffer` exported from `lsp.lua`,
   a `leanprogress` mode plus `waitForDiagnostics` validation on
-  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (28 tests).
+  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (31 tests).
   No protocol change.
 - **Stage 1's acceptance 12 is half superseded and was rewritten, not
   deleted.** It asserted `pmacs.lsp.config.lean4 == nil` to catch a
@@ -319,6 +319,21 @@ If it does not, stop and repair the remote/fetch configuration.
   are one fact and are now armed together, once. Plus a P2: the failure
   message hardcoded `lake serve` after the latch became
   command-agnostic, sending wrapper users to debug the wrong binary.
+- **Round-4 review: one P1, and it is the same defect a FOURTH time.**
+  `pmacs.lsp.config.lean4` is a single global entry, so swapping its
+  command invalidates **every** Lean buffer and **every** Lean server —
+  Q#LN15 gives one per project root. Rounds 1–3 each fixed the repair
+  for one buffer and one server; round 4 is "repair the armed target,
+  strand the rest". The shape that finally holds: retire ALL `lean4`
+  servers on latch, and repair each buffer **lazily and at most once**
+  when it becomes active (`buffer.after-switch` + the tick), because
+  `_attach_buffer` is active-buffer-only and cannot reach the others.
+  The per-buffer once-only bound is what stops a failing fallback
+  retrying forever — the round-2 defect a naive global repair loop would
+  have reintroduced for every buffer instead of one. Plus a P2: the
+  argument-inclusive attribution was implemented but pinned only by
+  "contains the command name", so a mutation dropping every argument
+  still passed.
 - **DURABLE LESSON — "the test that passes" vs "the test that
   discriminates."** Six tests across three rounds were written, run
   green, and only bite-testing showed they pinned nothing. **Carry this
@@ -341,8 +356,20 @@ If it does not, stop and repair the remote/fetch configuration.
   6. A fixture whose `serve` sleeps can never let the primary initialize
      first, so it cannot reach the ordering where a late verdict must
      retire a LIVE server.
+  7. Asserting on a field that no longer exists (`_probe.reattach_from`
+     after a refactor) reads as nil and passes for nothing. Assert
+     positive facts — a count, a command string — not absences.
   Rule: **a test is not evidence until the mutation it targets has been
   shown to fail it.**
+- **SECOND DURABLE LESSON — a scope error repeats until the scope is
+  named.** The "fallback silently does not happen" defect came back four
+  times: no re-attach; re-attach cleared by an unrelated buffer;
+  re-attach satisfied by the server being replaced; re-attach of one
+  buffer while the others stay stale. Every fix was locally correct and
+  none asked *what does this config swap invalidate?* — the answer being
+  every Lean buffer and every Lean server, because the config entry is
+  global and servers are per-root. **When a change edits shared state,
+  enumerate everything derived from it before repairing anything.**
 - **SUBSTRATE BUG FOUND, not fixed here (framing §6).**
   `LspManager::stop` on an ALREADY-terminal server takes its
   not-initialized branch, terminates the dead process and sets
@@ -368,9 +395,9 @@ If it does not, stop and repair the remote/fetch configuration.
   server-failure latch covers the rest.
 - Verification on this branch: `cargo fmt --check` clean; strict
   workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
-  lean4 server 28/28; lean4 stage 1 9/9; dispatch seams 15/15;
+  lean4 server 31/31; lean4 stage 1 9/9; dispatch seams 15/15;
   multi-root 13/13; M4 121; required GPU 155; **isolated-config
-  workspace sweep 3,217 across 94 suites, zero failures**;
+  workspace sweep 3,220 across 94 suites, zero failures**;
   `git diff --check` clean. (Round 1 of
   this entry recorded 17/17 and 3,206 — the PRE-fix counts — after the
   fixes were pushed. The ledger's protocol is that verification

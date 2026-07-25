@@ -132,6 +132,7 @@ local probe = {
                      -- when the server initializes, because a late
                      -- version verdict still has to retire it
   armed = false,     -- the target buffer + primary have been captured
+  repaired = {},     -- buffer key -> repair attempted (at most once)
   saw_initialized = false,
 }
 
@@ -147,6 +148,16 @@ local function configured_command()
     return "`" .. tostring(cmd) .. " " .. table.concat(args, " ") .. "`"
   end
   return "`" .. tostring(cmd) .. "`"
+end
+
+-- The fallback command, for status text.
+local function fallback_name()
+  local args = M._fallback.args or {}
+  if #args > 0 then
+    return "`" .. tostring(M._fallback.command) .. " "
+      .. table.concat(args, " ") .. "`"
+  end
+  return "`" .. tostring(M._fallback.command) .. "`"
 end
 
 local function report(msg)
@@ -232,8 +243,6 @@ end
 
 -- Retire the failed server, swap the command, then rebuild the
 -- attachment on the buffer that started this.
-local try_reattach
-
 -- Retire `sid` so it cannot come back. **Which call to use depends on
 -- the state, and using the wrong one is worse than doing nothing:**
 --
@@ -263,67 +272,85 @@ local function retire_server(sid)
   end
 end
 
+-- Retire EVERY Lean server, not just the one that failed.
+--
+-- `pmacs.lsp.config.lean4` is a single global entry, so swapping its
+-- command invalidates every server spawned from the old one — and
+-- Q#LN15 gives one server per project root, so there can be several.
+-- Retiring only the server that happened to fail left the others live
+-- and every buffer attached to them stranded on a command the config no
+-- longer names.
+local function retire_all_lean_servers()
+  local ok, rows = pcall(pmacs.lsp.list)
+  if not ok or not rows then return end
+  local ids = {}
+  for _, info in ipairs(rows) do
+    if info.language_id == "lean4" then ids[#ids + 1] = info.id end
+  end
+  for _, id in ipairs(ids) do retire_server(id) end
+end
+
+-- Rebuild the ACTIVE buffer's attachment if it is Lean and stale.
+--
+-- `_attach_buffer` is an active-buffer-only seam, so a global config
+-- swap cannot be applied to every open buffer at once. It is applied
+-- lazily instead: whenever a Lean buffer becomes the active one, if its
+-- record points at a server that is gone or terminal, it is rebuilt.
+--
+-- **At most one attempt per buffer.** Without that bound a fallback
+-- that also fails to spawn would retry every tick forever with nothing
+-- reported — the round-2 defect, which a general repair loop would
+-- otherwise reintroduce for every buffer instead of just one.
+--
+-- A `shutting-down` server is deliberately NOT treated as stale: it is
+-- still live by `server_is_live`'s reckoning, so `attach_buffer` would
+-- early-return the stale record and burn this buffer's single attempt
+-- on a no-op. Skipping leaves the attempt for a later tick, once the
+-- retirement has actually landed.
+local function repair_active_if_stale()
+  if not probe.latched then return end
+  local buf = pmacs.window.buffer()
+  if not buf then return end
+  local key = tostring(buf)
+  if probe.repaired[key] then return end
+  local ok_lang, lang = pcall(pmacs.lsp.buffer_language, buf)
+  if not ok_lang or lang ~= "lean4" then return end
+
+  local rec = pmacs.lsp.active_attachment()
+  local stale
+  if not rec then
+    stale = true
+  else
+    local kind = server_state_kind(rec.server)
+    stale = (kind == nil or kind == "crashed" or kind == "stopped")
+  end
+  if not stale then return end
+
+  probe.repaired[key] = true
+  local ok, fresh = pcall(pmacs.lsp._attach_buffer)
+  if not ok or not fresh then
+    report("LSP: lean4 fallback " .. fallback_name()
+      .. " did not start either")
+  end
+end
+
 local function fire_latch(sid, why)
   if probe.latched then return end
   probe.latched = true
   probe.watching = nil
-  if sid then retire_server(sid) end
   if not swap_to_fallback() then
     report("LSP: lean4 " .. why)
+    -- Still retire: the servers are broken whether or not a replacement
+    -- command was installed, and leaving them live would keep the
+    -- restart machinery running against a command known to fail.
+    retire_all_lean_servers()
     return
   end
-  report("LSP: lean4 " .. why .. "; falling back to `"
-    .. tostring(M._fallback.command) .. "`")
-  -- **Spawn the replacement and re-point the buffer at it.** Swapping
-  -- the config is not a fallback on its own: nothing re-fires an attach
-  -- on a config change and `attach_buffer` early-returns for a live
-  -- attachment, so without this the buffer stays bound to the server we
-  -- just retired and the user has a config edit and no language server.
-  --
-  -- The rebuild waits for two things, and conflating them is what made
-  -- round 2 wrong in two ways at once:
-  --   1. the retired server actually reaching a terminal state (or
-  --      being gone) — `stop` leaves `shutting-down`, which
-  --      `server_is_live` counts as LIVE, so attaching before then
-  --      early-returns the stale record and the swap silently no-ops;
-  --   2. the buffer that started this being the ACTIVE one, because
-  --      `_attach_buffer` is an active-buffer-only seam. The verdict
-  --      arrives asynchronously, so the user may well be somewhere else
-  --      by then — and "some attachment now names a different server"
-  --      is satisfied by an unrelated Rust buffer, which would clear the
-  --      retry while leaving the Lean buffer stale forever.
-  probe.reattach_from = sid and tostring(sid) or false
-  try_reattach()
-end
-
--- Returns true when there is nothing left to do: either the initiating
--- buffer is attached to the replacement, or the replacement itself
--- failed and that has been reported.
-function try_reattach()
-  if probe.reattach_from == nil then return true end
-  -- (2) Wait for the initiating buffer to be the active one.
-  local buf = pmacs.window.buffer()
-  if not buf or not probe.buf_key or tostring(buf) ~= probe.buf_key then
-    return false
-  end
-  -- (1) Wait for the retired server to stop counting as live.
-  if probe.reattach_from then
-    local kind = server_state_kind_for_key(probe.reattach_from)
-    if kind ~= nil and kind ~= "crashed" and kind ~= "stopped" then
-      return false
-    end
-  end
-  -- Both conditions met: attempt the replacement EXACTLY ONCE. Cleared
-  -- first so a failing fallback cannot retry every tick forever —
-  -- acceptance 27 promises a second failure surfaces rather than loops.
-  probe.reattach_from = nil
-  local ok, rec = pcall(pmacs.lsp._attach_buffer)
-  if not ok or not rec then
-    report("LSP: lean4 fallback `" .. tostring(M._fallback.command)
-      .. "` did not start either")
-    return false
-  end
-  return true
+  retire_all_lean_servers()
+  report("LSP: lean4 " .. why .. "; falling back to " .. fallback_name())
+  -- Repair what is in front of the user now; everything else is
+  -- repaired lazily as it becomes active (see `repair_active_if_stale`).
+  repair_active_if_stale()
 end
 
 local function drain_probe()
@@ -566,19 +593,26 @@ pmacs.hook.add("buffer.after-load", function()
   end
 end)
 
+-- A buffer switch is the moment a stale Lean buffer becomes visible, so
+-- repair immediately rather than waiting for the next tick. lsp.lua's
+-- own `after-switch` subscription re-pushes views but does NOT rebuild a
+-- stale attachment, so nothing else covers this.
+pmacs.hook.add("buffer.after-switch", function()
+  repair_active_if_stale()
+end)
+
 pmacs.hook.add("process.after-tick", function()
   drain_probe()
   poll_latch()
-  -- Keep trying until the stopped server is really gone; see the note in
-  -- `fire_latch`.
-  if probe.reattach_from ~= nil then try_reattach() end
+  -- Repair the active buffer if the latch invalidated it. Cheap when
+  -- there is nothing to do, and bounded to one attempt per buffer.
+  repair_active_if_stale()
 end)
 
 -- Test seam: acceptance drives the latch deterministically rather than
 -- waiting on real process timing. Not part of the public surface.
 M._probe = probe
 M._fire_latch = fire_latch
-M._try_reattach = try_reattach
 M._version_below_3_1 = version_below_3_1
 
 pmacs.lean = M
