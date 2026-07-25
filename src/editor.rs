@@ -525,6 +525,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/window.lua"),
             )
             .expect("load window builtin chunk");
+        // Dired Stage 1: the directory view. Loaded AFTER window.lua,
+        // whose `window.panel-height` setting a `display = "panel"`
+        // listing resolves, and after the pre-runtime tables it drives
+        // (`pmacs.config` / `command` / `keymap` / `buffer` / `editor` /
+        // `minibuffer` / `path`, plus `pmacs.fs` from fs.lua above).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/dired.lua"),
+                include_str!("../builtin/runtime/dired.lua"),
+            )
+            .expect("load dired builtin chunk");
         // Compile-mode (Arc 5 stage 1, Q#CM1) — ORDERING CONTRACT:
         // compile.lua must load AFTER lsp.lua. It takes over
         // `M-g n` / `M-g p` for the unified error dispatchers, and

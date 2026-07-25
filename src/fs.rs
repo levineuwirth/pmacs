@@ -116,6 +116,59 @@ impl FsEntryKind {
     }
 }
 
+/// Per-entry tolerance for [`read_dir_blocking`] (dired Q#DR6).
+///
+/// The M8.1 primitive was all-or-nothing: five per-entry conditions
+/// failed the *entire* listing, which makes a plain refresh of a busy
+/// directory (`/tmp`, a build tree) fail outright. The module doc used
+/// to say a per-entry-tolerant wrapper was "the package's job" --- it
+/// cannot be: the primitive hands Lua one structured error and no
+/// partial vec, so there is nothing to be tolerant *with*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadDirTolerance {
+    /// Any per-entry failure fails the whole listing. The original
+    /// M8.1 contract, and still the default at every Lua call site
+    /// that does not opt in.
+    Fatal,
+    /// Per-entry failures are recorded in [`FsDirListing::errors`] and
+    /// enumeration continues. A failure on the *parent* `read_dir`
+    /// stays fatal (a directory you cannot open has no partial
+    /// answer), and so does a non-UTF-8 entry **name** --- see
+    /// [`FsError::NonUtf8Path`].
+    PerEntry,
+}
+
+/// One per-entry failure recorded by a tolerant [`read_dir_blocking`].
+///
+/// `name` is optional because a per-entry `readdir` *iterator* error
+/// has no filename to report: the entry never materialized, and the
+/// underlying error is about the parent directory. Every other arm has
+/// an entry in hand and names it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsDirEntryError {
+    /// Basename of the entry that failed, when one is known.
+    pub name: Option<String>,
+    /// Rendered failure, already formatted for display.
+    pub message: String,
+}
+
+/// What [`read_dir_blocking`] returns: the entries it could read, plus
+/// the per-entry failures when the caller asked to tolerate them.
+///
+/// `errors` is `None` under [`ReadDirTolerance::Fatal`] and `Some`
+/// (possibly empty) under [`ReadDirTolerance::PerEntry`]. The
+/// distinction is load-bearing at the Lua boundary: it is what selects
+/// the bare-array result shape the M8.1 surface promises from the
+/// `{ entries = …, errors = … }` shape the tolerant opt returns, so the
+/// conversion never has to look the job back up.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsDirListing {
+    /// One entry per readable child, in filesystem iteration order.
+    pub entries: Vec<FsDirEntry>,
+    /// Per-entry failures; `None` in [`ReadDirTolerance::Fatal`] mode.
+    pub errors: Option<Vec<FsDirEntryError>>,
+}
+
 /// Errors produced by [`read_dir_blocking`] / [`stat_blocking`] /
 /// [`rename_blocking`] / [`chmod_blocking`] / [`remove_blocking`].
 ///
@@ -192,50 +245,97 @@ pub enum FsError {
 /// `to_string_lossy` would have mangled dired/wdired round-trips).
 ///
 /// Errors on the *parent* `read_dir` call surface as
-/// [`FsError::Io`]. Errors on individual entries (a single broken
-/// symlink, a permission-denied stat) currently propagate the same
-/// way --- the cleanest behavior at this primitive layer is "fail
-/// fast and let the caller decide whether a partial listing is
-/// acceptable"; dired-class will likely want a per-entry-tolerant
-/// wrapper but that's the package's job, not the primitive's.
+/// [`FsError::Io`] regardless of `tolerance`: a directory you cannot
+/// open has no partial answer.
+///
+/// Errors on individual entries (a permission-denied `lstat`, a child
+/// unlinked between `readdir` and `lstat`, a `readlink` failure, a
+/// non-UTF-8 symlink target) are governed by `tolerance`. Under
+/// [`ReadDirTolerance::Fatal`] they fail the whole listing, which is
+/// the M8.1 contract every existing caller relies on; under
+/// [`ReadDirTolerance::PerEntry`] they land in
+/// [`FsDirListing::errors`] and enumeration continues (dired Q#DR6).
+///
+/// A non-UTF-8 entry **name** is fatal in both modes. That is not a
+/// listing problem but a path-representation one: [`FsDirEntry::name`]
+/// is a `String` and every `pmacs.fs` op takes a `String` path, so a
+/// tolerantly-rendered non-UTF-8 name would be a name the caller could
+/// not pass back through `rename`. Byte-preserving paths are the named
+/// deferral (see [`FsError::NonUtf8Path`]). A non-UTF-8 *target*
+/// differs in kind --- the entry's own name is fine and nothing needs
+/// to round-trip the target --- so it joins the per-entry channel.
 pub fn read_dir_blocking(
     path: &Path,
     cancel: &CancellationToken,
-) -> Result<Vec<FsDirEntry>, FsError> {
+    tolerance: ReadDirTolerance,
+) -> Result<FsDirListing, FsError> {
     let iter = std::fs::read_dir(path).map_err(|source| FsError::Io {
         path: path.display().to_string(),
         source,
     })?;
     let mut out: Vec<FsDirEntry> = Vec::new();
+    let mut errors: Option<Vec<FsDirEntryError>> =
+        matches!(tolerance, ReadDirTolerance::PerEntry).then(Vec::new);
     let parent_str = path.display().to_string();
     for (i, entry_result) in iter.enumerate() {
         if i % READDIR_CANCEL_POLL_EVERY == 0 && cancel.is_cancelled() {
             return Err(FsError::Cancelled);
         }
-        let entry = entry_result.map_err(|source| FsError::Io {
-            path: parent_str.clone(),
-            source,
-        })?;
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(source) => {
+                // R2-2: the entry never materialized, so there is no
+                // name to report and the error names the parent.
+                record_entry_error(
+                    &mut errors,
+                    None,
+                    FsError::Io {
+                        path: parent_str.clone(),
+                        source,
+                    },
+                )?;
+                continue;
+            }
+        };
         let entry_path = entry.path();
-        let metadata = std::fs::symlink_metadata(&entry_path).map_err(|source| FsError::Io {
-            path: entry_path.display().to_string(),
-            source,
-        })?;
-        let kind = classify(&metadata);
-        let symlink_target = if matches!(kind, FsEntryKind::Symlink) {
-            match std::fs::read_link(&entry_path) {
-                Ok(t) => Some(path_to_utf8_string(t.as_os_str(), &parent_str)?),
-                Err(source) => {
-                    return Err(FsError::Io {
+        // Resolved first so a later per-entry failure can name it.
+        let name = path_to_utf8_string(&entry.file_name(), &parent_str)?;
+        let metadata = match std::fs::symlink_metadata(&entry_path) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                record_entry_error(
+                    &mut errors,
+                    Some(&name),
+                    FsError::Io {
                         path: entry_path.display().to_string(),
                         source,
-                    });
-                }
+                    },
+                )?;
+                continue;
             }
-        } else {
-            None
         };
-        let name = path_to_utf8_string(&entry.file_name(), &parent_str)?;
+        let kind = classify(&metadata);
+        let mut symlink_target = None;
+        if matches!(kind, FsEntryKind::Symlink) {
+            match std::fs::read_link(&entry_path) {
+                // A target we cannot represent leaves the entry in the
+                // listing with its target unknown, not the entry out of
+                // it: one weird symlink in `/tmp` used to take the
+                // whole directory down.
+                Ok(target) => match path_to_utf8_string(target.as_os_str(), &parent_str) {
+                    Ok(target) => symlink_target = Some(target),
+                    Err(error) => record_entry_error(&mut errors, Some(&name), error)?,
+                },
+                Err(source) => record_entry_error(
+                    &mut errors,
+                    Some(&name),
+                    FsError::Io {
+                        path: entry_path.display().to_string(),
+                        source,
+                    },
+                )?,
+            }
+        }
         out.push(FsDirEntry {
             name,
             kind,
@@ -246,7 +346,33 @@ pub fn read_dir_blocking(
             symlink_target,
         });
     }
-    Ok(out)
+    Ok(FsDirListing {
+        entries: out,
+        errors,
+    })
+}
+
+/// Route one per-entry failure: append it to the tolerant channel, or
+/// propagate it when the caller asked for the fatal contract.
+///
+/// `errors.is_none()` *is* [`ReadDirTolerance::Fatal`] --- keeping the
+/// mode in the accumulator rather than passing it separately makes the
+/// two impossible to disagree.
+fn record_entry_error(
+    errors: &mut Option<Vec<FsDirEntryError>>,
+    name: Option<&str>,
+    error: FsError,
+) -> Result<(), FsError> {
+    match errors {
+        Some(list) => {
+            list.push(FsDirEntryError {
+                name: name.map(ToOwned::to_owned),
+                message: error.to_string(),
+            });
+            Ok(())
+        }
+        None => Err(error),
+    }
 }
 
 /// Convert an [`std::ffi::OsStr`] to `String` strictly. Returns
@@ -495,12 +621,23 @@ mod tests {
         CancellationToken::new()
     }
 
+    /// The fatal-mode shorthand every pre-Q#DR6 test used.
+    fn read_dir_fatal(path: &Path, cancel: &CancellationToken) -> Result<Vec<FsDirEntry>, FsError> {
+        read_dir_blocking(path, cancel, ReadDirTolerance::Fatal).map(|listing| {
+            assert!(
+                listing.errors.is_none(),
+                "fatal mode must not open a per-entry channel"
+            );
+            listing.entries
+        })
+    }
+
     #[test]
     fn read_dir_returns_entries_with_lstat_metadata() {
         let td = tempfile::tempdir().expect("tempdir");
         std::fs::write(td.path().join("a.txt"), b"hello").expect("write");
         std::fs::create_dir(td.path().join("subdir")).expect("mkdir");
-        let entries = read_dir_blocking(td.path(), &token()).expect("read_dir");
+        let entries = read_dir_fatal(td.path(), &token()).expect("read_dir");
         let mut names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["a.txt", "subdir"]);
@@ -516,7 +653,7 @@ mod tests {
         let td = tempfile::tempdir().expect("tempdir");
         std::fs::write(td.path().join("real.txt"), b"x").expect("write");
         symlink("real.txt", td.path().join("link")).expect("symlink");
-        let entries = read_dir_blocking(td.path(), &token()).expect("read_dir");
+        let entries = read_dir_fatal(td.path(), &token()).expect("read_dir");
         let link = entries.iter().find(|e| e.name == "link").unwrap();
         assert_eq!(link.kind, FsEntryKind::Symlink);
         assert_eq!(link.symlink_target.as_deref(), Some("real.txt"));
@@ -535,7 +672,7 @@ mod tests {
         }
         let cancel = token();
         cancel.cancel();
-        let err = read_dir_blocking(td.path(), &cancel).expect_err("must observe cancel");
+        let err = read_dir_fatal(td.path(), &cancel).expect_err("must observe cancel");
         assert!(matches!(err, FsError::Cancelled), "got {err:?}");
     }
 
@@ -627,7 +764,7 @@ mod tests {
     fn read_dir_on_missing_path_reports_io_error() {
         let td = tempfile::tempdir().expect("tempdir");
         let missing = td.path().join("does-not-exist");
-        let err = read_dir_blocking(&missing, &token()).expect_err("must error");
+        let err = read_dir_fatal(&missing, &token()).expect_err("must error");
         match err {
             FsError::Io { path, .. } => {
                 assert!(
@@ -640,6 +777,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn read_dir_tolerant_opens_an_empty_error_channel_on_a_clean_directory() {
+        // `Some(vec![])` rather than `None` is the whole shape
+        // contract: the Lua boundary keys the bare-array-vs-table
+        // result on `errors.is_some()`, so a clean tolerant listing
+        // must still carry the channel.
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("a.txt"), b"x").expect("write");
+        let listing = read_dir_blocking(td.path(), &token(), ReadDirTolerance::PerEntry)
+            .expect("tolerant read_dir");
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.errors.as_deref(), Some(&[][..]));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn read_dir_tolerant_keeps_an_entry_whose_symlink_target_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("real.txt"), b"x").expect("write");
+        // A legal Unix symlink target that is not representable as a
+        // Rust `String`. Before Q#DR6 this single entry took the whole
+        // listing down.
+        symlink(
+            std::ffi::OsStr::from_bytes(b"tgt-\xff"),
+            td.path().join("weird"),
+        )
+        .expect("symlink");
+
+        let listing = read_dir_blocking(td.path(), &token(), ReadDirTolerance::PerEntry)
+            .expect("tolerant read_dir must survive a non-UTF-8 target");
+        let weird = listing
+            .entries
+            .iter()
+            .find(|e| e.name == "weird")
+            .expect("the entry itself must be listed");
+        assert_eq!(weird.kind, FsEntryKind::Symlink);
+        assert!(
+            weird.symlink_target.is_none(),
+            "an unrepresentable target reports as unknown"
+        );
+        assert!(
+            listing.entries.iter().any(|e| e.name == "real.txt"),
+            "the readable sibling must survive too"
+        );
+        let errors = listing.errors.expect("tolerant mode opens the channel");
+        assert_eq!(errors.len(), 1, "one per-entry failure: {errors:?}");
+        assert_eq!(errors[0].name.as_deref(), Some("weird"));
+
+        // The same directory under the fatal contract still fails
+        // whole-listing --- the opt is what changes behavior, not the
+        // walk.
+        let err = read_dir_fatal(td.path(), &token()).expect_err("fatal mode must still fail");
+        assert!(
+            matches!(err, FsError::NonUtf8Path { .. }),
+            "expected NonUtf8Path, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_dir_tolerant_records_a_failed_lstat_and_lists_nothing_else_wrong() {
+        use std::os::unix::fs::PermissionsExt;
+        // Failure mode 1 from the framing: a directory readable but not
+        // searchable. `readdir` yields the names; every child `lstat`
+        // fails with EACCES.
+        let td = tempfile::tempdir().expect("tempdir");
+        let dir = td.path().join("no-search");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::write(dir.join("child"), b"x").expect("write child");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o400)).expect("chmod 400");
+        let searchable = std::fs::symlink_metadata(dir.join("child")).is_ok();
+        if searchable {
+            // Running as root (or on a filesystem that ignores the
+            // bits): the premise cannot be established, so assert
+            // nothing rather than pass vacuously.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .expect("restore perms");
+            eprintln!("lstat still succeeds without search permission; skipping");
+            return;
+        }
+
+        let tolerant = read_dir_blocking(&dir, &token(), ReadDirTolerance::PerEntry);
+        let fatal = read_dir_fatal(&dir, &token());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore perms");
+
+        let listing = tolerant.expect("tolerant read_dir must not fail the listing");
+        assert!(
+            listing.entries.is_empty(),
+            "the unreadable child cannot be described: {:?}",
+            listing.entries
+        );
+        let errors = listing.errors.expect("tolerant mode opens the channel");
+        assert_eq!(errors.len(), 1, "one per-entry failure: {errors:?}");
+        assert_eq!(
+            errors[0].name.as_deref(),
+            Some("child"),
+            "an lstat failure has an entry in hand and must name it"
+        );
+        let err = fatal.expect_err("fatal mode must still fail the whole listing");
+        assert!(matches!(err, FsError::Io { .. }), "got {err:?}");
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn read_dir_on_non_utf8_entry_name_reports_structured_error() {
@@ -650,7 +890,7 @@ mod tests {
         // Rust `String`.
         let bad_name = std::ffi::OsStr::from_bytes(b"bad-\xff-name");
         std::fs::write(td.path().join(bad_name), b"").expect("write entry");
-        let err = read_dir_blocking(td.path(), &token()).expect_err("must error on non-UTF-8");
+        let err = read_dir_fatal(td.path(), &token()).expect_err("must error on non-UTF-8");
         match err {
             FsError::NonUtf8Path { parent, bytes } => {
                 assert!(

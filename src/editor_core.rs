@@ -4787,7 +4787,14 @@ fn backward_word(buf: &Buffer, mut pos: Position) -> Position {
 /// path's on-disk identity. Every step is best-effort — if `$HOME`
 /// or the cwd is unavailable the path is returned as far as it could
 /// be resolved rather than panicking.
-fn normalize_buffer_path(path: PathBuf) -> PathBuf {
+///
+/// Public because dired needs the *same* canonical form the buffer
+/// registry keys on (Q#DR2): its buffer-per-directory naming and
+/// `find_buffer_for_path`'s dedup have to agree, and a Lua-side mirror
+/// of this function would be a second implementation of a canonical
+/// form — the tab-width-constants class in miniature. `pmacs.path
+/// .canonicalize` is this function, not a copy of it.
+pub fn normalize_buffer_path(path: PathBuf) -> PathBuf {
     let path = expand_tilde(path);
     let abs = if path.is_absolute() {
         path

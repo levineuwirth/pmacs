@@ -12,7 +12,10 @@
 --     `symlink_target` is present only on symlink entries.
 --     `opts` may contain `supersede = "<key>"` to chain into the M3
 --     supersede semantics (a later read_dir under the same key
---     cancels the earlier one).
+--     cancels the earlier one), and `tolerant = true` to swap the
+--     all-or-nothing listing for `{ entries = ..., errors = ... }`
+--     (see fs.read_dir's own comment below). Any other key is an
+--     error rather than being silently ignored.
 --
 --   Order: entries are returned in *filesystem iteration order*,
 --   which is whatever the kernel's `readdir` syscall returns. On
@@ -69,24 +72,61 @@ end
 
 local fs = {}
 
--- Shared opts.supersede extractor; raises on misshapen opts.
-local function supersede_key(opts, where)
-  if opts == nil then return nil end
+-- Shared read-op opts parser; raises on misshapen opts.
+--
+-- Unknown keys are REJECTED, not ignored. The earlier version read
+-- `opts.supersede` and silently dropped everything else, which means a
+-- typo'd `tolerant` would degrade to the fatal contract with no signal
+-- at all --- exactly the failure the tolerant opt exists to prevent
+-- (dired framing §8, minor c). `allowed` is the per-op whitelist.
+local function read_opts(opts, where, allowed)
+  if opts == nil then return nil, false end
   if type(opts) ~= "table" then
     error(where .. ": opts must be a table or nil, got " .. type(opts))
   end
-  local k = opts.supersede
-  if k ~= nil and type(k) ~= "string" then
+  for key in pairs(opts) do
+    if not allowed[key] then
+      local names = {}
+      for name in pairs(allowed) do names[#names + 1] = name end
+      table.sort(names)
+      error(string.format("%s: unknown opts key %q (expected one of: %s)",
+        where, tostring(key), table.concat(names, ", ")))
+    end
+  end
+  local key = opts.supersede
+  if key ~= nil and type(key) ~= "string" then
     error(where .. ": opts.supersede must be a string")
   end
-  return k
+  local tolerant = opts.tolerant
+  if tolerant ~= nil and type(tolerant) ~= "boolean" then
+    error(where .. ": opts.tolerant must be a boolean")
+  end
+  return key, tolerant == true
 end
 
+local READ_DIR_OPTS = { supersede = true, tolerant = true }
+local STAT_OPTS = { supersede = true }
+
+-- Two result shapes, chosen by `opts.tolerant` (dired Q#DR6):
+--
+--   read_dir(path)                     -> { <entry>, ... }
+--   read_dir(path, { tolerant = true }) -> { entries = { <entry>, ... },
+--                                            errors  = { { name = ...?,
+--                                                          message = ... }, ... } }
+--
+-- The bare array is the M8.1 contract and stays exactly as it was, so
+-- an existing consumer (the frozen M8.2 dired fixture consumes it with
+-- `ipairs`) is unaffected. Under the opt, a per-entry `readdir` /
+-- `lstat` / `readlink` failure and a non-UTF-8 symlink *target* become
+-- `errors` rows instead of failing the whole listing; a failure on the
+-- parent directory, and a non-UTF-8 entry *name*, stay fatal. An
+-- `errors` row has no `name` when the entry never materialized.
 function fs.read_dir(path, opts)
   if type(path) ~= "string" then
     error("pmacs.fs.read_dir: path must be a string, got " .. type(path))
   end
-  local id = async_mod._dispatch_fs_read_dir(path, supersede_key(opts, "pmacs.fs.read_dir"))
+  local key, tolerant = read_opts(opts, "pmacs.fs.read_dir", READ_DIR_OPTS)
+  local id = async_mod._dispatch_fs_read_dir(path, key, tolerant)
   return build_handle(id)
 end
 
@@ -94,7 +134,8 @@ function fs.stat(path, opts)
   if type(path) ~= "string" then
     error("pmacs.fs.stat: path must be a string, got " .. type(path))
   end
-  local id = async_mod._dispatch_fs_stat(path, supersede_key(opts, "pmacs.fs.stat"))
+  local key = read_opts(opts, "pmacs.fs.stat", STAT_OPTS)
+  local id = async_mod._dispatch_fs_stat(path, key)
   return build_handle(id)
 end
 
