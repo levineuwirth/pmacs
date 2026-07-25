@@ -1,7 +1,8 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-25, after find-file (#162) landed — the dired
-arc's Stage 0 — following COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
+**Last updated: 2026-07-25, after the inline-math slice (#158) landed —
+the first mathematical typesetting in pmacs — following find-file (#162),
+the dired arc's Stage 0, and COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
 minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
 inline-math re-scout (#154), the vterm PTY-flake fix (#153), and the
 GPU initial-target doc refresh (#152); and before that GPU
@@ -26,11 +27,13 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-25)
 
-- `main` @ `2af1ab3` (find-file #162 atop COHERENCE.md #163, Lean 4 Stage 1
-  #160, minimap blank-slab #159, bottom-panel Stage 1 #155, inline-math
-  re-scout #154, vterm PTY-flake #153, and doc refresh #152). Protocol
-  unchanged at **v20**. The bullets below describe the arcs in their own
-  terms; this line is the head-of-`main` anchor.
+- `main` @ `d152120` (the bottom-panel landed-doc refresh #156 atop the
+  inline-math slice #158, dired Stage 1 #165, the GPU terminal input fix
+  #166, Lean 4 Stage 2 #161, the dired framing #164, COHERENCE.md #163,
+  find-file #162, Lean 4 Stage 1 #160, minimap blank-slab #159,
+  bottom-panel Stage 1 #155). Protocol unchanged at **v20**. The bullets
+  below describe the arcs in their own terms; this line is the
+  head-of-`main` anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -39,6 +42,32 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey **broken at step 3**
   (`pmacs .` exits 1).
+- **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
+  merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
+  frontend. **No protocol change (still v20); the whole slice lives in
+  `pmacs-gpu`**, because `pmacs-gpu` depends only on `pmacs-protocol` and
+  never on `pmacs` — a core-crate parser would have been unreachable from
+  where rendering happens.
+  - `math_parse.rs` → `math_layout.rs` → a `ChunkSource::MathBox` spacer
+    chunk → per-glyph mini-buffers drawn at the shaped line's real
+    baseline, with fraction rules as quads. Font is bundled Latin Modern
+    Math (~717 KiB) under the **GUST Font License** — not OFL.
+  - **The v0 subset is narrow and deliberately so**: Greek (34 entries),
+    sub/superscript, and `\frac`. Everything else — including relations
+    like `\geq`, fences, big operators, and all display math (`$$…$$`,
+    `\[…\]`) — is a named deferral, and an unsupported command degrades
+    the **whole span** back to source rather than rendering partially.
+    In a real paper most inline spans still show source; that is the
+    designed behaviour, not a defect.
+  - **Math is suppressed while the caret is inside its span**, so editing
+    always sees source. That gate reads the effective caret plus
+    selection endpoints and is fed by three separate refresh triggers;
+    it is the most delicate part of the slice.
+  - Selection and search washes cover the whole box rectangle, not
+    sub-ranges (sub-range washes are deferred).
+  - TUI shows the LaTeX source unchanged. That divergence is recorded
+    against `COHERENCE.md` §16, which audits the "no privileged
+    frontend" rule.
 - **find-file LANDED — #162** (`docs/dired-framing.md` §10, Q#DR11; merge
   `2af1ab3`; one review round). `C-x C-f` is the dired arc's **Stage 0**:
   pmacs previously had no discoverable way to open a file by path — no
