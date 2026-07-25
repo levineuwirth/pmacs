@@ -668,6 +668,33 @@ pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: 
     }
 }
 
+/// Read a `String` setting plus the registry epoch that keys any cache
+/// built from it (Q#TC4c).
+///
+/// The epoch is returned WITH the value deliberately: a caller caching a
+/// parsed form needs both, and reading them in two calls would let a
+/// `set` land between them and produce a cache stamped with the wrong
+/// epoch. `fallback` covers a bare core whose runtime never defined the
+/// setting, matching [`config_u32`].
+#[must_use]
+pub fn config_string_and_epoch(
+    lua: &Lua,
+    name: &str,
+    buffer_id: Option<BufferId>,
+    fallback: &str,
+) -> (String, u64) {
+    let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() else {
+        return (fallback.to_owned(), 0);
+    };
+    let borrowed = registry.borrow();
+    let epoch = borrowed.value_epoch();
+    let value = match borrowed.get(name, buffer_id) {
+        Ok(crate::config_registry::ConfigValue::Str(v)) => v.clone(),
+        _ => fallback.to_owned(),
+    };
+    (value, epoch)
+}
+
 /// Short-circuit a binding when the init phase has completed.
 ///
 /// Lifecycle-affecting Lua APIs (currently just `pmacs.attach`; M5.6d+)

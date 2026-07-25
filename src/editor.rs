@@ -989,19 +989,28 @@ impl EditorState {
             .get(&frontend_id)
             .is_some_and(|state| state.terminal_escape);
         if let Some(view_key) = terminal_key {
+            // Q#TC4: the escape chord is per terminal, resolved through
+            // `terminal.escape-key` and cached on the session so this
+            // hot path parses at most once per (terminal, config epoch).
+            let escape_chord = self.terminal_escape_chord(view_key.buffer_id);
             if escaped {
                 self.dispatchers
                     .entry(frontend_id)
                     .or_default()
                     .terminal_escape = false;
-                if chord.is_some_and(is_terminal_escape_chord) {
+                if chord == Some(escape_chord) {
+                    // Q#TC4b: repeating the escape sends THAT chord to the
+                    // child, not a hardcoded ETX. With a configured escape
+                    // of `C-x`, sending Ctrl-C here would both surprise the
+                    // user and make literal Ctrl-X unreachable, since the
+                    // first press is always consumed as the escape.
                     self.claim_terminal_controller(view_key);
-                    self.send_terminal_bytes(view_key.buffer_id, &[0x03]);
+                    self.send_terminal_escape_literal(view_key, escape_chord);
                     return;
                 }
                 // The post-escape key starts a fresh ordinary sequence below.
             } else if !dispatcher_pending {
-                if chord.is_some_and(is_terminal_escape_chord) {
+                if chord == Some(escape_chord) {
                     let state = self.dispatchers.entry(frontend_id).or_default();
                     state.terminal_escape = true;
                     state.dispatcher = KeyDispatcher::new();
@@ -1115,6 +1124,54 @@ impl EditorState {
             .borrow()
             .is_terminal(window.buffer_id)
             .then_some(key)
+    }
+
+    /// This terminal's effective escape chord (Q#TC4).
+    ///
+    /// Resolution is `get("terminal.escape-key", terminal_buffer)` —
+    /// buffer-local, then global, then default — because unlike the two
+    /// open-time settings this one is read while the terminal exists, so
+    /// a per-terminal escape is expressible and supported (Q#TC2b).
+    ///
+    /// The parse and the once-per-terminal invalid-value report both live
+    /// in [`crate::terminal::TerminalManager::escape_chord`]; this method
+    /// only supplies the resolved spelling and the epoch that keys the
+    /// cache, and surfaces any report through the status line — the same
+    /// channel `send_terminal_bytes` uses for terminal failures.
+    fn terminal_escape_chord(&self, buffer_id: crate::buffer::BufferId) -> Chord {
+        let lua = self.lua_host.lua();
+        let (spelling, epoch) = crate::lua_bindings::config_string_and_epoch(
+            lua,
+            "terminal.escape-key",
+            Some(buffer_id),
+            crate::terminal::DEFAULT_TERMINAL_ESCAPE_KEY,
+        );
+        let (chord, report) = self
+            .terminal_manager
+            .borrow_mut()
+            .escape_chord(buffer_id, epoch, &spelling);
+        if let Some(message) = report {
+            self.core.borrow_mut().status = message;
+        }
+        chord
+    }
+
+    /// Send the configured escape chord to the child as literal input
+    /// (Q#TC4b), through the same encoder ordinary keys use so it
+    /// inherits application-cursor and modifier handling.
+    fn send_terminal_escape_literal(&self, key: TerminalViewKey, chord: Chord) {
+        let event = KeyEvent::new(chord.code, chord.modifiers);
+        let Some((terminal_key, modifiers)) = terminal_key_from_crossterm(event) else {
+            return;
+        };
+        let modes = self
+            .terminal_manager
+            .borrow()
+            .modes_for_view(key)
+            .unwrap_or_default();
+        if let Some(bytes) = crate::terminal::input::encode_key(terminal_key, modifiers, modes) {
+            self.send_terminal_bytes(key.buffer_id, &bytes);
+        }
     }
 
     fn claim_terminal_controller(&self, key: TerminalViewKey) {
@@ -4419,10 +4476,6 @@ fn sanitize_single_line(s: &str) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
-}
-
-fn is_terminal_escape_chord(chord: Chord) -> bool {
-    chord.code == KeyCode::Char('c') && chord.modifiers == KeyModifiers::CONTROL
 }
 
 fn terminal_key_from_crossterm(key: KeyEvent) -> Option<(TerminalKey, TerminalModifiers)> {
