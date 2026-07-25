@@ -174,6 +174,46 @@ impl Theme {
             // prefix-walks to `tag`.
             ("tag", fg(5)),
             ("attribute", fg(3)),
+            // Lean 4 (framing Q#LN4). These four are the captures the Lean
+            // query uses that the set above lacks — but three of them are
+            // NOT Lean-only, and adding them here changes languages that
+            // already ship. That is the #146 lesson (`attribute`, above,
+            // retro-painted rust/lua/yaml) and it is deliberate, not
+            // incidental:
+            //
+            //   * `constructor` reaches SEVEN entries — rust, lua, python,
+            //     javascript, and (because `tree_sitter_javascript::
+            //     HIGHLIGHT_QUERY` is concatenated base-first into them)
+            //     javascriptreact, typescript, typescriptreact. Its shape is
+            //     not "constructors": rust/python/javascript tag every
+            //     capitalized identifier (`#match? "^[A-Z]"`), and lua tags
+            //     every table-constructor brace. So this recolors `Some`,
+            //     `None`, `Ok`, `Err`, every class-cased name, and every Lua
+            //     `{}`. All of those render as unstyled default text today.
+            //   * `character` reaches zig only.
+            //   * `keyword.conditional` reaches cmake and zig, which
+            //     currently flatten it to `keyword`; giving it
+            //     `keyword.control`'s style makes their conditionals read the
+            //     way rust's already do.
+            //   * `warning` reaches no other grammar. It exists for Lean's
+            //     `sorry` — an unproved goal, the single most important thing
+            //     to see in a proof file.
+            //
+            // The alternative was an in-repo query overlay renaming these
+            // into the existing vocabulary (the #144 LaTeX pattern), which
+            // would fork a 213-line query we would then own and hand-merge
+            // on every crate bump. There is no middle option: styling Lean's
+            // constructors without touching the other seven entries requires
+            // renaming the capture, which requires the overlay.
+            ("constructor", fg(11)),
+            ("character", fg(2)),
+            ("keyword.conditional", fg_bold(13)),
+            // Bold BRIGHT red, deliberately the loudest entry in the table
+            // and deliberately distinct from `number`'s plain `fg(1)`: in a
+            // proof file `sorry` means "this is admitted, not proved", which
+            // is the one thing a reader must never skim past. Plain `fg(1)`
+            // would have collided with every numeric literal on colour alone.
+            ("warning", fg_bold(9)),
         ];
         let by_capture = entries
             .iter()
@@ -1482,6 +1522,262 @@ mod tests {
             pmacs_protocol::cell::Color::Indexed(3),
             "a Rust #[derive] attribute paints the shared @attribute style (fg 3)"
         );
+    }
+
+    /// Paint `src` as `language` into a one-row grid and return the style
+    /// at column `col`. Shared by the Q#LN4 retro-paint pins below.
+    fn painted_fg_at(
+        language_name: &str,
+        file: &str,
+        src: &str,
+        col: u32,
+    ) -> pmacs_protocol::cell::Color {
+        painted_style_at(language_name, file, src, col).fg
+    }
+
+    /// As [`painted_fg_at`], but returns the whole style — needed where a
+    /// colour alone does not discriminate (Lean's `warning` vs `number`).
+    fn painted_style_at(
+        language_name: &str,
+        file: &str,
+        src: &str,
+        col: u32,
+    ) -> pmacs_protocol::cell::Style {
+        use crate::buffer::{Buffer, BufferId, EditOp};
+        use crate::cell::{Cell, CellSize};
+        use crate::syntax::{ParseView, SyntaxRegistry};
+
+        let reg = SyntaxRegistry::new();
+        let language = reg.language(language_name).expect("grammar loads");
+        let mut buf = Buffer::new(BufferId::next(), file);
+        buf.apply_edit(EditOp::Insert {
+            pos: 0,
+            bytes: src.as_bytes(),
+        })
+        .unwrap();
+        let view = ParseView::new(&buf, language, language_name.to_owned());
+        let handle = view.handle();
+        let _vid = buf.attach_view(Box::new(view));
+        let mut req = handle.make_request();
+        req.injection_aliases = reg.injection_alias_snapshot();
+        let bundle = crate::syntax::run_parse(req).expect("parse");
+        handle.install(reg.resolve_layer_queries(&bundle));
+
+        let mut hv = SyntaxHighlightView::new(handle, reg.theme());
+        let (rows, cols) = (1usize, 40usize);
+        let mut backing: Vec<Cell> = vec![Cell::default(); rows * cols];
+        let mut grid = CellGrid {
+            cells: &mut backing,
+            stride: cols as u32,
+            size: CellSize::new(rows as u32, cols as u32),
+        };
+        let viewport = Viewport {
+            buffer_start: 0,
+            buffer_end: u64::MAX,
+            cell_origin: CellCoord::new(0, 0),
+            cell_size: CellSize::new(rows as u32, cols as u32),
+            gutter_w: 0,
+            folds: None,
+        };
+        hv.render(&buf, viewport, &mut grid);
+        grid.get(CellCoord::new(0, col)).style
+    }
+
+    /// Does `language`'s compiled highlight query use `capture`?
+    fn query_uses_capture(language: &str, capture: &str) -> bool {
+        let reg = crate::syntax::SyntaxRegistry::new();
+        let Some(query) = reg.highlights_query(language) else {
+            panic!("{language} has no highlights query");
+        };
+        query.capture_names().contains(&capture)
+    }
+
+    #[test]
+    fn lean4_grid_paints_comment_keyword_name_operator_and_number() {
+        // Framing acceptance 5: the grammar plus the crate query plus the
+        // theme table actually produce distinct styles on a painted grid.
+        // Asserted end-to-end rather than at the query level because a
+        // capture that resolves to `Style::default()` is indistinguishable
+        // from no capture at all to a reader.
+        use pmacs_protocol::cell::Color;
+
+        // `-- c` — the whole comment run.
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "-- c\n", 0),
+            Color::Indexed(8),
+            "a Lean line comment paints the comment style"
+        );
+
+        // `def foo : Nat := 42`
+        let src = "def foo : Nat := 42\n";
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 0),
+            Color::Indexed(5),
+            "`def` paints the keyword style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 4),
+            Color::Indexed(4),
+            "the definition's name paints the function style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 14),
+            Color::Indexed(6),
+            "`:=` paints the operator style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 17),
+            Color::Indexed(1),
+            "a numeric literal paints the number style"
+        );
+
+        // A string literal, and `theorem` as a second declaration keyword.
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "def s := \"hi\"\n", 9),
+            Color::Indexed(2),
+            "a string literal paints the string style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "theorem t : True := trivial\n", 0),
+            Color::Indexed(5),
+            "`theorem` paints the keyword style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "theorem t : True := trivial\n", 8),
+            Color::Indexed(4),
+            "the theorem's name paints the function style"
+        );
+    }
+
+    #[test]
+    fn lean4_sorry_paints_the_warning_style_distinctly_from_a_number() {
+        // Framing acceptance 6. `sorry` admits a goal without proving it —
+        // in a proof file it is the single most important token to notice,
+        // and it is why Q#LN4 adds a `warning` entry at all.
+        //
+        // The style is asserted in FULL, not by colour: `number` and the
+        // first-choice `warning` colour were both indexed red, so a
+        // colour-only assertion would have passed with `sorry` painted
+        // exactly like the literal `42` beside it. That is the whole failure
+        // this test exists to prevent.
+        use pmacs_protocol::cell::Color;
+
+        let sorry = painted_style_at("lean4", "a.lean", "theorem t : True := sorry\n", 20);
+        assert_eq!(
+            sorry.fg,
+            Color::Indexed(9),
+            "`sorry` paints the warning colour"
+        );
+        assert!(sorry.bold, "`sorry` is bold");
+
+        let number = painted_style_at("lean4", "a.lean", "def n := 42\n", 9);
+        assert_ne!(
+            (sorry.fg, sorry.bold),
+            (number.fg, number.bold),
+            "`sorry` must be visually distinct from a numeric literal"
+        );
+    }
+
+    #[test]
+    fn lean4_constructor_capture_retro_paints_the_whole_javascript_family() {
+        // Framing acceptance 7 (Q#LN4), the breadth half. `constructor` was
+        // added for Lean, but four crates emit it — and because
+        // `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
+        // base-first into the react/typescript entries
+        // (`src/syntax.rs`), it reaches SEVEN language entries, not four.
+        //
+        // Asserted at the query level rather than per-fixture precisely
+        // because the composition is the fragile part: if someone stops
+        // concatenating the JS base query into `typescript`, this fails
+        // while any single-language fixture would still pass.
+        for language in [
+            "rust",
+            "lua",
+            "python",
+            "javascript",
+            "javascriptreact",
+            "typescript",
+            "typescriptreact",
+        ] {
+            assert!(
+                query_uses_capture(language, "constructor"),
+                "`{language}` emits @constructor, so Q#LN4's entry retro-paints it"
+            );
+        }
+    }
+
+    #[test]
+    fn lean4_capture_additions_paint_rust_constructors_and_lua_braces() {
+        // Framing acceptance 7, the "actually reaches painted cells" half —
+        // a query-name check alone would not prove the theme entry resolves.
+        // Both of these rendered as unstyled default text before Q#LN4.
+        use pmacs_protocol::cell::Color;
+
+        // `None` at col 8 — a bare capitalized identifier, which is what the
+        // rust query's `#match? "^[A-Z]"` tags. Note that `Some(1)` does NOT
+        // work here: in call position a narrower `@function` pattern wins and
+        // paints fg 4. The distinction is worth keeping in the test, because
+        // it is the difference between "capitalized identifiers recolor" and
+        // "enum variants recolor" — only the former is true.
+        assert_eq!(
+            painted_fg_at("rust", "a.rs", "let x = None;\n", 8),
+            Color::Indexed(11),
+            "a bare Rust capitalized identifier paints the shared @constructor style"
+        );
+        // `Some` in pattern position (col 10) does reach @constructor.
+        assert_eq!(
+            painted_fg_at("rust", "a.rs", "match v { Some(z) => z, None => 0 };\n", 10),
+            Color::Indexed(11),
+            "a Rust pattern-position variant paints the shared @constructor style"
+        );
+        // ...but in CALL position the narrower @function pattern wins. Pinned
+        // so the blast radius recorded in the framing stays accurate.
+        assert_eq!(
+            painted_fg_at("rust", "a.rs", "let e = Err(1);\n", 8),
+            Color::Indexed(4),
+            "a called variant keeps @function, not @constructor"
+        );
+        // Lua tags the table-constructor BRACES, not a name: `{` at col 10
+        // of `local t = {}`.
+        assert_eq!(
+            painted_fg_at("lua", "a.lua", "local t = {}\n", 10),
+            Color::Indexed(11),
+            "a Lua table brace paints the shared @constructor style"
+        );
+    }
+
+    #[test]
+    fn lean4_capture_additions_do_not_reach_unrelated_languages() {
+        // Framing acceptance 8 — the negative pin, redrawn in review round 1.
+        //
+        // Rev 1 named Lua and Python here, which was a self-contradiction:
+        // both are retro-painted by `constructor`, so a "nothing moved"
+        // assertion over them would have been vacuous — the #155 R2 shape.
+        // These ten emit NONE of the four names, verified by grep over the
+        // crate queries in the dependency graph.
+        //
+        // Stated at the query level, which is stronger than a fixture
+        // snapshot: it holds for every construct in the language, not just
+        // the one a fixture happened to exercise.
+        const ADDED: [&str; 4] = ["constructor", "character", "keyword.conditional", "warning"];
+        for language in [
+            "markdown", "json", "yaml", "html", "css", "c", "cpp", "go", "toml", "bash",
+        ] {
+            for capture in ADDED {
+                assert!(
+                    !query_uses_capture(language, capture),
+                    "`{language}` must not emit @{capture}; Q#LN4 would silently restyle it"
+                );
+            }
+        }
+
+        // Non-vacuity: the same predicate must find each name where it DOES
+        // occur. Without this, a `query_uses_capture` that always returned
+        // false would pass the loop above.
+        assert!(query_uses_capture("lean4", "constructor"));
+        assert!(query_uses_capture("zig", "character"));
+        assert!(query_uses_capture("cmake", "keyword.conditional"));
+        assert!(query_uses_capture("lean4", "warning"));
     }
 
     #[test]

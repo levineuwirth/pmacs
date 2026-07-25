@@ -54,6 +54,76 @@ git status --short --branch
 The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
+## Lean 4 lane (Arc 8) — Stage 1 IN REVIEW (PR #160)
+
+- Portable branch: `githubsucks/lean4-stage1`, worked in the shared
+  checkout (no sibling worktree), based on `githubsucks/main` @ `e745068`.
+- Approved framing: `docs/lean4-mode-framing.md` revision 4, committed as
+  the branch's first commit (`a382965`) after three review rounds. **Seven
+  stages**, 19 decisions (Q#LN1–19), 64 acceptance criteria. North star:
+  match or exceed VS Code's Lean support.
+- **Stage 1 implemented; no wire change (protocol stays v20), no LSP, no
+  frontend change.** Four commits: framing, grammar, theme captures,
+  editing surface + acceptance.
+  - `Cargo.toml` + `src/syntax.rs`: `arborium-lean` 2.18 and one
+    `BUILTIN_LANGUAGES` entry named **`lean4`** (Q#LN2 — the name becomes
+    the `didOpen` language_id), claiming `.lean` only.
+  - `src/highlight.rs`: four capture entries — `constructor`, `character`,
+    `keyword.conditional`, `warning`.
+  - `builtin/runtime/{comment,pair,syntax}.lua`: `--` comments, the
+    `⟨⟩ ⦃⦄ ⟮⟯` pair set, the `lean` → `lean4` modeline alias.
+  - `tests/lean4_stage1_acceptance.rs` plus unit tests in `syntax.rs` /
+    `highlight.rs`: 12 criteria, 17 tests.
+- **Q#LN1's open obligation is discharged.** `tree-sitter-lean4` is
+  unusable (depends on `tree-sitter ^0.25` directly against our 0.26,
+  exports no `LANGUAGE` const despite its README, packages no queries);
+  `arborium-lean` rides `tree-sitter-language 0.1` with a pre-generated
+  ABI-15 parser. `cargo tree -d` shows no duplicate core. The parse smoke
+  pins the failure mode that matters: `→`/`∀`/`≥` must produce
+  `(arrow)`/`(forall)`/`(comparison)`, since a mismatched-core build
+  degrades silently on exactly those characters rather than failing loudly.
+- **Q#LN4 is a deliberate retro-paint of seven language entries**, not
+  four: `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
+  base-first into javascriptreact/typescript/typescriptreact. Its shape is
+  "every capitalized identifier" (`#match? "^[A-Z]"`) plus every Lua table
+  brace — not "constructors". Pinned in both directions per #146.
+- Implementation findings not in the framing:
+  - `warning` had to move from bold red to bold **bright** red: `number`
+    is plain `fg(1)`, so `sorry` and an adjacent numeric literal were the
+    same colour. Found by writing the test.
+  - `Some(1)` is **not** `@constructor` — in call position a narrower
+    `@function` pattern wins. Only bare or pattern-position capitalized
+    identifiers reach it. Pinned so the blast-radius claim stays honest.
+  - Lean node kinds nest: `module > declaration > def|theorem`.
+  - `pmacs.parse.injection_aliases` is a documented **write-only** Lua
+    proxy (canonical map is Rust-side), so fence tests must drive
+    `_parse_now` and inspect layer languages, never read the table back.
+- **Review round 1 addressed.** The finding: acc12's server-list assertion
+  could not fail for the regression it named — the shared `editor()`
+  helper wipes `pmacs.lsp.config` before any buffer opens, so
+  `#pmacs.lsp.list() == 0` holds for every language regardless of what
+  Stage 1 ships. It now asserts against a **pristine** `EditorState` that
+  `pmacs.lsp.config.lean4` is nil, with a non-vacuity check that the same
+  lookup finds `rust`; bite-verified by adding a `lean4` config to
+  `lsp.lua` and watching it fail. Also fixed a stale column in a
+  `highlight.rs` comment.
+- Verification on this branch: `cargo fmt --check` clean; strict workspace
+  Clippy clean; 1,826 default + 2,003 CRDT library tests; lean4 Stage 1
+  9/9; comment toggle 14; auto-pair 45; injection 4; M4 121; required GPU
+  152; **isolated-config workspace sweep 3,150 across 90 suites**;
+  `git diff --check` clean. The sweep needs an isolated `XDG_CONFIG_HOME`
+  for the reason recorded in the bottom-panel lane below.
+- **Stage 2 is multi-root LSP server affinity** — pure substrate, no Lean
+  content, and it changes `ensure_server`, which every LSP language
+  shares. It is sequenced next because Lean is the language that makes its
+  absence a correctness failure rather than an inconvenience. Two
+  corrections the framing already carries for it: `root` is computed at
+  `lsp.lua:537`, **after** the reuse loop, so the fix must hoist it; and
+  `project_root_for` never returns nil for a file with a path, so the
+  affinity key must be the root only when a root was actually *detected*,
+  or markerless scratch files fragment into one server per directory for
+  every language.
+
 ## Bottom-panel lane (window placement + side windows) — Stage 1 IN REVIEW
 
 - Portable branch: `githubsucks/bottom-panel`, worktree
