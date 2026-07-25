@@ -6519,6 +6519,45 @@ pub fn install_async(
 ) -> mlua::Result<()> {
     lua.set_app_data(runtime.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
+
+    // Arc 8 Stage 3a (framing Q#LN20): the one *synchronous* filesystem
+    // primitive Lua has. `pmacs.fs` is otherwise an async, handle-
+    // returning surface built in `builtin/runtime/fs.lua`, so this
+    // arrives through a private table that file re-exports rather than
+    // joining the `_dispatch_fs_*` family it would not belong to.
+    //
+    // Installed here, alongside those dispatchers, purely for load
+    // order: `make_async_runtime` runs before `fs.lua` is evaluated,
+    // whereas `install_project` — the other plausible home — runs after
+    // it, so a canonicalizer placed there is nil when `fs.lua` reads it.
+    //
+    // Synchronous on purpose, and that is the whole point. The consumer
+    // is a function-valued `pmacs.lsp.config[lang].root`, which
+    // `project_root_for` calls from `ensure_server` <- `attach_buffer`
+    // <- the `buffer.after-load` hook — no coroutine, nothing to await
+    // on. An awaitable canonicalizer would be unusable there for exactly
+    // the reason `pmacs.fs.stat` already is, leaving #161's
+    // canonical-root obligation undischarged. The cost is one syscall on
+    // a path the editor is already opening; `pmacs.project.detect`
+    // canonicalizes synchronously on the same hook today.
+    {
+        let fs_priv = lua.create_table()?;
+        fs_priv.set(
+            "canonicalize",
+            lua.create_function(|_, path: String| {
+                // nil rather than an error for a path that cannot be
+                // resolved: asking about a deleted file or a broken
+                // symlink is ordinary, and raising would surface through
+                // `resolve_root_fn`'s pcall as a config bug, which it is
+                // not.
+                Ok(std::fs::canonicalize(&path)
+                    .ok()
+                    .map(|p| p.display().to_string()))
+            })?,
+        )?;
+        pmacs.set("_fs", fs_priv)?;
+    }
+
     let async_mod = lua.create_table()?;
 
     {

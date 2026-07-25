@@ -1546,6 +1546,160 @@ end
 -- itself is unaffected. Server ids are snapshotted before the loop
 -- because `apply_workspace_edit` → `find_or_open` can attach a new
 -- buffer mid-iteration (mutating `attachments`).
+-- Server-originated notification / response seams (framing Q#LN9) -------
+--
+-- Before this, `handle_server_requests` handled five `request` methods
+-- and `initialized`, and dropped every `notification` and `response` on
+-- the floor. Dropping responses made `pmacs.lsp.send_request` a
+-- write-only API from Lua: the reply was drained and discarded, so
+-- nothing outside Rust's typed stores could ever consume one.
+--
+-- Both seams route through the *existing* drain. A second
+-- `events_take` caller would steal events from this one — `take_events`
+-- removes the queue — so any new consumer must extend this loop rather
+-- than open its own.
+--
+-- method -> array of subscriber fns. Persistent; `pmacs.hook` has no
+-- `remove` and neither does this, deliberately matching it.
+local notification_subs = {}
+-- tostring(sid) -> { [request_id] = { fn = fn, attempt = n } }. One-shot.
+local pending_responses = {}
+
+local function report_subscriber_error(what, err)
+  local msg = string.format("LSP: %s subscriber failed: %s", what,
+    tostring(err))
+  -- COHERENCE §1.2: a pcall around background wiring must report, not
+  -- discard. `pmacs.editor.set_status` is the channel that exists;
+  -- `pmacs.error` is referenced by fifteen call sites and defined
+  -- nowhere in production, so it rides along rather than standing alone.
+  pcall(pmacs.editor.set_status, msg)
+  if pmacs.error then pcall(pmacs.error, msg) end
+end
+
+-- Current spawn attempt for `sid`, or nil if the manager has forgotten
+-- it. A restart reuses the sid but bumps the attempt, which is how a
+-- pending one-shot tells "my server is still here" from "my server died
+-- and a new generation took its id".
+local function server_attempt(sid)
+  local skey = tostring(sid)
+  for _, info in ipairs(pmacs.lsp.list()) do
+    if tostring(info.id) == skey then
+      return info.attempt or 0, info.state and info.state.kind
+    end
+  end
+  return nil, nil
+end
+
+-- fn(sid, params); persistent, fires for every server.
+function pmacs.lsp.on_notification(method, fn)
+  if type(method) ~= "string" or type(fn) ~= "function" then
+    error("pmacs.lsp.on_notification(method, fn): want string, function")
+  end
+  local subs = notification_subs[method]
+  if not subs then
+    subs = {}
+    notification_subs[method] = subs
+  end
+  subs[#subs + 1] = fn
+end
+
+-- fn(result, err); ONE-SHOT, keyed to the exact request.
+-- `request_id` is what `pmacs.lsp.send_request` returned.
+function pmacs.lsp.on_response(sid, request_id, fn)
+  if not sid or type(request_id) ~= "number" or type(fn) ~= "function" then
+    error("pmacs.lsp.on_response(sid, request_id, fn): want sid, number, function")
+  end
+  local skey = tostring(sid)
+  local pend = pending_responses[skey]
+  if not pend then
+    pend = {}
+    pending_responses[skey] = pend
+  end
+  -- The attempt is captured at registration so a restart under the same
+  -- sid purges this entry rather than leaving it waiting on a reply the
+  -- dead generation was going to send.
+  pend[request_id] = { fn = fn, attempt = server_attempt(sid) or 0 }
+end
+
+local function dispatch_notification(sid, ev)
+  local subs = notification_subs[ev.method]
+  if not subs then return end
+  -- Length captured up front: a subscriber that registers another one
+  -- must not be able to extend the list being walked.
+  local n = #subs
+  for i = 1, n do
+    local ok, err = pcall(subs[i], sid, ev.params)
+    if not ok then
+      report_subscriber_error("notification " .. tostring(ev.method), err)
+    end
+  end
+end
+
+local function deliver_response(sid, ev)
+  local skey = tostring(sid)
+  local pend = pending_responses[skey]
+  if not pend then return end
+  local entry = pend[ev.request_id]
+  if not entry then return end
+  -- Removed BEFORE invocation: a handler that raises must not be
+  -- re-entered by a later event carrying the same id.
+  pend[ev.request_id] = nil
+  if next(pend) == nil then pending_responses[skey] = nil end
+  local ok, err = pcall(entry.fn, ev.result, ev.error)
+  if not ok then
+    report_subscriber_error("response " .. tostring(ev.method), err)
+  end
+end
+
+-- Settle every one-shot whose server can no longer answer it.
+--
+-- Deliberately driven off `pmacs.lsp.list()` and NOT off a death event
+-- observed in the drain, because the drain cannot be relied on to reach
+-- the server in question: `handle_server_requests` builds its sid list
+-- from `attachments`, and a sid leaves that table whenever
+-- `attach_buffer` finds it dead and rebuilds the attachment against a
+-- fresh server. So the very event that should trigger the purge —
+-- `crashed` / `stopped` — is the one most likely to go undrained. A
+-- one-shot settled only by the drain would leak exactly when it matters.
+--
+-- `pmacs.lsp.list()` enumerates the manager directly and is unaffected
+-- by attachment bookkeeping, which is what makes it the right authority.
+local function purge_dead_pending()
+  if next(pending_responses) == nil then return end
+  local ok, rows = pcall(pmacs.lsp.list)
+  -- A failed enumeration is not evidence that every server died; leaving
+  -- the registrations alone is the safe read of "we don't know".
+  if not ok or not rows then return end
+  local alive = {}
+  for _, info in ipairs(rows) do
+    local kind = info.state and info.state.kind
+    if kind ~= "crashed" and kind ~= "stopped" then
+      alive[tostring(info.id)] = info.attempt or 0
+    end
+  end
+  for skey, pend in pairs(pending_responses) do
+    local attempt = alive[skey]
+    local dead = {}
+    for rid, entry in pairs(pend) do
+      -- Absent or terminal, or the same sid running a NEW generation:
+      -- in every case the request this entry awaits is unanswerable.
+      if attempt == nil or attempt ~= entry.attempt then
+        dead[#dead + 1] = rid
+      end
+    end
+    for _, rid in ipairs(dead) do
+      local entry = pend[rid]
+      pend[rid] = nil
+      local ok_h, err = pcall(entry.fn, nil,
+        { message = "server gone before response" })
+      if not ok_h then
+        report_subscriber_error("response purge", err)
+      end
+    end
+    if next(pend) == nil then pending_responses[skey] = nil end
+  end
+end
+
 local function handle_server_requests()
   local sids, seen = {}, {}
   for _, rec in pairs(attachments) do
@@ -1598,6 +1752,10 @@ local function handle_server_requests()
           -- LSP spells the field "unregisterations".
           pcall(unregister_file_watchers, sid,
             ev.params and ev.params.unregisterations)
+        elseif ev.kind == "notification" then
+          dispatch_notification(sid, ev)
+        elseif ev.kind == "response" then
+          deliver_response(sid, ev)
         elseif ev.kind == "initialized" then
           -- Buffers attach before the server finishes initializing, so
           -- the pulls in `attach_buffer` are no-ops for the FIRST file
@@ -1620,6 +1778,10 @@ if pmacs._async and pmacs._async.tick then
   pmacs._async.tick = function(...)
     local ret = _prior_async_tick(...)
     pcall(handle_server_requests)
+    -- After the drain, so a response delivered this tick settles its
+    -- one-shot normally rather than being purged as "server gone" in the
+    -- same pass when the server died right after answering.
+    pcall(purge_dead_pending)
     pcall(flush_due_did_changes)
     return ret
   end
