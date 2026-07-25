@@ -252,9 +252,21 @@ Confirmations, recorded because each was load-bearing and unverified:
    Stage 3b is the first stage that would benefit from setting it, and
    Q#LN7 now records why it deliberately does not need it.
 
-Citation drift repaired per COHERENCE §25: `project_root_for` is
-`builtin/runtime/lsp.lua:592`, not 513, and returns `root, source`
-rather than a bare root.
+Citation drift repaired per COHERENCE §25. Round 4's first pass stated
+the `project_root_for` correction in this section without editing the
+citation in §2.5 — the correction and the fix are different acts, and
+noting one is not doing the other. Review caught a second stale citation
+(`handle_server_requests`), which prompted a full sweep of every
+`file:line` from §2.4 onward; it found four more. All six:
+`project_root_for` 513 → **592** (and it now returns `root, source`
+rather than a bare root), `ensure_server` 527 → **610**,
+`handle_server_requests` 1448 → **1549**, `take_typed_edit`
+12798 → **12827**, `pair.lua` 213 → **229**, and `compile.lua`
+264 → **266**. Verified good and left alone: `listview.lua:138`,
+`src/lsp.rs:264`, `src/diag.rs:50`, `src/process.rs:193`,
+`src/project.rs:145`, and the `mod.rs` binding-block citations. The pre-#161 line numbers inside Q#LN15 are
+left as written: that stage has landed and its citations are historical
+record, not navigation.
 
 ## 1. What ships
 
@@ -465,7 +477,7 @@ and pin it.*
   params }` and `Response { id, result, error, method }` variants. Unknown
   server methods are delivered, not dropped.
 - **But `events_take` has exactly one consumer**: `handle_server_requests`
-  at `builtin/runtime/lsp.lua:1448`, driven off `pmacs._async.tick`. It
+  at `builtin/runtime/lsp.lua:1549`, driven off `pmacs._async.tick`. It
   `take`s — a drain. Its `if/elseif` chain handles five `request` methods
   and `initialized`, and **ignores every `notification` and every
   `response`**. A second module calling `events_take` would steal events
@@ -481,7 +493,7 @@ and pin it.*
 
 ### 2.5 Project-root detection
 
-`project_root_for` (`builtin/runtime/lsp.lua:513`) resolves:
+`project_root_for` (`builtin/runtime/lsp.lua:592`) resolves:
 `pmacs.lsp.config[language].root` → `pmacs.project.detect` → the file's own
 directory. Two gaps for Lean:
 
@@ -509,7 +521,7 @@ directory. Two gaps for Lean:
    then reports import errors for the whole file.
 
 Third, and the reason Stage 2 exists: `ensure_server`
-(`builtin/runtime/lsp.lua:527`) reuses any live server with a matching
+(`builtin/runtime/lsp.lua:610`) reuses any live server with a matching
 `language_id` regardless of the new file's project, so **the first `.lean`
 file opened fixes the root for every later `.lean` file.** For most
 languages that is an inconvenience; for Lean, where `lake serve` is bound
@@ -526,10 +538,10 @@ changes loose-file behavior for every language.
 
 `builtin/runtime/pair.lua` is the whole precedent for "react to a typed
 character": subscribe to `buffer.after-edit`, gate on
-`ed.this_command() == "buffer.self-insert"` (`pair.lua:213`), then take the
+`ed.this_command() == "buffer.self-insert"` (`pair.lua:229`), then take the
 exact provenance record.
 
-`pmacs.editor.take_typed_edit()` (`src/lua_bindings/mod.rs:12798`) returns
+`pmacs.editor.take_typed_edit()` (`src/lua_bindings/mod.rs:12827`) returns
 `{ buffer, window, codepoint, char, requested_start, requested_end,
 effective_start, effective_end, inserted_len, post_cursor, clean }` — or
 nil. Its doc comment is explicit:
@@ -558,7 +570,7 @@ cross-peer-degraded**. Lean's `⟨⟩` is outside that set.
   shows the adopter shape, gated on `spec.display == "panel"`.
   `pmacs.window.params()` and `pmacs.window.quit()` complete the surface.
 - Read-only generated buffers use the listview idiom, documented at
-  `builtin/runtime/compile.lua:264`: an erroring `pmacs.buffer.add_intercept`
+  `builtin/runtime/compile.lua:266`: an erroring `pmacs.buffer.add_intercept`
   for user edits, with module writes passing `{ bypass_intercept = true }`.
 - **Note for whoever picks this up on another machine:** the ledgers are
   stale about this. `docs/active-work.md:57` still heads the lane "Stage 1
@@ -896,9 +908,36 @@ already depends on `os.getenv`.
 
 One edge, probed: **`io.open` succeeds on a directory** (the handle opens;
 `read` returns nil without raising). A `lean-toolchain` *directory* would
-therefore read as a marker. The resolver reads one byte and treats a
-non-nil read as the marker, so a directory declines — an `io.open` truth
-test alone would be wrong, and wrong silently.
+therefore read as a marker under an `io.open` truth test — wrong, and
+wrong silently.
+
+The fix is **not** "read a byte and require it to be non-nil", which was
+this section's first answer and is wrong in the other direction: an
+**empty** `lean-toolchain` file also reads nil at EOF, so that rule
+declines a marker that exists. Marker semantics here are `lean4-mode`'s
+`locate-dominating-file` semantics — *existence*, not content — and a
+`lean-toolchain` can legitimately be empty. The discriminator is
+`read`'s **second** return, probed on LuaJIT 2.1:
+
+| Path | `io.open` | `f:read(1)` | Verdict |
+|---|---|---|---|
+| file with content | handle | `"l"`, no error | marker |
+| **empty file** | handle | `nil`, **no error** | **marker** |
+| directory | handle | `nil`, `"Is a directory"` | decline |
+| missing | `nil` | — | decline |
+
+So: `local data, err = f:read(1)` and decline only on a non-nil `err`.
+The rule is robust across platforms without needing to be re-probed on
+each, because both directory behaviors are declines — a platform whose
+`fopen` refuses a directory outright fails at `io.open`, and one that
+opens it fails at `read`. There is no platform on which a directory both
+opens and yields a byte.
+
+Acceptance 24a and 24b pin the two halves, and each must be shown to
+fail against the implementation that satisfies only the other —
+otherwise "handles directories" is satisfiable by the version that
+breaks empty files, which is exactly how this section's first answer got
+written.
 
 **The result must be canonical.** #161's contract: a configured root
 reaches `file_uri_for` verbatim and that URI is the affinity key, so two
@@ -1204,7 +1243,7 @@ rough edge but a correctness failure: `lake serve` is bound to one Lake
 package, so the second package a user opens gets a server that cannot
 resolve its imports.
 
-The change is small and spans two files:
+The change was small and spanned two files (Stage 2, landed as #161):
 
 - **`src/lua_bindings/mod.rs:9919`** — the `lsp.list()` row builder sets
   `id`/`label`/`language_id`/`command`/`state`/`attempt`. Add `root_uri`
@@ -1626,6 +1665,13 @@ the blast radius.
   *directory* does not mark a root. Bites against the bare `io.open`
   truth test, which round 4 probed succeeds on directories — the shape
   that would pass every other criterion here while being wrong.
+- **24b.** **Empty-marker pin (Q#LN8).** An **empty** `lean-toolchain`
+  file *does* mark a root — marker semantics are existence, not content.
+  Bites against the read-a-byte-and-require-non-nil rule, which declines
+  it at EOF. 24a and 24b must each be shown to fail against the
+  implementation that satisfies only the other; a suite carrying just
+  one of them is satisfied by a resolver that is silently wrong for the
+  other case.
 - **25.** A string-valued `pmacs.lsp.config.lean4.root` still works — the Q#LN8
   generalization is strictly additive.
 - **26.** `didOpen` carries `languageId = "lean4"`.
