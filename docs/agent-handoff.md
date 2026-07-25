@@ -70,6 +70,11 @@ commands, read `docs/active-work.md` immediately after this file.
     against an open buffer yet fails to load one that is not open —
     find-file expands the tilde Lua-side. Loading through the normalized
     path is a named deferral.
+  - **Stage 1 (the directory view) is IN REVIEW as PR #165** — the
+    builtin `dired.lua`, the per-entry-tolerant `read_dir` opt, and
+    `pmacs.path.canonicalize`. Its branch state, substrate facts, and
+    verification live in `docs/active-work.md`; this section absorbs them
+    when it merges.
 - **GPU initial target LANDED — #148**
   (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path

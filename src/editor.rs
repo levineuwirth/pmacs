@@ -525,6 +525,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/window.lua"),
             )
             .expect("load window builtin chunk");
+        // Dired Stage 1: the directory view. Loaded AFTER window.lua,
+        // whose `window.panel-height` setting a `display = "panel"`
+        // listing resolves, and after the pre-runtime tables it drives
+        // (`pmacs.config` / `command` / `keymap` / `buffer` / `editor` /
+        // `minibuffer` / `path`, plus `pmacs.fs` from fs.lua above).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/dired.lua"),
+                include_str!("../builtin/runtime/dired.lua"),
+            )
+            .expect("load dired builtin chunk");
         // Compile-mode (Arc 5 stage 1, Q#CM1) — ORDERING CONTRACT:
         // compile.lua must load AFTER lsp.lua. It takes over
         // `M-g n` / `M-g p` for the unified error dispatchers, and
@@ -5706,17 +5717,25 @@ mod tests {
 
     // ---- T M2.11 acceptance --------------------------------------------------
 
-    /// Every chord in the default global keymap must round-trip through
+    /// Every chord in the default keymap must round-trip through
     /// `pmacs.describe.key`: returning a non-nil table whose `command`
     /// matches the binding the keymap stack stores.
+    ///
+    /// `describe.key` resolves against the **effective context**
+    /// (buffer-local → mode → global), so a mode-scoped default is
+    /// asserted with a buffer that carries that mode rather than
+    /// context-free. Dired is the first builtin to bind mode-scoped keys
+    /// (#129's first non-detection consumer), and without the mode in
+    /// place its `n` / `p` / `g` correctly resolve to nothing.
     #[test]
     fn describe_key_identifies_every_default_binding() {
+        use crate::keymap_stack::Scope;
         let s = EditorState::new();
         let kms = s.lua_host.keymaps().borrow();
-        let bindings: Vec<(String, String)> = kms
+        let bindings: Vec<(Scope, String, String)> = kms
             .iter_all()
             .into_iter()
-            .map(|(_, seq, b)| (crate::key::display_sequence(&seq), b.command))
+            .map(|(scope, seq, b)| (scope, crate::key::display_sequence(&seq), b.command))
             .collect();
         drop(kms);
         // Sanity floor: the default keymap binds at least the M1 surface.
@@ -5725,18 +5744,50 @@ mod tests {
             "default keymap unexpectedly small: {} bindings",
             bindings.len()
         );
+        let modes: usize = bindings
+            .iter()
+            .filter(|(scope, _, _)| matches!(scope, Scope::Mode(_)))
+            .count();
+        assert!(
+            modes >= 1,
+            "a mode-scoped default is expected since dired Stage 1; \
+             found none, so the mode arm below asserts nothing"
+        );
 
-        for (seq, expected_command) in &bindings {
+        for (scope, seq, expected_command) in &bindings {
+            let mode = match scope {
+                Scope::Mode(name) => Some(name.clone()),
+                // No buffer-scoped defaults exist; a future one would
+                // need its own buffer context here.
+                Scope::Buffer(_) => continue,
+                Scope::Global => None,
+            };
+            // Set the context explicitly on EVERY iteration, including
+            // the global one: a mode left over from a previous iteration
+            // legitimately shadows a global binding of the same chord
+            // (dired's mode-scoped `RET` shadows
+            // `edit.newline-and-indent`, which is the point of the
+            // mode), so a leaked mode would make this assert the wrong
+            // thing.
+            let context = match &mode {
+                Some(name) => {
+                    format!("pmacs.buffer.set_major_mode(pmacs.window.buffer(), {name:?}); ")
+                }
+                None => "pmacs.buffer.set_major_mode(pmacs.window.buffer(), nil); ".to_owned(),
+            };
             let script = format!(
-                "local r = pmacs.describe.key({seq:?}); \
+                "{context}local r = pmacs.describe.key({seq:?}); \
                  if r == nil then return 'nil' else return r.command end"
             );
             let got: String = s.lua_host.lua().load(&script).eval().unwrap_or_else(|e| {
                 panic!("describe.key({seq}) raised: {e}");
             });
             assert_eq!(
-                &got, expected_command,
-                "describe.key for {seq:?} returned {got:?}, expected {expected_command:?}"
+                &got,
+                expected_command,
+                "describe.key for {seq:?} (scope {}) returned {got:?}, \
+                 expected {expected_command:?}",
+                scope.render()
             );
         }
     }
