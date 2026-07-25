@@ -1189,14 +1189,84 @@ impl EditorState {
         let _ = self.terminal_manager.borrow_mut().release_controller(key);
     }
 
+    /// Reconcile panels and release a controller whose window moved away.
+    ///
+    /// **Frontend-kind neutral, and deliberately so** (Q#GT1/Q#GT4): this
+    /// half reads only `core.views`, `core.windows`, and the controller —
+    /// never a grid size — so it is the half the dispatcher runs for EVERY
+    /// attached frontend once per tick. It was previously fused into
+    /// [`Self::sync_terminal_layout`], which meant a semantic frontend got
+    /// its controller-liveness release only as a side effect of a grid
+    /// resize it should never have received.
+    ///
+    /// [`Self::sync_semantic_terminal_layout`] cannot substitute for this:
+    /// when a GPU window switches away from its terminal, the buffer-follow
+    /// snapshot clears the viewport declaration
+    /// (`SemanticRenderState::on_buffer_snapshot_sent`), so the semantic arm
+    /// stops running entirely in exactly the case that needs the release.
+    ///
+    /// Returns `true` while `frontend_id` still holds a live controller.
+    pub fn sync_terminal_controller_liveness(&mut self, frontend_id: FrontendId) -> bool {
+        // Bottom-panel arc (Q#BP2b): a panel that just became
+        // unsatisfiable must have released its controller before any
+        // resize runs, or the child would be resized against a dead rect.
+        // This is the contract's only per-tick enforcement point, and it
+        // stays neutral so semantic frontends keep it (Q#GT7).
+        self.reconcile_panel_layout(frontend_id);
+        let Some(key) = self
+            .terminal_manager
+            .borrow()
+            .controller_view_for_frontend(frontend_id)
+        else {
+            return false;
+        };
+        let core = self.core.borrow();
+        let Some(view) = core.views.get(&frontend_id) else {
+            drop(core);
+            let _ = self.terminal_manager.borrow_mut().release_controller(key);
+            return false;
+        };
+        if view.active != key.window_id
+            || core
+                .windows
+                .get(&key.window_id)
+                .is_none_or(|window| window.buffer_id != key.buffer_id)
+        {
+            drop(core);
+            let _ = self.terminal_manager.borrow_mut().release_controller(key);
+            return false;
+        }
+        true
+    }
+
     /// Resize the one session durably controlled by `frontend_id`.
     ///
     /// This is called before process drain and paint, never from rendering.
+    ///
+    /// Composition of the two halves, preserved verbatim for the in-process
+    /// `editor::run` loop and `LOCAL`. The daemon dispatcher calls the halves
+    /// separately, because only the geometry half is grid-specific.
     pub fn sync_terminal_layout(&mut self, frontend_id: FrontendId, term_size: CellSize) -> bool {
-        // Bottom-panel arc (Q#BP2b): a panel that just became
-        // unsatisfiable must have released its controller before this
-        // runs, or the child would be resized against a dead rect.
-        self.reconcile_panel_layout(frontend_id);
+        self.sync_terminal_controller_liveness(frontend_id)
+            && self.sync_terminal_grid_geometry(frontend_id, term_size)
+    }
+
+    /// The grid half: TUI placement plus the resize it implies.
+    ///
+    /// **Grid frontends only** (Q#GT1). The placement lookup below is why:
+    /// a semantic frontend has no `window_placements` entry at all, so the
+    /// "no placement" arm would release its controller on EVERY tick. That
+    /// release reads like liveness and is not — it is grid geometry, and
+    /// moving it into [`Self::sync_terminal_controller_liveness`] would
+    /// reintroduce this framing's own defect in a new place.
+    ///
+    /// Assumes liveness already ran: the controller is live and its window
+    /// still shows the terminal.
+    pub fn sync_terminal_grid_geometry(
+        &mut self,
+        frontend_id: FrontendId,
+        term_size: CellSize,
+    ) -> bool {
         let Some(key) = self
             .terminal_manager
             .borrow()
@@ -1206,23 +1276,11 @@ impl EditorState {
         };
         let content = {
             let core = self.core.borrow();
-            let Some(view) = core.views.get(&frontend_id) else {
-                let _ = self.terminal_manager.borrow_mut().release_controller(key);
-                return false;
-            };
-            if view.active != key.window_id
-                || core
-                    .windows
-                    .get(&key.window_id)
-                    .is_none_or(|window| window.buffer_id != key.buffer_id)
-            {
-                let _ = self.terminal_manager.borrow_mut().release_controller(key);
-                return false;
-            }
             let Some(placement) = window_placements(&core, frontend_id, term_size)
                 .get(&key.window_id)
                 .copied()
             else {
+                drop(core);
                 let _ = self.terminal_manager.borrow_mut().release_controller(key);
                 return false;
             };
