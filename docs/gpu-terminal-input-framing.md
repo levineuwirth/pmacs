@@ -295,6 +295,16 @@ change. Stays v20.
 ## Deferred (named)
 
 - Interactive-shell echo on a raw-mode PTY (Q#GT5) — its own scout.
+- **A geometry change appears to clear the visible screen.** Observed while
+  building acceptance 4: after the probe's deliberate 25×92 → 20×71 resize,
+  the next frame's visible grid is entirely blank even though the content
+  (two short lines near the top) should survive a shrink of that size. It
+  reproduces on the pre-fix tree, so it is neither caused nor fixed here, and
+  it is why acceptance 4 latches its observation across frames instead of
+  reading the final one. Not investigated: it could be correct reflow
+  behaviour given where the child leaves its cursor (frames show the cursor
+  on the bottom row), or a real reflow defect. Named because the next person
+  to write a resize assertion will hit it.
 - `TerminalFrame` suppression including `screen_generation` in its equality:
   correct today and load-bearing for correctness, but it means any future
   content-neutral generation bump re-emits a frame. Recorded, not changed.
@@ -349,16 +359,29 @@ mutation (`src/terminal/screen.rs:1467`), so with a quiet child it is a
 6. A semantic frontend whose window stops showing the terminal **releases its
    controller** (Q#GT4), pinned through the extracted loop body — driven by an
    actual buffer switch, not by calling the release directly. This one bites
-   against revision 1's guard as well as against `main`.
+   against **revision 1's naive guard**, and deliberately **passes on `main`**:
+   today's sibling arms do supply the release, by the accident of the grid arm
+   running for a frontend it should never have run for. It is the pin that
+   stops the fix from trading one defect for another.
 7. End-to-end SIGWINCH count through the real PTY: a child trapping `WINCH`
    and printing a **fresh distinct breadcrumb per signal** (`WINCH 1`,
    `WINCH 2`, …) shows a bounded count. The distinctness is load-bearing —
    the established PTY-paint trap is that cell diffing skips both spaces and
    already-matching cells, so a repeated identical marker can assert nothing.
-8. Bite-verified: reverting the split fails 2, 3, 6 and 7 specifically.
-   Criteria 1 and 7 fail against `main`; criterion 6 fails against **both**
-   `main` and revision 1's guard, which is the point of keeping B1's
-   half-false score on the record.
+8. Bite-verified against **two** pre-images, because one is not enough here —
+   the naive guard fixes the storm and introduces a different defect, so a
+   single revert would score the fix complete when it is not. Measured
+   (`cargo test --lib`, manual revert since these tests share `src/daemon.rs`
+   with the production code):
+
+   | pin | `main` (sibling arms) | rev-1 naive guard | the split |
+   |---|---|---|---|
+   | acc 2+3 settle | **FAIL** | pass | pass |
+   | acc 6 controller release | pass | **FAIL** | pass |
+   | acc 5 grid still resizes | pass | pass | pass |
+
+   The middle column is B1's half-false score made executable: the naive
+   guard's first clause holds (the storm stops) and its second does not.
 
 Criteria 1, 2 and 7 are deliberately expressed as **quiet-child** assertions,
 because the existing acceptance's chatty child is exactly what hid this.
