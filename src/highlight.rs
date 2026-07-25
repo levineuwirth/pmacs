@@ -208,7 +208,12 @@ impl Theme {
             ("constructor", fg(11)),
             ("character", fg(2)),
             ("keyword.conditional", fg_bold(13)),
-            ("warning", fg_bold(1)),
+            // Bold BRIGHT red, deliberately the loudest entry in the table
+            // and deliberately distinct from `number`'s plain `fg(1)`: in a
+            // proof file `sorry` means "this is admitted, not proved", which
+            // is the one thing a reader must never skim past. Plain `fg(1)`
+            // would have collided with every numeric literal on colour alone.
+            ("warning", fg_bold(9)),
         ];
         let by_capture = entries
             .iter()
@@ -1527,6 +1532,17 @@ mod tests {
         src: &str,
         col: u32,
     ) -> pmacs_protocol::cell::Color {
+        painted_style_at(language_name, file, src, col).fg
+    }
+
+    /// As [`painted_fg_at`], but returns the whole style — needed where a
+    /// colour alone does not discriminate (Lean's `warning` vs `number`).
+    fn painted_style_at(
+        language_name: &str,
+        file: &str,
+        src: &str,
+        col: u32,
+    ) -> pmacs_protocol::cell::Style {
         use crate::buffer::{Buffer, BufferId, EditOp};
         use crate::cell::{Cell, CellSize};
         use crate::syntax::{ParseView, SyntaxRegistry};
@@ -1564,7 +1580,7 @@ mod tests {
             folds: None,
         };
         hv.render(&buf, viewport, &mut grid);
-        grid.get(CellCoord::new(0, col)).style.fg
+        grid.get(CellCoord::new(0, col)).style
     }
 
     /// Does `language`'s compiled highlight query use `capture`?
@@ -1574,6 +1590,92 @@ mod tests {
             panic!("{language} has no highlights query");
         };
         query.capture_names().contains(&capture)
+    }
+
+    #[test]
+    fn lean4_grid_paints_comment_keyword_name_operator_and_number() {
+        // Framing acceptance 5: the grammar plus the crate query plus the
+        // theme table actually produce distinct styles on a painted grid.
+        // Asserted end-to-end rather than at the query level because a
+        // capture that resolves to `Style::default()` is indistinguishable
+        // from no capture at all to a reader.
+        use pmacs_protocol::cell::Color;
+
+        // `-- c` — the whole comment run.
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "-- c\n", 0),
+            Color::Indexed(8),
+            "a Lean line comment paints the comment style"
+        );
+
+        // `def foo : Nat := 42`
+        let src = "def foo : Nat := 42\n";
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 0),
+            Color::Indexed(5),
+            "`def` paints the keyword style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 4),
+            Color::Indexed(4),
+            "the definition's name paints the function style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 14),
+            Color::Indexed(6),
+            "`:=` paints the operator style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", src, 17),
+            Color::Indexed(1),
+            "a numeric literal paints the number style"
+        );
+
+        // A string literal, and `theorem` as a second declaration keyword.
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "def s := \"hi\"\n", 9),
+            Color::Indexed(2),
+            "a string literal paints the string style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "theorem t : True := trivial\n", 0),
+            Color::Indexed(5),
+            "`theorem` paints the keyword style"
+        );
+        assert_eq!(
+            painted_fg_at("lean4", "a.lean", "theorem t : True := trivial\n", 8),
+            Color::Indexed(4),
+            "the theorem's name paints the function style"
+        );
+    }
+
+    #[test]
+    fn lean4_sorry_paints_the_warning_style_distinctly_from_a_number() {
+        // Framing acceptance 6. `sorry` admits a goal without proving it —
+        // in a proof file it is the single most important token to notice,
+        // and it is why Q#LN4 adds a `warning` entry at all.
+        //
+        // The style is asserted in FULL, not by colour: `number` and the
+        // first-choice `warning` colour were both indexed red, so a
+        // colour-only assertion would have passed with `sorry` painted
+        // exactly like the literal `42` beside it. That is the whole failure
+        // this test exists to prevent.
+        use pmacs_protocol::cell::Color;
+
+        let sorry = painted_style_at("lean4", "a.lean", "theorem t : True := sorry\n", 20);
+        assert_eq!(
+            sorry.fg,
+            Color::Indexed(9),
+            "`sorry` paints the warning colour"
+        );
+        assert!(sorry.bold, "`sorry` is bold");
+
+        let number = painted_style_at("lean4", "a.lean", "def n := 42\n", 9);
+        assert_ne!(
+            (sorry.fg, sorry.bold),
+            (number.fg, number.bold),
+            "`sorry` must be visually distinct from a numeric literal"
+        );
     }
 
     #[test]

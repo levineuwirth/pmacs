@@ -39,6 +39,10 @@ pmacs.comment.strings = {
   sh = "#",
   toml = "#",
   yaml = "#",
+  -- Lean 4 (framing Q#LN5). `--` only: Lean's block comment is `/- -/` and
+  -- its docstring `/-- -/`, but block-comment toggling is the comment arc's
+  -- own named deferral and this lane does not front-run it.
+  lean4 = "--",
 }
 
 -- Start of the line containing `pos`: chunked backward scan for the

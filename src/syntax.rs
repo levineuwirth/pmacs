@@ -251,6 +251,12 @@ pub fn default_injection_aliases() -> HashMap<String, String> {
         ("golang", "go"),
         ("yml", "yaml"),
         ("md", "markdown"),
+        // Lean 4 (framing Q#LN17). A ```lean fence is overwhelmingly Lean 4
+        // in practice, so the Lean 3 spelling is deliberately mapped forward
+        // rather than left unresolved. `lean4` needs no alias — it is the
+        // entry name. `lean4-mode` does the equivalent through
+        // `markdown-code-lang-modes`.
+        ("lean", "lean4"),
     ]
     .into_iter()
     .map(|(a, b)| (a.to_owned(), b.to_owned()))
