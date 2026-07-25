@@ -2630,6 +2630,7 @@ dependencies = [
  "pollster",
  "sys-locale",
  "tempfile",
+ "ttf-parser",
  "unicode-width",
  "wgpu",
  "winit",
