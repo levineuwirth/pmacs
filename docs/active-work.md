@@ -22,8 +22,9 @@ has landed regardless of what its lane says.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `c8ec8f3` (dired Stage 1 #165 atop GPU terminal
-  input #166, multi-root LSP affinity #161, the dired framing #164,
+  `githubsucks/main` @ `5aa9044` (the inline-math slice #158 atop dired
+  Stage 1 #165, GPU terminal input #166, multi-root LSP affinity #161,
+  the dired framing #164,
   find-file #162, COHERENCE.md #163, Lean 4 Stage 1 #160, the minimap
   blank-slab fix #159, bottom-panel Stage 1 #155, the inline-math re-scout
   #154, the vterm PTY-flake fix #153, and the GPU initial-target doc
