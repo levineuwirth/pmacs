@@ -265,7 +265,7 @@ If it does not, stop and repair the remote/fetch configuration.
 - Ships `builtin/runtime/lean.lua` (new), one `include_str!` line in
   `src/editor.rs`, `pmacs.lsp._attach_buffer` exported from `lsp.lua`,
   a `leanprogress` mode plus `waitForDiagnostics` validation on
-  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (20 tests).
+  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (25 tests).
   No protocol change.
 - **Stage 1's acceptance 12 is half superseded and was rewritten, not
   deleted.** It asserted `pmacs.lsp.config.lean4 == nil` to catch a
@@ -308,10 +308,14 @@ If it does not, stop and repair the remote/fetch configuration.
   server-failure latch covers the rest.
 - Verification on this branch: `cargo fmt --check` clean; strict
   workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
-  lean4 server 17/17; lean4 stage 1 9/9; dispatch seams 15/15;
+  lean4 server 25/25; lean4 stage 1 9/9; dispatch seams 15/15;
   multi-root 13/13; M4 121; required GPU 155; **isolated-config
-  workspace sweep 3,206 across 94 suites, zero failures**;
-  `git diff --check` clean.
+  workspace sweep 3,214 across 94 suites, zero failures**;
+  `git diff --check` clean. (Round 1 of
+  this entry recorded 17/17 and 3,206 — the PRE-fix counts — after the
+  fixes were pushed. The ledger's protocol is that verification
+  describes the pushed tree; recording it late is the #161 fmt-blocker
+  error in a slower form.)
 
 ## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
 

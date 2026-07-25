@@ -1553,10 +1553,14 @@ What remains deferred:
   stopped), so `attach_buffer` never rebuilds against it, and
   `LspManager::forget` refuses it for not being terminal. **Stopping a
   dead server is what makes it un-replaceable.** Found implementing
-  Stage 3b's latch, which works around it by checking the state before
-  stopping. The fix belongs in `stop` (treat an already-terminal client
-  as a no-op, or drive it straight to `Stopped`) and changes behavior
-  for every language, so it does not ride a Lean PR.
+  Stage 3b's latch, which works around it by dispatching on state:
+  `forget` for a terminal server (it requires terminal state, and
+  removing the client also drops the `next_restart_at` the crash armed),
+  `stop` for a live one. Merely *skipping* the call is not enough — that
+  leaves the restart timer running and the broken command respawns
+  underneath the fallback. The fix belongs in `stop` (treat an
+  already-terminal client as a no-op, or drive it straight to `Stopped`)
+  and changes behavior for every language, so it does not ride a Lean PR.
 - **Forwarding `cfg.restart` through `ensure_server`** — read by
   `lua_to_lsp_spec`, never set by the spawn table, so silently dropped on
   every auto-attach (found landing #161). Fixing it changes behavior for

@@ -390,7 +390,7 @@ fn with_fallback(state: &EditorState, lake_cmd: &Path) {
             r#"
             pmacs.lsp.config.lean4.command = "{}"
             pmacs.lsp.config.lean4.args = {{ "serve" }}
-            pmacs.lean.fallback = {{ command = "{}", args = {{}} }}
+            pmacs.lean._fallback = {{ command = "{}", args = {{}} }}
             "#,
             lua_str(lake_cmd),
             fake_lsp_path()
@@ -822,5 +822,250 @@ fn lean_root_is_canonical_so_a_symlinked_open_reuses_one_server() {
         1,
         "the symlinked path reuses it — the resolver canonicalizes, so \
          both spellings produce the same affinity key"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-2 review findings. Each of these fails against the code as it
+// stood at cdaea66, where the focused suite was already 20/20 — the
+// lifecycle defects were invisible to it.
+// ---------------------------------------------------------------------------
+
+/// Tick for at least `ms`, so a 500ms restart backoff actually elapses.
+/// The round-2 defect was invisible precisely because the suite stopped
+/// ticking as soon as the fallback initialized, ~300ms in.
+fn tick_for(state: &mut EditorState, ms: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+    while std::time::Instant::now() < deadline {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn r2_crashed_primary_does_not_respawn_underneath_the_fallback() {
+    // The crash schedules `next_restart_at`; `maybe_restart` fires after
+    // the 500ms backoff with no attempt ceiling. Skipping the retire
+    // call (round 2) left that armed, so the broken command kept
+    // respawning under the live fallback — forever, unobserved.
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let dying = fx.root.join("bin/dying-lake");
+    std::fs::create_dir_all(dying.parent().unwrap()).unwrap();
+    std::fs::write(&dying, "#!/bin/sh\nexit 3\n").unwrap();
+    std::fs::set_permissions(&dying, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut state = editor(&fx);
+    with_fallback(&state, &dying);
+    open(&state, &file);
+    // Well past one backoff.
+    tick_for(&mut state, 1400);
+
+    // **`attempt`, not liveness.** A respawning server spends most of
+    // its life in `crashed` waiting out the backoff, so "no live
+    // non-fallback server" is satisfied while it loops forever — that
+    // weaker assertion passed against the round-2 code and caught
+    // nothing. `attempt` increments on every spawn, so it counts the
+    // respawns directly. A retired server is absent from the list
+    // entirely (`forget` removes the client); one left with
+    // `next_restart_at` armed climbs past 1.
+    let worst_attempt: i64 = eval(
+        &state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        local live = rec and tostring(rec.server) or ""
+        local worst = 0
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) ~= live then
+            local a = s.attempt or 0
+            if a > worst then worst = a end
+          end
+        end
+        return worst
+        "#,
+    );
+    assert_eq!(
+        worst_attempt, 0,
+        "the retired primary is gone from the manager, not respawning          after the backoff (attempt > 0 means it is still there; > 1          means it respawned)"
+    );
+    assert_eq!(
+        attached_state(&state),
+        "initialized",
+        "and the buffer is on the live fallback"
+    );
+}
+
+#[test]
+fn r2_reattach_targets_the_originating_buffer_not_whatever_is_active() {
+    // `_attach_buffer` is an active-buffer-only seam and the latch's
+    // verdict arrives asynchronously. Round 2 accepted "some attachment
+    // now names a different server", which an unrelated Rust buffer
+    // satisfies — clearing the retry and stranding the Lean buffer.
+    //
+    // **Driven through the PROBE**, not through a missing executable: a
+    // missing command fails synchronously inside `buffer.after-load`,
+    // where the Lean buffer is still active and the rebuild happens
+    // inline, so the race cannot occur and the test proves nothing. The
+    // probe's verdict lands on a later tick, which is the whole point.
+    // The stub's `serve` sleeps, so only the probe can trigger anything.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    fx.write("pkg/Cargo.toml", "[package]\nname = \"p\"\n");
+    let lean_file = fx.write("pkg/A.lean", "def a := 1\n");
+    let rust_file = fx.write("pkg/src/main.rs", "fn main() {}\n");
+    let old_lake = fx.lake_stub("bin/lake", "Lake version 3.0.0");
+
+    let mut state = editor(&fx);
+    with_fallback(&state, &old_lake);
+    // A working Rust server, so switching away lands on a real
+    // attachment with a different server id — the decoy.
+    exec(
+        &state,
+        &format!(
+            "pmacs.lsp.config.rust = {{ command = \"{}\" }}",
+            fake_lsp_path()
+        ),
+    );
+
+    open(&state, &lean_file);
+    exec(&state, "_G.lean_buf = pmacs.window.buffer()");
+    // Switch away before the probe's verdict can land.
+    open(&state, &rust_file);
+    tick_for(&mut state, 500);
+
+    // Come back with a buffer SWITCH, not `find_or_open`. Re-opening
+    // fires `buffer.after-load`, which re-runs lsp.lua's own attach and
+    // would repair the record no matter what the latch did.
+    exec(&state, "pmacs.window.switch_buffer(_G.lean_buf)");
+    tick_for(&mut state, 400);
+
+    let lang: String = eval(
+        &state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        return rec and tostring(rec.language) or "none"
+        "#,
+    );
+    assert_eq!(lang, "lean4", "we are back on the Lean buffer");
+
+    // The observable that discriminates: WHICH command the Lean buffer's
+    // server is running. A retry cleared by the decoy leaves it on the
+    // original `lake` stub.
+    let cmd: String = eval(
+        &state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.command)
+          end
+        end
+        return "gone"
+        "#,
+    );
+    assert_eq!(
+        cmd,
+        fake_lsp_path(),
+        "the ORIGINATING Lean buffer ends up on the fallback — a decoy \
+         Rust attachment must not satisfy the retry"
+    );
+}
+
+#[test]
+fn r2_a_failing_fallback_is_reported_once_and_does_not_retry_forever() {
+    // Acceptance 27 promises a second failure surfaces rather than
+    // loops. Round 2 retried `_attach_buffer` every tick with nothing
+    // reported.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent_primary = fx.dir("bin/no-such-lake");
+    let absent_fallback = fx.dir("bin/no-such-lean");
+
+    let mut state = editor(&fx);
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.lean4.command = "{}"
+            pmacs.lsp.config.lean4.args = {{ "serve" }}
+            pmacs.lean._fallback = {{ command = "{}", args = {{}} }}
+            "#,
+            lua_str(&absent_primary),
+            lua_str(&absent_fallback)
+        ),
+    );
+
+    open(&state, &file);
+    tick_for(&mut state, 300);
+
+    let status = state.core.borrow().status.clone();
+    assert!(
+        status.contains("did not start either"),
+        "a failing fallback surfaces rather than retrying silently; saw \
+         {status:?}"
+    );
+    // And the retry state is cleared, so it is not looping.
+    let pending: String = eval(&state, "return tostring(pmacs.lean._probe.reattach_from)");
+    assert_eq!(pending, "nil", "the retry is retired, not spinning");
+}
+
+#[test]
+fn r2_a_working_wrapper_is_not_version_probed_as_lake() {
+    // `version_below_3_1` encodes LAKE's output contract. Applying it to
+    // an arbitrary wrapper is a category error: a working wrapper
+    // reporting its own "wrapper 1.0" would be replaced despite its
+    // server initializing fine.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    // Named something other than `lake`, reporting a sub-3.1 version,
+    // but which serves fine.
+    let wrapper = fx.lake_stub("bin/my-lean-wrapper", "wrapper 1.0");
+    let mut state = editor(&fx);
+    with_fallback(&state, &wrapper);
+
+    open(&state, &file);
+    tick_for(&mut state, 400);
+
+    let cmd: String = eval(&state, "return pmacs.lsp.config.lean4.command");
+    assert_eq!(
+        cmd,
+        wrapper.display().to_string(),
+        "a wrapper's own version string is not Lake's; the version probe \
+         must not run against it"
+    );
+    let latched: bool = eval(&state, "return pmacs.lean._probe.latched");
+    assert!(!latched, "and the latch stayed disarmed");
+}
+
+#[test]
+fn r2_an_unconfigured_lean_server_is_disabled_not_failed() {
+    // Setting `pmacs.lsp.config.lean4 = nil` means "off". Reporting that
+    // `nil` could not start is a false alarm, and latching poisons the
+    // session so a later configuration can never take effect.
+    let fx = Fixture::new();
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let mut state = editor(&fx);
+    exec(&state, "pmacs.lsp.config.lean4 = nil");
+    exec(&state, "pmacs.editor.set_status(\"\")");
+
+    open(&state, &file);
+    settle(&mut state);
+
+    assert_eq!(
+        state.core.borrow().status.clone(),
+        "",
+        "an unconfigured Lean server reports nothing — it is disabled"
+    );
+    let latched: bool = eval(&state, "return pmacs.lean._probe.latched");
+    assert!(
+        !latched,
+        "and the session is not poisoned: a later config must still work"
     );
 }

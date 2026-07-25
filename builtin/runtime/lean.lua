@@ -125,7 +125,8 @@ local probe = {
   started = false,   -- the `lake --version` probe has been spawned
   latched = false,   -- the fallback has fired (or been ruled out)
   proc = nil,        -- process id of the running probe
-  buf = "",          -- accumulated probe stdout
+  out = "",          -- accumulated probe stdout
+  buf_key = nil,     -- tostring() of the buffer that started this
   watching = nil,    -- sid we are waiting to see fail before initialize
   saw_initialized = false,
 }
@@ -142,9 +143,9 @@ end
 -- `lake serve` below 3.1.0 starts a server that cannot answer, which is
 -- worse than failing: `lean4-mode` probes for exactly this and falls
 -- back to `lean --server`. Parses the leading `x.y` of a version line.
--- State kind for `sid`, or nil if the manager has forgotten it.
-local function server_state_kind(sid)
-  local skey = tostring(sid)
+-- State kind for the server whose `tostring(id)` is `skey`, or nil if
+-- the manager has forgotten it (which is itself a terminal answer).
+local function server_state_kind_for_key(skey)
   local ok, rows = pcall(pmacs.lsp.list)
   if not ok or not rows then return nil end
   for _, info in ipairs(rows) do
@@ -155,6 +156,10 @@ local function server_state_kind(sid)
   return nil
 end
 
+local function server_state_kind(sid)
+  return server_state_kind_for_key(tostring(sid))
+end
+
 local function version_below_3_1(text)
   local major, minor = text:match("(%d+)%.(%d+)")
   if not major then return false end
@@ -163,11 +168,25 @@ local function version_below_3_1(text)
   return major == 3 and minor < 1
 end
 
--- What the latch falls back TO. A table rather than a literal so the
--- acceptance suite can point it at a stand-in server and drive the real
--- latch path end to end, instead of asserting on a config mutation that
--- proves nothing about whether a server ever starts.
-M.fallback = { command = "lean", args = { "--server" } }
+-- What the latch falls back TO.
+--
+-- **Underscored: a test seam, not supported user configuration.** It is
+-- a table only so the acceptance suite can point it at a stand-in server
+-- and drive the real latch path end to end, instead of asserting on a
+-- config mutation that proves nothing about whether a server ever
+-- starts. Presenting it as public config would owe framing,
+-- documentation, validation and mutation semantics that nothing here
+-- provides; users configure Lean through `pmacs.lsp.config.lean4`.
+M._fallback = { command = "lean", args = { "--server" } }
+
+local function same_args(a, b)
+  a, b = a or {}, b or {}
+  if #a ~= #b then return false end
+  for i = 1, #a do
+    if a[i] ~= b[i] then return false end
+  end
+  return true
+end
 
 -- Swap `command`/`args` ONLY. A wholesale table replacement would
 -- silently discard a user's `env` / `settings` / `init_options` / `root`
@@ -181,81 +200,111 @@ M.fallback = { command = "lean", args = { "--server" } }
 local function swap_to_fallback()
   local cfg = pmacs.lsp.config.lean4
   if not cfg then return false end
-  if cfg.command == M.fallback.command then return false end
-  cfg.command = M.fallback.command
-  cfg.args = M.fallback.args
+  -- Idempotence compares command AND args: the same command with
+  -- different arguments is not "already applied", and treating it as
+  -- such would silently skip a swap that still needed to happen.
+  if cfg.command == M._fallback.command
+      and same_args(cfg.args, M._fallback.args) then
+    return false
+  end
+  cfg.command = M._fallback.command
+  cfg.args = M._fallback.args
   return true
 end
 
--- Fire the fallback: stop the failing server FIRST, then swap, then let
--- the next attach spawn afresh.
---
--- Stopping first is load-bearing, not defensive. The spec default is
--- `LspRestartPolicy::OnCrash`, the termination handler never consults
--- the exit code, and `maybe_restart` has no attempt ceiling — so a
--- broken `lake` respawns forever on a backoff, underneath the latch,
--- producing a loop the latch cannot see the end of. `pmacs.lsp.stop`
--- sets `restart = Never` on the way out, which is what disarms it. The
--- fallback is therefore a FRESH server, not a restart of the old one.
+-- Retire the failed server, swap the command, then rebuild the
+-- attachment on the buffer that started this.
 local try_reattach
+
+-- Retire `sid` so it cannot come back. **Which call to use depends on
+-- the state, and using the wrong one is worse than doing nothing:**
+--
+--   * TERMINAL (`crashed` / `stopped`) -> `forget`. It requires a
+--     terminal state and removes the client outright, which also drops
+--     the `next_restart_at` the crash scheduled. `stop` here would take
+--     its not-initialized branch and set `ShuttingDown { .. None }` on
+--     the premise that "the next exit observation cleans up" — but the
+--     exit already happened, which is what made it `Crashed`. No
+--     further event arrives, so it sits in `ShuttingDown` forever:
+--     `server_is_live` reads that as LIVE so `attach_buffer` never
+--     rebuilds, and `forget` then refuses it for not being terminal.
+--   * NON-TERMINAL -> `stop`. `forget` rejects it, and `stop` disables
+--     restart and drives the polite shutdown.
+--
+-- Round 1 skipped the call entirely for terminal servers. That avoided
+-- the corruption but left `next_restart_at` armed, so the crashed
+-- primary respawned 500ms later and kept respawning underneath the
+-- live fallback — invisible to a test that stopped ticking first.
+local function retire_server(sid)
+  local kind = server_state_kind(sid)
+  if kind == nil then return end
+  if kind == "crashed" or kind == "stopped" then
+    pcall(pmacs.lsp.forget, sid)
+  else
+    pcall(pmacs.lsp.stop, sid)
+  end
+end
 
 local function fire_latch(sid, why)
   if probe.latched then return end
   probe.latched = true
   probe.watching = nil
-  -- **Only stop a server that is not ALREADY terminal**, and this is
-  -- load-bearing rather than tidy. `LspManager::stop` on a crashed
-  -- client takes its not-initialized branch: it terminates the
-  -- (already-dead) process and sets `ShuttingDown { .. None }`, with the
-  -- comment "the next exit observation cleans up" — but the exit was
-  -- already observed, which is what made it `Crashed`. No further event
-  -- arrives, so the client stays in `ShuttingDown` forever:
-  -- `server_is_live` counts it as LIVE (neither crashed nor stopped) so
-  -- `attach_buffer` never rebuilds, and `LspManager::forget` refuses it
-  -- for not being terminal. Stopping a dead server is what makes it
-  -- un-replaceable. Recorded as a substrate deferral in the framing §6.
-  if sid then
-    local kind = server_state_kind(sid)
-    if kind and kind ~= "crashed" and kind ~= "stopped" then
-      pcall(pmacs.lsp.stop, sid)
-    end
-  end
+  if sid then retire_server(sid) end
   if not swap_to_fallback() then
     report("LSP: lean4 " .. why)
     return
   end
   report("LSP: lean4 " .. why .. "; falling back to `"
-    .. tostring(M.fallback.command) .. "`")
-  -- **Spawn the replacement and re-point the buffer at it.** Stopping
-  -- and rewriting the config is not a fallback on its own: nothing
-  -- re-fires an attach on a config change, and `attach_buffer`
-  -- early-returns for a live attachment, so without this the buffer
-  -- stays bound to the server we just stopped and the user is left with
-  -- a config edit and no language server. Round 1 shipped exactly that,
-  -- with an acceptance test that asserted every server was terminal —
-  -- i.e. that pinned the absence of the fallback it claimed to check.
+    .. tostring(M._fallback.command) .. "`")
+  -- **Spawn the replacement and re-point the buffer at it.** Swapping
+  -- the config is not a fallback on its own: nothing re-fires an attach
+  -- on a config change and `attach_buffer` early-returns for a live
+  -- attachment, so without this the buffer stays bound to the server we
+  -- just retired and the user has a config edit and no language server.
   --
-  -- **Retried on the tick, not done inline**, and that is not caution:
-  -- `pmacs.lsp.stop` sends shutdown+exit and the state becomes
-  -- `shutting-down`, which `server_is_live` counts as LIVE. So an
-  -- immediate `_attach_buffer` early-returns the stale record and the
-  -- swap has no effect — the exact silent no-op this whole path exists
-  -- to avoid. Retrying until the old server actually reaches a terminal
-  -- state is what makes the rebuild happen.
+  -- The rebuild waits for two things, and conflating them is what made
+  -- round 2 wrong in two ways at once:
+  --   1. the retired server actually reaching a terminal state (or
+  --      being gone) — `stop` leaves `shutting-down`, which
+  --      `server_is_live` counts as LIVE, so attaching before then
+  --      early-returns the stale record and the swap silently no-ops;
+  --   2. the buffer that started this being the ACTIVE one, because
+  --      `_attach_buffer` is an active-buffer-only seam. The verdict
+  --      arrives asynchronously, so the user may well be somewhere else
+  --      by then — and "some attachment now names a different server"
+  --      is satisfied by an unrelated Rust buffer, which would clear the
+  --      retry while leaving the Lean buffer stale forever.
   probe.reattach_from = sid and tostring(sid) or false
   try_reattach()
 end
 
--- Returns true once the active Lean buffer is attached to a server that
--- is not the one the latch stopped.
+-- Returns true when there is nothing left to do: either the initiating
+-- buffer is attached to the replacement, or the replacement itself
+-- failed and that has been reported.
 function try_reattach()
   if probe.reattach_from == nil then return true end
-  local ok, rec = pcall(pmacs.lsp._attach_buffer)
-  if not ok or not rec then return false end
-  if probe.reattach_from and tostring(rec.server) == probe.reattach_from then
+  -- (2) Wait for the initiating buffer to be the active one.
+  local buf = pmacs.window.buffer()
+  if not buf or not probe.buf_key or tostring(buf) ~= probe.buf_key then
     return false
   end
+  -- (1) Wait for the retired server to stop counting as live.
+  if probe.reattach_from then
+    local kind = server_state_kind_for_key(probe.reattach_from)
+    if kind ~= nil and kind ~= "crashed" and kind ~= "stopped" then
+      return false
+    end
+  end
+  -- Both conditions met: attempt the replacement EXACTLY ONCE. Cleared
+  -- first so a failing fallback cannot retry every tick forever —
+  -- acceptance 27 promises a second failure surfaces rather than loops.
   probe.reattach_from = nil
+  local ok, rec = pcall(pmacs.lsp._attach_buffer)
+  if not ok or not rec then
+    report("LSP: lean4 fallback `" .. tostring(M._fallback.command)
+      .. "` did not start either")
+    return false
+  end
   return true
 end
 
@@ -265,7 +314,7 @@ local function drain_probe()
   if not ok or not evs then return end
   for _, ev in ipairs(evs) do
     if ev.kind == "stdout" or ev.kind == "stderr" then
-      probe.buf = probe.buf .. tostring(ev.bytes)
+      probe.out = probe.out .. tostring(ev.bytes)
     elseif ev.kind == "exited" or ev.kind == "signaled"
         or ev.kind == "crashed" then
       local proc = probe.proc
@@ -279,7 +328,7 @@ local function drain_probe()
       -- question failure detection would otherwise answer slowly: an
       -- old-but-working lake that starts a useless server.
       if ev.kind == "exited" and ev.code == 0
-          and version_below_3_1(probe.buf) then
+          and version_below_3_1(probe.out) then
         fire_latch(probe.watching, "lake is older than 3.1.0")
       end
     end
@@ -296,10 +345,20 @@ local function start_probe(root)
   probe.started = true
   local cfg = pmacs.lsp.config.lean4
   if not cfg or not cfg.command then return end
+  -- **Only probe something actually named `lake`.** `version_below_3_1`
+  -- parses the first `x.y` it finds anywhere in the output, which is a
+  -- rule about LAKE's output contract and nothing else. Run against a
+  -- user's wrapper it is a category error: a working `my-lean-wrapper`
+  -- reporting "wrapper 1.0" would be replaced despite its server having
+  -- initialized fine. The FAILURE latch stays command-agnostic — that
+  -- one keys on the server actually not starting, which is true of any
+  -- command — but the version rule only applies where its contract
+  -- holds.
+  local base = cfg.command:match("([^/]+)$") or cfg.command
+  if base ~= "lake" then return end
   -- Probe the binary we would actually run, not the literal string
-  -- "lake": a user pointing `command` at a wrapper or an absolute path
-  -- should have THAT probed, and a hardcoded name would silently probe
-  -- something else (or nothing).
+  -- "lake": a user pointing `command` at an absolute path to lake should
+  -- have THAT probed, not whatever `lake` resolves to on PATH.
   local spec = {
     -- COHERENCE §9: `ProcessSpec.label` is the only identity a process
     -- carries, and it is what `pmacs.process.list` renders. A user
@@ -429,6 +488,11 @@ pmacs.hook.add("buffer.after-load", function()
   local ok_lang, lang = pcall(pmacs.lsp.buffer_language, buf)
   if not ok_lang or lang ~= "lean4" then return end
 
+  -- The buffer that started this, remembered for the asynchronous
+  -- rebuild: `_attach_buffer` acts on whatever is active when the
+  -- verdict lands, which may be a different buffer entirely.
+  probe.buf_key = tostring(buf)
+
   if not probe.started then
     local path = pmacs.editor.file_path()
     start_probe(path and M.root_for(path) or nil)
@@ -444,14 +508,21 @@ pmacs.hook.add("buffer.after-load", function()
     return
   end
 
-  -- No attachment for a Lean buffer means `ensure_server` could not
-  -- spawn at all — a synchronous ENOENT, already swallowed upstream.
-  -- That is not something to wait for; it is the failure itself, and
-  -- the only place it is still observable.
+  -- **Unconfigured is DISABLED, not failed.** A user who sets
+  -- `pmacs.lsp.config.lean4 = nil`, or clears its `command`, has turned
+  -- the Lean server off; reporting that "nil could not be started" is a
+  -- false alarm, and latching would poison the session so a later
+  -- configuration could never take effect. Only a CONFIGURED command
+  -- that produced no attachment is a failure.
+  local cfg = pmacs.lsp.config.lean4
+  if not cfg or not cfg.command then return end
+
+  -- No attachment for a Lean buffer with a configured command means
+  -- `ensure_server` could not spawn at all — a synchronous ENOENT,
+  -- already swallowed upstream. That is not something to wait for; it
+  -- is the failure itself, and the only place it is still observable.
   if not probe.latched then
-    fire_latch(nil, "`" .. tostring(
-      pmacs.lsp.config.lean4 and pmacs.lsp.config.lean4.command)
-      .. "` could not be started")
+    fire_latch(nil, "`" .. tostring(cfg.command) .. "` could not be started")
   end
 end)
 
@@ -467,6 +538,7 @@ end)
 -- waiting on real process timing. Not part of the public surface.
 M._probe = probe
 M._fire_latch = fire_latch
+M._try_reattach = try_reattach
 M._version_below_3_1 = version_below_3_1
 
 pmacs.lean = M
