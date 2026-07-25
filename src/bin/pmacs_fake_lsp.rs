@@ -483,6 +483,27 @@ fn main() {
                     }
                 });
                 write_frame(&mut stdout, &echo);
+                // Arc 8 Stage 3b: `leanprogress` mode emits one
+                // `$/lean/fileProgress` covering line 0, so the Lean
+                // subscriber can be pinned end-to-end through the real
+                // drain rather than by calling its handler directly.
+                if mode == "leanprogress" && uri.is_string() {
+                    let progress = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "$/lean/fileProgress",
+                        "params": {
+                            "textDocument": { "uri": uri, "version": 1 },
+                            "processing": [{
+                                "range": {
+                                    "start": { "line": 0, "character": 0 },
+                                    "end":   { "line": 1, "character": 0 }
+                                },
+                                "kind": 1
+                            }]
+                        }
+                    });
+                    write_frame(&mut stdout, &progress);
+                }
                 // Also push a synthetic `publishDiagnostics`
                 // notification with two entries (one Error, one
                 // Warning) so M4.6 tests can exercise the store.
