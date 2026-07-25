@@ -517,6 +517,52 @@ If it does not, stop and repair the remote/fetch configuration.
   **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
   `git diff --check` clean. Gates were run against the committed tree.
 
+## Terminal config + copy mode arc — Stage 1 IN REVIEW
+
+- Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
+  **revision 4** (four review rounds), committed as the first commit of
+  Stage 1's branch. Two stages, two branches, two PRs; **no protocol
+  change**.
+- **Stage 1 = `githubsucks/terminal-config`**, worktree
+  `../pmacs-terminal-config`, based on `githubsucks/main` @ `d152120`.
+  Profiles, scrollback, escape key, and the `C-c t` opening binding.
+- **Stage 2 = `terminal-copy-mode`, not started.** Branch it off `main`
+  after Stage 1 merges: no dependency, but both edit
+  `builtin/runtime/terminal.lua`.
+- Load-bearing decisions, each forced by scouted ground truth:
+  - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
+    no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
+  - the **two open-time settings resolve through the global chain**,
+    because they are read before the identity buffer exists; only
+    `terminal.escape-key` resolves per buffer;
+  - the escape cache lives on **`TerminalSession`** so its lifetime is
+    the terminal's. `value_epoch` alone is not a sufficient key: it does
+    not advance when focus moves between terminals with different
+    buffer-local values;
+  - repeating the escape sends **that chord**, not a hardcoded `0x03`.
+- **Four bites, each against a different plausible wrong
+  implementation** — hardcoded ETX fails acc6/9; epoch-only cache key
+  fails acc7; single last-entry cache fails acc8's parse count; removing
+  the invalid-value fallback fails acc10. The first version of acc7
+  passed against the epoch-only bite because it asserted only that
+  terminal A still worked; the discriminating assertion is that **each**
+  terminal honors its own chord and not the other's.
+- Test instruments worth reusing: `cat -v` is the echo probe, because the
+  screen rejects C0 controls before they reach cells so a raw echoed
+  `Ctrl-X` is invisible; and the probe **counts occurrences** rather than
+  testing presence, because a single-character probe collides with the
+  child's own banner text.
+- Verification on this branch (against the committed tree): `cargo fmt
+  --check` clean; strict workspace Clippy clean; 1,832 default + 2,009
+  CRDT library tests; `terminal_config_acceptance` 10/10 in **both**
+  configurations; vterm Stage 1/2/3 9+10 / 6+6 / 5+9; config registry 16;
+  bottom-panel 46; listview 6; compile 67 (isolated config); M4 121;
+  required GPU 202; **isolated-config workspace sweep 3,262 across 94
+  suites**; `git diff --check` clean.
+  - `compile_mode_acceptance` fails 11/67 against the **real** user
+    config and passes 67/67 with an isolated `XDG_CONFIG_HOME` — the
+    known pre-existing trap, not this branch.
+
 ## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 (GPU band) is next
 
 Stage 1 is on `main`; nothing in this arc is in flight. Stage 2 has **no
