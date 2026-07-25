@@ -1,11 +1,15 @@
 # pmacs agent instructions
 
-**Start here: read `docs/agent-handoff.md`, then
+**Start here: read `docs/agent-handoff.md`, then `COHERENCE.md`, then
 `docs/active-work.md`, before taking on any work.** The handoff carries
 durable project state, working method, substrate invariants, and the
-standing backlog. The active-work ledger carries volatile branches,
+standing backlog. `COHERENCE.md` carries the product-coherence thesis
+and its audited ground truth (scorecard, per-concern gaps, priority
+order) — it is the standard new work gets evaluated against, not just a
+backlog item; read it before framing anything and cite the section a
+framing doc serves. The active-work ledger carries volatile branches,
 checkpoints, verification, and exact cross-machine recovery commands.
-Keep both updated according to their own update protocols.
+Keep all three updated according to their own update protocols.
 
 Always true, independent of the handoff:
 
@@ -14,7 +18,11 @@ Always true, independent of the handoff:
   (`pmacs-protocol`). `#![forbid(unsafe_code)]`.
 - Workflow: framing doc in `docs/` -> user approval -> branch -> implement
   -> full gate suite -> PR -> user review rounds -> user says when to
-  merge. Never merge unprompted. One feature, one branch, one PR.
+  merge. Never merge unprompted. One feature, one branch, one PR. A
+  framing doc for coherence-affecting work should state its coherence
+  impact (journey steps touched, interaction islands added, config
+  registry adoption, background-work attribution) per `COHERENCE.md`
+  §20.
 - Gates before any PR: `cargo fmt --check`; `cargo clippy --workspace
   --all-targets -- -D warnings` (as its own step); `cargo test --lib`;
   `cargo test --lib --features crdt`; the touched acceptance suites;
