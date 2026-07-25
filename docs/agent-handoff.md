@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-25, after find-file (#162) landed — the dired
-arc's Stage 0 — following COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
+**Last updated: 2026-07-25, after dired Stage 1 (#165) landed — the
+directory view — following GPU terminal input (#166), multi-root LSP
+affinity (#161), the dired framing (#164), find-file (#162) — the dired
+arc's Stage 0 — COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
 minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
 inline-math re-scout (#154), the vterm PTY-flake fix (#153), and the
 GPU initial-target doc refresh (#152); and before that GPU
@@ -26,11 +28,13 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-25)
 
-- `main` @ `2af1ab3` (find-file #162 atop COHERENCE.md #163, Lean 4 Stage 1
-  #160, minimap blank-slab #159, bottom-panel Stage 1 #155, inline-math
-  re-scout #154, vterm PTY-flake #153, and doc refresh #152). Protocol
-  unchanged at **v20**. The bullets below describe the arcs in their own
-  terms; this line is the head-of-`main` anchor.
+- `main` @ `c8ec8f3` (dired Stage 1 #165 atop GPU terminal input #166,
+  multi-root LSP affinity #161, the dired framing #164, find-file #162,
+  COHERENCE.md #163, Lean 4 Stage 1 #160, minimap blank-slab #159,
+  bottom-panel Stage 1 #155, inline-math re-scout #154, vterm PTY-flake
+  #153, and doc refresh #152). Protocol unchanged at **v20**. The bullets
+  below describe the arcs in their own terms; this line is the
+  head-of-`main` anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -70,11 +74,78 @@ commands, read `docs/active-work.md` immediately after this file.
     against an open buffer yet fails to load one that is not open —
     find-file expands the tilde Lua-side. Loading through the normalized
     path is a named deferral.
-  - **Stage 1 (the directory view) is IN REVIEW as PR #165** — the
-    builtin `dired.lua`, the per-entry-tolerant `read_dir` opt, and
-    `pmacs.path.canonicalize`. Its branch state, substrate facts, and
-    verification live in `docs/active-work.md`; this section absorbs them
-    when it merges.
+- **dired Stage 1 — the directory view — LANDED — #165**
+  (`docs/dired-framing.md` §0, S1-1…S1-12; merge `c8ec8f3`; one review
+  round). pmacs now has a directory surface: `C-x d` / `C-x C-j` open a
+  read-only listing, one buffer per directory named
+  `*dired:<canonical path>*`, with a `dired` major mode whose
+  mode-scoped keymap carries `RET`/`f`, `^`, `n`/`p`, `g`, `q`, `s`.
+  Protocol unchanged at **v20**. **Stage 2 (marks and operations) and
+  Stage 3 (wdired) each still need their own framing**; the frozen
+  fixture shrinks after Stage 3.
+  - **The Rust is confined to two things**: a per-entry-tolerant
+    `read_dir` (`ReadDirTolerance {Fatal, PerEntry}` →
+    `FsDirListing {entries, errors}`), because `read_dir_blocking` fails
+    a whole listing on any of five per-entry conditions and the tolerant
+    wrapper its own module doc delegates to package authors **cannot be
+    written in Lua** (one error value, no partial vec); and
+    `editor_core::normalize_buffer_path` becoming `pub`, exposed as
+    `pmacs.path.canonicalize`. Only non-UTF-8 **names** stay fatal —
+    byte-preserving paths would be needed. The Lua result **shape** keys
+    on `errors.is_some()`, so the bare array the frozen M8.2 fixture
+    consumes with `ipairs` is untouched.
+  - **Exposing a core normalizer beat mirroring it in Lua.** A Lua mirror
+    would have been a second canonical form — the same class of bug as
+    the five tab-width constants (#137). Applies to any future Lua-side
+    path reckoning.
+  - **A fixed-width column must be fixed-width for every input.** The
+    exported `pmacs.dired._layout` (MARK 0, KIND 2, PERMS 3–12, SIZE 13,
+    MTIME 24, NAME 41) is the contract Stage 3 reads offsets from, and
+    `%10d` overflows at ≥10 GB, silently shifting every column right of
+    it. Sizes now fall back to a width-clamped magnitude (K/M/G/T/P/E).
+  - **An ambient action must be gated on the buffer it assumes.** A
+    revert's cursor re-seat settles a tick or more later, by which time
+    the user may have switched buffers; the paint names its buffer and is
+    safe, but seating is ambient. This is the buffer-level instance of
+    the rule below that interactive origin does not survive an await.
+  - **A failure IS an answer — don't probe first.** Kinds are lstat-based
+    in both `read_dir` and `stat`, so nothing in an entry says whether a
+    symlink points at a directory. `RET` tries to list it and treats the
+    failure as the answer; an explicit probe was a second full
+    `read_dir`, so a descent listed twice.
+  - **Unbounded per-entry error collection needs a cap when nothing
+    cancels the work.** A dired listing carries no supersede key, so
+    cancellation was never the backstop the tolerant loop implicitly
+    relied on (`READDIR_MAX_CONSECUTIVE_ENTRY_ERRORS = 1024`).
+  - **This is the first builtin with mode-scoped keys** (#129's first
+    non-detection consumer), which broke the pre-existing
+    `describe_key_identifies_every_default_binding`: it asserted every
+    binding resolves through `describe.key` context-free, which held only
+    while the modes table was empty. It now sets the effective context
+    per binding and explicitly **clears** the mode for global ones,
+    because a leaked mode legitimately shadows a global chord of the same
+    name (dired's `RET` shadows `edit.newline-and-indent`), plus a floor
+    assertion that at least one mode-scoped binding exists.
+  - **A dedicated panel does not carry its dedication across a descent**
+    — the framing expected it to. `display_buffer` never replaces the
+    buffer in a slot dedicated to another one; it discards every
+    side-specific parameter and falls back to the document window (Q#BP3
+    2.iii), and the exact-window arm errors. Dired does not unpin the
+    user's panel; both arms are pinned.
+  - Smaller facts worth knowing before touching this code: a path-backed
+    buffer's **name is its full path**, not its basename, which matters
+    for any name assertion; `pmacs.buffer.kill` (not `remove`) redirects
+    windows off a doomed buffer first, so `dired.kill-when-opening` kills
+    **after** the replacement is displayed; ownership is checked against
+    the handle table only, never the buffer name; and `C-x d` takes **no**
+    completion source on purpose (with one, `RET` on an empty field opens
+    whatever sorts first, and RET-where-you-are is the gesture the binding
+    exists for — the field is prefilled instead).
+  - Verification at merge: 1,832 default + 2,009 CRDT library tests;
+    dired acceptance 25 + 25 CRDT; the frozen m8_1 10 / m8_2 15 / m8_3 32
+    unchanged, which is the additivity gate for the `read_dir` change; M4
+    121; required GPU 155; isolated-`XDG_CONFIG_HOME` workspace sweep
+    3,205 across 93 suites. 15 claims bite-verified.
 - **GPU initial target LANDED — #148**
   (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
@@ -760,6 +831,24 @@ final variant — its own round-trip cannot detect a discriminant shift.
   trap-guarded one-file swap over read-only `git show`, with an
   inverted verdict (exit 0 iff the tests FAIL against the old
   version), making bite-verification machine-checkable.
+- **A fix must be COMMITTED before it is bitten.** `scripts/bite`
+  restores by `git checkout --`, which reverts the file to **HEAD**, not
+  to the state it found — so any uncommitted work in a bitten file is
+  destroyed. A whole review round's fixes were wiped this way during
+  #165. Corollary for a NEW file: the swap-over-`git show` mode does not
+  apply at all, so its claims must be bitten by hand-editing, which makes
+  the commit-first rule load-bearing rather than hygienic.
+- **A CONFLICTING PR silently runs no CI at all.** GitHub builds
+  `pull_request` workflow runs against the PR's **merge ref**, which it
+  does not create while the branch conflicts with its base. So pushes
+  land, the branch updates, no run is ever queued, and **nothing reports
+  the absence** — the checks list simply keeps showing the last
+  successful run, which reads as current. Three pushes to #165 produced
+  zero CI before the cause was found, and `gh pr checks` returns nothing
+  usable here. On any lane that lives through a moving `main`, check
+  `gh pr view <N> --json mergeable,mergeStateStatus,headRefOid` and
+  confirm a run exists **for the current head sha**, not merely that a
+  recent run was green.
 - **Stacked PRs**: retarget the child to main BEFORE merging the
   parent — GitHub auto-closes a PR whose base branch is deleted and
   cannot reopen it (#104 → re-opened as #105).

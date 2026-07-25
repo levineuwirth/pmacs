@@ -1,7 +1,9 @@
 # Dired — framing
 
 **Revision 7 — 2026-07-25. Status: APPROVED; Stage 0 MERGED as #162;
-Stage 1 IN REVIEW as PR #165, review round 1 addressed.**
+Stage 1 MERGED as #165 (`main` @ `c8ec8f3`, one review round). Stage 2
+(marks and operations) and Stage 3 (wdired) each still need their own
+framing before implementation; the frozen fixture shrinks after Stage 3.**
 Rev 1 passed a ground-truth review; rev 2 fixed round 1's seven findings;
 rev 3 fixed round 2's six and was approved; rev 4 recorded what Stage 0's
 implementation falsified in the approved text (§0); rev 5 adds the
