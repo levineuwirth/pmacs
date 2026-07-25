@@ -328,6 +328,9 @@ impl<'a> MathLayout<'a> {
         Ok(Self { face, constants })
     }
 
+    /// Test-only introspection: the production draw path consumes the
+    /// constants through `layout`, never raw.
+    #[cfg(test)]
     #[must_use]
     pub fn constants(&self) -> MathConstants {
         self.constants
@@ -515,6 +518,19 @@ mod tests {
     use super::*;
 
     use crate::math_parse::parse;
+
+    /// Framing acceptance 16 (provenance half): the GUST licence ships
+    /// beside the font, names itself, and is not the OFL that covers
+    /// `JetBrains` Mono.
+    #[test]
+    fn bundled_licences_are_distinct_and_name_their_terms() {
+        let gust = include_str!("../fonts/GUST-FONT-LICENSE.txt");
+        let ofl = include_str!("../fonts/OFL.txt");
+        assert!(gust.contains("GUST Font License"));
+        assert!(gust.contains("LaTeX Project Public License"));
+        assert!(!ofl.contains("GUST"));
+        assert_ne!(gust, ofl);
+    }
 
     #[test]
     fn tex_symbol_greek_forms_are_italicised_too() {
@@ -744,7 +760,12 @@ mod tests {
             if scale < MIN_FIT_SCALE {
                 break Some((depth, src.clone()));
             }
-            if depth >= 6 {
+            // Headroom above the real boundary (5 with the round-3 MATH
+            // gaps): if a metric shift pushed the boundary past this bound,
+            // the expect below would fire with a message reading "the floor
+            // is dead code" when the truth is "the boundary moved past the
+            // search". Keep the bound comfortably above the boundary.
+            if depth >= 8 {
                 break None;
             }
             src = format!(r"\frac{{{src}}}{{c}}");

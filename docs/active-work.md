@@ -54,6 +54,41 @@ git status --short --branch
 The `git log` command must expose `0dd16a5` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
+## Inline-math slice lane — IN FLIGHT
+
+- Portable branch: `githubsucks/inline-math-slice`; worktree
+  `../pmacs-math-slice`.
+- Framing: `docs/inline-math-slice-framing.md` rev 3, approved after two
+  review rounds; parent arc framing merged as #154.
+- State: parser, font bundle (GUST licence), MATH-table layout with the
+  measured height budget, currency-guarded detection, and the
+  `ChunkSource::MathBox` spacer substrate are implemented and
+  round-3-reviewed (review fixes at `cbf7782`: the exclusive-`end`
+  mapping bug its own test had pinned, script-marker whitespace, fallible
+  layout via `UncoverableGlyph`, real fraction gap-min constants —
+  flagship scale 0.867, fallback depth 5).
+- Caret-driven suppression (the Q#MS5 gate over the effective caret and
+  Q#MS11 selection endpoints, chunk substitution before tab expansion,
+  the line-reuse predicate's third input, and the CursorByte /
+  optimistic-edit / Decorations refresh triggers), the draw pass
+  (per-glyph mini-buffers positioned by each shaped line's real
+  baseline, fraction-rule quads over the washes, the F8b family pin),
+  the Q#MS11 whole-rectangle wash widening, and the pixel acceptance
+  battery (criteria 5–11, 14–16; 17 discharged by the differential
+  `cargo tree -e features` check — byte-identical with and without the
+  dependency line) are implemented on the branch tip.
+- Clippy is CLEAN on the whole workspace at `-D warnings` — the draw
+  pass consumed every formerly-dead item.
+- Verification at the tip: 199 `pmacs-gpu` tests under
+  `PMACS_REQUIRE_GPU=1`; 1,815 default + 1,992 CRDT library tests; M4
+  121; full workspace sweep green (isolated `XDG_CONFIG_HOME`).
+- Remaining before PR: nothing known; awaiting the user's review pass.
+  Named v0 approximations: the peer-caret half of acceptance 14 is
+  pinned at the mapping level (unit tests), not pixels; a soft-wrapped
+  spacer draws its box whole at the first run's origin; the fit budget
+  reads the bundled code face even under a custom `set_font` family
+  (the draw anchors to the real shaped baseline either way).
+
 ## Folding lane (Arc 6) — Stages 1 and 2 MERGED; Stage 3 (GPU) is next
 
 Both shipped stages are on `main`; nothing in this arc is in flight. Stage 3

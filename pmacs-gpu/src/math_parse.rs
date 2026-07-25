@@ -454,6 +454,22 @@ mod tests {
         assert_eq!(mixed.len(), 1, "{mixed:?}");
     }
 
+    /// Round-3 F6 — a DOCUMENTED casualty of the `$$`-opaque rule, not a
+    /// guard failure: in `$a$$b$` the first span's legitimate closer is
+    /// immediately followed by the second span's opener, the lookahead
+    /// reads that pair as display-math `$$`, and the pending opener is
+    /// abandoned. Adjacent inline spans therefore need a separating
+    /// character. Pandoc finds two spans here; this scanner deliberately
+    /// finds none, because distinguishing `$a$$b$` from `$$x$$` requires
+    /// closer-context the framing's opaque-`$$` rule gave away.
+    #[test]
+    fn adjacent_inline_spans_are_eaten_by_the_display_guard() {
+        assert!(detect_math_spans("$a$$b$").is_empty());
+        assert!(detect_math_spans("$x^2$$y^2$").is_empty());
+        // One separating character restores both spans.
+        assert_eq!(detect_math_spans("$a$ $b$").len(), 2);
+    }
+
     #[test]
     fn whitespace_before_a_script_marker_still_merges_the_scripts() {
         // F2: without skipping whitespace in `parse_scripts`, `x^2 _i` built
