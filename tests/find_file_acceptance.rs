@@ -194,6 +194,85 @@ fn find_file_nonexistent_path_creates_a_new_file_buffer() {
     );
 }
 
+/// The everyday new-file flow: a BARE name, no separator, matching no
+/// existing entry. The candidate list empties on its own, so the typed
+/// text arrives and joins onto the root. This is the path users hit
+/// first, and it is the only route through `find_file_resolve` that
+/// combines free text with a relative join.
+#[test]
+fn find_file_bare_new_name_creates_in_the_root() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let fresh = td.path().join("zzz.txt");
+
+    let mut s = editor_in(td.path());
+    open_prompt(&mut s);
+    // "zzz.txt" is not a subsequence of "anchor.txt" (no 'z' in it), so
+    // nothing survives the filter and the typed name is what accepts.
+    type_str(&mut s, "zzz.txt");
+    assert!(
+        candidates(&s).is_empty(),
+        "fixture premise: a bare non-matching name must empty the list; got {:?}",
+        candidates(&s)
+    );
+
+    press(&mut s, KeyCode::Enter);
+
+    let path = active_path(&s).expect("a buffer must be bound to the new path");
+    assert_eq!(
+        std::path::Path::new(&path).parent(),
+        Some(td.path()),
+        "a bare name must join onto the prompt's root; got {path}"
+    );
+    assert!(
+        path.ends_with("zzz.txt"),
+        "the buffer must carry the typed name; got {path}"
+    );
+    let len: usize = eval(&s, "return pmacs.window.buffer():len()");
+    assert_eq!(len, 0, "a new-file buffer starts empty");
+    assert!(!fresh.exists(), "nothing is written to disk until save");
+}
+
+/// The failure arm. Accepting a DIRECTORY candidate reaches
+/// `display_file`, whose load fails (opening a directory succeeds, the
+/// read does not), and the command's `pcall` must turn that into a
+/// status message rather than letting the error escape mid-dispatch.
+/// Without the `pcall` this test fails, which is the point --- the
+/// guard is pinned through the real accept path, not asserted directly.
+#[test]
+fn find_file_accepting_a_directory_reports_instead_of_raising() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("sub")).expect("mkdir");
+
+    let mut s = editor_in(td.path());
+    let before = active_path(&s).expect("the anchor must be open");
+
+    open_prompt(&mut s);
+    // Only the directory matches: "anchor.txt" contains no 's'.
+    type_str(&mut s, "sub");
+    assert_eq!(
+        candidates(&s),
+        vec!["sub".to_string()],
+        "fixture premise: the directory must be the sole candidate"
+    );
+
+    press(&mut s, KeyCode::Enter);
+
+    let line = status(&s);
+    assert!(
+        line.starts_with("find-file: "),
+        "the failure must surface as this command's status message; got {line:?}"
+    );
+    assert_eq!(
+        active_path(&s).as_deref(),
+        Some(before.as_str()),
+        "a failed open must leave the active buffer alone"
+    );
+    assert!(
+        !eval::<bool>(&s, "return pmacs.minibuffer.is_active()"),
+        "the prompt must have closed even though the open failed"
+    );
+}
+
 /// 0d --- with no backing path, the prompt roots at the process cwd
 /// (`source_root` is omitted, and the Rust side defaults to ".").
 /// The test crate's cwd is the crate root, so `Cargo.toml` is a

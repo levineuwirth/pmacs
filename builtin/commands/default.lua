@@ -637,10 +637,23 @@ cmd { name = "editor.switch-buffer",
 --    are basenames and the filter is a subsequence match, is exactly
 --    when the input contains a `/`. That makes the deeper-path case work
 --    (`sub/inner.txt` matches no basename, so it arrives verbatim) and
---    leaves one documented hole: typing a NEW bare name that happens to
---    be a subsequence of an existing entry opens the existing file
---    instead of creating the new one. `acc4` pins that as a known
---    behavior rather than letting it be an accident.
+--    leaves TWO documented consequences, each pinned by a test rather
+--    than left to be rediscovered:
+--
+--    (a) typing a NEW bare name that happens to be a subsequence of an
+--        existing entry opens the existing file instead of creating the
+--        new one --- `find_file_selected_candidate_shadows_typed_text`.
+--        A new bare name that matches nothing is unaffected and creates
+--        normally (`find_file_bare_new_name_creates_in_the_root`).
+--    (b) accepting on EMPTY input opens the first candidate in sort
+--        order. `fuzzy_score` returns `Some(0)` for an empty needle, so
+--        everything ties and `filter_and_sort` falls back to
+--        lexicographic order --- which puts dotfiles first, and can put
+--        a DIRECTORY first, in which case the open fails and reports.
+--        This is the same mechanism `M-x` and `switch-buffer` already
+--        have, so it is inherited rather than introduced; it is recorded
+--        as decided, not overlooked, and listed in the framing's
+--        deferrals beside the accept-semantics fix that would close it.
 --
 -- The root is the active buffer's directory, or the process cwd when the
 -- buffer has no backing path (`source_root` defaults to "." Rust-side,
