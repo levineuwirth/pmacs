@@ -679,10 +679,20 @@ fn acc34b_falsified_by_a_resolver_that_skips_canonicalization() {
 // server-affinity key via `file_uri_for` and would silently fail to
 // round-trip. Bites against the `display()` form, which returns a
 // non-nil string for this fixture.
+//
+// **Linux-gated, and `cfg(unix)` was not enough** — CI caught that.
+// APFS enforces valid UTF-8 in filenames, so on macOS the `write` below
+// fails with EILSEQ ("Illegal byte sequence") before the code under test
+// is ever reached: the fixture cannot be built there. That is a
+// filesystem refusing to represent the case, not a behavioral
+// difference — the subject itself, `to_str()` returning None, is
+// platform-independent Rust. Gated explicitly rather than skipped at
+// runtime, so a future failure here is a real failure and not a silent
+// no-op.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn acc34a_canonicalize_declines_a_non_utf8_resolution() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt as _;

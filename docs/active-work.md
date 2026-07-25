@@ -236,9 +236,21 @@ If it does not, stop and repair the remote/fetch configuration.
   code rather than left looking covered.
 - Verification on this branch: `cargo fmt --check` clean; strict
   workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
-  dispatch seams 14/14; multi-root 13/13; M4 121; required GPU 155;
-  **isolated-config workspace sweep 3,188 across 93 suites, zero
-  failures**; `git diff --check` clean.
+  dispatch seams 15/15 on Linux (14 on macOS — see below); multi-root
+  13/13; M4 121; required GPU 155; **isolated-config workspace sweep
+  3,189 across 93 suites, zero failures**; `git diff --check` clean.
+- **Two flakes/portability facts from CI round 1, both worth keeping:**
+  1. `composition_overhead_under_ten_percent` tripped once in a local
+     sweep at 18.8% against a 10% budget, then passed 3/3 in isolation
+     here, passed in isolation on main, and passed a full sweep rerun.
+     The tell is in its own output: the same run reported realistic-frame
+     overhead as **-4.6%**, and a negative figure is measurement noise,
+     not added work. Load-sensitive under a parallel `--workspace` run.
+  2. **A non-UTF-8 filename fixture cannot be built on macOS.** APFS
+     enforces valid UTF-8, so `std::fs::write` fails with EILSEQ
+     ("Illegal byte sequence") before the code under test is reached.
+     `#[cfg(unix)]` is NOT sufficient for such a fixture —
+     `#[cfg(target_os = "linux")]` is. Cost one red CI round to learn.
 
 ## Dired lane — framing APPROVED; Stage 0 MERGED, Stage 1 next
 
