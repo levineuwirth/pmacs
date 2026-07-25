@@ -611,6 +611,129 @@ cmd { name = "editor.switch-buffer",
         }
       end }
 
+-- find-file (dired arc Stage 0; docs/dired-framing.md Q#DR11) ----------------
+--
+-- Until now pmacs had no discoverable way to open a file by path: a file
+-- entered a session only from the CLI, an LSP jump, a project-search
+-- visit, or `C-x C-r` (whose prompt does pass free text through, but
+-- completes only over the recent list). This is that surface.
+--
+-- Two substrate facts shape it, and both are load-bearing:
+--
+-- 1. COMPLETION IS FLAT. `source = "files"` lists ONE directory and
+--    yields bare basenames (`minibuffer.rs` `list_directory`), capped at
+--    the shared candidate limit. A custom function source could not do
+--    better: sources are called with NO arguments, so a callback cannot
+--    see the input to re-root on, and it runs synchronously outside any
+--    coroutine, where `Handle:await()` raises --- so it cannot list a
+--    directory either. Hierarchical completion is a named Rust change in
+--    the framing, not something this command can fake.
+--
+-- 2. A SELECTED CANDIDATE SHADOWS TYPED TEXT. `recompute_candidates`
+--    sets `selected = Some(0)` whenever the candidate list is non-empty,
+--    and `resolve_accepted_value` returns the CANDIDATE whenever
+--    anything is selected. So `on_accept` receives typed text only when
+--    the input filters every candidate away --- which, since candidates
+--    are basenames and the filter is a subsequence match, is exactly
+--    when the input contains a `/`. That makes the deeper-path case work
+--    (`sub/inner.txt` matches no basename, so it arrives verbatim) and
+--    leaves TWO documented consequences, each pinned by a test rather
+--    than left to be rediscovered:
+--
+--    (a) typing a NEW bare name that happens to be a subsequence of an
+--        existing entry opens the existing file instead of creating the
+--        new one --- `find_file_selected_candidate_shadows_typed_text`.
+--        A new bare name that matches nothing is unaffected and creates
+--        normally (`find_file_bare_new_name_creates_in_the_root`).
+--    (b) accepting on EMPTY input opens the first candidate in sort
+--        order. `fuzzy_score` returns `Some(0)` for an empty needle, so
+--        everything ties and `filter_and_sort` falls back to
+--        lexicographic order --- which puts dotfiles first, and can put
+--        a DIRECTORY first, in which case the open fails and reports.
+--        This is the same mechanism `M-x` and `switch-buffer` already
+--        have, so it is inherited rather than introduced; it is recorded
+--        as decided, not overlooked, and listed in the framing's
+--        deferrals beside the accept-semantics fix that would close it.
+--
+-- The root is the active buffer's directory, or the process cwd when the
+-- buffer has no backing path (`source_root` defaults to "." Rust-side,
+-- so the nil case needs no special handling here). It appears in the
+-- prompt because the field itself must stay empty: any prefill would
+-- contain a `/` and filter every candidate away, killing completion.
+
+-- Directory part of a path. "/a/b" -> "/a"; "/a" -> "/"; "a" -> nil.
+local function find_file_dirname(path)
+  local dir = path:match("^(.*)/[^/]*$")
+  if dir == nil then return nil end
+  if dir == "" then return "/" end
+  return dir
+end
+
+-- Expand a leading `~` component using $HOME: `~` -> $HOME, `~/x` ->
+-- $HOME/x. `~user` is left alone (no passwd lookup), matching the core's
+-- own `expand_tilde`.
+--
+-- This has to happen HERE, before the path reaches the core, because
+-- `get_or_load_buffer` normalizes the path it STORES but loads from the
+-- raw one --- so a `~/...` path deduplicates against an already-open
+-- buffer yet fails to load when the file is not open yet. Expanding up
+-- front makes both halves agree.
+local function find_file_expand_tilde(path)
+  local home = os.getenv("HOME")
+  if home == nil or home == "" then return path end
+  if home:sub(-1) == "/" then home = home:sub(1, -2) end
+  if path == "~" then return home end
+  local rest = path:match("^~/(.*)$")
+  if rest == nil then return path end
+  return home .. "/" .. rest
+end
+
+-- Turn an accepted value into a path. The value is either a bare
+-- basename (a selected candidate) or whatever the user typed, so a
+-- non-absolute value joins onto the prompt's root --- which resolves
+-- both cases to the same file when they name the same one.
+local function find_file_resolve(root, value)
+  local path = find_file_expand_tilde(value)
+  if path:sub(1, 1) == "/" then return path end
+  local base = root or "."
+  if base:sub(-1) == "/" then return base .. path end
+  return base .. "/" .. path
+end
+
+-- The active buffer's directory, or nil when it has no backing path.
+local function find_file_root()
+  local buf = pmacs.window.buffer()
+  if buf == nil then return nil end
+  local ok, path = pcall(function() return buf:path() end)
+  if not (ok and path) then return nil end
+  return find_file_dirname(path)
+end
+
+cmd { name = "find-file",
+      description = "Open a file by path, completing within one directory.",
+      fn = function()
+        local root = find_file_root()
+        pmacs.minibuffer.read {
+          prompt = "Find file (" .. (root or ".") .. "): ",
+          source = "files",
+          source_root = root,
+          history = "find-file",
+          on_accept = function(value)
+            if value == nil or value == "" then return end
+            local path = find_file_resolve(root, value)
+            -- A path that does not exist yet CREATES a buffer bound to
+            -- it: `display_file` routes through `resolve_target_buffer`,
+            -- which on NotFound creates, binds, and sets "[new file]".
+            -- That is Emacs parity and deliberate, so only a real
+            -- failure (a directory, a permission error) reaches here.
+            local ok, err = pcall(pmacs.window.display_file, path, { select = true })
+            if not ok then
+              pmacs.editor.set_status("find-file: " .. tostring(err))
+            end
+          end,
+        }
+      end }
+
 -- Command palette (M-x) ------------------------------------------------------
 --
 -- Opens the minibuffer with a "commands" completion source, then

@@ -525,6 +525,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/window.lua"),
             )
             .expect("load window builtin chunk");
+        // Dired Stage 1: the directory view. Loaded AFTER window.lua,
+        // whose `window.panel-height` setting a `display = "panel"`
+        // listing resolves, and after the pre-runtime tables it drives
+        // (`pmacs.config` / `command` / `keymap` / `buffer` / `editor` /
+        // `minibuffer` / `path`, plus `pmacs.fs` from fs.lua above).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/dired.lua"),
+                include_str!("../builtin/runtime/dired.lua"),
+            )
+            .expect("load dired builtin chunk");
         // Compile-mode (Arc 5 stage 1, Q#CM1) — ORDERING CONTRACT:
         // compile.lua must load AFTER lsp.lua. It takes over
         // `M-g n` / `M-g p` for the unified error dispatchers, and
@@ -1189,14 +1200,84 @@ impl EditorState {
         let _ = self.terminal_manager.borrow_mut().release_controller(key);
     }
 
+    /// Reconcile panels and release a controller whose window moved away.
+    ///
+    /// **Frontend-kind neutral, and deliberately so** (Q#GT1/Q#GT4): this
+    /// half reads only `core.views`, `core.windows`, and the controller —
+    /// never a grid size — so it is the half the dispatcher runs for EVERY
+    /// attached frontend once per tick. It was previously fused into
+    /// [`Self::sync_terminal_layout`], which meant a semantic frontend got
+    /// its controller-liveness release only as a side effect of a grid
+    /// resize it should never have received.
+    ///
+    /// [`Self::sync_semantic_terminal_layout`] cannot substitute for this:
+    /// when a GPU window switches away from its terminal, the buffer-follow
+    /// snapshot clears the viewport declaration
+    /// (`SemanticRenderState::on_buffer_snapshot_sent`), so the semantic arm
+    /// stops running entirely in exactly the case that needs the release.
+    ///
+    /// Returns `true` while `frontend_id` still holds a live controller.
+    pub fn sync_terminal_controller_liveness(&mut self, frontend_id: FrontendId) -> bool {
+        // Bottom-panel arc (Q#BP2b): a panel that just became
+        // unsatisfiable must have released its controller before any
+        // resize runs, or the child would be resized against a dead rect.
+        // This is the contract's only per-tick enforcement point, and it
+        // stays neutral so semantic frontends keep it (Q#GT7).
+        self.reconcile_panel_layout(frontend_id);
+        let Some(key) = self
+            .terminal_manager
+            .borrow()
+            .controller_view_for_frontend(frontend_id)
+        else {
+            return false;
+        };
+        let core = self.core.borrow();
+        let Some(view) = core.views.get(&frontend_id) else {
+            drop(core);
+            let _ = self.terminal_manager.borrow_mut().release_controller(key);
+            return false;
+        };
+        if view.active != key.window_id
+            || core
+                .windows
+                .get(&key.window_id)
+                .is_none_or(|window| window.buffer_id != key.buffer_id)
+        {
+            drop(core);
+            let _ = self.terminal_manager.borrow_mut().release_controller(key);
+            return false;
+        }
+        true
+    }
+
     /// Resize the one session durably controlled by `frontend_id`.
     ///
     /// This is called before process drain and paint, never from rendering.
+    ///
+    /// Composition of the two halves, preserved verbatim for the in-process
+    /// `editor::run` loop and `LOCAL`. The daemon dispatcher calls the halves
+    /// separately, because only the geometry half is grid-specific.
     pub fn sync_terminal_layout(&mut self, frontend_id: FrontendId, term_size: CellSize) -> bool {
-        // Bottom-panel arc (Q#BP2b): a panel that just became
-        // unsatisfiable must have released its controller before this
-        // runs, or the child would be resized against a dead rect.
-        self.reconcile_panel_layout(frontend_id);
+        self.sync_terminal_controller_liveness(frontend_id)
+            && self.sync_terminal_grid_geometry(frontend_id, term_size)
+    }
+
+    /// The grid half: TUI placement plus the resize it implies.
+    ///
+    /// **Grid frontends only** (Q#GT1). The placement lookup below is why:
+    /// a semantic frontend has no `window_placements` entry at all, so the
+    /// "no placement" arm would release its controller on EVERY tick. That
+    /// release reads like liveness and is not — it is grid geometry, and
+    /// moving it into [`Self::sync_terminal_controller_liveness`] would
+    /// reintroduce this framing's own defect in a new place.
+    ///
+    /// Assumes liveness already ran: the controller is live and its window
+    /// still shows the terminal.
+    pub fn sync_terminal_grid_geometry(
+        &mut self,
+        frontend_id: FrontendId,
+        term_size: CellSize,
+    ) -> bool {
         let Some(key) = self
             .terminal_manager
             .borrow()
@@ -1206,23 +1287,11 @@ impl EditorState {
         };
         let content = {
             let core = self.core.borrow();
-            let Some(view) = core.views.get(&frontend_id) else {
-                let _ = self.terminal_manager.borrow_mut().release_controller(key);
-                return false;
-            };
-            if view.active != key.window_id
-                || core
-                    .windows
-                    .get(&key.window_id)
-                    .is_none_or(|window| window.buffer_id != key.buffer_id)
-            {
-                let _ = self.terminal_manager.borrow_mut().release_controller(key);
-                return false;
-            }
             let Some(placement) = window_placements(&core, frontend_id, term_size)
                 .get(&key.window_id)
                 .copied()
             else {
+                drop(core);
                 let _ = self.terminal_manager.borrow_mut().release_controller(key);
                 return false;
             };
@@ -5648,17 +5717,25 @@ mod tests {
 
     // ---- T M2.11 acceptance --------------------------------------------------
 
-    /// Every chord in the default global keymap must round-trip through
+    /// Every chord in the default keymap must round-trip through
     /// `pmacs.describe.key`: returning a non-nil table whose `command`
     /// matches the binding the keymap stack stores.
+    ///
+    /// `describe.key` resolves against the **effective context**
+    /// (buffer-local → mode → global), so a mode-scoped default is
+    /// asserted with a buffer that carries that mode rather than
+    /// context-free. Dired is the first builtin to bind mode-scoped keys
+    /// (#129's first non-detection consumer), and without the mode in
+    /// place its `n` / `p` / `g` correctly resolve to nothing.
     #[test]
     fn describe_key_identifies_every_default_binding() {
+        use crate::keymap_stack::Scope;
         let s = EditorState::new();
         let kms = s.lua_host.keymaps().borrow();
-        let bindings: Vec<(String, String)> = kms
+        let bindings: Vec<(Scope, String, String)> = kms
             .iter_all()
             .into_iter()
-            .map(|(_, seq, b)| (crate::key::display_sequence(&seq), b.command))
+            .map(|(scope, seq, b)| (scope, crate::key::display_sequence(&seq), b.command))
             .collect();
         drop(kms);
         // Sanity floor: the default keymap binds at least the M1 surface.
@@ -5667,18 +5744,50 @@ mod tests {
             "default keymap unexpectedly small: {} bindings",
             bindings.len()
         );
+        let modes: usize = bindings
+            .iter()
+            .filter(|(scope, _, _)| matches!(scope, Scope::Mode(_)))
+            .count();
+        assert!(
+            modes >= 1,
+            "a mode-scoped default is expected since dired Stage 1; \
+             found none, so the mode arm below asserts nothing"
+        );
 
-        for (seq, expected_command) in &bindings {
+        for (scope, seq, expected_command) in &bindings {
+            let mode = match scope {
+                Scope::Mode(name) => Some(name.clone()),
+                // No buffer-scoped defaults exist; a future one would
+                // need its own buffer context here.
+                Scope::Buffer(_) => continue,
+                Scope::Global => None,
+            };
+            // Set the context explicitly on EVERY iteration, including
+            // the global one: a mode left over from a previous iteration
+            // legitimately shadows a global binding of the same chord
+            // (dired's mode-scoped `RET` shadows
+            // `edit.newline-and-indent`, which is the point of the
+            // mode), so a leaked mode would make this assert the wrong
+            // thing.
+            let context = match &mode {
+                Some(name) => {
+                    format!("pmacs.buffer.set_major_mode(pmacs.window.buffer(), {name:?}); ")
+                }
+                None => "pmacs.buffer.set_major_mode(pmacs.window.buffer(), nil); ".to_owned(),
+            };
             let script = format!(
-                "local r = pmacs.describe.key({seq:?}); \
+                "{context}local r = pmacs.describe.key({seq:?}); \
                  if r == nil then return 'nil' else return r.command end"
             );
             let got: String = s.lua_host.lua().load(&script).eval().unwrap_or_else(|e| {
                 panic!("describe.key({seq}) raised: {e}");
             });
             assert_eq!(
-                &got, expected_command,
-                "describe.key for {seq:?} returned {got:?}, expected {expected_command:?}"
+                &got,
+                expected_command,
+                "describe.key for {seq:?} (scope {}) returned {got:?}, \
+                 expected {expected_command:?}",
+                scope.render()
             );
         }
     }

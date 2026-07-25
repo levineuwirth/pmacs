@@ -202,8 +202,18 @@ fn format_outcome(outcome: &JobOutcome) -> String {
         JobOutcome::Complete(JobResult::Parse { duration_ms }) => {
             format!("ok (parse {duration_ms}ms)")
         }
-        JobOutcome::Complete(JobResult::ReadDir(entries)) => {
-            format!("ok ({} entries)", entries.len())
+        JobOutcome::Complete(JobResult::ReadDir(listing)) => {
+            // Per-entry failures (dired Q#DR6) are counted here too: a
+            // tolerant listing that dropped half a directory is not the
+            // same observable outcome as a clean one.
+            match listing.errors.as_deref() {
+                Some(errors @ [_, ..]) => format!(
+                    "ok ({} entries, {} unreadable)",
+                    listing.entries.len(),
+                    errors.len()
+                ),
+                _ => format!("ok ({} entries)", listing.entries.len()),
+            }
         }
         JobOutcome::Complete(JobResult::Stat(entry)) => {
             format!("ok (stat {:?})", entry.name)

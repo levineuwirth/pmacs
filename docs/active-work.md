@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-24.** This file records volatile work that has not
+**Snapshot: 2026-07-25.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -14,10 +14,11 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `e745068` (bottom-panel Stage 1 #155 atop GPU
-  initial-target #148, folding Stage 2 landed-doc refresh #150, folding
-  Stage 2 #149, the ledger refresh #147, web grammars HTML+CSS #146, and
-  the LaTeX Stage 1 #144 / inline-math framing #145 pair; protocol v20).
+  `githubsucks/main` @ `8c86d34` (the dired framing #164 atop find-file
+  #162, COHERENCE.md #163, Lean 4 Stage 1 #160, the minimap blank-slab fix
+  #159, bottom-panel Stage 1 #155, the inline-math re-scout #154, the vterm
+  PTY-flake fix #153, and the GPU initial-target doc refresh #152; protocol
+  v20).
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -51,8 +52,342 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `e745068` or a newer intentional main.
+The `git log` command must expose `8c86d34` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
+
+## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
+
+- Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
+  round, all twelve checks green). Branch `githubsucks/lean4-stage1`
+  retained; it was worked in the shared checkout (no sibling worktree).
+- Approved framing: `docs/lean4-mode-framing.md` revision 4, committed as
+  the branch's first commit (`a382965`) after three review rounds. **Seven
+  stages**, 19 decisions (Q#LN1–19), 64 acceptance criteria. North star:
+  match or exceed VS Code's Lean support.
+- **Stage 1 implemented; no wire change (protocol stays v20), no LSP, no
+  frontend change.** Four commits: framing, grammar, theme captures,
+  editing surface + acceptance.
+  - `Cargo.toml` + `src/syntax.rs`: `arborium-lean` 2.18 and one
+    `BUILTIN_LANGUAGES` entry named **`lean4`** (Q#LN2 — the name becomes
+    the `didOpen` language_id), claiming `.lean` only.
+  - `src/highlight.rs`: four capture entries — `constructor`, `character`,
+    `keyword.conditional`, `warning`.
+  - `builtin/runtime/{comment,pair,syntax}.lua`: `--` comments, the
+    `⟨⟩ ⦃⦄ ⟮⟯` pair set, the `lean` → `lean4` modeline alias.
+  - `tests/lean4_stage1_acceptance.rs` plus unit tests in `syntax.rs` /
+    `highlight.rs`: 12 criteria, 17 tests.
+- **Q#LN1's open obligation is discharged.** `tree-sitter-lean4` is
+  unusable (depends on `tree-sitter ^0.25` directly against our 0.26,
+  exports no `LANGUAGE` const despite its README, packages no queries);
+  `arborium-lean` rides `tree-sitter-language 0.1` with a pre-generated
+  ABI-15 parser. `cargo tree -d` shows no duplicate core. The parse smoke
+  pins the failure mode that matters: `→`/`∀`/`≥` must produce
+  `(arrow)`/`(forall)`/`(comparison)`, since a mismatched-core build
+  degrades silently on exactly those characters rather than failing loudly.
+- **Q#LN4 is a deliberate retro-paint of seven language entries**, not
+  four: `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
+  base-first into javascriptreact/typescript/typescriptreact. Its shape is
+  "every capitalized identifier" (`#match? "^[A-Z]"`) plus every Lua table
+  brace — not "constructors". Pinned in both directions per #146.
+- Implementation findings not in the framing:
+  - `warning` had to move from bold red to bold **bright** red: `number`
+    is plain `fg(1)`, so `sorry` and an adjacent numeric literal were the
+    same colour. Found by writing the test.
+  - `Some(1)` is **not** `@constructor` — in call position a narrower
+    `@function` pattern wins. Only bare or pattern-position capitalized
+    identifiers reach it. Pinned so the blast-radius claim stays honest.
+  - Lean node kinds nest: `module > declaration > def|theorem`.
+  - `pmacs.parse.injection_aliases` is a documented **write-only** Lua
+    proxy (canonical map is Rust-side), so fence tests must drive
+    `_parse_now` and inspect layer languages, never read the table back.
+- **Review round 1 addressed.** The finding: acc12's server-list assertion
+  could not fail for the regression it named — the shared `editor()`
+  helper wipes `pmacs.lsp.config` before any buffer opens, so
+  `#pmacs.lsp.list() == 0` holds for every language regardless of what
+  Stage 1 ships. It now asserts against a **pristine** `EditorState` that
+  `pmacs.lsp.config.lean4` is nil, with a non-vacuity check that the same
+  lookup finds `rust`; bite-verified by adding a `lean4` config to
+  `lsp.lua` and watching it fail. Also fixed a stale column in a
+  `highlight.rs` comment.
+- Verification on this branch: `cargo fmt --check` clean; strict workspace
+  Clippy clean; 1,826 default + 2,003 CRDT library tests; lean4 Stage 1
+  9/9; comment toggle 14; auto-pair 45; injection 4; M4 121; required GPU
+  152; **isolated-config workspace sweep 3,150 across 90 suites**;
+  `git diff --check` clean. The sweep needs an isolated `XDG_CONFIG_HOME`
+  for the reason recorded in the bottom-panel lane below.
+### Stage 2 — multi-root LSP server affinity (Q#LN15)
+
+- Portable branch: `githubsucks/lsp-multi-root-affinity`, shared checkout,
+  based on `githubsucks/main` @ `0827dd1`. Named for the substrate, not
+  for Lean: **the diff contains no Lean content**, because `ensure_server`
+  is the one server-affinity function every LSP language shares and a
+  cross-cutting change to it must not be reviewable only as a Lean
+  feature.
+- Three files, no protocol change: `src/lua_bindings/mod.rs` (the
+  `lsp.list()` row builder gains `root_uri` + `cwd`),
+  `builtin/runtime/lsp.lua` (`project_root_for` returns `root, source`;
+  `ensure_server` hoists it above the reuse loop and matches on it),
+  `tests/lsp_multi_root_acceptance.rs` (9 tests, acceptance 13–21).
+- **The rule that keeps this from regressing every other language: the
+  affinity key is the root only when a root was actually FOUND.**
+  `project_root_for` never returns nil for a file with a path — its last
+  resort is the file's own directory — so a naive `(language_id, root)`
+  key gives every directory of loose scratch files its own server, for
+  every language. `source` is `"config" | "detected" | "fallback"` and
+  only the first two become a key.
+- **Wire-identical for the fallback case, and that is provable rather
+  than hoped.** Matching is on the spawned spec's `root_uri` (nil matching
+  nil), so the fallback spawn passes `root_uri = nil`; `cwd` still carries
+  the directory and `build_initialize` derives the identical `rootUri`
+  from `cwd` when the field is None, using a percent-encoder with the same
+  allowed set as Lua's `file_uri_for`. `build_initialize` (`src/lsp.rs`)
+  is the **only** reader of `spec.root_uri` in the tree.
+- Deliberate behavior change, asserted not discovered: a server
+  hand-spawned from `init.lua` with only `cwd` set also reads back nil, so
+  a root-bearing attach will not adopt it.
+- `config[language].root` may now be a `function(path) -> string|nil`,
+  memoized per directory — needed because the hoist puts root resolution
+  on every attach rather than every spawn. The memo is keyed **weakly by
+  the resolver function itself**, so replacing `config[lang].root` cannot
+  serve a root the previous resolver computed. This is Q#LN8's
+  generalization landing early; the Lean resolver that uses it is Stage 3.
+- Bite-verified three ways: 5/9 fail against the pre-change `lsp.lua`,
+  8/9 against the pre-change `mod.rs`, and — the one that matters most —
+  installing the naive always-key-on-root variant fails acceptance 20 and
+  21 exactly as Q#LN15 part 2 predicts. The four that survive the first
+  bite (13, 15, 16, 19) are the regression pins; passing on both sides is
+  their job.
+- Every fixture sets `pmacs.project.set_search_boundary` at its own
+  tempdir root. Without it the marker walk climbs to the filesystem root
+  and a stray `.git` above the temp directory turns the markerless cases
+  into detected ones — the assertions would still pass while testing
+  nothing.
+- **Found but not fixed here (pre-existing, own lane):** `ensure_server`
+  never forwards `cfg.restart` to `pmacs.lsp.spawn`, so a
+  `restart = "never"` in `pmacs.lsp.config[lang]` is silently dropped on
+  the auto-attach path. At least one existing test sets it believing it
+  takes effect. Out of scope for a PR whose acceptance 16 pins existing
+  attach behavior as unchanged.
+- **Review round 1 addressed.** The blocker was process, not design: the
+  test file was committed *before* `cargo fmt` ran, so the fix sat
+  uncommitted in the working tree and the branch as pushed failed the
+  first gate. The reported "fmt clean" described the worktree, not the
+  branch — gate results are only meaningful when run against the pushed
+  tree. Also added the two pins review asked for (a **string** `config
+  .root` as an affinity key — acc17 only covered the function form; and
+  `root = false` reading as unset), each bite-verified against exactly
+  the mutation it targets and neither against the other. And documented
+  the canonicalization obligation: the `"detected"` arm is canonicalized
+  for free, a **configured** root is not, so on macOS a resolver
+  returning `/var/…` and a detected `/private/var/…` are different keys
+  for one directory. Stage 3's Lean resolver is the first real consumer,
+  so the obligation is written at the point of use.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
+  multi-root 11/11; M4 121; statusline 7; completion popup 9; auto-pair
+  45; required GPU 155; **isolated-config workspace sweep 3,164 across 91
+  suites**; `git diff --check` clean. The sweep needs an isolated
+  `XDG_CONFIG_HOME` and `-- --skip basedpyright`.
+
+## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)
+
+- Approved framing: `docs/dired-framing.md` **revision 6** — rev 5 is the
+  approved text (merged as its own docs PR #164), rev 6 adds §0's Stage 1
+  implementation notes (S1-1…S1-9). Stages 2 (marks and operations) and 3
+  (wdired) each get their own detailed framing after the prior stage lands.
+- **Stage 0 (`C-x C-f` find-file) MERGED as #162** (`main` @ `2af1ab3`,
+  2026-07-25, one review round, 12/12 CI green). Durable facts moved to
+  `docs/agent-handoff.md` §1 per rule 3 below.
+- **Stage 1 branch: `githubsucks/dired-stage1`**, worktree
+  `../pmacs-dired-stage1`, based on `githubsucks/main` @ `8c86d34` (the
+  framing merge #164). **A fresh cut, not a rebase:** the older `dired`
+  branch (`ffdd642`, worktree `../pmacs-dired-arc`) was based on the
+  superseded `0827dd1` and carried only the framing content #164 already
+  put on `main`, so merging it would have reconciled two histories of one
+  document. It is left untouched and carries nothing unmerged.
+- **Stage 1 implemented; no wire change (protocol stays v20).** What
+  landed on the branch:
+  - `builtin/runtime/dired.lua`: one buffer per directory named
+    `*dired:<canonical path>*` with the handle-table ownership check;
+    read-only intercept + `set_round_trip_input`; the `dired` major mode
+    and its mode-scoped keymap (`RET`/`f`, `^`, `n`/`p`, `g`, `q`, `s`);
+    basename cursor re-seating across every wholesale repaint;
+    `display_file` for file visits and same-window reuse for directory
+    descent; `C-x d` / `C-x C-j`; the `dired.kill-when-opening` setting.
+    Loaded after `window.lua`.
+  - `src/fs.rs`: `ReadDirTolerance`, `FsDirEntryError`, `FsDirListing`,
+    and one walk that either fails on a per-entry condition or records it
+    (Q#DR6). `src/async_runtime.rs` carries the listing in
+    `ReplyKind::ReadDir` / `JobResult::ReadDir`; `src/lua_bindings/mod.rs`
+    keys the Lua result **shape** on `errors.is_some()`, so the bare array
+    the frozen M8.2 fixture consumes with `ipairs` is untouched;
+    `builtin/runtime/fs.lua` validates read-op opts and **rejects unknown
+    keys** (a typo'd `tolerant` used to degrade silently to fatal).
+  - `src/editor_core.rs` + `src/lua_bindings/mod.rs`:
+    `normalize_buffer_path` is `pub` and exposed as
+    `pmacs.path.canonicalize` — Q#DR2's preferred end state, so no Lua
+    mirror exists and Stage 2 owes no mirror removal. This makes B2
+    ("tolerant `read_dir` is the only Rust change") false by one small
+    binding, deliberately.
+  - `tests/dired_acceptance.rs`: 22 tests over framing items 1–16,
+    dispatch-driven; item 17 is the m8_1/m8_2/m8_3 additivity gate.
+- **The framing claim the substrate falsified (S1-2):** R2-3 expected a
+  dedicated dired panel to carry its dedication across a descent.
+  `display_buffer` never replaces the buffer in a slot dedicated to
+  another one — it discards every side-specific parameter and falls back
+  to the document window (Q#BP3 2.iii), and the exact-window arm errors.
+  Dired does not unpin the user's panel; both arms are pinned.
+- **The vacuity the bites found (S1-3):** acceptance 3c cannot pin the
+  descent *routing*. Dired holds focus in its own panel, so a raw
+  `switch_buffer` lands in the same window and every 3c assertion holds
+  either way. Dedication is the only discriminator, so the
+  dedicated-panel test is the real pin — and the vacuity is documented at
+  the assertion rather than relabelled.
+- **The pre-existing test dired's first mode-scoped binding broke
+  (S1-4):** `describe_key_identifies_every_default_binding` asserted every
+  binding in the stack resolves through `describe.key` context-free, which
+  held only while the modes table was empty. It now sets the effective
+  context per binding and explicitly *clears* the mode for global ones,
+  because a leaked mode legitimately shadows a global chord of the same
+  name (dired's `RET` shadows `edit.newline-and-indent`).
+- Durable substrate facts, independent of this arc:
+  - `pmacs.buffer.kill` (not `remove`) redirects windows off a doomed
+    buffer before removal, so `kill-when-opening` kills **after** the
+    replacement is displayed.
+  - Interactive origin does **not** survive an await: work resumed in
+    `tick_async` sees no `InteractiveCommandOrigin`, so `pmacs.window.*`
+    acts for the *ambient* active frontend (S1-9).
+  - Kinds are lstat-based in both `read_dir` and `stat`, so nothing in an
+    entry says whether a symlink points at a directory; `RET` probes by
+    trying to list it (S1-8).
+  - A path-backed buffer's *name* is its full path, not its basename —
+    worth knowing before writing any name assertion.
+  - `C-x d` takes **no** completion source on purpose (S1-5): with one,
+    RET on an empty field opens whatever sorts first, and
+    RET-on-where-you-are is the gesture the binding exists for. The field
+    is prefilled instead.
+- **Bite verification:** 15 claims, each mutated in place and required to
+  fail the test that names it. `dired.lua` is new, so `scripts/bite`'s
+  file swap does not apply; every mutation was applied and reverted with
+  `git checkout --`. One came back VACUOUS and is recorded above.
+- **Review round 1 addressed** (framing rev 7, S1-10…S1-12). Three
+  behavioral fixes, each bite-verified: `dired.revert`'s re-seat is
+  guarded on the active buffer (an ambient `move_to_line` after an await
+  moved an unrelated buffer's cursor — the buffer-level instance of
+  S1-9); `fmt_size` keeps the column width past ten digits, because
+  `_layout` is a contract Stage 3 is planned against; and the symlink
+  descent dropped its probe, since `open_directory`'s
+  changed-nothing-on-failure invariant *is* the probe (it was listing the
+  target directory twice). Plus a consecutive-`readdir`-error cap, because
+  **nothing cancels a dired listing** — it carries no supersede key, so
+  cancellation was never the backstop the tolerant loop implicitly relied
+  on. Naming/comment findings taken as-is.
+  - Durable process lesson, hit twice now: a mutation-bite helper restores
+    with `git checkout --`, which reverts to **HEAD** — so a fix must be
+    committed *before* it is bitten. Round 1's fixes were briefly wiped by
+    exactly that.
+- **Canonical main integrated twice** — at `46a1b8f` (multi-root LSP
+  affinity #161) and again at `b889873` (GPU terminal input #166), both
+  merged rather than rebased per the #135/#137 precedent so the review
+  anchors stay addressable. Each conflict was a single doc hunk resolved
+  as the union: this lane owns COHERENCE's journey step 7 file half, #161
+  owns the in-flight list, #166 owns step 8's GPU-terminal addendum.
+  Three things worth carrying:
+  - **A conflicting PR silently stops running CI.** GitHub builds
+    `pull_request` runs against the merge ref, which does not exist while
+    the PR conflicts, so no run is created and nothing reports a
+    failure — the checks list simply stays as it was. Three pushes to
+    this branch produced no CI at all before the cause was found. Watch
+    `mergeable` on a long-lived lane, not just the check list.
+  - #161's own COHERENCE finding **falsified a claim in this lane's
+    module doc**: `pmacs.error` is never defined in production, so an
+    uncaught raise inside a `pmacs.async` coroutine does not reach
+    `*errors*` as the comment said. It reaches a bare `error()` inside
+    `pmacs._async.tick()`, whose result `tick_async` discards with
+    `let _ =` — i.e. nowhere. That makes dired's per-coroutine `pcall` +
+    `set_status` load-bearing rather than tidy, and the comment now says
+    so.
+  - **A lane in review against a fast-moving `main` needs its gates rerun
+    per integration, not per push.** Main advanced twice inside this
+    review round, and the second time landed while the first
+    integration's sweep was still running. The numbers below describe the
+    twice-merged tree.
+- Verification on the twice-merged tree (`main` @ `b889873`):
+  `cargo fmt --check` clean; strict workspace Clippy clean; **1,832
+  default + 2,009 CRDT** library tests; dired acceptance **25 default +
+  25 CRDT**; m8_1 10 / m8_2 15 / m8_3 32 unchanged; multi-root 13 and
+  vterm Stage 3 5 (both suites main added, green under this lane's
+  `mod.rs` and `editor.rs` changes); M4 121; required GPU 155;
+  **isolated-`XDG_CONFIG_HOME` workspace sweep 3,205 passed across 93
+  suites, zero failures**; `git diff --check` clean. The sweep needs the
+  isolated config for the reason recorded in the bottom-panel lane
+  below.
+- Coherence (framing §0.5, required since #163): serves `COHERENCE.md` §20
+  Priority 1, which names this work explicitly; journey step 7's file half
+  goes from no surface to a surface; **adds no interaction island** — keys
+  are a mode-scoped keymap, and wdired will be a mode swap; adopts
+  `pmacs.config` for `dired.kill-when-opening`; inherits §9's
+  worker-attribution gap for its `read_dir` jobs without worsening it. The
+  audited claims this changes are updated in `COHERENCE.md` itself, per its
+  §25.
+- **Boundary with the Journey Stage 1 arc** (`COHERENCE.md` §20 arc-cut
+  1): CLI directory-argument handling (`pmacs .` exits 1) belongs there,
+  not here — Stage 1 does **not** fix it. The two meet at
+  `resolve_target_buffer`; dired supplies the buffer a directory should
+  resolve *to*, and `pmacs .` should route into it rather than growing a
+  second directory surface.
+
+## GPU terminal input lane — IN REVIEW
+
+- Portable branch: `githubsucks/gpu-terminal-input`, worktree
+  `../pmacs-gui-term-input`, based on `githubsucks/main` @ `46a1b8f`.
+- Approved framing: `docs/gpu-terminal-input-framing.md` revision 2,
+  committed as the branch's first commit (`9a0df21`). Bug fix, not a
+  feature; **no protocol change (stays v20)**.
+- Reported as "text input within the terminal doesn't work on GUI, this is
+  fine in TUI". Root cause: the dispatcher applied **both** terminal-layout
+  syncs to **every** attached frontend, and a semantic session satisfies both
+  conditions (a `term_sizes` entry from `AttachRequest` *and* a terminal
+  declaration). Its PTY was resized twice per tick forever — grid arm installs
+  the TUI placement size, semantic arm installs the declared content
+  rectangle, each arm's idempotence guard seeing only what the other just
+  wrote — so the child took a `SIGWINCH` storm at tick cadence.
+- **The fix is a split, not a guard.** The grid arm is also the only per-tick
+  controller-liveness release a semantic frontend gets, and
+  `sync_semantic_terminal_layout` cannot take that over: the buffer-follow
+  snapshot clears the viewport declaration (`on_buffer_snapshot_sent`), so
+  that arm stops running in exactly the switch-away case that needs the
+  release. `sync_terminal_layout` is therefore split into a
+  frontend-kind-neutral half (panel reconcile + liveness) and a grid-only
+  geometry half, with the loop body extracted to
+  `sync_terminal_layouts_for_tick` so the exclusivity is structural and tests
+  drive the real thing.
+- **Trap for anyone touching this again:** the release at the "no
+  `window_placements` entry" arm reads like liveness and is grid geometry. A
+  semantic frontend has no placement entry at all, so moving it into the
+  neutral half releases a GPU controller every tick.
+- Bite-verified against **two** pre-images, because the naive guard fixes the
+  storm and introduces the leak:
+
+  | pin | `main` | naive guard | the split |
+  |---|---|---|---|
+  | settle (acc 2+3) | FAIL | pass | pass |
+  | controller release (acc 6) | pass | FAIL | pass |
+  | grid still resizes (acc 5) | pass | pass | pass |
+
+- Real-path evidence: a quiet child trapping `SIGWINCH` reports **144 frames
+  in 4 s and `WINCH 1..12` on screen** against the pre-fix tree, versus a
+  settled screen with the fix.
+- **Deliberately out of scope, named:** interactive-shell echo on a raw-mode
+  PTY (Q#GT5 — reproduces in-process too, so it is not the GUI/TUI
+  asymmetry), and a geometry change appearing to clear the visible screen
+  (reproduces pre-fix; why acceptance 4 latches its observation across
+  frames).
+- Verification on this branch: `cargo fmt --check` clean; strict workspace
+  Clippy clean; 1,829 default + 2,006 CRDT library tests; vterm Stage 1/2/3
+  10 / 6 / 9 CRDT; bottom-panel Stage 1 46; M4 121; required GPU 155;
+  **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
+  `git diff --check` clean. Gates were run against the committed tree.
 
 ## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 (GPU band) is next
 

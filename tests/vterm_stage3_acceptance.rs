@@ -1087,3 +1087,228 @@ fn a28_a30_a_v18_semantic_peer_has_no_terminal_surface() {
         .terminate(terminal_buffer, &mut state.process_supervisor.borrow_mut())
         .expect("terminate child");
 }
+
+// ---- GPU terminal input: the double terminal-layout sync -----------------
+//
+// Acceptance 1, 4 and 7 of `docs/gpu-terminal-input-framing.md`, on the real
+// path: real daemon, real PTY child, real `pmacs-gpu` attach client.
+//
+// `a37` above passes on the broken tree, and these are shaped around exactly
+// why. Its child prints 400 rows on a timer, so a frame storm hides inside
+// legitimate output; its only frame-count assertion is `frames >= 2`; and its
+// resize assertion is satisfied by a geometry that oscillates THROUGH the
+// asserted width. The children below are therefore deliberately QUIET, and
+// the assertions are upper bounds.
+
+/// A terminal child that produces nothing on its own and prints one fresh,
+/// DISTINCT breadcrumb per `SIGWINCH`.
+///
+/// Distinctness is load-bearing: `cell::diff` skips both spaces and
+/// already-matching cells, so a repeated identical marker can never be
+/// asserted on — the second and later copies would paint nothing.
+#[cfg(feature = "crdt")]
+const WINCH_PROBE_INIT_LUA: &str = r#"
+pmacs.command.define {
+  name = "vterm-probe.open",
+  description = "Open a quiet terminal that counts SIGWINCH.",
+  fn = function()
+    return pmacs.terminal.open {
+      command = "/bin/sh",
+      args = { "-c",
+        "n=0; trap 'n=$((n+1)); printf \"WINCH %d\r\n\" \"$n\"' WINCH; " ..
+        "printf 'READY\r\n'; while :; do sleep 0.2; done" },
+    }
+  end,
+}
+pmacs.keymap.bind { scope = "global", sequence = "C-M-t", command = "vterm-probe.open" }
+"#;
+
+/// A terminal child that echoes input by copying stdin to stdout.
+///
+/// `cat` is the right instrument precisely because it does NOT echo: termios
+/// `ECHO` is off on a `TerminalMode::Raw` PTY, so nothing in the kernel line
+/// discipline reflects the byte. `cat` copies it exactly once, which makes a
+/// single typed character produce a single unambiguous cell.
+#[cfg(feature = "crdt")]
+const CAT_PROBE_INIT_LUA: &str = r#"
+pmacs.command.define {
+  name = "vterm-probe.open",
+  description = "Open a terminal child that copies stdin to stdout.",
+  fn = function()
+    return pmacs.terminal.open {
+      command = "/bin/sh",
+      args = { "-c", "printf 'READY\r\n'; exec cat" },
+    }
+  end,
+}
+pmacs.keymap.bind { scope = "global", sequence = "C-M-t", command = "vterm-probe.open" }
+"#;
+
+/// Run the headless GPU probe against a daemon built from `init_lua`, and
+/// return its parsed report. `observe_ms` selects quiet-observation mode.
+#[cfg(feature = "crdt")]
+fn run_gpu_probe(
+    init_lua: &str,
+    observe_ms: Option<u64>,
+) -> Option<std::collections::HashMap<String, String>> {
+    use std::path::{Path, PathBuf};
+
+    fn gpu_binary() -> PathBuf {
+        Path::new(env!("CARGO_BIN_EXE_pmacs"))
+            .parent()
+            .expect("test binary directory")
+            .join("pmacs-gpu")
+    }
+
+    let required = std::env::var_os("PMACS_REQUIRE_GPU").is_some();
+    let binary = gpu_binary();
+    if !binary.exists() {
+        assert!(
+            !required,
+            "PMACS_REQUIRE_GPU is set but {} is not built",
+            binary.display()
+        );
+        eprintln!("skipping: {} is not built", binary.display());
+        return None;
+    }
+
+    let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
+        &[
+            ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
+            ("PMACS_INSTANCE_MULTI_FRONTEND", "1"),
+        ],
+        init_lua,
+    );
+    let report = daemon
+        .socket_path()
+        .parent()
+        .expect("socket parent")
+        .join("gpu-probe.txt");
+    let mut command = std::process::Command::new(&binary);
+    command
+        .arg("--headless-probe")
+        .arg(daemon.socket_path())
+        .arg(&report)
+        .env("PMACS_GPU_PROBE_OPEN_KEY", "t");
+    if let Some(ms) = observe_ms {
+        command.env("PMACS_GPU_PROBE_OBSERVE_MS", ms.to_string());
+    }
+    let output = command.output().expect("run the headless GPU probe");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let no_adapter = output.status.code() == Some(3);
+        assert!(
+            no_adapter && !required,
+            "headless GPU probe failed (status {:?}):\n{stderr}",
+            output.status.code()
+        );
+        eprintln!("skipping: no wgpu adapter available");
+        return None;
+    }
+    let text = std::fs::read_to_string(&report).expect("probe report");
+    Some(
+        text.lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+    )
+}
+
+/// Acceptance 1 and 7: a GPU session showing a quiet terminal must settle.
+///
+/// Both assertions are upper bounds over a fixed observation window, which is
+/// the only shape that can see this defect. On the pre-fix tree the dispatcher
+/// resized the PTY twice per tick forever, so the child took a `SIGWINCH`
+/// storm and the daemon emitted a terminal frame per tick — measured at ~730
+/// frames in 20 s against a child that printed one line and then slept.
+#[cfg(feature = "crdt")]
+#[test]
+fn gpu_terminal_geometry_settles_and_stops_signalling_the_child() {
+    const OBSERVE_MS: u64 = 4_000;
+    let Some(facts) = run_gpu_probe(WINCH_PROBE_INIT_LUA, Some(OBSERVE_MS)) else {
+        return;
+    };
+    let report = || format!("{facts:#?}");
+
+    assert_eq!(
+        facts.get("entered_terminal_mode").map(String::as_str),
+        Some("true"),
+        "precondition: the GPU entered terminal mode from a real frame: {}",
+        report()
+    );
+    // Non-vacuity for the whole test: the child really did run, and the
+    // breadcrumb mechanism really does paint.
+    let screen = facts.get("last_frame_text").cloned().unwrap_or_default();
+    assert!(
+        screen.contains("READY"),
+        "precondition: the child's own output must reach the frame: {}",
+        report()
+    );
+
+    // Acceptance 1 — a quiet child must not produce a frame per tick. The
+    // bound is generous: the session legitimately emits a first frame, plus a
+    // frame for the geometry it settles at, plus the WINCH breadcrumb.
+    let frames: u32 = facts
+        .get("frames")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    assert!(
+        (1..=12).contains(&frames),
+        "a quiet terminal must settle, got {frames} frames in {OBSERVE_MS} ms \
+         (pre-fix: one per dispatcher tick): {}",
+        report()
+    );
+
+    // Acceptance 7 — bounded SIGWINCH, counted by the child itself through
+    // the real PTY. At most one resize is legitimate here (the frontend's
+    // first declaration); the probe requests none in quiet mode.
+    assert!(
+        !screen.contains("WINCH 3"),
+        "the child must not be signalled repeatedly: {}",
+        report()
+    );
+}
+
+/// Acceptance 4: a character typed through the real GPU attach client reaches
+/// the child and its copy comes back in a rendered frame.
+///
+/// **This is a keep-working pin, not a fix discriminator** — it passes on the
+/// pre-fix tree too. Key transport was never the defect (falsified hypothesis
+/// 2 in the framing), and this exists so that a future change to the routing
+/// or transport cannot quietly break what the resize fix was not about.
+#[cfg(feature = "crdt")]
+#[test]
+fn gpu_terminal_input_reaches_the_child_and_returns_in_a_frame() {
+    let Some(facts) = run_gpu_probe(CAT_PROBE_INIT_LUA, None) else {
+        return;
+    };
+    let report = || format!("{facts:#?}");
+
+    assert_eq!(
+        facts.get("entered_terminal_mode").map(String::as_str),
+        Some("true"),
+        "precondition: terminal mode: {}",
+        report()
+    );
+    let frames: u32 = facts
+        .get("frames")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    assert!(
+        frames >= 1,
+        "precondition: the child ran and painted: {}",
+        report()
+    );
+    // The probe types `x`; `cat` copies it back exactly once. The observation
+    // is LATCHED across frames rather than read off the last one: the probe
+    // also requests a geometry change, and a reflow rewrites the visible grid.
+    // "did the byte come back" and "is it still on screen at the end" are
+    // different questions, and only the first is about input reaching the
+    // child.
+    assert_eq!(
+        facts.get("input_echo_observed").map(String::as_str),
+        Some("true"),
+        "the typed character must reach the child and return: {}",
+        report()
+    );
+}

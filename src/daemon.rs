@@ -1536,23 +1536,7 @@ fn dispatcher_loop(
         // Accepted terminal context controls PTY size. Apply any focus,
         // window, or resize changes before consuming another child-output
         // batch so screen reflow and subsequent bytes share one geometry.
-        for frontend_id in &attached_fids {
-            if let Some(size) = term_sizes.get(frontend_id).copied() {
-                editor.sync_terminal_layout(*frontend_id, size);
-            }
-            // Vterm Stage 3 — the semantic twin, right beside the grid
-            // sync so both frontend kinds resize the screen before the
-            // next child-output drain. The frontend declared a CONTENT
-            // rectangle, so this consumes the size directly instead of
-            // running the TUI placement helper, which would subtract a
-            // modeline the GPU never drew.
-            if let Some((buffer_id, size)) = semantic_states
-                .get(frontend_id)
-                .and_then(crate::semantic_render::SemanticRenderState::terminal_viewport)
-            {
-                editor.sync_semantic_terminal_layout(*frontend_id, buffer_id, size);
-            }
-        }
+        sync_terminal_layouts_for_tick(editor, &attached_fids, &term_sizes, &semantic_states);
 
         // `tick_async` last: the M4.5 async bridge settles awaiters
         // inside `tick_lsp` (via the message bus); draining + resuming
@@ -3064,6 +3048,56 @@ fn build_presence_snapshot(editor: &EditorState, frontend_id: FrontendId) -> Pre
     }
 }
 
+/// One dispatcher tick's terminal-layout step, for every attached frontend.
+///
+/// Extracted from the dispatcher loop so the grid/semantic exclusivity is
+/// **structural** rather than two adjacent `if`s, and so acceptance tests can
+/// drive the real loop body instead of re-implementing it (Q#GT1).
+///
+/// The shape that matters: liveness is frontend-kind NEUTRAL and runs for
+/// everyone, exactly once; the geometry arms are EXCLUSIVE alternatives keyed
+/// on the same `semantic_states` membership that session establishment uses,
+/// so a session can never be caught by both.
+///
+/// Before this existed, both arms ran for every frontend. A semantic session
+/// has a `term_sizes` entry (from `AttachRequest`) *and* a terminal
+/// declaration, so its PTY was resized twice per tick, forever: the grid arm
+/// installed the TUI placement size, the semantic arm installed the declared
+/// content rectangle, and each arm's own idempotence guard saw only the size
+/// the other had just written. The child got a `SIGWINCH` storm at tick
+/// cadence, which is what made typing into a GPU terminal impossible while
+/// output kept flowing.
+fn sync_terminal_layouts_for_tick(
+    editor: &mut EditorState,
+    attached_fids: &[FrontendId],
+    term_sizes: &HashMap<FrontendId, CellSize>,
+    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+) {
+    for frontend_id in attached_fids {
+        // Neutral half: panel reconciliation (Q#BP2b's only per-tick
+        // enforcement point) and the release of a controller whose window
+        // moved away. A semantic frontend gets this from nowhere else —
+        // its own arm stops running the moment the buffer-follow snapshot
+        // clears the declaration (Q#GT4/Q#GT7).
+        editor.sync_terminal_controller_liveness(*frontend_id);
+
+        // Geometry: exactly one arm per frontend kind.
+        if let Some(state) = semantic_states.get(frontend_id) {
+            // Vterm Stage 3 — the frontend declared a CONTENT rectangle,
+            // so this consumes the size directly instead of running the
+            // TUI placement helper, which would subtract a modeline the
+            // GPU never drew. A semantic frontend with no declaration yet
+            // gets NO resize at all, which is correct: the terminal keeps
+            // the geometry it was opened with until one arrives.
+            if let Some((buffer_id, size)) = state.terminal_viewport() {
+                editor.sync_semantic_terminal_layout(*frontend_id, buffer_id, size);
+            }
+        } else if let Some(size) = term_sizes.get(frontend_id).copied() {
+            editor.sync_terminal_grid_geometry(*frontend_id, size);
+        }
+    }
+}
+
 /// Dispatch a semantic (grid-less) frontend's input event into the
 /// shared editor core (Phase B, session B1). Mirrors the `Key` / `Mouse`
 /// arms of [`apply_event`] but takes no `RenderState` — a semantic
@@ -3363,6 +3397,235 @@ mod tests {
             read_message::<InstanceMessage>(&mut semantic_client).is_err(),
             "a semantic peer displaying another buffer must receive no snapshot"
         );
+    }
+
+    // ---- GPU terminal input: the double terminal-layout sync -------------
+    //
+    // These drive `sync_terminal_layouts_for_tick` — the REAL dispatcher loop
+    // body, not a re-implementation of it. That distinction is the whole
+    // point: the Stage 3 acceptance sent input through `client.send_key`
+    // directly and therefore pinned transport rather than routing, which is
+    // how the defect these pin shipped.
+    //
+    // The observable is `TerminalScreen::generation`. It advances once per
+    // screen mutation, so with a child that produces no output and no
+    // `tick_processes` call, "generation stopped advancing" is exactly "the
+    // geometry settled" — a state predicate, not a readout.
+
+    /// Open a quiet terminal and give `frontend_id` a view that shows it,
+    /// holding its controller — the state the dispatcher loop runs against.
+    fn quiet_terminal_for(
+        editor: &EditorState,
+        frontend_id: FrontendId,
+    ) -> (crate::buffer::BufferId, crate::window::WindowId) {
+        let mut spec = crate::terminal::TerminalSpec::new("/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        spec.rows = 24;
+        spec.cols = 80;
+        let buffer_id = editor
+            .terminal_manager
+            .borrow_mut()
+            .open(
+                spec,
+                &mut editor.core.borrow_mut(),
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("open terminal");
+
+        let window_id = crate::window::WindowId::next();
+        {
+            let mut core = editor.core.borrow_mut();
+            let text_view = {
+                let registry = core.registry.clone();
+                let registry = registry.borrow();
+                let buffer = registry.get(buffer_id).expect("terminal buffer");
+                crate::text_view::TextView::new(buffer)
+            };
+            core.windows.insert(
+                window_id,
+                crate::window::Window::new(window_id, buffer_id, text_view),
+            );
+            core.register_frontend_view(
+                frontend_id,
+                crate::window::FrontendView {
+                    layout: crate::window::Layout::single(window_id),
+                    active: window_id,
+                    fold_projection: true,
+                    panel_capable: false,
+                    frame_geometry: None,
+                    panel_hidden: false,
+                },
+            );
+        }
+        let key = crate::terminal::TerminalViewKey::new(frontend_id, window_id, buffer_id);
+        let mut manager = editor.terminal_manager.borrow_mut();
+        manager.register_view(key);
+        manager.claim_controller(key);
+        (buffer_id, window_id)
+    }
+
+    fn screen_generation(editor: &EditorState, buffer_id: crate::buffer::BufferId) -> u64 {
+        editor
+            .terminal_manager
+            .borrow()
+            .snapshot(buffer_id)
+            .expect("terminal snapshot")
+            .screen_generation
+    }
+
+    /// Acceptance 2 and 3: one declaration produces exactly one resize, and
+    /// the screen then STAYS at the declared content rectangle.
+    ///
+    /// Against the pre-split tree both arms ran for the semantic frontend and
+    /// generation advanced by two per iteration forever, because each arm's
+    /// idempotence guard only ever saw the size the other had just written.
+    #[test]
+    fn semantic_terminal_geometry_settles_after_one_declaration() {
+        let fid = FrontendId(41);
+        let mut editor = EditorState::new();
+        let (buffer_id, _window) = quiet_terminal_for(&editor, fid);
+
+        // The GPU declares a CONTENT rectangle; the grid size it also
+        // reported at attach is deliberately DIFFERENT, which is the
+        // collision the defect fed on.
+        let declared = CellSize::new(25, 92);
+        let mut semantic = crate::semantic_render::SemanticRenderState::for_peer(fid, 20);
+        semantic.set_terminal_viewport(buffer_id, declared);
+        let semantic_states = HashMap::from([(fid, semantic)]);
+        let term_sizes = HashMap::from([(fid, CellSize::new(24, 80))]);
+        let attached = vec![fid];
+
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        let after_first = screen_generation(&editor, buffer_id);
+        assert_eq!(
+            editor.terminal_manager.borrow().screen_size(buffer_id),
+            Some(declared),
+            "the declared content rectangle must win"
+        );
+
+        // Acceptance 2: every further tick is a no-op.
+        for _ in 0..8 {
+            sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        }
+        assert_eq!(
+            screen_generation(&editor, buffer_id),
+            after_first,
+            "an unchanged declaration must not mutate the screen again \
+             (pre-split: +2 per tick, forever)"
+        );
+        // Acceptance 3: the state predicate, not "a frame at this width
+        // arrived at some point".
+        assert_eq!(
+            editor.terminal_manager.borrow().screen_size(buffer_id),
+            Some(declared),
+            "the geometry must SETTLE at the declared rectangle"
+        );
+
+        editor.process_supervisor.borrow_mut().shutdown();
+    }
+
+    /// Acceptance 6: a semantic frontend whose window switches away releases
+    /// its terminal controller.
+    ///
+    /// This bites against BOTH the pre-split tree's sibling arms and against
+    /// the naive "skip the grid arm for semantic frontends" guard, which is
+    /// why B1 is recorded as half-false. The release cannot live in
+    /// `sync_semantic_terminal_layout`: the buffer-follow snapshot clears the
+    /// viewport declaration, so that arm stops running in exactly this case —
+    /// modelled here by dropping the declaration alongside the switch.
+    #[test]
+    fn semantic_frontend_releases_its_terminal_controller_when_its_window_switches_away() {
+        let fid = FrontendId(42);
+        let mut editor = EditorState::new();
+        let (buffer_id, window_id) = quiet_terminal_for(&editor, fid);
+
+        let declared = CellSize::new(25, 92);
+        let mut semantic = crate::semantic_render::SemanticRenderState::for_peer(fid, 20);
+        semantic.set_terminal_viewport(buffer_id, declared);
+        let mut semantic_states = HashMap::from([(fid, semantic)]);
+        let term_sizes = HashMap::from([(fid, CellSize::new(24, 80))]);
+        let attached = vec![fid];
+
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        assert_eq!(
+            editor
+                .terminal_manager
+                .borrow()
+                .controller_view_for_frontend(fid),
+            Some(crate::terminal::TerminalViewKey::new(
+                fid, window_id, buffer_id
+            )),
+            "precondition: the frontend holds the controller"
+        );
+
+        // The window switches to a document, and the snapshot that announces
+        // it clears the semantic declaration — `on_buffer_snapshot_sent`.
+        let document = editor.core.borrow().registry.borrow_mut().create("doc");
+        {
+            let mut core = editor.core.borrow_mut();
+            let text_view = {
+                let registry = core.registry.clone();
+                let registry = registry.borrow();
+                let buffer = registry.get(document).expect("document buffer");
+                crate::text_view::TextView::new(buffer)
+            };
+            let window = core.windows.get_mut(&window_id).expect("window");
+            *window = crate::window::Window::new(window_id, document, text_view);
+        }
+        semantic_states
+            .get_mut(&fid)
+            .expect("semantic state")
+            .on_buffer_snapshot_sent(document);
+
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        assert_eq!(
+            editor
+                .terminal_manager
+                .borrow()
+                .controller_view_for_frontend(fid),
+            None,
+            "a semantic frontend that left its terminal must release the \
+             controller, or no peer can resize that PTY again"
+        );
+
+        editor.process_supervisor.borrow_mut().shutdown();
+    }
+
+    /// Acceptance 5 at the unit seam: a GRID frontend still gets its
+    /// placement-derived resize. The split must not turn the storm fix into
+    /// "semantic frontends win everywhere".
+    #[test]
+    fn grid_terminal_geometry_still_syncs_for_a_grid_frontend() {
+        let fid = FrontendId(43);
+        let mut editor = EditorState::new();
+        let (buffer_id, _window) = quiet_terminal_for(&editor, fid);
+
+        let semantic_states = HashMap::new();
+        let term_sizes = HashMap::from([(fid, CellSize::new(40, 100))]);
+        let attached = vec![fid];
+
+        let before = editor.terminal_manager.borrow().screen_size(buffer_id);
+        sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        let after = editor.terminal_manager.borrow().screen_size(buffer_id);
+
+        assert_ne!(before, after, "a grid frontend must still resize its PTY");
+        assert_eq!(
+            after.map(|size| size.cols),
+            Some(100),
+            "the grid arm supplies the full declared width"
+        );
+        // And it too settles.
+        let settled = screen_generation(&editor, buffer_id);
+        for _ in 0..4 {
+            sync_terminal_layouts_for_tick(&mut editor, &attached, &term_sizes, &semantic_states);
+        }
+        assert_eq!(
+            screen_generation(&editor, buffer_id),
+            settled,
+            "an unchanged grid size must not mutate the screen again"
+        );
+
+        editor.process_supervisor.borrow_mut().shutdown();
     }
 
     #[test]
