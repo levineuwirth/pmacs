@@ -486,6 +486,26 @@ impl CrdtState {
     pub fn record_checkpoint(&self) -> LoroResult<()> {
         self.undo.borrow_mut().record_new_checkpoint()
     }
+
+    /// Discard the bound peer's undo and redo history, keeping the
+    /// document itself untouched.
+    ///
+    /// Loro's `UndoManager` exposes no `clear`, but it does not need
+    /// one: a manager records only what happens **after** it is
+    /// constructed. [`Self::from_bytes`] already relies on exactly
+    /// that property to keep the seed insert out of undo. Replacing
+    /// the manager with a fresh one bound to the same doc therefore
+    /// leaves nothing to undo, and drops the old manager's retained
+    /// stacks with it.
+    ///
+    /// Used by [`crate::buffer::Buffer::set_generated_contents`], whose
+    /// contract is that a generated buffer accumulates no history
+    /// across refreshes. Marking the buffer read-only would stop the
+    /// history being *replayed*, but not being *retained* — a panel
+    /// refreshed on a timer would grow without bound.
+    pub fn clear_undo_history(&self) {
+        *self.undo.borrow_mut() = Self::create_undo_manager(&self.doc);
+    }
 }
 
 /// T M10.3: map a [`crate::protocol::FrontendId`] to the loro `PeerID`
