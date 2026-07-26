@@ -34,6 +34,10 @@ pub use pmacs_protocol::terminal::{
 /// Configuration-time, not a wire bound: history never crosses the
 /// protocol, so this stays core-owned.
 pub const DEFAULT_TERMINAL_SCROLLBACK_ROWS: usize = 10_000;
+
+/// Default `terminal.escape-key`, and the fallback an unparseable value
+/// falls back to (Q#TC4a).
+pub const DEFAULT_TERMINAL_ESCAPE_KEY: &str = "C-c";
 /// Maximum retained main-screen history cells. Core-owned for the same
 /// reason as [`DEFAULT_TERMINAL_SCROLLBACK_ROWS`].
 pub const MAX_TERMINAL_HISTORY_CELLS: usize = 4_000_000;

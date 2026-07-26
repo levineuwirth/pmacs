@@ -389,14 +389,110 @@ If it does not, stop and repair the remote/fetch configuration.
   **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
   `git diff --check` clean. Gates were run against the committed tree.
 
+## Terminal config + copy mode arc — Stage 1 IN REVIEW
+
+- Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
+  **revision 4** (four review rounds), committed as the first commit of
+  Stage 1's branch. Two stages, two branches, two PRs; **no protocol
+  change**.
+- **Stage 1 = `githubsucks/terminal-config`**, worktree
+  `../pmacs-terminal-config`, based on `githubsucks/main` @ `d152120`
+  and merged up to `c93f9ee` during review round 1. Profiles,
+  scrollback, escape key, and the `C-c t` opening binding.
+- **Stage 2 = `terminal-copy-mode`, not started.** Branch it off `main`
+  after Stage 1 merges: no dependency, but both edit
+  `builtin/runtime/terminal.lua`.
+- Load-bearing decisions, each forced by scouted ground truth:
+  - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
+    no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
+  - the **two open-time settings resolve through the global chain**,
+    because they are read before the identity buffer exists; only
+    `terminal.escape-key` resolves per buffer;
+  - the escape cache lives on **`TerminalSession`** so its lifetime is
+    the terminal's. `value_epoch` alone is not a sufficient key: it does
+    not advance when focus moves between terminals with different
+    buffer-local values;
+  - repeating the escape sends **that chord**, not a hardcoded `0x03`.
+- **Four bites, each against a different plausible wrong
+  implementation** — hardcoded ETX fails acc6/9; epoch-only cache key
+  fails acc7; single last-entry cache fails acc8's parse count; removing
+  the invalid-value fallback fails acc10. The first version of acc7
+  passed against the epoch-only bite because it asserted only that
+  terminal A still worked; the discriminating assertion is that **each**
+  terminal honors its own chord and not the other's.
+- Test instruments worth reusing: `cat -v` is the echo probe, because the
+  screen rejects C0 controls before they reach cells so a raw echoed
+  `Ctrl-X` is invisible; and the probe **counts occurrences** rather than
+  testing presence, because a single-character probe collides with the
+  child's own banner text.
+- **Review round 1 (2026-07-25) — five findings, all real, all fixed.**
+  One blocker and two majors were the same failure in three places: a
+  claim asserted somewhere cheaper than where it lives.
+  - *Blocker — `COHERENCE.md` was stale in four places, not the three
+    reported.* Step 8 still read "no keybinding"; §11 still read "five
+    settings"; and §6's dispatch table still cited
+    `is_terminal_escape_chord`, **a symbol this PR deletes**. §25 makes
+    that update ride the PR. A PR that changes audited ground truth has
+    to re-grep the audit for its own symbols, not only for its topic.
+  - *Major — acceptance 5 was vacuous.* It asserted a registry
+    round-trip, so it stayed green with the setting's **only** consumer
+    deleted. It now opens a real terminal whose child overflows the
+    24-row screen, scrolls the view to its oldest retained row, and
+    asserts `LINE001` is present at 10,000 and absent at 0. **Asserting
+    a value was stored is not asserting anything reads it.**
+  - *Major — acceptance 8a asserted the session count, not the cache.*
+    An editor-side map with no purge hook — the exact rejected design —
+    leaks *while* sessions drain, so it passed. Fixed with a
+    `TerminalManager::escape_caches()` seam. **A lifecycle claim needs a
+    lifecycle observable.**
+  - *Moderate — `table.sort` over user-controlled profile keys.* A
+    table holding both a string and a numeric key raised `attempt to
+    compare number with string` **on the unknown-profile path**,
+    replacing the diagnostic being asked for; `%q` raised likewise on a
+    non-string `profile` argument. Both are partial functions applied to
+    user input **on a diagnostic path** — the error reporter was the
+    thing that failed.
+  - *Minor — the committed framing still said "not yet approved".*
+- **Three new bites, each falsified by revert**: deleting the scrollback
+  consumer fails acc5 (and only acc5); restoring the raw-key sort
+  reproduces `attempt to compare string with number` verbatim; and
+  implementing the rejected editor-side map fails the new acc8a at
+  `left: 2, right: 1` **while passing the old session-count version** —
+  which is the review finding demonstrated rather than argued.
+- Verification after the round-1 fixes, on the tree merged with
+  `githubsucks/main` @ `c93f9ee`: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,832 default + 2,009 CRDT library tests;
+  `terminal_config_acceptance` **12/12 in both configurations**; vterm
+  Stage 1/2 9+10 / 6+6; config registry 16+16; bottom-panel Stage 1
+  46+46; M4 121; required GPU 202; `git diff --check` clean.
+  - `compile_mode_acceptance` fails 11/67 against the **real** user
+    config and passes 67/67 with an isolated `XDG_CONFIG_HOME` — the
+    known pre-existing trap, not this branch.
+  - **`vterm_stage3_acceptance::a37` fails on this machine — and fails
+    identically on the PR's own base `d152120`**, so it is not this
+    branch's regression. It is load-sensitive: it passed at `d152120`
+    once and failed at that same commit twenty minutes later, with a
+    second agent saturating the machine with `rustc` in between. Two
+    ways it lies, both worth knowing: it **silently returns `ok` when
+    `pmacs-gpu` is not built** in the same target dir (only
+    `PMACS_REQUIRE_GPU=1` promotes that skip to a failure, and the gate
+    list applies that flag to `-p pmacs-gpu`, a *different* package), and
+    it is **crdt-gated, so CI has never run it at all**. A green a37 in
+    a gate log means nothing unless the binary was built and the flag
+    was set. Needs its own lane; see the CI `crdt`-coverage lane on #168.
+  - `pmacs-gpu` itself failed 201/202 once under the same load and passed
+    202/202 on immediate rerun.
+
 ## Bottom-panel lane (Arc 7) — Stage 1 + framing MERGED; Stage 2A IN REVIEW
 
 Stage 1 and the Stage 2 framing are on `main`. **Stage 2A is
 implemented and in review.**
 
 - **Stage 2A — portable branch `githubsucks/bottom-panel-stage2a`**,
-  worktree `../pmacs-bp-stage2a`, based on `githubsucks/main` @
-  `c93f9ee`. Two commits: the classified census routing, then the
+  worktree `../pmacs-bp-stage2a`, **canonical `main` @ `cf54270`
+  integrated** (review round 1, finding 4 — the terminal-config lane
+  #173 also changes `src/editor.rs`, so gates were rerun on the merge
+  result, not the old combination). Two commits: the classified census routing, then the
   painter extraction + acceptance. **No protocol change; no behavior
   change for any frontend today** — with `panel_capable = false` for
   semantic sessions, `primary_document_window` returns `view.active`
@@ -417,6 +513,17 @@ implemented and in review.**
   catch the first bite — it compares the two authorities directly, so
   only a consumer-level assertion catches a misrouted consumer. Keep
   both kinds.
+- **Review round 1 closed: 4 P1 + 2 P2, all real.** The P1s were a
+  stale-`Pointer` focus steal (the failed-alignment arm returned the
+  window, so #8's activation focused it before `dispatch_pointer`
+  rejected the buffer), the missing A2A-2 two-context fan-out, a census
+  suite that asserted the AUTHORITY rather than the CONSUMERS, and the
+  missing main integration. **Two of the new pins were themselves
+  vacuous on the first attempt** — the dispatcher test passed because an
+  unregistered session is dropped at `daemon.rs:1962` before reaching
+  the aligner, and the painter test was a fixed-point check that
+  survived deleting `text_view.render`. Both now fail under their own
+  bite.
 - **`vterm_stage3_acceptance::a37` is a pre-existing flake here**, not a
   Stage 2A regression: measured **6/8 failures on the base commit** and
   **7/8 on the branch** in matched isolated samples. It needs a real

@@ -2992,7 +2992,13 @@ fn align_primary_document_window(
         }
         let reg = core.registry.borrow();
         let Ok(buf) = reg.get(buffer_id) else {
-            return Some(win_id); // Unknown buffer — leave the window as-is.
+            // Unknown buffer — leave the window as-is, and report
+            // FAILURE. Returning the window here would let a stale or
+            // forged `Pointer` naming a dead buffer take focus out of a
+            // panel via #8's activation, *before* `dispatch_pointer`
+            // rejects the mismatched buffer. Alignment did not happen,
+            // so no caller may treat this as a document gesture.
+            return None;
         };
         (win_id, TextView::new(buf))
     };
@@ -4636,6 +4642,132 @@ mod tests {
         assert_ne!(
             core.windows[&panel].buffer_id, opened.buffer_id,
             "the panel was not overwritten with the target"
+        );
+    }
+
+    /// Bottom-panel §1.3 #8, review round 1 finding 1: a STALE document
+    /// `Pointer` must not steal focus out of a panel.
+    ///
+    /// Driven through `handle_dispatcher_event` — the real dispatcher
+    /// seam — because the defect lived in the *pair* of alignment and
+    /// activation, not in either alone. `align_primary_document_window`
+    /// once returned the window even when the named buffer was gone, so
+    /// #8's activation focused the document before `dispatch_pointer`
+    /// ever rejected the mismatched buffer.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_stale_document_pointer_does_not_steal_focus_from_a_panel() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use crate::window::{FrontendView, Layout, LayoutNode, Orientation, Window, WindowParams};
+        use pmacs_protocol::{Modifiers, PointerKind};
+
+        let mut editor = EditorState::new();
+        let fid = FrontendId(88);
+
+        // One document window + one focused bottom panel.
+        let (document, panel, dead_buffer) = {
+            let mut core = editor.core.borrow_mut();
+            let doc_buf = core.active_window().buffer_id;
+            let panel_buf = core.registry.borrow_mut().create("*panel*");
+            // A buffer id that names nothing: the stale-pointer payload.
+            let dead_buffer = crate::buffer::BufferId::from_raw(999_999);
+
+            let document = crate::window::WindowId::next();
+            let panel_id = crate::window::WindowId::next();
+            let (doc_view, panel_view) = {
+                let reg = core.registry.borrow();
+                (
+                    crate::text_view::TextView::new(reg.get(doc_buf).expect("doc")),
+                    crate::text_view::TextView::new(reg.get(panel_buf).expect("panel")),
+                )
+            };
+            core.windows
+                .insert(document, Window::new(document, doc_buf, doc_view));
+            let mut panel = Window::new(panel_id, panel_buf, panel_view);
+            let mut params = WindowParams::default();
+            params.side = Some(crate::window::Side::Bottom);
+            params.fixed_rows = Some(4);
+            panel.params = params;
+            core.windows.insert(panel_id, panel);
+            core.register_frontend_view(
+                fid,
+                FrontendView {
+                    layout: Layout {
+                        root: LayoutNode::Split {
+                            orientation: Orientation::Horizontal,
+                            children: vec![LayoutNode::Leaf(document), LayoutNode::Leaf(panel_id)],
+                            weights: vec![1, 1],
+                        },
+                    },
+                    active: panel_id,
+                    fold_projection: false,
+                    panel_capable: true,
+                    frame_geometry: None,
+                    panel_hidden: false,
+                },
+            );
+            (document, panel_id, dead_buffer)
+        };
+
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(fid, crate::semantic_render::SemanticRenderState::new(fid));
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        term_sizes.insert(fid, CellSize::new(24, 80));
+        let mut last_idle = HashMap::new();
+        let mut last_active = HashMap::new();
+        let mut bells = HashMap::new();
+        // The dispatcher drops any event from an UNINSTALLED session
+        // (#148's defense-in-depth membership check), so the session must
+        // be registered or this test passes for the wrong reason — it did,
+        // on the first attempt.
+        let mut registry = SessionRegistry::new();
+        registry.register_session(
+            fid,
+            crate::presence::SessionState {
+                negotiated_protocol_version: pmacs_protocol::PROTOCOL_VERSION,
+                negotiated_capabilities: crate::protocol::NegotiatedCapabilities {
+                    semantic_render: true,
+                    crdt_replica: true,
+                    ..Default::default()
+                },
+                color_slot: 0,
+            },
+        );
+
+        handle_dispatcher_event(
+            DispatcherEvent::FrontendEvent {
+                source: fid,
+                event: FrontendEvent::Pointer {
+                    frontend_id: fid,
+                    buffer_id: dead_buffer,
+                    byte: 0,
+                    kind: PointerKind::Down,
+                    mods: Modifiers::default(),
+                },
+            },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_idle,
+            &mut last_active,
+            &mut bells,
+            &mut registry,
+        );
+
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "a stale Pointer naming a dead buffer must NOT move focus out of the panel"
+        );
+        assert_ne!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "non-vacuity: the document window is a real, distinct focus target"
         );
     }
 }

@@ -810,7 +810,11 @@ impl SemanticRenderState {
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         if let Some(evaluation) = statusline_evaluation {
-            self.emit_statusline_segments(evaluation, &mut out);
+            let document_window = state
+                .core
+                .borrow()
+                .primary_document_window(self.frontend_id);
+            self.emit_statusline_segments(evaluation, document_window, &mut out);
         }
         out
     }
@@ -929,7 +933,11 @@ impl SemanticRenderState {
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         if let Some(evaluation) = statusline_evaluation {
-            self.emit_statusline_segments(evaluation, &mut out);
+            let document_window = state
+                .core
+                .borrow()
+                .primary_document_window(self.frontend_id);
+            self.emit_statusline_segments(evaluation, document_window, &mut out);
         }
         out
     }
@@ -941,6 +949,7 @@ impl SemanticRenderState {
     fn emit_statusline_segments(
         &mut self,
         evaluation: StatuslineEvaluation,
+        document_window: Option<crate::window::WindowId>,
         out: &mut Vec<InstanceMessage>,
     ) {
         let to_wire = |segments: Vec<crate::statusline::EvaluatedStatuslineSegment>| {
@@ -955,10 +964,16 @@ impl SemanticRenderState {
         let frontend_id = self.frontend_id;
         match evaluation.outcome {
             StatuslineEvaluationOutcome::Ready(windows) => {
-                if let Some(window) = windows
-                    .into_iter()
-                    .find(|window| window.context.frontend_id == frontend_id)
-                {
+                // Bottom-panel A2A-2: the fan-out now yields the primary
+                // document AND the visible side window, so the wire
+                // segments must be selected by WINDOW IDENTITY. Taking
+                // "the first context for my frontend" would silently
+                // depend on capture order and could ship the panel's
+                // mode-line text as the document status band.
+                if let Some(window) = windows.into_iter().find(|window| {
+                    window.context.frontend_id == frontend_id
+                        && Some(window.context.window_id) == document_window
+                }) {
                     self.emit_statusline_payload(
                         window.context.buffer_id,
                         to_wire(window.left),
@@ -2925,6 +2940,7 @@ mod tests {
                 ),
                 new_failures: Vec::new(),
             },
+            None,
             &mut stale,
         );
         assert!(stale.is_empty(), "phase-1 stale evaluation emits nothing");
@@ -2945,13 +2961,13 @@ mod tests {
             new_failures: Vec::new(),
         };
         let mut replacement = Vec::new();
-        semantic.emit_statusline_segments(invalidated(), &mut replacement);
+        semantic.emit_statusline_segments(invalidated(), None, &mut replacement);
         assert_eq!(
             statusline_of(&replacement),
             Some((buffer_id, Vec::new(), Vec::new()))
         );
         let mut unchanged = Vec::new();
-        semantic.emit_statusline_segments(invalidated(), &mut unchanged);
+        semantic.emit_statusline_segments(invalidated(), None, &mut unchanged);
         assert!(
             unchanged.is_empty(),
             "the empty invalidation became baseline"
