@@ -554,7 +554,7 @@ If it does not, stop and repair the remote/fetch configuration.
   **not** `crdt`-gated and do run under CI's exact flags, including the
   controller-release pin whose only job is catching the plausible wrong fix.
 
-## Terminal config + copy mode arc — Stage 1 MERGED; Stage 2 is next
+## Terminal config + copy mode arc — Stage 1 MERGED; Stage 2 IN REVIEW
 
 - Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
   **revision 4** (four review rounds), committed as the first commit of
@@ -567,9 +567,188 @@ If it does not, stop and repair the remote/fetch configuration.
   binding; no protocol change. Main was integrated **twice** during the
   single review round (`ccf29e3`, then `c93f9ee` after the first merge
   left the PR conflicting) — see the no-CI-while-conflicting fact below.
-- **Stage 2 = `terminal-copy-mode`, not started.** Branch it off `main`
-  after Stage 1 merges: no dependency, but both edit
-  `builtin/runtime/terminal.lua`.
+- **Stage 2 = `githubsucks/terminal-copy-mode`**, worktree
+  `../pmacs-terminal-copy-mode`, based on `githubsucks/main` @
+  `cf54270`. Copy mode: `M-x terminal.copy-mode` / `C-c C-t`.
+- **Stage 2 ships eight of nine criteria, and the missing one is named.**
+  Criterion 17 (a real semantic frontend proving neither daemon buffer
+  nor mirror mutates) is **not pinned**: the optimistic apply exists only
+  in `pmacs-gpu/src/main.rs`, and the headless `SemanticClient` every
+  other semantic test uses has no optimistic path, so a faithful test
+  must drive the real GPU binary — the `a37` foundation, which CI never
+  compiles, silently skips without the binary, and is load-sensitive. A
+  second test on that footing buys the appearance of coverage. Both
+  halves of the mechanism are pinned **ungated** instead: acceptance 16
+  (the guard is armed — `dispatch_idle` false while the snapshot is
+  focused) and 16b (the daemon holds — `is_read_only()` is **true** at
+  the rope, so an op that did arrive is refused by `ensure_writable()`).
+  **Rounds 2-3 changed what 17 must show.** 16b asserted `false` through
+  round 1, documenting the hazard; round 2 closed it. So the eventual
+  real-GPU test must look for **mirror mutation plus daemon refusal —
+  divergence** — not the "mutates both sides, silently" the criterion
+  originally specified, which after the fix cannot happen and would pass
+  for the wrong reason. The wire-level half stays an explicit obligation
+  of the CI `crdt`-coverage lane.
+- Load-bearing Stage 2 decisions:
+  - **The snapshot MATERIALIZES into an ordinary buffer**, so isearch,
+    motion, selection and the kill ring work with no new substrate, and
+    "keys must not reach the child" dissolves structurally — the
+    transport arm keys on `is_terminal(buffer_id)` and a snapshot is not
+    a terminal. **The dispatch-shadow count stays at six.**
+  - **One serializer, not two** (Q#TC7): `copy_retained` builds a
+    whole-range *selection* and hands it to `copy_selection_bytes`.
+  - **`prune` reacts to removal rather than causing it** — it filters on
+    `!registry.contains(buffer_id)`, so a child exiting does NOT remove
+    the terminal buffer. That is why `on_removed` is a sound teardown
+    hook, and why a finished command's output stays readable.
+- **Five bites, five different wrong implementations.** Removing
+  `set_round_trip_input` fails acceptance 16 **in the default
+  configuration** (the whole reason that pin is ungated); a naive
+  independently-written serializer fails all four unit pins, with the
+  diffs naming each drift mode (broken soft wrap, untrimmed blanks,
+  trailing newline); making re-invoke create a fresh buffer fails 18;
+  dropping the kill-with-terminal teardown fails 18; removing the
+  intercept fails 16b. Each failed exactly one test.
+- **Review round 1 — four findings, all real, and they rhyme in pairs.**
+  Two P1 implementation defects and two P2 vacuous pins, all four tracing
+  to one root: **a name is not an identity, and a context-free readout is
+  not a state observation.**
+  - *P1 — a foreign same-named buffer was adopted and clobbered.* Snapshot
+    writes use `bypass_intercept`, so found-by-name adoption overwrote a
+    user's buffer; the reviewer reproduced "do not clobber" becoming 23
+    newlines. Fixed by dired's F7 rule: **ownership means "in our own
+    handle table"**, and a taken name yields a `<2>` variant.
+  - *P1 — snapshot identity was keyed by terminal NAME.*
+    `TerminalManager::open` uniquifies only the *derived* name, so an
+    explicit `name = "*same*"` lets two valid terminals share one; they
+    then shared a snapshot, `q` returned to the wrong terminal, and
+    killing either removed it. Now keyed by comparing buffer handles in an
+    array — `BufferIdLua` implements `__eq` but each wrapper is a distinct
+    table key, so **comparison works and hashing does not**.
+  - *P2 — the refresh pins were vacuous.* 19 compared a quiet terminal's
+    snapshot against itself and 18 counted buffers, so both passed with
+    `render_snapshot` replaced by a no-op. Now the test types a marker
+    into the `cat` child, requires it **absent** first, then refreshes.
+  - *P2 — the tail-follow pin could not observe view state.*
+    `manager.snapshot(buffer_id)` is context-free and always reads the
+    live screen, so it reported "at the tail" for a view forced to the
+    oldest retained row. Now read through `snapshot_for_view`'s
+    `at_bottom` and projected cells.
+- **Four more bites, all discriminating.** Restoring adopt-by-name fails
+  18a *and* 18b; restoring name-keyed identity fails 18b; making
+  `render_snapshot` a no-op fails **both** 18 and 19 (the vacuity,
+  demonstrated); and forcing the view off the tail fails 20.
+- **Review round 2 — one P1, and its fix retires half a named deferral.**
+  **Undo emptied the "read-only" snapshot.** `render_snapshot` wrote with
+  `bypass_intercept`, leaving ordinary undo history, and **`Buffer::undo`
+  reaches the rope through `ensure_writable` without ever consulting the
+  intercept chain** — so `C-/` *or* `M-x buffer.undo` replaced a freshly
+  rendered snapshot with an empty buffer. `set_round_trip_input` does not
+  help: it routes the key into the daemon command path, which is where
+  undo runs.
+  - **Rebinding the undo chords would NOT have fixed it**, and
+    `compile.lua` already says so in a comment — "command/menu undo stays
+    dispatchable". `*compilation*` and listview panels therefore carry the
+    same latent defect today.
+  - Fixed with `Buffer::set_generated_contents` (Lua
+    `pmacs.buffer.set_generated_contents`): lift `read_only`, replace
+    skipping intercepts, **discard history**, re-assert `read_only`. This
+    ships the deferred lane's two halves *as one primitive* — a bare
+    `set_read_only` would let a caller lock a buffer it can no longer
+    refresh, which is exactly why that lane was deferred. Clearing history
+    also stops a periodically refreshed buffer accumulating rope clones
+    nothing can ever pop.
+  - New pins: **acc16c** drives the real M-x path
+    (`command.invoke_interactive`), the chord, and redo, and asserts the
+    owner's refresh still works; **acc16b** flipped from asserting
+    `is_read_only()` is *false* to *true*, because the property it
+    described is the one that was fixed; plus three `buffer.rs` unit tests.
+  - Bite: restoring the `delete`+`insert` render reproduces the report
+    exactly — `left: Some("")` against the full snapshot — failing acc16c
+    and acc16b.
+  - **Still open:** `*compilation*` and listview remain emptiable by
+    `M-x buffer.undo`; the primitive they need now exists and is proven,
+    so the remainder is adoption plus a streaming-friendly variant.
+- **Review round 3 — one P1 and two P2s, all on the round-2 primitive.**
+  The lesson: **a rope write is only half of an edit, and "discard
+  history" means whichever history the buffer actually has.**
+  - **P1 — the binding swallowed the edit.** `set_generated_contents`
+    returned `()`, so nothing called `notify_buffer_edit_to_windows`.
+    Two consequences, both reproduced by the reviewer: in the default
+    build a window showing the buffer kept a `TextView` line index
+    describing the *previous* contents, and the next paint indexed the
+    new rope with stale ranges — `assertion failed: end <= self.len()`
+    in `src/rope.rs`; in the CRDT build `pending_crdt_ops` stayed empty,
+    so replica mirrors never received the owner's write. The prior
+    `buf:delete`/`buf:insert` pair had done this fan-out for free.
+    Fixed by applying **one whole-buffer `Replace`**, returning its
+    `Edit`, and notifying from the binding.
+  - **P2 — "discard history" was false in CRDT mode.** The v0.1 stacks
+    are bypassed entirely there; the history lives in loro's
+    `UndoManager`. `read_only` stops the replay but not the retention,
+    which is the memory cost the contract claims to eliminate.
+    `UndoManager` has no `clear`, but needs none — it records only what
+    happens after construction, the property `CrdtState::from_bytes`
+    already uses to keep the seed insert out of undo. New
+    `CrdtState::clear_undo_history` rebinds a fresh manager to the
+    same doc.
+  - **P2 — the docs described the pre-fix architecture.** Q#TC6a said no
+    Lua binding sets `read_only` and round-trip input is the only guard;
+    the acceptance text still said `is_read_only() == false` while 16b
+    had been flipped to `true`; `terminal.lua`'s comment repeated the
+    obsolete claim. The architecture is **layered** and now says so:
+    rope-level read-only protects the daemon copy, round-trip input
+    protects the replica's optimistic mirror, and neither substitutes
+    for the other. Q#TC6a carries a superseded-in-part box rather than
+    being silently rewritten.
+  - New pins: **acc16d** paints the window after a *shrinking* generated
+    write (the stale offsets then point past the end, which is the
+    reported crash rather than stale pixels); **acc16e** asserts the
+    refresh is queued for mirrors through the real copy-mode path
+    (`crdt`-gated, therefore dark in CI — 16d is the half that runs);
+    plus a CRDT `buffer.rs` unit test that ten renders leave the
+    `UndoManager` with nothing recorded.
+  - Bites: dropping the notify panics acc16d at `rope.rs:145` and fails
+    acc16e with `queued: []`; dropping the `UndoManager` rebind fails
+    the new unit test on `can_undo`.
+  - **Still open:** the fan-out obligation makes `*compilation*`/listview
+    adoption more than a one-line swap — recorded in `COHERENCE.md` §14
+    alongside the undo half.
+- **Review round 4 — one P2, docs only, and it is the interesting kind.**
+  **A fix can invalidate a test that was never written.** Criterion 17's
+  *bite* still described the pre-round-2 world: remove
+  `set_round_trip_input` and the op "mutates both sides, silently, with
+  no divergence to notice". True while nothing set `read_only` from Lua;
+  false once `set_generated_contents` did. A real-GPU test written to
+  that spec would hunt for a daemon-side edit that can no longer occur
+  and pass for the wrong reason — the specification would have leaked
+  the round-2 regression back in, through a test not yet built.
+  - Restated around **unauthorized mirror mutation plus daemon refusal =
+    divergence**, in all four places that carried the old claim: the
+    criterion, the Q#TC6a heading, the acceptance-16 doc comment, and the
+    bite roster. The heading's "ONLY thing" now says what it is the only
+    thing *for* — the replica's own mirror.
+  - Why round-trip input is still load-bearing rather than redundant: a
+    daemon refusal arrives after the frontend has already applied
+    optimistically and painted. It buys divergence instead of silent
+    agreement; it does not prevent the mutation the user sees.
+  - **Gate-run flake observed and scoped without overclaiming its cause.**
+    `cargo test --lib --features crdt` failed ~1 run in 5 on
+    `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
+    — `active_reader_probe` returning `None` at `process.rs:3179`
+    ("live runtime probe"). **Pre-existing and unrelated:** this branch
+    does not touch `src/process.rs` (last changed by the Darwin PTY
+    signal-name fix), and the test passed 10/10 standalone; the observed
+    failures were during parallel full-suite runs. That localizes the
+    trigger to suite load or interaction, but does **not** distinguish
+    parallelism from another full-suite effect — no serial full-suite bite
+    was run. The leading code-path explanation is the known `drain_until`
+    trap: draining for `Started` also ticks, and a tick can reap the leader
+    before the following `active_reader_probe`. That is an inference from
+    the failure site and control flow, not yet a falsified root cause.
+    It belongs to the CI `crdt`-coverage lane for discrimination. The two
+    round-2 CRDT failures had no captured test names; this flake is a
+    plausible candidate for them, but they remain **unattributed**.
 - Load-bearing decisions, each forced by scouted ground truth:
   - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
     no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
