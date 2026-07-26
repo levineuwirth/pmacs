@@ -1341,9 +1341,16 @@ impl EditorState {
         frontend_id: FrontendId,
         buffer_id: crate::buffer::BufferId,
     ) -> Option<TerminalViewKey> {
+        // Bottom-panel §1.3 #6/#10/#11 — Projection. The full-window
+        // semantic terminal declaration, its snapshot/sync, and its
+        // frame suppression all describe the frontend's PRIMARY DOCUMENT
+        // surface, never a panel band: panel terminals get `PanelFrame`
+        // / `PanelPointer` in Stage 2B instead. Resolving through
+        // `view.active` would let a focused panel terminal both claim
+        // the document declaration and suppress the document pass.
         let core = self.core.borrow();
-        let view = core.views.get(&frontend_id)?;
-        let window = core.windows.get(&view.active)?;
+        let win_id = core.primary_document_window(frontend_id)?;
+        let window = core.windows.get(&win_id)?;
         if window.buffer_id != buffer_id {
             return None;
         }
@@ -1471,6 +1478,16 @@ impl EditorState {
         };
         if coord.row >= size.rows || coord.col >= size.cols {
             return false;
+        }
+        // Bottom-panel §1.3 #11 — Projection + focus. A non-hover
+        // gesture on the DOCUMENT terminal means "work here", so it
+        // takes focus back out of a panel before the gesture replays;
+        // bare hover neither focuses nor claims the controller.
+        if !matches!(kind, TerminalMouseKind::Move) {
+            let mut core = self.core.borrow_mut();
+            if let Some(win_id) = core.primary_document_window(frontend_id) {
+                core.focus_window(frontend_id, win_id);
+            }
         }
         self.core.borrow_mut().active_frontend = frontend_id;
         self.apply_terminal_gesture(key, size, coord, kind, mods, (coord.row, coord.col));

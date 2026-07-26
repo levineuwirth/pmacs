@@ -639,9 +639,20 @@ fn capture_target_contexts(
                 .views
                 .get(&frontend_id)
                 .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
+            // Bottom-panel §1.3 #12 — Projection. This LOOKUP resolves
+            // the primary document window: with a panel focused,
+            // `view.active` would name the panel and the declared-buffer
+            // check would clear the document's statusline.
+            //
+            // `active` is NOT rerouted with it (Q#BP14/parent 42): it
+            // reports ACTUAL focus, so a document provider truthfully
+            // observes `active = false` while the panel owns focus.
+            let window_id = core
+                .primary_document_window(frontend_id)
+                .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
             let window = core
                 .windows
-                .get(&view.active)
+                .get(&window_id)
                 .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
             if buffers.get(window.buffer_id).is_err() {
                 return Err(StatuslineNoMessageReason::BufferUnavailable);
@@ -653,7 +664,7 @@ fn capture_target_contexts(
                 frontend_id,
                 window_id: window.id,
                 buffer_id: window.buffer_id,
-                active: true,
+                active: window.id == view.active,
             }])
         }
     }

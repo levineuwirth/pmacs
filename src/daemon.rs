@@ -1145,9 +1145,13 @@ fn dispatcher_loop(
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_capabilities.semantic_render)
                 {
+                    // Bottom-panel §1.3 #1 — Projection. The buffer this
+                    // frontend DISPLAYS AS ITS DOCUMENT, not the one it
+                    // happens to focus: focusing a panel must re-send no
+                    // snapshot and must never swap the replica's mirror.
                     let active_now = {
                         let core = editor.core.borrow();
-                        core.active_window_for(*fid).map(|w| w.buffer_id)
+                        core.primary_document_buffer(*fid)
                     };
                     if let Some(active_now) = active_now
                         && last_active_buffer_sent.get(fid) != Some(&active_now)
@@ -1430,8 +1434,16 @@ fn dispatcher_loop(
                         .session_state(*fid)
                         .is_some_and(|s| s.negotiated_capabilities.crdt_replica)
                 {
+                    // Bottom-panel §1.3 #3 — Projection. `CursorByte` is
+                    // the replica's authoritative DOCUMENT cursor; a
+                    // focused panel must not retarget it at the panel
+                    // buffer (Q#BP14's "active buffer is a
+                    // document-surface term, not an input-focus term").
                     let core = editor.core.borrow();
-                    if let Some(window) = core.active_window_for(*fid) {
+                    if let Some(window) = core
+                        .primary_document_window(*fid)
+                        .and_then(|win_id| core.windows.get(&win_id))
+                    {
                         let cursor_byte_msg = InstanceMessage::CursorByte {
                             buffer_id: window.buffer_id,
                             byte_pos: window.cursor,
@@ -2038,12 +2050,17 @@ fn handle_dispatcher_event(
                     // straight back off it. The declared buffer is
                     // checked too — a terminal has no byte viewport to
                     // honor from any direction.
+                    // Bottom-panel §1.3 #9 — Projection. The gate asks
+                    // "is this frontend's DOCUMENT surface a terminal",
+                    // so it tests the primary document window. A focused
+                    // TERMINAL PANEL must not suppress the still-visible
+                    // document's viewport.
                     let terminal_context = {
                         let manager = editor.terminal_manager.borrow();
                         let core = editor.core.borrow();
                         let active = core
-                            .active_window_for(source)
-                            .is_some_and(|window| manager.is_terminal(window.buffer_id));
+                            .primary_document_buffer(source)
+                            .is_some_and(|document| manager.is_terminal(document));
                         active || manager.is_terminal(buffer_id)
                     };
                     if semantic_states.contains_key(&source) && !terminal_context {
@@ -2056,7 +2073,11 @@ fn handle_dispatcher_event(
                         // LOCAL's attach-time buffer (often a scratch the
                         // user isn't viewing), so arrow keys moved an
                         // off-screen cursor and the caret never tracked.
-                        align_semantic_window_to_buffer(editor, source, buffer_id);
+                        // Bottom-panel §1.3 #7 — Projection, and it must
+                        // NOT move focus. Routing this through the
+                        // focused window would let an ordinary document
+                        // viewport overwrite a focused panel's buffer.
+                        align_primary_document_window(editor, source, buffer_id);
                         if let Some(sem) = semantic_states.get_mut(&source) {
                             sem.set_viewport(buffer_id, visible, generation);
                         }
@@ -2121,7 +2142,11 @@ fn handle_dispatcher_event(
                     // aligns to the buffer the frontend says it was
                     // displaying: a click can race a buffer switch.
                     if semantic_states.contains_key(&source) {
-                        align_semantic_window_to_buffer(editor, source, buffer_id);
+                        // Bottom-panel §1.3 #8 — Projection + focus. A
+                        // click in the DOCUMENT area means "work here",
+                        // so unlike `Viewport` (#7) this one also takes
+                        // focus out of a panel.
+                        align_and_activate_primary_document_window(editor, source, buffer_id);
                         if kind == PointerKind::Context {
                             // Q#CM1 — right-click opens the context menu
                             // at the hit byte (needs the Lua builder, so
@@ -2359,9 +2384,15 @@ fn ensure_active_buffer_crdt_backed(
     editor: &EditorState,
     fid: FrontendId,
 ) -> Option<crate::buffer::BufferId> {
+    // Bottom-panel §1.3 #2 — Projection, and the sharpest case in the
+    // census. The upgrade BROADCASTS a `BufferSnapshot` to every
+    // replica, so keying it on focus would mean focusing a fresh
+    // generated panel buffer swaps every peer's document mirror to it.
+    // A panel buffer that genuinely needs CRDT backing gets it when it
+    // is displayed as a document, not as a side effect of focus.
     let buffer_id_opt = {
         let core = editor.core.borrow();
-        core.active_window_for(fid).map(|w| w.buffer_id)
+        core.primary_document_buffer(fid)
     };
     let buffer_id = buffer_id_opt?;
     let core = editor.core.borrow();
@@ -2493,11 +2524,13 @@ fn publish_buffer_snapshot_to_replicas(
             continue;
         }
         if session.negotiated_capabilities.semantic_render {
-            let displays_buffer = editor
-                .core
-                .borrow()
-                .active_window_for(*peer_id)
-                .is_some_and(|window| window.buffer_id == buffer_id);
+            // Bottom-panel §1.3 #21 — Projection. "Displays this
+            // buffer" means the peer's DOCUMENT surface: testing the
+            // focused window would both miss a buffer visible in the
+            // document (panel focused elsewhere) and replace the peer's
+            // mirror for one visible only in a panel.
+            let displays_buffer =
+                editor.core.borrow().primary_document_buffer(*peer_id) == Some(buffer_id);
             if !displays_buffer {
                 continue;
             }
@@ -2936,38 +2969,59 @@ fn handle_remote_crdt_op(
 /// whole switch. This is the input/display alignment fix for B1: the
 /// frontend's *declared* buffer becomes the buffer its keys edit and
 /// its `CursorByte` reports.
-fn align_semantic_window_to_buffer(
+/// Align a semantic frontend's **primary document window** to the
+/// buffer it declared (bottom-panel §1.3 #7, Q#BP14).
+///
+/// **Never touches `view.active`.** This is why rejecting panel-named
+/// events does not fix the *document* event: with a panel focused, an
+/// ordinary document `Viewport` routed through the focused window would
+/// overwrite the panel's buffer with the document buffer. Returns the
+/// window it aligned so the `Pointer` path (#8) can activate it.
+fn align_primary_document_window(
     editor: &mut EditorState,
     fid: FrontendId,
     buffer_id: crate::buffer::BufferId,
-) {
+) -> Option<crate::window::WindowId> {
     use crate::text_view::TextView;
 
-    let text_view = {
+    let (win_id, text_view) = {
         let core = editor.core.borrow();
-        let Some(win_id) = core.views.get(&fid).map(|v| v.active) else {
-            return;
-        };
+        let win_id = core.primary_document_window(fid)?;
         if core.windows.get(&win_id).map(|w| w.buffer_id) == Some(buffer_id) {
-            return; // Already displaying this buffer.
+            return Some(win_id); // Already displaying this buffer.
         }
         let reg = core.registry.borrow();
         let Ok(buf) = reg.get(buffer_id) else {
-            return; // Unknown buffer — leave the window as-is.
+            return Some(win_id); // Unknown buffer — leave the window as-is.
         };
-        TextView::new(buf)
+        (win_id, TextView::new(buf))
     };
 
     let mut core = editor.core.borrow_mut();
-    let Some(win_id) = core.views.get(&fid).map(|v| v.active) else {
-        return;
-    };
     if let Some(win) = core.windows.get_mut(&win_id) {
         win.buffer_id = buffer_id;
         win.text_view = text_view;
         win.cursor = 0;
         win.selection = None;
         win.overlays.clear();
+    }
+    Some(win_id)
+}
+
+/// Align the primary document window **and take focus to it**
+/// (bottom-panel §1.3 #8, Q#BP14).
+///
+/// A click in the document area means "work here", so it moves focus
+/// out of a panel. This is the one place projection and focus
+/// legitimately move together — every other Projection consumer must
+/// use [`align_primary_document_window`] alone.
+fn align_and_activate_primary_document_window(
+    editor: &mut EditorState,
+    fid: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+) {
+    if let Some(win_id) = align_primary_document_window(editor, fid, buffer_id) {
+        editor.core.borrow_mut().focus_window(fid, win_id);
     }
 }
 

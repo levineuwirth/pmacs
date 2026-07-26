@@ -1345,9 +1345,13 @@ impl SemanticRenderState {
         state: &EditorState,
         buffer_id: BufferId,
     ) -> Option<InstanceMessage> {
+        // Bottom-panel §1.3 #4 — Projection. `LineNumbers` describes the
+        // replica's DOCUMENT surface; a focused panel must not replace
+        // the document's gutter mode with the panel window's.
         let mode = {
             let core = state.core.borrow();
-            core.active_window_for(self.frontend_id)
+            core.primary_document_window(self.frontend_id)
+                .and_then(|win_id| core.windows.get(&win_id))
                 .map_or(crate::window::LineNumberMode::Off, |w| w.line_numbers)
         };
         if self.last_line_numbers == Some(mode) {
@@ -1703,7 +1707,12 @@ impl SemanticRenderState {
         // Emitting CurrentLine here forced a whole-buffer line table on
         // every frame even though pmacs-gpu ignores its own current-line
         // wash.
-        if let Some(win) = core.active_window_for(self.frontend_id)
+        // Bottom-panel §1.3 #5 — Projection. Selection decorations
+        // belong to the document surface the viewport describes; a
+        // selection made inside a focused panel must not paint into it.
+        if let Some(win) = core
+            .primary_document_window(self.frontend_id)
+            .and_then(|win_id| core.windows.get(&win_id))
             && win.buffer_id == vp.buffer_id
             && let Some((lo, hi)) = win.region()
             && let Some(range) = clip_to_viewport(lo, hi, vp)
