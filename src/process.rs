@@ -2296,7 +2296,27 @@ mod tests {
         (id, spawn_started_pid(sup, id))
     }
 
-    /// Drain until `Started` and return the OS pid it carries.
+    /// The OS pid straight from the supervisor's own record, WITHOUT
+    /// ticking.
+    ///
+    /// `drain_until` ticks, and a tick can observe a fast child's exit
+    /// and transition the record out of `Running` — after which
+    /// `signal` returns "is not running" and never reaches the
+    /// diagnostic at all. Any test whose child exits promptly must read
+    /// the pid this way. (Found by the parallel workspace sweep: the
+    /// drain-based helper raced only under load.)
+    fn record_pid(sup: &ProcessSupervisor, id: ProcessId) -> u32 {
+        match sup.processes.get(&id).expect("record").state {
+            ProcessState::Running { pid, .. } | ProcessState::Exiting { pid, .. } => pid,
+            ProcessState::Starting => panic!("spawn has not reported a pid yet"),
+            ProcessState::Terminated(_) => {
+                panic!("the record already left Running; the pid is unavailable")
+            }
+        }
+    }
+
+    /// Drain until `Started` and return the OS pid it carries. Safe
+    /// only for children that outlive the drain; see [`record_pid`].
     fn spawn_started_pid(sup: &mut ProcessSupervisor, id: ProcessId) -> u32 {
         let evs = drain_until(sup, id, Duration::from_secs(5), |evs| {
             evs.iter()
@@ -2331,6 +2351,11 @@ mod tests {
             if err.contains("leader=exited(") {
                 return err;
             }
+            assert!(
+                !err.contains("is not running"),
+                "the record left Running before the diagnostic could run, so \
+                 this test never exercised it: {err}"
+            );
             assert!(
                 Instant::now() < deadline,
                 "leader never observed as exited within {timeout:?}: {err}"
@@ -2430,7 +2455,9 @@ mod tests {
         let mut spec = ProcessSpec::new("diag-exited", "/bin/sh");
         spec.args = vec!["-c".into(), "exit 3".into()];
         let id = sup.spawn(spec).expect("spawn");
-        let pid = spawn_started_pid(&mut sup, id);
+        // NOT `spawn_started_pid`: draining ticks, and this child exits
+        // immediately.
+        let pid = record_pid(&sup, id);
 
         let err = terminate_until_leader_exited(&mut sup, id, Duration::from_secs(10));
 
@@ -2506,7 +2533,9 @@ mod tests {
             mode: TerminalMode::Canonical,
         };
         let id = sup.spawn(spec).expect("spawn");
-        let _ = spawn_started_pid(&mut sup, id);
+        // NOT `spawn_started_pid`: draining ticks, and a tick can reap
+        // this immediately-exiting child before the diagnostic runs.
+        let _ = record_pid(&sup, id);
 
         // Drives `observe_leader`, which try_waits the real PTY child
         // for the first time and reaps it.
