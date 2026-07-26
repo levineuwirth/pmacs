@@ -23,7 +23,8 @@ here too until #172 removed it — that is the update those two owe.)
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `a27f646` (Lean 4 Stage 4a #179 atop bottom-panel
+  `githubsucks/main` @ `74301d1` (the dired Stage 1 landed-doc refresh
+  #169 atop Lean 4 Stage 4a #179, bottom-panel
   Stage 2A #177, the bottom-panel Stage 2 framing #175, terminal
   configuration Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a #167, the
   CRDT undo repro #157, the inline-math landed-doc refresh #172, the
@@ -161,175 +162,145 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b, 4a MERGED; 4b is next
+## Lean 4 lane (Arc 8) — Stages 1–4a MERGED; Stage 4b IN REVIEW
 
-- **Stages 1, 2, 3a and 3b are MERGED** — #160 (`main` @ `0827dd1`),
-  #161 (`46a1b8f`), #167 (`6f348c9`), #170 (`d400f30`). Their full
+- **Stages 1, 2, 3a, 3b and 4a are MERGED** — #160 (`main` @ `0827dd1`),
+  #161 (`46a1b8f`), #167 (`6f348c9`), #170 (`d400f30`), #179
+  (`a27f646`). Their full
   histories were pruned from this ledger in round 6, per this file's own
   instruction to remove entries when their PR merges; the durable facts
   now live in `docs/agent-handoff.md` §1's Lean 4 bullet, which is where
-  a fresh machine should read them. `docs/lean4-mode-framing.md` rev 8
+  a fresh machine should read them. `docs/lean4-mode-framing.md` rev 9
   carries the decisions.
 
-### Stage 4 — framing rev 8, split into 4a/4b (branch `lean4-stage4a-typed-edit-chain`)
+### Stage 4b — the Unicode input method (branch `lean4-stage4b-input-method`)
 
-- Stages 3a and 3b **merged as #167** (`main` @ `6f348c9`) and **#170**
-  (`main` @ `d400f30`), 2026-07-26. Both were integrated against a main
-  that had advanced 50 commits mid-review; the only conflict either time
-  was this ledger's own lane headings, resolved by keeping both sides.
-- **Stage 4a merged as #179** (`main` @ `a27f646`, 2026-07-26) — the
-  typed-edit consumer chain. Worktree `../pmacs-lean-stage4`, branched
-  off `main` @ `d400f30`; retained, carrying nothing unmerged.
-  `docs/lean4-mode-framing.md` **revision 8** remains the approved
-  framing. **Stage 4b (the Lean-specific half) is framed and not
-  started.**
-- **Round 6 review found five P1s, four of them internal to rev 6** —
-  facts about pmacs the revision asserted without checking, while its
-  external (upstream) facts held. Fixed in rev 7: Stage 4a's footprint
-  omitted the test file its own acceptance requires; pending
-  abbreviation state was keyed by buffer when pmacs is **multi-frontend**
-  (`EditorCore.views` is per-`FrontendId`, `take_typed_edit` is already
-  frontend-keyed, and `buffer.after-switch` fires with NO arguments, so
-  a buffer-keyed clear lets any frontend discard another's pending
-  state); the shortest-match rule was missing its **tie-break by source
-  declaration order**, which 101 prefixes depend on and a `pairs`-
-  iterated Lua map cannot express; and the generator's "abort on keys
-  needing escaping" rule **rejects the real table** (`\` is a key, `"`
-  begins eleven).
-- **A 404 on a guessed path is not evidence of absence.** Rev 6 declared
-  the upstream package ships no README after fetching the package root,
-  with the directory listing showing `src/README.md` already in hand.
-  The README states the tie rule in one sentence.
-- **Round 7 review found one remaining P1 in acceptance 45i.** Rev 7
-  required A's pending abbreviation to survive B editing the same
-  buffer, while Q#LN22 also required an exact buffer-revision advance.
-  Those cannot both hold: revisions are buffer-global and every edit
-  bumps them. Rev 8 keeps the conservative guard and separates
-  ownership from survival — B cannot consume A's record, but B editing
-  the shared buffer invalidates A lazily; B switching buffers or
-  detaching remains frontend-scoped when no shared-buffer edit
-  intervenes.
-- **Round 5 re-scout split Stage 4 into 4a (substrate) and 4b (Lean).**
-  4a is the typed-edit consumer chain — `builtin/runtime/typed_edit.lua`
-  plus `pair.lua` re-expressed as one registered consumer, no behavior
-  change. 4b is the input method. The split is forced by §4's own rule,
-  which Stage 4's risk column ("refactors `pair.lua`'s provenance read")
-  broke while the prose called the stage Lean-only.
-- **This is the SECOND consecutive re-scout to find that rule broken**
-  (round 4 found it for Stage 3). Rev 5 had even noticed the shape and
-  answered it with a commit boundary. **A commit boundary is not a review
-  boundary.** Re-check every remaining stage against §4 at scout time;
-  the rule is not self-enforcing.
-- **Rev 5's expansion semantics were wrong in three ways**, found by
-  reading `leanprover/vscode-lean4` @ `17d1d08` rather than inferring
-  from behavior. Resolution is *shortest key having the input as a
-  prefix* (`\al` → `∀` from `all`, not `alpha`); there is **no
-  terminator list** (`'+ '` is a key, so space extends after `\+`; `'\'`
-  is a key, so `\\` → `\`); and an unmatchable tail is **appended**,
-  not dropped (`\alp7` → `α7`).
-- **There is no cursor-motion hook**, so rev 5's acceptance 43 ("moving
-  the cursor out abandons it") was not buildable. Abandonment is lazy —
-  validated at the next typed edit — and the criterion now asserts what
-  pmacs can actually detect. Upstream drives this off `changeSelections`;
-  that seam does not exist here.
-- **`dispatch_key` is only half the production path for 4b.** The
-  auto-pair suite gets away with dispatch-only because Q#AP1 removed the
-  pair chars from the optimistic classifiers; `\` and the letters are
-  NOT excluded, so on a CRDT frontend the optimistic producer is the real
-  path. That producer is `#[cfg(feature = "crdt")]` and CI never enables
-  `crdt`, and the gate list runs `--features crdt` only for `--lib` — a
-  crdt-gated integration test is **dark twice over**.
-- The whole expansion has cross-peer-degraded undo (Q#LN21): six
-  source-peer optimistic inserts replaced by one daemon-peer op.
-  `set_round_trip_input` would fix it and is rejected — it also disables
-  `dispatch_idle`, so RET stops inserting a newline.
-- Table facts re-derived at `17d1d08`: 1,855 entries, 36,861 bytes, all
-  keys ASCII, **64** keys carry a `lean4` pair-set char, **305** keys are
-  proper prefixes of another (so 1,550 expand eagerly), **26** values
-  carry `$CURSOR`, and **119** are multi-codepoint — the 26
-  `$CURSOR`-bearing values plus 93 others.
-- Citation sweep per COHERENCE §25: five live citations moved in the 50
-  commits since rev 5 — `take_typed_edit` 12827→12990,
-  `handle_server_requests` 1549→1815, `fs.stat` 93→133,
-  `detect_buffer_language` 452→457, `send_request`/`send_notification`
-  9342/9361→9507/9527.
-### Stage 4a — the typed-edit consumer chain (IMPLEMENTED, same branch)
-
-- Footprint exactly as Q#LN10 declares it: `builtin/runtime/typed_edit.lua`
-  (new), `pair.lua` re-expressed as one consumer,
-  `src/editor.rs` +15 (the `include_str!` and its ordering comment), and
-  `tests/typed_edit_chain_acceptance.rs` (new, 13 tests).
-  **`tests/auto_pair_acceptance.rs` is UNCHANGED — `git diff --stat
-  main...HEAD -- tests/auto_pair_acceptance.rs` is empty.** That is
-  criterion 46 checked at the diff, which is the only way it means
-  anything.
-- **The chain calls consumers even when the record is nil.** This is a
-  decision, not an implementation detail: three existing auto-pairing
-  tests assert `pmacs.pair._last_record == nil` after a record-less
-  fan-out (paste, programmatic insert, nested manual `hook.run`), so
-  skipping consumers on nil fails them. Stage 4b needs the same
-  delivery to abandon a pending abbreviation an unrelated edit
-  invalidated.
-- **Ordered insertion, not `table.sort`** — Lua's sort is not stable, and
-  "ties broken by registration order" is a stated contract.
-- **The chain `pcall`s each consumer** and reports through
-  `set_status`. Rev 7 justified this by claiming an uncontained throw
-  would fail the fan-out for every other subscriber including lsp.lua's
-  didChange flush; **that is wrong** — `run_all_must_succeed`
-  (`src/hook.rs:332`) collects errors and continues, so the other
-  subscribers still run. The real consequence is narrower and still
-  worth containing: the throw skips every LATER consumer in the chain.
-  The rendering is protected too, because a Lua error may be a table
-  whose `__tostring` throws.
-- **Round 8 (review) findings, all fixed on this branch:** each consumer
-  now gets its **own shallow copy** of the record (the same table let a
-  declining consumer rewrite `rec.char`, which pairing reads — typing
-  `x` could produce `x)`); the fan-out iterates a **snapshot** (a
-  consumer registering a lower-priority one shifted itself forward under
-  `ipairs` and ran twice, unbounded if repeated); `tostring` moved
-  inside the containment; **non-finite and non-integer priorities are
-  rejected** (NaN is a number and every ordered comparison with it is
-  false, so it landed wherever the insertion scan gave up and silently
-  voided the ordering contract); and `add_consumer` now returns a handle
-  with `remove_consumer` beside it, so re-evaluating a config no longer
-  leaks callbacks the way `pmacs.hook.add` does (COHERENCE §13).
-- **Every acceptance test is bite-verified by mutation**, per the
-  standing rule that a test is not evidence until the mutation it
-  targets has been shown to fail it:
+- Framing `docs/lean4-mode-framing.md` **revision 12** (rounds 10, 11
+  and 12 = review of the implementation). Stage
+  4a (the typed-edit consumer chain) MERGED as #179; this branch is 4b,
+  the Lean content that registers on it.
+- Footprint: `scripts/regen-lean-abbrev` (new, the generator),
+  `builtin/runtime/lean_abbrev.lua` (new, VENDORED DATA — 1,855 entries
+  from `leanprover/vscode-lean4@17d1d08`, Apache-2.0),
+  `builtin/runtime/lean_input.lua` (new, the consumer at priority 50),
+  `src/editor.rs` (two `include_str!` blocks),
+  `tests/lean_input_acceptance.rs` (new, 31 tests), and one
+  `#[cfg(feature = "crdt")]` `--lib` test in `src/daemon.rs`
+  (acceptance 45f). No protocol change (Q#LN14). Entirely Lua apart
+  from the load sites and that one test.
+- **Round 9 corrected three acceptance criteria that the real table
+  contradicts** — found by simulating the state machine over all 1,855
+  entries and re-reading upstream at the pinned commit, not by reading
+  the prose again. `\to` is NOT eager (`top`, `to0`, `toa` extend it);
+  `\zzzz` expands to `ζzzz ` because `ze`/`zeta`/`zsqrtd` exist, and
+  only `$ % , ; @ W` open no key at all; and `\alpha`'s undo does not
+  restore `\alpha ` because `alpha` IS eager, so the terminator is a
+  separate edit. Criteria 38, 41 and 42 now state both paths.
+- **Two generator bugs, both caught by its own round-trip check
+  failing closed:** `str.splitlines()` also splits on U+2028/U+2029,
+  and 53 symbols contain one literally, so the check reported a count
+  mismatch that was its own bug; then escaping via `chr(byte)` produced
+  a latin-1-shaped string that `write_text(encoding="utf-8")`
+  re-encoded, and every non-ASCII symbol landed double-encoded. The
+  first version of the check compared IN-MEMORY strings and agreed with
+  itself. **It now stages the file, re-reads the bytes from disk, and
+  renames into place only on a match.**
+- **The point must be placed explicitly after the replace.** The
+  expansion SHRINKS the buffer (`\alpha` 6 bytes → `α` 2), so a point
+  left at the pre-edit offset is past the new end and every later
+  self-insert is silently rejected — the editor looks dead after the
+  first expansion. Pairing's "no cursor motion on the clean path" does
+  not generalize: that holds only for an insert AT the cursor.
+- **Three tests were vacuous when first written and were found by
+  biting, not by review:** the abandonment test asserted text that a
+  wrongly-surviving record would also produce (claiming makes no edit —
+  it needed the follow-up keystroke that completes an eager key); the
+  re-arm test used the framing's own `\alpha\to`, which never reaches
+  the re-arm branch because `alpha` is eager and closes the record
+  first (`\al\to` does); and both buffer-switch tests passed through
+  `find_or_open`'s fresh-load path, which fires `buffer.after-load` and
+  a record-less edit rather than `buffer.after-switch` — deleting the
+  subscriber left them green. All three now bite.
+- **Bite table** (each mutation, and the tests it fails):
 
   | Mutation | Tests it fails |
   |---|---|
-  | append instead of ordered insert | 5 chain |
-  | `>=` instead of `>` in the insert scan | 1 chain (tiebreak) |
-  | re-take the record per consumer | 4 chain |
-  | ignore the claim return value | 1 chain |
-  | drop the `pcall` | 1 chain |
-  | skip consumers when `rec == nil` | 1 chain + **3 auto-pair** |
-  | load `typed_edit.lua` after `lsp.lua` | 1 chain + **2 auto-pair** (Q#AP7) |
-  | hand every consumer the same record table | 1 chain (46f) |
-  | iterate the live array instead of a snapshot | 1 chain (46g) |
-  | render the error outside the `pcall` | 1 chain (46d) |
-  | accept any Lua number as a priority | 1 chain (46h) |
-  | make `remove_consumer` a no-op | 2 chain (46g, 46h) |
+  | register at priority 150 (after pairing) | 2 |
+  | claim only completed expansions | 2 |
+  | longest match instead of shortest | 9 |
+  | equal-length tie keeps the LATER key | 3 |
+  | remove the eager branch | 8 |
+  | expand without the terminator in the span | 2 |
+  | remove the re-arm branch | 1 |
+  | remove the point-still-at-span-end check | 1 |
+  | remove the exact-revision check | 1 |
+  | leave the point where the replace found it | 5 |
+  | remove the `lean4` language gate | 1 |
+  | remove the `lean.abbrev` gate | 2 |
+  | `buffer.after-switch` clears every frontend | 1 |
+  | delete the `buffer.after-switch` subscriber | 1 |
+  | `frontend.detached` purges every frontend | 1 |
+  | claim the terminator | 1 |
+  | expand inside the chain, then decline | 2 |
+  | drop the `cursor() == post_cursor` check | 1 |
+  | place the point without the context guard | 1 |
+  | load lean_input.lua after lsp.lua | 1 |
+  | let a nested fan-out consume the deferred slot | 1 |
+  | stop counting chain invocations | 1 |
+  | count fan-outs in the expander instead of the sentinel | 1 |
 
-  The first attempt at the last bite was WORTHLESS as written: moving
-  only `typed_edit.lua` past `lsp.lua` left `pair.lua` calling a nil
-  `add_consumer`, so the runtime failed to load and all 9 tests died —
-  loud, but not a test of the flush-ordering property. Moving
-  `typed_edit.lua` AND `pair.lua` past `lsp.lua` is the faithful
-  falsification: registration succeeds, the hook lands late, and exactly
-  the three ordering tests fail. **A bite that kills everything has not
-  isolated anything.**
-- Verification on this branch (commit-then-gate, so this describes the
-  pushed tree): `cargo fmt --check` clean; strict workspace Clippy
-  clean; 1,832 default + 2,009 CRDT library tests; auto-pair 45/45;
-  typed-edit chain 13/13 (and 13/13 again under `--no-default-features
-  --features lua54`, since the fixes touch `math.huge`, `%`, and
-  `__tostring` behavior that differs between the backends); M4 121;
-  required GPU 202; **isolated-config workspace sweep 3,332 across 97
-  suites, zero failures** with `grep -c basedpyright` = 0; `git diff
-  --check` clean.
-- Stage 4b (the input method) is NOT in this PR and not started.
+  Acceptance 45f bit by construction: without a registered window for
+  the source frontend it ran six fan-outs with a nil record and proved
+  nothing, because `handle_remote_crdt_op` arms nothing unless the
+  source's active window displays the buffer.
+- **Round 10 (review) found three defects, all about what happens
+  AROUND the expansion rather than about resolving an abbreviation.** A
+  pair character that TERMINATES an abbreviation never reached pairing
+  (`\alp(` gave `α(`): the first revision claimed the terminator, and
+  merely declining is not enough either, because the chain hands each
+  consumer a copy of the record made before any consumer ran — so
+  expanding inside the chain invalidates pairing's copy and the closer
+  is lost anyway (verified by mutation, not assumed). The expansion now
+  runs on **its own `buffer.after-edit` subscriber** after the chain,
+  with a span that stops before the terminator. That is a new instance
+  of Q#AP7, so it is now pinned with the sighelp fake server.
+  Post-insert point motion was also mistaken for a valid span (the
+  relevance check needs `cursor() == post_cursor`, as pairing's has
+  since #110), and cursor placement could move a buffer an intercept
+  had switched to.
+- **Round 11 found the round-10 fix incomplete in one place:
+  `buffer.after-edit` fan-outs NEST.** A consumer between the expander
+  (50) and pairing (100) that calls `pmacs.hook.run("buffer.after-edit")`
+  re-enters the expander's subscriber while the OUTER chain is still
+  mid-list; the nested pass expanded and outer pairing then resumed with
+  an invalidated record — `α(` again, through the chain's documented
+  re-entrancy seam instead of through claiming. **Deferring work past a
+  fan-out means owning which fan-out it belongs to.** The chain's
+  subscriber and the expander's each run exactly once per fan-out, so
+  counting the first and matching it off in the second identifies the
+  nesting level with no new seam in merged Stage 4a substrate.
+- **Round 12 found round 11's counter in the wrong place.** It counted
+  invocations of the EXPANDER, which is optional: a lower-priority
+  consumer can claim and stop the chain before the expander runs, while
+  that fan-out's deferred subscriber still runs — so the nested pass
+  went uncounted, looked outermost, expanded early, and outer pairing
+  resumed with an invalidated record. The count now comes from a no-op
+  consumer at the MINIMUM priority, which runs first in every chain
+  invocation that reaches any consumer, and degrades safely: the only
+  thing that can skip it is a claim ahead of it, which skips the
+  expander too. A subscriber registered beside `run_deferred` cannot
+  serve — the whole nested fan-out completes inside the outer chain's
+  subscriber, before it would run.
+- **Rounds 10–12 share a shape worth naming.** Each fix was correct
+  about the failure it was shown and wrong about the boundary of the
+  mechanism it leaned on — first the chain's copy semantics, then its
+  re-entrancy, then its short-circuit. **A queue that outlives the
+  thing that filled it has to name that thing, not approximate it.**
+- Undo is cross-peer-degraded on CRDT frontends and that is ACCEPTED,
+  named in the module header (Q#LN21): six source-peer optimistic
+  inserts replaced by one daemon-peer op. `set_round_trip_input` would
+  fix it and also disables `dispatch_idle`, so RET would stop inserting
+  a newline.
 
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 

@@ -37,7 +37,8 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-26)
 
-- `main` @ `a27f646` (Lean 4 Stage 4a #179 atop bottom-panel Stage 2A
+- `main` @ `74301d1` (the dired Stage 1 landed-doc refresh #169 atop
+  Lean 4 Stage 4a #179, bottom-panel Stage 2A
   #177, the bottom-panel Stage 2 framing #175, terminal configuration
   Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a #167, the CRDT undo repro
   #157, the inline-math landed-doc refresh #172, the bottom-panel
@@ -101,9 +102,9 @@ commands, read `docs/active-work.md` immediately after this file.
     config swap invalidates. The durable lesson is to heal at
     **consumption** — the point where a stale record is handed out — not
     at the moment of the swap.
-  - **Stage 4a (typed-edit consumer chain) is implemented and in review
-    as PR #179** (branch `lean4-stage4a-typed-edit-chain`, framing rev
-    8). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
+  - **Stage 4a (typed-edit consumer chain) MERGED as #179** (`main` @
+    `a27f646`, two review rounds). It is substrate only:
+    `builtin/runtime/typed_edit.lua` owns the
     single `buffer.after-edit` subscriber and the single one-shot read,
     `pair.lua` becomes its first registered consumer, and
     `tests/auto_pair_acceptance.rs` is unchanged by zero lines
@@ -117,10 +118,51 @@ commands, read `docs/active-work.md` immediately after this file.
     iterates a **snapshot**, because a consumer that registers a
     lower-priority one shifts itself forward under `ipairs` and runs
     twice.
-  - Remaining: Stage 4b (the Unicode input method) is framed and
-    awaiting approval — not started; stages 5 (goal panel), 6 (`#eval`
-    output channel), and 7 (module hierarchy) are framed but not
-    scouted against current `main`.
+  - **Round 8's durable lesson: `run_all_must_succeed` does NOT abort
+    the fan-out.** `src/hook.rs:332` collects each callback's error and
+    continues to the remaining subscribers, marking only the run
+    failed — so an uncontained throw inside a hook subscriber does not
+    stop `lsp.lua` from flushing didChange. Two framing revisions
+    asserted the opposite to justify a `pcall`. The guard was right and
+    the reason was wrong, and by the time review caught it the wrong
+    reason had been copied into a module comment, an acceptance
+    criterion, a test comment, and the ledger. **Correct the source a
+    rationale derives from, not only the sites that quote it.**
+  - **Stage 4b (the Unicode input method) is implemented and in review**
+    (branch `lean4-stage4b-input-method`, framing rev 9): a vendored
+    1,855-entry table generated from `leanprover/vscode-lean4@17d1d08`
+    by `scripts/regen-lean-abbrev`, plus a consumer registered on the
+    Stage 4a chain at priority 50, ahead of pairing. **A consumer
+    cannot both edit and let a later consumer act on the same
+    keystroke**: the chain hands each consumer a copy of the record made
+    before any consumer ran, so an edit invalidates every copy still to
+    be used. The expansion therefore runs on a SECOND
+    `buffer.after-edit` subscriber after the chain — which is how a
+    pair character that terminates an abbreviation still pairs
+    (`\alp(` → `α()`). And **deferring work past a fan-out means
+    owning which fan-out it belongs to**: these fan-outs NEST, so a
+    consumer between the expander and pairing that calls
+    `pmacs.hook.run` re-enters the deferred subscriber while the outer
+    chain is still mid-list, and the count that recognises this has to
+    come from a MINIMUM-PRIORITY consumer — the expander is optional
+    (a claim can stop the chain first) and a subscriber beside the
+    deferred one is too late (the nested fan-out finishes inside the
+    outer chain's subscriber). Its other durable facts:
+    the table must stay an ORDERED SEQUENCE (equal-length ties resolve
+    by source declaration order, which a `pairs`-iterated map cannot
+    express); a generator round-trip check must re-read the BYTES ON
+    DISK, because comparing in-memory strings cannot see an encoding
+    applied by the write itself; and an expansion that SHRINKS the
+    buffer must place the point explicitly, or every later self-insert
+    is silently rejected and the editor looks dead.
+  - **Round 9 corrected three approved acceptance criteria** by
+    simulating the state machine over all 1,855 entries rather than
+    re-reading the prose. Four review rounds over the text had not
+    found them, because each named an example that reads as obviously
+    right and is wrong only against the data.
+  - Remaining: stages 5 (goal panel), 6 (`#eval` output channel), and 7
+    (module hierarchy) are framed but not scouted against current
+    `main`.
 
 - **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
   merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
