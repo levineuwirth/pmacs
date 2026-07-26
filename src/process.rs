@@ -2278,103 +2278,131 @@ mod tests {
         );
     }
 
-    /// Spawn a PTY child that stays alive until terminated, and wait
-    /// for its `Started` event so a pid and a foreground group exist.
-    fn spawn_live_pty(sup: &mut ProcessSupervisor, name: &str) -> ProcessId {
-        let mut spec = ProcessSpec::new(name, "/bin/sh");
-        spec.args = vec!["-c".into(), "sleep 30".into()];
+    /// Spawn a PTY child that leads its own session and stays alive
+    /// until terminated, returning its id and OS pid.
+    ///
+    /// `/bin/sleep` directly rather than through a shell: a shell may
+    /// place the command in a different foreground process group, and
+    /// these tests assert the exact target the tty reports.
+    fn spawn_live_pty(sup: &mut ProcessSupervisor, name: &str) -> (ProcessId, u32) {
+        let mut spec = ProcessSpec::new(name, "/bin/sleep");
+        spec.args = vec!["30".into()];
         spec.mode = ProcessMode::Pty {
             rows: 24,
             cols: 80,
             mode: TerminalMode::Canonical,
         };
         let id = sup.spawn(spec).expect("spawn");
-        let _ = drain_until(sup, id, Duration::from_secs(5), |evs| {
+        (id, spawn_started_pid(sup, id))
+    }
+
+    /// Drain until `Started` and return the OS pid it carries.
+    fn spawn_started_pid(sup: &mut ProcessSupervisor, id: ProcessId) -> u32 {
+        let evs = drain_until(sup, id, Duration::from_secs(5), |evs| {
             evs.iter()
                 .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
         });
-        id
+        evs.iter()
+            .find_map(|e| match e.kind {
+                ProcessEventKind::Started { pid } => Some(pid),
+                _ => None,
+            })
+            .expect("Started carries a pid")
+    }
+
+    /// Drive the production diagnostic until it observes the leader as
+    /// exited, bounded by `timeout`.
+    ///
+    /// A fixed sleep is NOT proof of exit — on a loaded runner the child
+    /// can still be live, which would turn these tests into false
+    /// failures. This synchronises on the very observation under test.
+    /// Each failing attempt leaves the record untouched, because the
+    /// failure path returns before any bookkeeping (Q#PD2), so looping
+    /// is side-effect free.
+    fn terminate_until_leader_exited(
+        sup: &mut ProcessSupervisor,
+        id: ProcessId,
+        timeout: Duration,
+    ) -> String {
+        let deadline = Instant::now() + timeout;
+        loop {
+            sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+            let err = sup.terminate(id).expect_err("injected EPERM must fail");
+            if err.contains("leader=exited(") {
+                return err;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "leader never observed as exited within {timeout:?}: {err}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Q#PD1 acceptance 1 — a group-directed failure names the target,
     /// the branch that chose it, the expected group, the errno, and the
     /// leader's own state, as five separate facts.
     ///
-    /// The leader field is the one that matters: for a PTY the signal
-    /// goes to the terminal's foreground group, which is a different
-    /// entity from the spawned child whenever job control has moved
-    /// the terminal. Three rejected designs for this code collapsed
-    /// the two; the report keeps them apart.
+    /// Asserted as an exact message against the pid the kernel actually
+    /// assigned, so a hardcoded target could not satisfy it. The leader
+    /// field is the one that matters: for a PTY the signal goes to the
+    /// terminal's foreground group, a different entity from the spawned
+    /// child whenever job control has moved the terminal. Three rejected
+    /// designs for this code collapsed the two; the report keeps them
+    /// apart, and here they are asserted to agree only because nothing
+    /// has moved the terminal.
     #[test]
     fn a_group_directed_kill_failure_reports_target_and_leader_separately() {
         let mut sup = ProcessSupervisor::new();
-        let id = spawn_live_pty(&mut sup, "diag-group");
+        let (id, pid) = spawn_live_pty(&mut sup, "diag-group");
 
         sup.force_next_kill_errno(nix::errno::Errno::EPERM);
         let err = sup.terminate(id).expect_err("injected EPERM must fail");
 
-        assert!(err.contains("EPERM"), "errno is reported: {err}");
-        assert!(
-            err.contains("via tcgetpgrp"),
-            "the target SOURCE distinguishes a tty-read group from a spawn group: {err}"
+        let expected = format!(
+            "kill: {} (target=-{pid} via tcgetpgrp, leader_pid={pid}, expected_group=-{pid}, leader=live)",
+            nix::errno::Errno::EPERM
         );
-        assert!(
-            err.contains("target=-"),
-            "a group target renders negative: {err}"
+        assert_eq!(
+            err, expected,
+            "the report names the exact target the tty reported, the exact \
+             leader pid, and observes the leader as live"
         );
-        assert!(
-            err.contains("expected_group=-"),
-            "the spawn-time group is shown so a divergence is visible: {err}"
-        );
-        assert!(
-            err.contains("leader=live"),
-            "the leader is observed independently of the group: {err}"
-        );
-        // Non-vacuity: the two numbers are actually rendered, not empty.
-        assert!(
-            err.contains("leader_pid=") && !err.contains("leader_pid=0,"),
-            "a real leader pid is reported: {err}"
-        );
+
+        let _ = sup.signal(id, Signal::SIGKILL);
     }
 
     /// Q#PD1 acceptance 2 — a leader-directed failure records the
-    /// fallback branch and a positive target, and omits the group
-    /// field that would be meaningless for it.
+    /// fallback branch and a positive target, and omits the group field
+    /// that would be meaningless for it. Exact message again.
     #[test]
     fn a_leader_directed_kill_failure_reports_the_fallback_branch() {
         let mut sup = ProcessSupervisor::new();
-        let mut spec = ProcessSpec::new("diag-leader", "/bin/sh");
-        spec.args = vec!["-c".into(), "sleep 30".into()];
+        let mut spec = ProcessSpec::new("diag-leader", "/bin/sleep");
+        spec.args = vec!["30".into()];
         let id = sup.spawn(spec).expect("spawn");
-        let _ = drain_until(&mut sup, id, Duration::from_secs(5), |evs| {
-            evs.iter()
-                .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
-        });
+        let pid = spawn_started_pid(&mut sup, id);
 
         sup.force_next_kill_errno(nix::errno::Errno::ESRCH);
         let err = sup.terminate(id).expect_err("injected ESRCH must fail");
 
-        assert!(err.contains("ESRCH"), "errno is reported: {err}");
-        assert!(
-            err.contains("via leader-pid"),
-            "a non-group pipe child targets its own pid: {err}"
+        let expected = format!(
+            "kill: {} (target={pid} via leader-pid, leader_pid={pid}, leader=live)",
+            nix::errno::Errno::ESRCH
         );
-        assert!(
-            !err.contains("target=-"),
-            "a leader target renders positive: {err}"
+        assert_eq!(
+            err, expected,
+            "a non-group pipe child targets its own pid, and the group \
+             field is omitted where it has no meaning"
         );
-        assert!(
-            !err.contains("expected_group="),
-            "the group field is omitted where it has no meaning: {err}"
-        );
+
         let _ = sup.signal(id, Signal::SIGKILL);
     }
 
     /// Q#PD1 acceptance 3 — every leader state renders distinctly. The
-    /// `Unobservable` and `NoRuntime` arms cannot be produced by a
-    /// real child on demand, so they are pinned directly; `live` and
-    /// `exited` are pinned through the real path by the tests around
-    /// this one.
+    /// `Unobservable` and `NoRuntime` arms cannot be produced by a real
+    /// child on demand, so they are pinned directly; `live` and `exited`
+    /// are pinned through the real path by the tests around this one.
     #[test]
     fn every_leader_observation_renders_distinctly() {
         assert_eq!(
@@ -2393,25 +2421,27 @@ mod tests {
         assert_eq!(LeaderObservation::NoRuntime.render(), "no-runtime");
     }
 
-    /// Q#PD1 acceptance 3, exited arm through the REAL path — the
-    /// leader has genuinely exited and the report says so.
+    /// Q#PD1 acceptance 3, exited arm through the REAL path — the leader
+    /// has genuinely exited and the report carries its exact code, not
+    /// merely "some exit".
     #[test]
     fn a_failure_after_the_child_exits_reports_the_leader_as_exited() {
         let mut sup = ProcessSupervisor::new();
         let mut spec = ProcessSpec::new("diag-exited", "/bin/sh");
         spec.args = vec!["-c".into(), "exit 3".into()];
         let id = sup.spawn(spec).expect("spawn");
-        // Wait for the child to actually be gone, but do NOT tick past
-        // the point where the record leaves Running — `signal` needs a
-        // live record to reach the kill at all.
-        std::thread::sleep(Duration::from_millis(300));
+        let pid = spawn_started_pid(&mut sup, id);
 
-        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
-        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+        let err = terminate_until_leader_exited(&mut sup, id, Duration::from_secs(10));
 
-        assert!(
-            err.contains("leader=exited("),
-            "an exited leader is observed as exited, not guessed from the errno: {err}"
+        let expected = format!(
+            "kill: {} (target={pid} via leader-pid, leader_pid={pid}, leader=exited(code 3))",
+            nix::errno::Errno::EPERM
+        );
+        assert_eq!(
+            err, expected,
+            "the exact exit code is observed from the real child, not \
+             inferred from the errno"
         );
     }
 
@@ -2427,10 +2457,7 @@ mod tests {
         spec.args = vec!["-c".into(), "sleep 30".into()];
         spec.group = true;
         let id = sup.spawn(spec).expect("spawn");
-        let _ = drain_until(&mut sup, id, Duration::from_secs(5), |evs| {
-            evs.iter()
-                .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
-        });
+        let pid = spawn_started_pid(&mut sup, id);
         assert!(
             sup.reap_ledger.is_empty(),
             "precondition: nothing armed before the attempt"
@@ -2438,7 +2465,12 @@ mod tests {
 
         sup.force_next_kill_errno(nix::errno::Errno::EPERM);
         let err = sup.terminate(id).expect_err("injected EPERM must fail");
-        assert!(err.contains("via group"), "a group=true pipe child: {err}");
+
+        let expected = format!(
+            "kill: {} (target=-{pid} via group, leader_pid={pid}, expected_group=-{pid}, leader=live)",
+            nix::errno::Errno::EPERM
+        );
+        assert_eq!(err, expected, "a group=true pipe child reports via group");
 
         assert!(
             matches!(
@@ -2458,7 +2490,7 @@ mod tests {
     /// Q#PD3/Q#PD4 acceptance 5 — the diagnostic consults the REAL
     /// `ChildHandle::try_wait` on the REAL child, which reaps it and
     /// caches the status. `poll_one` must still emit exactly one exit
-    /// event afterwards.
+    /// event, carrying the exact code.
     ///
     /// A stubbed observation would bypass the double-`try_wait` path
     /// entirely and pin nothing, so the injection replaces the kill
@@ -2474,34 +2506,33 @@ mod tests {
             mode: TerminalMode::Canonical,
         };
         let id = sup.spawn(spec).expect("spawn");
-        std::thread::sleep(Duration::from_millis(300));
+        let _ = spawn_started_pid(&mut sup, id);
 
-        // The forced failure drives `observe_leader`, which try_waits
-        // the real PTY child for the first time.
-        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
-        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+        // Drives `observe_leader`, which try_waits the real PTY child
+        // for the first time and reaps it.
+        let err = terminate_until_leader_exited(&mut sup, id, Duration::from_secs(10));
         assert!(
-            err.contains("leader=exited("),
-            "the real handle was consulted: {err}"
+            err.contains("leader=exited(code 7)"),
+            "the real handle was consulted and carries the exact code: {err}"
         );
 
-        // Now the supervisor's own try_wait must still see the status.
+        // The supervisor's own try_wait must still see that status.
         let evs = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
-        let terminal = evs
+        let terminal: Vec<i32> = evs
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind,
-                    ProcessEventKind::Exited { .. } | ProcessEventKind::Signaled { .. }
-                )
+            .filter_map(|e| match e.kind {
+                ProcessEventKind::Exited { code, .. } => Some(code),
+                ProcessEventKind::Signaled { .. } => Some(-1),
+                _ => None,
             })
-            .count();
+            .collect();
         assert_eq!(
-            terminal, 1,
-            "exactly one terminal event survives the diagnostic's try_wait"
+            terminal,
+            vec![7],
+            "exactly one terminal event survives the diagnostic's try_wait, \
+             carrying the child's real exit code"
         );
     }
-
     #[test]
     fn signal_terminates_a_running_child() {
         let mut sup = ProcessSupervisor::new();
