@@ -1,7 +1,8 @@
 # Dired Stage 2 — marks and operations — framing
 
-**Revision 3 — 2026-07-25. Status: PROPOSED; review rounds 1 and 2
-addressed (round 2: four blocking, two high, four cleanups).**
+**Revision 4 — 2026-07-25. Status: PROPOSED; review rounds 1–3
+addressed. Round 3: three design blockers, one merge-readiness blocker,
+four cleanups — and the staging call taken (§10: three PRs, not two).**
 Continues `docs/dired-framing.md` (rev 7, approved; Stage 0 merged as
 #162, Stage 1 as #165). That document's §6 and §7 carry the *approved*
 shape of marks and operations; this one re-verifies every claim in them
@@ -59,8 +60,8 @@ before being acted on; all seven held.
   `R` and `w` as point-based by construction (§4), plus acceptance for
   `R` with unrelated marks present.
 - **F5 (high) — load-bearing decisions lacked falsifying acceptance.**
-  All five additions taken; see §13 items 14, 27, 38, 39, and 40
-  (renumbered in rev 3).
+  All five additions taken; see §13 items 14, 27, 39, 40, and 41
+  (renumbered again in rev 4).
 - **F6 (medium) — `take_settled_renames()` was underspecified.** Correct:
   a no-argument drain either needs a second queue or a scan of every
   settled entry, neither of which rev 1 named. Rev 2 takes the reviewer's
@@ -78,6 +79,55 @@ concept that does not exist, so `R` stays point-based and is *named* as
 such rather than being an unstated exception. §11 keeps it deferred.
 
 ---
+
+### Review round 3 (rev 3 → rev 4)
+
+Round 3's theme: rev 3 named the right seams but two of them were sized
+from a partial inventory, and one promise was still stronger than the
+mechanism behind it. All three verified against `c93f9ee`.
+
+- **H1 (blocking) — the modified check still races the syscall.**
+  Correct, and rev 3's "immediately before each syscall" was wrong about
+  where the boundary is: `pmacs.fs.remove` **dispatches a worker**, so the
+  interval between the Lua check and `remove_blocking`'s
+  `remove_file`/`remove_dir` is wide open, and acceptance 20 (edit before
+  `y`) could never detect it. Rev 4 **narrows the promise** to a
+  TOCTOU-bounded pre-dispatch check — the same honest framing G6 forced on
+  `R` — rather than inventing a reservation primitive inside a dired
+  stage. The residue is stated: reconciliation preserves the
+  newly-modified *buffer*, but the *file* is gone, so **the orphan
+  deferral rev 3 scoped to the LSP path applies to dired too** (§6, §11).
+- **H2 (blocking) — the LSP teardown inventory was a third of the real
+  one.** Rev 3 cleared five stores. `LspManager` (`src/lsp.rs:741-819`)
+  holds **fourteen** URI-bearing store families, plus the `documents` text
+  map that `didChange` diffs against, and `pending_routes` — whose
+  `ResponseRoute` variants **carry the URI** at fifteen insert sites
+  (`:1684-2133`), so an in-flight response repopulates a key *after* any
+  clear. §5 now carries the full inventory and a purge/drain policy
+  modelled on the server-scoped teardown that already exists (§5).
+- **H3 (blocking) — the diagnostic-view seam was still "either/or".**
+  Verified: `DiagnosticView.uri` is private and immutable, `View` has no
+  downcast, and `_attach_view` (`lua_bindings/diag.rs:211-232`) takes
+  `active_window_mut()` and **errors** if the active window is not showing
+  the buffer — so it reaches one window. Rev 4 **chooses** the seam, and it
+  has direct precedent: a `View::rename_resource` default-no-op hook
+  alongside `overlay_identity` and `clone_for_split` (the hook family
+  #113 added for this exact class), swept over
+  `core.windows.values_mut()` the way overlay disposal already is
+  (`mod.rs:2016-2019`). In-place mutation, so **overlay order is
+  preserved by construction** (§5).
+- **H4 (merge-readiness)** — #169's problem, not this PR's; fixed there by
+  merging `c93f9ee` and aligning its recovery threshold with its own
+  canonical anchor.
+- **H5 — four cleanups**, all taken: the §4 item-35 → item-40 reference,
+  the §5 acceptance 27 → 30 and 28 → 32 references, and the §10 table's
+  obsolete "rename-only Rust" description.
+
+**And the staging call, taken as directed: three PRs, not two** (§10,
+Q#DR17). The reconciliation transaction lands first, on its own — after
+three rounds the LSP lifecycle and multi-window diagnostic work are
+substantial enough that reviewing them beside a mark layer would waste
+the round.
 
 ### Review round 2 (rev 2 → rev 3)
 
@@ -466,7 +516,7 @@ A basename in a set that has vanished from disk since it was marked is
 **dropped from the batch and reported**, not silently skipped and not
 fatal to the rest — the parent framing's §6 rule, kept. Note this is a
 distinct event from a revert pruning the mark (§3): a target can vanish
-*between* the last revert and the operation, and §13 item 35 pins that
+*between* the last revert and the operation, and §13 item 40 pins that
 the batch reports it rather than silently shrinking.
 
 ---
@@ -523,40 +573,154 @@ The hook carries the **paths**, not the rebind list, precisely because
 dired's buffers are pathless: a path-keyed consumer must be able to
 reconcile from `(old, new)` alone.
 
-#### The LSP subscriber, in full (G3)
+#### The LSP subscriber, in full (G3, corrected H2)
 
-Rev 2 said "recompute `rec.uri` and didClose/didOpen". That is necessary
-and **not sufficient** — five more owners are URI-keyed, and one of them
-is not reachable from Lua at all. The contract, in order:
+Rev 2 said "recompute `rec.uri` and didClose/didOpen". Rev 3 added five
+stores. Both were sized from a partial inventory: `LspManager`
+(`src/lsp.rs:741-819`) holds **fourteen** URI-bearing store families, and
+two more things keyed the same way.
 
-1. **Settle in-flight work first.** Bump/flush any pending `didChange`
-   for the old URI before closing it, so the server is not left with an
-   edit it can no longer attribute.
-2. **`didClose` the old URI.** Note what this does *not* do: it removes
-   the open-document registration only. It does not clear the per-`(server,
-   uri)` stores.
-3. **Drop the old URI's stores explicitly** — `pmacs.diag`,
-   `semantic_tokens` (including `result_id`, or the next delta request
-   rides a result id the server has forgotten), `signature`, `definition`,
-   `references`. Each has a `clear`-shaped entry point already.
+**The complete inventory**, from the struct itself:
+
+| # | Field | Keyed by |
+|---|---|---|
+| 1 | `diag_store` | uri |
+| 2 | `completion_store` | (server, uri) |
+| 3 | `hover_store` | (server, uri) |
+| 4 | `signature_store` | (server, uri) |
+| 5 | `definition_store` | (server, uri) |
+| 6 | `locations_store` | (server, uri, **kind**) — references / declaration / typeDefinition / implementation |
+| 7 | `symbol_store` | **scope**-keyed — documentSymbol *and* workspace symbol |
+| 8 | `document_highlight_store` | (server, uri) |
+| 9 | `formatting_store` | (server, uri) |
+| 10 | `rename_store` | (server, uri) |
+| 11 | `prepare_rename_store` | (server, uri) |
+| 12 | `code_action_store` | (server, uri) |
+| 13 | `inlay_hint_store` | (server, uri) |
+| 14 | `semantic_token_store` | (server, uri) — plus the retained raw int stream and `result_id` |
+
+Plus **`documents: HashMap<(LspServerId, String), String>`** (`:810`), the
+latest full text per `(server, uri)` — which is what `didChange` diffs
+against, so a stale entry under the old URI is a *correctness* problem,
+not just a leak. And **`pending_routes`** (`:797`), whose `ResponseRoute`
+variants **carry the URI**: fifteen insert sites at `:1684-2133`
+(`Completion`, `Hover`, `Signature`, `Definition`, `Locations`,
+`DocumentSymbol`, `DocumentHighlight`, `Formatting`, `Rename`,
+`PrepareRename`, `CodeAction`, `InlayHint`, `SemanticTokens` ×2,
+`SemanticTokensDelta`).
+
+**That last one is why "clear the stores" is not enough** (H2): a response
+already in flight when the rename happens routes on arrival and
+**repopulates the old key after the clear**. Clearing without purging
+in-flight routes is a race that reintroduces exactly the state it removed.
+
+**One manager-level method, `forget_uri(sid, uri)`**, doing all of it —
+because fourteen call sites at the Lua layer is how one gets forgotten.
+Its shape is modelled directly on the **server-scoped** teardown that
+already exists (`restart`, `:1316-1331`), which does the same three things
+one axis over:
+
+1. **Purge `pending_routes`** whose route carries this URI —
+   `retain`, mirroring `:1324`'s `retain(|(sid, _), _| *sid != id)`.
+2. **Drain-cancel their awaiters.** `pending_external` holds the
+   `Handle:await()` side, and the existing contract is explicit that it is
+   "drained-cancelled wherever `pending_routes` is purged" (`:799-803`);
+   `drain_external_cancelled` (`:1596`) is the existing sweep. Skipping
+   this hangs any coroutine awaiting a request against the old URI.
+3. **Clear all fourteen stores plus `documents`** for the old key. Each
+   store already has a keyed `clear` (`diag.rs:262`, `hover.rs:160`,
+   `completion.rs:331`, `semantic_tokens.rs:263`, …). Note the two
+   irregular keys: `locations_store` is **kind**-keyed, so all four kinds
+   must go; `symbol_store` is **scope**-keyed and holds workspace symbols
+   too, so only the document-scoped entry is dropped.
+
+**Worth stating because it is surprising:** the server-restart teardown
+clears `deferred_notifications`, `pending_routes`, `documents`, and drains
+externals — but **not** the fourteen result stores. Rev 4 does not change
+that (it is a separate pre-existing question about whether stale results
+should survive a restart), but it does mean `forget_uri` has no per-server
+precedent to copy for the store half, only the route/document half.
+
+Then the ordered sequence, per attachment:
+
+1. **Flush any pending `didChange`** for the old URI, so the server is not
+   left with an edit it can no longer attribute.
+2. **`didClose` the old URI** — which removes the open-document
+   registration and nothing else.
+3. **`forget_uri(sid, old)`** — the purge/drain/clear above.
 4. **Re-run `ensure_server`.** Since #161 affinity keys on the detected
-   project root, a rename *across roots* needs a **different server**, not
-   a different URI. Same-root renames reuse the existing one.
-5. **`didOpen` the new URI** against whichever server step 4 selected,
-   with the buffer's current text and a fresh version.
-6. **Re-root the diagnostic view for every window showing the buffer.**
-   `DiagnosticView.uri` is **set once at construction** and the field's
-   own doc anticipates exactly this: *"M5 may add re-rooting if a buffer
-   is renamed"* (`src/diag.rs:455-457`). Updating `rec.uri` leaves an
-   attached view rendering the **old** URI's diagnostics forever. Either
-   the view gains a `set_uri`, or the attachment is torn down and
-   `pmacs.diag._attach_view` re-run per window — the framing prefers
-   `set_uri` because a teardown loses the view's position in the
-   composition stack.
+   project root, a rename *across roots* needs a **different server**;
+   same-root renames reuse. When the server changes, step 3 runs against
+   the **old** server and `didOpen` goes to the new one.
+5. **`didOpen` the new URI** with the buffer's current text and a fresh
+   version.
+6. **Re-root the diagnostic views** (below).
 
-Acceptance 27 is correspondingly stronger: **diagnostics must be present
-before the rename**, and afterwards only the **new** URI's diagnostics are
-visible and countable, with the old URI's store empty.
+#### Re-rooting the diagnostic views: the seam, chosen (H3)
+
+`DiagnosticView.uri` is **set once at construction** and the field's own
+doc anticipates exactly this: *"M5 may add re-rooting if a buffer is
+renamed"* (`src/diag.rs:455-457`). Rev 3 left it as "either a `set_uri` or
+tear down and re-attach", which round 3 rightly rejected: neither option
+explained how **passive** windows are reached, and the field is private
+while `View` has **no downcast**, so an outside caller cannot reach it at
+all. Two further facts make the naive options worse:
+
+- **`_attach_view` reaches only the active window.** It takes
+  `core_borrow.active_window_mut()` and **errors** if that window is not
+  showing the buffer (`lua_bindings/diag.rs:216-224`). So a
+  re-attach-per-window loop cannot be driven from Lua, and a passive split
+  never got its overlay from this path in the first place.
+- **A remove-and-re-push loses composition order.** Overlays are an
+  ordered `Vec<Box<dyn View>>` (`window.rs:365`) merged in sequence, so
+  re-pushing puts the diagnostic underline at the end of the stack rather
+  than where it was.
+
+**The seam: a `View::rename_resource` hook.** `View` (`src/view.rs`)
+already carries exactly this family of cross-window overlay hooks, added
+by #113 round 6 for the same class of problem — `overlay_identity`, whose
+own doc says it "lets disposal remove **every window copy**", and
+`clone_for_split`. Rev 4 adds a third:
+
+```rust
+/// Retarget this overlay from `old_uri` to `new_uri` after a resource
+/// rename. Default: no-op --- a view that renders nothing URI-keyed is
+/// unaffected. Mutates in place, so the overlay keeps its position in
+/// the window's composition order.
+fn rename_resource(&mut self, _old_uri: &str, _new_uri: &str) {}
+```
+
+`DiagnosticView` overrides it to swap its own private field when the URI
+matches. The field **stays private**; no downcast is needed; and any
+future URI-bearing overlay opts in by overriding the same hook instead of
+growing another special case.
+
+**The sweep has precedent too.** Overlay disposal already walks every
+window and acts on identity:
+
+```rust
+for win in core.windows.values_mut() {
+    win.overlays.retain(|v| v.overlay_identity() != Some(id));
+}
+```
+
+(`lua_bindings/mod.rs:2016-2019`.) The rename sweep is the same traversal
+with `retain` replaced by a call to `rename_resource` — so **every** window
+showing the buffer is reached, active or passive, in one pass, and order is
+preserved because nothing is removed or re-pushed.
+
+**One thing this deliberately does not fix.** A passive split that never
+received a `DiagnosticView` still has none — `_attach_view`'s
+active-window-only restriction is a **pre-existing** gap (`ensure_overlay`
++ `clone_for_split` cover the split-from-an-attached-window case, not the
+attach-while-passive case). Renaming cannot re-root an overlay that was
+never attached, and pretending otherwise would make acceptance 30 pass for
+the wrong reason. Named in §11.
+
+Acceptance 30 is correspondingly stronger: **diagnostics present before
+the rename**, **at least two windows** showing the buffer, and afterwards
+only the **new** URI's diagnostics are visible and countable in *both*,
+with the old URI's store empty.
 
 #### The dired subscriber, and the setter it needs (G2)
 
@@ -736,19 +900,48 @@ indistinguishable from a normal buffer, and the next `C-x C-s` silently
 resurrects the file. A refusal is visible, recoverable, and the user can
 save-or-discard and retry.
 
-### Checked twice, because a prompt is not a lock (G4)
+### Checked twice — and still only best-effort (G4, narrowed H1)
 
 `buf:is_modified()` is exposed to Lua (`mod.rs:1234`), so dired decides
-this itself. It must decide **twice**:
+this itself. It checks **twice**:
 
-- **Before the confirm**, so the prompt can state the skip up front:
+- **Before the confirm**, so the prompt states the skip up front:
   `Delete 3 entries? (1 has unsaved changes and will be skipped) (y/n) `.
-- **Again immediately before each syscall.** The prompt is not modal
-  against the world: another frontend attached to the same daemon can
-  edit a buffer while it is open, and the batch is serialized (§9) so
-  there is a real window between the answer and the *n*-th removal. A
-  buffer that became modified in that window is skipped and reported, and
-  §13 item 20 pins exactly that interleaving.
+- **Again immediately before dispatching each removal.** The prompt is not
+  modal against the world: another frontend attached to the same daemon
+  can edit a buffer while it is open, and the batch is serialized (§9), so
+  there is a real window between the answer and the *n*-th dispatch.
+
+**And that is where the guarantee stops. It is a pre-dispatch check, not a
+lock (H1).** Rev 3 said "immediately before each syscall", which was wrong
+about where the boundary is: `pmacs.fs.remove` **dispatches a worker**, so
+the syscall happens later, on another thread, in `remove_blocking`. An
+edit landing between dispatch and `remove_file`/`remove_dir` is not
+detected by anything, and **no acceptance test can pin an interval that is
+not closed** — which is why rev 3's acceptance 20 (edit before `y`) could
+never have detected this.
+
+So the promise is stated at its real strength, the same way G6 forced for
+`R`: **a TOCTOU-bounded pre-dispatch refusal.** What survives the race is
+worth being precise about:
+
+- the **buffer** survives with its contents — `reconcile_delete` keeps a
+  modified buffer rather than killing it, and that half *is* robust,
+  because it runs at drain time on whatever state exists then;
+- the **file** is gone.
+
+Which means **the orphaned-modified-buffer residue rev 3 scoped to the LSP
+path applies to dired too**, on this narrow race. §11 carries it as one
+deferral, not two.
+
+Closing it properly needs one of two things this stage should not invent:
+a **reservation** (some lock or generation the worker re-validates before
+the syscall), or a **synchronous** delete path. The synchronous option is
+tempting because `apply_resource_op` already does main-thread
+`std::fs::remove_*`, and it would remove the need for the delete harvest
+entirely — but it puts N blocking syscalls on the main thread for an
+N-entry batch, and a fire-and-forget `pmacs.fs.remove` from any *other*
+caller would still need the harvest. Named in §11.
 
 ## 7. Confirmation (Q#DR15)
 
@@ -908,49 +1101,50 @@ The contract:
 
 ---
 
-## 10. Staging: 2a then 2b (Q#DR17)
+## 10. Staging: three PRs (Q#DR17, revised in rev 4)
 
-**Recommendation: split, and cut it at "needs a new Rust primitive".**
+**Rev 4 takes the further cut, as directed in round 3.** Rev 3 already
+recorded that 2a's Rust had outgrown "one narrowly-scoped change"; round 3
+called it, and the three rounds of findings on the reconciliation half are
+the evidence — every one of G1, G3, H1, H2, and H3 was about the
+transaction, not about marks.
 
-| | 2a | 2b |
-|---|---|---|
-| Keys | `m u U t d x D R w M` | `+ C`, recursive delete |
-| New `pmacs.fs` ops | **none** | `mkdir`, `copy`, `remove_dir_all` |
-| New `JobKind` variants | none | 3 (12 → 15) |
-| Rust | rename **transaction** + two hooks + `apply_resource_op` fix | three primitives |
-| Config keys | none | `dired.recursive-deletes` |
+| | **2a — reconciliation** | **2b — marks and operations** | **2c — new primitives** |
+|---|---|---|---|
+| User-visible surface | **none** | `m u U t d x D R w M` | `+ C`, recursive delete |
+| Rust | `reconcile_rename`, `reconcile_delete`, `TickOutcome`, `PendingJob` paths, `forget_uri` (14 stores + `documents` + route purge + drain), `View::rename_resource` + the window sweep, `apply_resource_op` (rename **and** delete arms), `apply_workspace_edit` origin, `pmacs.buffer.set_name` | `pmacs.killring.push` | `mkdir`, `copy`, `remove_dir_all`; `JobKind` 12 → 15 |
+| Lua | the two hook subscribers in `lsp.lua` | all of `dired.lua`'s mark/op layer, `minibuffer.lua` | two ops |
+| Config keys | none | none | `dired.recursive-deletes` |
+| Acceptance | items 25–38 | 1–24, 39–41 | 42–47 |
 
-The cut works because of C5: `remove` already deletes files and empty
-directories, so 2a's whole surface runs on the five ops that exist. That
-makes 2a *"the mark-and-operate layer, plus the resource-reconciliation
-transaction"* and 2b *"three additive primitives and the two ops that need
-them"* — two PRs a reviewer can hold one at a time.
+**Why 2a first, with no dired surface at all.** It is a self-contained
+substrate correctness fix that stands on its own merits: it closes a path
+where an LSP-authored delete **destroys unsaved work today**
+(`mod.rs:3256-3285`), and one where renaming the active file through a
+workspace edit **materializes a phantom buffer** (`lsp.lua:1266`). Neither
+needs dired to be worth fixing, and neither is dired's fault. Landing it
+alone also means the LSP lifecycle work — a fourteen-store inventory, an
+in-flight route purge, an awaiter drain, and a new `View` hook swept across
+every window — gets a review round of its own rather than sharing one with
+a mark column.
 
-Why not one PR: 2a's Rust is no longer small — after rounds 1 and 2 it
-is a rename **and** delete reconciliation, two hooks, a buffer-name
-setter, a kill-ring entry point, an LSP teardown/re-attach contract, and
-a change to the workspace-edit applier. That is exactly why it must not
-also carry three new fs primitives: the reviewer who should be
-scrutinizing the drain and the LSP contract would also be checking
-`copy`'s overwrite semantics. The arc has already shown what that costs —
-#165 was one round because its Rust was one narrowly-scoped change.
+**Why marks second rather than first.** The mark layer is the more visible
+work and the more pleasant to review, which is exactly the argument for
+*not* putting it in the same PR as the substrate change: it would absorb
+the attention. It also genuinely depends on 2a — `R` is unsafe on a
+directory without the transaction, and `D`/`x` are unsafe on a visited file
+without `reconcile_delete`.
 
-**If 2a still looks too large after that list, the natural further cut is
-along the same line**: the reconciliation transaction (rename + delete +
-hooks + LSP + applier) is a self-contained substrate correctness fix with
-no dired surface at all, and could land before the mark layer. It is
-listed here rather than chosen, because it trades one review round for
-two.
+**Why 2c last and separate.** Three additive fs primitives with their own
+overwrite and lstat-safety semantics (§8, §13 items 42–47). Nothing in 2b
+needs them; `remove` already covers files and empty directories (C5).
 
-Why not three PRs: the mark layer with no operation to consume it ships
-nothing a user can do, and a marks-only PR would have to invent
-throwaway acceptance for state no command reads.
-
-**2a is the approval-critical one.** If the split is rejected, the
-combined PR is the same content in the same order and this framing still
-applies; §13's acceptance is already labelled by stage.
-
----
+**The cost, stated.** Three PRs is three review cycles instead of two, and
+2a ships nothing a user can see — its acceptance is entirely
+substrate-level (a no-await rename, a two-window diagnostic re-root, an
+LSP store inventory). That is the trade round 3 accepted, and the reason it
+is worth it: a bug in 2a is a silent data-loss bug, and those are the ones
+that deserve an undivided reviewer.
 
 ## 11. Deferred (named)
 
@@ -973,9 +1167,27 @@ applies; §13's acceptance is already labelled by stage.
 - **A no-replace rename primitive** (G6) — `renameat2(RENAME_NOREPLACE)`
   on Linux, `renamex_np` on macOS, link/unlink elsewhere. Until then `R`'s
   refusal is a TOCTOU-bounded preflight, which §8 states plainly.
-- **An LSP-driven delete can still orphan a modified buffer** (G4).
-  Stage 2 stops it *destroying* one, but the file still goes. Fixing it
-  means deciding what a partially-applied workspace edit does.
+- **A delete can still orphan a modified buffer** — one deferral, two
+  paths (H1). On the LSP path this is by design (the user accepted the
+  refactor); on dired's it is the residue of the open
+  dispatch-to-syscall interval. Stage 2 stops both from *destroying* the
+  buffer; the file still goes. Closing dired's half needs a
+  **reservation** the worker re-validates, or a **synchronous** delete
+  path — the latter would also make the delete harvest unnecessary for
+  dired, but puts N blocking syscalls on the main thread and leaves every
+  other `pmacs.fs.remove` caller unprotected. Closing the LSP half means
+  deciding what a partially-applied workspace edit does.
+- **A passive window that never received a `DiagnosticView` still has
+  none** (H3). `_attach_view` takes `active_window_mut()` and errors
+  otherwise (`lua_bindings/diag.rs:216-224`); `ensure_overlay` +
+  `clone_for_split` cover split-from-attached, not attach-while-passive.
+  Pre-existing, and rename cannot re-root an overlay that was never
+  attached.
+- **The server-restart teardown does not clear the fourteen result
+  stores** (`lsp.rs:1316-1331` clears routes, documents, and deferred
+  notifications only). Pre-existing; whether stale results should survive
+  a restart is its own question, and `forget_uri` deliberately does not
+  answer it.
 - **The rooturi sink's weak wait predicate** (`m4_acceptance.rs:5487`) —
   same class as the config-sink race fixed in #174, not observed failing,
   and the obvious fix would trade a precise regression diff for a vague
@@ -1019,7 +1231,7 @@ applies; §13's acceptance is already labelled by stage.
 
 ## 13. Acceptance
 
-**Stage 2a — marks**
+**2b — marks** *(stage labels follow §10's three-PR cut)*
 
 1. `m` marks the entry at point and advances; the mark renders at
    `_layout.MARK_START` and **no other column moves** (asserted against
@@ -1036,7 +1248,7 @@ applies; §13's acceptance is already labelled by stage.
    the marked set, and **leaves every mark intact** (F4 — pins that §4's
    point-based class is real and not an accident).
 
-**Stage 2a — operations**
+**2b — operations**
 
 7. `d` then `x` deletes the flagged file, after a confirm; declining
    deletes nothing.
@@ -1064,7 +1276,7 @@ applies; §13's acceptance is already labelled by stage.
     following `C-k` does not append to it.
 16. The listing reverts **once** after a batch, not per entry.
 
-**Stage 2a — deletion policy (§6, F2)**
+**2b — deletion policy (§6)**
 
 17. Deleting an **unmodified** visited file kills its buffer.
 18. Deleting a **modified** visited file is **refused**; the buffer
@@ -1072,10 +1284,13 @@ applies; §13's acceptance is already labelled by stage.
 19. The confirm prompt **states the skip before the user answers**, not
     after.
 20. **A buffer modified after the prompt appears but before `y`** is
-    skipped and reported (G4): the check is re-run immediately before
-    each syscall, because another frontend can edit during the prompt and
-    the batch is serialized. *(An implementation that checks only once,
-    up front, fails this.)*
+    skipped and reported: the check is re-run before each **dispatch**,
+    because another frontend can edit during the prompt and the batch is
+    serialized. *(An implementation that checks only once, up front, fails
+    this.)* **This is the whole of the guarantee** — the dispatch-to-syscall
+    interval is open (H1) and deliberately has no test, because no test can
+    pin an interval that is not closed. What §13 item 24 pins instead is
+    the half that *is* robust: the modified buffer survives.
 21. Deleting a directory kills buffers on its **descendants**.
 22. An open dired handle on a deleted directory is closed
     (`resource.deleted`).
@@ -1087,7 +1302,7 @@ applies; §13's acceptance is already labelled by stage.
     the handle still kills the unmodified buffer, which is what makes the
     drain harvest the right seam rather than dired firing the hook.
 
-**Stage 2a — rename reconciliation (§5, F1)**
+**2a — reconciliation (§5, §6)**
 
 25. **No-await rename**: dispatch `pmacs.fs.rename`, never take the
     result, pump — the open buffer's path has moved. *(Fails if the
@@ -1103,61 +1318,68 @@ applies; §13's acceptance is already labelled by stage.
 29. **Buffer name** follows the path, so the buffer list and statusline
     show the new filename — and a buffer the user renamed by hand keeps
     its own name.
-30. **An attached LSP buffer with diagnostics present before the
-    rename**: afterwards only the **new** URI's diagnostics are visible
-    and countable, the old URI's store is empty, and the **attached
-    diagnostic view renders the new URI** — not merely `rec.uri` updated
-    (G3; `DiagnosticView.uri` is set once at construction).
-31. A rename **across project roots** re-runs `ensure_server` and the
+30. **An attached LSP buffer with diagnostics present before the rename,
+    shown in at least TWO windows** (H3): afterwards both windows render
+    the **new** URI's diagnostics, the old URI's store is empty, and each
+    window's overlay keeps its **position in the composition order** — not
+    merely `rec.uri` updated (`DiagnosticView.uri` is set once at
+    construction, and a remove-and-re-push would pass a one-window test
+    while reordering the stack).
+31. **The store inventory** (H2): after a rename, an entry that existed
+    under the old URI in each of the fourteen stores plus `documents` is
+    gone, and **a response already in flight at rename time does not
+    repopulate the old key** — the `pending_routes` purge and awaiter
+    drain, without which the clear is undone by arrival.
+32. A rename **across project roots** re-runs `ensure_server` and the
     buffer ends up attached to a **different** server; a same-root rename
     reuses the existing one (#161's affinity key).
-32. **An open dired buffer on the renamed directory** follows it: its
+33. **An open dired buffer on the renamed directory** follows it: its
     `handle.path`, **its buffer name** (`*dired:<new path>*`), and
     `handle_for_path` dedup under the new path all move together (G2 —
     asserting `handle.path` alone would pass with the name still stale).
-33. **The workspace-edit origin**: renaming the *active* file through
+34. **The workspace-edit origin**: renaming the *active* file through
     the full `apply_workspace_edit` path leaves **no phantom empty
     buffer** at the obsolete path, and the user is returned to the
     **same buffer** (now under its new path). *(G1 — this is a change to
     the applier, which must capture the buffer handle; no reconciliation
     can reach the string it captures today.)*
-34. When the origin buffer is **gone** after the edit, the applier
+35. When the origin buffer is **gone** after the edit, the applier
     restores nothing rather than falling back to the old path.
-35. `apply_resource_op`'s rename finds a buffer whose stored path is
+36. `apply_resource_op`'s rename finds a buffer whose stored path is
     normalized but whose op names it un-normalized (the `:3249` fix).
-36. A **failed** rename reconciles nothing.
-37. Additivity: `m8_1`, `m8_2`, `m8_3` at unchanged counts.
+37. A **failed** rename reconciles nothing.
+38. Additivity: `m8_1`, `m8_2`, `m8_3` at unchanged counts.
 
-**Stage 2a — the shared helpers**
+**2b — the shared helpers**
 
-38. **`pmacs.minibuffer.confirm`** (Q#DR15, F5): an **empty `RET` does
+39. **`pmacs.minibuffer.confirm`** (Q#DR15, F5): an **empty `RET` does
     not call `on_yes`**; `y`, `Y`, `yes`, `YES` all do; `n` and arbitrary
     text do not. *(A typed-`n` test alone would not catch a completion
     source being reintroduced — the empty-`RET` arm is the one that
     detects it.)*
-39. **Serialization** (Q#DR16, F5): in a batch of N mutations, the second
+40. **Serialization** (Q#DR16, F5): in a batch of N mutations, the second
     is **not dispatched until the first has settled**. Asserted by
     observing at most one in-flight fs job at any pump step — *not* by
     the end state, which is identical if all N were dispatched at once
     and awaited afterwards.
-40. A marked target that vanishes **between the last revert and the
+41. A marked target that vanishes **between the last revert and the
     operation** is **reported**, not silently dropped (F5 — distinct from
     item 4's revert-time pruning).
 
-**Stage 2b**
+**2c — new primitives**
 
-41. `+` creates a subdirectory, which appears on the next listing.
-42. `C` copies a file and preserves mode bits; refuses a directory
+42. `+` creates a subdirectory, which appears on the next listing.
+43. `C` copies a file and preserves mode bits; refuses a directory
     source.
-43. `C` with several marked entries requires an existing directory
+44. `C` with several marked entries requires an existing directory
     destination and refuses otherwise **before copying anything**.
-44. `C` onto existing targets confirms **once** with the collision count;
+45. `C` onto existing targets confirms **once** with the collision count;
     **declining copies the non-colliding entries and skips the rest**
     (F7).
-45. `remove_dir_all` **unlinks a symlink-to-a-directory rather than
+46. `remove_dir_all` **unlinks a symlink-to-a-directory rather than
     traversing it** — pinned at the primitive, mirroring
     `remove_blocking`'s lstat guard (F7).
-46. Recursive delete happens only with `dired.recursive-deletes` enabled
+47. Recursive delete happens only with `dired.recursive-deletes` enabled
     **and** a confirm; disabled, the non-empty directory still fails.
 
 **Bite obligations.** Each of these must fail against a stated mutation:
@@ -1170,20 +1392,26 @@ applies; §13's acceptance is already labelled by stage.
 | 25 | the reconciliation moved to `_take_result` |
 | 27 | `find_by_path`'s first match instead of every match |
 | 28 | a string `starts_with` instead of a path-component prefix |
-| 30 | `rec.uri` updated without re-rooting the diagnostic view |
-| 32 | `handle.path` updated without the buffer name |
-| 33 | the applier restoring by path instead of by buffer handle |
-| 38 | a completion source added to `confirm` |
-| 39 | the batch changed to dispatch-all-then-await |
+| 30 | `rec.uri` updated without re-rooting the diagnostic view — and a remove-and-re-push, which passes a one-window test |
+| 31 | the store clear without the `pending_routes` purge, so an in-flight response repopulates the old key |
+| 33 | `handle.path` updated without the buffer name |
+| 34 | the applier restoring by path instead of by buffer handle |
+| 39 | a completion source added to `confirm` |
+| 40 | the batch changed to dispatch-all-then-await |
 
 `dired.lua` is an existing file now, so `scripts/bite`'s
 swap-over-`git show` mode applies — but per #165's lesson, **commit
-before biting**. Items 30, 32, and 33 are the round-2 additions, and each
-one is a case where rev 2's design would have passed a weaker test.
+before biting**. Items 30, 33, and 34 came from round 2 and item 31 from
+round 3; each is a case where the previous revision's design would have
+passed a weaker test. Note that **item 20 has no bite for the interval it
+cannot close** (H1) — only for the check it does make.
 
 ## 14. Gates (per PR)
 
-The standard suite from `CLAUDE.md`, plus what this work touches:
+The standard suite from `CLAUDE.md`, plus what this work touches. **2a's
+  gates are the widest of the three** — it changes `lsp.rs`, `view.rs`,
+  `window.rs`, `editor_core.rs`, and `lua_bindings`, so every LSP suite is
+  in its blast radius, not just the dired one:
 `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D
 warnings` as its own step; `cargo test --lib` and `--lib --features
 crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
@@ -1225,7 +1453,15 @@ crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
   **re-root `DiagnosticView`**, whose URI is set once at construction;
   and `apply_workspace_edit` must capture the **buffer handle** rather
   than the path string, restoring with `switch_buffer` and **no path
-  fallback**, since no transaction can reach a captured Lua local.*) (§5)
+  fallback**, since no transaction can reach a captured Lua local.*)
+  *(Completed in rev 4, H2/H3:* the LSP half is one manager-level
+  **`forget_uri(sid, uri)`** covering **fourteen** URI-bearing stores plus
+  `documents`, **plus a `pending_routes` purge and awaiter drain** — an
+  in-flight response otherwise repopulates the old key after the clear;
+  and the view half is a **`View::rename_resource`** default-no-op hook
+  swept over `core.windows.values_mut()`, chosen over `set_uri` or
+  re-attach because it reaches passive windows and **preserves overlay
+  order by mutating in place**.*) (§5)
 - **Q#DR15** Confirmation is `pmacs.minibuffer.confirm` in a new
   `builtin/runtime/minibuffer.lua`, with **no completion source**;
   affirmative is `y`/`yes` case-insensitively and everything else —
@@ -1233,10 +1469,15 @@ crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
 - **Q#DR16** Batches **serialize** (await each op), a per-entry failure
   does not abort, successful marks clear while failed marks persist, and
   the listing reverts **once** at the end. (§9)
-- **Q#DR17** Stage 2 **splits into 2a and 2b** at the "needs a new Rust
-  primitive" line: 2a is the mark layer plus `d x D R w M` on the
-  existing five ops plus the rename transaction; 2b adds
-  `mkdir`/`copy`/`remove_dir_all` and `+ C` and recursive delete. (§10)
+- **Q#DR17** *(revised in rev 4)* Stage 2 ships as **three** PRs, not
+  two: **2a** the resource-reconciliation transaction with **no dired
+  surface at all** (rename + delete reconciliation, `forget_uri` over
+  fourteen stores, `View::rename_resource`, the applier fix,
+  `pmacs.buffer.set_name`); **2b** the mark layer plus
+  `m u U t d x D R w M` on the five existing fs ops; **2c**
+  `mkdir`/`copy`/`remove_dir_all` with `+ C` and recursive delete. 2a
+  first because a bug in it is silent data loss, and because every
+  blocking finding across three rounds landed on it. (§10)
 - **Q#DR18** *(new in rev 2, F2; given a seam in rev 3, G4)* Deleting a
   path something holds. **One shared `EditorCore::reconcile_delete`**,
   symmetric with `reconcile_rename` — whole registry, equality or
@@ -1248,9 +1489,12 @@ crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
   asymmetric: dired **refuses the whole entry** when a visited buffer is
   modified, while an LSP-authored delete still removes the file (the user
   accepted the refactor) but **no longer destroys the buffer**. The
-  modified check runs **before** the confirm *and again immediately
-  before each syscall*, because another frontend can edit while the
-  prompt is open. Deliberately diverges from Emacs, which orphans the
+  modified check runs **before** the confirm *and again before each
+  dispatch*, because another frontend can edit while the prompt is open —
+  but it is a **pre-dispatch check, not a lock** (H1): `pmacs.fs.remove`
+  dispatches a worker, so the dispatch-to-syscall interval stays open
+  and the promise is stated at that strength, as G6 forced for `R`.
+  Deliberately diverges from Emacs, which orphans the
   buffer and lets the next save resurrect the file. (§6)
 - **Q#DR19** *(new in rev 2, F3)* `M` (chmod) is **new scope** beyond the
   parent's approved table and needs explicit approval. It **refuses
@@ -1272,6 +1516,24 @@ crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
   rename, which its own module doc says is why buffer-per-directory
   exists. Uniqueness stays the caller's job, matching the Rust setter.
   (§5)
+- **Q#DR23** *(new in rev 4, H2)* The LSP rename teardown is **one
+  manager-level `forget_uri(sid, uri)`**, not per-store calls at the Lua
+  layer: fourteen call sites is how one gets forgotten. It purges
+  `pending_routes` by URI, **drain-cancels the matching awaiters** (the
+  existing contract at `lsp.rs:799-803` already requires this wherever
+  routes are purged), and clears all fourteen stores plus `documents`,
+  handling `locations_store`'s **kind** key and `symbol_store`'s **scope**
+  key specially. Modelled on the server-scoped teardown at
+  `lsp.rs:1316-1331`. (§5)
+- **Q#DR24** *(new in rev 4, H3)* Diagnostic re-rooting is a
+  **`View::rename_resource(&mut self, old, new)`** default-no-op hook,
+  joining `overlay_identity` and `clone_for_split` in the family #113
+  added for cross-window overlay problems, swept over
+  `core.windows.values_mut()` exactly as overlay disposal already is
+  (`mod.rs:2016-2019`). Chosen over exposing `set_uri` (the field stays
+  private, and `View` has no downcast) and over tear-down-and-re-attach
+  (which loses composition order, and `_attach_view` cannot reach a
+  passive window at all). (§5)
 - **Q#DR22** *(new in rev 3, G5)* **`pmacs.killring.push(text)`** is
   exposed, with the semantics `copy()` already establishes for
   non-region text: push the entry, mirror to the OS clipboard, and
@@ -1281,15 +1543,26 @@ crdt`; `dired_acceptance` (default **and** `crdt`); **`m8_1`, `m8_2`,
 ## 16. Branch and PR plan
 
 Framing on `dired-stage2-framing`, kept after merge per the repo's
-`-framing` convention. Implementation on `dired-stage2a` cut fresh from
-`main` after the framing lands, then `dired-stage2b` cut from `main`
-after 2a merges — **not** stacked, since 2b needs nothing from 2a's diff
-beyond a merged `main`, and the arc has already paid for a stacked
-retarget once (#104 → #105).
+`-framing` convention. Then **three** implementation branches, each cut
+fresh from `main` after the previous one merges — **not** stacked, since
+each needs only a merged `main` and the arc has already paid for a stacked
+retarget once (#104 → #105):
 
-One feature, one branch, one PR; gates green before each PR; the ledger
-lane and `docs/agent-handoff.md` §1 updated per their own protocols as
-each lands.
+1. **`dired-stage2a-reconciliation`** — the transaction, no dired surface.
+2. **`dired-stage2b-marks`** — the mark and operation layer.
+3. **`dired-stage2c-primitives`** — `mkdir`/`copy`/`remove_dir_all`.
+
+One feature, one branch, one PR; gates green before each; the ledger lane
+and `docs/agent-handoff.md` §1 updated per their own protocols as each
+lands.
+
+**Naming 2a for the substrate, not for dired**, following #161's
+precedent: its diff contains no dired code, and a cross-cutting
+correctness fix to rename/delete reconciliation must not be reviewable
+only as a dired feature. The PR body should lead with the two defects it
+closes on `main` today — the LSP-authored delete that destroys unsaved
+work, and the workspace-edit phantom buffer — because neither needs dired
+to be worth fixing.
 
 **Ledger note:** this framing branch deliberately touches **only** this
 file. `docs/active-work.md` and `docs/agent-handoff.md` are held by the
