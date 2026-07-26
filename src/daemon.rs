@@ -4439,7 +4439,7 @@ mod tests {
 
     /// B1 input/display alignment: a semantic frontend's window is bound
     /// to LOCAL's attach-time buffer, but the buffer it *displays* is
-    /// the one it declares via `Viewport`. `align_semantic_window_to_buffer`
+    /// the one it declares via `Viewport`. `align_primary_document_window`
     /// re-points the window so keys edit the displayed buffer — without
     /// it, arrow keys moved an off-screen cursor in the wrong buffer and
     /// the caret never tracked.
@@ -4477,7 +4477,9 @@ mod tests {
         );
 
         // The frontend declares it is displaying the file buffer.
-        align_semantic_window_to_buffer(&mut editor, fid, file);
+        // Bottom-panel §1.3 #7: `Viewport` takes the projection-only
+        // aligner, which never touches `view.active`.
+        align_primary_document_window(&mut editor, fid, file);
         assert_eq!(
             editor
                 .core
