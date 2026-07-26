@@ -1496,7 +1496,7 @@ claim a reader must be able to check without reconstructing
 | `builtin/runtime/typed_edit.lua` | new — the chain owner |
 | `builtin/runtime/pair.lua` | re-expressed as one registered consumer |
 | `src/editor.rs` | one `include_str!` line, before `pair.lua`'s |
-| `tests/typed_edit_chain_acceptance.rs` | new — criteria 46a–46e |
+| `tests/typed_edit_chain_acceptance.rs` | new — criteria 46a–46h |
 | `tests/auto_pair_acceptance.rs` | **unchanged, zero lines** |
 
 Rev 6 listed only the first three and then required criteria 46a–46e,
@@ -2374,7 +2374,7 @@ substrate pin, filed under Stage 4 only because Stage 4 was one stage.
 Per the no-renumbering rule above, round 5's additions take letter
 suffixes on both sides of the split.
 
-46a–46e live in a **new `tests/typed_edit_chain_acceptance.rs`**, which
+46a–46h live in a **new `tests/typed_edit_chain_acceptance.rs`**, which
 is part of Stage 4a's declared footprint (Q#LN10) and a required gate
 for its PR. They cannot live in `tests/auto_pair_acceptance.rs`, which
 criterion 46 requires to stay byte-identical.
@@ -2394,14 +2394,44 @@ criterion 46 requires to stay byte-identical.
     `include_str!` order happens to agree with intent.
 46c. A claiming consumer stops the chain — a later consumer does not
     run — and a non-claiming one does not.
-46d. A consumer that throws is contained: the fan-out still succeeds,
-    the other consumers still run, and the failure reports through
-    `set_status`. Bites against the `all-must-succeed` contract taking
-    the whole fan-out down with one bad consumer (Q#LN10).
+46d. A consumer that throws is contained: the later consumers still
+    run, and the failure reports through `set_status`. Bites against a
+    chain where one bad consumer silently disables every consumer
+    behind it. (Round 8 correction: an uncontained throw would *not*
+    take the fan-out's other subscribers down — `run_all_must_succeed`
+    in `src/hook.rs` collects errors and continues, so `lsp.lua` still
+    flushes. Rev 7 claimed otherwise. The containment is still
+    required; the reason is narrower than stated.) Rendering the error
+    is itself protected: a Lua error may be any value, including a
+    table whose `__tostring` throws, and reporting outside the
+    containment reintroduces the escape it exists to prevent.
 46e. **Q#AP7 ordering survives.** The existing `sighelp` fake-server
     test — pairing's closer must be in the buffer before `lsp.lua`
     flushes `didChange` — still holds with pairing behind the chain.
     Falsified by moving the chain's registration after `lsp.lua`'s.
+46f. **Each consumer's record is its own.** A declining consumer that
+    mutates the record it was handed cannot change what a later
+    consumer sees. Bites against handing every consumer the same
+    mutable table: pairing decides what to close from `rec.char`, so a
+    forged `char` makes it insert a pair the user never typed. Every
+    field is a scalar or an opaque id, so a shallow copy is a complete
+    snapshot.
+46g. **The fan-out iterates a snapshot.** A consumer may register or
+    remove consumers while the chain runs; both take effect on the next
+    fan-out. Bites against iterating the live array, where a consumer
+    that registers a lower-priority one shifts itself forward under
+    `ipairs` and runs twice — unbounded if it re-registers each time.
+46h. **The registrar has a lifecycle.** `add_consumer` returns an
+    opaque handle; `remove_consumer` unregisters it and reports whether
+    it was live, so a double-remove is a no-op rather than a throw.
+    Without it, re-evaluating a config or reloading a package
+    accumulates callbacks permanently — the leak `COHERENCE.md` §13
+    already records against `pmacs.hook.add`, which a teardown-less
+    chain would inherit and spread to every consumer. Priority is
+    validated as a **finite integer in i32 range**, matching
+    `pmacs.completion.register`: NaN is a number and every ordered
+    comparison with it is false, so a bare type check lets it land
+    wherever the insertion scan gives up and silently voids 46b.
 
 **Stage 4b — the Unicode input method**
 

@@ -1,11 +1,13 @@
 //! Typed-edit consumer chain acceptance (Arc 8 Stage 4a,
-//! docs/lean4-mode-framing.md Q#LN10, criteria 46a–46e).
+//! docs/lean4-mode-framing.md Q#LN10, criteria 46a–46h).
 //!
 //! The chain owns the single `buffer.after-edit` subscriber that reads
 //! the one-shot typed-edit record (Q#AP9) and offers it to consumers in
 //! priority order. These tests pin the chain's OWN behavior — take-once,
-//! priority ordering, claim-stops-chain, throw containment, and the
-//! Q#AP7 flush ordering it inherited from `pair.lua`.
+//! priority ordering, claim-stops-chain, throw containment, per-consumer
+//! record isolation, snapshot iteration under re-entrant registration,
+//! the registration lifecycle, and the Q#AP7 flush ordering it inherited
+//! from `pair.lua`.
 //!
 //! They deliberately do not re-test auto-pairing: criterion 46 requires
 //! `tests/auto_pair_acceptance.rs` to pass byte-identical, and that
@@ -324,9 +326,12 @@ fn a_throwing_consumer_is_contained_reported_and_does_not_stop_the_chain() {
         "#,
     );
 
-    // `buffer.after-edit` is all-must-succeed: an uncontained throw
-    // would fail the fan-out for every other subscriber, including
-    // lsp.lua's didChange flush.
+    // An uncontained throw would abandon every LATER consumer in the
+    // chain and mark the whole `buffer.after-edit` run failed. It would
+    // NOT stop the hook's other subscribers — all-must-succeed collects
+    // errors and keeps going (`src/hook.rs`'s `run_all_must_succeed`) —
+    // so what this pins is that one broken consumer cannot silently
+    // disable the ones behind it.
     type_str(&mut s, "(");
 
     let later_ran: bool = eval(&s, "return _G.later_ran");
@@ -357,11 +362,42 @@ fn add_consumer_rejects_malformed_registrations() {
         ),
         (
             "pmacs.typed_edit.add_consumer{ name = \"n\", fn = function() end }",
-            "priority must be a number",
+            "priority must be a finite integer",
         ),
         (
             "pmacs.typed_edit.add_consumer{ name = \"n\", priority = 1 }",
             "fn must be a function",
+        ),
+        // NaN is a number and every ordered comparison with it is
+        // false, so a bare type check lets it land wherever the
+        // insertion scan gives up — and the lowest-first contract the
+        // Lean expander depends on quietly stops holding. The
+        // infinities and non-integers go with it: priority matches
+        // `pmacs.completion.register`'s i32.
+        (
+            "pmacs.typed_edit.add_consumer{ name = \"n\", priority = 0/0, \
+             fn = function() end }",
+            "priority must be a finite integer",
+        ),
+        (
+            "pmacs.typed_edit.add_consumer{ name = \"n\", priority = math.huge, \
+             fn = function() end }",
+            "priority must be a finite integer",
+        ),
+        (
+            "pmacs.typed_edit.add_consumer{ name = \"n\", priority = -math.huge, \
+             fn = function() end }",
+            "priority must be a finite integer",
+        ),
+        (
+            "pmacs.typed_edit.add_consumer{ name = \"n\", priority = 1.5, \
+             fn = function() end }",
+            "priority must be a finite integer",
+        ),
+        (
+            "pmacs.typed_edit.add_consumer{ name = \"n\", priority = 4e9, \
+             fn = function() end }",
+            "priority must be a finite integer",
         ),
     ] {
         let err = s
@@ -376,6 +412,188 @@ fn add_consumer_rejects_malformed_registrations() {
             "expected {want:?} in the error for {src:?}, got {msg:?}"
         );
     }
+}
+
+#[test]
+fn an_error_whose_rendering_throws_is_still_contained() {
+    // A Lua error may be any value, including a table whose
+    // `__tostring` throws. Rendering it outside the containment is a
+    // second, uncontained throw — the chain would stop at exactly the
+    // consumer it was trying to report.
+    let mut s = editor_with("");
+    exec(
+        &s,
+        r#"
+        _G.later_ran = false
+        local hostile = setmetatable({}, {
+          __tostring = function() error("rendering exploded") end,
+        })
+        pmacs.typed_edit.add_consumer {
+          name = "boom", priority = 1, fn = function() error(hostile) end,
+        }
+        pmacs.typed_edit.add_consumer {
+          name = "later", priority = 2,
+          fn = function() _G.later_ran = true; return false end,
+        }
+        "#,
+    );
+
+    type_str(&mut s, "(");
+
+    let later_ran: bool = eval(&s, "return _G.later_ran");
+    assert!(
+        later_ran,
+        "an unrenderable error must not escape the containment"
+    );
+    assert_eq!(buffer_text(&s), "()", "and pairing still ran");
+    let st = status(&s);
+    assert!(
+        st.contains("boom") && st.contains("<unprintable error>"),
+        "the consumer is still named, with a placeholder body, got {st:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The record a consumer sees is its own
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_consumers_mutation_of_the_record_cannot_reach_the_next_consumer() {
+    // The record is plain Lua data. Handing every consumer the same
+    // table lets a DECLINING consumer rewrite provenance for the ones
+    // behind it — and pairing decides what to close from `rec.char`,
+    // so a forged `char` makes it insert a pair the user never typed.
+    let mut s = editor_with("");
+    exec(
+        &s,
+        r#"
+        _G.downstream_char = "unset"
+        pmacs.typed_edit.add_consumer {
+          name = "vandal", priority = 1,
+          fn = function(rec)
+            if rec then rec.char = "("; rec.codepoint = 40 end
+            return false
+          end,
+        }
+        pmacs.typed_edit.add_consumer {
+          name = "witness", priority = 2,
+          fn = function(rec)
+            _G.downstream_char = rec and rec.char or "nil"
+            return false
+          end,
+        }
+        "#,
+    );
+
+    type_str(&mut s, "x");
+
+    let downstream: String = eval(&s, "return _G.downstream_char");
+    assert_eq!(
+        downstream, "x",
+        "the next consumer sees the real typed character"
+    );
+    assert_eq!(
+        buffer_text(&s),
+        "x",
+        "and pairing, reading the same field, did not close a forged opener"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Re-entrant registration, and the consumer lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn registering_or_removing_during_a_fan_out_takes_effect_on_the_next_one() {
+    // The fan-out iterates a snapshot. Iterating the live array instead
+    // lets a consumer that registers a LOWER-priority one shift itself
+    // forward under `ipairs` and run twice in a single fan-out — and
+    // repeating the registration makes that unbounded.
+    let mut s = editor_with("");
+    exec(
+        &s,
+        r#"
+        _G.order = {}
+        local function mark(tag)
+          return function() _G.order[#_G.order + 1] = tag; return false end
+        end
+        _G.doomed = pmacs.typed_edit.add_consumer {
+          name = "doomed", priority = 50, fn = mark("doomed"),
+        }
+        _G.did_register = false
+        pmacs.typed_edit.add_consumer {
+          name = "a", priority = 10,
+          fn = function()
+            _G.order[#_G.order + 1] = "a"
+            if not _G.did_register then
+              _G.did_register = true
+              pmacs.typed_edit.add_consumer { name = "b", priority = 5, fn = mark("b") }
+              pmacs.typed_edit.remove_consumer(_G.doomed)
+            end
+            return false
+          end,
+        }
+        "#,
+    );
+
+    type_str(&mut s, "x");
+    let first: String = eval(&s, "return table.concat(_G.order, ',')");
+    assert_eq!(
+        first, "a,doomed",
+        "`a` runs once even though it registered ahead of itself, and \
+         `doomed` still runs in the fan-out it was removed during"
+    );
+
+    exec(&s, "_G.order = {}");
+    type_str(&mut s, "y");
+    let second: String = eval(&s, "return table.concat(_G.order, ',')");
+    assert_eq!(
+        second, "b,a",
+        "both the registration and the removal land on the next fan-out"
+    );
+}
+
+#[test]
+fn remove_consumer_unregisters_and_reports_whether_it_was_live() {
+    // Without removal, re-evaluating a config or reloading a package
+    // accumulates callbacks permanently — the leak COHERENCE.md §13
+    // already records against `pmacs.hook.add`. A chain with no
+    // teardown would inherit it and spread it to every consumer.
+    let mut s = editor_with("");
+    exec(
+        &s,
+        r#"
+        _G.runs = 0
+        _G.h = pmacs.typed_edit.add_consumer {
+          name = "temporary", priority = 1,
+          fn = function() _G.runs = _G.runs + 1; return false end,
+        }
+        "#,
+    );
+
+    type_str(&mut s, "x");
+    let runs: i64 = eval(&s, "return _G.runs");
+    assert_eq!(runs, 1, "registered consumers run");
+
+    let first_removal: bool = eval(&s, "return pmacs.typed_edit.remove_consumer(_G.h)");
+    let second_removal: bool = eval(&s, "return pmacs.typed_edit.remove_consumer(_G.h)");
+    assert!(first_removal, "removing a live consumer reports true");
+    assert!(
+        !second_removal,
+        "a double-remove is a reportable no-op, not a throw"
+    );
+
+    type_str(&mut s, "y");
+    let runs: i64 = eval(&s, "return _G.runs");
+    assert_eq!(runs, 1, "the removed consumer no longer runs");
+    // Removal is surgical: the chain itself, and pairing on it, survive.
+    exec(&s, "pmacs.editor.goto_byte(pmacs.window.buffer():len())");
+    type_str(&mut s, "(");
+    assert_eq!(
+        buffer_text(&s),
+        "xy()",
+        "the rest of the chain is untouched"
+    );
 }
 
 // ---------------------------------------------------------------------------

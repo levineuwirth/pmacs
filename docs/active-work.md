@@ -149,9 +149,9 @@ If it does not, stop and repair the remote/fetch configuration.
 ### Stage 4a — the typed-edit consumer chain (IMPLEMENTED, same branch)
 
 - Footprint exactly as Q#LN10 declares it: `builtin/runtime/typed_edit.lua`
-  (new, 112 lines), `pair.lua` re-expressed as one consumer,
+  (new), `pair.lua` re-expressed as one consumer,
   `src/editor.rs` +15 (the `include_str!` and its ordering comment), and
-  `tests/typed_edit_chain_acceptance.rs` (new, 9 tests).
+  `tests/typed_edit_chain_acceptance.rs` (new, 13 tests).
   **`tests/auto_pair_acceptance.rs` is UNCHANGED — `git diff --stat
   main...HEAD -- tests/auto_pair_acceptance.rs` is empty.** That is
   criterion 46 checked at the diff, which is the only way it means
@@ -166,9 +166,26 @@ If it does not, stop and repair the remote/fetch configuration.
 - **Ordered insertion, not `table.sort`** — Lua's sort is not stable, and
   "ties broken by registration order" is a stated contract.
 - **The chain `pcall`s each consumer** and reports through
-  `set_status`. `buffer.after-edit` is all-must-succeed, so an
-  uncontained throw fails the fan-out for every other subscriber
-  including lsp.lua's didChange flush.
+  `set_status`. Rev 7 justified this by claiming an uncontained throw
+  would fail the fan-out for every other subscriber including lsp.lua's
+  didChange flush; **that is wrong** — `run_all_must_succeed`
+  (`src/hook.rs:332`) collects errors and continues, so the other
+  subscribers still run. The real consequence is narrower and still
+  worth containing: the throw skips every LATER consumer in the chain.
+  The rendering is protected too, because a Lua error may be a table
+  whose `__tostring` throws.
+- **Round 8 (review) findings, all fixed on this branch:** each consumer
+  now gets its **own shallow copy** of the record (the same table let a
+  declining consumer rewrite `rec.char`, which pairing reads — typing
+  `x` could produce `x)`); the fan-out iterates a **snapshot** (a
+  consumer registering a lower-priority one shifted itself forward under
+  `ipairs` and ran twice, unbounded if repeated); `tostring` moved
+  inside the containment; **non-finite and non-integer priorities are
+  rejected** (NaN is a number and every ordered comparison with it is
+  false, so it landed wherever the insertion scan gave up and silently
+  voided the ordering contract); and `add_consumer` now returns a handle
+  with `remove_consumer` beside it, so re-evaluating a config no longer
+  leaks callbacks the way `pmacs.hook.add` does (COHERENCE §13).
 - **Every acceptance test is bite-verified by mutation**, per the
   standing rule that a test is not evidence until the mutation it
   targets has been shown to fail it:
@@ -182,6 +199,11 @@ If it does not, stop and repair the remote/fetch configuration.
   | drop the `pcall` | 1 chain |
   | skip consumers when `rec == nil` | 1 chain + **3 auto-pair** |
   | load `typed_edit.lua` after `lsp.lua` | 1 chain + **2 auto-pair** (Q#AP7) |
+  | hand every consumer the same record table | 1 chain (46f) |
+  | iterate the live array instead of a snapshot | 1 chain (46g) |
+  | render the error outside the `pcall` | 1 chain (46d) |
+  | accept any Lua number as a priority | 1 chain (46h) |
+  | make `remove_consumer` a no-op | 2 chain (46g, 46h) |
 
   The first attempt at the last bite was WORTHLESS as written: moving
   only `typed_edit.lua` past `lsp.lua` left `pair.lua` calling a nil
@@ -194,9 +216,12 @@ If it does not, stop and repair the remote/fetch configuration.
 - Verification on this branch (commit-then-gate, so this describes the
   pushed tree): `cargo fmt --check` clean; strict workspace Clippy
   clean; 1,832 default + 2,009 CRDT library tests; auto-pair 45/45;
-  typed-edit chain 9/9; M4 121; required GPU 202; **isolated-config
-  workspace sweep 3,328 across 97 suites, zero failures** with
-  `grep -c basedpyright` = 0; `git diff --check` clean.
+  typed-edit chain 13/13 (and 13/13 again under `--no-default-features
+  --features lua54`, since the fixes touch `math.huge`, `%`, and
+  `__tostring` behavior that differs between the backends); M4 121;
+  required GPU 202; **isolated-config workspace sweep 3,332 across 97
+  suites, zero failures** with `grep -c basedpyright` = 0; `git diff
+  --check` clean.
 - Stage 4b (the input method) is NOT in this PR and not started.
 
 ## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)

@@ -88,10 +88,26 @@ commands, read `docs/active-work.md` immediately after this file.
     config swap invalidates. The durable lesson is to heal at
     **consumption** — the point where a stale record is handed out — not
     at the moment of the swap.
-  - Remaining: Stage 4a (typed-edit consumer chain) and 4b (the Unicode
-    input method) are framed and awaiting approval; stages 5 (goal
-    panel), 6 (`#eval` output channel), and 7 (module hierarchy) are
-    framed but not scouted against current `main`.
+  - **Stage 4a (typed-edit consumer chain) is implemented and in review
+    as PR #179** (branch `lean4-stage4a-typed-edit-chain`, framing rev
+    8). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
+    single `buffer.after-edit` subscriber and the single one-shot read,
+    `pair.lua` becomes its first registered consumer, and
+    `tests/auto_pair_acceptance.rs` is unchanged by zero lines
+    (criterion 46, verified at the diff). No protocol change, no Lean
+    content. The three decisions that turned out load-bearing rather
+    than stylistic: consumers are called **even when the record is
+    nil** (three existing auto-pair tests assert the non-event through
+    it, and 4b abandons stale pending state on it); each consumer gets
+    its **own copy** of the record, because pairing reads `rec.char`
+    and a declining consumer could otherwise forge it; and the fan-out
+    iterates a **snapshot**, because a consumer that registers a
+    lower-priority one shifts itself forward under `ipairs` and runs
+    twice.
+  - Remaining: Stage 4b (the Unicode input method) is framed and
+    awaiting approval — not started; stages 5 (goal panel), 6 (`#eval`
+    output channel), and 7 (module hierarchy) are framed but not
+    scouted against current `main`.
 
 - **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
   merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
