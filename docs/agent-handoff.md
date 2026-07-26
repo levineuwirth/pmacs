@@ -1,11 +1,13 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-25, after the CRDT undo repro (#157) and the
-inline-math landed-doc refresh (#172) — following the bottom-panel
-landed-doc refresh (#156), the inline-math slice (#158), dired Stage 1
-(#165) — the directory view — the GPU terminal input fix (#166), Lean 4
-Stage 2 (#161), the dired framing (#164), find-file (#162), the dired
-arc's Stage 0, and COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
+**Last updated: 2026-07-26, after Lean 4 stages 3a and 3b (#167, #170)
+landed — pmacs' first Lean language server — following the CRDT undo
+repro (#157), the inline-math landed-doc refresh (#172), the
+bottom-panel landed-doc refresh (#156), the inline-math slice (#158),
+the first mathematical typesetting in pmacs, dired Stage 1 (#165) — the
+directory view — the GPU terminal input fix (#166), Lean 4 Stage 2
+(#161), the dired framing (#164), and find-file (#162),
+the dired arc's Stage 0, and COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
 minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
 inline-math re-scout (#154), the vterm PTY-flake fix (#153), and the
 GPU initial-target doc refresh (#152); and before that GPU
@@ -28,16 +30,16 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-25)
+## 1. Where the project stands (2026-07-26)
 
-- `main` @ `ccf29e3` (the CRDT undo repro #157 atop the inline-math
-  landed-doc refresh #172, the bottom-panel landed-doc refresh #156, the
-  inline-math slice #158, dired Stage 1 #165, the GPU terminal input fix
-  #166, Lean 4 Stage 2 #161, the dired framing #164, COHERENCE.md #163,
-  find-file #162, Lean 4 Stage 1 #160, minimap blank-slab #159,
-  bottom-panel Stage 1 #155). Protocol unchanged at **v20**. The bullets
-  below describe the arcs in their own terms; this line is the
-  head-of-`main` anchor.
+- `main` @ `d400f30` (Lean 4 Stage 3b #170 atop Stage 3a #167, the CRDT
+  undo repro #157, the inline-math landed-doc refresh #172, the
+  bottom-panel landed-doc refresh #156, the inline-math slice #158,
+  dired Stage 1 #165, the GPU terminal input fix #166, Lean 4 Stage 2
+  #161, the dired framing #164, COHERENCE.md #163, find-file #162, Lean
+  4 Stage 1 #160, minimap blank-slab #159, bottom-panel Stage 1 #155).
+  Protocol unchanged at **v20**. The bullets below describe the arcs in
+  their own terms; this line is the head-of-`main` anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -46,6 +48,72 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey **broken at step 3**
   (`pmacs .` exits 1).
+- **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b LANDED**
+  (`docs/lean4-mode-framing.md`; #160, #161, #167, #170; merge
+  `d400f30`). pmacs edits Lean 4: `arborium-lean` highlighting, a
+  `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
+  server with a Lake-aware outermost root, a lazy toolchain probe, a
+  one-shot `lean --server` fallback, and `waitForDiagnostics`. **No
+  protocol change in any stage** (still v20).
+  - **Two of the four stages contained no Lean at all**, and that is the
+    arc's organizing rule: *no PR mixes a cross-cutting substrate change
+    with Lean feature content.* Stage 2 made LSP server affinity
+    per-project-root (`ensure_server` had been reusing one server across
+    roots — a correctness bug for every language, not just Lean). Stage
+    3a added notification/response subscription seams to
+    `handle_server_requests`, the single shared LSP event drain, plus
+    `pmacs.fs.canonicalize`.
+  - **Two consecutive re-scouts found that rule broken by the stage
+    being scouted** — Stage 3 in round 4, Stage 4 in round 5, each time
+    by a risk column that contradicted its own prose. The rule is not
+    self-enforcing. Re-check every remaining stage's risk column at
+    scout time.
+  - **A configured LSP root must be a canonical absolute path.** It
+    reaches `file_uri_for` verbatim and that URI is the affinity key, so
+    one package opened by two spellings spawns two servers. Stage 3a's
+    `pmacs.fs.canonicalize` is the primitive; it returns nil rather than
+    a lossy path for non-UTF-8 input.
+  - **`LspManager::stop` on an already-terminal client strands it in
+    `ShuttingDown` forever** — `server_is_live` then counts it live so
+    nothing rebuilds against it, and `forget` refuses it for not being
+    terminal. *Stopping a dead server is what makes it un-replaceable.*
+    Stage 3b works around it by dispatching on state (`forget` when
+    terminal, `stop` when live); merely skipping the call leaves
+    `next_restart_at` armed. The real fix is unframed substrate work.
+  - **`elan` shims lie**: `lake --version` and `lean --version` can both
+    fail ("no default toolchain configured") on a machine where Lean
+    otherwise works, so `command -v lake` is worthless as a capability
+    check. Lean acceptance is fake-server; live smokes must be PATH-
+    **and** success-gated.
+  - Stage 3b took six review rounds, and **the same defect appeared four
+    times**: "the fallback silently doesn't happen," as no re-attach,
+    then re-attach cleared by an unrelated buffer, then satisfied by the
+    very server being replaced, then repairing one buffer while the rest
+    stayed stale. Each fix was locally right; none asked what a *global*
+    config swap invalidates. The durable lesson is to heal at
+    **consumption** — the point where a stale record is handed out — not
+    at the moment of the swap.
+  - **Stage 4a (typed-edit consumer chain) is implemented and in review
+    as PR #179** (branch `lean4-stage4a-typed-edit-chain`, framing rev
+    8). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
+    single `buffer.after-edit` subscriber and the single one-shot read,
+    `pair.lua` becomes its first registered consumer, and
+    `tests/auto_pair_acceptance.rs` is unchanged by zero lines
+    (criterion 46, verified at the diff). No protocol change, no Lean
+    content. The three decisions that turned out load-bearing rather
+    than stylistic: consumers are called **even when the record is
+    nil** (three existing auto-pair tests assert the non-event through
+    it, and 4b abandons stale pending state on it); each consumer gets
+    its **own copy** of the record, because pairing reads `rec.char`
+    and a declining consumer could otherwise forge it; and the fan-out
+    iterates a **snapshot**, because a consumer that registers a
+    lower-priority one shifts itself forward under `ipairs` and runs
+    twice.
+  - Remaining: Stage 4b (the Unicode input method) is framed and
+    awaiting approval — not started; stages 5 (goal panel), 6 (`#eval`
+    output channel), and 7 (module hierarchy) are framed but not
+    scouted against current `main`.
+
 - **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
   merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
   frontend. **No protocol change (still v20); the whole slice lives in
