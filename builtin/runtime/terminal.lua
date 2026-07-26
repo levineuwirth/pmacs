@@ -65,27 +65,44 @@ local PROFILE_FIELDS = {
   env = "table",
 }
 
+-- Every diagnostic below renders a caller- or user-supplied value, so
+-- rendering must never be the thing that fails. `%q` is partial — it
+-- raises on a table or function — and a profile name arrives straight
+-- from `open { profile = ... }`.
+local function describe_name(name)
+  if type(name) == "string" then return string.format("%q", name) end
+  return string.format("<%s %s>", type(name), tostring(name))
+end
+
 local function validate_profile(name, profile)
+  local shown = describe_name(name)
   if type(profile) ~= "table" then
-    error(string.format("terminal profile %q must be a table", name), 0)
+    error(string.format("terminal profile %s must be a table", shown), 0)
   end
   for key, value in pairs(profile) do
     local expected = PROFILE_FIELDS[key]
     if not expected then
-      error(string.format("terminal profile %q: unknown field %q", name, tostring(key)), 0)
+      error(string.format("terminal profile %s: unknown field %q", shown, tostring(key)), 0)
     end
     if type(value) ~= expected then
       error(string.format(
-        "terminal profile %q: field %q must be a %s, got %s",
-        name, key, expected, type(value)), 0)
+        "terminal profile %s: field %q must be a %s, got %s",
+        shown, key, expected, type(value)), 0)
     end
   end
   return profile
 end
 
+-- `terminal.profiles` is a raw user table, so its keys are whatever the
+-- user wrote. Sorting them directly raises "attempt to compare number
+-- with string" the moment the table holds both a string and a numeric
+-- key — and it raises on the UNKNOWN-PROFILE path, replacing the very
+-- error this list exists to explain with an opaque one. Sorting DISPLAY
+-- strings is total over every key type, so the diagnostic survives a
+-- malformed table.
 local function known_profile_names()
   local names = {}
-  for name in pairs(terminal.profiles) do names[#names + 1] = name end
+  for name in pairs(terminal.profiles) do names[#names + 1] = tostring(name) end
   table.sort(names)
   return names
 end
@@ -106,7 +123,8 @@ local function resolve_profile(requested)
     local known = known_profile_names()
     local listed = #known > 0 and table.concat(known, ", ") or "(none defined)"
     error(string.format(
-      "terminal profile %q is not defined; known profiles: %s", name, listed), 0)
+      "terminal profile %s is not defined; known profiles: %s",
+      describe_name(name), listed), 0)
   end
   return validate_profile(name, profile)
 end

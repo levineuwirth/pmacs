@@ -32,13 +32,18 @@ fn eval_err(state: &EditorState, src: &str) -> String {
     }
 }
 
-fn screen_text(state: &EditorState, buffer: pmacs::buffer::BufferId) -> String {
-    let manager = state.terminal_manager.borrow();
-    let Some(snapshot) = manager.snapshot(buffer) else {
-        return String::new();
-    };
+/// The viewport every test projects through. Deliberately SHORTER than
+/// the 24-row screen a terminal opens with, so "scroll to the oldest
+/// retained row" has somewhere to go even when nothing is retained —
+/// which is what makes the two scrollback arms differ by content rather
+/// than by whether scrolling was possible at all.
+fn viewport() -> CellSize {
+    CellSize::new(10, 40)
+}
+
+fn cells_to_text(cells: &[pmacs::cell::Cell]) -> String {
     let mut text = String::new();
-    for cell in &snapshot.cells {
+    for cell in cells {
         match &cell.glyph {
             Glyph::Char(c) => text.push(*c),
             Glyph::Cluster(b) => text.push_str(&String::from_utf8_lossy(b)),
@@ -46,6 +51,33 @@ fn screen_text(state: &EditorState, buffer: pmacs::buffer::BufferId) -> String {
         }
     }
     text
+}
+
+fn screen_text(state: &EditorState, buffer: pmacs::buffer::BufferId) -> String {
+    let manager = state.terminal_manager.borrow();
+    let Some(snapshot) = manager.snapshot(buffer) else {
+        return String::new();
+    };
+    cells_to_text(&snapshot.cells)
+}
+
+/// Text a view actually shows, which is where retained history is
+/// visible at all — the live `screen_text` above always reads the tail.
+fn view_text(state: &EditorState, key: TerminalViewKey) -> String {
+    let mut manager = state.terminal_manager.borrow_mut();
+    manager
+        .snapshot_for_view(key, viewport())
+        .map(|snapshot| cells_to_text(&snapshot.cells))
+        .unwrap_or_default()
+}
+
+/// Scroll a view to its OLDEST retained row and read it back.
+fn oldest_view_text(state: &EditorState, key: TerminalViewKey) -> String {
+    state
+        .terminal_manager
+        .borrow_mut()
+        .scroll_view(key, viewport(), i32::MAX);
+    view_text(state, key)
 }
 
 fn tick_until(state: &mut EditorState, needle: &str, buffer: pmacs::buffer::BufferId) -> bool {
@@ -71,7 +103,7 @@ fn focus_terminal(state: &EditorState, buffer: pmacs::buffer::BufferId) -> Windo
     let mut manager = state.terminal_manager.borrow_mut();
     manager.register_view(key);
     manager.claim_controller(key);
-    let _ = manager.snapshot_for_view(key, CellSize::new(10, 40));
+    let _ = manager.snapshot_for_view(key, viewport());
     window
 }
 
@@ -223,6 +255,44 @@ fn acc2_unknown_profile_lists_known_names_and_creates_nothing() {
     assert_eq!(state.terminal_manager.borrow().len(), 0);
 }
 
+/// Acceptance 2 (malformed table): `pmacs.terminal.profiles` is a raw
+/// user table, so a diagnostic that walks its keys must be total over
+/// them. A table holding both a string and a numeric key made
+/// `table.sort` raise "attempt to compare number with string" — on the
+/// unknown-profile path, replacing the exact error being asked for.
+#[test]
+fn acc2_malformed_profile_keys_do_not_mask_the_unknown_profile_error() {
+    let state = EditorState::new();
+    exec(&state, CAT_PROFILE);
+    exec(
+        &state,
+        r#"pmacs.terminal.profiles[1] = { command = "/bin/sh" }"#,
+    );
+
+    let err = eval_err(
+        &state,
+        r#"return pmacs.terminal.open { profile = "ghost" }"#,
+    );
+    assert!(
+        err.contains("ghost") && err.contains("echo"),
+        "the unknown-profile error must survive a malformed table: {err}"
+    );
+    assert!(
+        !err.contains("attempt to compare"),
+        "listing known profiles must not raise: {err}"
+    );
+
+    // Rendering the REQUESTED name is partial too: `%q` raises on a
+    // table, and the name arrives straight from the caller.
+    let err = eval_err(&state, r"return pmacs.terminal.open { profile = {} }");
+    assert!(
+        err.contains("is not defined") && err.contains("known profiles"),
+        "a non-string profile name must render, not raise: {err}"
+    );
+
+    assert_eq!(state.terminal_manager.borrow().len(), 0);
+}
+
 /// Acceptance 3: explicit beats profile beats setting beats `$SHELL`, and
 /// `env` MERGES rather than replacing.
 #[test]
@@ -282,10 +352,77 @@ fn acc3_acc4_explicit_command_wins_and_empty_default_means_no_profile() {
     state.process_supervisor.borrow_mut().shutdown();
 }
 
-/// Acceptance 5: scrollback resolves from the setting, is overridden by an
-/// explicit value, and `0` is legal.
+/// A child that overflows the 24-row screen and then goes quiet, so its
+/// early output can only still be found in RETAINED HISTORY. Zero-padded
+/// so `LINE001` is not a substring of `LINE100`.
+const FILL_PROFILE: &str = r#"
+pmacs.terminal.profiles.fill = {
+  command = "/bin/sh",
+  args = { "-c",
+    "i=1; while [ $i -le 200 ]; do printf 'LINE%03d\r\n' $i; i=$((i+1)); done; printf 'DONE\r\n'; exec cat" },
+}
+"#;
+
+/// Acceptance 5: the scrollback SETTING reaches the screen's retained
+/// history, an explicit spec value overrides it, and `0` is legal.
+///
+/// Asserted end to end, through a real child and a real view, rather
+/// than by reading the value back out of the registry: a registry
+/// round-trip is a test of the registry, and would stay green with the
+/// setting's only consumer (`terminal.lua`'s `resolved.scrollback_rows`
+/// fallback) deleted outright.
 #[test]
-fn acc5_scrollback_setting_override_and_bounds() {
+fn acc5_scrollback_setting_reaches_retained_history() {
+    let mut state = EditorState::new();
+    exec(&state, FILL_PROFILE);
+
+    // Arm 1: `0` is legal, and means the early rows are GONE.
+    exec(&state, r#"pmacs.config.set("terminal.scrollback-rows", 0)"#);
+    let none = open_cat_terminal(&state, r#"profile = "fill""#);
+    assert!(tick_until(&mut state, "DONE", none), "child finished");
+    let window = focus_terminal(&state, none);
+    let none_key = TerminalViewKey::new(FrontendId::LOCAL, window, none);
+    let oldest = oldest_view_text(&state, none_key);
+    assert!(
+        !oldest.contains("LINE001"),
+        "with scrollback 0 the oldest retained row must not be the \
+         child's first line: {oldest:?}"
+    );
+
+    // Arm 2: a large setting retains it, reachable by scrolling back.
+    exec(
+        &state,
+        r#"pmacs.config.set("terminal.scrollback-rows", 10000)"#,
+    );
+    let kept = open_cat_terminal(&state, r#"profile = "fill""#);
+    assert!(tick_until(&mut state, "DONE", kept), "child finished");
+    let window = focus_terminal(&state, kept);
+    let kept_key = TerminalViewKey::new(FrontendId::LOCAL, window, kept);
+    let oldest = oldest_view_text(&state, kept_key);
+    assert!(
+        oldest.contains("LINE001"),
+        "with scrollback 10000 the first line must survive in history: \
+         {oldest:?}"
+    );
+
+    // Arm 3: an explicit spec value beats the setting, which is still 10000.
+    let overridden = open_cat_terminal(&state, r#"profile = "fill", scrollback_rows = 0"#);
+    assert!(tick_until(&mut state, "DONE", overridden), "child finished");
+    let window = focus_terminal(&state, overridden);
+    let overridden_key = TerminalViewKey::new(FrontendId::LOCAL, window, overridden);
+    let oldest = oldest_view_text(&state, overridden_key);
+    assert!(
+        !oldest.contains("LINE001"),
+        "an explicit scrollback_rows = 0 must beat the setting: {oldest:?}"
+    );
+
+    state.process_supervisor.borrow_mut().shutdown();
+}
+
+/// Acceptance 5 (bounds): the registered range rejects out-of-range
+/// values, and `0` is inside it rather than a disabled sentinel.
+#[test]
+fn acc5_scrollback_bounds() {
     let state = EditorState::new();
     exec(&state, r#"pmacs.config.set("terminal.scrollback-rows", 0)"#);
     assert_eq!(
@@ -397,6 +534,11 @@ fn acc7_acc8_acc8a_per_terminal_escape_cache_identity_and_lifecycle() {
     );
     assert!(escape_was_armed(&mut state, b, 'N'), "B primes on its C-b");
     let primed = state.terminal_manager.borrow().escape_parses();
+    assert_eq!(
+        state.terminal_manager.borrow().escape_caches(),
+        2,
+        "each primed terminal holds its own cache"
+    );
 
     // Acceptance 7 — BOTH directions. Asserting only that A still works
     // after A->B->A is not enough: an epoch-only cache hands whichever
@@ -442,6 +584,13 @@ fn acc7_acc8_acc8a_per_terminal_escape_cache_identity_and_lifecycle() {
     );
 
     // Acceptance 8a: the cache dies with its terminal.
+    //
+    // Waiting for the SESSION count to fall is not the assertion — a
+    // session set that drains while an editor-side `HashMap<BufferId,
+    // EscapeCache>` keeps its entry (the rejected implementation named
+    // in Q#TC4c, which has no purge hook) satisfies it exactly. The
+    // discriminating observable is the CACHE count, which such a map
+    // would hold at its high-water mark of 2.
     let sessions_before = state.terminal_manager.borrow().len();
     exec(&state, "pmacs.terminal.terminate(TERM_A)");
     exec(&state, "pmacs.buffer.kill(TERM_A)");
@@ -452,10 +601,31 @@ fn acc7_acc8_acc8a_per_terminal_escape_cache_identity_and_lifecycle() {
         state.tick_processes();
         assert!(
             Instant::now() < deadline,
-            "killing the terminal must remove its session, and with it the cache"
+            "killing the terminal must remove its session"
         );
         thread::sleep(Duration::from_millis(20));
     }
+    assert_eq!(
+        state.terminal_manager.borrow().escape_caches(),
+        1,
+        "killing terminal A must drop ITS cache, not merely its session"
+    );
+
+    // ...and the surviving cache is B's, so the right one was dropped.
+    focus_terminal(&state, b);
+    state.dispatch_key(
+        FrontendId::LOCAL,
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+    );
+    assert!(
+        escape_was_armed(&mut state, b, 'T'),
+        "terminal B must still escape on its own C-b after A was killed"
+    );
+    assert_eq!(
+        state.terminal_manager.borrow().escape_parses(),
+        primed,
+        "B's surviving cache must not have been reparsed"
+    );
     state.process_supervisor.borrow_mut().shutdown();
 }
 

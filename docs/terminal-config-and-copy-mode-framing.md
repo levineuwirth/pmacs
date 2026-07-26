@@ -1,7 +1,9 @@
 # Terminal configuration and copy mode
 
 **Revision 4 — scouted against canonical `main` @ `b889873` (protocol v20),
-2026-07-25. Not yet approved; no branch, no implementation.**
+2026-07-25. APPROVED after four review rounds. Stage 1 is implemented on
+branch `terminal-config` (PR #173); Stage 2 (`terminal-copy-mode`) is
+framed but not started, and branches off `main` after Stage 1 merges.**
 
 Revision 4 gives the escape-key cache an owner and a lifecycle (Q#TC4c) —
 revision 3 named the key but not the storage, and two implementations
@@ -503,6 +505,15 @@ additive, on its own binding, and does not replace scroll-and-select.
    error that **lists the known profile names**, and creates no buffer,
    session, or process. An explicitly passed unknown `profile` fails the same
    way **even when `terminal.default-profile` is valid** (Q#TC3a).
+2a. That diagnostic is **total over a malformed profiles table** (review round
+   1). `pmacs.terminal.profiles` is a raw user table, so listing its names must
+   not assume its keys are comparable and rendering a requested name must not
+   assume it is a string: a table holding both a string and a numeric key made
+   `table.sort` raise `attempt to compare number with string` *on the
+   unknown-profile path*, replacing the exact error being asked for, and `%q`
+   raises on a non-string `profile` argument. Both are partial functions
+   applied to user input on a diagnostic path — the failure class is
+   "the error reporter is the thing that fails".
 3. Field-by-field resolution follows Q#TC3a: explicit open field beats profile
    field beats scalar setting beats `$SHELL`. `env` **merges**, with explicit
    entries overriding profile entries of the same name.
@@ -623,6 +634,19 @@ Full gate suite per `CLAUDE.md` for each PR separately, plus:
   chord unreachable); **10** (its failure mode is a terminal nobody can
   escape); and **16/17** (a read-only buffer that silently accepts an edit on
   both sides).
+- **The observation seams the cache pins need are `escape_parses` (how often)
+  and `escape_caches` (how many are still held).** Neither is inferable from
+  behavior: for a *valid* setting a correct per-session cache and a leaking
+  editor-side map produce identical keystroke results, and both leave the
+  session count draining normally. Review round 1 caught 8a asserting the
+  session count instead — which the unpurged-map bite passes, since a map with
+  no purge hook leaks *while* sessions drain. A lifecycle claim needs a
+  lifecycle observable; the count of live sessions is not one.
+- **Criterion 5 must open a real terminal and read back retained history.**
+  Round 1 caught it asserting a registry round-trip instead, which is a test of
+  the registry: it stays green with the setting's only consumer deleted. The
+  same shape to watch for anywhere — *asserting that a value was stored is not
+  asserting that anything reads it*.
 - **Do not gate the new suites on `#[cfg(feature = "crdt")]` unless a test
   genuinely needs CRDT.** CI never enables that feature, so a suite gated that
   way is written and then never run — 264 tests are currently dark for exactly

@@ -607,7 +607,7 @@ impl TerminalManager {
                 let already = previously_reported.as_deref() == Some(spelling);
                 let message = (!already).then(|| {
                     format!(
-                        "terminal.escape-key {spelling:?} is not a valid chord ({error});                          using C-c"
+                        "terminal.escape-key {spelling:?} is not a valid chord ({error}); using C-c"
                     )
                 });
                 (fallback, Some(spelling.to_owned()), message)
@@ -631,6 +631,24 @@ impl TerminalManager {
     #[must_use]
     pub fn escape_parses(&self) -> u64 {
         self.escape_parses
+    }
+
+    /// How many terminals currently hold a cached escape chord.
+    ///
+    /// The LIFETIME half of Q#TC4c's cache contract, which `escape_parses`
+    /// cannot cover: parse counting says a valid setting is read once, but
+    /// says nothing about whether the cache is ever released. Because the
+    /// cache lives on [`TerminalSession`], this count falls with the
+    /// session set by construction — which is exactly the property worth
+    /// pinning, since the rejected alternative (an editor-side
+    /// `HashMap<BufferId, EscapeCache>`) has no purge hook and would hold
+    /// this at its high-water mark while sessions drained.
+    #[must_use]
+    pub fn escape_caches(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.escape.is_some())
+            .count()
     }
 
     /// Resize a terminal screen and its PTY after validating shared limits.
