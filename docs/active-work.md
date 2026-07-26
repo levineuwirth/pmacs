@@ -331,6 +331,25 @@ If it does not, stop and repair the remote/fetch configuration.
   --check` clean.
 - Stage 4b (the input method) is NOT in this PR and not started.
 
+## Journey Stage 1a — framing rev 5 APPROVED; branch cut, implementing
+
+- Approved framing: `docs/journey-stage1a-framing.md` **rev 5** (four
+  review rounds). Branch `journey-stage1a-directory-open`, framing
+  committed as its first commit. No PR yet.
+- Recovery: `git fetch githubsucks && git checkout
+  journey-stage1a-directory-open`. The framing now travels; the
+  implementation does not until it is committed and pushed.
+- Ordering: PR #177 MERGED (2026-07-26), so 1a is unblocked. 1a lands
+  before dired Stage 2. When 1a lands, Stage 2 must re-scout and revise
+  its framing around the scoped `pmacs.window.commit_to` boundary before
+  its implementation branch is cut. That revision is a prerequisite, not
+  a review-time discovery.
+- Implementation order inside the branch (framing §12): scoped frontend
+  override + shared eligibility predicate first (separable, testable
+  without dired), then `commit_to` and the opaque destination, then the
+  directory arm and resolver chain, then the journey suite, then the
+  doc updates COHERENCE §25 requires.
+
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
 - **No branch, no framing yet.** Found while gating #166, then measured
