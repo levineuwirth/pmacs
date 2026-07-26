@@ -157,7 +157,7 @@ commands, read `docs/active-work.md` immediately after this file.
     at the moment of the swap.
   - **Stage 4a (the typed-edit consumer chain) MERGED as #179**
     (branch `lean4-stage4a-typed-edit-chain`, framing rev 8; it is part
-    of the `fe8b8ba` anchor above). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
+    of the main anchor above). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
     single `buffer.after-edit` subscriber and the single one-shot read,
     `pair.lua` becomes its first registered consumer, and
     `tests/auto_pair_acceptance.rs` is unchanged by zero lines
@@ -1036,24 +1036,33 @@ it lives in loro's `UndoManager`. That has no `clear`, and needs none — a
 manager records only what happens after construction, so
 `CrdtState::clear_undo_history` rebinds a fresh one to the same doc.
 
-**Not yet adopted — and the inventory is four call sites, not two.**
-Every generated buffer outside copy mode still uses the older idiom:
-an erroring intercept plus `set_round_trip_input`, written through
-`bypass_intercept`, with the rope left writable. All of them are
+**Not yet adopted — the inventory is four writer mechanisms covering
+five buffers.** *Every remaining intercept-protected writer* uses the
+older idiom: an erroring intercept plus `set_round_trip_input`, written
+through `bypass_intercept`, with the rope left writable. All are
 emptiable by `M-x buffer.undo`:
 
-| buffer | writer | shape |
+| writer | buffers | shape |
 |---|---|---|
-| listview panels | `builtin/runtime/listview.lua:60-61` | delete-all + insert |
-| `*compilation*` | `builtin/runtime/compile.lua` (`ensure_slot`) | **append** per output batch |
-| `*search-results*` | same `ensure_slot` mechanism in `compile.lua` | **append** per match batch |
-| dired buffers | `builtin/runtime/dired.lua:371` | whole-buffer replace |
+| `builtin/runtime/listview.lua:60-61` | every listview panel | delete-all + insert |
+| `builtin/runtime/compile.lua` (`ensure_slot`) | `*compilation*`, `*shell-command*` | **append** per output batch |
+| `builtin/commands/default.lua:869` | `*search-results*` | reset per query, then **append** per match batch |
+| `builtin/runtime/dired.lua:371` | every dired buffer | whole-buffer replace |
+
+**Do not read `ensure_slot` as covering the search panel** — it serves
+`*compilation*` and `*shell-command*` only (`compile.lua:1090,1125`).
+`*search-results*` is an independent panel with its own intercept,
+round-trip mark and writes, and `compile.lua` names it only in a
+predicate. Nor is the scope "every generated buffer": `*workers*`,
+`*help*` and `*buffer-list*` are generated too but do not use this
+idiom, and the REPL package's intercept
+(`builtin/packages/repl/init.lua:187`) is an op-filtering editing
+policy, not a read-only panel — neither group belongs to this lane.
 
 Adoption is not a one-line swap. It inherits the fan-out obligation, and
-the two `compile.lua` slots append rather than replacing wholesale, so
-they need a **streaming variant** of the primitive; listview and dired
-are already whole-buffer replaces and are the cheap half. Recorded in
-`COHERENCE.md` §14.
+the three appending buffers need a **streaming variant** of the
+primitive; listview and dired already write whole-buffer replaces and
+are the cheap half. Recorded in `COHERENCE.md` §14.
 
 **And it does not replace `set_round_trip_input`.** The protection is
 layered across two copies: rope-level `read_only` refuses the op at the

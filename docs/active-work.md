@@ -36,8 +36,12 @@ landed regardless of what a lane says.
   #158, dired Stage 1 #165, the GPU terminal input fix #166, Lean 4
   Stage 2 #161, the dired framing #164, COHERENCE.md #163, find-file
   #162, Lean 4 Stage 1 #160, and the minimap blank-slab fix #159;
-  protocol v20). The previous snapshot named `a27f646`; the recovery
-  check below accepts it or anything newer.
+  protocol v20). The previous snapshot named `a27f646`, and **the
+  recovery floor has advanced past it**: the check below now requires
+  `74301d1` or newer, so a tree at `a27f646` no longer passes. That is
+  deliberate — the floor moves with the base, because a check that
+  accepts an older commit than the declared base passes on a tree the
+  rest of this file does not describe.
   **Lanes below that name an older base have not been re-based; derive
   their integration surface from `git diff <their base>..main`.**
 - On the transfer source, `origin/main` named a release mirror at
@@ -733,9 +737,10 @@ git worktree add --track \
   Branch `gpu-terminal-input` and worktree `../pmacs-gui-term-input` retained.
   **Its landed-doc pair MERGED as #168** (`main` @ `1b6a084`,
   2026-07-26): #166 recorded as landed, the CI `crdt`-coverage gap
-  measured (**264 tests dark workspace-wide**, 177 in the library — as
-  of `1b6a084`; the live figure is 273/185 at `fe8b8ba`, and the
-  coverage lane above is the authority), the
+  measured (**264 tests dark workspace-wide**, 177 in the library — a
+  reading taken at `1b6a084` and kept here only as history. **The CI
+  `crdt`-coverage lane above is the authority for the live figure**;
+  do not quote this one forward), the
   vterm audit corrected — "only 3 of 9 acceptances drive a real daemon"
   was optimistic; without the frontend binary the honest number is
   **2** — and the a37 findings folded into the coverage lane.
