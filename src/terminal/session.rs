@@ -12,6 +12,7 @@ use crate::ansi::AnsiParserProfile;
 use crate::buffer::{Buffer, BufferId};
 use crate::cell::{Cell, CellCoord, CellSize};
 use crate::editor_core::EditorCore;
+use crate::key::{Chord, parse_chord};
 use crate::process::{
     ProcessEventKind, ProcessId, ProcessMode, ProcessSpec, ProcessState, ProcessSupervisor,
     RestartPolicy, StdinMode, TerminalMode,
@@ -218,12 +219,40 @@ pub(super) struct TerminalSession {
     pub(super) screen: TerminalScreen,
     pub(super) process: TerminalProcessState,
     pub(super) annotated: bool,
+    /// Resolved `terminal.escape-key` for this terminal (Q#TC4c).
+    ///
+    /// The cache lives HERE, not in an editor-side map, because a
+    /// session is created in [`TerminalManager::open`] and dropped on
+    /// kill/prune — so its lifetime is exactly the cache's, with no
+    /// purge hook to forget. An editor-side map would leak an entry per
+    /// terminal; a single last-entry cache would reparse (and re-report
+    /// an invalid value) every time focus alternates between two
+    /// terminals.
+    pub(super) escape: Option<EscapeCache>,
+}
+
+/// One terminal's parsed escape chord, valid for one config epoch.
+pub(super) struct EscapeCache {
+    /// The `ConfigRegistry::value_epoch` this was parsed at. The key is
+    /// `(this session, epoch)`: the epoch alone is not enough, because
+    /// it does not advance when focus moves between terminals with
+    /// different buffer-local values.
+    pub(super) epoch: u64,
+    /// The effective chord — the parsed spelling, or the `C-c` fallback.
+    pub(super) chord: Chord,
+    /// The invalid spelling already reported for this terminal, if any.
+    /// Reporting is once per terminal per effective invalid value: an
+    /// unchanged bad value stays quiet, a *different* bad value reports
+    /// again because it is a new mistake.
+    pub(super) reported_invalid: Option<String>,
 }
 
 /// Owns the one-buffer/one-process/one-screen terminal registry.
 #[derive(Default)]
 pub struct TerminalManager {
     pub(super) sessions: HashMap<BufferId, TerminalSession>,
+    /// Total escape-key parses performed (Q#TC4c observability).
+    escape_parses: u64,
     process_to_buffer: HashMap<ProcessId, BufferId>,
     /// Removed buffers whose children are still being reaped. Their events
     /// remain manager-owned so Lua/LSP/MCP consumers cannot steal a batch.
@@ -331,6 +360,7 @@ impl TerminalManager {
                 screen,
                 process: TerminalProcessState::Running,
                 annotated: false,
+                escape: None,
             },
         );
         debug_assert!(previous.is_none(), "fresh BufferId collided");
@@ -538,6 +568,89 @@ impl TerminalManager {
             .map_err(TerminalError::Process)
     }
 
+    /// Resolve this terminal's effective escape chord, parsing at most
+    /// once per `(terminal, config epoch)` (Q#TC4c).
+    ///
+    /// `spelling` is the caller-resolved `terminal.escape-key` value and
+    /// `epoch` the registry's `value_epoch()` it was read at. Returns the
+    /// effective chord plus, at most once per terminal per effective
+    /// invalid value, a message the caller should surface.
+    ///
+    /// An unparseable spelling falls back to `C-c` rather than leaving the
+    /// terminal with no escape at all (Q#TC4a): without one, every key goes
+    /// to the child and the user cannot reach the binding that would fix
+    /// the setting that broke it.
+    pub fn escape_chord(
+        &mut self,
+        buffer_id: BufferId,
+        epoch: u64,
+        spelling: &str,
+    ) -> (Chord, Option<String>) {
+        let fallback = default_escape_chord();
+        if let Some(session) = self.sessions.get(&buffer_id)
+            && let Some(cache) = session.escape.as_ref()
+            && cache.epoch == epoch
+        {
+            return (cache.chord, None);
+        }
+        self.escape_parses = self.escape_parses.saturating_add(1);
+        let Some(session) = self.sessions.get_mut(&buffer_id) else {
+            return (fallback, None);
+        };
+        let previously_reported = session
+            .escape
+            .as_ref()
+            .and_then(|cache| cache.reported_invalid.clone());
+        let (chord, reported_invalid, report) = match parse_chord(spelling) {
+            Ok(chord) => (chord, None, None),
+            Err(error) => {
+                let already = previously_reported.as_deref() == Some(spelling);
+                let message = (!already).then(|| {
+                    format!(
+                        "terminal.escape-key {spelling:?} is not a valid chord ({error}); using C-c"
+                    )
+                });
+                (fallback, Some(spelling.to_owned()), message)
+            }
+        };
+        session.escape = Some(EscapeCache {
+            epoch,
+            chord,
+            reported_invalid,
+        });
+        (chord, report)
+    }
+
+    /// How many escape-key spellings this manager has parsed.
+    ///
+    /// An observability seam for Q#TC4c's cache contract, which is
+    /// otherwise unpinnable for a VALID setting: a correct per-session
+    /// cache and a single last-entry cache produce identical behavior
+    /// there and differ only in how often they parse. Counting reports
+    /// covers the invalid case; this covers the valid one.
+    #[must_use]
+    pub fn escape_parses(&self) -> u64 {
+        self.escape_parses
+    }
+
+    /// How many terminals currently hold a cached escape chord.
+    ///
+    /// The LIFETIME half of Q#TC4c's cache contract, which `escape_parses`
+    /// cannot cover: parse counting says a valid setting is read once, but
+    /// says nothing about whether the cache is ever released. Because the
+    /// cache lives on [`TerminalSession`], this count falls with the
+    /// session set by construction — which is exactly the property worth
+    /// pinning, since the rejected alternative (an editor-side
+    /// `HashMap<BufferId, EscapeCache>`) has no purge hook and would hold
+    /// this at its high-water mark while sessions drained.
+    #[must_use]
+    pub fn escape_caches(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.escape.is_some())
+            .count()
+    }
+
     /// Resize a terminal screen and its PTY after validating shared limits.
     pub fn resize(
         &mut self,
@@ -729,4 +842,13 @@ fn sanitize_metadata(value: &str) -> String {
         clean.push(ch);
     }
     clean
+}
+
+/// The built-in terminal escape chord, and the fallback for an
+/// unparseable `terminal.escape-key` (Q#TC4a).
+pub(super) fn default_escape_chord() -> Chord {
+    Chord::new(
+        crossterm::event::KeyCode::Char('c'),
+        crossterm::event::KeyModifiers::CONTROL,
+    )
 }

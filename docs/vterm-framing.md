@@ -1711,6 +1711,22 @@ half of criterion 14, is dark for the same reason. Stage 2 is fully covered
 (6/6). This is not a vterm problem: 264 tests workspace-wide are dark,
 including 177 in the library. It has its own lane in `docs/active-work.md`.
 
+**And `a37` is darker still than that count implies: it reports `ok` without
+running whenever `pmacs-gpu` is absent from the same target directory**
+(measured 2026-07-26 while gating #173). It derives the sibling binary from
+`CARGO_BIN_EXE_pmacs` and, finding nothing, prints a skip notice and returns.
+A fresh worktree reports the suite 9/9 in 0.17 s having executed the arc's
+only real-daemon/real-PTY/real-wgpu path zero times; a genuine run takes
+about four seconds. `PMACS_REQUIRE_GPU=1` is the only thing that turns that
+skip into a failure, and the standing gate list applies that flag to
+`cargo test -p pmacs-gpu`, a different package. So the audit's claim that
+"only 3 of 9 Stage 3 tests drive a real daemon" was itself optimistic —
+**on a target directory without the frontend binary the honest number is 2**,
+and nothing in the gate log says so. It is also load-sensitive: it passed and
+then failed at the same commit twenty minutes apart under machine
+contention. Criterion 22's unpinned "without thrash" and this are the arc's
+two standing verification gaps.
+
 **Not audited:** §11's blanket claim that "deferral means graceful ignore or
 documented absence, never escape leakage, panic, unbounded allocation, or
 child leak". That covers roughly twenty deferred items and none were

@@ -525,6 +525,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/window.lua"),
             )
             .expect("load window builtin chunk");
+        // Dired Stage 1: the directory view. Loaded AFTER window.lua,
+        // whose `window.panel-height` setting a `display = "panel"`
+        // listing resolves, and after the pre-runtime tables it drives
+        // (`pmacs.config` / `command` / `keymap` / `buffer` / `editor` /
+        // `minibuffer` / `path`, plus `pmacs.fs` from fs.lua above).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/dired.lua"),
+                include_str!("../builtin/runtime/dired.lua"),
+            )
+            .expect("load dired builtin chunk");
         // Compile-mode (Arc 5 stage 1, Q#CM1) — ORDERING CONTRACT:
         // compile.lua must load AFTER lsp.lua. It takes over
         // `M-g n` / `M-g p` for the unified error dispatchers, and
@@ -978,19 +989,28 @@ impl EditorState {
             .get(&frontend_id)
             .is_some_and(|state| state.terminal_escape);
         if let Some(view_key) = terminal_key {
+            // Q#TC4: the escape chord is per terminal, resolved through
+            // `terminal.escape-key` and cached on the session so this
+            // hot path parses at most once per (terminal, config epoch).
+            let escape_chord = self.terminal_escape_chord(view_key.buffer_id);
             if escaped {
                 self.dispatchers
                     .entry(frontend_id)
                     .or_default()
                     .terminal_escape = false;
-                if chord.is_some_and(is_terminal_escape_chord) {
+                if chord == Some(escape_chord) {
+                    // Q#TC4b: repeating the escape sends THAT chord to the
+                    // child, not a hardcoded ETX. With a configured escape
+                    // of `C-x`, sending Ctrl-C here would both surprise the
+                    // user and make literal Ctrl-X unreachable, since the
+                    // first press is always consumed as the escape.
                     self.claim_terminal_controller(view_key);
-                    self.send_terminal_bytes(view_key.buffer_id, &[0x03]);
+                    self.send_terminal_escape_literal(view_key, escape_chord);
                     return;
                 }
                 // The post-escape key starts a fresh ordinary sequence below.
             } else if !dispatcher_pending {
-                if chord.is_some_and(is_terminal_escape_chord) {
+                if chord == Some(escape_chord) {
                     let state = self.dispatchers.entry(frontend_id).or_default();
                     state.terminal_escape = true;
                     state.dispatcher = KeyDispatcher::new();
@@ -1104,6 +1124,54 @@ impl EditorState {
             .borrow()
             .is_terminal(window.buffer_id)
             .then_some(key)
+    }
+
+    /// This terminal's effective escape chord (Q#TC4).
+    ///
+    /// Resolution is `get("terminal.escape-key", terminal_buffer)` —
+    /// buffer-local, then global, then default — because unlike the two
+    /// open-time settings this one is read while the terminal exists, so
+    /// a per-terminal escape is expressible and supported (Q#TC2b).
+    ///
+    /// The parse and the once-per-terminal invalid-value report both live
+    /// in [`crate::terminal::TerminalManager::escape_chord`]; this method
+    /// only supplies the resolved spelling and the epoch that keys the
+    /// cache, and surfaces any report through the status line — the same
+    /// channel `send_terminal_bytes` uses for terminal failures.
+    fn terminal_escape_chord(&self, buffer_id: crate::buffer::BufferId) -> Chord {
+        let lua = self.lua_host.lua();
+        let (spelling, epoch) = crate::lua_bindings::config_string_and_epoch(
+            lua,
+            "terminal.escape-key",
+            Some(buffer_id),
+            crate::terminal::DEFAULT_TERMINAL_ESCAPE_KEY,
+        );
+        let (chord, report) = self
+            .terminal_manager
+            .borrow_mut()
+            .escape_chord(buffer_id, epoch, &spelling);
+        if let Some(message) = report {
+            self.core.borrow_mut().status = message;
+        }
+        chord
+    }
+
+    /// Send the configured escape chord to the child as literal input
+    /// (Q#TC4b), through the same encoder ordinary keys use so it
+    /// inherits application-cursor and modifier handling.
+    fn send_terminal_escape_literal(&self, key: TerminalViewKey, chord: Chord) {
+        let event = KeyEvent::new(chord.code, chord.modifiers);
+        let Some((terminal_key, modifiers)) = terminal_key_from_crossterm(event) else {
+            return;
+        };
+        let modes = self
+            .terminal_manager
+            .borrow()
+            .modes_for_view(key)
+            .unwrap_or_default();
+        if let Some(bytes) = crate::terminal::input::encode_key(terminal_key, modifiers, modes) {
+            self.send_terminal_bytes(key.buffer_id, &bytes);
+        }
     }
 
     fn claim_terminal_controller(&self, key: TerminalViewKey) {
@@ -4410,10 +4478,6 @@ fn sanitize_single_line(s: &str) -> String {
         .collect()
 }
 
-fn is_terminal_escape_chord(chord: Chord) -> bool {
-    chord.code == KeyCode::Char('c') && chord.modifiers == KeyModifiers::CONTROL
-}
-
 fn terminal_key_from_crossterm(key: KeyEvent) -> Option<(TerminalKey, TerminalModifiers)> {
     let modifiers = crate::protocol::crossterm_translate::mods_from_crossterm(key.modifiers);
     let key = crate::protocol::crossterm_translate::keycode_from_crossterm(key.code);
@@ -5706,17 +5770,25 @@ mod tests {
 
     // ---- T M2.11 acceptance --------------------------------------------------
 
-    /// Every chord in the default global keymap must round-trip through
+    /// Every chord in the default keymap must round-trip through
     /// `pmacs.describe.key`: returning a non-nil table whose `command`
     /// matches the binding the keymap stack stores.
+    ///
+    /// `describe.key` resolves against the **effective context**
+    /// (buffer-local → mode → global), so a mode-scoped default is
+    /// asserted with a buffer that carries that mode rather than
+    /// context-free. Dired is the first builtin to bind mode-scoped keys
+    /// (#129's first non-detection consumer), and without the mode in
+    /// place its `n` / `p` / `g` correctly resolve to nothing.
     #[test]
     fn describe_key_identifies_every_default_binding() {
+        use crate::keymap_stack::Scope;
         let s = EditorState::new();
         let kms = s.lua_host.keymaps().borrow();
-        let bindings: Vec<(String, String)> = kms
+        let bindings: Vec<(Scope, String, String)> = kms
             .iter_all()
             .into_iter()
-            .map(|(_, seq, b)| (crate::key::display_sequence(&seq), b.command))
+            .map(|(scope, seq, b)| (scope, crate::key::display_sequence(&seq), b.command))
             .collect();
         drop(kms);
         // Sanity floor: the default keymap binds at least the M1 surface.
@@ -5725,18 +5797,50 @@ mod tests {
             "default keymap unexpectedly small: {} bindings",
             bindings.len()
         );
+        let modes: usize = bindings
+            .iter()
+            .filter(|(scope, _, _)| matches!(scope, Scope::Mode(_)))
+            .count();
+        assert!(
+            modes >= 1,
+            "a mode-scoped default is expected since dired Stage 1; \
+             found none, so the mode arm below asserts nothing"
+        );
 
-        for (seq, expected_command) in &bindings {
+        for (scope, seq, expected_command) in &bindings {
+            let mode = match scope {
+                Scope::Mode(name) => Some(name.clone()),
+                // No buffer-scoped defaults exist; a future one would
+                // need its own buffer context here.
+                Scope::Buffer(_) => continue,
+                Scope::Global => None,
+            };
+            // Set the context explicitly on EVERY iteration, including
+            // the global one: a mode left over from a previous iteration
+            // legitimately shadows a global binding of the same chord
+            // (dired's mode-scoped `RET` shadows
+            // `edit.newline-and-indent`, which is the point of the
+            // mode), so a leaked mode would make this assert the wrong
+            // thing.
+            let context = match &mode {
+                Some(name) => {
+                    format!("pmacs.buffer.set_major_mode(pmacs.window.buffer(), {name:?}); ")
+                }
+                None => "pmacs.buffer.set_major_mode(pmacs.window.buffer(), nil); ".to_owned(),
+            };
             let script = format!(
-                "local r = pmacs.describe.key({seq:?}); \
+                "{context}local r = pmacs.describe.key({seq:?}); \
                  if r == nil then return 'nil' else return r.command end"
             );
             let got: String = s.lua_host.lua().load(&script).eval().unwrap_or_else(|e| {
                 panic!("describe.key({seq}) raised: {e}");
             });
             assert_eq!(
-                &got, expected_command,
-                "describe.key for {seq:?} returned {got:?}, expected {expected_command:?}"
+                &got,
+                expected_command,
+                "describe.key for {seq:?} (scope {}) returned {got:?}, \
+                 expected {expected_command:?}",
+                scope.render()
             );
         }
     }

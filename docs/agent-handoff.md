@@ -1,10 +1,12 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-25, after the GPU terminal input fix (#166) landed —
-the double terminal-layout sync that made a GPU terminal untypable — following
-Lean 4 Stage 2 (#161), the dired framing pair (#163/#164), find-file (#162) —
-the dired
-arc's Stage 0 — following COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
+**Last updated: 2026-07-26, after terminal configuration Stage 1 (#173)
+landed — profiles, scrollback, a per-terminal configurable escape key, and
+the `C-c t` opening binding — following the GPU terminal input fix (#166),
+the double terminal-layout sync that made a GPU terminal untypable; the
+inline-math slice (#158), the first mathematical typesetting in pmacs; Lean 4
+Stage 2 (#161), the dired framing pair (#163/#164), find-file (#162) — the
+dired arc's Stage 0 — COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
 minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
 inline-math re-scout (#154), the vterm PTY-flake fix (#153), and the
 GPU initial-target doc refresh (#152); and before that GPU
@@ -29,11 +31,13 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-25)
 
-- `main` @ `2af1ab3` (find-file #162 atop COHERENCE.md #163, Lean 4 Stage 1
-  #160, minimap blank-slab #159, bottom-panel Stage 1 #155, inline-math
-  re-scout #154, vterm PTY-flake #153, and doc refresh #152). Protocol
-  unchanged at **v20**. The bullets below describe the arcs in their own
-  terms; this line is the head-of-`main` anchor.
+- `main` @ `d152120` (the bottom-panel landed-doc refresh #156 atop the
+  inline-math slice #158, dired Stage 1 #165, the GPU terminal input fix
+  #166, Lean 4 Stage 2 #161, the dired framing #164, COHERENCE.md #163,
+  find-file #162, Lean 4 Stage 1 #160, minimap blank-slab #159,
+  bottom-panel Stage 1 #155). Protocol unchanged at **v20**. The bullets
+  below describe the arcs in their own terms; this line is the
+  head-of-`main` anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -42,6 +46,32 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey **broken at step 3**
   (`pmacs .` exits 1).
+- **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
+  merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
+  frontend. **No protocol change (still v20); the whole slice lives in
+  `pmacs-gpu`**, because `pmacs-gpu` depends only on `pmacs-protocol` and
+  never on `pmacs` — a core-crate parser would have been unreachable from
+  where rendering happens.
+  - `math_parse.rs` → `math_layout.rs` → a `ChunkSource::MathBox` spacer
+    chunk → per-glyph mini-buffers drawn at the shaped line's real
+    baseline, with fraction rules as quads. Font is bundled Latin Modern
+    Math (~717 KiB) under the **GUST Font License** — not OFL.
+  - **The v0 subset is narrow and deliberately so**: Greek (34 entries),
+    sub/superscript, and `\frac`. Everything else — including relations
+    like `\geq`, fences, big operators, and all display math (`$$…$$`,
+    `\[…\]`) — is a named deferral, and an unsupported command degrades
+    the **whole span** back to source rather than rendering partially.
+    In a real paper most inline spans still show source; that is the
+    designed behaviour, not a defect.
+  - **Math is suppressed while the caret is inside its span**, so editing
+    always sees source. That gate reads the effective caret plus
+    selection endpoints and is fed by three separate refresh triggers;
+    it is the most delicate part of the slice.
+  - Selection and search washes cover the whole box rectangle, not
+    sub-ranges (sub-range washes are deferred).
+  - TUI shows the LaTeX source unchanged. That divergence is recorded
+    against `COHERENCE.md` §16, which audits the "no privileged
+    frontend" rule.
 - **find-file LANDED — #162** (`docs/dired-framing.md` §10, Q#DR11; merge
   `2af1ab3`; one review round). `C-x C-f` is the dired arc's **Stage 0**:
   pmacs previously had no discoverable way to open a file by path — no
@@ -73,14 +103,92 @@ commands, read `docs/active-work.md` immediately after this file.
     against an open buffer yet fails to load one that is not open —
     find-file expands the tilde Lua-side. Loading through the normalized
     path is a named deferral.
-- **GPU initial target LANDED — #148**
-  (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
-  rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
-  refresh #150, folding Stage 2 #149, ledger refresh #147, web grammars #146,
-  LaTeX Stage 1 #144 / inline-math framing #145, and folding Stage 1 #142),
-  protocol **v20** (`SUPPORTED=[6..=20]`; v16 = `ThemeFacts`, v17 =
+  - **Stage 1 (the directory view) is IN REVIEW as PR #165** — the
+    builtin `dired.lua`, the per-entry-tolerant `read_dir` opt, and
+    `pmacs.path.canonicalize`. Its branch state, substrate facts, and
+    verification live in `docs/active-work.md`; this section absorbs them
+    when it merges.
+- Protocol **v20** (`SUPPORTED=[6..=20]`; v16 = `ThemeFacts`, v17 =
   `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events, v20 =
   the GPU initial-target semantic bootstrap family).
+- **Bottom panel Stage 1 (window placement + TUI side windows) LANDED —
+  #155** (`docs/bottom-panel-framing.md` rev 4; merge `e745068`; two review
+  rounds). **No protocol change (still v20).** Arc 7's substrate: pmacs now
+  has Emacs's `display-buffer` + window parameters, and a buffer can be
+  displayed in a fixed-height window pinned to the bottom of the frame that
+  feature code targets **by policy** instead of by stealing the selected
+  window.
+  - `src/window.rs`: `WindowParams { side, fixed_rows, dedicated }` plus
+    implementation-owned `quit_action` / `origin_document` (Lua reads them,
+    `set_params` refuses them); `MIN_WINDOW_OUTER_ROWS = 2`;
+    `Layout::compute(area, fixed)` subtracts fixed children before dividing
+    the remainder by weight, preserving last-flexible-takes-the-remainder, so
+    a tree with no fixed leaves computes byte-identically to before.
+  - **`Layout::compute` has TWO production callers**, and both must feed the
+    same shared `panel_fixed_rows` map: `window_placements` and
+    `src/overlay_paint.rs`'s peer-presence pass, which derives its own
+    text-area `Rect` and never routes through the first. Leaving the second
+    on unfixed geometry paints every peer cursor at the row it would occupy
+    with no panel open.
+  - **The minimum is recursive** (`subtree_min_rows`: horizontal splits sum,
+    vertical splits max). "Two rows at the root" does not give each nested
+    leaf two rows. `interactive_min_rows` is the same recursion over the
+    user's `window.min-height` preference, and applies to drag/keyboard
+    resize ONLY — the layout pass and frame-resize reconciliation use the
+    structural floor, so changing a preference can never invalidate an
+    existing layout.
+  - **Hiding a panel is a durable state transition, not a per-frame effect**
+    (`EditorState::reconcile_panel_layout`): it moves focus out and releases
+    the terminal controller, because the terminal resize path merely returns
+    on zero content without releasing. It runs after attach/resize/display/
+    close and defensively before input dispatch, terminal sync, and paint.
+  - `FrontendView` gains `panel_capable`, `frame_geometry`
+    (`None` = **unknown**, never the GPU attach request's permanent 24×80
+    placeholder), and derived `panel_hidden` — each spelled explicitly at
+    every construction site, preserving folding's non-`Default` discipline.
+  - `EditorCore::primary_document_window` is the Q#BP14 projection seam;
+    `display_buffer` is Phase 1 of the display transaction (exact target →
+    side affinity → ordinary reuse, with option-valued height/dedication);
+    the Lua layer owns Phase 2 (activate → hook → reconcile → revalidate →
+    final-focus matrix).
+  - **Optimistic input is gated per WINDOW, not per buffer**:
+    `dispatch_idle_for` returns `false` whenever the acting frontend's active
+    window is a side window. Marking the panel's BUFFER round-trip would be
+    wrong — `round_trip_buffers` is global by `BufferId`, so it would disable
+    optimistic apply for another frontend editing that buffer as its document.
+  - Jump entries are per frontend and carry their origin `WindowId`; a stale
+    **side** origin is SKIPPED, because degrading it to an active-window
+    switch is exactly the duplicate-panel corruption the arc removes.
+  - `pmacs.window.display / display_file / quit / panel / params /
+    set_params / resize / display_target`, plus `builtin/runtime/window.lua`
+    (`window.panel-height`, `window.min-height`, `C-x ^` / `C-x C-^`).
+    Adopters take `display = "current" | "panel"`; **Stage 1 default is
+    `"current"`** and Stage 3 flips it.
+  - The divider is the upper subtree's existing mode-line row — no row added
+    or consumed, `ui.divider` restyles every exposed segment of one boundary,
+    and drag state is `HashMap<FrontendId, _>` so frontends cannot steal each
+    other's gestures.
+  - `open_initial_target` now shares one `resolve_target_buffer` +
+    exact-window install seam with `display_file`, and reasserts into a
+    document window after hooks (a startup hook can now create a panel).
+  - Final gates: 1,817 default + 1,994 CRDT library tests; the new
+    `bottom_panel_stage1_acceptance` 46; kill ring 30; compile 67; M4 121;
+    required GPU 152; initial-target 14 CRDT; all three vterm suites; folding
+    Stage 2 48. All 12 CI checks green at merge.
+  - **Stage 2 (the GPU panel band) is FRAMED** —
+    `docs/bottom-panel-stage2-framing.md`, four review rounds, no open
+    items. It takes protocol **v21** and ships as two serial slices:
+    **2A** classified census routing + per-window painter extraction (no
+    wire change), then **2B** the wire, the daemon projection, the band,
+    and the negotiated `panel_capable` flip. Parent acceptance 37–55
+    remains authoritative. Stage 3 is the adopter default flip.
+  - **The §1.3 census is CLASSIFIED, not uniformly redirected.** Only the
+    Projection class (#1–#12, #21–#22) routes through
+    `primary_document_window`; focus/input (#13–#15, #23), focus chrome
+    and surface-routed (#16–#19), and focus/session (#20) keep their own
+    authorities. Rerouting them breaks remote-op validation and
+    application, `DispatchIdle`, presence, focused
+    search/menu/completion routing, and terminal bell ownership.
 - **GPU initial target LANDED — #148**
   (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
@@ -578,8 +686,14 @@ commands, read `docs/active-work.md` immediately after this file.
     (GPU) is next**, unframed.
   - **Web grammars HTML+CSS LANDED — #146**, and **LaTeX Stage 1 — #144**
     with its inline-math parent framing **#145**.
-  - Remaining ranked arcs: 6 folding Stage 3, 7 DAP, 8 GPU splits, plus
-    the `.ipynb` arc (its JSON-grammar prerequisite shipped in #123).
+  - **Arc 7 (bottom panel) Stage 1 LANDED — #155** — window placement,
+    window parameters, TUI side windows, the divider, and the adopter
+    `display` opt-in. **Stage 2 (the GPU band) is next and needs its own
+    re-framing**; Stage 3 is the default flip. DAP was parked awaiting
+    exactly this arc's Stage 1 and can now re-baseline its touch census.
+  - Remaining ranked arcs: 6 folding Stage 3, 7 bottom-panel Stages 2–3,
+    DAP, 8 GPU splits, plus the `.ipynb` arc (its JSON-grammar
+    prerequisite shipped in #123).
 
 - **GPU terminal input LANDED — #166** (`main` @ `b889873`;
   `docs/gpu-terminal-input-framing.md` rev 2; one review round). The
@@ -745,6 +859,25 @@ final variant — its own round-trip cannot detect a discriminant shift.
 
 ## 5. Hard-won ops lessons
 
+- **A test that skips on a missing precondition reports `ok`, and a gate log
+  cannot tell that apart from a pass.** `vterm_stage3_acceptance::a37` — the
+  only acceptance driving a real daemon, a real PTY and a real wgpu render
+  together — derives `pmacs-gpu` from `CARGO_BIN_EXE_pmacs` and, when that
+  binary is absent from the target directory, prints a skip and returns.
+  A fresh worktree reports the suite 9/9 **in 0.17 s having never run it**;
+  a real run takes ~4 s. `PMACS_REQUIRE_GPU=1` is what promotes the skip to
+  a failure, and the standing gate list applies that flag to
+  `cargo test -p pmacs-gpu`, a *different package*. Two habits follow:
+  build the workspace before believing any suite that reaches for a sibling
+  binary, and **judge such a suite by its elapsed time**, not its verdict.
+- **Before attributing a red test to your branch, run it on the merge base.**
+  `a37` failed on the #173 branch, which looked like a regression; it failed
+  identically on the PR's own base and on two intermediate commits, and had
+  *passed* on that same base twenty minutes earlier. The variable was machine
+  load from a second agent compiling continuously. Load-sensitive tests make
+  both verdicts uninformative in isolation, so the base-commit run is the
+  cheapest way to tell a regression from weather — and it is much cheaper
+  than the bisect it replaces.
 - **A daemon-side fix is not deployed until the daemon is restarted from a
   tree that contains it.** #166's reporter rebuilt and saw no change: the
   running daemon had been started from a shared checkout still on a pre-fix
@@ -893,6 +1026,44 @@ final variant — its own round-trip cannot detect a discriminant shift.
   before any `FrontendEvent` touches render/size/editor state. Generalizes:
   when a new failure path can leave a handle installed without its owning
   session, dropping a handle is not the same as tearing down the connection.
+- **A guard with no production caller passes every direct-call test.**
+  #155 round 1: `EditorCore::try_split_active` implemented the side-window
+  split refusal, but `pmacs.window.split_horizontal` / `split_vertical` — and
+  therefore `C-x 2` / `C-x 3` — still called plain `split_active`. The
+  acceptance test called the core method directly, so reverting the guard
+  entirely would have left every test green. Same shape as folding #142
+  round 2. Assert through the outermost user-reachable seam
+  (`try_exec(&s, "pmacs.window.split_horizontal()")`), then falsify by
+  revert. When the test shares a file with the code it pins, `scripts/bite`
+  cannot swap it — break the production line by hand and `git checkout --`.
+- **A geometric readout is not a state predicate.**
+  `TerminalViewStatus::at_bottom` is defined as `scroll_offset == 0` — "the
+  viewport currently reaches the tail", not "this view follows the tail". A
+  still-anchored view satisfies it whenever it happens to be tall enough, so
+  asserting it could not detect that Q#BP7's growth re-arm had never been
+  implemented (#155 round 2): the next rows the child printed pushed the
+  anchored view back into history. Pinning *following* requires advancing the
+  world — feed more child output through a filesystem gate — and asserting the
+  view came along. Related: `scroll_offset` is viewport-relative, so
+  "unchanged across a height change" is vacuous or wrong; the invariant is
+  the frozen ANCHOR.
+- **A PTY in the default mode does not translate LF to CRLF.** An
+  `echo`-driven test fixture staircases rightward, and past the viewport
+  width every row clips to blanks — so `assert_eq!(top_before, top_after)`
+  compares `"" == ""` and passes for any regression (#155 round 2). Emit
+  `printf '...\r\n'`, and guard text comparisons with
+  `assert!(!observed.is_empty())` the same way the panel daemon pin guards on
+  `!panel_hidden`.
+- **Widening an ambient resolver into a scoped one can make a total function
+  partial.** #155 round 2 resolved both arms of `pmacs.window.buffer()`
+  through the acting frontend "for uniformity". `acting_frontend` follows the
+  interactive origin, which can name a frontend with no registered view (a
+  bare `dispatch_key` from an unattached peer), so the no-argument arm began
+  raising instead of answering. No runtime caller `pcall`s it, so killring,
+  syntax, autosave, pair, indent and comment silently dropped operations —
+  `kill_ring_acceptance` went 30/30 to 25/5 on every CI platform. The ambient
+  resolver's fallback is what makes it *total*; keep it, and document that as
+  deliberate. Uniformity is not free when the paths have different totality.
 - **An upgrade decision must be tracked independently of the outcome that
   triggered it.** #148 published a target's fresh `BufferSnapshot` to
   existing grid replicas only when the buffer was `newly_loaded ||

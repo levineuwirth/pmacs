@@ -668,6 +668,33 @@ pub fn config_u32(lua: &Lua, name: &str, buffer_id: Option<BufferId>, fallback: 
     }
 }
 
+/// Read a `String` setting plus the registry epoch that keys any cache
+/// built from it (Q#TC4c).
+///
+/// The epoch is returned WITH the value deliberately: a caller caching a
+/// parsed form needs both, and reading them in two calls would let a
+/// `set` land between them and produce a cache stamped with the wrong
+/// epoch. `fallback` covers a bare core whose runtime never defined the
+/// setting, matching [`config_u32`].
+#[must_use]
+pub fn config_string_and_epoch(
+    lua: &Lua,
+    name: &str,
+    buffer_id: Option<BufferId>,
+    fallback: &str,
+) -> (String, u64) {
+    let Some(registry) = lua.app_data_ref::<config::SharedConfigRegistry>() else {
+        return (fallback.to_owned(), 0);
+    };
+    let borrowed = registry.borrow();
+    let epoch = borrowed.value_epoch();
+    let value = match borrowed.get(name, buffer_id) {
+        Ok(crate::config_registry::ConfigValue::Str(v)) => v.clone(),
+        _ => fallback.to_owned(),
+    };
+    (value, epoch)
+}
+
 /// Short-circuit a binding when the init phase has completed.
 ///
 /// Lifecycle-affecting Lua APIs (currently just `pmacs.attach`; M5.6d+)
@@ -2439,6 +2466,7 @@ pub fn install(
     )?;
     pmacs.set("instance", install_instance_module(lua, registry)?)?;
     pmacs.set("ansi", install_ansi_module(lua)?)?;
+    pmacs.set("path", install_path_module(lua)?)?;
     pmacs.set("packages", install_packages_module(lua)?)?;
     pmacs.set("state", install_state_module(lua)?)?;
     pmacs.set("session", install_session_module(lua)?)?;
@@ -3553,6 +3581,46 @@ impl UserData for AnsiParserLua {
             Ok("AnsiParser".to_string())
         });
     }
+}
+
+/// Build the `pmacs.path.*` table: pure path arithmetic, no
+/// filesystem access and no editor state.
+///
+/// `canonicalize(path)` is [`crate::editor_core::normalize_buffer_path`]
+/// itself — the function the buffer registry's path keys already go
+/// through on write and that `find_buffer_for_path` looks up with. It
+/// expands a leading `~`, absolutizes against the process cwd, folds
+/// `.` / `..` lexically, and drops redundant separators (so a trailing
+/// slash disappears everywhere except at root). Symlinks are
+/// deliberately **not** resolved: dired's `..` must return where the
+/// user navigated from, and a not-yet-created "[new file]" path has
+/// nothing to resolve.
+///
+/// Exposed rather than mirrored in Lua because dired keys one buffer per
+/// directory on this form (Q#DR2). Two implementations that disagree on
+/// an edge (`//tmp`, `~` with `HOME` unset, a `..` that would escape
+/// root) would mint two buffers for one directory with no error
+/// anywhere.
+///
+/// The result crosses the boundary through `to_string_lossy`, so a
+/// non-UTF-8 `$HOME` (or a non-UTF-8 argument) can yield a Lua string
+/// that no longer names the `PathBuf` the registry keys on. That is the
+/// same limit `pmacs.fs` already documents — byte-preserving paths are
+/// post-v0.1 work that widens every path in the API — and it is recorded
+/// here so this binding is not read as an exception to it.
+fn install_path_module(lua: &Lua) -> mlua::Result<Table> {
+    let path = lua.create_table()?;
+    path.set(
+        "canonicalize",
+        lua.create_function(|_, raw: String| {
+            Ok(
+                crate::editor_core::normalize_buffer_path(std::path::PathBuf::from(raw))
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        })?,
+    )?;
+    Ok(path)
 }
 
 /// Build the `pmacs.ansi.*` table. The only entry today is
@@ -6479,6 +6547,40 @@ fn fs_dir_entry_to_lua(lua: &Lua, entry: &crate::fs::FsDirEntry) -> mlua::Result
     Ok(t)
 }
 
+/// Convert a settled `read_dir` listing to its Lua result value.
+///
+/// The shape is chosen by the listing itself (dired Q#DR6): a fatal-mode
+/// listing carries no error channel and stays the **bare array** the
+/// M8.1 surface documents --- the frozen M8.2 fixture consumes it with
+/// `ipairs` --- while a tolerant listing becomes
+/// `{ entries = { … }, errors = { { name = …?, message = … }, … } }`.
+/// Keying on the payload rather than on the job keeps the additive
+/// promise checkable in one place.
+fn fs_dir_listing_to_lua(lua: &Lua, listing: crate::fs::FsDirListing) -> mlua::Result<mlua::Value> {
+    let entries = lua.create_table_with_capacity(listing.entries.len(), 0)?;
+    for (i, entry) in listing.entries.iter().enumerate() {
+        entries.set(i + 1, fs_dir_entry_to_lua(lua, entry)?)?;
+    }
+    let Some(errors) = listing.errors else {
+        return Ok(mlua::Value::Table(entries));
+    };
+    let rows = lua.create_table_with_capacity(errors.len(), 0)?;
+    for (i, error) in errors.iter().enumerate() {
+        let row = lua.create_table_with_capacity(0, 2)?;
+        // `name` is absent for a per-entry `readdir` iterator error:
+        // the entry never materialized, so there is nothing to name.
+        if let Some(name) = &error.name {
+            row.set("name", name.as_str())?;
+        }
+        row.set("message", error.message.as_str())?;
+        rows.set(i + 1, row)?;
+    }
+    let out = lua.create_table_with_capacity(0, 2)?;
+    out.set("entries", entries)?;
+    out.set("errors", rows)?;
+    Ok(mlua::Value::Table(out))
+}
+
 fn stream_payload_to_lua(lua: &Lua, payload: StreamPayload) -> mlua::Result<mlua::Value> {
     match payload {
         StreamPayload::U64(v) => Ok(mlua::Value::Integer(i64::try_from(v).unwrap_or(i64::MAX))),
@@ -6570,9 +6672,23 @@ pub fn install_async(
         let rt = runtime.clone();
         async_mod.set(
             "_dispatch_fs_read_dir",
-            lua.create_function(move |_, (path, key): (String, Option<String>)| {
-                Ok(rt.dispatch_fs_read_dir(std::path::PathBuf::from(path), key.as_deref()))
-            })?,
+            lua.create_function(
+                move |_, (path, key, tolerant): (String, Option<String>, Option<bool>)| {
+                    // dired Q#DR6: the tolerance is decided at dispatch
+                    // and travels in the settled payload, so the result
+                    // conversion below never has to look the job back up.
+                    let tolerance = if tolerant == Some(true) {
+                        crate::fs::ReadDirTolerance::PerEntry
+                    } else {
+                        crate::fs::ReadDirTolerance::Fatal
+                    };
+                    Ok(rt.dispatch_fs_read_dir(
+                        std::path::PathBuf::from(path),
+                        tolerance,
+                        key.as_deref(),
+                    ))
+                },
+            )?,
         )?;
     }
 
@@ -6777,16 +6893,15 @@ pub fn install_async(
                             i64::try_from(duration_ms).unwrap_or(i64::MAX),
                         ));
                     }
-                    Some(JobOutcome::Complete(JobResult::ReadDir(entries))) => {
+                    Some(JobOutcome::Complete(JobResult::ReadDir(listing))) => {
                         // Lua surface for fs.read_dir settle:
                         // status "ok", value = array of per-entry
-                        // tables. T M8.1.
+                        // tables (T M8.1), or the
+                        // `{ entries = …, errors = … }` table when the
+                        // caller opted into per-entry tolerance
+                        // (dired Q#DR6).
                         out.push_back(mlua::Value::String(lua.create_string("ok")?));
-                        let t = lua.create_table_with_capacity(entries.len(), 0)?;
-                        for (i, entry) in entries.into_iter().enumerate() {
-                            t.set(i + 1, fs_dir_entry_to_lua(lua, &entry)?)?;
-                        }
-                        out.push_back(mlua::Value::Table(t));
+                        out.push_back(fs_dir_listing_to_lua(lua, listing)?);
                     }
                     Some(JobOutcome::Complete(JobResult::Stat(entry))) => {
                         // Lua surface for fs.stat settle: status
@@ -6933,9 +7048,9 @@ fn workers_snapshot_to_lua(lua: &Lua, runtime: &SharedAsyncRuntime) -> mlua::Res
                 "ok",
                 mlua::Value::Integer(i64::try_from(*duration_ms).unwrap_or(i64::MAX)),
             ),
-            JobOutcome::Complete(JobResult::ReadDir(entries)) => (
+            JobOutcome::Complete(JobResult::ReadDir(listing)) => (
                 "ok",
-                mlua::Value::Integer(i64::try_from(entries.len()).unwrap_or(i64::MAX)),
+                mlua::Value::Integer(i64::try_from(listing.entries.len()).unwrap_or(i64::MAX)),
             ),
             JobOutcome::Complete(JobResult::Stat(entry)) => {
                 ("ok", mlua::Value::String(lua.create_string(&entry.name)?))
