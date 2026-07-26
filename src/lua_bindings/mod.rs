@@ -6621,6 +6621,54 @@ pub fn install_async(
 ) -> mlua::Result<()> {
     lua.set_app_data(runtime.clone());
     let pmacs: Table = lua.globals().get("pmacs")?;
+
+    // Arc 8 Stage 3a (framing Q#LN20): the one *synchronous* filesystem
+    // primitive Lua has. `pmacs.fs` is otherwise an async, handle-
+    // returning surface built in `builtin/runtime/fs.lua`, so this
+    // arrives through a private table that file re-exports rather than
+    // joining the `_dispatch_fs_*` family it would not belong to.
+    //
+    // Installed here, alongside those dispatchers, purely for load
+    // order: `make_async_runtime` runs before `fs.lua` is evaluated,
+    // whereas `install_project` — the other plausible home — runs after
+    // it, so a canonicalizer placed there is nil when `fs.lua` reads it.
+    //
+    // Synchronous on purpose, and that is the whole point. The consumer
+    // is a function-valued `pmacs.lsp.config[lang].root`, which
+    // `project_root_for` calls from `ensure_server` <- `attach_buffer`
+    // <- the `buffer.after-load` hook — no coroutine, nothing to await
+    // on. An awaitable canonicalizer would be unusable there for exactly
+    // the reason `pmacs.fs.stat` already is, leaving #161's
+    // canonical-root obligation undischarged. The cost is one syscall on
+    // a path the editor is already opening; `pmacs.project.detect`
+    // canonicalizes synchronously on the same hook today.
+    {
+        let fs_priv = lua.create_table()?;
+        fs_priv.set(
+            "canonicalize",
+            lua.create_function(|_, path: String| {
+                // nil rather than an error for a path that cannot be
+                // resolved: asking about a deleted file or a broken
+                // symlink is ordinary, and raising would surface through
+                // `resolve_root_fn`'s pcall as a config bug, which it is
+                // not.
+                //
+                // `to_str`, NOT `display()`. A resolution that lands on
+                // non-UTF-8 bytes has no faithful string form, and
+                // `display()` would substitute U+FFFD and hand back a
+                // path that does not exist on disk — strictly worse than
+                // nil here, because this value becomes a server-affinity
+                // key via `file_uri_for` and would silently fail to
+                // round-trip. Unrepresentable is a decline, matching how
+                // the fs layer already treats non-UTF-8 symlink targets.
+                Ok(std::fs::canonicalize(&path)
+                    .ok()
+                    .and_then(|p| p.to_str().map(str::to_owned)))
+            })?,
+        )?;
+        pmacs.set("_fs", fs_priv)?;
+    }
+
     let async_mod = lua.create_table()?;
 
     {

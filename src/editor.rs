@@ -415,6 +415,18 @@ impl EditorState {
                 include_str!("../builtin/runtime/listview.lua"),
             )
             .expect("load listview builtin chunk");
+        // The typed-edit consumer chain (Arc 8 Stage 4a, Q#LN10) —
+        // ORDERING CONTRACT: typed_edit.lua must load BEFORE pair.lua,
+        // which registers a consumer into it, and therefore before
+        // lsp.lua. It owns the single `buffer.after-edit` subscriber
+        // that reads the one-shot typed-edit record, so its
+        // registration position is what preserves Q#AP7 below.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/typed_edit.lua"),
+                include_str!("../builtin/runtime/typed_edit.lua"),
+            )
+            .expect("load typed_edit builtin chunk");
         // Auto-pairing (Arc 2, Q#AP7) — ORDERING CONTRACT: pair.lua
         // must load BEFORE lsp.lua. Hook callbacks run in registration
         // order, and lsp.lua's `buffer.after-edit` callback flushes
@@ -424,6 +436,9 @@ impl EditorState {
         // the closer stays unsynchronized until the next edit (hook
         // edits don't re-fire the hook). pair.lua's `pmacs.lsp.*`
         // lookups are lazy and nil-guarded for the same reason.
+        // Since Stage 4a the closer is inserted from the chain's
+        // subscriber rather than pair.lua's own, which is registered
+        // one chunk earlier — strictly safer for this contract.
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/pair.lua"),
@@ -436,6 +451,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/lsp.lua"),
             )
             .expect("load lsp builtin chunk");
+        // Arc 8 Stage 3b: the Lean 4 language server. Loaded after
+        // lsp.lua because it registers `pmacs.lsp.config.lean4`,
+        // subscribes on the Stage 3a notification seam, and adds a
+        // `buffer.after-load` hook that must run AFTER lsp.lua's own
+        // (it reads the attachment lsp.lua creates).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/lean.lua"),
+                include_str!("../builtin/runtime/lean.lua"),
+            )
+            .expect("load lean builtin chunk");
         // Arc 1a: the in-buffer completion popup driver. Loaded after
         // lsp.lua because it drives `pmacs.lsp.request_completion` /
         // `pmacs.lsp.attachment_for_request` and after the framework
@@ -1398,9 +1424,16 @@ impl EditorState {
         frontend_id: FrontendId,
         buffer_id: crate::buffer::BufferId,
     ) -> Option<TerminalViewKey> {
+        // Bottom-panel §1.3 #6/#10/#11 — Projection. The full-window
+        // semantic terminal declaration, its snapshot/sync, and its
+        // frame suppression all describe the frontend's PRIMARY DOCUMENT
+        // surface, never a panel band: panel terminals get `PanelFrame`
+        // / `PanelPointer` in Stage 2B instead. Resolving through
+        // `view.active` would let a focused panel terminal both claim
+        // the document declaration and suppress the document pass.
         let core = self.core.borrow();
-        let view = core.views.get(&frontend_id)?;
-        let window = core.windows.get(&view.active)?;
+        let win_id = core.primary_document_window(frontend_id)?;
+        let window = core.windows.get(&win_id)?;
         if window.buffer_id != buffer_id {
             return None;
         }
@@ -1528,6 +1561,16 @@ impl EditorState {
         };
         if coord.row >= size.rows || coord.col >= size.cols {
             return false;
+        }
+        // Bottom-panel §1.3 #11 — Projection + focus. A non-hover
+        // gesture on the DOCUMENT terminal means "work here", so it
+        // takes focus back out of a panel before the gesture replays;
+        // bare hover neither focuses nor claims the controller.
+        if !matches!(kind, TerminalMouseKind::Move) {
+            let mut core = self.core.borrow_mut();
+            if let Some(win_id) = core.primary_document_window(frontend_id) {
+                core.focus_window(frontend_id, win_id);
+            }
         }
         self.core.borrow_mut().active_frontend = frontend_id;
         self.apply_terminal_gesture(key, size, coord, kind, mods, (coord.row, coord.col));
@@ -3209,6 +3252,170 @@ impl CompletionPopupKey {
     }
 }
 
+/// Scroll one window so its cursor stays visible, reckoning in
+/// **visible** lines when a fold map is supplied (Arc 6 Q#FD18).
+///
+/// Extracted from `paint_frame` for bottom-panel Stage 2 (Q#BP8): the
+/// panel band runs this for its own window when that window owns focus,
+/// against the same supplied map, and leaves a passive panel's
+/// `view_top` untouched.
+///
+/// **The fold map is a parameter, never built here (Q#BP17).** A panel
+/// painted for a frontend whose `fold_projection` is false must pass
+/// `None`; `EditorCore::fold_map_for_window` is the wrong source there
+/// because it gates on the **active** frontend, which is right for
+/// command-time reckoning and wrong for painting another frontend's
+/// panel.
+fn prepare_window_cursor_visible(
+    window: &mut crate::window::Window,
+    buf: &crate::buffer::Buffer,
+    inner_rows: u32,
+    folds: Option<&crate::fold_view::VisibleLineMap>,
+) {
+    let cursor_row = window
+        .text_view
+        .pos_to_display(buf, window.cursor)
+        .map_or(0, |d| d.row as usize);
+    match folds {
+        // The logical cursor may sit on a hidden line (a shared fold, or
+        // goto-line into one); the row that actually renders — and so
+        // the row to scroll to — is its visible head (Q#FD16/FD18,
+        // framing acceptance 8).
+        Some(map) => {
+            let anchor = map.visible_head_of(cursor_row);
+            let top = map.clamp_view_top(window.view_top);
+            window.view_top = if anchor < top {
+                anchor
+            } else if inner_rows > 0 && map.visible_rows_between(top, anchor) >= inner_rows as usize
+            {
+                map.nth_visible_back(anchor, inner_rows as usize - 1)
+            } else {
+                top
+            };
+        }
+        None => {
+            if cursor_row < window.view_top {
+                window.view_top = cursor_row;
+            } else if inner_rows > 0 && cursor_row >= window.view_top + inner_rows as usize {
+                window.view_top = cursor_row + 1 - inner_rows as usize;
+            }
+        }
+    }
+}
+
+/// Paint one window's document content: text, gutter, overlays,
+/// selection, and its mode line.
+///
+/// Extracted from `paint_frame`'s per-window loop for bottom-panel
+/// Stage 2 (Q#BP8) — the panel band paints its window into a
+/// panel-sized grid at the same origin-agnostic `Viewport`, so this is
+/// that body lifted out rather than a second painter. No concrete
+/// text/gutter/overlay/mode-line painter forks (Bet B2').
+///
+/// **`folds` is a parameter, never built here (Q#BP17).** Folding's
+/// "a semantic session never enters `paint_frame`" premise is what the
+/// panel band breaks; the panel path passes `None` when the owning
+/// frontend's `fold_projection` is false, and must not call
+/// `EditorCore::fold_map_for_window`, which gates on the **active**
+/// frontend.
+#[allow(clippy::too_many_arguments)]
+fn paint_window_content(
+    grid: &mut crate::cell::CellGrid<'_>,
+    window: &mut crate::window::Window,
+    buf: &crate::buffer::Buffer,
+    placement: WindowPlacement,
+    folds: Option<&crate::fold_view::VisibleLineMap>,
+    focused: bool,
+    theme: &crate::highlight::Theme,
+    statusline: Option<&crate::statusline::StatuslineWindowSegments>,
+    diag_store: &std::sync::Arc<std::sync::Mutex<crate::diag::DiagnosticStore>>,
+) {
+    let rect = placement.outer;
+    let inner_rows = placement.content.size.rows;
+    if let Some(map) = folds {
+        window.view_top = map.clamp_view_top(window.view_top);
+    }
+    let viewport_buffer_start = window.text_view.line_offset(window.view_top).unwrap_or(0);
+    // UX gutter (Q#UX2): reserve a left strip for line numbers and
+    // shrink+shift the text area into the remainder, so every
+    // viewport-relative painter (text, syntax, diagnostics, search)
+    // stays gutter-agnostic. A window too narrow for the gutter falls
+    // back to no gutter this frame rather than starving the text.
+    let gutter_w = {
+        let w = window.gutter_width();
+        if w >= rect.size.cols { 0 } else { w }
+    };
+    let viewport = Viewport {
+        buffer_start: viewport_buffer_start,
+        buffer_end: buf.len(),
+        cell_origin: CellCoord::new(rect.origin.row, rect.origin.col + gutter_w),
+        cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
+        gutter_w,
+        folds,
+    };
+    // Composition (T M2.9): base text_view paints first, then the
+    // gutter numbers — before the overlays, so a diagnostic overlay
+    // can draw its severity sign into the gutter's leading column
+    // without the gutter's own blank pass erasing it — then each
+    // overlay in attach order. See [`crate::view::View`].
+    window.text_view.render(buf, viewport, grid);
+    if gutter_w > 0 {
+        paint_line_number_gutter(grid, window, &rect, inner_rows, gutter_w, folds, theme);
+    }
+    for overlay in &mut window.overlays {
+        overlay.render(buf, viewport, grid);
+    }
+    paint_local_selection(grid, buf, window, &rect, inner_rows, gutter_w, folds, theme);
+    // Mode line for this window. Painted last so the line
+    // itself is always visible regardless of overlay activity.
+    let coord = window
+        .text_view
+        .pos_to_display(buf, window.cursor)
+        .unwrap_or_default();
+    // Arc 6 Stage 2 (Q#FD18): All/Top/Bot/% are reckoned in
+    // VISIBLE-line space — a buffer whose remainder is collapsed
+    // reads "All", not "Top". The cursor's ordinal anchors on its
+    // visible head, since that is the row it renders on.
+    let (ind_top, ind_total, ind_cursor) = match folds {
+        Some(map) => (
+            map.visible_rows_between(0, window.view_top),
+            map.visible_line_count(window.text_view.line_count()),
+            map.visible_rows_between(0, map.visible_head_of(coord.row as usize)),
+        ),
+        None => (
+            window.view_top,
+            window.text_view.line_count(),
+            coord.row as usize,
+        ),
+    };
+    let scroll = format_scroll_indicator(ind_top, inner_rows as usize, ind_total, ind_cursor);
+    // Lock scoped to the summary computation only: the overlay
+    // renders above include `DiagnosticView`, which takes this
+    // same mutex — holding the guard across the loop deadlocked
+    // the daemon on the first frame after a file (and thus a
+    // diagnostic overlay) was opened.
+    let diags = {
+        let guard = diag_store.lock().expect("diag store mutex poisoned");
+        diag_mode_line_summary(&guard, buf)
+    };
+    let custom = statusline;
+    paint_mode_line(
+        grid,
+        &rect,
+        buf.name(),
+        buf.is_modified(),
+        focused,
+        coord.row,
+        coord.col,
+        &scroll,
+        &diags,
+        mode_line_style(theme),
+        custom.map_or(&[], |segments| segments.left.as_slice()),
+        custom.map_or(&[], |segments| segments.right.as_slice()),
+        theme,
+    );
+}
+
 /// Paint one full frame into `grid` and return the desired terminal
 /// cursor position.
 ///
@@ -3318,6 +3525,11 @@ pub fn paint_frame(
             // Arc 6 Stage 2 (Q#FD18): the auto-scroll clamp reckons in
             // VISIBLE lines. Built from the active window itself, before
             // the mutable borrow below.
+            //
+            // Bottom-panel Q#BP17: built HERE and passed in, because the
+            // panel path (Stage 2B) must supply `None` for a frontend
+            // whose `fold_projection` is false. Building it inside the
+            // clamp would hard-wire the grid's answer.
             let folds = core
                 .windows
                 .get(&active)
@@ -3325,36 +3537,7 @@ pub fn paint_frame(
             let aw = core.windows.get_mut(&active).expect(
                 "invariant: active_window_id always references a live window in core.windows",
             );
-            let cursor_row = aw
-                .text_view
-                .pos_to_display(buf, aw.cursor)
-                .map_or(0, |d| d.row as usize);
-            match folds.as_ref() {
-                // The logical cursor may sit on a hidden line (a shared
-                // fold, or goto-line into one); the row that actually
-                // renders — and so the row to scroll to — is its visible
-                // head (Q#FD16/FD18, framing acceptance 8).
-                Some(map) => {
-                    let anchor = map.visible_head_of(cursor_row);
-                    let top = map.clamp_view_top(aw.view_top);
-                    aw.view_top = if anchor < top {
-                        anchor
-                    } else if inner_rows > 0
-                        && map.visible_rows_between(top, anchor) >= inner_rows as usize
-                    {
-                        map.nth_visible_back(anchor, inner_rows as usize - 1)
-                    } else {
-                        top
-                    };
-                }
-                None => {
-                    if cursor_row < aw.view_top {
-                        aw.view_top = cursor_row;
-                    } else if inner_rows > 0 && cursor_row >= aw.view_top + inner_rows as usize {
-                        aw.view_top = cursor_row + 1 - inner_rows as usize;
-                    }
-                }
-            }
+            prepare_window_cursor_visible(aw, buf, inner_rows, folds.as_ref());
         }
     }
 
@@ -3406,114 +3589,17 @@ pub fn paint_frame(
         let Ok(buf) = reg.get(window.buffer_id) else {
             continue;
         };
-        // Arc 6 Stage 2 (Q#FD12, round-2 F2): ONE visible-line map per
-        // rendered document window, keyed on that window's own buffer and
-        // line offsets. A split may show different buffers with only one
-        // folded, so a per-frame singleton would leak one pane's folds
-        // into the other. `None` when this buffer has no folds — the
-        // unfolded path then paints exactly as before.
         let folds = crate::fold_view::map_for_window(&state.fold_registry, window);
-        // `view_top` stays a source-line index (Bet B5) but must never
-        // rest on a hidden line: clamp BACKWARD so a fold at the top of
-        // the viewport shows its head (Q#FD18, acceptance 8).
-        if let Some(map) = folds.as_ref() {
-            window.view_top = map.clamp_view_top(window.view_top);
-        }
-        let viewport_buffer_start = window.text_view.line_offset(window.view_top).unwrap_or(0);
-        // UX gutter (Q#UX2): reserve a left strip for line numbers and
-        // shrink+shift the text area into the remainder, so every
-        // viewport-relative painter (text, syntax, diagnostics, search)
-        // stays gutter-agnostic. A window too narrow for the gutter falls
-        // back to no gutter this frame rather than starving the text.
-        let gutter_w = {
-            let w = window.gutter_width();
-            if w >= rect.size.cols { 0 } else { w }
-        };
-        let viewport = Viewport {
-            buffer_start: viewport_buffer_start,
-            buffer_end: buf.len(),
-            cell_origin: CellCoord::new(rect.origin.row, rect.origin.col + gutter_w),
-            cell_size: crate::cell::CellSize::new(inner_rows, rect.size.cols - gutter_w),
-            gutter_w,
-            folds: folds.as_ref(),
-        };
-        // Composition (T M2.9): base text_view paints first, then the
-        // gutter numbers — before the overlays, so a diagnostic overlay
-        // can draw its severity sign into the gutter's leading column
-        // without the gutter's own blank pass erasing it — then each
-        // overlay in attach order. See [`crate::view::View`].
-        window.text_view.render(buf, viewport, grid);
-        if gutter_w > 0 {
-            paint_line_number_gutter(
-                grid,
-                window,
-                &rect,
-                inner_rows,
-                gutter_w,
-                folds.as_ref(),
-                &theme,
-            );
-        }
-        for overlay in &mut window.overlays {
-            overlay.render(buf, viewport, grid);
-        }
-        paint_local_selection(
+        paint_window_content(
             grid,
-            buf,
             window,
-            &rect,
-            inner_rows,
-            gutter_w,
+            buf,
+            placement,
             folds.as_ref(),
-            &theme,
-        );
-        // Mode line for this window. Painted last so the line
-        // itself is always visible regardless of overlay activity.
-        let coord = window
-            .text_view
-            .pos_to_display(buf, window.cursor)
-            .unwrap_or_default();
-        // Arc 6 Stage 2 (Q#FD18): All/Top/Bot/% are reckoned in
-        // VISIBLE-line space — a buffer whose remainder is collapsed
-        // reads "All", not "Top". The cursor's ordinal anchors on its
-        // visible head, since that is the row it renders on.
-        let (ind_top, ind_total, ind_cursor) = match folds.as_ref() {
-            Some(map) => (
-                map.visible_rows_between(0, window.view_top),
-                map.visible_line_count(window.text_view.line_count()),
-                map.visible_rows_between(0, map.visible_head_of(coord.row as usize)),
-            ),
-            None => (
-                window.view_top,
-                window.text_view.line_count(),
-                coord.row as usize,
-            ),
-        };
-        let scroll = format_scroll_indicator(ind_top, inner_rows as usize, ind_total, ind_cursor);
-        // Lock scoped to the summary computation only: the overlay
-        // renders above include `DiagnosticView`, which takes this
-        // same mutex — holding the guard across the loop deadlocked
-        // the daemon on the first frame after a file (and thus a
-        // diagnostic overlay) was opened.
-        let diags = {
-            let guard = diag_store.lock().expect("diag store mutex poisoned");
-            diag_mode_line_summary(&guard, buf)
-        };
-        let custom = statusline_by_window.get(id);
-        paint_mode_line(
-            grid,
-            &rect,
-            buf.name(),
-            buf.is_modified(),
             *id == active,
-            coord.row,
-            coord.col,
-            &scroll,
-            &diags,
-            mode_line_style(&theme),
-            custom.map_or(&[], |segments| segments.left.as_slice()),
-            custom.map_or(&[], |segments| segments.right.as_slice()),
             &theme,
+            statusline_by_window.get(id),
+            &diag_store,
         );
     }
     drop(reg);
