@@ -1543,6 +1543,24 @@ What remains deferred:
   which events may be dropped, which is a policy question with
   user-visible consequences for diagnostics and progress; Stage 3a states
   the seam's contract around the behavior rather than changing it.
+- **`LspManager::stop` on an already-terminal server strands it.** The
+  not-initialized branch terminates the (already-dead) process and sets
+  `ShuttingDown { shutdown_request_id: None }` on the premise that "the
+  next exit observation cleans up" — but for a `Crashed` client the exit
+  has already been observed, which is what produced that state. No
+  further event arrives, so the client sits in `ShuttingDown`
+  permanently: `server_is_live` counts it as live (neither crashed nor
+  stopped), so `attach_buffer` never rebuilds against it, and
+  `LspManager::forget` refuses it for not being terminal. **Stopping a
+  dead server is what makes it un-replaceable.** Found implementing
+  Stage 3b's latch, which works around it by dispatching on state:
+  `forget` for a terminal server (it requires terminal state, and
+  removing the client also drops the `next_restart_at` the crash armed),
+  `stop` for a live one. Merely *skipping* the call is not enough — that
+  leaves the restart timer running and the broken command respawns
+  underneath the fallback. The fix belongs in `stop` (treat an
+  already-terminal client as a no-op, or drive it straight to `Stopped`)
+  and changes behavior for every language, so it does not ride a Lean PR.
 - **Forwarding `cfg.restart` through `ensure_server`** — read by
   `lua_to_lsp_spec`, never set by the spawn table, so silently dropped on
   every auto-attach (found landing #161). Fixing it changes behavior for
@@ -1722,9 +1740,13 @@ the blast radius.
   channel a user can actually observe; a report added through
   `pmacs.error` alone must fail this.
 - **37.** `textDocument/waitForDiagnostics` resolves through the response seam
-  (Q#LN16). **PATH-and-success-gated live smoke:** if `lake serve`
-  starts successfully a real elaboration completes and diagnostics
-  arrive; skipped otherwise, never failed.
+  (Q#LN16), **carrying both `uri` and `version`** — Lean's
+  `WaitForDiagnosticsParams` requires the document version, and a fake
+  server that echoes any payload will hide its absence, so the fixture
+  must reject a request that omits it.
+  **PATH-and-success-gated live smoke:** if `lake serve` starts
+  successfully a real elaboration completes and diagnostics arrive;
+  skipped otherwise, never failed.
 
 These two sections are bulleted with explicit labels rather than
 numbered, because the split leaves each stage's criteria non-contiguous

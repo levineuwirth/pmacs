@@ -55,7 +55,7 @@ git status --short --branch
 The `git log` command must expose `d152120` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Lean 4 lane (Arc 8) — Stages 1+2 MERGED; Stage 3a IN REVIEW
+## Lean 4 lane (Arc 8) — Stages 1+2 MERGED; 3a IN REVIEW (#167); 3b STACKED
 
 - Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
   round, all twelve checks green). Branch `githubsucks/lean4-stage1`
@@ -252,6 +252,216 @@ If it does not, stop and repair the remote/fetch configuration.
      ("Illegal byte sequence") before the code under test is reached.
      `#[cfg(unix)]` is NOT sufficient for such a fixture —
      `#[cfg(target_os = "linux")]` is. Cost one red CI round to learn.
+
+### Stage 3b — the Lean language server (branch `lean4-stage3b-server`)
+
+- Same worktree `../pmacs-lean-stage3`, **branched off
+  `lean4-stage3a-seams`, not off `main`** — 3b consumes 3a's response
+  seam and `pmacs.fs.canonicalize`, so it is strictly sequential.
+  **Retarget PR #170 to `main` BEFORE merging #167, not after** — the
+  kill-ring lesson exactly. (Round 1 of this ledger entry stated the
+  reverse in its first sentence and the correct rule in the next; the
+  review caught it. A safety rule written twice with opposite senses is
+  worse than not written.)
+- Ships `builtin/runtime/lean.lua` (new), one `include_str!` line in
+  `src/editor.rs`, `pmacs.lsp._attach_buffer` exported from `lsp.lua`,
+  a `leanprogress` mode plus `waitForDiagnostics` validation on
+  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (40 tests).
+  No protocol change.
+- **Stage 1's acceptance 12 is half superseded and was rewritten, not
+  deleted.** It asserted `pmacs.lsp.config.lean4 == nil` to catch a
+  Stage-3 front-run; 3b is that stage. What survives is the restraint
+  half — constructing an editor spawns nothing though the config now
+  names `lake`, and opening a Lean buffer with no server configured
+  spawns nothing — which is what holds Q#LN7's "not at init" promise.
+- **The marker test is wrong in two opposite directions if done naively**
+  and both are pinned: `io.open` SUCCEEDS on a directory (so truthiness
+  accepts a `lean-toolchain` dir), but requiring a non-nil read rejects
+  an EMPTY `lean-toolchain` (a legitimate marker — existence semantics,
+  not content). Discriminator is `read`'s SECOND return; decline only on
+  a non-nil err. Probed on LuaJIT 2.1.
+- **Fifteen bites recorded, each against the committed tree.** R1: bare
+  `io.open` → 24a fails / 24b passes; require-non-nil → 24b fails / 24a
+  passes; no canonicalization → symlinked open spawns two servers; no
+  re-attach after the swap → three latch tests fail; hook keyed on the
+  attachment → the missing-`lake` case fails; `waitForDiagnostics`
+  without `version` → acc37 fails with InvalidParams. R2: skip retiring
+  a terminal server → `attempt` reaches 3; no originating-buffer gate →
+  the Lean buffer is left on the `lake` stub; retry-forever → the
+  failing-fallback test fails; version-probe any command → the
+  working-wrapper test fails; no disabled guard → the unconfigured test
+  sees "`nil` could not be started". R3: verdict keyed on `watching` →
+  the late-verdict test finds the buffer still on `lake`; `buf_key`
+  rewritten per load → the second-buffer test fails; hardcoded
+  `lake serve` → the wrapper-naming test fails.
+- **Round-2 review: three more P1 lifecycle defects, suite 20/20 with
+  all of them live.** (1) The crashed primary respawned forever —
+  skipping the retire call avoided corrupting terminal servers but left
+  `next_restart_at` armed. **`forget` is the call for a TERMINAL server**
+  (it requires terminal state and removes the client, dropping the
+  restart timer); `stop` is for a live one and corrupts a terminal one.
+  (2) Re-attachment targeted whatever buffer was active when the async
+  verdict landed; an unrelated Rust attachment satisfied "a different
+  server id". (3) A failing fallback retried every tick forever, silent.
+  Plus two P2s: the Lake version parser was applied to arbitrary wrapper
+  output, and an UNCONFIGURED `config.lean4` was reported as failure and
+  latched, poisoning the session.
+- **Round-3 review: two more P1s, both asynchronous correlation, suite
+  25/25.** (a) `probe.watching` is cleared when the server initializes,
+  so a SLOW version verdict arrived with nil and retired nothing —
+  `_attach_buffer` returned the still-live primary and the retry called
+  it success, so status and config said "fell back" while the buffer
+  stayed put. **That is the round-1 silent no-op reached through a third
+  event ordering.** `probe.primary` is now separate from
+  `probe.watching` and survives initialization. (b) `buf_key` was
+  rewritten on every Lean `after-load`, so a second Lean buffer opened
+  before the verdict became the rebuild target while the latch still
+  watched the first buffer's server. Target buffer and primary server
+  are one fact and are now armed together, once. Plus a P2: the failure
+  message hardcoded `lake serve` after the latch became
+  command-agnostic, sending wrapper users to debug the wrong binary.
+- **Round-4 review: one P1, and it is the same defect a FOURTH time.**
+  `pmacs.lsp.config.lean4` is a single global entry, so swapping its
+  command invalidates **every** Lean buffer and **every** Lean server —
+  Q#LN15 gives one per project root. Rounds 1–3 each fixed the repair
+  for one buffer and one server; round 4 is "repair the armed target,
+  strand the rest". The shape that finally holds: retire ALL `lean4`
+  servers on latch, and repair each buffer **lazily and at most once**
+  when it becomes active (`buffer.after-switch` + the tick), because
+  `_attach_buffer` is active-buffer-only and cannot reach the others.
+  The per-buffer once-only bound is what stops a failing fallback
+  retrying forever — the round-2 defect a naive global repair loop would
+  have reintroduced for every buffer instead of one. Plus a P2: the
+  argument-inclusive attribution was implemented but pinned only by
+  "contains the command name", so a mutation dropping every argument
+  still passed.
+- **Round-5 review: one P1 plus a frontend scope hole, and four more.**
+  (1) A fallback that SPAWNS and then dies retried forever: the
+  once-per-buffer guard bounds `_attach_buffer`, not the server it
+  produced, and `ensure_server` never forwards `cfg.restart` so the
+  fallback inherits `OnCrash` — respawned by the manager with no
+  ceiling, silently, because `latched` had disabled the primary's poll.
+  The fallback now gets its own one-shot die-before-initialize watch.
+  (2) **Simultaneous frontends**: both repair triggers read the ambient
+  `pmacs.window.buffer()`, and the daemon restores `active_frontend` to
+  the last-dispatched one before `tick_processes`, so a Lean buffer
+  active in ANOTHER frontend gets no `after-switch` and stays stale.
+  Fixed at the right seam — **make CONSUMPTION safe**: both
+  `attached_for_active` and `attachment_for_request` now refuse a record
+  whose server is dead (the former rebuilds, the latter reports none,
+  since it must not perturb LSP state). Healing at the point of use is
+  frontend-agnostic, because whichever frontend runs a command is active
+  while it runs. (3) The retirement sweep selected on `language_id`, so
+  it stopped USER-spawned Lean servers too; it now keys on the
+  `default-lean4` label `ensure_server` stamps, which is the derivation
+  discriminator. (4) `probe.latched` gated repair even when NO swap
+  occurred, so an already-fallback config was retried and misreported.
+  Split out `probe.fallback_installed`. (5) The once-per-buffer
+  assertion counted TABLE KEYS, which cannot distinguish "once per
+  buffer" from "every tick for one buffer" — cardinality stays 1 either
+  way. Now a numeric attempt counter; the bite shows **174 vs 1**.
+- **Round-6 review: four P1s and one P2, suite 40/40.** (1) General
+  point-of-use healing treated a crashed OnCrash server as absent and
+  spawned beside it while its old id still had `next_restart_at` armed;
+  `attach_buffer` now forgets a terminal record before replacement.
+  `attachment_for_request` remains non-attaching and preserves the
+  record, so a same-id restart can recover instead of being orphaned.
+  (2) The fallback watch was scalar, while Q#LN15 permits simultaneous
+  per-root servers and lsp.lua can create them without passing through
+  Lean's repair function. Watches are now per-SID and discover every
+  config-driven Lean server from a private origin table. (3) The shipped
+  `lean.wait-for-diagnostics` command bypassed both safe resolvers and
+  still consumed a stopped record; it now uses a command-safe resolver,
+  waits asynchronously for a healed replacement to initialize, and the
+  test requires the real request to finish. (4) When no config swap
+  occurred, one failed root still swept a healthy root; that arm now
+  retires only the SID whose verdict fired. (5) `label` is public and
+  unreserved, therefore not ownership. lsp.lua records successful
+  config-driven spawns privately, and every Lean lifecycle decision keys
+  on that origin fact; the user-server pin deliberately collides on
+  `default-lean4`. All five bites against `19f48d4` discriminate: the
+  old files produce 2 same-root servers, a fallback attempt of 4, a
+  shipped command still targeting `stopped`, retirement of the healthy
+  root, and retirement of the colliding user server, respectively.
+- **DURABLE LESSON — "the test that passes" vs "the test that
+  discriminates."** Green tests across six rounds repeatedly pinned only
+  a nearby helper or an absence, and only biting exposed it. **Carry this
+  to `docs/agent-handoff.md` when the lane lands.** The concrete shapes,
+  all from this branch:
+  1. R1 acceptance 36 asserted "every server is terminal" — pinning the
+     ABSENCE of the fallback it claimed to test.
+  2. "No live non-fallback server" misses a respawn loop: a respawning
+     server sits in `crashed` most of the time. `attempt` counts
+     respawns; liveness does not.
+  3. Returning to a buffer via `find_or_open` re-fires
+     `buffer.after-load`, which repairs the attachment regardless of the
+     code under test. Use `switch_buffer`.
+  4. A MISSING executable fails synchronously inside `after-load`, where
+     the rebuild happens inline — no async race can occur. Only the
+     probe path exercises asynchronous ordering.
+  5. A mutation that RAISES (indexing a nil config) is swallowed by the
+     hook's pcall, so the bite "passes" for the wrong reason. A bite must
+     reproduce the original shape, not merely break the code.
+  6. A fixture whose `serve` sleeps can never let the primary initialize
+     first, so it cannot reach the ordering where a late verdict must
+     retire a LIVE server.
+  7. Asserting on a field that no longer exists (`_probe.reattach_from`
+     after a refactor) reads as nil and passes for nothing. Assert
+     positive facts — a count, a command string — not absences.
+  8. Counting DISTINCT KEYS cannot bound REPEATED WORK: a per-tick retry
+     on one buffer keeps `#repaired == 1` forever. Count the attempts,
+     not the things attempted against (bite: 174 vs 1).
+  9. A NONEXISTENT executable only exercises synchronous ENOENT. To
+     reach "spawned, then died", the fixture must actually spawn.
+  10. Calling the two SAFE HELPERS directly does not pin a shipped
+      command that bypasses both. Drive the command registry entry and
+      require its terminal result — replacing a dead record with a
+      `starting` server is still not success if the request is issued
+      before initialize.
+  Rule: **a test is not evidence until the mutation it targets has been
+  shown to fail it.**
+- **SECOND DURABLE LESSON — a scope error repeats until the scope is
+  named.** The "fallback silently does not happen" defect came back four
+  times: no re-attach; re-attach cleared by an unrelated buffer;
+  re-attach satisfied by the server being replaced; re-attach of one
+  buffer while the others stay stale. Every fix was locally correct and
+  none asked *what does this config swap invalidate?* — the answer being
+  every Lean buffer and every Lean server, because the config entry is
+  global and servers are per-root. **When a change edits shared state,
+  enumerate everything derived from it before repairing anything.**
+- **SUBSTRATE BUG FOUND, not fixed here (framing §6).**
+  `LspManager::stop` on an ALREADY-terminal server takes its
+  not-initialized branch, terminates the dead process and sets
+  `ShuttingDown { .. None }` on the premise that "the next exit
+  observation cleans up" — but the exit already happened, which is what
+  made it `Crashed`. No further event arrives, so the client is stuck in
+  `ShuttingDown` **forever**: `server_is_live` reads it as LIVE, so
+  `attach_buffer` never rebuilds, and `forget` refuses it for not being
+  terminal. **Stopping a dead server is what makes it un-replaceable.**
+  Lean works around it by dispatching on state: `forget` when
+  terminal, `stop` when live. Merely SKIPPING the call is not
+  enough — that leaves `next_restart_at` armed.
+- Round-1 review found four P1s, all real: the latch swapped the config
+  but never spawned or re-attached (and acc36 *asserted every server was
+  terminal*, pinning the absence of the fallback); a missing `lake`
+  bypassed probe and latch entirely because the hook keyed on an
+  attachment that ENOENT prevents; `waitForDiagnostics` omitted the
+  `version` Lean requires; and the ledger stated the dangerous stacking
+  order.
+- The probe's non-zero exit is deliberately NOT a fallback trigger —
+  §2.9's elan shim makes `lake --version` fail where `lake serve` still
+  works. Only a parseable version below 3.1.0 triggers it; the
+  server-failure latch covers the rest.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,829 default + 2,003 CRDT library tests;
+  lean4 server 40/40; lean4 stage 1 9/9; dispatch seams 15/15;
+  multi-root 13/13; M4 121; required GPU 155; **isolated-config
+  serial workspace sweep 3,229 across 94 suites, zero failures**;
+  `git diff --check` clean. (Round 1 of
+  this entry recorded 17/17 and 3,206 — the PRE-fix counts — after the
+  fixes were pushed. The ledger's protocol is that verification
+  describes the pushed tree; recording it late is the #161 fmt-blocker
+  error in a slower form.)
 
 ## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)
 

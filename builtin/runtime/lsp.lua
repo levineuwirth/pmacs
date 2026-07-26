@@ -607,6 +607,12 @@ local function project_root_for(language, path)
   return dir_of(path), "fallback"
 end
 
+-- Servers created by the automatic config-driven path. This is the
+-- ownership fact a caller-supplied `label` cannot provide: labels are
+-- public, unreserved display strings, while entries here are written
+-- only after this module itself successfully spawns a server.
+local default_servers = {}
+
 local function ensure_server(language, path)
   local cfg = pmacs.lsp.config[language]
   if not cfg or not cfg.command then return nil end
@@ -660,7 +666,30 @@ local function ensure_server(language, path)
     cwd = root,
     root_uri = key_uri,
   })
-  if ok then return sid end
+  if ok then
+    default_servers[tostring(sid)] = language
+    return sid
+  end
+  return nil
+end
+
+-- Internal ownership seam for builtins whose lifecycle follows the
+-- config-driven server set (currently Lean's one-shot fallback). A
+-- user-managed server may deliberately use the same language id, label,
+-- command, and root; none of those make it ours.
+function pmacs.lsp._is_default_server(sid, language)
+  local owned_language = default_servers[tostring(sid)]
+  return owned_language ~= nil
+    and (language == nil or owned_language == language)
+end
+
+local function server_state_kind(sid)
+  if not sid then return nil end
+  for _, info in ipairs(pmacs.lsp.list()) do
+    if tostring(info.id) == tostring(sid) then
+      return info.state and info.state.kind
+    end
+  end
   return nil
 end
 
@@ -669,14 +698,8 @@ end
 -- forgotten, or was spawned against a now-replaced `pmacs.lsp.config`
 -- entry — get rebuilt on the next attach attempt.
 local function server_is_live(sid)
-  if not sid then return false end
-  for _, info in ipairs(pmacs.lsp.list()) do
-    if tostring(info.id) == tostring(sid) then
-      local kind = info.state and info.state.kind
-      return kind ~= "crashed" and kind ~= "stopped"
-    end
-  end
-  return false
+  local kind = server_state_kind(sid)
+  return kind ~= nil and kind ~= "crashed" and kind ~= "stopped"
 end
 
 local function server_is_initialized(sid)
@@ -811,6 +834,15 @@ local function attach_buffer(buf)
   local existing = attachments[key]
   if existing and server_is_live(existing.server) then return existing end
   if existing then
+    local kind = server_state_kind(existing.server)
+    if kind == "crashed" or kind == "stopped" then
+      -- A terminal OnCrash client may still have `next_restart_at`
+      -- armed. Spawning beside it creates two same-root servers when
+      -- the old id restarts. `forget` is the terminal-state operation:
+      -- it removes the client and cancels that pending restart before
+      -- the replacement is created.
+      pcall(pmacs.lsp.forget, existing.server)
+    end
     attachments[key] = nil
     -- Unsent edits targeted the dead attachment; the did_open below
     -- carries the full current text, superseding them.
@@ -871,6 +903,21 @@ local function attached_for_active()
   if not buf then return nil end
   local key = tostring(buf)
   local rec = attachments[key]
+  -- A record whose server is dead is worse than no record: every
+  -- command below issues requests against it and gets silence. Rebuild
+  -- instead, which is what `attach_buffer` does for a stale attachment
+  -- anyway — this just stops the dead record short-circuiting that.
+  --
+  -- Load-bearing for anything that retires a server out from under open
+  -- buffers (Arc 8 Stage 3b's fallback latch retires every Lean server
+  -- at once). Buffers in OTHER frontends get no `buffer.after-switch`
+  -- in this one, so an eager repair sweep keyed on the ambient active
+  -- buffer cannot reach them; healing at the point of USE is
+  -- frontend-agnostic, because whichever frontend runs the command is
+  -- the active one while it runs.
+  if rec and not server_is_live(rec.server) then
+    rec = nil
+  end
   if rec then
     -- Every interactive command resolves its attachment here before
     -- issuing requests; flushing now means the server answers those
@@ -879,6 +926,14 @@ local function attached_for_active()
     return rec
   end
   return attach_buffer(buf)
+end
+
+-- Internal command-path resolver for builtin request producers outside
+-- this module. Unlike `active_attachment` it may replace a dead record;
+-- unlike `attachment_for_request` it is called only from an explicit
+-- user command, where attach-on-use is the intended policy.
+function pmacs.lsp._attachment_for_command()
+  return attached_for_active()
 end
 
 -- Pure, side-effect-free attachment lookup for the active buffer:
@@ -891,6 +946,24 @@ function pmacs.lsp.active_attachment()
   local buf = pmacs.window.buffer()
   if not buf then return nil end
   return attachments[tostring(buf)]
+end
+
+-- Re-run the attach for the ACTIVE buffer, rebuilding it against the
+-- current `pmacs.lsp.config`.
+--
+-- Exists for the Arc 8 Stage 3b fallback latch (Q#LN7): after that latch
+-- stops a server that failed to start and rewrites `config.lean4`,
+-- something has to actually spawn the replacement and re-point the
+-- buffer at it. Nothing else does — `attach_buffer` early-returns for a
+-- live attachment, and no hook re-fires on a config change, so without
+-- this the buffer stays bound to the stopped server and the "fallback"
+-- is a config edit with no effect.
+--
+-- Deliberately keyed on the active buffer, matching `attach_buffer`'s
+-- own use of `active_buffer_path()`; it is not a general re-attach for
+-- arbitrary buffers and must not be used as one.
+function pmacs.lsp._attach_buffer()
+  return attach_buffer(pmacs.window.buffer())
 end
 
 -- Arc 4 stage 3: pure modeline projection.  This reads the private
@@ -924,6 +997,19 @@ function pmacs.lsp.attachment_for_request()
   local key = tostring(buf)
   local rec = attachments[key]
   if not rec then return nil end
+  -- Same liveness rule as `attached_for_active`: a record naming a dead
+  -- server is worse than none, because the caller issues a request
+  -- against it and waits for a reply that cannot come. Unlike that
+  -- function this one is deliberately non-attaching (it must not
+  -- perturb LSP state), so a dead record reads as "no attachment"
+  -- rather than triggering a rebuild.
+  if not server_is_live(rec.server) then
+    -- Preserve the record. A crashed OnCrash server may restart under
+    -- the SAME id; clearing the map here would orphan that recovered
+    -- server, while this non-attaching lookup has no authority to
+    -- cancel the restart or create a replacement.
+    return nil
+  end
   flush_did_change(key)
   return rec
 end
