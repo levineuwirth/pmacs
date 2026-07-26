@@ -143,7 +143,11 @@ commands, read `docs/active-work.md` immediately after this file.
     owning which fan-out it belongs to**: these fan-outs NEST, so a
     consumer between the expander and pairing that calls
     `pmacs.hook.run` re-enters the deferred subscriber while the outer
-    chain is still mid-list. Its other durable facts:
+    chain is still mid-list, and the count that recognises this has to
+    come from a MINIMUM-PRIORITY consumer — the expander is optional
+    (a claim can stop the chain first) and a subscriber beside the
+    deferred one is too late (the nested fan-out finishes inside the
+    outer chain's subscriber). Its other durable facts:
     the table must stay an ORDERED SEQUENCE (equal-length ties resolve
     by source declaration order, which a `pairs`-iterated map cannot
     express); a generator round-trip check must re-read the BYTES ON

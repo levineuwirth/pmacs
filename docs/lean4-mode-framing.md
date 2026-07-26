@@ -46,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial. Current revision: **11**.
+Revision 1 — initial. Current revision: **12**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -586,6 +586,26 @@ One P1 in the round-10 fix, and one stale comment.
    said the expansion replaces the span "INCLUDING the terminator",
    which round 10 deliberately stopped doing. The behaviour it asserts
    was correct; only the explanation was stale.
+
+### Round 12 (rev 11 → rev 12)
+
+One P1: round 11's counter was in the wrong place.
+
+1. **The nesting count lived in the expander, which is optional.** A
+   consumer at a lower priority can claim and stop the chain before the
+   expander runs, while that fan-out's deferred-expansion subscriber
+   still runs — so the nested pass went uncounted, looked like the
+   outermost one, expanded early, and outer pairing resumed with an
+   invalidated record. `\alp(` gave `α(` again. The count now comes
+   from a no-op consumer at the minimum priority, which runs first in
+   every chain invocation that reaches any consumer; acceptance 45o
+   pins the short-circuit path that 45n does not reach.
+
+The pattern across rounds 10–12 is worth naming: each fix was correct
+about the failure it was shown and wrong about the boundary of the
+mechanism it relied on — the chain's copy semantics, then its
+re-entrancy, then its short-circuit. **A queue that outlives the thing
+that filled it needs to name that thing, not approximate it.**
 
 ## 1. What ships
 
@@ -1815,11 +1835,27 @@ performed the expansion would reproduce the exact bug deferring exists
 to fix, reached through the chain's documented re-entrancy seam instead
 of through claiming.
 
-The chain's subscriber and the expander's subscriber each run exactly
-once per fan-out, in that order, so counting invocations of the first
-and matching them off in the second identifies the nesting level — no
-new seam in typed_edit.lua, which is merged substrate. Only the
-outermost pass expands; a nested one leaves the expansion queued.
+The nesting level is counted by a **no-op consumer registered at the
+minimum priority**, matched off in the expander's subscriber. Only the
+outermost pass expands; a nested one leaves the expansion queued. No
+new seam in typed_edit.lua, which is merged substrate.
+
+Where the count lives is the whole difficulty, and two plausible places
+are both wrong (round 12):
+
+- **A subscriber registered beside the expander's is too late.** The
+  entire nested fan-out completes inside the OUTER chain's subscriber,
+  before any subscriber registered after it runs.
+- **The expander itself is optional.** A lower-priority consumer may
+  claim and stop the chain before the expander is reached, so a nested
+  pass would go uncounted while its `run_deferred` still ran — and
+  would then look like the outermost one.
+
+A minimum-priority consumer runs first in every chain invocation that
+reaches any consumer at all. Its guarantee is exactly the ordering
+contract the chain already rests on, and it degrades safely: the only
+thing that can skip it is a claim ahead of it, which skips the expander
+too, so nothing is queued in that fan-out either.
 
 Two guards this exposes, both of which pairing already carries:
 
@@ -2736,6 +2772,14 @@ criterion 46 requires to stay byte-identical.
     outer chain would then hand pairing a record the replace had
     invalidated — the round-10 failure again, through the chain's
     documented re-entrancy seam rather than through claiming.
+45o. **A nested fan-out that never reaches the expander must not
+    expand early either** (round 12). Same shape as 45n, but the nested
+    pass is short-circuited by a consumer at priority 25 that claims
+    when the record is nil — so the expander never runs on it. Bites
+    against counting fan-outs in the expander, which is optional by
+    construction: the uncounted nested pass looks outermost, expands,
+    and outer pairing resumes with an invalidated record. 45n passes
+    against that bug, which is why both are pinned.
 45h. **Tie-break by source order (§2.11).** `\f` + space yields `‹` —
     `f<` and `f>` are both length 2, and `f<` is declared first. Same
     for `\"` + space → `Ä`, first of eleven equal-length candidates.
@@ -2890,7 +2934,7 @@ uncapped event queue, the dropped `cfg.restart`, and — unchanged from
 languages other than Lean, and §4's rule is what keeps them out of a Lean
 PR.
 
-### 9.1 Coherence impact — stages 4a and 4b (rev 11)
+### 9.1 Coherence impact — stages 4a and 4b (rev 12)
 
 **Sections served.** §6 (interaction islands) primarily, and in the
 *preventing* direction rather than the fixing one — see below. §11

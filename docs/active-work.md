@@ -175,8 +175,8 @@ If it does not, stop and repair the remote/fetch configuration.
 
 ### Stage 4b — the Unicode input method (branch `lean4-stage4b-input-method`)
 
-- Framing `docs/lean4-mode-framing.md` **revision 11** (rounds 10 and
-  11 = review of the implementation). Stage
+- Framing `docs/lean4-mode-framing.md` **revision 12** (rounds 10, 11
+  and 12 = review of the implementation). Stage
   4a (the typed-edit consumer chain) MERGED as #179; this branch is 4b,
   the Lean content that registers on it.
 - Footprint: `scripts/regen-lean-abbrev` (new, the generator),
@@ -184,7 +184,7 @@ If it does not, stop and repair the remote/fetch configuration.
   from `leanprover/vscode-lean4@17d1d08`, Apache-2.0),
   `builtin/runtime/lean_input.lua` (new, the consumer at priority 50),
   `src/editor.rs` (two `include_str!` blocks),
-  `tests/lean_input_acceptance.rs` (new, 30 tests), and one
+  `tests/lean_input_acceptance.rs` (new, 31 tests), and one
   `#[cfg(feature = "crdt")]` `--lib` test in `src/daemon.rs`
   (acceptance 45f). No protocol change (Q#LN14). Entirely Lua apart
   from the load sites and that one test.
@@ -247,6 +247,7 @@ If it does not, stop and repair the remote/fetch configuration.
   | load lean_input.lua after lsp.lua | 1 |
   | let a nested fan-out consume the deferred slot | 1 |
   | stop counting chain invocations | 1 |
+  | count fan-outs in the expander instead of the sentinel | 1 |
 
   Acceptance 45f bit by construction: without a registered window for
   the source frontend it ran six fan-outs with a nil record and proved
@@ -278,6 +279,23 @@ If it does not, stop and repair the remote/fetch configuration.
   subscriber and the expander's each run exactly once per fan-out, so
   counting the first and matching it off in the second identifies the
   nesting level with no new seam in merged Stage 4a substrate.
+- **Round 12 found round 11's counter in the wrong place.** It counted
+  invocations of the EXPANDER, which is optional: a lower-priority
+  consumer can claim and stop the chain before the expander runs, while
+  that fan-out's deferred subscriber still runs — so the nested pass
+  went uncounted, looked outermost, expanded early, and outer pairing
+  resumed with an invalidated record. The count now comes from a no-op
+  consumer at the MINIMUM priority, which runs first in every chain
+  invocation that reaches any consumer, and degrades safely: the only
+  thing that can skip it is a claim ahead of it, which skips the
+  expander too. A subscriber registered beside `run_deferred` cannot
+  serve — the whole nested fan-out completes inside the outer chain's
+  subscriber, before it would run.
+- **Rounds 10–12 share a shape worth naming.** Each fix was correct
+  about the failure it was shown and wrong about the boundary of the
+  mechanism it leaned on — first the chain's copy semantics, then its
+  re-entrancy, then its short-circuit. **A queue that outlives the
+  thing that filled it has to name that thing, not approximate it.**
 - Undo is cross-peer-degraded on CRDT frontends and that is ACCEPTED,
   named in the module header (Q#LN21): six source-peer optimistic
   inserts replaced by one daemon-peer op. `set_round_trip_input` would

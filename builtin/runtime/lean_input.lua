@@ -229,7 +229,7 @@ end
 -- The consumer
 -- ---------------------------------------------------------------------
 
--- Chain-consumer invocations not yet matched by a `run_deferred`.
+-- Chain invocations not yet matched by a `run_deferred`.
 --
 -- `buffer.after-edit` fan-outs NEST: the typed-edit contract explicitly
 -- supports a consumer calling `pmacs.hook.run("buffer.after-edit")`,
@@ -240,15 +240,29 @@ end
 -- bug deferring exists to fix: pairing resumes afterwards holding a
 -- record the replace has invalidated, declines, and the closer is lost.
 --
--- The chain's subscriber and this module's subscriber run exactly once
--- each per fan-out, in that order, so counting invocations of the first
--- and matching them off in the second identifies the nesting level
--- without any new seam in typed_edit.lua. Only the outermost pass
--- performs the expansion; a nested one leaves it queued.
+-- Counting has to happen INSIDE the chain and BEFORE any consumer that
+-- might start a nested fan-out. A subscriber registered alongside
+-- `run_deferred` is too late — the whole nested fan-out completes
+-- inside the outer chain's subscriber, before either of them runs. And
+-- counting in the expander itself is not enough: a lower-priority
+-- consumer may CLAIM and stop the chain before the expander is
+-- reached, so a nested pass would go uncounted while its
+-- `run_deferred` still ran (round 11's fix, round 12's defect).
+--
+-- Hence a separate no-op consumer at the minimum priority, which runs
+-- first in every chain invocation that reaches any consumer at all.
+-- Its guarantee is exactly the ordering contract the chain already
+-- rests on, and it degrades safely: the only thing that can skip it is
+-- a claim ahead of it, which skips the expander too, so nothing is
+-- queued in that fan-out either.
 local depth = 0
 
-local function on_typed_edit(rec)
+local function count_fan_out()
   depth = depth + 1
+  return false
+end
+
+local function on_typed_edit(rec)
   local fid = frontend_id()
   if fid == nil then return false end
 
@@ -426,8 +440,8 @@ local function run_deferred()
   -- Match off this fan-out's chain invocation. `> 1` means the outer
   -- chain is still mid-list — pairing has not had the terminator yet —
   -- so the queued expansion stays queued for the outer pass. The clamp
-  -- keeps this honest if a lower-priority consumer claimed before the
-  -- chain reached ours, in which case there is nothing queued anyway.
+  -- keeps this honest if a claim beat the counting consumer, in which
+  -- case nothing was queued in that fan-out either.
   local level = depth
   if depth > 0 then depth = depth - 1 end
   if level > 1 then return end
@@ -486,6 +500,15 @@ pmacs.hook.add("buffer.after-switch", function()
   local fid = frontend_id()
   if fid ~= nil then pending[fid] = nil end
 end)
+
+-- Runs first in every chain invocation that reaches a consumer at all,
+-- which is what makes the nesting count trustworthy — see `depth`. It
+-- declines, always: it observes, it does not participate.
+pmacs.typed_edit.add_consumer {
+  name = "lean-abbrev-fan-out-counter",
+  priority = -2147483648,
+  fn = count_fan_out,
+}
 
 pmacs.typed_edit.add_consumer {
   name = "lean-abbrev",

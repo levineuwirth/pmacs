@@ -252,6 +252,65 @@ fn a_nested_fan_out_between_the_expander_and_pairing_does_not_expand_early() {
 }
 
 #[test]
+fn a_nested_fan_out_that_never_reaches_the_expander_still_does_not_expand_early() {
+    // The chain's OTHER exit: a consumer may CLAIM and stop the chain
+    // before the expander is reached, while the fan-out's
+    // deferred-expansion subscriber still runs. Counting in the
+    // expander itself therefore misses that pass — it would look like
+    // the outermost one and expand early, and outer pairing would
+    // resume with an invalidated record.
+    //
+    // The sequence, exactly: a consumer at 25 declines on the outer
+    // pass (there is a record) and claims on the nested one (there is
+    // not); a consumer at 75 runs one nested fan-out from between the
+    // expander and pairing.
+    let (mut s, _f) = lean_editor();
+    exec(
+        &s,
+        r#"
+        _G.NESTED, _G.CLAIMED = 0, 0
+        pmacs.typed_edit.add_consumer {
+          name = "claims-only-when-recordless",
+          priority = 25,   -- ahead of the expander at 50
+          fn = function(rec)
+            if rec == nil then
+              _G.CLAIMED = _G.CLAIMED + 1
+              return true   -- stops the chain: the expander never runs
+            end
+            return false
+          end,
+        }
+        pmacs.typed_edit.add_consumer {
+          name = "nested-fan-out",
+          priority = 75,   -- between the expander (50) and pairing (100)
+          fn = function()
+            if _G.NESTED == 0 then
+              _G.NESTED = 1
+              pmacs.hook.run("buffer.after-edit")
+            end
+            return false
+          end,
+        }
+        "#,
+    );
+
+    type_str(&mut s, "\\alp(");
+    let (nested, claimed): (i64, i64) = eval(&s, "return _G.NESTED, _G.CLAIMED");
+    assert_eq!(nested, 1, "the nested fan-out must actually have run");
+    assert!(
+        claimed >= 1,
+        "the nested pass must actually have been short-circuited before \
+         the expander, or this pins the same thing as 45n"
+    );
+    assert_eq!(
+        text(&s),
+        "α()",
+        "the nesting count comes from a point that runs before any \
+         consumer can claim, so the nested pass was still recognised"
+    );
+}
+
+#[test]
 fn a_pair_character_outside_a_pending_abbreviation_still_pairs() {
     // The other direction: claiming extensions must not disable pairing
     // in Lean buffers generally.
