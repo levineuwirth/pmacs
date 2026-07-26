@@ -14,16 +14,17 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `a27f646` (Lean 4 Stage 4a #179 atop bottom-panel
-  Stage 2A #177, the bottom-panel Stage 2 framing #175, terminal
-  configuration Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a #167, the
-  CRDT undo repro #157, the inline-math landed-doc refresh #172, the
-  bottom-panel landed-doc refresh #156, the inline-math slice #158,
-  dired Stage 1 #165, the GPU terminal input fix #166, Lean 4 Stage 2
-  #161, the dired framing #164, COHERENCE.md #163, find-file #162, Lean 4
-  Stage 1 #160, and the minimap blank-slab fix #159; protocol v20). The
-  previous snapshot named `d152120`; the recovery check below accepts it
-  or anything newer.
+  `githubsucks/main` @ `fe8b8ba` (terminal copy mode #178 atop the
+  GPU-terminal-input landed docs #168, Lean 4 Stage 4a #179,
+  bottom-panel Stage 2A #177, the bottom-panel Stage 2 framing #175,
+  terminal configuration Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a
+  #167, the CRDT undo repro #157, the inline-math landed-doc refresh
+  #172, the bottom-panel landed-doc refresh #156, the inline-math slice
+  #158, dired Stage 1 #165, the GPU terminal input fix #166, Lean 4
+  Stage 2 #161, the dired framing #164, COHERENCE.md #163, find-file
+  #162, Lean 4 Stage 1 #160, and the minimap blank-slab fix #159;
+  protocol v20). The previous snapshot named `a27f646`; the recovery
+  check below accepts it or anything newer.
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -57,7 +58,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `d152120` or a newer intentional main.
+The `git log` command must expose `fe8b8ba` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
 ## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b, 4a MERGED; 4b is next
@@ -230,7 +231,13 @@ If it does not, stop and repair the remote/fetch configuration.
   --check` clean.
 - Stage 4b (the input method) is NOT in this PR and not started.
 
-## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)
+## Dired lane — Stages 0 and 1 MERGED; Stage 2 framing in review (#171)
+
+> **Lane retained deliberately.** Rule 4 below removes a lane after
+> merge, but its durable facts must reach `docs/agent-handoff.md` first,
+> and that absorption is the job of the **open landed-doc PR #169**.
+> Writing it from here would put two PRs on the same text. #169 removes
+> this lane; the Stage 2 framing PR #171 is still open besides.
 
 - Approved framing: `docs/dired-framing.md` **revision 6** — rev 5 is the
   approved text (merged as its own docs PR #164), rev 6 adds §0's Stage 1
@@ -389,11 +396,16 @@ If it does not, stop and repair the remote/fetch configuration.
   Every `#[cfg(feature = "crdt")]` test is therefore **not compiled** in CI,
   not merely skipped.
 - **Measured, `--list` under CI's exact flags versus the same flags plus
-  `crdt`: 3,024 vs 3,288 — 264 tests dark.** Per target:
+  `crdt`: 3,170 vs 3,443 — 273 tests dark.** Re-measured at `fe8b8ba`
+  (2026-07-26). **The number moves with every merge and must be
+  re-measured, not quoted.** #168 reported 3,024 vs 3,288 — 264 dark,
+  177 in the library — at `1b6a084`; #178 then added CRDT-only
+  generated-buffer coverage, and other lanes landed CRDT tests in
+  between. Per target:
 
   | dark | CI | full | target |
   |---:|---:|---:|---|
-  | 177 | 1,832 | 2,009 | **the library itself** (`src/lib.rs`) |
+  | 185 | 1,842 | 2,027 | **the library itself** (`src/lib.rs`) |
   | 21 | 15 | 36 | `m5_5_acceptance` |
   | 13 | 1 | 14 | `gpu_invocation_acceptance` |
   | 13 | 1 | 14 | `gpu_initial_target_acceptance` |
@@ -405,15 +417,20 @@ If it does not, stop and repair the remote/fetch configuration.
   | 3 | 0 | 3 | `compile_mode_crdt_acceptance` |
   | 2 | 22 | 24 | `theme_faces_acceptance` |
   | 2 | 0 | 2 | `m11_5_semantic_acceptance` |
+  | 1 | 14 | 15 | `terminal_copy_mode_acceptance` |
   | 1 | 9 | 10 | `vterm_stage1_acceptance` |
   | 1 | 7 | 8 | `statusline_segments_acceptance` |
   | 1 | 10 | 11 | `gpu_font_acceptance` |
   | 1 | 0 | 1 | `auto_indent_crdt_acceptance` |
   | 1 | 0 | 1 | `m10_11_perf` |
 
+  The rows sum to 273; the table is the whole census, not its head.
+
 - **The single worst line is the library.** `cargo test --lib --features crdt`
-  is a REQUIRED local gate in `CLAUDE.md`, and CI has never run it. 177
-  library tests — the whole CRDT half — are developer-machine-only.
+  is a REQUIRED local gate in `CLAUDE.md`, and CI has never run it. 185
+  library tests — the whole CRDT half — are developer-machine-only, and
+  that count grows with every merged branch that adds a `crdt`-gated
+  unit test.
 - **Ten suites run zero or one test in CI**, including `gpu_initial_target`
   (#148's entire acceptance, 1/14), `gpu_invocation` (#141's, 1/14), and
   `a37`, the Vterm Stage 3 real-daemon/real-PTY/real-wgpu path that #135
@@ -467,288 +484,34 @@ If it does not, stop and repair the remote/fetch configuration.
 - Mitigating fact, verified rather than assumed: #166's three unit pins are
   **not** `crdt`-gated and do run under CI's exact flags, including the
   controller-release pin whose only job is catching the plausible wrong fix.
-
-## Terminal config + copy mode arc — BOTH STAGES MERGED (arc complete)
-
-- Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
-  **revision 4** (four review rounds), committed as the first commit of
-  Stage 1's branch. Two stages, two branches, two PRs; **no protocol
-  change**.
-- **Stage 1 MERGED as #173** (`main` @ `cf54270`, 2026-07-26, one review
-  round, all twelve checks green). Branch `githubsucks/terminal-config`
-  and worktree `../pmacs-terminal-config` retained. Profiles, scrollback,
-  a per-terminal configurable escape key, and the `C-c t` opening
-  binding; no protocol change. Main was integrated **twice** during the
-  single review round (`ccf29e3`, then `c93f9ee` after the first merge
-  left the PR conflicting) — see the no-CI-while-conflicting fact below.
-- **Stage 2 MERGED as #178** (`main` @ `fe8b8ba`, 2026-07-26, **four
-  review rounds**, twelve checks green on head `1b44c69` — verified by
-  `head_sha`, not by the check summary). Copy mode:
-  `M-x terminal.copy-mode` / `C-c C-t`. Branch
-  `githubsucks/terminal-copy-mode` and worktree
-  `../pmacs-terminal-copy-mode` retained. Main was integrated once, after
-  #168 landed; the `docs/active-work.md` terminal-lane conflict resolved
-  by taking main's fuller Stage 1 sentence under this lane's Stage 2
-  record.
-- **Stage 2 ships eight of nine criteria, and the missing one is named.**
-  Criterion 17 (a real semantic frontend proving neither daemon buffer
-  nor mirror mutates) is **not pinned**: the optimistic apply exists only
-  in `pmacs-gpu/src/main.rs`, and the headless `SemanticClient` every
-  other semantic test uses has no optimistic path, so a faithful test
-  must drive the real GPU binary — the `a37` foundation, which CI never
-  compiles, silently skips without the binary, and is load-sensitive. A
-  second test on that footing buys the appearance of coverage. Both
-  halves of the mechanism are pinned **ungated** instead: acceptance 16
-  (the guard is armed — `dispatch_idle` false while the snapshot is
-  focused) and 16b (the daemon holds — `is_read_only()` is **true** at
-  the rope, so an op that did arrive is refused by `ensure_writable()`).
-  **Rounds 2-3 changed what 17 must show.** 16b asserted `false` through
-  round 1, documenting the hazard; round 2 closed it. So the eventual
-  real-GPU test must look for **mirror mutation plus daemon refusal —
-  divergence** — not the "mutates both sides, silently" the criterion
-  originally specified, which after the fix cannot happen and would pass
-  for the wrong reason. The wire-level half stays an explicit obligation
-  of the CI `crdt`-coverage lane.
-- Load-bearing Stage 2 decisions:
-  - **The snapshot MATERIALIZES into an ordinary buffer**, so isearch,
-    motion, selection and the kill ring work with no new substrate, and
-    "keys must not reach the child" dissolves structurally — the
-    transport arm keys on `is_terminal(buffer_id)` and a snapshot is not
-    a terminal. **The dispatch-shadow count stays at six.**
-  - **One serializer, not two** (Q#TC7): `copy_retained` builds a
-    whole-range *selection* and hands it to `copy_selection_bytes`.
-  - **`prune` reacts to removal rather than causing it** — it filters on
-    `!registry.contains(buffer_id)`, so a child exiting does NOT remove
-    the terminal buffer. That is why `on_removed` is a sound teardown
-    hook, and why a finished command's output stays readable.
-- **Five bites, five different wrong implementations.** Removing
-  `set_round_trip_input` fails acceptance 16 **in the default
-  configuration** (the whole reason that pin is ungated); a naive
-  independently-written serializer fails all four unit pins, with the
-  diffs naming each drift mode (broken soft wrap, untrimmed blanks,
-  trailing newline); making re-invoke create a fresh buffer fails 18;
-  dropping the kill-with-terminal teardown fails 18; removing the
-  intercept fails 16b. Each failed exactly one test.
-- **Review round 1 — four findings, all real, and they rhyme in pairs.**
-  Two P1 implementation defects and two P2 vacuous pins, all four tracing
-  to one root: **a name is not an identity, and a context-free readout is
-  not a state observation.**
-  - *P1 — a foreign same-named buffer was adopted and clobbered.* Snapshot
-    writes use `bypass_intercept`, so found-by-name adoption overwrote a
-    user's buffer; the reviewer reproduced "do not clobber" becoming 23
-    newlines. Fixed by dired's F7 rule: **ownership means "in our own
-    handle table"**, and a taken name yields a `<2>` variant.
-  - *P1 — snapshot identity was keyed by terminal NAME.*
-    `TerminalManager::open` uniquifies only the *derived* name, so an
-    explicit `name = "*same*"` lets two valid terminals share one; they
-    then shared a snapshot, `q` returned to the wrong terminal, and
-    killing either removed it. Now keyed by comparing buffer handles in an
-    array — `BufferIdLua` implements `__eq` but each wrapper is a distinct
-    table key, so **comparison works and hashing does not**.
-  - *P2 — the refresh pins were vacuous.* 19 compared a quiet terminal's
-    snapshot against itself and 18 counted buffers, so both passed with
-    `render_snapshot` replaced by a no-op. Now the test types a marker
-    into the `cat` child, requires it **absent** first, then refreshes.
-  - *P2 — the tail-follow pin could not observe view state.*
-    `manager.snapshot(buffer_id)` is context-free and always reads the
-    live screen, so it reported "at the tail" for a view forced to the
-    oldest retained row. Now read through `snapshot_for_view`'s
-    `at_bottom` and projected cells.
-- **Four more bites, all discriminating.** Restoring adopt-by-name fails
-  18a *and* 18b; restoring name-keyed identity fails 18b; making
-  `render_snapshot` a no-op fails **both** 18 and 19 (the vacuity,
-  demonstrated); and forcing the view off the tail fails 20.
-- **Review round 2 — one P1, and its fix retires half a named deferral.**
-  **Undo emptied the "read-only" snapshot.** `render_snapshot` wrote with
-  `bypass_intercept`, leaving ordinary undo history, and **`Buffer::undo`
-  reaches the rope through `ensure_writable` without ever consulting the
-  intercept chain** — so `C-/` *or* `M-x buffer.undo` replaced a freshly
-  rendered snapshot with an empty buffer. `set_round_trip_input` does not
-  help: it routes the key into the daemon command path, which is where
-  undo runs.
-  - **Rebinding the undo chords would NOT have fixed it**, and
-    `compile.lua` already says so in a comment — "command/menu undo stays
-    dispatchable". `*compilation*` and listview panels therefore carry the
-    same latent defect today.
-  - Fixed with `Buffer::set_generated_contents` (Lua
-    `pmacs.buffer.set_generated_contents`): lift `read_only`, replace
-    skipping intercepts, **discard history**, re-assert `read_only`. This
-    ships the deferred lane's two halves *as one primitive* — a bare
-    `set_read_only` would let a caller lock a buffer it can no longer
-    refresh, which is exactly why that lane was deferred. Clearing history
-    also stops a periodically refreshed buffer accumulating rope clones
-    nothing can ever pop.
-  - New pins: **acc16c** drives the real M-x path
-    (`command.invoke_interactive`), the chord, and redo, and asserts the
-    owner's refresh still works; **acc16b** flipped from asserting
-    `is_read_only()` is *false* to *true*, because the property it
-    described is the one that was fixed; plus three `buffer.rs` unit tests.
-  - Bite: restoring the `delete`+`insert` render reproduces the report
-    exactly — `left: Some("")` against the full snapshot — failing acc16c
-    and acc16b.
-  - **Still open:** `*compilation*` and listview remain emptiable by
-    `M-x buffer.undo`; the primitive they need now exists and is proven,
-    so the remainder is adoption plus a streaming-friendly variant.
-- **Review round 3 — one P1 and two P2s, all on the round-2 primitive.**
-  The lesson: **a rope write is only half of an edit, and "discard
-  history" means whichever history the buffer actually has.**
-  - **P1 — the binding swallowed the edit.** `set_generated_contents`
-    returned `()`, so nothing called `notify_buffer_edit_to_windows`.
-    Two consequences, both reproduced by the reviewer: in the default
-    build a window showing the buffer kept a `TextView` line index
-    describing the *previous* contents, and the next paint indexed the
-    new rope with stale ranges — `assertion failed: end <= self.len()`
-    in `src/rope.rs`; in the CRDT build `pending_crdt_ops` stayed empty,
-    so replica mirrors never received the owner's write. The prior
-    `buf:delete`/`buf:insert` pair had done this fan-out for free.
-    Fixed by applying **one whole-buffer `Replace`**, returning its
-    `Edit`, and notifying from the binding.
-  - **P2 — "discard history" was false in CRDT mode.** The v0.1 stacks
-    are bypassed entirely there; the history lives in loro's
-    `UndoManager`. `read_only` stops the replay but not the retention,
-    which is the memory cost the contract claims to eliminate.
-    `UndoManager` has no `clear`, but needs none — it records only what
-    happens after construction, the property `CrdtState::from_bytes`
-    already uses to keep the seed insert out of undo. New
-    `CrdtState::clear_undo_history` rebinds a fresh manager to the
-    same doc.
-  - **P2 — the docs described the pre-fix architecture.** Q#TC6a said no
-    Lua binding sets `read_only` and round-trip input is the only guard;
-    the acceptance text still said `is_read_only() == false` while 16b
-    had been flipped to `true`; `terminal.lua`'s comment repeated the
-    obsolete claim. The architecture is **layered** and now says so:
-    rope-level read-only protects the daemon copy, round-trip input
-    protects the replica's optimistic mirror, and neither substitutes
-    for the other. Q#TC6a carries a superseded-in-part box rather than
-    being silently rewritten.
-  - New pins: **acc16d** paints the window after a *shrinking* generated
-    write (the stale offsets then point past the end, which is the
-    reported crash rather than stale pixels); **acc16e** asserts the
-    refresh is queued for mirrors through the real copy-mode path
-    (`crdt`-gated, therefore dark in CI — 16d is the half that runs);
-    plus a CRDT `buffer.rs` unit test that ten renders leave the
-    `UndoManager` with nothing recorded.
-  - Bites: dropping the notify panics acc16d at `rope.rs:145` and fails
-    acc16e with `queued: []`; dropping the `UndoManager` rebind fails
-    the new unit test on `can_undo`.
-  - **Still open:** the fan-out obligation makes `*compilation*`/listview
-    adoption more than a one-line swap — recorded in `COHERENCE.md` §14
-    alongside the undo half.
-- **Review round 4 — one P2, docs only, and it is the interesting kind.**
-  **A fix can invalidate a test that was never written.** Criterion 17's
-  *bite* still described the pre-round-2 world: remove
-  `set_round_trip_input` and the op "mutates both sides, silently, with
-  no divergence to notice". True while nothing set `read_only` from Lua;
-  false once `set_generated_contents` did. A real-GPU test written to
-  that spec would hunt for a daemon-side edit that can no longer occur
-  and pass for the wrong reason — the specification would have leaked
-  the round-2 regression back in, through a test not yet built.
-  - Restated around **unauthorized mirror mutation plus daemon refusal =
-    divergence**, in all four places that carried the old claim: the
-    criterion, the Q#TC6a heading, the acceptance-16 doc comment, and the
-    bite roster. The heading's "ONLY thing" now says what it is the only
-    thing *for* — the replica's own mirror.
-  - Why round-trip input is still load-bearing rather than redundant: a
-    daemon refusal arrives after the frontend has already applied
-    optimistically and painted. It buys divergence instead of silent
-    agreement; it does not prevent the mutation the user sees.
-  - **Gate-run flake observed and scoped without overclaiming its cause.**
-    `cargo test --lib --features crdt` failed ~1 run in 5 on
-    `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
-    — `active_reader_probe` returning `None` at `process.rs:3179`
-    ("live runtime probe"). **Pre-existing and unrelated:** this branch
-    does not touch `src/process.rs` (last changed by the Darwin PTY
-    signal-name fix), and the test passed 10/10 standalone; the observed
-    failures were during parallel full-suite runs. That localizes the
-    trigger to suite load or interaction, but does **not** distinguish
-    parallelism from another full-suite effect — no serial full-suite bite
-    was run. The leading code-path explanation is the known `drain_until`
-    trap: draining for `Started` also ticks, and a tick can reap the leader
-    before the following `active_reader_probe`. That is an inference from
-    the failure site and control flow, not yet a falsified root cause.
-    It belongs to the CI `crdt`-coverage lane for discrimination. The two
-    round-2 CRDT failures had no captured test names; this flake is a
-    plausible candidate for them, but they remain **unattributed**.
-- Load-bearing decisions, each forced by scouted ground truth:
-  - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
-    no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
-  - the **two open-time settings resolve through the global chain**,
-    because they are read before the identity buffer exists; only
-    `terminal.escape-key` resolves per buffer;
-  - the escape cache lives on **`TerminalSession`** so its lifetime is
-    the terminal's. `value_epoch` alone is not a sufficient key: it does
-    not advance when focus moves between terminals with different
-    buffer-local values;
-  - repeating the escape sends **that chord**, not a hardcoded `0x03`.
-- **Four bites, each against a different plausible wrong
-  implementation** — hardcoded ETX fails acc6/9; epoch-only cache key
-  fails acc7; single last-entry cache fails acc8's parse count; removing
-  the invalid-value fallback fails acc10. The first version of acc7
-  passed against the epoch-only bite because it asserted only that
-  terminal A still worked; the discriminating assertion is that **each**
-  terminal honors its own chord and not the other's.
-- Test instruments worth reusing: `cat -v` is the echo probe, because the
-  screen rejects C0 controls before they reach cells so a raw echoed
-  `Ctrl-X` is invisible; and the probe **counts occurrences** rather than
-  testing presence, because a single-character probe collides with the
-  child's own banner text.
-- **Review round 1 (2026-07-25) — five findings, all real, all fixed.**
-  One blocker and two majors were the same failure in three places: a
-  claim asserted somewhere cheaper than where it lives.
-  - *Blocker — `COHERENCE.md` was stale in four places, not the three
-    reported.* Step 8 still read "no keybinding"; §11 still read "five
-    settings"; and §6's dispatch table still cited
-    `is_terminal_escape_chord`, **a symbol this PR deletes**. §25 makes
-    that update ride the PR. A PR that changes audited ground truth has
-    to re-grep the audit for its own symbols, not only for its topic.
-  - *Major — acceptance 5 was vacuous.* It asserted a registry
-    round-trip, so it stayed green with the setting's **only** consumer
-    deleted. It now opens a real terminal whose child overflows the
-    24-row screen, scrolls the view to its oldest retained row, and
-    asserts `LINE001` is present at 10,000 and absent at 0. **Asserting
-    a value was stored is not asserting anything reads it.**
-  - *Major — acceptance 8a asserted the session count, not the cache.*
-    An editor-side map with no purge hook — the exact rejected design —
-    leaks *while* sessions drain, so it passed. Fixed with a
-    `TerminalManager::escape_caches()` seam. **A lifecycle claim needs a
-    lifecycle observable.**
-  - *Moderate — `table.sort` over user-controlled profile keys.* A
-    table holding both a string and a numeric key raised `attempt to
-    compare number with string` **on the unknown-profile path**,
-    replacing the diagnostic being asked for; `%q` raised likewise on a
-    non-string `profile` argument. Both are partial functions applied to
-    user input **on a diagnostic path** — the error reporter was the
-    thing that failed.
-  - *Minor — the committed framing still said "not yet approved".*
-- **Three new bites, each falsified by revert**: deleting the scrollback
-  consumer fails acc5 (and only acc5); restoring the raw-key sort
-  reproduces `attempt to compare string with number` verbatim; and
-  implementing the rejected editor-side map fails the new acc8a at
-  `left: 2, right: 1` **while passing the old session-count version** —
-  which is the review finding demonstrated rather than argued.
-- Verification after the round-1 fixes, on the tree merged with
-  `githubsucks/main` @ `c93f9ee`: `cargo fmt --check` clean; strict
-  workspace Clippy clean; 1,832 default + 2,009 CRDT library tests;
-  `terminal_config_acceptance` **12/12 in both configurations**; vterm
-  Stage 1/2 9+10 / 6+6; config registry 16+16; bottom-panel Stage 1
-  46+46; M4 121; required GPU 202; `git diff --check` clean.
-  - `compile_mode_acceptance` fails 11/67 against the **real** user
-    config and passes 67/67 with an isolated `XDG_CONFIG_HOME` — the
-    known pre-existing trap, not this branch.
-  - **`vterm_stage3_acceptance::a37` fails on this machine — and fails
-    identically on the PR's own base `d152120`**, so it is not this
-    branch's regression. It is load-sensitive: it passed at `d152120`
-    once and failed at that same commit twenty minutes later, with a
-    second agent saturating the machine with `rustc` in between. Two
-    ways it lies, both worth knowing: it **silently returns `ok` when
-    `pmacs-gpu` is not built** in the same target dir (only
-    `PMACS_REQUIRE_GPU=1` promotes that skip to a failure, and the gate
-    list applies that flag to `-p pmacs-gpu`, a *different* package), and
-    it is **crdt-gated, so CI has never run it at all**. A green a37 in
-    a gate log means nothing unless the binary was built and the flag
-    was set. Needs its own lane; see the CI `crdt`-coverage lane on #168.
-  - `pmacs-gpu` itself failed 201/202 once under the same load and passed
-    202/202 on immediate rerun.
+- **This lane also owns a `--lib --features crdt` flake, observed and
+  scoped without overclaiming its cause** (inherited from #178's gating,
+  where the terminal lane recorded it). `cargo test --lib --features
+  crdt` failed ~1 run in 5 on
+  `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
+  — `active_reader_probe` returning `None` at `process.rs:3179` ("live
+  runtime probe"). **Pre-existing and unrelated to #178:** that branch
+  did not touch `src/process.rs` (last changed by the Darwin PTY
+  signal-name fix), and the test passed 10/10 standalone; the observed
+  failures were during parallel full-suite runs. That localizes the
+  trigger to suite load or interaction, but does **not** distinguish
+  parallelism from another full-suite effect — no serial full-suite bite
+  was run. The leading code-path explanation is the known `drain_until`
+  trap: draining for `Started` also ticks, and a tick can reap the leader
+  before the following `active_reader_probe`. That is an inference from
+  the failure site and control flow, not yet a falsified root cause.
+  Discriminating it belongs here. Two unnamed CRDT failures in #178's
+  round-2 gating are a plausible match but remain **unattributed** — no
+  test names were captured.
+- **A second standing obstacle for this lane:** `cargo clippy --workspace
+  --all-targets --features crdt -- -D warnings` **fails on `main`** —
+  re-verified at `fe8b8ba`: four errors in `src/daemon.rs`
+  (`useless_conversion` at 3996, missing doc backticks at 4076,
+  `too_many_lines` 112/100 at 4083, an unneeded `mut` at 4965) and one in
+  `tests/auto_indent_crdt_acceptance.rs:42` (doc backticks). The
+  standing gate list runs Clippy without `crdt`, so these lints have
+  never been enforced. Any CI job that compiles the `crdt` targets has to
+  fix them first or it will be red on arrival.
 
 ## Bottom-panel lane (Arc 7) — Stages 1, 2A + framing MERGED; 2B is next
 
@@ -936,6 +699,24 @@ git worktree add --track \
 
 ## Closed since the last snapshot
 
+- **Terminal configuration + copy mode arc — BOTH STAGES MERGED, lane
+  removed.** Stage 1 **#173** (`main` @ `cf54270`, one review round) and
+  Stage 2 **#178** (`main` @ `fe8b8ba`, **four review rounds**, twelve
+  checks green on head `1b44c69` — verified by `head_sha`, not by the
+  check summary), both 2026-07-26, both with no protocol change.
+  Approved framing: `docs/terminal-config-and-copy-mode-framing.md` rev
+  4, committed as the first commit of Stage 1's branch; its Q#TC6a
+  carries a superseded-in-part box rather than a silent rewrite. Durable
+  facts moved to `docs/agent-handoff.md` §1 (the arc bullet) and §4 (the
+  `set_generated_contents` invariant) per rule 3 below, and to
+  `COHERENCE.md` §14. **Stage 2 ships eight of nine criteria and the
+  missing one is named** — criterion 17 needs a real GPU frontend, so it
+  waits on the `a37` footing; the handoff records what it must assert.
+  Branches `githubsucks/terminal-config` and
+  `githubsucks/terminal-copy-mode` with worktrees
+  `../pmacs-terminal-config` and `../pmacs-terminal-copy-mode` are
+  retained. The gate-run flake found while gating #178 moved to the CI
+  `crdt`-coverage lane above, which owns its discrimination.
 - **GPU terminal input (the double terminal-layout sync) — MERGED as #166**
   (`main` @ `b889873`, 2026-07-25, one review round, all twelve checks green
   after a macOS PTY-timing rerun). The dispatcher applied **both**
@@ -955,7 +736,9 @@ git worktree add --track \
   Branch `gpu-terminal-input` and worktree `../pmacs-gui-term-input` retained.
   **Its landed-doc pair MERGED as #168** (`main` @ `1b6a084`,
   2026-07-26): #166 recorded as landed, the CI `crdt`-coverage gap
-  measured (**264 tests dark workspace-wide**, 177 in the library), the
+  measured (**264 tests dark workspace-wide**, 177 in the library — as
+  of `1b6a084`; the live figure is 273/185 at `fe8b8ba`, and the
+  coverage lane above is the authority), the
   vterm audit corrected — "only 3 of 9 acceptances drive a real daemon"
   was optimistic; without the frontend binary the honest number is
   **2** — and the a37 findings folded into the coverage lane.

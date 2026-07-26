@@ -564,11 +564,16 @@ additive, on its own binding, and does not replace scroll-and-select.
   would replay, and it stops a periodically refreshed buffer accumulating
   rope clones that `read_only` guarantees nothing can ever pop.
 
-  **What remains of the lane:** `*compilation*` and listview panels still
-  rely on intercept-plus-round-trip and are still emptiable by
-  `M-x buffer.undo`. The primitive they need now exists and is proven, so
-  the remaining work is adoption plus a streaming-friendly variant
-  (`*compilation*` appends rather than replacing wholesale).
+  **What remains of the lane — four writers, not two** (corrected in
+  review round 5, which found the inventory short): listview panels
+  (`listview.lua:60-61`), `*compilation*` and `*search-results*` (both
+  through `compile.lua`'s shared `ensure_slot`), and dired buffers
+  (`dired.lua:371`) all still rely on intercept-plus-round-trip over a
+  writable rope, and are all still emptiable by `M-x buffer.undo`. The
+  primitive they need now exists and is proven, so the remaining work is
+  adoption plus a streaming-friendly variant — the two `compile.lua`
+  slots append rather than replacing wholesale, while listview and dired
+  already write whole-buffer replaces and are the cheap half.
 
   **The CRDT half is closed too** (review round 3). Clearing the v0.1
   stacks proves nothing in CRDT mode, where they are bypassed entirely and

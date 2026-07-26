@@ -61,6 +61,53 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey **broken at step 3**
   (`pmacs .` exits 1).
+- **Terminal configuration + copy mode arc — COMPLETE**
+  (`docs/terminal-config-and-copy-mode-framing.md` rev 4; Stage 1 #173,
+  Stage 2 #178; no protocol change in either, still v20). Stage 1 ships
+  profiles, scrollback, a per-terminal configurable escape key and the
+  `C-c t` opener; Stage 2 ships copy mode — `M-x terminal.copy-mode` /
+  `C-c C-t`.
+  - **The snapshot MATERIALIZES into an ordinary buffer.** That is the
+    arc's organizing decision: isearch, motion, selection and the kill
+    ring work with no new substrate, and "keys must not reach the child"
+    dissolves structurally, because the transport arm keys on
+    `is_terminal(buffer_id)` and a snapshot is not a terminal. **The
+    dispatch-shadow count therefore stays at six.**
+  - **`prune` reacts to buffer removal rather than causing it** — it
+    filters on `!registry.contains(buffer_id)`, so a child exiting does
+    **not** remove the terminal buffer. That is what makes `on_removed` a
+    sound teardown hook, and why a finished command's output stays
+    readable.
+  - **Ownership means "in our own handle table", never found-by-name**
+    (dired's F7 rule, re-learned here): snapshot writes use
+    `bypass_intercept`, so adopting a same-named foreign buffer clobbers
+    user data. Snapshot identity is keyed by **comparing buffer handles
+    in an array** — `BufferIdLua` implements `__eq` but each wrapper is a
+    distinct table key, so comparison works and hashing does not.
+  - **Profiles are a raw Lua table**, joining `pmacs.lsp.config` and
+    `pmacs.pair.sets`, because `ConfigValue` is four scalars with no
+    table kind. The two open-time settings resolve through the **global**
+    chain (they are read before the identity buffer exists); only
+    `terminal.escape-key` resolves per buffer, and its cache lives on
+    **`TerminalSession`** so its lifetime is the terminal's —
+    `value_epoch` alone is not a sufficient key, because it does not
+    advance when focus moves between terminals holding different
+    buffer-local values.
+  - **Criterion 17 is deliberately unpinned, and its bite is now stated
+    correctly.** A real semantic frontend proving neither copy is mutated
+    needs the actual GPU binary (the optimistic apply exists only in
+    `pmacs-gpu/src/main.rs`; the headless `SemanticClient` has no
+    optimistic path), i.e. the `a37` footing §5 warns about. After
+    `set_generated_contents` the eventual test must look for
+    **unauthorized mirror mutation plus daemon refusal — divergence**,
+    not the "mutates both sides silently" the criterion originally
+    specified, which can no longer happen and would pass for the wrong
+    reason. *A fix can invalidate a test that was never written.*
+  - Test instruments worth reusing: **`cat -v` is the echo probe**,
+    because the screen rejects C0 controls before they reach cells so a
+    raw echoed `Ctrl-X` is invisible; and such probes must **count
+    occurrences rather than test presence**, because a single-character
+    probe collides with the child's own banner text.
 - **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b LANDED**
   (`docs/lean4-mode-framing.md`; #160, #161, #167, #170; merge
   `d400f30`). pmacs edits Lean 4: `arborium-lean` highlighting, a
@@ -106,9 +153,9 @@ commands, read `docs/active-work.md` immediately after this file.
     config swap invalidates. The durable lesson is to heal at
     **consumption** — the point where a stale record is handed out — not
     at the moment of the swap.
-  - **Stage 4a (typed-edit consumer chain) is implemented and in review
-    as PR #179** (branch `lean4-stage4a-typed-edit-chain`, framing rev
-    8). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
+  - **Stage 4a (the typed-edit consumer chain) MERGED as #179**
+    (branch `lean4-stage4a-typed-edit-chain`, framing rev 8; it is part
+    of the `fe8b8ba` anchor above). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
     single `buffer.after-edit` subscriber and the single one-shot read,
     `pair.lua` becomes its first registered consumer, and
     `tests/auto_pair_acceptance.rs` is unchanged by zero lines
@@ -184,11 +231,13 @@ commands, read `docs/active-work.md` immediately after this file.
     against an open buffer yet fails to load one that is not open —
     find-file expands the tilde Lua-side. Loading through the normalized
     path is a named deferral.
-  - **Stage 1 (the directory view) is IN REVIEW as PR #165** — the
-    builtin `dired.lua`, the per-entry-tolerant `read_dir` opt, and
-    `pmacs.path.canonicalize`. Its branch state, substrate facts, and
-    verification live in `docs/active-work.md`; this section absorbs them
-    when it merges.
+  - **Stage 1 (the directory view) MERGED as #165** — the builtin
+    `dired.lua`, the per-entry-tolerant `read_dir` opt, and
+    `pmacs.path.canonicalize`. Its durable facts have **not** been
+    absorbed here yet: that is the job of the open landed-doc PR
+    **#169**, and duplicating it from this PR would put two authorities
+    on the same text. Until #169 merges, `docs/active-work.md`'s dired
+    lane remains the record.
 - Protocol **v20** (`SUPPORTED=[6..=20]`; v16 = `ThemeFacts`, v17 =
   `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events, v20 =
   the GPU initial-target semantic bootstrap family).
@@ -920,11 +969,24 @@ it lives in loro's `UndoManager`. That has no `clear`, and needs none — a
 manager records only what happens after construction, so
 `CrdtState::clear_undo_history` rebinds a fresh one to the same doc.
 
-**Not yet adopted:** `*compilation*` and listview panels still rely on
-intercept-plus-`set_round_trip_input` and remain emptiable by
-`M-x buffer.undo`. Adoption is not a one-line swap — it inherits the
-fan-out obligation, and `*compilation*` appends rather than replacing, so
-it needs a streaming variant. Recorded in `COHERENCE.md` §14.
+**Not yet adopted — and the inventory is four call sites, not two.**
+Every generated buffer outside copy mode still uses the older idiom:
+an erroring intercept plus `set_round_trip_input`, written through
+`bypass_intercept`, with the rope left writable. All of them are
+emptiable by `M-x buffer.undo`:
+
+| buffer | writer | shape |
+|---|---|---|
+| listview panels | `builtin/runtime/listview.lua:60-61` | delete-all + insert |
+| `*compilation*` | `builtin/runtime/compile.lua` (`ensure_slot`) | **append** per output batch |
+| `*search-results*` | same `ensure_slot` mechanism in `compile.lua` | **append** per match batch |
+| dired buffers | `builtin/runtime/dired.lua:371` | whole-buffer replace |
+
+Adoption is not a one-line swap. It inherits the fan-out obligation, and
+the two `compile.lua` slots append rather than replacing wholesale, so
+they need a **streaming variant** of the primitive; listview and dired
+are already whole-buffer replaces and are the cheap half. Recorded in
+`COHERENCE.md` §14.
 
 **And it does not replace `set_round_trip_input`.** The protection is
 layered across two copies: rope-level `read_only` refuses the op at the

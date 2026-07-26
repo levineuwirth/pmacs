@@ -1222,14 +1222,20 @@ Primitive-by-primitive against the list above:
   `compile.lua`'s own comment admits ("command/menu undo stays
   dispatchable"). `Buffer::set_generated_contents` (write + discard
   history + assert `read_only`, in one authorized call) now fixes this
-  for the terminal snapshot; `*compilation*` and listview panels have
-  not yet adopted it and remain emptiable. **A second half of the same
+  for the terminal snapshot; **four writers have not yet adopted it and
+  remain emptiable** — listview panels, `*compilation*`,
+  `*search-results*` (the same `ensure_slot` mechanism in `compile.lua`),
+  and dired buffers, all of which pair an erroring intercept with
+  `bypass_intercept` writes over a still-writable rope. **A second half of the same
   caveat, found in round 3: a rope write is only half of an edit.** The
   owner-authorized write must be fanned out to the windows showing the
   buffer and queued for replica mirrors, or the displaying window keeps
   a line index describing the previous contents and the next paint
   indexes the new rope with stale ranges. Adoption is therefore not a
-  one-line swap.
+  one-line swap — and the two `compile.lua` slots **append** rather than
+  replacing wholesale, so they need a streaming variant of the primitive
+  that does not exist yet. Listview and dired already write whole-buffer
+  replaces and are the cheap half.
 - **Diagnostics collection** ✓ — `DiagnosticStore` + signs + unified
   `error.next` source.
 - **Transient selector** ✓ — the minibuffer (though its `source`
