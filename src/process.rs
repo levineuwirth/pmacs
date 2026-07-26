@@ -470,6 +470,13 @@ pub struct ProcessSupervisor {
     /// TERM→KILL window used when arming the ledger. Constant
     /// [`GROUP_TERM_GRACE`] in production; overridable in tests.
     group_term_grace: Duration,
+    /// Q#PD4 test seam: forces the next `kill(2)` attempt in
+    /// [`Self::signal`] to fail with this errno, consumed once.
+    /// Always `None` in production — there is no way to set it outside
+    /// `cfg(test)`. It replaces the *kill result only*, so the leader
+    /// observation still runs against the real child handle; a stubbed
+    /// observation would bypass the code path under test.
+    forced_kill_errno: Option<nix::errno::Errno>,
 }
 
 /// One armed group in the reap ledger.
@@ -684,7 +691,50 @@ impl ChildHandle {
     }
 }
 
-fn signal_target(proc: &ManagedProcess, pid: u32) -> Result<Pid, String> {
+/// Which branch of [`signal_target`] chose the target (Q#PD1).
+///
+/// Recorded on failure because the branches differ in what a failing
+/// `kill` can possibly mean: only [`Self::LeaderPid`] aims at the
+/// spawned child itself. The other two aim at a *group*, which for a
+/// PTY is read from the terminal and can belong to something the
+/// supervisor never spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetSource {
+    /// The tty's current foreground process group, read at signal
+    /// time. Diverges from the leader exactly when job control has
+    /// moved the terminal.
+    ForegroundGroup,
+    /// A `group = true` pipe child leading its own process group.
+    SpawnGroup,
+    /// The child's own pid.
+    LeaderPid,
+}
+
+impl TargetSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ForegroundGroup => "tcgetpgrp",
+            Self::SpawnGroup => "group",
+            Self::LeaderPid => "leader-pid",
+        }
+    }
+
+    /// Whether the target is a process group rather than one process.
+    fn is_group(self) -> bool {
+        matches!(self, Self::ForegroundGroup | Self::SpawnGroup)
+    }
+}
+
+/// The entity a signal was actually aimed at, plus the branch that
+/// chose it. Carried so a failure can report the target as a fact
+/// separate from the leader's state (Q#PD1).
+#[derive(Debug, Clone, Copy)]
+struct SignalTarget {
+    pid: Pid,
+    source: TargetSource,
+}
+
+fn signal_target(proc: &ManagedProcess, pid: u32) -> Result<SignalTarget, String> {
     if let Some(runtime) = proc.runtime.as_ref()
         && let ChildHandle::Pty {
             _master: master, ..
@@ -692,7 +742,10 @@ fn signal_target(proc: &ManagedProcess, pid: u32) -> Result<Pid, String> {
         && let Some(pgrp) = master.process_group_leader()
         && pgrp > 0
     {
-        return Ok(Pid::from_raw(-pgrp));
+        return Ok(SignalTarget {
+            pid: Pid::from_raw(-pgrp),
+            source: TargetSource::ForegroundGroup,
+        });
     }
     // `group = true` pipe children lead a fresh process group
     // (`process_group(0)` at spawn ⇒ pgid == pid), so fatal signals
@@ -700,11 +753,80 @@ fn signal_target(proc: &ManagedProcess, pid: u32) -> Result<Pid, String> {
     // (Q#CM3).
     if proc.spec.group {
         let pgid = i32::try_from(pid).map_err(|e| e.to_string())?;
-        return Ok(Pid::from_raw(-pgid));
+        return Ok(SignalTarget {
+            pid: Pid::from_raw(-pgid),
+            source: TargetSource::SpawnGroup,
+        });
     }
-    Ok(Pid::from_raw(
-        i32::try_from(pid).map_err(|e| e.to_string())?,
-    ))
+    Ok(SignalTarget {
+        pid: Pid::from_raw(i32::try_from(pid).map_err(|e| e.to_string())?),
+        source: TargetSource::LeaderPid,
+    })
+}
+
+/// The spawned leader's state at the moment a `kill` failed (Q#PD1).
+///
+/// Deliberately reported *beside* the target rather than folded into a
+/// verdict: for a PTY the two are different entities whenever job
+/// control has moved the terminal, and three successive designs for
+/// this code were unsound precisely because they collapsed them.
+enum LeaderObservation {
+    Exited(TermStatus),
+    Live,
+    Unobservable(String),
+    NoRuntime,
+}
+
+impl LeaderObservation {
+    fn render(&self) -> String {
+        match self {
+            Self::Exited(TermStatus::Exited(code)) => format!("exited(code {code})"),
+            Self::Exited(TermStatus::Signaled(sig)) => format!("exited(signal {sig})"),
+            Self::Live => "live".to_owned(),
+            Self::Unobservable(e) => format!("unobservable({e})"),
+            Self::NoRuntime => "no-runtime".to_owned(),
+        }
+    }
+}
+
+/// Observe the spawned leader. Note this *reaps* an exited child and
+/// caches its status; that is why Q#PD3 claims "no disposition change"
+/// rather than "strictly additive", and why an event-count test pins
+/// that `poll_one` still emits exactly one exit event afterwards.
+fn observe_leader(proc: &mut ManagedProcess) -> LeaderObservation {
+    let Some(runtime) = proc.runtime.as_mut() else {
+        return LeaderObservation::NoRuntime;
+    };
+    match runtime.child.try_wait() {
+        Ok(Some(status)) => LeaderObservation::Exited(status),
+        Ok(None) => LeaderObservation::Live,
+        Err(e) => LeaderObservation::Unobservable(e),
+    }
+}
+
+/// Render a failing `kill` as the five facts of Q#PD1. The disposition
+/// is unchanged (Q#PD2) — this only replaces a message that said
+/// nothing but the errno.
+fn signal_failure_report(
+    target: SignalTarget,
+    leader_pid: u32,
+    errno: &nix::errno::Errno,
+    leader: &LeaderObservation,
+) -> String {
+    let expected = if target.source.is_group() {
+        match i32::try_from(leader_pid) {
+            Ok(p) => format!(", expected_group=-{p}"),
+            Err(_) => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    format!(
+        "kill: {errno} (target={} via {}, leader_pid={leader_pid}{expected}, leader={})",
+        target.pid.as_raw(),
+        target.source.as_str(),
+        leader.render(),
+    )
 }
 
 /// Termination status of one generation. Internal --- the supervisor
@@ -807,7 +929,18 @@ impl ProcessSupervisor {
             shut_down: false,
             reap_ledger: HashMap::new(),
             group_term_grace: GROUP_TERM_GRACE,
+            forced_kill_errno: None,
         }
+    }
+
+    /// Q#PD4 test seam: make the next `kill(2)` attempt in
+    /// [`Self::signal`] report `errno` instead of calling the kernel.
+    /// Consumed by that one attempt. Everything downstream — target
+    /// selection, the leader observation against the real child, and
+    /// the error construction — runs unmodified.
+    #[cfg(test)]
+    fn force_next_kill_errno(&mut self, errno: nix::errno::Errno) {
+        self.forced_kill_errno = Some(errno);
     }
 
     /// Override the SIGTERM-to-SIGKILL grace window. Test helper.
@@ -928,7 +1061,21 @@ impl ProcessSupervisor {
             return Err(format!("process {id} is not running"));
         };
         let target = signal_target(proc, pid)?;
-        nix::sys::signal::kill(target, Some(signal)).map_err(|e| format!("kill: {e}"))?;
+        // Q#PD4: the seam injects the KILL attempt's result only —
+        // never the observation below — so target selection, the real
+        // `ChildHandle::try_wait` against the real child, and the error
+        // construction all run for real. Consumed once.
+        let kill_result = match self.forced_kill_errno.take() {
+            Some(errno) => Err(errno),
+            None => nix::sys::signal::kill(target.pid, Some(signal)),
+        };
+        if let Err(errno) = kill_result {
+            // Q#PD1/Q#PD2: the failure describes itself; the
+            // disposition is unchanged — this still returns `Err`,
+            // with no state transition and no ledger arming.
+            let leader = observe_leader(proc);
+            return Err(signal_failure_report(target, pid, &errno, &leader));
+        }
         if matches!(signal, Signal::SIGTERM | Signal::SIGKILL | Signal::SIGHUP) {
             proc.state = ProcessState::Exiting {
                 pid,
@@ -2128,6 +2275,230 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e.kind, ProcessEventKind::Exited { code: 0 })),
             "must observe Exited{{code:0}}"
+        );
+    }
+
+    /// Spawn a PTY child that stays alive until terminated, and wait
+    /// for its `Started` event so a pid and a foreground group exist.
+    fn spawn_live_pty(sup: &mut ProcessSupervisor, name: &str) -> ProcessId {
+        let mut spec = ProcessSpec::new(name, "/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        let id = sup.spawn(spec).expect("spawn");
+        let _ = drain_until(sup, id, Duration::from_secs(5), |evs| {
+            evs.iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
+        });
+        id
+    }
+
+    /// Q#PD1 acceptance 1 — a group-directed failure names the target,
+    /// the branch that chose it, the expected group, the errno, and the
+    /// leader's own state, as five separate facts.
+    ///
+    /// The leader field is the one that matters: for a PTY the signal
+    /// goes to the terminal's foreground group, which is a different
+    /// entity from the spawned child whenever job control has moved
+    /// the terminal. Three rejected designs for this code collapsed
+    /// the two; the report keeps them apart.
+    #[test]
+    fn a_group_directed_kill_failure_reports_target_and_leader_separately() {
+        let mut sup = ProcessSupervisor::new();
+        let id = spawn_live_pty(&mut sup, "diag-group");
+
+        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+
+        assert!(err.contains("EPERM"), "errno is reported: {err}");
+        assert!(
+            err.contains("via tcgetpgrp"),
+            "the target SOURCE distinguishes a tty-read group from a spawn group: {err}"
+        );
+        assert!(
+            err.contains("target=-"),
+            "a group target renders negative: {err}"
+        );
+        assert!(
+            err.contains("expected_group=-"),
+            "the spawn-time group is shown so a divergence is visible: {err}"
+        );
+        assert!(
+            err.contains("leader=live"),
+            "the leader is observed independently of the group: {err}"
+        );
+        // Non-vacuity: the two numbers are actually rendered, not empty.
+        assert!(
+            err.contains("leader_pid=") && !err.contains("leader_pid=0,"),
+            "a real leader pid is reported: {err}"
+        );
+    }
+
+    /// Q#PD1 acceptance 2 — a leader-directed failure records the
+    /// fallback branch and a positive target, and omits the group
+    /// field that would be meaningless for it.
+    #[test]
+    fn a_leader_directed_kill_failure_reports_the_fallback_branch() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("diag-leader", "/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        let id = sup.spawn(spec).expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), |evs| {
+            evs.iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
+        });
+
+        sup.force_next_kill_errno(nix::errno::Errno::ESRCH);
+        let err = sup.terminate(id).expect_err("injected ESRCH must fail");
+
+        assert!(err.contains("ESRCH"), "errno is reported: {err}");
+        assert!(
+            err.contains("via leader-pid"),
+            "a non-group pipe child targets its own pid: {err}"
+        );
+        assert!(
+            !err.contains("target=-"),
+            "a leader target renders positive: {err}"
+        );
+        assert!(
+            !err.contains("expected_group="),
+            "the group field is omitted where it has no meaning: {err}"
+        );
+        let _ = sup.signal(id, Signal::SIGKILL);
+    }
+
+    /// Q#PD1 acceptance 3 — every leader state renders distinctly. The
+    /// `Unobservable` and `NoRuntime` arms cannot be produced by a
+    /// real child on demand, so they are pinned directly; `live` and
+    /// `exited` are pinned through the real path by the tests around
+    /// this one.
+    #[test]
+    fn every_leader_observation_renders_distinctly() {
+        assert_eq!(
+            LeaderObservation::Exited(TermStatus::Exited(0)).render(),
+            "exited(code 0)"
+        );
+        assert_eq!(
+            LeaderObservation::Exited(TermStatus::Signaled("SIGTERM".into())).render(),
+            "exited(signal SIGTERM)"
+        );
+        assert_eq!(LeaderObservation::Live.render(), "live");
+        assert_eq!(
+            LeaderObservation::Unobservable("try_wait: boom".into()).render(),
+            "unobservable(try_wait: boom)"
+        );
+        assert_eq!(LeaderObservation::NoRuntime.render(), "no-runtime");
+    }
+
+    /// Q#PD1 acceptance 3, exited arm through the REAL path — the
+    /// leader has genuinely exited and the report says so.
+    #[test]
+    fn a_failure_after_the_child_exits_reports_the_leader_as_exited() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("diag-exited", "/bin/sh");
+        spec.args = vec!["-c".into(), "exit 3".into()];
+        let id = sup.spawn(spec).expect("spawn");
+        // Wait for the child to actually be gone, but do NOT tick past
+        // the point where the record leaves Running — `signal` needs a
+        // live record to reach the kill at all.
+        std::thread::sleep(Duration::from_millis(300));
+
+        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+
+        assert!(
+            err.contains("leader=exited("),
+            "an exited leader is observed as exited, not guessed from the errno: {err}"
+        );
+    }
+
+    /// Q#PD2 acceptance 4 — **the disposition is unchanged.** An
+    /// injected failure still fails, and neither the state transition
+    /// nor the reap-ledger arming runs. This is the assertion that
+    /// separates a diagnostic from the tolerance rules three review
+    /// rounds rejected; flipping any arm to `Ok` fails it.
+    #[test]
+    fn an_injected_failure_changes_no_state_and_arms_no_ledger() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("diag-disposition", "/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        spec.group = true;
+        let id = sup.spawn(spec).expect("spawn");
+        let _ = drain_until(&mut sup, id, Duration::from_secs(5), |evs| {
+            evs.iter()
+                .any(|e| matches!(e.kind, ProcessEventKind::Started { .. }))
+        });
+        assert!(
+            sup.reap_ledger.is_empty(),
+            "precondition: nothing armed before the attempt"
+        );
+
+        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+        assert!(err.contains("via group"), "a group=true pipe child: {err}");
+
+        assert!(
+            matches!(
+                sup.processes.get(&id).expect("record").state,
+                ProcessState::Running { .. }
+            ),
+            "a failed kill must not transition the record to Exiting"
+        );
+        assert!(
+            sup.reap_ledger.is_empty(),
+            "a failed kill must not arm the reap ledger"
+        );
+
+        let _ = sup.signal(id, Signal::SIGKILL);
+    }
+
+    /// Q#PD3/Q#PD4 acceptance 5 — the diagnostic consults the REAL
+    /// `ChildHandle::try_wait` on the REAL child, which reaps it and
+    /// caches the status. `poll_one` must still emit exactly one exit
+    /// event afterwards.
+    ///
+    /// A stubbed observation would bypass the double-`try_wait` path
+    /// entirely and pin nothing, so the injection replaces the kill
+    /// result only.
+    #[test]
+    fn observing_the_leader_does_not_consume_the_exit_event() {
+        let mut sup = ProcessSupervisor::new();
+        let mut spec = ProcessSpec::new("diag-one-event", "/bin/sh");
+        spec.args = vec!["-c".into(), "exit 7".into()];
+        spec.mode = ProcessMode::Pty {
+            rows: 24,
+            cols: 80,
+            mode: TerminalMode::Canonical,
+        };
+        let id = sup.spawn(spec).expect("spawn");
+        std::thread::sleep(Duration::from_millis(300));
+
+        // The forced failure drives `observe_leader`, which try_waits
+        // the real PTY child for the first time.
+        sup.force_next_kill_errno(nix::errno::Errno::EPERM);
+        let err = sup.terminate(id).expect_err("injected EPERM must fail");
+        assert!(
+            err.contains("leader=exited("),
+            "the real handle was consulted: {err}"
+        );
+
+        // Now the supervisor's own try_wait must still see the status.
+        let evs = drain_until(&mut sup, id, Duration::from_secs(5), has_exited);
+        let terminal = evs
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    ProcessEventKind::Exited { .. } | ProcessEventKind::Signaled { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            terminal, 1,
+            "exactly one terminal event survives the diagnostic's try_wait"
         );
     }
 
