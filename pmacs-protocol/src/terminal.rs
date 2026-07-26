@@ -37,10 +37,20 @@ pub const MAX_TERMINAL_COLS: u16 = 512;
 
 /// Maximum visible terminal cells accepted at creation, resize, or on
 /// the wire.
-pub const MAX_TERMINAL_VISIBLE_CELLS: usize = 262_144;
+///
+/// An alias of the shared wire-grid bound: this is transport safety, not
+/// a PTY policy, so it must not drift from the panel's.
+pub const MAX_TERMINAL_VISIBLE_CELLS: usize = crate::wire_grid::MAX_WIRE_GRID_VISIBLE_CELLS;
 
 /// Maximum UTF-8 bytes retained in one terminal grapheme cluster.
-pub const MAX_TERMINAL_GRAPHEME_BYTES: usize = 256;
+///
+/// An **alias** of the shared wire-grid bound, not an independent value.
+/// The terminal screen truncates clusters to this constant while
+/// [`crate::wire_grid`] validates against its own; if the two were
+/// separate literals, raising one would make the producer emit clusters
+/// its own validator rejects — or, worse, accept clusters no frontend
+/// budgeted for. Keeping this a re-export means they cannot drift.
+pub const MAX_TERMINAL_GRAPHEME_BYTES: usize = crate::wire_grid::MAX_WIRE_GRID_GRAPHEME_BYTES;
 
 /// Shared cap for terminal title and process-outcome metadata.
 pub const MAX_TERMINAL_METADATA_BYTES: usize = 1_024;
@@ -56,7 +66,7 @@ pub const MAX_TERMINAL_METADATA_BYTES: usize = 1_024;
 /// protocol test `maximum_legal_terminal_frame_encodes_below_the_transport_cap`
 /// measures the largest legal frame this bound admits and pins it below
 /// the unchanged 16 MiB cap.
-pub const MAX_TERMINAL_FRAME_GLYPH_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_TERMINAL_FRAME_GLYPH_BYTES: usize = crate::wire_grid::MAX_WIRE_GRID_GLYPH_BYTES;
 
 // ---------------------------------------------------------------------------
 // Payload types

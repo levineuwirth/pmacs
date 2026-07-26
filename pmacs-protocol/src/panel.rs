@@ -22,7 +22,7 @@ use crate::wire_grid::{
 ///
 /// Identical to the terminal bound: it is the transport-safety limit,
 /// not a PTY policy, so both messages answer to it.
-pub const MAX_PANEL_VISIBLE_CELLS: usize = 262_144;
+pub const MAX_PANEL_VISIBLE_CELLS: usize = crate::wire_grid::MAX_WIRE_GRID_VISIBLE_CELLS;
 
 /// Bounds a panel frame enforces on its cell grid.
 ///

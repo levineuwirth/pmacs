@@ -39,6 +39,14 @@ pub const MAX_WIRE_GRID_GLYPH_BYTES: usize = 8 * 1024 * 1024;
 /// Per-cell grapheme-cluster byte ceiling shared by every wire grid.
 pub const MAX_WIRE_GRID_GRAPHEME_BYTES: usize = 256;
 
+/// Visible-cell ceiling shared by every wire grid.
+///
+/// This is the transport-safety bound, not a per-message policy: it is
+/// what keeps `rows * cols * per-cell` inside the transport frame limit,
+/// so both the terminal and the panel answer to it even though they
+/// carry different per-axis caps.
+pub const MAX_WIRE_GRID_VISIBLE_CELLS: usize = 262_144;
+
 /// Bounds a particular wire grid enforces.
 ///
 /// `max_rows` / `max_cols` are per-message policy. `max_visible_cells`

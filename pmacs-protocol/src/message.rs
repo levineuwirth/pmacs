@@ -491,6 +491,12 @@ pub enum FrontendEvent {
     /// Carries both epochs so a gesture aimed at a panel that has since
     /// been replaced or reopened cannot be applied to its successor.
     /// Unlike [`Self::Pointer`], accepting this **activates the panel**.
+    ///
+    /// `buffer_id` and `panel_epoch` close different holes and neither
+    /// subsumes the other: `buffer_id` catches an A→B buffer
+    /// replacement, while `panel_epoch` catches close/hide/reopen of the
+    /// **same** persistent buffer — which a buffer id alone cannot
+    /// distinguish — without putting a `WindowId` on the wire.
     PanelPointer {
         /// Which frontend produced the gesture (untrusted, as above).
         frontend_id: FrontendId,
@@ -498,6 +504,8 @@ pub enum FrontendEvent {
         geometry_epoch: u64,
         /// Presentation identity this gesture addresses.
         panel_epoch: u64,
+        /// Buffer the frontend believed the panel was displaying.
+        buffer_id: crate::BufferId,
         /// Cell the pointer is over, within the declared panel grid.
         coord: CellCoord,
         /// Which gesture step this is.

@@ -5,12 +5,16 @@
 //! projection, the epoch state machine, and the GPU band are later
 //! slices of this stage and are not exercised here.
 
-use pmacs_protocol::cell::{Cell, CellCoord, CellSize, Glyph, Style};
+use pmacs_protocol::cell::{Cell, CellCoord, CellSize, Color, Glyph, Style, UnderlineStyle};
 use pmacs_protocol::message::{FrontendEvent, InstanceMessage, Modifiers, MouseButton, MouseKind};
-use pmacs_protocol::panel::{PanelFrame, PanelFrameError, PanelFramePayload};
+use pmacs_protocol::panel::{
+    MAX_PANEL_VISIBLE_CELLS, PanelFrame, PanelFrameError, PanelFramePayload,
+};
 use pmacs_protocol::terminal::{
     MAX_TERMINAL_COLS, TerminalFrame, TerminalFrameError, TerminalProcessState,
 };
+use pmacs_protocol::transport::MAX_FRAME_BYTES;
+use pmacs_protocol::wire_grid::{MAX_WIRE_GRID_GLYPH_BYTES, MAX_WIRE_GRID_GRAPHEME_BYTES};
 use pmacs_protocol::{BufferId, FrontendId, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
 
 fn cell(ch: char) -> Cell {
@@ -19,6 +23,43 @@ fn cell(ch: char) -> Cell {
         style: Style::default(),
         attachment: None,
     }
+}
+
+/// The style whose postcard encoding is as long as a legal `Style` gets.
+fn maximal_style() -> Style {
+    Style {
+        fg: Color::Rgb(0xff, 0xee, 0xdd),
+        bg: Color::Rgb(0x11, 0x22, 0x33),
+        bold: true,
+        italic: true,
+        underline: UnderlineStyle::Dashed,
+        reverse: true,
+        underline_color: Color::Rgb(0x44, 0x55, 0x66),
+    }
+}
+
+fn maximal_cell(glyph: Glyph) -> Cell {
+    Cell {
+        glyph,
+        style: maximal_style(),
+        attachment: None,
+    }
+}
+
+/// A single-column cluster of exactly `len` UTF-8 bytes.
+fn cluster_of_len(len: usize) -> Vec<u8> {
+    assert!((1..=MAX_WIRE_GRID_GRAPHEME_BYTES).contains(&len));
+    let mut text = String::with_capacity(len);
+    if len % 2 == 1 {
+        text.push(' ');
+    } else {
+        text.push('\u{e9}');
+    }
+    while text.len() < len {
+        text.push('\u{301}');
+    }
+    assert_eq!(text.len(), len);
+    text.into_bytes()
 }
 
 fn panel_frame(rows: u32, cols: u32) -> PanelFrame {
@@ -121,6 +162,7 @@ fn the_three_panel_events_round_trip() {
             frontend_id: fid,
             geometry_epoch: 2,
             panel_epoch: 7,
+            buffer_id: BufferId::from_raw(21),
             coord: CellCoord::new(3, 9),
             kind: MouseKind::Down(MouseButton::Left),
             mods: Modifiers::default(),
@@ -132,6 +174,45 @@ fn the_three_panel_events_round_trip() {
         assert_eq!(decoded, event);
         assert_eq!(decoded.frontend_id(), fid);
     }
+}
+
+#[test]
+fn panel_pointer_carries_buffer_id_distinctly_from_panel_epoch() {
+    // The two fields close different holes and neither subsumes the
+    // other: `buffer_id` catches an A->B buffer replacement, while
+    // `panel_epoch` catches close/hide/reopen of the SAME buffer, which
+    // a buffer id alone cannot see. So each must independently reach the
+    // wire — a field silently dropped from the encoding would let one of
+    // those two stale gestures through.
+    let base = |buffer: u64, panel_epoch: u64| FrontendEvent::PanelPointer {
+        frontend_id: FrontendId(4),
+        geometry_epoch: 2,
+        panel_epoch,
+        buffer_id: BufferId::from_raw(buffer),
+        coord: CellCoord::new(1, 1),
+        kind: MouseKind::Down(MouseButton::Left),
+        mods: Modifiers::default(),
+    };
+    let encode = |e: &FrontendEvent| postcard::to_allocvec(e).expect("encode");
+
+    // Same panel epoch, different buffer: must differ on the wire.
+    assert_ne!(encode(&base(1, 7)), encode(&base(2, 7)));
+    // Same buffer, different panel epoch: must also differ.
+    assert_ne!(encode(&base(1, 7)), encode(&base(1, 8)));
+
+    // And both survive decode rather than being defaulted.
+    let event = base(31, 7);
+    let decoded: FrontendEvent = postcard::from_bytes(&encode(&event)).expect("decode");
+    let FrontendEvent::PanelPointer {
+        buffer_id,
+        panel_epoch,
+        ..
+    } = decoded
+    else {
+        panic!("expected a PanelPointer, got {decoded:?}");
+    };
+    assert_eq!(buffer_id, BufferId::from_raw(31));
+    assert_eq!(panel_epoch, 7);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +282,7 @@ fn appending_panel_events_does_not_move_the_previous_final_event_discriminant() 
                 frontend_id: fid,
                 geometry_epoch: 1,
                 panel_epoch: 1,
+                buffer_id: BufferId::from_raw(1),
                 coord: CellCoord::new(0, 0),
                 kind: MouseKind::Down(MouseButton::Left),
                 mods: Modifiers::default(),
@@ -348,4 +430,98 @@ fn terminal_frames_are_unchanged_by_the_factoring() {
             actual: 3
         })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// 39 — the transport-safety ratchet
+// ---------------------------------------------------------------------------
+
+/// The largest legal panel frame, plus the same frame one glyph byte over.
+///
+/// Deliberately shaped `1 x MAX_PANEL_VISIBLE_CELLS`: a panel carries no
+/// per-axis cap, so this is a legal panel geometry a terminal frame
+/// cannot express, and it is therefore the worst case the terminal's own
+/// ratchet never measured.
+fn panel_budget_boundary_frames() -> (PanelFrame, PanelFrame) {
+    /// Shortest cluster length postcard encodes with a two-byte length
+    /// prefix, which is what makes a cluster cell maximally expensive.
+    const WIDE_PREFIX_LEN: usize = 128;
+    let area = MAX_PANEL_VISIBLE_CELLS;
+
+    // Every cell owes at least one glyph byte; the rest of the budget is
+    // spent on as many two-byte-prefix clusters as it affords.
+    let spare = MAX_WIRE_GRID_GLYPH_BYTES - area;
+    let wide_cells = spare / (WIDE_PREFIX_LEN - 1);
+    let remainder = spare % (WIDE_PREFIX_LEN - 1);
+    assert!(wide_cells + usize::from(remainder > 0) <= area);
+
+    let wide = cluster_of_len(WIDE_PREFIX_LEN).into_boxed_slice();
+    let single = cluster_of_len(1).into_boxed_slice();
+    let mut cells = Vec::with_capacity(area);
+    for index in 0..area {
+        let glyph = if index < wide_cells {
+            Glyph::Cluster(wide.clone())
+        } else if index == wide_cells && remainder > 0 {
+            Glyph::Cluster(cluster_of_len(remainder + 1).into_boxed_slice())
+        } else {
+            Glyph::Cluster(single.clone())
+        };
+        cells.push(maximal_cell(glyph));
+    }
+
+    let cols = u32::try_from(area).expect("area fits u32");
+    let exact = PanelFrame {
+        buffer_id: BufferId::from_raw(u64::MAX),
+        panel_epoch: u64::MAX,
+        geometry_epoch: u64::MAX,
+        size: CellSize::new(1, cols),
+        cells,
+        cursor: Some(CellCoord::new(0, cols - 1)),
+        focused: true,
+    };
+
+    let mut over = exact.clone();
+    // One more byte of glyph, nothing else changed.
+    let last = over.cells.len() - 1;
+    over.cells[last] = maximal_cell(Glyph::Cluster(cluster_of_len(3).into_boxed_slice()));
+
+    (exact, over)
+}
+
+#[test]
+fn maximum_legal_panel_frame_encodes_below_the_transport_cap() {
+    let (exact, over) = panel_budget_boundary_frames();
+    assert_eq!(exact.validate(), Ok(()));
+
+    // The fixture must actually sit ON the boundary, or the ratchet
+    // below measures something smaller than the worst case and would
+    // stay green while a real maximum frame overran the transport.
+    let mut glyph_bytes = 0usize;
+    for cell in &exact.cells {
+        glyph_bytes += match &cell.glyph {
+            Glyph::Char(ch) => ch.len_utf8(),
+            Glyph::Cluster(bytes) => bytes.len(),
+            Glyph::Continuation => 0,
+        };
+    }
+    assert_eq!(
+        glyph_bytes, MAX_WIRE_GRID_GLYPH_BYTES,
+        "the measured fixture must spend the whole aggregate budget"
+    );
+
+    // One byte over is rejected, which is what makes `exact` maximal.
+    assert!(matches!(
+        over.validate(),
+        Err(PanelFrameError::GlyphBudget { .. })
+    ));
+
+    let msg = InstanceMessage::PanelFrame(PanelFramePayload::Present(exact));
+    let bytes = postcard::to_allocvec(&msg).expect("encode");
+    assert!(
+        bytes.len() < MAX_FRAME_BYTES,
+        "largest legal panel frame encodes to {} bytes, at or above the \
+         {MAX_FRAME_BYTES}-byte transport cap; the aggregate glyph bound no \
+         longer keeps panel traffic inside the existing transport limit",
+        bytes.len()
+    );
 }
