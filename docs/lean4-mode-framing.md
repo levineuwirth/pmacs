@@ -6,7 +6,7 @@ pmacs has no Lean support of any kind: `grep -rin lean` over `*.rs`,
 plain buffer — no grammar, no major mode, no comment syntax, no pair set,
 no server.
 
-This lane closes that in eight stages. Stage boundaries are drawn where
+This lane closes that in nine stages. Stage boundaries are drawn where
 the *substrate* changes, not where the feature list does — see §4.
 §9 states the lane's coherence impact per `COHERENCE.md` §20.
 
@@ -21,11 +21,12 @@ the *substrate* changes, not where the feature list does — see §4.
   #144 (LaTeX), #146 (HTML+CSS). Stage 1 is that pattern almost exactly.
 - Stages 2 and 4–6 are **not** that pattern, and none should be mistaken
   for a one-liner. Stage 2 changes `ensure_server`, shared by every LSP
-  language. Stage 4 builds the editor's first input method. Stage 5 is the
+  language. Stage 4a changes how typed-character provenance is consumed
+  and Stage 4b builds the editor's first input method. Stage 5 is the
   first consumer of a non-standard LSP method family. Stage 6 adds a
   severity-routing policy to `LspServerSpec`.
 - The user's stated north star is **matching or exceeding what VS Code
-  does with Lean**. §5's bet 6 scores honestly how close the eight stages get
+  does with Lean**. §5's bet 6 scores honestly how close the nine stages get
   and names precisely what is still missing.
 
 Parallel-safety: Stage 1 touches `Cargo.toml`, `src/syntax.rs`,
@@ -45,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial.
+Revision 1 — initial. Current revision: **8**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -283,10 +284,230 @@ rather than a bare root), `ensure_server` 527 → **610**,
 pre-#161 line numbers inside Q#LN15 are left as written: that stage has
 landed and its citations are historical record, not navigation.
 
+### Round 5 (rev 5 → rev 6) — Stage 4 re-scout and split
+
+Stages 3a and 3b landed (#167, #170). Re-scouting Stage 4 against `main`
+@ `d400f30` produced **six findings that change the plan** and three
+that confirm it. (Round 6 found five more, four of them internal to this
+revision; read that section too before trusting a rev-6 statement.) The pmacs-side facts were verified in a worktree at
+that commit; the upstream facts were verified by downloading and reading
+`leanprover/vscode-lean4` at commit `17d1d08` (2026-05-29) — the
+algorithm, not its documentation, since the `lean4-unicode-input`
+package ships no README. *(Round 6: it does, at `src/README.md` — see
+that section. Corrections to round 5's own numbers are marked inline
+below rather than rewritten, per the standing rule that revision
+entries are record, not navigation.)*
+
+1. **Stage 4 violated this document's own splitting rule — the same way
+   Stage 3 did.** §4 says "no PR in this arc mixes a cross-cutting
+   substrate change with Lean feature content," and §4's own risk column
+   for Stage 4 read *"refactors `pair.lua`'s provenance read."*
+   `pair.lua` is every language's auto-pairing; the refactor is
+   cross-cutting substrate by exactly the test that split out stages 2
+   and 3a. Rev 5 already conceded the shape without acting on it —
+   Q#LN10 said the refactor "lands *first*, as its own commit with no
+   behavior change, so a regression bisects cleanly." A commit boundary
+   is not a review boundary. **Stage 4 is now 4a (the typed-edit
+   consumer chain, no Lean) and 4b (the input method).** Confirmed
+   `pair.lua:226` is still the **only** production `take_typed_edit`
+   caller; the other eight call sites are all in
+   `tests/auto_pair_acceptance.rs`.
+2. **The expansion semantics in rev 5's Q#LN10 were wrong in three
+   ways.** Reading `AbbreviationProvider.ts` and `TrackedAbbreviation.ts`
+   rather than inferring from behavior:
+   - Rev 5 said expansion fires on "a unique complete match that no
+     longer key extends." Upstream's rule is
+     `findSymbolsByAbbreviationPrefix(abbrev)[0]` — the symbol of the
+     **shortest key having `abbrev` as a prefix**. `\alp` + space is not
+     a failure; it yields `α`, because `alpha` is the shortest key
+     starting with `alp`. Verified against the table: `\al` → `∀`, from
+     `all`, not from `alpha`.
+   - Rev 5 named "an explicit terminator (space, tab, RET, or a second
+     `\`)." **There is no terminator list upstream.** A character
+     terminates iff extending the pending key by it leaves zero prefix
+     matches. Space usually does — but `'+ '` **is a key** (one of
+     1,855), so after `\+` a space extends rather than terminates. And a
+     second `\` is not a terminator either: `'\'` is a key mapping to
+     `\`, so `\\` extends, matches uniquely, and expands to a single
+     backslash. It terminates only when the pending key is non-empty and
+     no key extends it.
+   - Rev 5 did not carry the suffix rule at all. When no key has
+     `abbrev` as a prefix, upstream recurses on `abbrev` minus its last
+     character and **appends the leftover**: `\alp7` → `α7`. Dropping
+     this makes a large class of real input silently unexpandable.
+3. **There is no cursor-motion hook, so acceptance 43 as written cannot
+   be built.** The Rust core fires exactly eight named hooks
+   (`builtin/hooks/default.lua`): `buffer.before-save`,
+   `buffer.after-load`, `buffer.after-edit`, `buffer.after-switch`,
+   `buffer.after-save`, `editor.before-quit`, `frontend.detached`,
+   `process.after-tick`. Upstream drives abandonment off
+   `changeSelections`, a seam pmacs does not have. Abandonment must
+   therefore be **lazy** — validated at the next typed edit against the
+   pending region — which changes what acceptance 43 can assert. Q#LN22
+   states the state machine this forces.
+4. **`dispatch_key` is only half of Stage 4b's production path.** Rev 5
+   inherited the auto-pairing suite's dispatch-driven harness without
+   noticing why that harness is sufficient *there*: Q#AP1 removed the
+   pair characters from both optimistic classifiers, so for pair chars
+   dispatch **is** production. `\` and the ASCII letters are not
+   excluded — `classify_key` returns `Insert(c)` for them
+   (`src/optimistic.rs:144`: `Char(c) if !c.is_control() &&
+   !is_builtin_pair_char(c)`), so on a CRDT frontend an abbreviation is
+   typed entirely through the *optimistic* producer, which arms the same
+   record from `handle_remote_crdt_op` (`src/daemon.rs:3965` pins the
+   classification). A dispatch-only Stage 4b suite would pin the path
+   real users do not take. The trap underneath: that producer is
+   `#[cfg(feature = "crdt")]`, and CI never enables `crdt` — so a
+   crdt-gated integration test is dark twice over, since the required
+   gate list runs `--features crdt` only for `--lib`. Q#LN22 and §7 say
+   what to do about it instead of discovering it in review.
+5. **The whole expansion has cross-peer-degraded undo, and it is a
+   larger bite than `⟨⟩`'s.** Q#LN6 already accepts this for three
+   bracket pairs. But there the mismatch is one optimistic opener
+   against one daemon-peer closer; here the user's `\alpha` is six
+   source-peer optimistic inserts and the expansion is a single
+   daemon-peer `replace` **over all six**. Q#LN21 takes the decision —
+   including why `pmacs.buffer.set_round_trip_input`, which already
+   exists and would fix it, is the wrong instrument.
+6. **The table's shape is sharper than "1,855 entries."** Re-counted at
+   `17d1d08`: 1,855 entries, all `string → string`, **all keys ASCII**,
+   longest key 25 characters, 36,861 bytes of JSON. **64** keys contain
+   a `lean4` pair-set character (rev 5's number, reproduced exactly).
+   Three numbers rev 5 did not have and the algorithm needs: **305**
+   keys are proper prefixes of another key (so 1,550 are eager-expandable
+   on uniqueness and 305 are not), **26** values carry `$CURSOR` (not
+   just `\<>`), and **93** values are multi-codepoint. Two values contain
+   a backslash — `n` → `\n` and `setminus` → `\` — which is why upstream
+   needs a `doNotTrackNewAbbr` guard and why §2.11 records that pmacs
+   does not.
+
+   *Corrected in round 6.* **119** symbols are multi-codepoint, of which
+   26 carry `$CURSOR`; "93" was the non-`$CURSOR` subset stated as a
+   total. **Three** values contain a backslash — the `\` → `\` identity
+   entry was missed. And this entry's biggest omission is not a number:
+   the shortest-key rule needs a **tie-break by source declaration
+   order**, which the README round 5 said did not exist states outright.
+   §2.11 and Q#LN11 carry the corrected facts.
+
+Confirmations, recorded because each was load-bearing and unverified:
+
+7. **`take_typed_edit`'s one-shot contract is unchanged**
+   (`src/editor_core.rs:4047`): per-frontend, cleared by the producer
+   when the fan-out returns, nil to a nested manual `hook.run`. The
+   hazard rev 5 built Q#LN10 around is real and still the reason 4a
+   exists.
+8. **Load order still constrains the chain.** `pair.lua` loads at
+   `src/editor.rs:430` and `lsp.lua` at `:436`, and Q#AP7's reason
+   holds: `lsp.lua`'s `buffer.after-edit` callback synchronously flushes
+   `didChange` on the signature-trigger path. An expansion that landed
+   after that flush would send the server the unexpanded text.
+9. **Embedding the table needs no special machinery.** Every builtin
+   runtime chunk is an `include_str!`, and `lsp.lua` is already 111 KB
+   of the 414 KB total. A ~45 KB generated Lua table is within the
+   existing practice, so Q#LN11 embeds it rather than inventing a
+   lazy-load path.
+
+Citation drift repaired per COHERENCE §25, on the same terms as round
+4's sweep. Five live citations moved in the 50 commits since rev 5:
+`take_typed_edit` 12827 → **12990**, `handle_server_requests` 1549 →
+**1815**, `fs.stat` 93 → **133**, `detect_buffer_language` 452 →
+**457**, and `send_request`/`send_notification` 9342/9361 →
+**9507**/**9527**. Left as written: the pre-#161 numbers inside Q#LN15
+and the revision-history entries above, which are historical record
+rather than navigation.
+
+### Round 6 (rev 6 → rev 7)
+
+The 4a/4b split held; five P1s against the revision's own content, all
+real, all reproduced. Four share a root: **rev 6 verified its external
+facts and under-verified its internal ones.**
+
+1. **Stage 4a's declared footprint excluded the tests its acceptance
+   required.** Q#LN10 listed three production files while 46a–46e demand
+   chain-specific tests that cannot live in
+   `tests/auto_pair_acceptance.rs` — criterion 46 requires that file
+   byte-identical. Footprint now names
+   `tests/typed_edit_chain_acceptance.rs` and adds it to the PR's gates.
+2. **Pending state had the wrong owner.** §2.11 reasoned "no
+   multi-cursor, therefore one point" and Q#LN22 keyed pending
+   abbreviations by buffer. pmacs is multi-frontend: `EditorCore.views`
+   is per-`FrontendId` with its own active window, `take_typed_edit` is
+   *already* frontend-keyed, and `pmacs.frontend.id()` exists. Two
+   frontends on one Lean buffer — the TUI-plus-GPU case this project
+   ships — would share one slot. Worse, `buffer.after-switch` takes no
+   arguments, so a buffer-keyed clear-on-switch lets any frontend
+   discard another's pending abbreviation. Now keyed
+   `(frontend, buffer)` with a window check, frontend-scoped
+   after-switch clearing, a `frontend.detached` purge, and acceptance
+   45i — which the buffer-keyed design passes every other criterion
+   without.
+3. **The shortest-match rule was missing its tie-break, and rev 6's
+   research method is why.** Upstream keeps declaration order among
+   equal-length shortest keys. The README states it in one sentence —
+   and rev 6 asserted "the package ships no README" after a 404 on the
+   package root, without checking the directory listing it had already
+   fetched, which shows `README.md` under `src/`. **A 404 on a guessed
+   path is not evidence of absence.** The rule is load-bearing: 101
+   prefixes have equal-shortest candidates resolving to *different*
+   symbols (`f` → `f<` not `f>`; `"` picks `"A` from eleven). A `pairs`-
+   iterated Lua map cannot express it, so Q#LN11 now emits an ordered
+   sequence and Q#LN22 sorts by `(#key, source rank)`.
+4. **The generator's rejection rule rejected the current table.** "Abort
+   on keys needing Lua escaping" would reject `\` and the eleven `"X`
+   keys — and acceptance 45d requires `\` to work. Replaced with
+   canonical lossless escaping; the generator aborts only on duplicate
+   keys, invalid UTF-8, and a failed self-round-trip. Relatedly, 45g
+   claimed the suite compares against `abbreviations.json`, which is not
+   shipped; it now pins self-consistency properties and leaves
+   source fidelity to the generator, where the source is in hand.
+5. **Durable and volatile state were not reconciled** —
+   `docs/agent-handoff.md` still anchored `main` at `d152120` with
+   neither #167 nor #170, while `docs/active-work.md` kept full merged
+   Stage 3a/3b histories against its own instruction to remove merged
+   entries, under a stale July 25 snapshot date. Round 5 updated the
+   ledger and skipped the handoff; per CLAUDE.md both are required
+   reading, and the one that outranks the other was the one left wrong.
+
+Corrections carried in the same revision, each verified against the
+data: the README exists (finding 3); there are **119** multi-codepoint
+symbols, of which 26 carry `$CURSOR` — rev 6's "93" was the
+non-`$CURSOR` subset reported as a total; **three** values contain a
+backslash (`\`, `n`, `setminus`), not two; Q#LN22 now states the rule
+acceptance 45d depended on, that an unclaimed terminating `\` is
+reprocessed as a new leader; acceptance 38 now says the terminator is
+retained, so undo restores `\alpha ` with its space; the coherence
+section cites golden-journey **step 5** ("Edit immediately"), not step
+4; and §8's config-registry prior art points at Q#LN22, where the gate
+now lives.
+
+### Round 7 (rev 7 → rev 8)
+
+One P1 remained in the new multi-frontend acceptance, plus two
+documentation cleanups.
+
+1. **Acceptance 45i contradicted Q#LN22's conservative abandonment
+   rule.** It required frontend A's pending abbreviation to survive
+   frontend B editing the same buffer, but `buffer:revision()` is
+   buffer-global and advances on every edit. B's first edit therefore
+   invalidates A's record under the exact-revision guard. The criterion
+   now separates the two contracts: another frontend cannot consume A's
+   record, but any intervening edit to their shared buffer invalidates
+   it lazily; navigation and detachment remain frontend-scoped when no
+   shared-buffer edit intervenes. The pending record now names its
+   `expected_revision` explicitly so the validation rule is buildable.
+   Preserving A's record through peer edits would require translating
+   and validating its span across arbitrary edits, a substantially
+   larger substrate change that Stage 4b does not take on.
+2. **The volatile ledger retained rev 6's undercount.** Its table facts
+   now say 119 multi-codepoint symbols — 26 `$CURSOR`-bearing and 93
+   others — matching §2.11 and Q#LN11.
+3. **§9.1's revision label was stale.** It now names rev 8.
+
 ## 1. What ships
 
-Eight stages, after round 4 split Stage 3. The north star is VS Code
-parity; the honest statement of where that lands is in §5, bet 6.
+Nine stages, after round 4 split Stage 3 and round 5 split Stage 4. The
+north star is VS Code parity; the honest statement of where that lands
+is in §5, bet 6.
 
 **Stage 1 — grammar, mode, and the editing table stakes.** `.lean` files
 highlight, carry a `lean4` major mode, and get comment-toggle and
@@ -315,10 +536,19 @@ on 3a's seam. Adds `textDocument/waitForDiagnostics`. Diagnostics, hover,
 completion, goto-definition, document symbols, and semantic tokens all
 arrive through the existing typed surfaces.
 
-**Stage 4 — the Unicode input method.** Typing `\alpha` produces `α`,
+**Stage 4a — the typed-edit consumer chain.** Pure substrate, no Lean
+content, split from Stage 4 in round 5 for the reason stages 2 and 3a
+were: it changes machinery every language runs through. The one-shot
+`take_typed_edit()` record stops being auto-pairing's private property
+and becomes a small ordered chain that reads it once and offers it to
+registered consumers. `pair.lua` becomes the chain's first and only
+consumer, with no behavior change.
+
+**Stage 4b — the Unicode input method.** Typing `\alpha` produces `α`,
 `\to` produces `→`, `\<>` produces `⟨⟩` with the point between them.
-1,855 abbreviations vendored from vscode-lean4. This is the stage that
-makes Lean actually typable in pmacs.
+1,855 abbreviations vendored from vscode-lean4, registered as a chain
+consumer ahead of auto-pairing. This is the stage that makes Lean
+actually typable in pmacs.
 
 **Stage 5 — the goal view.** A `*lean-goal*` panel that renders
 `$/lean/plainGoal` at the point, refreshed on a debounced tick and on
@@ -405,7 +635,7 @@ injections_query }`. Adding a grammar is one entry plus one `Cargo.toml`
 line; the doc comment at `src/syntax.rs:756` says exactly this and it has
 held for every grammar since.
 
-`builtin/runtime/syntax.lua:452` `detect_buffer_language` resolves, in
+`builtin/runtime/syntax.lua:457` `detect_buffer_language` resolves, in
 order: modeline → `pmacs.parse.language_for_path` (the grammar extension
 table) → `pmacs.lsp.filetypes[ext]` → `pmacs.parse.language_from_filename`
 → shebang. A grammar entry claiming `lean` therefore resolves `.lean`
@@ -486,13 +716,13 @@ and pin it.*
 
 - `pmacs.lsp` already exposes generic `send_request(id, method, params)`
   → request id and `send_notification(id, method, params)`
-  (`src/lua_bindings/mod.rs:9342`, `:9361`). Non-standard methods need no
+  (`src/lua_bindings/mod.rs:9507`, `:9527`). Non-standard methods need no
   new Rust to *send*.
 - `LspEventKind` (`src/lsp.rs:264`) has generic `Notification { method,
   params }` and `Response { id, result, error, method }` variants. Unknown
   server methods are delivered, not dropped.
 - **But `events_take` has exactly one consumer**: `handle_server_requests`
-  at `builtin/runtime/lsp.lua:1549`, driven off `pmacs._async.tick`. It
+  at `builtin/runtime/lsp.lua:1815`, driven off `pmacs._async.tick`. It
   `take`s — a drain. Its `if/elseif` chain handles five `request` methods
   and `initialized`, and **ignores every `notification` and every
   `response`**. A second module calling `events_take` would steal events
@@ -556,7 +786,7 @@ character": subscribe to `buffer.after-edit`, gate on
 `ed.this_command() == "buffer.self-insert"` (`pair.lua:229`), then take the
 exact provenance record.
 
-`pmacs.editor.take_typed_edit()` (`src/lua_bindings/mod.rs:12827`) returns
+`pmacs.editor.take_typed_edit()` (`src/lua_bindings/mod.rs:12990`) returns
 `{ buffer, window, codepoint, char, requested_start, requested_end,
 effective_start, effective_end, inserted_len, post_cursor, clean }` — or
 nil. Its doc comment is explicit:
@@ -570,7 +800,19 @@ it on every self-insert. A Lean abbreviation expander that independently
 calls `take_typed_edit()` in the same `buffer.after-edit` fan-out gets nil
 or steals it from auto-pairing, depending on hook order — and hook order is
 not a contract. This is the single load-bearing constraint on Stage 4 and
-the reason Stage 4 is its own PR rather than a rider on Stage 1.
+the reason Stage 4 is its own PR rather than a rider on Stage 1 — and,
+after round 5, the reason its substrate half is Stage 4a rather than a
+first commit on a Lean branch.
+
+Re-verified at `d400f30`: `pair.lua:226` remains the **only** production
+caller. The eight other call sites in the tree are all in
+`tests/auto_pair_acceptance.rs`. So the chain Stage 4a introduces has
+exactly one consumer to migrate, which is what makes a no-behavior-change
+substrate PR possible at all.
+
+Two producers arm the record, not one, and §2.11 is where that matters:
+the dispatch fallback and — under `#[cfg(feature = "crdt")]` — the
+optimistic CRDT arm reached from `handle_remote_crdt_op`.
 
 Related, from `pair.lua:30`'s Q#AP1 note: only the nine built-in pair chars
 `()[]{}"'` and backtick are excluded from the frontends' optimistic
@@ -679,6 +921,129 @@ mis-rendered as defects**, and the count misleads.
 The publish path absorbs into the Rust store *and* still delivers the
 notification to `events_take`, so Lua can observe them; but suppressing
 them from the store needs a Rust-side policy, not a Lua filter. Q#LN18.
+
+### 2.11 The upstream input method (external, verified by reading it)
+
+Scouted 2026-07-26 against `leanprover/vscode-lean4` @ `17d1d08`,
+package `lean4-unicode-input`, files `AbbreviationProvider.ts`,
+`TrackedAbbreviation.ts`, `AbbreviationRewriter.ts`,
+`AbbreviationConfig.ts`, `abbreviations.json`, and — round 6 — the
+package README at `lean4-unicode-input/src/README.md`. Apache-2.0.
+
+**Rev 6 first claimed this package ships no README. It does**, at
+`src/README.md` rather than the package root, and the 404 on the root
+path was taken as absence without checking the directory listing that
+was already in hand. That cost the tie rule below: the README states it
+in one sentence, and reading only the code left it as an inference from
+`Array.prototype.sort`'s stability rather than a documented contract.
+
+**Resolution.** `findSymbolsByAbbreviationPrefix(p)` collects every key
+having `p` as a prefix, sorts them by **key length ascending**, and maps
+to symbols. `getReplacementText(a)`:
+
+1. If any key has `a` as a prefix, return the shortest such key's symbol.
+2. Otherwise recurse on `a` minus its last character; if that yields
+   something, return it **with the dropped character appended**.
+3. Otherwise undefined — no expansion.
+
+Verified against the table: `alpha` → `α`, `alp` → `α` (via `alpha`),
+`al` → `∀` (via `all`, *not* `alpha` — shortest wins, and this is
+surprising enough to be worth an acceptance criterion), `alp7` → `α7`
+via rule 2, `a` → `α` (`a` is itself a key, among 29 prefix matches).
+
+**The tie rule, and why it is a constraint on the vendored format.**
+When several shortest keys have equal length, upstream takes **the one
+declared first in `abbreviations.json`**. The README says so outright;
+the code achieves it because `Object.keys()` yields JSON insertion order
+and `Array.prototype.sort` is stable. Ties are not rare: **101 prefixes
+have equal-shortest candidates that resolve to *different* symbols**.
+`f` picks `f<` → `‹` over `f>` → `›`; `"` picks `"A` → `Ä` from eleven
+equal-length candidates; `(` picks `()` over `(=`, `(b`, `((`, `([`.
+
+A Lua table iterated with `pairs` has no order at all, so **a generated
+`{ [key] = symbol }` map cannot express this contract** — it would
+resolve these 101 prefixes nondeterministically, and worse, *stably
+wrong* per build. Q#LN11 therefore carries source rank alongside the
+symbol.
+
+**Two things the README explains that the code does not.** `Tab` is the
+manual early-replacement trigger upstream binds, which is why
+`getReplacementText`'s shortest-prefix rule is user-visible at all
+rather than an internal detail. And the `[]_`/`{}_` entries in the table
+are not symbols anyone types — they are **decoys**, added so that `\[`
+is not uniquely-and-completely matching and therefore does not eagerly
+expand before the user can type the second `[`. That is the same
+collision Q#LN22 handles from the pairing side, solved upstream by
+editing the data. Anyone regenerating the table must not "clean up"
+those entries.
+
+**Tracking.** The leader `\` is inserted into the buffer like any other
+character, and the tracked range starts after it; the replaced range
+spans the leader inclusive (`abbreviationRange.moveKeepEnd(-1)`). So the
+buffer literally shows `\alpha` until expansion, then that whole span
+becomes `α`.
+
+**Termination.** There is no terminator set. On each typed character
+`c`, if `findSymbolsByAbbreviationPrefix(a .. c)` is empty the
+abbreviation is marked `finished`, **`c` is not absorbed into it**, and
+the pending text expands before `c` lands. Otherwise `c` extends the
+key. Two consequences the obvious "space ends it" model gets wrong:
+
+- `'+ '` is a key, so after `\+` a space **extends**. Space is a
+  terminator by consequence, never by rule.
+- `'\'` is a key (→ `\`), so `\\` extends, is uniquely complete, and
+  eagerly expands to one backslash. A second `\` terminates only when
+  the pending key is non-empty and unextendable — at which point the
+  rewriter starts a *new* tracked abbreviation on it.
+
+**Eager expansion.** When `eagerReplacementEnabled`, an abbreviation
+expands the moment it is *unique and complete*: exactly one key has it
+as a prefix, and it is itself a key. 1,550 of the 1,855 keys qualify;
+the other 305 are proper prefixes of some other key and must wait for
+termination. `\to` is in the first group — it expands with no terminator
+typed, which is why acceptance 41 is meaningful and not a restatement of
+38.
+
+**Cursor placement.** `$CURSOR` is stripped from the symbol and its
+index becomes the post-expansion point, applied only when the point sat
+at the end of the abbreviation. 26 values carry it.
+
+**Abandonment.** Upstream expands on `changeSelections` — any tracked
+abbreviation the cursor has left. pmacs has no cursor-motion hook
+(round-5 finding 3), so this seam does not exist here and Q#LN22 makes
+abandonment lazy instead.
+
+**The re-arm guard pmacs does not need.** Three values contain a
+backslash — `\` → `\`, `n` → `\n`, and `setminus` → `\` (rev 6 first
+said two, dropping the `\` → `\` identity entry) — so an expansion can
+insert a backslash; upstream sets
+`doNotTrackNewAbbr` across the replace so that backslash does not open a
+new abbreviation. In pmacs the expansion is a programmatic `buf:replace`
+that arms no typed-edit record, so the chain sees nothing and cannot
+re-arm. The guard is unnecessary here **because of** the provenance
+contract, not by accident — and the acceptance must pin it, because a
+future consumer that inferred from buffer text rather than provenance
+would reintroduce the bug.
+
+**What pmacs does not have to carry.** Multi-cursor within a frontend.
+Upstream tracks a `Set<TrackedAbbreviation>` and sorts changes bottom-up
+for that reason; pmacs has one point per frontend view.
+
+**What pmacs has instead, and rev 6 got wrong.** Rev 6 read "no
+multi-cursor" as "one point" and keyed pending state by buffer alone.
+**pmacs is multi-frontend**: `EditorCore.views` is a
+`HashMap<FrontendId, FrontendView>`, each with its own active window and
+cursor; `take_typed_edit` is already keyed by frontend
+(`typed_edit_armed: Option<(FrontendId, TypedEditRecord)>`, matched
+against `active_frontend`); the record carries `window` as well as
+`buffer`; and `pmacs.frontend.id()` is exposed to Lua. Two frontends
+editing the same Lean buffer — the ordinary TUI-plus-GPU case, not an
+exotic one — would share a single buffer-keyed pending slot, so one
+could extend, expand, or silently clear the other's half-typed
+abbreviation. `buffer.after-switch` makes it worse: it fires with no
+arguments, so a buffer-keyed clear-on-switch would let *any* frontend's
+navigation discard a pending abbreviation belonging to another. Q#LN22
+keys the state accordingly.
 
 ## 3. Decisions
 
@@ -911,7 +1276,7 @@ file's directory.
 
 **How the walk tests for the marker — and why not the obvious way.**
 `pmacs.fs.stat` is asynchronous: it returns an awaitable handle
-(`builtin/runtime/fs.lua:93`) that only settles under `:await()` inside a
+(`builtin/runtime/fs.lua:133`) that only settles under `:await()` inside a
 coroutine. The resolver has no coroutine. It runs synchronously inside
 `ensure_server` ← `attach_buffer` ← the `buffer.after-load` hook, so
 awaiting is not merely slow there, it is unavailable — and blocking the
@@ -1102,86 +1467,295 @@ The binding is general, not Lean-shaped: it serves every future
 function-valued `root`, and it is what lets #161's doc comment stop
 warning about a footgun and start naming a fix.
 
-### Q#LN10 — Stage 4 mechanism: one shared provenance read, not two
+### Q#LN10 — Stage 4a: one shared provenance read, not two
 
 The hazard is §2.6 — `take_typed_edit()` is one-shot and `pair.lua`
-already consumes it.
+already consumes it. A second independent caller in the same
+`buffer.after-edit` fan-out gets nil or steals the record, depending on
+hook order, and hook order is not a contract.
 
 Decision: **`pair.lua` stops being the sole consumer.** Extract the
 provenance read into a single `buffer.after-edit` subscriber owned by a
-small shared module, which takes the record once and passes it to an
-ordered list of typed-edit consumers (auto-pair, Lean abbreviation).
-Consumers return whether they handled the edit; the first that does stops
-the chain.
+small shared module — `builtin/runtime/typed_edit.lua`, loaded
+immediately before `pair.lua` — which takes the record once and offers
+it to registered consumers in a defined order. A consumer returns
+whether it **claimed** the edit; the first that claims stops the chain.
 
-Two consequences worth stating up front:
+`pmacs.typed_edit.add_consumer { name = <string>, priority = <number>,
+fn = function(rec) ... end }`, lowest priority first, ties broken by
+registration order. Priority is an explicit number rather than
+load-order-implied because Q#LN22's collision makes ordering
+load-bearing, and rev 5's "the abbreviation consumer runs first" is a
+claim a reader must be able to check without reconstructing
+`src/editor.rs`'s include list.
 
-- This touches `pair.lua`, which is load-bearing for auto-pairing
-  acceptance. The full pairing suite is a required gate for Stage 4, and
-  the refactor lands *first*, as its own commit with no behavior change,
-  so a regression bisects cleanly.
-- Ordering is a contract, not an accident, and the collision is real:
-  **64 of the 1,855 abbreviation keys contain a character in the proposed
-  `lean4` pair set** — `\[[]]` → `⟦⟧`, `\(())` → `⸨⸩`, `\{{}}` → `⦃⦄`,
-  `\{}` → `{$CURSOR}`. With pairing first, typing `\[` inserts `[]`
-  with the point between, so the pending key is corrupted to `\[]` before
-  the second `[` is ever typed and `\[[]]` becomes unreachable. The
-  abbreviation consumer runs first.
+**Stage 4a ships this and nothing else.** Its whole content is:
 
-  (Rev 1 justified this with `\<>`, which was wrong: `<` is not in the
-  pair set per Q#LN6, so that key is safe under either order.)
+| File | Change |
+|---|---|
+| `builtin/runtime/typed_edit.lua` | new — the chain owner |
+| `builtin/runtime/pair.lua` | re-expressed as one registered consumer |
+| `src/editor.rs` | one `include_str!` line, before `pair.lua`'s |
+| `tests/typed_edit_chain_acceptance.rs` | new — criteria 46a–46h |
+| `tests/auto_pair_acceptance.rs` | **unchanged, zero lines** |
 
-**The contract that collision exposes:** the abbreviation consumer must
-claim a self-insert that **extends an open pending abbreviation**, not
-only one that completes an expansion. A consumer that only claims
-completed expansions hands every intermediate keystroke to auto-pairing,
-which is exactly how `\[` gets corrupted. "Claimed" here means the chain
-stops, not that an edit was made.
+Rev 6 listed only the first three and then required criteria 46a–46e,
+which no existing suite can host: the auto-pairing suite must stay
+untouched (that is the whole point of criterion 46), so the chain's own
+behavior — take-once, priority order, claim-stops-chain, throw
+containment — has nowhere to live. A declared footprint that excludes
+the tests its own acceptance demands is not a footprint. The new suite
+joins the required gate list for this PR alongside
+`tests/auto_pair_acceptance.rs`.
 
-Expansion semantics (matching vscode-lean4 and `lean4-input`):
+Round 5's finding 1 is why this is a PR and not a first commit —
+`pair.lua` is every language's auto-pairing, and a reviewer looking at a
+Lean PR should not have to also review a rewrite of it.
 
-- `\` opens a pending abbreviation, tracked per buffer with its start
-  offset. Every subsequent self-insert that extends it is claimed. The
-  pending state is abandoned on any non-self-insert command, buffer
-  switch, or cursor move away from the pending region.
-- Expansion fires on a unique complete match that no longer key extends,
-  or on an explicit terminator (space, tab, RET, or a second `\`).
-- The vendored table's `$CURSOR` placeholder becomes the point position
-  after the replace — this is how `\<>` yields `⟨|⟩`.
-- The whole expansion is **one `buf:replace`** — one undo step, one CRDT
-  op, one effective-edit verification. Same discipline as
-  `comment.lua`'s Q#CT5.
-- Gated by `pmacs.config.define{ name = "lean.abbrev", type = "boolean",
-  default = true, mutability = "live" }`, read against the *source* buffer
-  of the typed edit — the `editing.auto-pair` precedent (`pair.lua:44`),
-  including its round-2 correction to resolve `rec.buffer` rather than
-  `pmacs.window.buffer()`.
+**The no-behavior-change claim must be pinned, not asserted.** The full
+`tests/auto_pair_acceptance.rs` suite is a required gate for 4a and must
+pass **unmodified** — a suite edited to accommodate the refactor proves
+nothing (the recorded lesson: what a test suite pins is its assertions).
+Three assertions the existing suite already makes are the load-bearing
+ones, because they are what a chain could plausibly break: that a second
+`take_typed_edit()` in the same fan-out yields nil, that pairing still
+sees the exact record via `_capture_records`, and that the Q#AP7 ordering
+against `lsp.lua`'s `didChange` flush still holds.
 
-### Q#LN11 — Stage 4 data: vendor the table, generated, attributed
+**What 4a deliberately does not do.** It does not change the `all-must-
+succeed` contract. What that contract actually does on a throw was
+stated wrongly through rev 7 and is corrected here, because this
+paragraph is the authority the module comment, criterion 46d, the test,
+and the ledger all descend from: `run_all_must_succeed`
+(`src/hook.rs:332`) **collects** the error and continues to the hook's
+remaining subscribers, marking only the run as failed. An uncontained
+throw inside the chain therefore does **not** stop `lsp.lua` from
+flushing `didChange`. What it does stop is every LATER consumer in the
+chain — the chain is one subscriber, and a throw abandons the rest of
+its loop.
+
+That is a narrower consequence than rev 7 claimed and still worth
+containing, because the failure is silent in the direction that matters:
+a consumer that throws disables the consumers behind it with no signal
+at the seam where they were registered. The chain owner therefore
+`pcall`s each consumer and reports through `pmacs.editor.set_status`,
+matching `pair.lua`'s existing never-throw-from-after-edit discipline —
+this is behavior-preserving for pairing (which already never throws) and
+is the guardrail 4b needs. The **rendering** of the caught error is
+protected the same way: a Lua error may be any value, including a table
+whose `__tostring` throws, so `tostring` outside the `pcall` would
+reintroduce the escape the containment exists to prevent.
+
+### Q#LN11 — Stage 4b data: vendor the table, generated, attributed
 
 `abbreviations.json` in `leanprover/vscode-lean4` is a flat
-`string → string` object of **1,855 entries** (counted, not estimated),
-of which **64 contain a character in the `lean4` pair set** — the
-collision Q#LN10's ordering exists to handle. vscode-lean4 is Apache-2.0.
+`string → string` object of **1,855 entries**, verified at commit
+`17d1d08` (2026-05-29), 36,861 bytes, all keys ASCII, longest key 25
+characters. The counts the algorithm depends on, all re-derived from the
+file rather than estimated:
+
+| Count | What it drives |
+|---|---|
+| 64 keys containing a `lean4` pair-set char | Q#LN22's ordering |
+| 305 keys that are proper prefixes of another | which keys can expand eagerly |
+| 1,550 keys uniquely-and-completely matching | the eager-expansion set |
+| 26 values containing `$CURSOR` | point placement |
+| 119 multi-codepoint symbols (26 of them `$CURSOR`-bearing) | the replace is not one-char-for-many |
+| 101 prefixes with disagreeing equal-shortest ties | why the format carries source rank |
+
+(Rev 6 gave the multi-codepoint figure as 93, which was the count
+*excluding* the `$CURSOR` entries — a subset reported as a total.)
+
+vscode-lean4 is Apache-2.0.
+
+**Format: an ordered array, not a map.** §2.11's tie rule makes source
+order semantic, and a Lua `{ [key] = symbol }` table iterated with
+`pairs` cannot carry it. The generated file emits a **sequence** —
+`{ {key, symbol}, ... }` in `abbreviations.json` order — plus a derived
+`key → index` lookup built at load time for the exact-match case.
+Resolution sorts candidates by `(#key, index)`, so the 101 ties resolve
+the way upstream resolves them and the file's own line order is the
+audit trail. A map-shaped emit would be nondeterministic across builds
+and, once a hash order happened to be stable, *stably wrong*.
 
 Vendor it as a generated `builtin/runtime/lean_abbrev.lua` with a header
-recording source repo, commit, license, and the regeneration command —
-the `builtin/queries/latex/highlights.scm` precedent (#144) for
-third-party data, extended with provenance because this is a much larger
-artifact under a named license.
+recording source repo, commit, license, entry count, and the
+regeneration command — the `builtin/queries/latex/highlights.scm`
+precedent (#144) for third-party data, extended with provenance because
+this is a much larger artifact under a named license.
 
-Not fetched at runtime, not a package-manager dependency: the input method
-must work offline and on first launch.
+Not fetched at runtime, not a package-manager dependency: the input
+method must work offline and on first launch.
 
-**Upkeep is a documented manual process, not code.** There is no automatic
-sync and none is wanted — an editor that silently re-downloads its input
-method has a supply-chain problem, not a feature. The generator script
-lives at `scripts/regen-lean-abbrev`, takes a vscode-lean4 commit as its
-argument, and rewrites the file including its provenance header. The
-header records source commit, license, entry count, and the regeneration
-command, so the file is self-describing to whoever next touches it. A
-refresh is an ordinary PR with a visible diff — which is the point: the
-diff is the review.
+**Embedded, not lazily loaded.** ~45 KB of generated Lua joins the 414 KB
+of builtin runtime already compiled in by `include_str!`, of which
+`lsp.lua` alone is 111 KB. Inventing a lazy-load path for an 11% increase
+would be new machinery bought with no measurement, and the arithmetic is
+stated here so a reviewer can disagree with it on numbers.
+
+**Upkeep is a documented manual process, not code.** There is no
+automatic sync and none is wanted — an editor that silently re-downloads
+its input method has a supply-chain problem, not a feature. The generator
+script lives at `scripts/regen-lean-abbrev`, takes a vscode-lean4 commit
+as its argument, and rewrites the file including its provenance header,
+so the file is self-describing to whoever next touches it. A refresh is
+an ordinary PR with a visible diff — which is the point: the diff is the
+review.
+
+**Escaping is canonical and lossless, not a rejection trigger.** Rev 6
+said the generator aborts on "a key containing a character the emitted
+Lua would have to escape." **That rule rejects the current table**: `\`
+is a key, `"` begins eleven keys (`"A` → `Ä` …), and acceptance 45d
+requires `\` to work. The generator instead emits every key and symbol
+through one canonical Lua string escaper — `\\`, `\"`, `\n`, `\r`,
+`\t`, and `\ddd` for any other control byte, everything else literal
+UTF-8 — chosen so the emit is byte-deterministic across runs.
+
+What the generator *does* abort on, because these are real corruption
+rather than syntax:
+
+- a duplicate key after decoding (JSON permits it; the table must not),
+- a key or symbol that is not well-formed UTF-8,
+- a round-trip mismatch: the generator re-parses its own output and
+  compares the full ordered sequence against the source, entry for
+  entry, and fails if they differ anywhere.
+
+That last check is what makes the artifact trustworthy, and it belongs
+in the generator rather than in the acceptance suite — the suite cannot
+see `abbreviations.json`, which is not shipped. Same discipline as
+Q#LN20's refusal to hand back a lossy path: refuse rather than emit
+something plausible.
+
+### Q#LN21 — Stage 4b: the expansion's undo is cross-peer-degraded; ship it, name it
+
+`classify_key` (`src/optimistic.rs:144`) returns `Insert(c)` for `\` and
+for every ASCII letter — only the nine built-in pair chars are excluded
+(Q#AP1). So on a CRDT frontend the user's `\alpha` arrives as six
+**source-peer** optimistic inserts, while the expansion is a single
+**daemon-peer** `buf:replace` spanning all six. Undo across that boundary
+is not chronologically arbitrated; this is the same defect Q#LN6 already
+accepts for `⟨⟩`, `⦃⦄`, `⟮⟯`, one order of magnitude wider.
+
+Considered and rejected: `pmacs.buffer.set_round_trip_input(buf, true)`,
+which exists, is per-buffer, and would fix this exactly. Its six current
+callers are all read-only generated buffers — listview, compile, dired,
+terminal — and it does considerably more than disable optimistic insert:
+per `src/editor_core.rs:505`, `dispatch_idle` reports false, so RET
+reaches buffer-local bindings instead of inserting a newline. Turning it
+on for every ordinary editable Lean source file would trade a known undo
+degradation for an unknown behavior change across the whole editing
+surface, and would make Lean the one language whose typing has a
+different latency profile.
+
+Also rejected: adding `\` to the always-round-trip set. It is
+frontend-side and language-blind, so this would tax LaTeX, C, shell, and
+every string literal in the editor to fix one language.
+
+Decision: **accept the degradation, name it in the module comment, and
+do not paper over it.** The general fix is chronological cross-peer undo
+arbitration — already on the standing backlog, and the same fix Q#LN6
+points at. What Stage 4b owes is honesty about scope: this is not "a few
+brackets," it is every abbreviation the user types on a CRDT frontend.
+
+### Q#LN22 — Stage 4b mechanism: lazy abandonment, explicit ordering
+
+**Ordering.** The abbreviation consumer registers ahead of auto-pairing.
+The collision is real: 64 keys contain a `lean4` pair-set character —
+`\[[]]` → `⟦⟧`, `\(())` → `⸨⸩`, `\{{}}` → `⦃⦄`, `\{}` → `{$CURSOR}`.
+With pairing first, typing `\[` inserts `[]` with the point between, so
+the pending key is corrupted to `\[]` before the second `[` is typed and
+`\[[]]` becomes unreachable.
+
+(Rev 1 justified this with `\<>`, which was wrong: `<` is not in the pair
+set per Q#LN6, so that key is safe under either order.)
+
+**The contract the collision exposes:** the consumer must claim a
+self-insert that **extends an open pending abbreviation**, not only one
+that completes an expansion. A consumer that claims only completed
+expansions hands every intermediate keystroke to auto-pairing, which is
+exactly how `\[` gets corrupted. "Claimed" means the chain stops, not
+that an edit was made.
+
+**State machine**, per §2.11's ground truth rather than rev 5's
+reconstruction of it:
+
+- `\` typed in a `lean4` buffer opens a pending abbreviation: `{ buffer,
+  window, start_offset, text = "", expected_revision }`, keyed on
+  **`(frontend, buffer)`** — see below. `expected_revision` is the
+  buffer's revision after that leader edit.
+- A subsequent self-insert `c` is claimed iff at least one key has
+  `text .. c` as a prefix; then `text = text .. c`. If it is also
+  uniquely-and-completely matching (one of the 1,550), expand now.
+- If no key extends `text .. c`, expand `text` **first**, then let `c`
+  land normally — the chain does *not* claim `c`.
+- **A terminating `c` that is itself `\` is then reprocessed as a new
+  leader**, opening a fresh pending abbreviation at its position. This
+  is the rule acceptance 45d depends on (`\alpha\to` → `α→`) and rev 6
+  specified the acceptance without specifying the rule; upstream gets it
+  from `processChange`, where a `finished` abbreviation reports
+  `isAffected = false` and so does not suppress the new-leader branch.
+  Note this is *not* the `\\` case: there the pending text is empty, `\`
+  extends rather than terminates, and the result is one literal
+  backslash with no pending state left open.
+- Expansion resolves through §2.11's rules — shortest key wins, ties
+  broken by source rank, unmatchable tail appended (`\alp7` → `α7`).
+- `$CURSOR` is stripped from the symbol and its index becomes the point.
+
+**Ownership is per frontend, not per buffer** (§2.11). The key is
+`(pmacs.frontend.id(), rec.buffer)`, and the stored `window` must still
+match `rec.window` for the state to be usable — a frontend that moved
+the same buffer into a different window is no longer typing where the
+pending span is. Two consequences the buffer-only design got wrong:
+
+- `buffer.after-switch` fires with **no arguments**, so it cannot say
+  whose switch it was. The subscriber reads `pmacs.frontend.id()` at
+  callback time — documented as "the frontend that produced the most
+  recent dispatched input event" — and clears **only that frontend's**
+  entries. A blanket clear would let one frontend's navigation discard
+  another's half-typed abbreviation.
+- `frontend.detached` fires with the raw frontend id and is the purge
+  seam, exactly as `killring.lua` uses it (Q#KR11). Without it a
+  detached frontend's pending state leaks for the life of the session.
+
+This costs one table level and buys correctness in the ordinary
+TUI-plus-GPU configuration, which is not an exotic setup — it is the
+one this project ships two frontends for.
+
+**Abandonment is lazy, because there is no cursor-motion hook** (round-5
+finding 3). Pending state is validated at the next typed edit and
+discarded when any of these no longer holds: the record's buffer and
+window are the pending ones; `rec.effective_start` equals `start_offset
++ 1 + #text` (the point is still at the end of the pending span); and
+the buffer's `revision()` equals `expected_revision + 1`, meaning the
+current typed edit is the only edit since this frontend last extended
+the pending abbreviation. A claimed extension stores the current
+revision as the new `expected_revision`. This is deliberately
+conservative across frontends: any intervening edit to the shared
+buffer invalidates the pending record even if it occurred elsewhere.
+Keeping the record alive would require translating and validating its
+span through arbitrary peer edits, substrate Stage 4b does not add.
+`buffer.after-switch` clears the acting frontend's entries eagerly,
+since that hook *does* exist. The
+practical difference from upstream: a user who clicks away mid-`\alp`
+and types elsewhere gets the pending state dropped rather than expanded.
+Upstream expands it. **This is a deliberate divergence** — expanding
+into a region the user has left is the worse failure, and pmacs cannot
+detect the departure at the moment it happens.
+
+**One `buf:replace`** for the whole expansion — one undo step, one CRDT
+op, one effective-edit verification, with the same
+rejected/altered-by-intercept reporting as `comment.lua`'s Q#CT5 and
+`pair.lua`. A rejection drops the pending state; it does not retry.
+
+**Gate:** `pmacs.config.define{ name = "lean.abbrev", type = "boolean",
+default = true, mutability = "live" }`, read against the **source**
+buffer of the typed edit — the `editing.auto-pair` precedent
+(`pair.lua:46`), including its round-2 correction to resolve
+`rec.buffer` rather than `pmacs.window.buffer()`.
+
+**Language gate:** the consumer opens no pending abbreviation outside a
+`lean4` buffer, resolved from `rec.buffer` for the same reason. `\` in a
+Rust buffer is an ordinary character and `\[` there still pairs.
 
 ### Q#LN12 — Stage 5 sends `$/lean/plainGoal` through a typed Rust request
 
@@ -1418,13 +1992,14 @@ never lands.
 | 2 | multi-root server affinity | **`ensure_server`, shared by every language** | — |
 | 3a | notification/response seams + purge; `pmacs.fs.canonicalize` | **the shared event drain, run by every language** | — |
 | 3b | `lake serve` + probe/latch, Lake root, `waitForDiagnostics` | none — Lean-only files plus one config entry | 1, 2, 3a |
-| 4 | Unicode input method | **refactors `pair.lua`'s provenance read** | 1 |
+| 4a | typed-edit consumer chain | **refactors `pair.lua`'s provenance read, shared by every language** | — |
+| 4b | Unicode input method | none — Lean-only files plus one chain consumer | 1, 4a |
 | 5 | goal panel | new typed LSP request; panel adopter | 3a, 3b |
 | 6 | `#eval` / `#check` output channel | **new `LspServerSpec` policy field** | 3b, 5 |
 | 7 | module hierarchy | listview adopter + one typed Rust request | 3a, 3b |
 
-Four of the eight carry risk that is *not* about Lean — stages 1, 2, 3a,
-and 6 each change something every language touches. That is the
+Five of the nine carry risk that is *not* about Lean — stages 1, 2, 3a,
+4a, and 6 each change something every language touches. That is the
 organizing principle of the split: **no PR in this arc mixes a
 cross-cutting substrate change with Lean feature content.** A reviewer
 looking at Stage 2 sees only `ensure_server`; a reviewer looking at Stage
@@ -1435,6 +2010,16 @@ used to read "two `lsp.lua` generalizations" for a stage the prose called
 Lean-only. One generalization shipped as Stage 2; extracting the other as
 3a is what makes the claim true again. The rule is only worth writing
 down if it survives contact with a stage that is inconvenient to split.
+
+Round 5 found the *same* rule broken again, by Stage 4, whose risk column
+read "refactors `pair.lua`'s provenance read" — every language's
+auto-pairing — for a stage described as the Lean input method. Rev 5 had
+noticed the shape and answered it with a commit boundary; a commit
+boundary is not a review boundary. Twice in two re-scouts is the
+interesting part: **this rule is not self-enforcing, and a stage only
+looks Lean-only until someone re-reads its own risk column.** Every
+remaining stage should be re-checked against it at scout time, not
+assumed.
 
 Ordering notes:
 
@@ -1453,11 +2038,21 @@ Ordering notes:
   `builtin/runtime/lsp.lua`. Unlike stages 1 and 2, this pair is strictly
   sequential — recorded here, per the #126/#127 lesson, rather than
   discovered in a rebase.
-- **Stage 4 does not depend on stages 2, 3a, or 3b** and could run in
-  parallel, but should not: both touch `lsp.lua`/`pair.lua`-adjacent
-  runtime files, and the #126/#127 lesson is that parallel-safety
-  requires the file split be agreed *before* either lane starts.
-  Sequential is cheaper.
+- **Stage 4a depends on nothing in this arc** — not even Stage 1. It is
+  a pure runtime-substrate change whose only content is `pair.lua` and a
+  new module beside it, and it would be worth landing if the Lean arc
+  were abandoned tomorrow, because "the typed-edit record has exactly
+  one consumer forever" is not a property anyone chose.
+- **4a and 4b cannot run as sibling worktrees**, for the 3a/3b reason:
+  4b's consumer is written against the registration API 4a adds. Strictly
+  sequential, recorded before either starts.
+- **Stage 4b depends on stages 1 and 4a and on nothing else** — not on
+  2, 3a, or 3b. The input method is useful with no language server at
+  all, which is the honest ordering argument for putting it this early:
+  a user with no Lean toolchain installed still gets a Lean editor that
+  can type Lean. It could run in parallel with the 5/6/7 lane, but
+  should not, per the #126/#127 lesson that parallel-safety requires the
+  file split be agreed *before* either lane starts.
 - **Stage 6 depends on Stage 5** only for the read-only generated-buffer
   and panel machinery, which Stage 5 establishes. If Stage 5 slips, Stage
   6 can carry that machinery itself at the cost of duplicating it.
@@ -1496,7 +2091,22 @@ Stated so they can be scored, per house style.
    inside `buffer.after-edit` re-enters the hook in a way pairing does not
    already survive. Confidence: medium — pairing does the same thing, but
    over a single codepoint rather than a multi-byte span.
-6. **These eight stages reach rough VS Code parity for everything except
+5a. **Lazy abandonment is good enough without a cursor-motion hook**
+   (rev 6, Q#LN22). Falsified if a user in normal editing hits a case
+   where stale pending state produces a *wrong* expansion rather than a
+   dropped one — the failure mode this design chooses. Confidence:
+   medium-high, because every path that can invalidate the state either
+   goes through `buffer.after-edit` (where it is checked) or through
+   `buffer.after-switch` (where it is cleared), and the residual is a
+   cursor move with no intervening edit, which the next typed edit
+   catches by position. If it fails, the fix is a cursor-motion hook —
+   substrate work with its own framing, not a patch to this stage.
+5b. **Stage 4a is behavior-preserving.** Falsified by any change to
+   `tests/auto_pair_acceptance.rs` being needed to make it pass.
+   Confidence: high, and cheap to score — it is a diff-level check, not
+   a judgment call. This bet is stated separately from bet 5 because it
+   is the one a reviewer can falsify in ten seconds.
+6. **These nine stages reach rough VS Code parity for everything except
    the interactive infoview.** Scored honestly rather than aspirationally.
    What lands: highlighting, goal view, Unicode input, diagnostics,
    hover, completion, goto-definition, symbols, semantic tokens, `#eval`
@@ -1528,10 +2138,26 @@ What remains deferred:
 - **GPU goal band** — blocked on bottom-panel Stage 2 (Q#LN14). The panel
   is grid-only until then.
 - **A `cursor.after-move` hook** — there is none (Q#LN13), so Stage 5
-  polls off `process.after-tick`. A real motion hook would serve the goal
-  view, `completion.lua`'s cursor-delta heuristic, and the outline/hover
-  panels alike; it is substrate work that should not be invented inside a
-  language lane.
+  polls off `process.after-tick` and Stage 4b abandons pending
+  abbreviations lazily rather than on departure (Q#LN22, round-5 finding
+  3). A real motion hook would serve the goal view, the input method,
+  `completion.lua`'s cursor-delta heuristic, and the outline/hover panels
+  alike; it is substrate work that should not be invented inside a
+  language lane. Two consumers in this arc now want it, which is worth
+  recording as evidence for whoever frames it.
+- **Chronological cross-peer undo arbitration** — the general fix for
+  Q#LN6's bracket pairs and Q#LN21's abbreviation expansions alike.
+  Already on the standing backlog; named again here because Stage 4b
+  widens the exposure from three pair characters to every abbreviation a
+  user types on a CRDT frontend, which changes how often the existing
+  defect is met without changing what it is.
+- **Per-buffer optimistic-apply policy** — the narrower thing Q#LN21
+  actually wanted and did not build. `set_round_trip_input` is the only
+  existing lever and it is too blunt (it also changes RET dispatch); a
+  frontend-side, language-aware round-trip character set would fix the
+  undo degradation for Lean without taxing every other language, and
+  would retire Q#AP1's limitation too. Frontend + protocol work, so
+  Q#LN14's no-protocol-change rule keeps it out of this arc entirely.
 - **LSP server reaping / LRU** — Q#LN15's per-root affinity makes
   unbounded `lake serve` growth possible. No editor caps this by default
   and pmacs will not either in this arc, but the policy question is now
@@ -1758,12 +2384,83 @@ revision take letter suffixes rather than displacing anything. Round 3's
 finding 4 was stale cross-references surviving a renumber; not
 renumbering is the cheaper way to not repeat it.
 
-**Stage 4 — the Unicode input method**
+**Stage 4a — the typed-edit consumer chain**
 
-38. `\alpha` + space yields `α`; the whole expansion is a single undo step.
+Criterion 46 keeps its number and moves here — it was always the
+substrate pin, filed under Stage 4 only because Stage 4 was one stage.
+Per the no-renumbering rule above, round 5's additions take letter
+suffixes on both sides of the split.
+
+46a–46h live in a **new `tests/typed_edit_chain_acceptance.rs`**, which
+is part of Stage 4a's declared footprint (Q#LN10) and a required gate
+for its PR. They cannot live in `tests/auto_pair_acceptance.rs`, which
+criterion 46 requires to stay byte-identical.
+
+46. **Provenance-refactor pin:** the full `tests/auto_pair_acceptance.rs`
+    suite passes **unmodified**. A suite edited to accommodate the
+    refactor proves nothing; the diff for 4a must show zero lines
+    changed in that file.
+46a. The chain reads the record exactly once: with two consumers
+    registered, a `take_typed_edit()` from inside either observes nil,
+    and both consumers receive the *same* record fields. Bites against a
+    chain that re-takes per consumer (which would hand the second one
+    nil in production and pass a single-consumer test).
+46b. Ordering is by declared priority, not registration order: two
+    consumers registered low-priority-last still run
+    low-priority-first. Bites against a chain that "works" only because
+    `include_str!` order happens to agree with intent.
+46c. A claiming consumer stops the chain — a later consumer does not
+    run — and a non-claiming one does not.
+46d. A consumer that throws is contained: the later consumers still
+    run, and the failure reports through `set_status`. Bites against a
+    chain where one bad consumer silently disables every consumer
+    behind it. (Round 8 correction: an uncontained throw would *not*
+    take the fan-out's other subscribers down — `run_all_must_succeed`
+    in `src/hook.rs` collects errors and continues, so `lsp.lua` still
+    flushes. Rev 7 claimed otherwise. The containment is still
+    required; the reason is narrower than stated.) Rendering the error
+    is itself protected: a Lua error may be any value, including a
+    table whose `__tostring` throws, and reporting outside the
+    containment reintroduces the escape it exists to prevent.
+46e. **Q#AP7 ordering survives.** The existing `sighelp` fake-server
+    test — pairing's closer must be in the buffer before `lsp.lua`
+    flushes `didChange` — still holds with pairing behind the chain.
+    Falsified by moving the chain's registration after `lsp.lua`'s.
+46f. **Each consumer's record is its own.** A declining consumer that
+    mutates the record it was handed cannot change what a later
+    consumer sees. Bites against handing every consumer the same
+    mutable table: pairing decides what to close from `rec.char`, so a
+    forged `char` makes it insert a pair the user never typed. Every
+    field is a scalar or an opaque id, so a shallow copy is a complete
+    snapshot.
+46g. **The fan-out iterates a snapshot.** A consumer may register or
+    remove consumers while the chain runs; both take effect on the next
+    fan-out. Bites against iterating the live array, where a consumer
+    that registers a lower-priority one shifts itself forward under
+    `ipairs` and runs twice — unbounded if it re-registers each time.
+46h. **The registrar has a lifecycle.** `add_consumer` returns an
+    opaque handle; `remove_consumer` unregisters it and reports whether
+    it was live, so a double-remove is a no-op rather than a throw.
+    Without it, re-evaluating a config or reloading a package
+    accumulates callbacks permanently — the leak `COHERENCE.md` §13
+    already records against `pmacs.hook.add`, which a teardown-less
+    chain would inherit and spread to every consumer. Priority is
+    validated as a **finite integer in i32 range**, matching
+    `pmacs.completion.register`: NaN is a number and every ordered
+    comparison with it is false, so a bare type check lets it land
+    wherever the insertion scan gives up and silently voids 46b.
+
+**Stage 4b — the Unicode input method**
+
+38. `\alpha` + space yields `α ` — the space lands first and the
+    expansion runs in the following `buffer.after-edit`, so the
+    terminator is **retained**, not consumed. The expansion is a single
+    undo step: one undo restores `\alpha ` (with its space), not
+    `\alph`. Rev 6 wrote the post-undo text as `\alpha`, which would be
+    true only if the terminator were swallowed.
 39. `\<>` yields `⟨⟩` with the point between them, from the `$CURSOR`
     placeholder.
-40. **Pair-collision pin (Q#LN10).** `\[[]]` yields `⟦⟧`: each `[` is
+40. **Pair-collision pin (Q#LN22).** `\[[]]` yields `⟦⟧`: each `[` is
     claimed as an extension of the pending abbreviation, so auto-pairing
     never inserts a closing `]` into the pending key. Bites against an
     ordering where pairing runs first, and against a consumer that claims
@@ -1773,15 +2470,87 @@ renumbering is the cheaper way to not repeat it.
 41. `\to` yields `→` eagerly on uniqueness, with no terminator typed.
 42. A prefix with no match (`\zzzz` + space) is left as literal text; no
     edit is made.
-43. Moving the cursor out of a pending abbreviation abandons it.
+43. **Lazy abandonment (Q#LN22).** Because there is no cursor-motion
+    hook, this asserts what pmacs can actually detect: after `\alp`, an
+    explicit `goto_byte` elsewhere followed by typing `h` inserts a
+    plain `h` and leaves the `\alp` text untouched — the pending state
+    is dropped, not expanded. Plus: `buffer.after-switch` clears pending
+    state eagerly. **Rev 5's version of this criterion was not
+    buildable**; recorded so the change is visible rather than silent.
 44. `pmacs.config.set("lean.abbrev", false)` disables expansion; the
     setting is read against the typed edit's **source** buffer.
 45. Expansion does not fire in a non-`lean4` buffer — including that a
     pending abbreviation is never opened there, so `\[` in a Rust buffer
     still pairs normally.
-46. **Provenance-refactor pin:** the full auto-pairing acceptance suite
-    passes unchanged, and a bite against the pre-refactor `pair.lua`
-    confirms the shared-consumer commit is behavior-preserving.
+45a. **Shortest-key resolution (§2.11).** `\alp` + space yields `α`, and
+    `\al` + space yields `∀` — from `all`, not `alpha`. The second is
+    the one that bites: a "longest match" or "unique match only"
+    implementation passes the first and fails this.
+45b. **Suffix rule.** `\alp7` + space yields `α7`. Bites against an
+    implementation that drops unmatchable trailing characters or
+    abandons the whole abbreviation.
+45c. **There is no terminator list.** `\+` followed by space extends
+    rather than terminating, because `'+ '` is a key. Bites against any
+    implementation with a hardcoded space/tab/RET terminator set — which
+    is what rev 5 specified.
+45d. **`\\` yields a single `\`**, by extension-and-eager-match rather
+    than by treating the second `\` as a terminator. And after a
+    *non-empty* pending key, a second `\` does terminate and open a new
+    abbreviation: `\alpha\to` + space yields `α→`.
+45e. **No re-arm through inserted text (§2.11).** `\setminus` + space
+    yields a literal `\`, and typing an ordinary letter after it inserts
+    that letter — the inserted backslash opens no pending abbreviation,
+    because the expansion is a programmatic replace that arms no record.
+    Bites against a future consumer that infers pending state from
+    buffer text instead of provenance.
+45i. **Pending state is per frontend, with conservative shared-buffer
+    invalidation (Q#LN22).** Two frontends share a `lean4` buffer at
+    distinct points. A types `\al`; B types `p`. B's `p` lands normally
+    at B's point rather than extending A's record. Because that edit
+    advances the shared buffer's revision, A then typing `l` + space
+    leaves literal `\all ` rather than expanding: A's stale record is
+    abandoned lazily. In a fresh setup, A types `\al`, B switches
+    buffers **without editing the shared buffer**, and A typing `l` +
+    space still yields `∀`; B's switch clears only B's entries. Finally,
+    `frontend.detached` for B purges B's entries only and does not clear
+    a still-valid A record. Bites both against the buffer-keyed design
+    rev 6 specified and against the impossible rev-7 promise that
+    pending state survives arbitrary peer edits.
+45f. **Both producers, and the CI-darkness stated.** The dispatch path
+    is pinned by the criteria above. The optimistic CRDT producer
+    (round-5 finding 4) is pinned by a separate criterion driving
+    `handle_remote_crdt_op`, which is `#[cfg(feature = "crdt")]` and
+    therefore **dark in CI and dark in the required gate list**, since
+    that list runs `--features crdt` only for `--lib`. The PR must
+    either land that coverage as a `--lib` test where the gate reaches
+    it, or state in its description that the optimistic path was
+    verified only locally and name the command. Silence here is the
+    failure mode — a green CI would otherwise read as covering the path
+    most users take.
+45g. **Table integrity — what the suite can actually check.**
+    `abbreviations.json` is not shipped, so the suite cannot diff
+    against it and rev 6's "matches byte-for-byte" was unbuildable; a
+    count plus seven spot entries could not prove 1,855 round-trip
+    anyway. The full source-fidelity check belongs to the generator
+    (Q#LN11: re-parse own output, compare the ordered sequence entry for
+    entry, fail on any difference). What the suite pins instead are
+    self-consistency properties that a corrupt emit breaks:
+    - the loaded sequence's length equals the header's declared count,
+      and equals the declared count for the recorded upstream commit;
+    - every key is unique, and the derived `key → index` lookup has the
+      same cardinality as the sequence (a collision would silently drop
+      entries);
+    - every key and symbol is well-formed UTF-8, and no symbol contains
+      `$CURSOR` more than once;
+    - the resolution spot-set behaves: `alpha`, `to`, `<>`, `+ `, `\`,
+      `n`, `setminus`, and the tie cases from 45h.
+45h. **Tie-break by source order (§2.11).** `\f` + space yields `‹` —
+    `f<` and `f>` are both length 2, and `f<` is declared first. Same
+    for `\"` + space → `Ä`, first of eleven equal-length candidates.
+    **This is the criterion that bites a map-shaped vendored table**:
+    with `pairs` iteration it passes or fails by hash order, so it must
+    also be run against a deliberately reversed sequence and shown to
+    fail. 101 prefixes are exposed to this rule.
 
 **Stage 5 — the goal view**
 
@@ -1847,9 +2616,9 @@ renumbering is the cheaper way to not repeat it.
   it, with the extra success-gate §2.9 forces.
 - **#110 (auto-pairing)** — `take_typed_edit()` provenance, the fail-closed
   discipline on transformed source edits, and Q#AP1's optimistic-classifier
-  limitation. Stage 4 is built on all three.
+  limitation. Stage 4a generalizes the first; 4b is built on all three.
 - **#127 (config registry)** — `pmacs.config.define` and the
-  source-buffer-resolution correction. Q#LN10's gate follows
+  source-buffer-resolution correction. Q#LN22's gate follows
   `editing.auto-pair` exactly.
 - **#129 (mode system)** — mode-scoped keymaps for Stage 5.
 - **#155 (bottom panel)** — `pmacs.window.display` and the panel adopter
@@ -1895,8 +2664,8 @@ alongside sixteen other languages — deliberately *not* the typed registry,
 because moving one language's entry there while the other sixteen stay
 put would fragment the surface rather than unify it. Migrating
 `pmacs.lsp.config` wholesale is a config-arc concern; this lane must not
-create a precedent that makes it harder. Stage 4's `lean.abbrev` gate is
-where this arc does enter the registry, and Q#LN10 already commits to the
+create a precedent that makes it harder. Stage 4b's `lean.abbrev` gate is
+where this arc does enter the registry, and Q#LN22 already commits to the
 `editing.auto-pair` shape.
 
 **Background-work attribution (§9).** Three pieces of background work,
@@ -1928,3 +2697,60 @@ uncapped event queue, the dropped `cfg.restart`, and — unchanged from
 #161 — surfacing the spawn failure itself. Each is a behavior change for
 languages other than Lean, and §4's rule is what keeps them out of a Lean
 PR.
+
+### 9.1 Coherence impact — stages 4a and 4b (rev 8)
+
+**Sections served.** §6 (interaction islands) primarily, and in the
+*preventing* direction rather than the fixing one — see below. §11
+(config registry) secondarily, by adding one option in the established
+shape rather than a new switch mechanism.
+
+**Golden journey (§2).** No step is touched by 4a. 4b improves **step 5
+("Edit immediately")** for Lean specifically and changes nothing for any
+other language — rev 6 cited step 4, which is "Understand the visible
+interface" and is untouched by both stages: the pending-abbreviation state exists only in `lean4` buffers.
+Neither stage changes launch, open, or attach.
+
+**Interaction islands (§6).** **None added, and this is the load-bearing
+claim of Stage 4b.** An input method is the archetypal island: a modal
+state where ordinary keys mean something else, usually with its own
+keymap, its own escape, and its own set of commands that only work
+inside it. Stage 4b deliberately has none of those. There is no keymap,
+no dispatch shadow, no mode line indicator, no command that only works
+mid-abbreviation, and no key that exits. The pending state is invisible
+to every other subsystem, is abandoned by ordinary editing, and its
+worst failure is that the user's literal text stays literal. The
+`lean.abbrev` switch is an ordinary registry boolean, not an island
+toggle.
+
+Stage 4a's chain is the mechanism that makes that possible, and it also
+retires a smaller island risk: today the only way for a second feature to
+react to a typed character is to compete with `pair.lua` for a one-shot
+record, and the natural workaround — inferring from buffer text — is how
+input methods grow their own private state and, eventually, their own
+modal surface.
+
+**Config registry (§11).** One option, `lean.abbrev`, in exactly the
+`editing.auto-pair` shape (boolean, `mutability = "live"`, resolved
+against the typed edit's source buffer). This is the arc entering the
+registry as §9's earlier text predicted, and it is a genuine adoption
+rather than a new surface. Stage 4a adds none.
+
+**Background-work attribution (§9).** Neither stage does background work.
+Both are synchronous inside an existing hook fan-out; no process is
+spawned, no timer armed, no request issued. There is nothing to attribute
+and nothing to worsen — recorded explicitly because "none" is an answer
+this section should be able to give without ambiguity.
+
+**Debt this revision retires.** The unowned assumption that
+`take_typed_edit()` has exactly one consumer forever. That was never a
+decision — it was the shape of the only caller — and every future
+typed-character feature would have had to rediscover it. Stage 4a turns
+an accident into an API with a stated ordering contract.
+
+**Debt this revision names rather than pays.** One, and it is real:
+Q#LN21's cross-peer undo degradation, now covering every abbreviation
+rather than three bracket pairs. The fix is chronological cross-peer undo
+arbitration, already on the standing backlog and already blocking Q#LN6.
+Stage 4b makes the existing gap more visible without widening the class
+of defect — but "more visible" is the honest word, not "unchanged."
