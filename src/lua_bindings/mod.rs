@@ -3068,6 +3068,36 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     {
         let reg = registry.clone();
         buffer.set(
+            // Replace a generated buffer's contents and leave it genuinely
+            // immutable — the one authorized door through `read_only`.
+            //
+            // Deliberately NOT an exposed `set_read_only`: that would let a
+            // caller lock a buffer with no way to refresh it, which is the
+            // failure mode that kept generated-buffer immutability deferred.
+            // Pairing the lock with the write in a single call is what makes
+            // it safe to ship.
+            "set_generated_contents",
+            lua.create_function(move |lua, (id, text): (BufferIdLua, mlua::String)| {
+                let edit = {
+                    let mut registry = reg.borrow_mut();
+                    let buffer = registry.get_mut(id.0).map_err(mlua::Error::external)?;
+                    buffer
+                        .set_generated_contents(&text.as_bytes())
+                        .map_err(mlua::Error::external)?
+                };
+                // The registry borrow is released first: the fan-out
+                // re-enters the core, and a live borrow would panic.
+                // Skipping it is not an option — see
+                // `Buffer::set_generated_contents`.
+                notify_buffer_edit_to_windows(lua, id.0, &edit);
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let reg = registry.clone();
+        buffer.set(
             "from_bytes",
             lua.create_function(move |_, (name, bytes): (String, mlua::String)| {
                 let id = reg.borrow_mut().create_from_bytes(name, &bytes.as_bytes());
@@ -8880,6 +8910,25 @@ fn install_terminal(
                 };
                 core.borrow_mut().clipboard_set_for(key.frontend_id, bytes);
                 Ok(true)
+            })?,
+        )?;
+    }
+
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "_copy_retained",
+            // Q#TC7: returns the whole retained range as a string, through
+            // the same serializer selection-copy uses. Takes an explicit
+            // buffer rather than resolving the active view, because copy
+            // mode reads a terminal that may not be displayed — and
+            // because the caller already holds the handle it keyed its
+            // snapshot on.
+            lua.create_function(move |lua, buffer: BufferIdLua| {
+                let Some(bytes) = manager.borrow().copy_retained(buffer.0) else {
+                    return Ok(None);
+                };
+                Ok(Some(lua.create_string(&bytes)?))
             })?,
         )?;
     }

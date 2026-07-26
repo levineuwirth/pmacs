@@ -1,9 +1,31 @@
 # Terminal configuration and copy mode
 
 **Revision 4 — scouted against canonical `main` @ `b889873` (protocol v20),
-2026-07-25. APPROVED after four review rounds. Stage 1 is implemented on
-branch `terminal-config` (PR #173); Stage 2 (`terminal-copy-mode`) is
-framed but not started, and branches off `main` after Stage 1 merges.**
+2026-07-25. APPROVED after four review rounds. Stage 1 MERGED as #173
+(`main` @ `cf54270`, 2026-07-26). Stage 2 implemented on branch
+`terminal-copy-mode` off `main` @ `cf54270`; no protocol change.**
+
+**Stage 2 ships eight of its nine criteria, plus 18a and 18b added in review
+round 1 and 16c-16e in rounds 2-3.** Rounds 2 and 3 changed the design, not
+just the code: the snapshot is now genuinely `read_only` at the rope, so
+**Q#TC6a's analysis below is superseded in part** — read the box at its head
+before the analysis. Q#TC6a's conclusion survives; two of its premises do
+not, and **criterion 17's bite was restated with them** — the daemon now
+refuses the op, so the failure it must look for is mirror mutation plus
+divergence, not silent agreement.
+
+Criterion 17's semantic-frontend end-to-end pin is deliberately
+absent — see the note under it — because a faithful version requires the real
+`pmacs-gpu` optimistic path, and therefore the `a37` foundation, which CI never
+compiles and which skips silently. Both halves of the *mechanism* it guards are
+pinned ungated instead (16, 16b). No other criterion is partial.
+
+**Review round 1 found four defects, and the pair of them rhymes.** Two were
+implementation (18a's foreign-buffer clobber, 18b's name-keyed identity) and
+two were vacuous pins (18/19's refresh, 20's tail-follow) — and all four trace
+to the same root: **a name is not an identity, and a context-free readout is
+not a state observation.** The name mistake produced both P1s; the readout
+mistake produced both P2s.
 
 Revision 4 gives the escape-key cache an owner and a lifecycle (Q#TC4c) —
 revision 3 named the key but not the storage, and two implementations
@@ -330,9 +352,36 @@ ordinary document buffer, so:
   inspectable — the idiom `COHERENCE.md` §6 identifies as the right side of
   the line.
 
-**Q#TC6a — the snapshot is BOTH intercept-read-only AND round-trip-marked,
-and `set_round_trip_input` is the ONLY thing standing between a replica
-frontend and unauthorized mutation.**
+**Q#TC6a — the snapshot is read-only at the rope AND round-trip-marked, and
+each guard covers a copy the other cannot reach: `read_only` refuses the op
+at the daemon, `set_round_trip_input` is the ONLY thing standing between a
+replica frontend and unauthorized mutation of its own mirror.**
+
+> **SUPERSEDED IN PART BY IMPLEMENTATION (review rounds 2-3). Read this
+> box before the analysis below it.** The reasoning is still the correct
+> account of the substrate *as it stood when this was written*, and its
+> conclusion about round-trip input still holds. Two of its premises no
+> longer do:
+>
+> - "**No Lua binding sets `read_only` at all**" — one does now.
+>   `pmacs.buffer.set_generated_contents` leaves it asserted, so on the
+>   daemon side undo, redo, ordinary edits and imported CRDT ops are all
+>   refused by `ensure_writable()`. That closed a real defect: undo
+>   bypasses the intercept chain, so `M-x buffer.undo` emptied the
+>   snapshot.
+> - "**`set_round_trip_input` is the ONLY thing**" — it is now the only
+>   thing standing between a replica and *mirror* mutation, which is the
+>   half `read_only` cannot reach. A semantic frontend applies
+>   optimistically in its own mirror before the daemon sees the op; a
+>   daemon-side refusal cannot prevent that, it can only make the two
+>   copies disagree.
+>
+> The protection is therefore **layered, not singular**: rope-level
+> read-only protects the daemon copy, round-trip input protects the
+> replica copy, and neither substitutes for the other. The intercept
+> survives only to give a dispatching edit a named error. The Deferred
+> lane below records what this leaves open for `*compilation*` and
+> listview, which have **not** adopted the primitive.
 
 The established idiom is two calls: `listview.lua:106` and `compile.lua:272`
 each pair `pmacs.buffer.add_intercept` with
@@ -368,7 +417,8 @@ Two things follow, and both are recorded rather than fixed here:
   genuinely immutable at the rope/CRDT boundary the way terminal identity
   buffers are, turning round-trip back into real defence in depth. That is a
   substrate change affecting listview and compile as much as this snapshot, so
-  it is named in Deferred with its own lane.
+  it is named in Deferred with its own lane. **Done for this snapshot only**,
+  and not by exposing the setter — see the Deferred lane and the box above.
 
 **Q#TC7 — the materializer reuses the existing serializer.** A whole-range
 variant of `copy_selection_bytes` over `retained_rows` inherits the criterion
@@ -494,6 +544,44 @@ additive, on its own binding, and does not replace scroll-and-select.
   "skip the intercepts". Naming only the setter would have made it look like a
   one-line follow-up.
 
+  **PARTIALLY RETIRED in Stage 2, because review round 2 turned it from a
+  nice-to-have into a defect.** An intercept guards the dispatch path only,
+  and `Buffer::undo` reaches the rope through `ensure_writable` without ever
+  consulting the intercept chain — so a single `C-/` replaced a freshly
+  rendered snapshot with an empty buffer. Rebinding the undo chords
+  buffer-locally, which is `*compilation*`'s existing idiom, does **not**
+  close it: `compile.lua` says so itself ("command/menu undo stays
+  dispatchable"), and `M-x buffer.undo` needs no keymap.
+
+  The fix ships the deferral's two halves together as **one** primitive
+  rather than exposing the setter: `Buffer::set_generated_contents` (Lua:
+  `pmacs.buffer.set_generated_contents`) lifts `read_only`, replaces the
+  contents skipping intercepts, **discards the history**, and re-asserts
+  `read_only`. Pairing the lock with the write is precisely what makes it
+  safe — a bare `set_read_only` would let a caller lock a buffer it can no
+  longer refresh, which is why the lane was deferred in the first place.
+  Discarding history is load-bearing twice: it removes the entries undo
+  would replay, and it stops a periodically refreshed buffer accumulating
+  rope clones that `read_only` guarantees nothing can ever pop.
+
+  **What remains of the lane:** `*compilation*` and listview panels still
+  rely on intercept-plus-round-trip and are still emptiable by
+  `M-x buffer.undo`. The primitive they need now exists and is proven, so
+  the remaining work is adoption plus a streaming-friendly variant
+  (`*compilation*` appends rather than replacing wholesale).
+
+  **The CRDT half is closed too** (review round 3). Clearing the v0.1
+  stacks proves nothing in CRDT mode, where they are bypassed entirely and
+  the history lives in loro's `UndoManager`. `read_only` would stop that
+  history being *replayed* but not *retained* — a panel refreshed on a
+  timer still grows without bound, which is the condition the contract
+  says it eliminates. `UndoManager` exposes no `clear`, but it needs none:
+  a manager records only what happens after it is constructed, which
+  `CrdtState::from_bytes` already relies on to keep the seed insert out of
+  undo. `CrdtState::clear_undo_history` rebinds a fresh manager to the same
+  doc, and `set_generated_contents` clears whichever history the buffer
+  actually has.
+
 ## Acceptance
 
 ### Stage 1 — `terminal-config`
@@ -563,6 +651,32 @@ additive, on its own binding, and does not replace scroll-and-select.
     them for selection copy.
 15. isearch over the snapshot finds content that is **only in scrollback**
     (scrolled off the visible screen), with no change to `src/search.rs` (B1).
+16c. **Undo cannot empty the snapshot, by chord OR by command** (review
+    round 2). `Buffer::undo` bypasses the intercept chain entirely, so the
+    snapshot must be `read_only` at the rope. Pinning only the chords would
+    be a false pass: `M-x buffer.undo` and the menu reach the command with
+    no keymap involved, which is why `*compilation*`'s chord-rebinding idiom
+    does not close this. Pinned through **`invoke_interactive`**, the real
+    M-x path, plus the chord, plus redo — and paired with an assertion that
+    the owner's own refresh still works, since that is what plain
+    `read_only` would have broken.
+16d. **A generated write reaches the window, not just the rope** (review
+    round 3). `set_generated_contents` returns one whole-buffer `Replace`
+    and its binding fans it out; swallowing it leaves a displaying
+    window's `TextView` line index describing the *previous* contents.
+    Pinned by **painting** — a shrinking write, so the stale offsets point
+    past the buffer end and the next render trips
+    `assertion failed: end <= self.len()` in `src/rope.rs`, which is the
+    reported crash rather than merely stale pixels. Driven through the Lua
+    binding copy mode itself calls, so it covers every future owner of the
+    primitive.
+16e. **The same write is queued for replica mirrors** (review round 3,
+    CRDT half). The dropped fan-out also skipped
+    `queue_daemon_origin_crdt_op`, so a replica's mirror never imports the
+    owner's write and its optimistic edits are generated against content
+    already replaced. Pinned through the real copy-mode refresh on an
+    upgraded snapshot. `crdt`-gated, therefore dark in CI — 16d is the half
+    that actually runs there.
 16. **Ungated, runs in CI:** focusing the snapshot buffer makes
     `dispatch_idle_for` report **false**. This is the whole mechanism Q#TC6a
     depends on, it needs no CRDT, and it fails the moment
@@ -572,18 +686,85 @@ additive, on its own binding, and does not replace scroll-and-select.
 17. **Through a semantic frontend** (this one does need CRDT): keys typed in
     the snapshot buffer reach ordinary dispatch and never the child, and
     **neither the daemon buffer nor the frontend's mirror is mutated**
-    (Q#TC6a). Bite: with `set_round_trip_input` removed, the optimistic op is
-    emitted, bypasses the Lua intercept, passes `ensure_writable()`, and
-    mutates **both sides** — a buffer the editor calls read-only silently
-    accepts an edit.
+    (Q#TC6a). Bite: with `set_round_trip_input` removed, the frontend
+    applies the edit **optimistically to its own mirror** and emits the op;
+    the mirror now shows text the user was told is read-only. The daemon
+    refuses the op at `ensure_writable()` — `set_generated_contents` leaves
+    `read_only` asserted — so the two copies **diverge**, and the local
+    mirror is the one the user is looking at.
+
+    **This bite changed in review round 3, and the direction matters.**
+    Rounds 1-2 specified it as "mutates *both sides*, silently, with no
+    divergence to notice" — true when nothing set `read_only` from Lua,
+    and false now. The eventual real-GPU test must assert **mirror
+    mutation plus daemon refusal**, not silent agreement; written the old
+    way it would look for a daemon-side edit that can no longer happen and
+    pass for the wrong reason. That the daemon now holds is exactly why
+    round-trip input is still load-bearing rather than redundant: a
+    refusal protects the daemon's copy and does nothing for the replica's.
+
+    **NOT PINNED as specified, deliberately, and this is the one gap in
+    Stage 2.** A faithful test has to drive the *real* `pmacs-gpu` binary:
+    the optimistic apply lives only in `pmacs-gpu/src/main.rs`
+    (`optimistic_crdt_insert` / `optimistic_insert_text`), and the headless
+    `SemanticClient` the other semantic tests use has no optimistic path at
+    all, so it cannot produce the op whose absence is the claim. That means
+    building on the `a37` foundation — which is `crdt`-gated so CI never
+    compiles it, **returns `ok` without running** when `pmacs-gpu` is absent
+    from the target directory, and is load-sensitive enough to pass and fail
+    at the same commit twenty minutes apart. A second test on that footing
+    would add the appearance of coverage without the substance.
+
+    What IS pinned instead, ungated and in CI: acceptance 16 asserts the
+    guard is armed (`dispatch_idle` false while the snapshot is focused, so
+    no replica can apply optimistically or emit), and acceptance 16b asserts
+    the buffer is `is_read_only()` **true** at the rope, so an op that did
+    arrive at the daemon would be refused by `ensure_writable()` rather
+    than applied. (Rounds 1-2 asserted **false** here, documenting the
+    hazard; round 2 closed it, and the assertion was flipped with it.
+    That does not make 17 redundant — a daemon-side refusal cannot stop a
+    replica mutating its own mirror, which is precisely what
+    `set_round_trip_input` is for.) Together those cover both halves of
+    Q#TC6a's *mechanism*. What remains unproven is only the end-to-end wire
+    behaviour of a real GPU frontend, and it stays an explicit obligation of
+    the CI `crdt`-coverage lane rather than being quietly dropped.
 18. Re-invoking against the same terminal refreshes in place; the buffer count
     does not grow (Q#TC8). Killing the snapshot leaves the terminal running;
     killing the terminal removes the snapshot.
+
+    **The refresh half must be observed by CONTENT, not by buffer count**
+    (review round 1). Counting buffers, or comparing a quiet terminal's
+    snapshot against itself, passes with `render_snapshot` replaced by a
+    no-op. The child is `exec cat`, so the test types a marker into the
+    focused terminal, requires it **absent** from the existing snapshot, and
+    only then re-invokes — the "advance the world" discipline.
+18a. **A foreign buffer carrying the snapshot's name is never adopted.**
+    `pmacs.buffer.create` accepts any caller-chosen name, and snapshot writes
+    use `bypass_intercept`, so found-by-name adoption silently overwrites a
+    user's data — reproduced in review round 1 as "do not clobber" becoming
+    23 newlines. Ownership means **"in copy mode's own handle table"**, which
+    is dired's F7 rule; a taken name yields a `<2>` variant.
+18b. **Snapshot identity is the terminal BUFFER, not its name.**
+    `TerminalManager::open` uniquifies only the *derived* name — an explicit
+    `name = ...` is inserted verbatim — so two valid terminals can share one.
+    A name-keyed table hands them a single snapshot: the second invocation
+    retargets it, `q` returns to the wrong terminal, and killing either one
+    removes the shared buffer. Keyed instead by comparing buffer handles in
+    an array, because `BufferIdLua` implements `__eq` but each wrapper is a
+    distinct table key — comparison works, hashing does not.
 19. `C-t` in a terminal buffer (physically `C-c C-t`) enters copy mode; `g`
     refreshes the snapshot from the live terminal and `q` returns to the source
     terminal (Q#TC8a).
 20. The live terminal's own keys are unchanged while a snapshot exists
     (Q#TC9), and the terminal keeps following its tail.
+
+    **Tail-following must be read through the registered VIEW.** Review
+    round 1: `TerminalManager::snapshot(buffer_id)` is context-free and
+    always returns the live screen, so it reports "at the tail" even for a
+    view forced to the oldest retained row — falsified by doing exactly
+    that and watching the assertion still pass. `snapshot_for_view`'s
+    `at_bottom` plus its projected cells are the only observables that can
+    tell the two apart.
 21. The dispatch-shadow count is **unchanged at six** — pinned by asserting
     `describe-key` reports the truth for the snapshot buffer's `g` and `q`,
     which is the observable difference between the buffer-local idiom and a
@@ -632,8 +813,9 @@ Full gate suite per `CLAUDE.md` for each PR separately, plus:
   implementations (epoch-only key, single last-entry, unpurged map), which is
   why one pin was not enough; **9** (a hardcoded `0x03` makes the configured
   chord unreachable); **10** (its failure mode is a terminal nobody can
-  escape); and **16/17** (a read-only buffer that silently accepts an edit on
-  both sides).
+  escape); and **16** (a read-only buffer whose replica mirror accepts an
+  edit the user is then looking at — 17's daemon half was closed in review
+  round 2, and its bite restated in round 3).
 - **The observation seams the cache pins need are `escape_parses` (how often)
   and `escape_caches` (how many are still held).** Neither is inferable from
   behavior: for a *valid* setting a correct per-session cache and a leaking
