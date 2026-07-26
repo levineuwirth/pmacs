@@ -468,7 +468,7 @@ If it does not, stop and repair the remote/fetch configuration.
   **not** `crdt`-gated and do run under CI's exact flags, including the
   controller-release pin whose only job is catching the plausible wrong fix.
 
-## Terminal config + copy mode arc — Stage 1 MERGED; Stage 2 IN REVIEW
+## Terminal config + copy mode arc — BOTH STAGES MERGED (arc complete)
 
 - Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
   **revision 4** (four review rounds), committed as the first commit of
@@ -481,9 +481,15 @@ If it does not, stop and repair the remote/fetch configuration.
   binding; no protocol change. Main was integrated **twice** during the
   single review round (`ccf29e3`, then `c93f9ee` after the first merge
   left the PR conflicting) — see the no-CI-while-conflicting fact below.
-- **Stage 2 = `githubsucks/terminal-copy-mode`**, worktree
-  `../pmacs-terminal-copy-mode`, based on `githubsucks/main` @
-  `cf54270`. Copy mode: `M-x terminal.copy-mode` / `C-c C-t`.
+- **Stage 2 MERGED as #178** (`main` @ `fe8b8ba`, 2026-07-26, **four
+  review rounds**, twelve checks green on head `1b44c69` — verified by
+  `head_sha`, not by the check summary). Copy mode:
+  `M-x terminal.copy-mode` / `C-c C-t`. Branch
+  `githubsucks/terminal-copy-mode` and worktree
+  `../pmacs-terminal-copy-mode` retained. Main was integrated once, after
+  #168 landed; the `docs/active-work.md` terminal-lane conflict resolved
+  by taking main's fuller Stage 1 sentence under this lane's Stage 2
+  record.
 - **Stage 2 ships eight of nine criteria, and the missing one is named.**
   Criterion 17 (a real semantic frontend proving neither daemon buffer
   nor mirror mutates) is **not pinned**: the optimistic apply exists only
@@ -947,6 +953,12 @@ git worktree add --track \
   reproduces in-process and so is not the GUI/TUI asymmetry; and a geometry
   change appearing to clear the visible screen, which reproduces pre-fix).
   Branch `gpu-terminal-input` and worktree `../pmacs-gui-term-input` retained.
+  **Its landed-doc pair MERGED as #168** (`main` @ `1b6a084`,
+  2026-07-26): #166 recorded as landed, the CI `crdt`-coverage gap
+  measured (**264 tests dark workspace-wide**, 177 in the library), the
+  vterm audit corrected — "only 3 of 9 acceptances drive a real daemon"
+  was optimistic; without the frontend binary the honest number is
+  **2** — and the a37 findings folded into the coverage lane.
 - **Inline-math slice — MERGED as #158** (`main` @ `5aa9044`,
   2026-07-25). Detect → parse → layout → draw for `$…$`, entirely inside
   `pmacs-gpu`, no protocol change. Verified by the user's manual pass on

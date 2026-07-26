@@ -1,9 +1,13 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-26, after Lean 4 Stage 4a (#179) — the typed-edit
+**Last updated: 2026-07-26, after terminal copy mode (#178) — `C-c C-t`
+materializes a terminal's whole retained range into an ordinary buffer,
+plus `Buffer::set_generated_contents`, the first genuinely immutable
+generated-buffer write path — and its landed-doc pair (#168); following
+Lean 4 Stage 4a (#179) — the typed-edit
 consumer chain — and bottom-panel Stage 2A (#177), the classified census
 routing that makes every Projection-class consumer ask
-`primary_document_window`; following the bottom-panel Stage 2 framing
+`primary_document_window`; the bottom-panel Stage 2 framing
 (#175), terminal configuration Stage 1 (#173) — profiles, scrollback, a
 per-terminal configurable escape key, and the `C-c t` opening binding —
 Lean 4 stages 3a and 3b (#167, #170), pmacs' first Lean language server;
@@ -37,7 +41,8 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-26)
 
-- `main` @ `a27f646` (Lean 4 Stage 4a #179 atop bottom-panel Stage 2A
+- `main` @ `fe8b8ba` (terminal copy mode #178 atop the GPU-terminal-input
+  landed docs #168, Lean 4 Stage 4a #179, bottom-panel Stage 2A
   #177, the bottom-panel Stage 2 framing #175, terminal configuration
   Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a #167, the CRDT undo repro
   #157, the inline-math landed-doc refresh #172, the bottom-panel
@@ -883,6 +888,50 @@ before trusting them:
   `$UID`, use `(id -u)`). Check `$SHELL` here before assuming.
 
 ## 4. Substrate invariants (do not undo; tests enforce most of these)
+
+**Generated buffers: `Buffer::set_generated_contents` is the ONE
+authorized write** (terminal copy mode #178) — lift `read_only`, replace
+via a single whole-buffer `Replace` skipping intercepts, discard history,
+re-assert `read_only`, and **return the `Edit`**. Three things make it a
+unit rather than a convenience:
+
+- **An intercept is not read-only.** `Buffer::undo` reaches the rope
+  through `ensure_writable` and never consults the intercept chain, so an
+  intercept-only "read-only" buffer is emptied by `M-x buffer.undo`.
+  Rebinding the undo *chords* buffer-locally does **not** close it —
+  `compile.lua`'s own comment says so ("command/menu undo stays
+  dispatchable"). Only rope-level `read_only` does.
+- **A bare `set_read_only` would be worse than nothing**, because it also
+  refuses the owner's refresh — the operation such buffers exist for.
+  That is why the pairing, not the setter, is the primitive. There is
+  deliberately no Lua `set_read_only`.
+- **A rope write is only half of an edit.** The returned `Edit` must be
+  fanned out (`notify_buffer_edit_to_windows`, which also queues the
+  daemon-origin CRDT op). Skip it and a displaying window keeps a
+  `TextView` line index describing the previous contents — the next paint
+  indexes the new rope with stale ranges and trips
+  `assertion failed: end <= self.len()` — while replica mirrors never
+  import the write at all.
+
+History clearing is load-bearing twice (nothing can pop entries
+`read_only` makes unreachable, so they leak), and must clear **whichever
+history the buffer has**: the v0.1 stacks are bypassed in CRDT mode, where
+it lives in loro's `UndoManager`. That has no `clear`, and needs none — a
+manager records only what happens after construction, so
+`CrdtState::clear_undo_history` rebinds a fresh one to the same doc.
+
+**Not yet adopted:** `*compilation*` and listview panels still rely on
+intercept-plus-`set_round_trip_input` and remain emptiable by
+`M-x buffer.undo`. Adoption is not a one-line swap — it inherits the
+fan-out obligation, and `*compilation*` appends rather than replacing, so
+it needs a streaming variant. Recorded in `COHERENCE.md` §14.
+
+**And it does not replace `set_round_trip_input`.** The protection is
+layered across two copies: rope-level `read_only` refuses the op at the
+daemon; round-trip input stops a semantic frontend applying
+optimistically to its **own mirror**, which a daemon-side refusal cannot
+reach — the refusal arrives after the frontend has already painted, so it
+buys divergence, not prevention.
 
 **Command boundaries (Arc 2 kill-ring substrate)** —
 `EditorCore.command_history: HashMap<FrontendId, CommandBoundary{this, last}>`,
