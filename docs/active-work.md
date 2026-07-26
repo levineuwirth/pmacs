@@ -685,10 +685,15 @@ If it does not, stop and repair the remote/fetch configuration.
   second test on that footing buys the appearance of coverage. Both
   halves of the mechanism are pinned **ungated** instead: acceptance 16
   (the guard is armed — `dispatch_idle` false while the snapshot is
-  focused) and 16b (the hazard is real — the snapshot's `is_read_only()`
-  is **false** despite the intercept, so nothing at the rope/CRDT
-  boundary would stop an op that did arrive). The wire-level half is an
-  explicit obligation of the CI `crdt`-coverage lane.
+  focused) and 16b (the daemon holds — `is_read_only()` is **true** at
+  the rope, so an op that did arrive is refused by `ensure_writable()`).
+  **Rounds 2-3 changed what 17 must show.** 16b asserted `false` through
+  round 1, documenting the hazard; round 2 closed it. So the eventual
+  real-GPU test must look for **mirror mutation plus daemon refusal —
+  divergence** — not the "mutates both sides, silently" the criterion
+  originally specified, which after the fix cannot happen and would pass
+  for the wrong reason. The wire-level half stays an explicit obligation
+  of the CI `crdt`-coverage lane.
 - Load-bearing Stage 2 decisions:
   - **The snapshot MATERIALIZES into an ordinary buffer**, so isearch,
     motion, selection and the kill ring work with no new substrate, and
@@ -814,6 +819,38 @@ If it does not, stop and repair the remote/fetch configuration.
   - **Still open:** the fan-out obligation makes `*compilation*`/listview
     adoption more than a one-line swap — recorded in `COHERENCE.md` §14
     alongside the undo half.
+- **Review round 4 — one P2, docs only, and it is the interesting kind.**
+  **A fix can invalidate a test that was never written.** Criterion 17's
+  *bite* still described the pre-round-2 world: remove
+  `set_round_trip_input` and the op "mutates both sides, silently, with
+  no divergence to notice". True while nothing set `read_only` from Lua;
+  false once `set_generated_contents` did. A real-GPU test written to
+  that spec would hunt for a daemon-side edit that can no longer occur
+  and pass for the wrong reason — the specification would have leaked
+  the round-2 regression back in, through a test not yet built.
+  - Restated around **unauthorized mirror mutation plus daemon refusal =
+    divergence**, in all four places that carried the old claim: the
+    criterion, the Q#TC6a heading, the acceptance-16 doc comment, and the
+    bite roster. The heading's "ONLY thing" now says what it is the only
+    thing *for* — the replica's own mirror.
+  - Why round-trip input is still load-bearing rather than redundant: a
+    daemon refusal arrives after the frontend has already applied
+    optimistically and painted. It buys divergence instead of silent
+    agreement; it does not prevent the mutation the user sees.
+  - **Gate-run flake identified and attributed, not waved off.**
+    `cargo test --lib --features crdt` failed ~1 run in 5 on
+    `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
+    — `active_reader_probe` returning `None` at `process.rs:3179`
+    ("live runtime probe"). **Pre-existing and unrelated:** this branch
+    does not touch `src/process.rs` (last changed by the Darwin PTY
+    signal-name fix), and the test passes 10/10 standalone, failing only
+    under full-suite parallelism. It is **another instance of the known
+    `drain_until` trap** — draining for `Started` to learn the pid also
+    ticks, and a tick reaps the leader, so the probe that follows finds
+    nothing live. Same module and same signature as the earlier
+    `signal`-says-"is not running" case. This also explains the
+    unattributed "2 failed" CRDT run recorded in round 2. Belongs to the
+    CI `crdt`-coverage lane, which is where the whole class lives.
 - Load-bearing decisions, each forced by scouted ground truth:
   - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
     no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;

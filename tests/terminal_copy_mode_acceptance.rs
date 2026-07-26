@@ -308,8 +308,15 @@ fn acc15_isearch_finds_content_only_in_scrollback() {
 
 /// Acceptance 16 — the load-bearing pin, and the reason this suite is
 /// ungated. `set_round_trip_input` is the ONLY thing standing between a
-/// replica frontend and unauthorized mutation (Q#TC6a), so its regression
-/// must be caught in the configuration CI actually compiles.
+/// replica frontend and unauthorized mutation **of its own mirror**
+/// (Q#TC6a), so its regression must be caught in the configuration CI
+/// actually compiles.
+///
+/// Rope-level `read_only` does not substitute for it. Since review round 2
+/// the daemon refuses such an op at `ensure_writable()` — but a refusal
+/// arrives after the frontend has already applied optimistically and
+/// painted the result. What that buys is divergence instead of silent
+/// agreement; what stops the mutation is this.
 #[test]
 fn acc16_dispatch_idle_is_false_while_the_snapshot_is_focused() {
     let mut state = EditorState::new();

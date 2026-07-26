@@ -9,7 +9,12 @@
 round 1 and 16c-16e in rounds 2-3.** Rounds 2 and 3 changed the design, not
 just the code: the snapshot is now genuinely `read_only` at the rope, so
 **Q#TC6a's analysis below is superseded in part** — read the box at its head
-before the analysis. Q#TC6a's conclusion survives; two of its premises do not. Criterion 17's semantic-frontend end-to-end pin is deliberately
+before the analysis. Q#TC6a's conclusion survives; two of its premises do
+not, and **criterion 17's bite was restated with them** — the daemon now
+refuses the op, so the failure it must look for is mirror mutation plus
+divergence, not silent agreement.
+
+Criterion 17's semantic-frontend end-to-end pin is deliberately
 absent — see the note under it — because a faithful version requires the real
 `pmacs-gpu` optimistic path, and therefore the `a37` foundation, which CI never
 compiles and which skips silently. Both halves of the *mechanism* it guards are
@@ -347,9 +352,10 @@ ordinary document buffer, so:
   inspectable — the idiom `COHERENCE.md` §6 identifies as the right side of
   the line.
 
-**Q#TC6a — the snapshot is BOTH intercept-read-only AND round-trip-marked,
-and `set_round_trip_input` is the ONLY thing standing between a replica
-frontend and unauthorized mutation.**
+**Q#TC6a — the snapshot is read-only at the rope AND round-trip-marked, and
+each guard covers a copy the other cannot reach: `read_only` refuses the op
+at the daemon, `set_round_trip_input` is the ONLY thing standing between a
+replica frontend and unauthorized mutation of its own mirror.**
 
 > **SUPERSEDED IN PART BY IMPLEMENTATION (review rounds 2-3). Read this
 > box before the analysis below it.** The reasoning is still the correct
@@ -680,10 +686,22 @@ additive, on its own binding, and does not replace scroll-and-select.
 17. **Through a semantic frontend** (this one does need CRDT): keys typed in
     the snapshot buffer reach ordinary dispatch and never the child, and
     **neither the daemon buffer nor the frontend's mirror is mutated**
-    (Q#TC6a). Bite: with `set_round_trip_input` removed, the optimistic op is
-    emitted, bypasses the Lua intercept, passes `ensure_writable()`, and
-    mutates **both sides** — a buffer the editor calls read-only silently
-    accepts an edit.
+    (Q#TC6a). Bite: with `set_round_trip_input` removed, the frontend
+    applies the edit **optimistically to its own mirror** and emits the op;
+    the mirror now shows text the user was told is read-only. The daemon
+    refuses the op at `ensure_writable()` — `set_generated_contents` leaves
+    `read_only` asserted — so the two copies **diverge**, and the local
+    mirror is the one the user is looking at.
+
+    **This bite changed in review round 3, and the direction matters.**
+    Rounds 1-2 specified it as "mutates *both sides*, silently, with no
+    divergence to notice" — true when nothing set `read_only` from Lua,
+    and false now. The eventual real-GPU test must assert **mirror
+    mutation plus daemon refusal**, not silent agreement; written the old
+    way it would look for a daemon-side edit that can no longer happen and
+    pass for the wrong reason. That the daemon now holds is exactly why
+    round-trip input is still load-bearing rather than redundant: a
+    refusal protects the daemon's copy and does nothing for the replica's.
 
     **NOT PINNED as specified, deliberately, and this is the one gap in
     Stage 2.** A faithful test has to drive the *real* `pmacs-gpu` binary:
@@ -795,8 +813,9 @@ Full gate suite per `CLAUDE.md` for each PR separately, plus:
   implementations (epoch-only key, single last-entry, unpurged map), which is
   why one pin was not enough; **9** (a hardcoded `0x03` makes the configured
   chord unreachable); **10** (its failure mode is a terminal nobody can
-  escape); and **16/17** (a read-only buffer that silently accepts an edit on
-  both sides).
+  escape); and **16** (a read-only buffer whose replica mirror accepts an
+  edit the user is then looking at — 17's daemon half was closed in review
+  round 2, and its bite restated in round 3).
 - **The observation seams the cache pins need are `escape_parses` (how often)
   and `escape_caches` (how many are still held).** Neither is inferable from
   behavior: for a *valid* setting a correct per-session cache and a leaking
