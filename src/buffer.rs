@@ -504,6 +504,55 @@ impl Buffer {
         self.read_only = read_only;
     }
 
+    /// Replace a generated buffer's entire contents on behalf of its owner,
+    /// and leave it genuinely immutable.
+    ///
+    /// This is the **owner-authorized update path** that genuine
+    /// immutability for generated buffers requires. A snapshot, panel or
+    /// `*compilation*` buffer must reject ordinary edits, **undo, redo**,
+    /// and remote CRDT imports alike — and only [`read_only`] does that.
+    /// An edit intercept is not enough: it guards the dispatch/edit path
+    /// only, while [`Buffer::undo`] reaches the rope through
+    /// `ensure_writable` without ever consulting the intercept chain. A
+    /// buffer protected by an intercept alone can therefore be emptied by
+    /// `C-/`, by `M-x buffer.undo`, or by the menu — the command is
+    /// reachable even where the chords are rebound to no-ops.
+    ///
+    /// But `read_only` also blocks the owner's own refresh, which is the
+    /// operation such buffers exist for. So the owner needs exactly one
+    /// door, and this is it: lift the flag, replace the contents skipping
+    /// intercepts, **discard the resulting history**, re-assert the flag.
+    ///
+    /// Discarding history is not tidiness. Without it every refresh pushes
+    /// undo entries holding full rope clones that nothing can ever pop —
+    /// `read_only` guarantees they are unreachable — so a periodically
+    /// refreshed buffer would grow without bound.
+    ///
+    /// [`read_only`]: Self::set_read_only
+    pub fn set_generated_contents(&mut self, bytes: &[u8]) -> Result<(), BufferError> {
+        self.read_only = false;
+        let result = self.replace_whole_buffer(bytes);
+        // Cleared even on failure: a partial replace must not leave a
+        // half-applied edit reachable through an undo the owner cannot see.
+        self.undo.clear();
+        self.redo.clear();
+        self.read_only = true;
+        result
+    }
+
+    fn replace_whole_buffer(&mut self, bytes: &[u8]) -> Result<(), BufferError> {
+        let len = self.len();
+        if len > 0 {
+            self.apply_edit_skip_intercepts(EditOp::Delete {
+                range: Range::new(0, len),
+            })?;
+        }
+        if !bytes.is_empty() {
+            self.apply_edit_skip_intercepts(EditOp::Insert { pos: 0, bytes })?;
+        }
+        Ok(())
+    }
+
     fn ensure_writable(&self) -> Result<(), BufferError> {
         if self.read_only {
             Err(BufferError::ReadOnly {
@@ -1954,6 +2003,72 @@ mod tests {
             drop(make("*unused*"));
         }
     );
+
+    /// The whole point of the primitive: after an owner write the buffer
+    /// is immutable, and `undo` — which never consults the intercept
+    /// chain — cannot reach back past it.
+    #[test]
+    fn set_generated_contents_writes_then_locks_and_leaves_nothing_to_undo() {
+        let mut buf = Buffer::new(BufferId::next(), "*generated*");
+        buf.set_generated_contents(b"first render").expect("write");
+
+        assert_eq!(buf.len(), 12);
+        assert!(buf.is_read_only(), "the buffer ends immutable");
+        assert!(
+            matches!(buf.undo(), Err(BufferError::ReadOnly { .. })),
+            "undo must be refused at the rope, not merely at dispatch"
+        );
+        assert!(matches!(buf.redo(), Err(BufferError::ReadOnly { .. })));
+
+        // Even with the lock lifted there is no history to replay — the
+        // protection does not depend on the flag alone.
+        buf.set_read_only(false);
+        assert!(matches!(buf.undo(), Err(BufferError::NothingToUndo)));
+        assert!(matches!(buf.redo(), Err(BufferError::NothingToRedo)));
+    }
+
+    /// Refreshing repeatedly must not accumulate unreachable history.
+    /// Each render would otherwise push entries holding full rope clones
+    /// that `read_only` guarantees nothing can ever pop.
+    #[test]
+    fn repeated_generated_writes_do_not_accumulate_history() {
+        let mut buf = Buffer::new(BufferId::next(), "*generated*");
+        for i in 0..10 {
+            buf.set_generated_contents(format!("render {i}").as_bytes())
+                .expect("write");
+        }
+        let mut bytes = vec![0u8; buf.len() as usize];
+        buf.snapshot_rope().slice(0, buf.len(), &mut bytes);
+        assert_eq!(String::from_utf8(bytes).expect("utf8"), "render 9");
+
+        buf.set_read_only(false);
+        assert!(
+            matches!(buf.undo(), Err(BufferError::NothingToUndo)),
+            "ten renders must leave an empty undo stack, not ten entries"
+        );
+    }
+
+    /// An ordinary edit is still refused after a generated write, so the
+    /// primitive does not quietly leave the buffer writable.
+    #[test]
+    fn set_generated_contents_still_refuses_ordinary_edits() {
+        let mut buf = Buffer::new(BufferId::next(), "*generated*");
+        buf.set_generated_contents(b"content").expect("write");
+        assert!(matches!(
+            buf.apply_edit(EditOp::Insert {
+                pos: 0,
+                bytes: b"x"
+            }),
+            Err(BufferError::ReadOnly { .. })
+        ));
+        assert!(matches!(
+            buf.apply_edit_skip_intercepts(EditOp::Insert {
+                pos: 0,
+                bytes: b"x"
+            }),
+            Err(BufferError::ReadOnly { .. })
+        ));
+    }
 
     #[cfg(feature = "crdt")]
     #[test]

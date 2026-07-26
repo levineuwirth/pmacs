@@ -1214,7 +1214,16 @@ Primitive-by-primitive against the list above:
   rebindable (§6's counter-example).
 - **Output channel** ✓ — the compile-mode `*compilation*` model
   (streamed, intercept-read-only, error-rule parsing), reused by grep
-  and shell-command.
+  and shell-command. **Caveat found in terminal copy mode's review
+  (Stage 2): "intercept-read-only" is not read-only.** `Buffer::undo`
+  reaches the rope through `ensure_writable` without consulting the
+  intercept chain, so `M-x buffer.undo` empties such a buffer — and
+  rebinding the undo *chords* buffer-locally does not close it, as
+  `compile.lua`'s own comment admits ("command/menu undo stays
+  dispatchable"). `Buffer::set_generated_contents` (write + discard
+  history + assert `read_only`, in one authorized call) now fixes this
+  for the terminal snapshot; `*compilation*` and listview panels have
+  not yet adopted it and remain emptiable.
 - **Diagnostics collection** ✓ — `DiagnosticStore` + signs + unified
   `error.next` source.
 - **Transient selector** ✓ — the minibuffer (though its `source`

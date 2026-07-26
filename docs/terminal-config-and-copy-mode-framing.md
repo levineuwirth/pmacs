@@ -508,6 +508,35 @@ additive, on its own binding, and does not replace scroll-and-select.
   "skip the intercepts". Naming only the setter would have made it look like a
   one-line follow-up.
 
+  **PARTIALLY RETIRED in Stage 2, because review round 2 turned it from a
+  nice-to-have into a defect.** An intercept guards the dispatch path only,
+  and `Buffer::undo` reaches the rope through `ensure_writable` without ever
+  consulting the intercept chain — so a single `C-/` replaced a freshly
+  rendered snapshot with an empty buffer. Rebinding the undo chords
+  buffer-locally, which is `*compilation*`'s existing idiom, does **not**
+  close it: `compile.lua` says so itself ("command/menu undo stays
+  dispatchable"), and `M-x buffer.undo` needs no keymap.
+
+  The fix ships the deferral's two halves together as **one** primitive
+  rather than exposing the setter: `Buffer::set_generated_contents` (Lua:
+  `pmacs.buffer.set_generated_contents`) lifts `read_only`, replaces the
+  contents skipping intercepts, **discards the history**, and re-asserts
+  `read_only`. Pairing the lock with the write is precisely what makes it
+  safe — a bare `set_read_only` would let a caller lock a buffer it can no
+  longer refresh, which is why the lane was deferred in the first place.
+  Discarding history is load-bearing twice: it removes the entries undo
+  would replay, and it stops a periodically refreshed buffer accumulating
+  rope clones that `read_only` guarantees nothing can ever pop.
+
+  **What remains of the lane:** `*compilation*` and listview panels still
+  rely on intercept-plus-round-trip and are still emptiable by
+  `M-x buffer.undo`. The primitive they need now exists and is proven, so
+  the remaining work is adoption plus a streaming-friendly variant
+  (`*compilation*` appends rather than replacing wholesale). The CRDT half
+  is also still open: `set_generated_contents` clears the v0.1 stacks, and
+  in CRDT mode `read_only` is what refuses undo, since loro's
+  `UndoManager` has no clear exposed through `CrdtState`.
+
 ## Acceptance
 
 ### Stage 1 — `terminal-config`
@@ -577,6 +606,15 @@ additive, on its own binding, and does not replace scroll-and-select.
     them for selection copy.
 15. isearch over the snapshot finds content that is **only in scrollback**
     (scrolled off the visible screen), with no change to `src/search.rs` (B1).
+16c. **Undo cannot empty the snapshot, by chord OR by command** (review
+    round 2). `Buffer::undo` bypasses the intercept chain entirely, so the
+    snapshot must be `read_only` at the rope. Pinning only the chords would
+    be a false pass: `M-x buffer.undo` and the menu reach the command with
+    no keymap involved, which is why `*compilation*`'s chord-rebinding idiom
+    does not close this. Pinned through **`invoke_interactive`**, the real
+    M-x path, plus the chord, plus redo — and paired with an assertion that
+    the owner's own refresh still works, since that is what plain
+    `read_only` would have broken.
 16. **Ungated, runs in CI:** focusing the snapshot buffer makes
     `dispatch_idle_for` report **false**. This is the whole mechanism Q#TC6a
     depends on, it needs no CRDT, and it fails the moment

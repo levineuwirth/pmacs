@@ -738,6 +738,39 @@ If it does not, stop and repair the remote/fetch configuration.
   18a *and* 18b; restoring name-keyed identity fails 18b; making
   `render_snapshot` a no-op fails **both** 18 and 19 (the vacuity,
   demonstrated); and forcing the view off the tail fails 20.
+- **Review round 2 — one P1, and its fix retires half a named deferral.**
+  **Undo emptied the "read-only" snapshot.** `render_snapshot` wrote with
+  `bypass_intercept`, leaving ordinary undo history, and **`Buffer::undo`
+  reaches the rope through `ensure_writable` without ever consulting the
+  intercept chain** — so `C-/` *or* `M-x buffer.undo` replaced a freshly
+  rendered snapshot with an empty buffer. `set_round_trip_input` does not
+  help: it routes the key into the daemon command path, which is where
+  undo runs.
+  - **Rebinding the undo chords would NOT have fixed it**, and
+    `compile.lua` already says so in a comment — "command/menu undo stays
+    dispatchable". `*compilation*` and listview panels therefore carry the
+    same latent defect today.
+  - Fixed with `Buffer::set_generated_contents` (Lua
+    `pmacs.buffer.set_generated_contents`): lift `read_only`, replace
+    skipping intercepts, **discard history**, re-assert `read_only`. This
+    ships the deferred lane's two halves *as one primitive* — a bare
+    `set_read_only` would let a caller lock a buffer it can no longer
+    refresh, which is exactly why that lane was deferred. Clearing history
+    also stops a periodically refreshed buffer accumulating rope clones
+    nothing can ever pop.
+  - New pins: **acc16c** drives the real M-x path
+    (`command.invoke_interactive`), the chord, and redo, and asserts the
+    owner's refresh still works; **acc16b** flipped from asserting
+    `is_read_only()` is *false* to *true*, because the property it
+    described is the one that was fixed; plus three `buffer.rs` unit tests.
+  - Bite: restoring the `delete`+`insert` render reproduces the report
+    exactly — `left: Some("")` against the full snapshot — failing acc16c
+    and acc16b.
+  - **Still open:** `*compilation*` and listview remain emptiable by
+    `M-x buffer.undo`; the primitive they need now exists and is proven,
+    so the remainder is adoption plus a streaming-friendly variant. In
+    CRDT mode `read_only` is what refuses undo, since loro's `UndoManager`
+    exposes no clear through `CrdtState`.
 - Load-bearing decisions, each forced by scouted ground truth:
   - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
     no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;

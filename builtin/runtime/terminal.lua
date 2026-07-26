@@ -319,12 +319,18 @@ end
 -- drift between the two.
 local function render_snapshot(record)
   local text = raw_copy_retained(record.terminal) or ""
-  local buf = record.buffer
-  local len = buf:len()
-  -- Snapshot writes bypass the read-only intercept; everything else is
-  -- rejected by it.
-  if len > 0 then buf:delete(0, len, { bypass_intercept = true }) end
-  if #text > 0 then buf:insert(0, text, { bypass_intercept = true }) end
+  -- The owner-authorized write, and the ONLY one this buffer accepts.
+  --
+  -- Not `delete`+`insert` with `bypass_intercept` (review round 2): that
+  -- leaves the buffer writable at the rope, and it leaves undo history
+  -- behind. `Buffer::undo` reaches the rope through `ensure_writable`
+  -- without consulting the intercept chain, so a single `C-/` — or
+  -- `M-x buffer.undo`, which no buffer-local rebinding can take away —
+  -- replaced a freshly rendered snapshot with an empty buffer.
+  -- `set_generated_contents` writes, discards the history, and leaves
+  -- `read_only` asserted, so undo/redo and remote CRDT imports are all
+  -- refused at the rope.
+  pmacs.buffer.set_generated_contents(record.buffer, text)
 end
 
 local function claim_snapshot(term_buf)

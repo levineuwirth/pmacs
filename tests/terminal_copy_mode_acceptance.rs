@@ -333,10 +333,10 @@ fn acc16_dispatch_idle_is_false_while_the_snapshot_is_focused() {
 }
 
 /// Acceptance 16 (the other half): the intercept rejects ordinary edits,
-/// and — the fact that makes round-trip load-bearing rather than defence
-/// in depth — the buffer is **not** `read_only` at the rope boundary.
+/// and the buffer is genuinely `read_only` at the rope boundary, so the
+/// protection does not depend on which key or command was used.
 #[test]
-fn acc16b_the_intercept_rejects_edits_but_is_not_rope_level_protection() {
+fn acc16b_the_snapshot_is_immutable_at_the_rope_not_merely_intercepted() {
     let mut state = EditorState::new();
     let terminal = open_fill_terminal(&mut state);
     focus_terminal(&state, terminal);
@@ -347,10 +347,6 @@ fn acc16b_the_intercept_rejects_edits_but_is_not_rope_level_protection() {
     let after = buffer_text_by_name(&state, SNAPSHOT_NAME).expect("snapshot");
     assert_eq!(before, after, "the read-only intercept rejects self-insert");
 
-    // Q#TC6a, stated as a test so the next reader does not mistake the
-    // intercept for real immutability: no Lua binding sets
-    // `Buffer::read_only`, so this buffer accepts rope/CRDT mutation and
-    // only the round-trip mark above keeps a replica from producing one.
     let core = state.core.borrow();
     let registry = core.registry.borrow();
     let ids = registry.ids();
@@ -364,15 +360,84 @@ fn acc16b_the_intercept_rejects_edits_but_is_not_rope_level_protection() {
         })
         .expect("snapshot buffer id");
     assert!(
-        !registry
+        registry
             .get(snapshot)
             .expect("snapshot buffer")
             .is_read_only(),
-        "the Lua intercept does NOT set Buffer::read_only — this is why \
-         set_round_trip_input is the guard and not hardening"
+        "an intercept guards the dispatch path only; `Buffer::undo` reaches \
+         the rope through `ensure_writable` without consulting it, so the \
+         snapshot must be read-only at the rope"
     );
     drop(registry);
     drop(core);
+    state.process_supervisor.borrow_mut().shutdown();
+}
+
+/// Acceptance 16c (review round 2, P1): **undo cannot empty the snapshot**,
+/// through the chord *or* through the command.
+///
+/// The chord half alone would be a false pass. `M-x buffer.undo` and the
+/// menu reach `Buffer::undo` without passing through any buffer-local
+/// keymap, so rebinding `C-/` to a no-op — the existing `*compilation*`
+/// idiom, which documents that "command/menu undo stays dispatchable" —
+/// leaves the buffer emptiable. Only rope-level `read_only` closes both.
+#[test]
+fn acc16c_undo_cannot_empty_the_snapshot_by_chord_or_by_command() {
+    let mut state = EditorState::new();
+    let terminal = open_fill_terminal(&mut state);
+    focus_terminal(&state, terminal);
+    exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
+
+    let rendered = buffer_text_by_name(&state, SNAPSHOT_NAME).expect("snapshot");
+    assert!(
+        rendered.contains("LINE200"),
+        "precondition: the snapshot has content to lose"
+    );
+
+    // The command path — reachable regardless of any buffer-local binding.
+    let _: Value = state
+        .lua_host
+        .lua()
+        .load(r"return pcall(pmacs.command.invoke_interactive, 'buffer.undo')")
+        .eval()
+        .expect("invoke_interactive is callable");
+    assert_eq!(
+        buffer_text_by_name(&state, SNAPSHOT_NAME).as_deref(),
+        Some(rendered.as_str()),
+        "M-x buffer.undo must not empty the snapshot"
+    );
+
+    // The chord path.
+    press(&mut state, KeyCode::Char('/'), KeyModifiers::CONTROL);
+    assert_eq!(
+        buffer_text_by_name(&state, SNAPSHOT_NAME).as_deref(),
+        Some(rendered.as_str()),
+        "C-/ must not empty the snapshot"
+    );
+
+    // Redo is the same door.
+    let _: Value = state
+        .lua_host
+        .lua()
+        .load(r"return pcall(pmacs.command.invoke_interactive, 'buffer.redo')")
+        .eval()
+        .expect("invoke_interactive is callable");
+    assert_eq!(
+        buffer_text_by_name(&state, SNAPSHOT_NAME).as_deref(),
+        Some(rendered.as_str()),
+        "buffer.redo must not alter the snapshot either"
+    );
+
+    // ...and the owner's own refresh still works, which is the whole
+    // reason plain `read_only` was not enough on its own.
+    emit_into_child(&mut state, terminal, "STILLREFRESHES");
+    exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
+    assert!(
+        buffer_text_by_name(&state, SNAPSHOT_NAME)
+            .expect("snapshot")
+            .contains("STILLREFRESHES"),
+        "the owner-authorized write path must survive immutability"
+    );
     state.process_supervisor.borrow_mut().shutdown();
 }
 

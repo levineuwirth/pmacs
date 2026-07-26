@@ -3068,6 +3068,29 @@ fn install_buffer_module(lua: &Lua, registry: &SharedRegistry) -> mlua::Result<T
     {
         let reg = registry.clone();
         buffer.set(
+            // Replace a generated buffer's contents and leave it genuinely
+            // immutable — the one authorized door through `read_only`.
+            //
+            // Deliberately NOT an exposed `set_read_only`: that would let a
+            // caller lock a buffer with no way to refresh it, which is the
+            // failure mode that kept generated-buffer immutability deferred.
+            // Pairing the lock with the write in a single call is what makes
+            // it safe to ship.
+            "set_generated_contents",
+            lua.create_function(move |_, (id, text): (BufferIdLua, mlua::String)| {
+                let mut registry = reg.borrow_mut();
+                let buffer = registry.get_mut(id.0).map_err(mlua::Error::external)?;
+                buffer
+                    .set_generated_contents(&text.as_bytes())
+                    .map_err(mlua::Error::external)?;
+                Ok(())
+            })?,
+        )?;
+    }
+
+    {
+        let reg = registry.clone();
+        buffer.set(
             "from_bytes",
             lua.create_function(move |_, (name, bytes): (String, mlua::String)| {
                 let id = reg.borrow_mut().create_from_bytes(name, &bytes.as_bytes());
