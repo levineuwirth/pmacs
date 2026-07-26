@@ -46,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial. Current revision: **10**.
+Revision 1 — initial. Current revision: **11**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -566,6 +566,26 @@ resolving an abbreviation, plus one stale count.
 Acceptance 45m was added with them: the expansion now runs on its own
 `buffer.after-edit` subscriber, which is a new instance of Q#AP7 and
 was unpinned.
+
+### Round 11 (rev 10 → rev 11)
+
+One P1 in the round-10 fix, and one stale comment.
+
+1. **The deferred expansion was not tied to the fan-out that queued
+   it.** `buffer.after-edit` fan-outs nest — the typed-edit contract
+   supports a consumer calling `pmacs.hook.run` — and a nested run
+   re-enters the expander's subscriber while the OUTER chain is still
+   mid-list. A consumer at priority 75 running one nested fan-out made
+   `\alp(` yield `α(` again: the nested pass expanded, and outer
+   pairing then resumed with a record the replace had invalidated.
+   Round 10's own failure mode, reached through re-entrancy instead of
+   claiming. Q#LN22 now specifies matching chain invocations against
+   expander invocations so only the outermost pass expands; acceptance
+   45n pins it.
+2. **A test comment still described the discarded span design** — it
+   said the expansion replaces the span "INCLUDING the terminator",
+   which round 10 deliberately stopped doing. The behaviour it asserts
+   was correct; only the explanation was stale.
 
 ## 1. What ships
 
@@ -1785,6 +1805,22 @@ and the typed text only; whatever pairing did lands after it and
 survives untouched. One undo restores the same text either way, because
 the terminator was always its own insert.
 
+**The deferred expansion must belong to its own fan-out** (round 11).
+`buffer.after-edit` fan-outs NEST — Q#AP9 and typed_edit.lua's header
+both say so explicitly, and a consumer may call `pmacs.hook.run`. A
+nested run re-enters every subscriber, including the deferred
+expansion's, while the OUTER chain is still walking its consumer list
+and pairing has not yet seen the terminator. A nested pass that
+performed the expansion would reproduce the exact bug deferring exists
+to fix, reached through the chain's documented re-entrancy seam instead
+of through claiming.
+
+The chain's subscriber and the expander's subscriber each run exactly
+once per fan-out, in that order, so counting invocations of the first
+and matching them off in the second identifies the nesting level — no
+new seam in typed_edit.lua, which is merged substrate. Only the
+outermost pass expands; a nested one leaves the expansion queued.
+
 Two guards this exposes, both of which pairing already carries:
 
 - The relevance check is **three-part**, not two: buffer, window, **and
@@ -2692,6 +2728,14 @@ criterion 46 requires to stay byte-identical.
     unexpanded text. Pinned with the `sighelp` fake server and `(` as
     the trigger — the flush carrying the terminator carries `α()`.
     Falsified by loading lean_input.lua after lsp.lua.
+45n. **A nested fan-out must not expand early** (round 11). A consumer
+    registered BETWEEN the expander and pairing that calls
+    `pmacs.hook.run("buffer.after-edit")` once still yields `α()` for
+    `\alp(`. Bites against a deferred slot consumed by whichever
+    fan-out happens to reach it: the nested pass would expand, and the
+    outer chain would then hand pairing a record the replace had
+    invalidated — the round-10 failure again, through the chain's
+    documented re-entrancy seam rather than through claiming.
 45h. **Tie-break by source order (§2.11).** `\f` + space yields `‹` —
     `f<` and `f>` are both length 2, and `f<` is declared first. Same
     for `\"` + space → `Ä`, first of eleven equal-length candidates.
@@ -2846,7 +2890,7 @@ uncapped event queue, the dropped `cfg.restart`, and — unchanged from
 languages other than Lean, and §4's rule is what keeps them out of a Lean
 PR.
 
-### 9.1 Coherence impact — stages 4a and 4b (rev 10)
+### 9.1 Coherence impact — stages 4a and 4b (rev 11)
 
 **Sections served.** §6 (interaction islands) primarily, and in the
 *preventing* direction rather than the fixing one — see below. §11

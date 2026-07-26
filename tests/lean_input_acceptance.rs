@@ -98,7 +98,10 @@ fn lean_editor() -> (EditorState, PathBuf) {
 fn the_finish_path_retains_the_terminator_in_one_undo_step() {
     // `alp` is not a key; `alpha` is the shortest key extending it. The
     // space does not extend anything, so it lands first and the
-    // expansion replaces the whole span INCLUDING the terminator.
+    // expansion replaces the leader and the typed text — the span stops
+    // BEFORE the terminator, so whatever auto-pairing did with it
+    // survives. One undo restores the same text either way, because the
+    // terminator was its own insert to begin with.
     let (mut s, _f) = lean_editor();
     type_str(&mut s, "\\alp ");
     assert_eq!(text(&s), "α ", "terminator retained, not consumed");
@@ -206,6 +209,45 @@ fn a_pair_character_that_terminates_an_abbreviation_still_pairs() {
         3,
         "and the point sits between the pair — after α (2 bytes) and \
          the opener"
+    );
+}
+
+#[test]
+fn a_nested_fan_out_between_the_expander_and_pairing_does_not_expand_early() {
+    // `buffer.after-edit` fan-outs NEST — the typed-edit contract
+    // explicitly supports a consumer calling `pmacs.hook.run`, and a
+    // nested run re-enters every subscriber, including the deferred
+    // expansion's. If the nested pass performed the expansion, the
+    // OUTER chain would then resume and hand pairing a record the
+    // replace had already invalidated: `α(` again, reached through the
+    // chain's documented re-entrancy seam rather than through claiming.
+    let (mut s, _f) = lean_editor();
+    exec(
+        &s,
+        r#"
+        _G.NESTED = 0
+        pmacs.typed_edit.add_consumer {
+          name = "nested-fan-out",
+          priority = 75,   -- between the expander (50) and pairing (100)
+          fn = function()
+            if _G.NESTED == 0 then
+              _G.NESTED = 1
+              pmacs.hook.run("buffer.after-edit")
+            end
+            return false
+          end,
+        }
+        "#,
+    );
+
+    type_str(&mut s, "\\alp(");
+    let nested: i64 = eval(&s, "return _G.NESTED");
+    assert_eq!(nested, 1, "the nested fan-out must actually have run");
+    assert_eq!(
+        text(&s),
+        "α()",
+        "the expansion waited for the OUTERMOST pass, so pairing still \
+         held a valid record when the terminator reached it"
     );
 }
 

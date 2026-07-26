@@ -139,7 +139,11 @@ commands, read `docs/active-work.md` immediately after this file.
     be used. The expansion therefore runs on a SECOND
     `buffer.after-edit` subscriber after the chain — which is how a
     pair character that terminates an abbreviation still pairs
-    (`\alp(` → `α()`). Its other durable facts:
+    (`\alp(` → `α()`). And **deferring work past a fan-out means
+    owning which fan-out it belongs to**: these fan-outs NEST, so a
+    consumer between the expander and pairing that calls
+    `pmacs.hook.run` re-enters the deferred subscriber while the outer
+    chain is still mid-list. Its other durable facts:
     the table must stay an ORDERED SEQUENCE (equal-length ties resolve
     by source declaration order, which a `pairs`-iterated map cannot
     express); a generator round-trip check must re-read the BYTES ON

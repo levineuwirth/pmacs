@@ -175,8 +175,8 @@ If it does not, stop and repair the remote/fetch configuration.
 
 ### Stage 4b — the Unicode input method (branch `lean4-stage4b-input-method`)
 
-- Framing `docs/lean4-mode-framing.md` **revision 10** (round 10 =
-  review of the implementation). Stage
+- Framing `docs/lean4-mode-framing.md` **revision 11** (rounds 10 and
+  11 = review of the implementation). Stage
   4a (the typed-edit consumer chain) MERGED as #179; this branch is 4b,
   the Lean content that registers on it.
 - Footprint: `scripts/regen-lean-abbrev` (new, the generator),
@@ -184,7 +184,7 @@ If it does not, stop and repair the remote/fetch configuration.
   from `leanprover/vscode-lean4@17d1d08`, Apache-2.0),
   `builtin/runtime/lean_input.lua` (new, the consumer at priority 50),
   `src/editor.rs` (two `include_str!` blocks),
-  `tests/lean_input_acceptance.rs` (new, 29 tests), and one
+  `tests/lean_input_acceptance.rs` (new, 30 tests), and one
   `#[cfg(feature = "crdt")]` `--lib` test in `src/daemon.rs`
   (acceptance 45f). No protocol change (Q#LN14). Entirely Lua apart
   from the load sites and that one test.
@@ -245,6 +245,8 @@ If it does not, stop and repair the remote/fetch configuration.
   | drop the `cursor() == post_cursor` check | 1 |
   | place the point without the context guard | 1 |
   | load lean_input.lua after lsp.lua | 1 |
+  | let a nested fan-out consume the deferred slot | 1 |
+  | stop counting chain invocations | 1 |
 
   Acceptance 45f bit by construction: without a registered window for
   the source frontend it ran six fan-outs with a nil record and proved
@@ -265,6 +267,17 @@ If it does not, stop and repair the remote/fetch configuration.
   relevance check needs `cursor() == post_cursor`, as pairing's has
   since #110), and cursor placement could move a buffer an intercept
   had switched to.
+- **Round 11 found the round-10 fix incomplete in one place:
+  `buffer.after-edit` fan-outs NEST.** A consumer between the expander
+  (50) and pairing (100) that calls `pmacs.hook.run("buffer.after-edit")`
+  re-enters the expander's subscriber while the OUTER chain is still
+  mid-list; the nested pass expanded and outer pairing then resumed with
+  an invalidated record — `α(` again, through the chain's documented
+  re-entrancy seam instead of through claiming. **Deferring work past a
+  fan-out means owning which fan-out it belongs to.** The chain's
+  subscriber and the expander's each run exactly once per fan-out, so
+  counting the first and matching it off in the second identifies the
+  nesting level with no new seam in merged Stage 4a substrate.
 - Undo is cross-peer-degraded on CRDT frontends and that is ACCEPTED,
   named in the module header (Q#LN21): six source-peer optimistic
   inserts replaced by one daemon-peer op. `set_round_trip_input` would

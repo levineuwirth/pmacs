@@ -229,7 +229,26 @@ end
 -- The consumer
 -- ---------------------------------------------------------------------
 
+-- Chain-consumer invocations not yet matched by a `run_deferred`.
+--
+-- `buffer.after-edit` fan-outs NEST: the typed-edit contract explicitly
+-- supports a consumer calling `pmacs.hook.run("buffer.after-edit")`,
+-- and a nested run re-enters every subscriber — including this module's
+-- deferred-expansion subscriber, while the OUTER chain is still walking
+-- its consumer list and pairing has not yet seen the terminator. A
+-- nested run that performed the expansion would reproduce exactly the
+-- bug deferring exists to fix: pairing resumes afterwards holding a
+-- record the replace has invalidated, declines, and the closer is lost.
+--
+-- The chain's subscriber and this module's subscriber run exactly once
+-- each per fan-out, in that order, so counting invocations of the first
+-- and matching them off in the second identifies the nesting level
+-- without any new seam in typed_edit.lua. Only the outermost pass
+-- performs the expansion; a nested one leaves it queued.
+local depth = 0
+
 local function on_typed_edit(rec)
+  depth = depth + 1
   local fid = frontend_id()
   if fid == nil then return false end
 
@@ -404,6 +423,15 @@ end
 -- A claim by ANY chain consumer stops the chain but not this — which
 -- is the point. Pairing claims the terminator it reacts to.
 local function run_deferred()
+  -- Match off this fan-out's chain invocation. `> 1` means the outer
+  -- chain is still mid-list — pairing has not had the terminator yet —
+  -- so the queued expansion stays queued for the outer pass. The clamp
+  -- keeps this honest if a lower-priority consumer claimed before the
+  -- chain reached ours, in which case there is nothing queued anyway.
+  local level = depth
+  if depth > 0 then depth = depth - 1 end
+  if level > 1 then return end
+
   local fid = frontend_id()
   if fid == nil then return end
   local d = deferred[fid]
