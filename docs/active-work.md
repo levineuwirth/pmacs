@@ -389,10 +389,45 @@ If it does not, stop and repair the remote/fetch configuration.
   **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
   `git diff --check` clean. Gates were run against the committed tree.
 
-## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 IN FRAMING
+## Bottom-panel lane (Arc 7) — Stage 1 + framing MERGED; Stage 2A IN REVIEW
 
-Stage 1 is on `main`. **Stage 2 is in framing**, no implementation in
-flight.
+Stage 1 and the Stage 2 framing are on `main`. **Stage 2A is
+implemented and in review.**
+
+- **Stage 2A — portable branch `githubsucks/bottom-panel-stage2a`**,
+  worktree `../pmacs-bp-stage2a`, based on `githubsucks/main` @
+  `c93f9ee`. Two commits: the classified census routing, then the
+  painter extraction + acceptance. **No protocol change; no behavior
+  change for any frontend today** — with `panel_capable = false` for
+  semantic sessions, `primary_document_window` returns `view.active`
+  in every existing configuration, so this is seam adoption that
+  becomes load-bearing in 2B.
+- Verification on this branch: `cargo fmt --check` clean; strict
+  workspace Clippy clean; **1,832 default + 2,009 CRDT** library tests;
+  new `bottom_panel_stage2a_acceptance` 10/10; bottom-panel Stage 1
+  46; statusline segments 7 default / 8 CRDT; m11_5 semantic 2 CRDT;
+  GPU initial target 14 CRDT; vterm Stage 1/2 10 / 6; folding Stage 2
+  48; M4 121; required GPU 202; `git diff --check` clean.
+- **Both key routings were falsified by revert.** Rerouting
+  `dispatch_idle_for` (#14, Focus) through `primary_document_window`
+  fails `focus_class_dispatch_idle_still_tracks_the_focused_window`;
+  reverting the statusline lookup (#12, Projection) to `view.active`
+  fails the document-context test. Worth recording: the *structural*
+  test `focus_and_projection_disagree_in_the_same_state` did **not**
+  catch the first bite — it compares the two authorities directly, so
+  only a consumer-level assertion catches a misrouted consumer. Keep
+  both kinds.
+- **`vterm_stage3_acceptance::a37` is a pre-existing flake here**, not a
+  Stage 2A regression: measured **6/8 failures on the base commit** and
+  **7/8 on the branch** in matched isolated samples. It needs a real
+  daemon + real PTY + headless GPU and is documented load-sensitive.
+  It also silently returns `ok` unless `pmacs-gpu` has been built, and
+  is `crdt`-gated so CI never runs it at all.
+- **Two suites are dark without `--features crdt`**:
+  `m11_5_semantic_acceptance` reports **0 tests** and
+  `gpu_initial_target_acceptance` reports **1** in the default config.
+  Both are semantic-census suites, so Stage 2A must be gated with the
+  feature on or its most relevant coverage never executes.
 
 - Stage 1 merged as **#155** (`main` @ `e745068`, 2026-07-24, after two
   review rounds). No protocol change. Durable substrate facts live in
