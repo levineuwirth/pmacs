@@ -14,11 +14,13 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `d152120` (the bottom-panel landed-doc refresh #156
-  atop the inline-math slice #158, dired Stage 1 #165, the GPU terminal
-  input fix #166, Lean 4 Stage 2 #161, the dired framing #164,
-  COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160, and the minimap
-  blank-slab fix #159; protocol v20).
+  `githubsucks/main` @ `d400f30` (Lean 4 Stage 3b #170 atop Stage 3a
+  #167, the bottom-panel landed-doc refresh #156, the inline-math slice
+  #158, dired Stage 1 #165, the GPU terminal input fix #166, Lean 4
+  Stage 2 #161, the dired framing #164, COHERENCE.md #163, find-file
+  #162, Lean 4 Stage 1 #160, and the minimap blank-slab fix #159;
+  protocol v20). The previous snapshot named `d152120`; the recovery
+  check below accepts it or anything newer.
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -55,7 +57,7 @@ git status --short --branch
 The `git log` command must expose `d152120` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Lean 4 lane (Arc 8) — Stages 1+2 MERGED; 3a IN REVIEW (#167); 3b STACKED
+## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b MERGED; Stage 4 IN FRAMING
 
 - Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
   round, all twelve checks green). Branch `githubsucks/lean4-stage1`
@@ -189,7 +191,7 @@ If it does not, stop and repair the remote/fetch configuration.
   suites**; `git diff --check` clean. The sweep needs an isolated
   `XDG_CONFIG_HOME` and `-- --skip basedpyright`.
 
-### Stage 3a — dispatch seams + `pmacs.fs.canonicalize` (branch `lean4-stage3a-seams`)
+### Stage 3a — dispatch seams + `pmacs.fs.canonicalize` — MERGED #167 (`main` @ `6f348c9`)
 
 - Worktree `../pmacs-lean-stage3`, branched off `githubsucks/main` @
   `46a1b8f`. Carries framing **rev 5** (the Stage 3 split) as its first
@@ -253,7 +255,7 @@ If it does not, stop and repair the remote/fetch configuration.
      `#[cfg(unix)]` is NOT sufficient for such a fixture —
      `#[cfg(target_os = "linux")]` is. Cost one red CI round to learn.
 
-### Stage 3b — the Lean language server (branch `lean4-stage3b-server`)
+### Stage 3b — the Lean language server — MERGED #170 (`main` @ `d400f30`)
 
 - Same worktree `../pmacs-lean-stage3`, **branched off
   `lean4-stage3a-seams`, not off `main`** — 3b consumes 3a's response
@@ -462,6 +464,61 @@ If it does not, stop and repair the remote/fetch configuration.
   fixes were pushed. The ledger's protocol is that verification
   describes the pushed tree; recording it late is the #161 fmt-blocker
   error in a slower form.)
+
+### Stage 4 — framing rev 6, split into 4a/4b (branch `lean4-stage4a-typed-edit-chain`)
+
+- Stages 3a and 3b **merged as #167** (`main` @ `6f348c9`) and **#170**
+  (`main` @ `d400f30`), 2026-07-26. Both were integrated against a main
+  that had advanced 50 commits mid-review; the only conflict either time
+  was this ledger's own lane headings, resolved by keeping both sides.
+- Worktree `../pmacs-lean-stage4`, branched off `main` @ `d400f30`.
+  Framing-only so far: `docs/lean4-mode-framing.md` **revision 6**. No
+  code. Awaiting user approval before implementation, per the workflow.
+- **Round 5 re-scout split Stage 4 into 4a (substrate) and 4b (Lean).**
+  4a is the typed-edit consumer chain — `builtin/runtime/typed_edit.lua`
+  plus `pair.lua` re-expressed as one registered consumer, no behavior
+  change. 4b is the input method. The split is forced by §4's own rule,
+  which Stage 4's risk column ("refactors `pair.lua`'s provenance read")
+  broke while the prose called the stage Lean-only.
+- **This is the SECOND consecutive re-scout to find that rule broken**
+  (round 4 found it for Stage 3). Rev 5 had even noticed the shape and
+  answered it with a commit boundary. **A commit boundary is not a review
+  boundary.** Re-check every remaining stage against §4 at scout time;
+  the rule is not self-enforcing.
+- **Rev 5's expansion semantics were wrong in three ways**, found by
+  reading `leanprover/vscode-lean4` @ `17d1d08` rather than inferring
+  from behavior. Resolution is *shortest key having the input as a
+  prefix* (`\al` → `∀` from `all`, not `alpha`); there is **no
+  terminator list** (`'+ '` is a key, so space extends after `\+`; `'\'`
+  is a key, so `\\` → `\`); and an unmatchable tail is **appended**,
+  not dropped (`\alp7` → `α7`).
+- **There is no cursor-motion hook**, so rev 5's acceptance 43 ("moving
+  the cursor out abandons it") was not buildable. Abandonment is lazy —
+  validated at the next typed edit — and the criterion now asserts what
+  pmacs can actually detect. Upstream drives this off `changeSelections`;
+  that seam does not exist here.
+- **`dispatch_key` is only half the production path for 4b.** The
+  auto-pair suite gets away with dispatch-only because Q#AP1 removed the
+  pair chars from the optimistic classifiers; `\` and the letters are
+  NOT excluded, so on a CRDT frontend the optimistic producer is the real
+  path. That producer is `#[cfg(feature = "crdt")]` and CI never enables
+  `crdt`, and the gate list runs `--features crdt` only for `--lib` — a
+  crdt-gated integration test is **dark twice over**.
+- The whole expansion has cross-peer-degraded undo (Q#LN21): six
+  source-peer optimistic inserts replaced by one daemon-peer op.
+  `set_round_trip_input` would fix it and is rejected — it also disables
+  `dispatch_idle`, so RET stops inserting a newline.
+- Table facts re-derived at `17d1d08`: 1,855 entries, 36,861 bytes, all
+  keys ASCII, **64** keys carry a `lean4` pair-set char, **305** keys are
+  proper prefixes of another (so 1,550 expand eagerly), **26** values
+  carry `$CURSOR`, **93** are multi-codepoint.
+- Citation sweep per COHERENCE §25: five live citations moved in the 50
+  commits since rev 5 — `take_typed_edit` 12827→12990,
+  `handle_server_requests` 1549→1815, `fs.stat` 93→133,
+  `detect_buffer_language` 452→457, `send_request`/`send_notification`
+  9342/9361→9507/9527.
+- Verification: none yet — the branch carries no code. `git diff --check`
+  clean.
 
 ## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)
 
