@@ -1438,10 +1438,10 @@ fn r5_a_fallback_that_dies_after_spawning_is_bounded_and_reported() {
 
 #[test]
 fn r5_a_user_spawned_lean_server_is_not_retired_by_the_fallback() {
-    // `retire_*` selected on `language_id == "lean4"`, which also names
-    // servers the user spawned themselves from `init.lua`. Those are not
-    // derived from `pmacs.lsp.config.lean4` and stopping them is a
-    // destructive side effect on state this module does not own.
+    // Language id AND label are public caller-supplied values. Even a
+    // user server that deliberately collides with the automatic path's
+    // `default-lean4` display label is not derived from
+    // `pmacs.lsp.config.lean4` and must not be stopped.
     let fx = Fixture::new();
     fx.toolchain("pkg", "v4.9.0\n");
     let file = fx.write("pkg/A.lean", "def a := 1\n");
@@ -1453,7 +1453,7 @@ fn r5_a_user_spawned_lean_server_is_not_retired_by_the_fallback() {
         &format!(
             r#"
             _G.mine = pmacs.lsp.spawn({{
-              label = "my-own-lean",
+              label = "default-lean4",
               language_id = "lean4",
               command = "{}",
               args = {{}},
@@ -1640,5 +1640,243 @@ fn r5_a_dead_attachment_is_never_handed_to_a_command() {
         rebuilt != "stopped" && rebuilt != "crashed" && rebuilt != "gone" && rebuilt != "none",
         "the attaching path rebuilds against a live server; saw \
          {rebuilt:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-6 review. Each is a direct counterexample against 19f48d4.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r6_the_shipped_lean_command_rebuilds_a_dead_attachment() {
+    // The round-5 test called `attachment_for_request` and
+    // `_attach_buffer` directly, while the shipped Lean command read the
+    // raw `active_attachment` and still handed its request to a stopped
+    // server. Drive the production command this time.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let mut state = editor(&fx);
+    open(&state, &file);
+    settle(&mut state);
+
+    exec(
+        &state,
+        r"
+        local rec = pmacs.lsp.active_attachment()
+        assert(rec)
+        pmacs.lsp.stop(rec.server)
+        ",
+    );
+    tick_for(&mut state, 200);
+
+    exec(
+        &state,
+        r#"pmacs.command.invoke("lean.wait-for-diagnostics")"#,
+    );
+    let kind: String = eval(
+        &state,
+        r#"
+        local rec = pmacs.lsp.active_attachment()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.state and s.state.kind)
+          end
+        end
+        return "gone"
+        "#,
+    );
+    assert!(
+        kind != "stopped" && kind != "crashed" && kind != "gone" && kind != "none",
+        "the shipped command must resolve through the command-safe \
+         attachment path; saw {kind:?}"
+    );
+    tick_for(&mut state, 500);
+    let status = state.core.borrow().status.clone();
+    assert_eq!(
+        status, "lean: elaboration complete",
+        "the rebuilt command path must deliver the request, not merely \
+         replace the attachment"
+    );
+}
+
+#[test]
+fn r6_every_spawned_fallback_server_is_bounded() {
+    // A scalar fallback watch covers only one Q#LN15 root. The second
+    // server can also be created directly by lsp.lua's after-load path,
+    // bypassing `repair_active_if_stale` entirely.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fx = Fixture::new();
+    fx.toolchain("one", "v4.9.0\n");
+    fx.toolchain("two", "v4.9.0\n");
+    let first = fx.write("one/A.lean", "def a := 1\n");
+    let second = fx.write("two/B.lean", "def b := 2\n");
+    let absent_primary = fx.dir("bin/no-such-lake");
+    let dying_fallback = fx.root.join("bin/dying-lean");
+    std::fs::create_dir_all(dying_fallback.parent().unwrap()).unwrap();
+    std::fs::write(&dying_fallback, "#!/bin/sh\nexit 4\n").unwrap();
+    std::fs::set_permissions(&dying_fallback, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut state = editor(&fx);
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.lean4.command = "{}"
+            pmacs.lsp.config.lean4.args = {{ "serve" }}
+            pmacs.lean._fallback = {{ command = "{}", args = {{}} }}
+            "#,
+            lua_str(&absent_primary),
+            lua_str(&dying_fallback)
+        ),
+    );
+
+    open(&state, &first);
+    open(&state, &second);
+    tick_for(&mut state, 1600);
+
+    let worst_attempt: i64 = eval(
+        &state,
+        r"
+        local worst = 0
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if s.language_id == 'lean4' and (s.attempt or 0) > worst then
+            worst = s.attempt
+          end
+        end
+        return worst
+        ",
+    );
+    assert!(
+        worst_attempt <= 1,
+        "every fallback server must be bounded; an unwatched root \
+         reached attempt {worst_attempt}"
+    );
+}
+
+#[test]
+fn r6_point_of_use_healing_does_not_duplicate_a_restarting_server() {
+    // A crashed OnCrash server still has `next_restart_at` armed.
+    // Spawning a fresh id beside it produces two same-root servers when
+    // the old one restarts. Use Rust so this pins the general lsp.lua
+    // seam independently of Lean's fallback lifecycle.
+    let fx = Fixture::new();
+    let file = fx.write("A.rs", "fn main() {}\n");
+    let mut state = editor(&fx);
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.rust = {{
+              command = "{}",
+              args = {{}},
+              env = {{ PMACS_FAKE_LSP_MODE = "crash" }},
+            }}
+            "#,
+            fake_lsp_path()
+        ),
+    );
+    open(&state, &file);
+
+    let mut crashed = false;
+    for _ in 0..100 {
+        state.tick_processes();
+        state.tick_lsp();
+        crashed = eval(
+            &state,
+            r#"
+            for _, s in ipairs(pmacs.lsp.list()) do
+              if s.language_id == "rust"
+                  and s.state and s.state.kind == "crashed" then
+                return true
+              end
+            end
+            return false
+            "#,
+        );
+        if crashed {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(crashed, "precondition: the attached server crashed");
+
+    exec(&state, "pmacs.lsp.hover_at_cursor()");
+    let rust_servers: i64 = eval(
+        &state,
+        r#"
+        local n = 0
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if s.language_id == "rust" then n = n + 1 end
+        end
+        return n
+        "#,
+    );
+    assert_eq!(
+        rust_servers, 1,
+        "healing must cancel the old id's armed restart before spawning \
+         its replacement"
+    );
+}
+
+#[test]
+fn r6_no_swap_retires_only_the_failed_root() {
+    // When config already equals the fallback, no shared config changed.
+    // One root's failure must not globally retire another root's healthy
+    // instance of the same cwd-sensitive command.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fx = Fixture::new();
+    fx.toolchain("bad", "v4.9.0\n");
+    fx.toolchain("good", "v4.9.0\n");
+    let bad = fx.write("bad/A.lean", "def a := 1\n");
+    let good = fx.write("good/B.lean", "def b := 2\n");
+    let wrapper = fx.root.join("bin/root-sensitive-lean");
+    std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \"$PWD\" in */bad) exit 4;; esac\nexec \"{}\"\n",
+            fake_lsp_path()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut state = editor(&fx);
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.lean4.command = "{}"
+            pmacs.lsp.config.lean4.args = {{}}
+            pmacs.lean._fallback = {{ command = "{}", args = {{}} }}
+            "#,
+            lua_str(&wrapper),
+            lua_str(&wrapper)
+        ),
+    );
+    open(&state, &bad);
+    open(&state, &good);
+    tick_for(&mut state, 700);
+
+    let good_alive: bool = eval(
+        &state,
+        r#"
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if s.cwd and s.cwd:match("/good$") then
+            local k = s.state and s.state.kind
+            return k ~= "stopped" and k ~= "crashed"
+          end
+        end
+        return false
+        "#,
+    );
+    assert!(
+        good_alive,
+        "one root's failure must not stop another root when no config \
+         swap occurred"
     );
 }

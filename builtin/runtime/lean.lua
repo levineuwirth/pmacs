@@ -137,8 +137,8 @@ local probe = {
                      -- table cardinality cannot tell "once per buffer"
                      -- from "every tick for one buffer"
   fallback_installed = false,
-  fallback_watch = nil, -- fallback sid being polled for die-before-init
-  fallback_failed = false,
+  fallback_watches = {}, -- sid key -> sid, each polled die-before-init
+  fallback_done = {}, -- sid key -> initialized or terminally handled
   saw_initialized = false,
 }
 
@@ -286,23 +286,36 @@ end
 -- Retiring only the server that happened to fail left the others live
 -- and every buffer attached to them stranded on a command the config no
 -- longer names.
--- Only servers this module's config produced. `ensure_server` labels
--- every auto-attached server `default-<language>`, so that label is the
--- derivation discriminator: a server the USER spawned from `init.lua`
--- carries their own label, is not derived from `pmacs.lsp.config.lean4`,
--- and must not be stopped because our config changed. Selecting on
--- `language_id` alone swept those up too — a destructive side effect on
--- state this module does not own.
-local DERIVED_LABEL = "default-lean4"
+-- Only servers the config-driven path itself produced. A server's label,
+-- language, command, and root are all caller-supplied public values; none
+-- is an ownership discriminator. `lsp.lua` records the successful spawn
+-- in a private origin table, which is the fact this lifecycle may act on.
+local function is_derived_server(sid)
+  local ok, owned = pcall(pmacs.lsp._is_default_server, sid, "lean4")
+  return ok and owned == true
+end
 
 local function retire_derived_lean_servers()
   local ok, rows = pcall(pmacs.lsp.list)
   if not ok or not rows then return end
   local ids = {}
   for _, info in ipairs(rows) do
-    if info.label == DERIVED_LABEL then ids[#ids + 1] = info.id end
+    if is_derived_server(info.id) then ids[#ids + 1] = info.id end
   end
-  for _, id in ipairs(ids) do retire_server(id) end
+  for _, id in ipairs(ids) do
+    -- These ids predate the fallback spawn. Mark them handled before
+    -- retirement so the discovery poll cannot mistake their terminal
+    -- state for a fallback that failed to initialize.
+    probe.fallback_done[tostring(id)] = true
+    retire_server(id)
+  end
+end
+
+local function watch_fallback_server(sid)
+  if not sid or not is_derived_server(sid) then return end
+  local key = tostring(sid)
+  if probe.fallback_done[key] then return end
+  probe.fallback_watches[key] = sid
 end
 
 -- Rebuild the ACTIVE buffer's attachment if it is Lean and stale.
@@ -358,33 +371,44 @@ local function repair_active_if_stale()
   end
   -- **A successful SPAWN is not a successful START.** The once-per-
   -- buffer bound stops `_attach_buffer` being called again, but it says
-  -- nothing about the server it produced: `ensure_server` never forwards
-  -- `cfg.restart`, so the fallback inherits `OnCrash`, and an executable
-  -- that dies before `initialize` is respawned by the manager forever
-  -- with no attempt ceiling — silently, because `latched` has already
-  -- disabled the primary's failure poll. Watch this one too, once.
-  if not probe.fallback_watch and not probe.fallback_failed then
-    probe.fallback_watch = fresh.server
-  end
+  -- nothing about the server it produced. Arm this id immediately; the
+  -- poll below also discovers servers created through lsp.lua's own
+  -- after-load and command paths.
+  watch_fallback_server(fresh.server)
 end
 
--- The fallback's own die-before-initialize poll. One shot: on failure it
--- retires the server (which is what actually ends the respawn loop) and
--- reports, and never re-arms.
-local function poll_fallback()
-  local sid = probe.fallback_watch
-  if not sid then return end
-  local kind = server_state_kind(sid)
-  if kind == "initialized" then
-    probe.fallback_watch = nil
-    return
+-- Every fallback server gets its own die-before-initialize poll. A scalar
+-- watch cannot cover Q#LN15's simultaneous per-root servers, and a server
+-- may be created by lsp.lua's after-load or command path without passing
+-- through `repair_active_if_stale`. Discovery from the private ownership
+-- table closes both holes.
+local function poll_fallbacks()
+  if not probe.fallback_installed then return end
+  local ok, rows = pcall(pmacs.lsp.list)
+  if not ok or not rows then return end
+
+  local by_key = {}
+  for _, info in ipairs(rows) do
+    local key = tostring(info.id)
+    by_key[key] = info
+    if not probe.fallback_done[key] and is_derived_server(info.id) then
+      probe.fallback_watches[key] = info.id
+    end
   end
-  if kind == nil or kind == "crashed" or kind == "stopped" then
-    probe.fallback_watch = nil
-    probe.fallback_failed = true
-    if kind ~= nil then retire_server(sid) end
-    report("LSP: lean4 fallback " .. fallback_name()
-      .. " started but did not stay up")
+
+  for key, sid in pairs(probe.fallback_watches) do
+    local info = by_key[key]
+    local kind = info and info.state and info.state.kind
+    if kind == "initialized" then
+      probe.fallback_watches[key] = nil
+      probe.fallback_done[key] = true
+    elseif info == nil or kind == "crashed" or kind == "stopped" then
+      probe.fallback_watches[key] = nil
+      probe.fallback_done[key] = true
+      if info ~= nil then retire_server(sid) end
+      report("LSP: lean4 fallback " .. fallback_name()
+        .. " started but did not stay up")
+    end
   end
 end
 
@@ -394,10 +418,10 @@ local function fire_latch(sid, why)
   probe.watching = nil
   if not swap_to_fallback() then
     report("LSP: lean4 " .. why)
-    -- Still retire: the servers are broken whether or not a replacement
-    -- command was installed, and leaving them live would keep the
-    -- restart machinery running against a command known to fail.
-    retire_derived_lean_servers()
+    -- No shared config changed, so only the server whose failure
+    -- triggered this verdict is invalid. Sweeping every root here stops
+    -- healthy instances of a root-sensitive command for no reason.
+    if sid and is_derived_server(sid) then retire_server(sid) end
     return
   end
   retire_derived_lean_servers()
@@ -551,22 +575,66 @@ function M.wait_for_diagnostics(sid, uri, version, fn)
   return rid
 end
 
+local function when_server_ready(sid, fn)
+  local function state_kind()
+    local ok, state = pcall(pmacs.lsp.status, sid)
+    if not ok or not state then return nil end
+    return state.kind
+  end
+
+  local kind = state_kind()
+  if kind == "initialized" then
+    fn(nil)
+    return
+  end
+  if kind == nil or kind == "crashed" or kind == "stopped" then
+    fn("server did not initialize")
+    return
+  end
+
+  -- A command may have just healed a dead attachment, in which case the
+  -- replacement is still starting. Requests are not queued before
+  -- initialize, so issue this one after the lifecycle reaches ready
+  -- rather than replacing the attachment and immediately failing on it.
+  pmacs.async(function()
+    for _ = 1, 300 do
+      pmacs.async.yield_to_next_tick()
+      kind = state_kind()
+      if kind == "initialized" then
+        fn(nil)
+        return
+      end
+      if kind == nil or kind == "crashed" or kind == "stopped" then
+        fn("server did not initialize")
+        return
+      end
+    end
+    fn("server initialization timed out")
+  end)
+end
+
 pmacs.command.define {
   name = "lean.wait-for-diagnostics",
   description = "Wait for the Lean server to finish elaborating this file",
   fn = function()
-    local rec = pmacs.lsp.active_attachment()
+    local rec = pmacs.lsp._attachment_for_command()
     if not rec or rec.language ~= "lean4" then
       pmacs.editor.set_status("lean: no Lean server for this buffer")
       return
     end
     pmacs.editor.set_status("lean: elaborating…")
-    M.wait_for_diagnostics(rec.server, rec.uri, rec.version, function(err)
-      if err then
-        pmacs.editor.set_status("lean: " .. tostring(err))
-      else
-        pmacs.editor.set_status("lean: elaboration complete")
+    when_server_ready(rec.server, function(init_err)
+      if init_err then
+        pmacs.editor.set_status("lean: " .. tostring(init_err))
+        return
       end
+      M.wait_for_diagnostics(rec.server, rec.uri, rec.version, function(err)
+        if err then
+          pmacs.editor.set_status("lean: " .. tostring(err))
+        else
+          pmacs.editor.set_status("lean: elaboration complete")
+        end
+      end)
     end)
   end,
 }
@@ -600,13 +668,17 @@ pmacs.hook.add("buffer.after-load", function()
   local ok_lang, lang = pcall(pmacs.lsp.buffer_language, buf)
   if not ok_lang or lang ~= "lean4" then return end
 
-  if not probe.started then
-    local path = pmacs.editor.file_path()
-    start_probe(path and M.root_for(path) or nil)
-  end
-
   local rec = pmacs.lsp.active_attachment()
   if rec and rec.language == "lean4" then
+    -- A matching-root server supplied by the user may be adopted by
+    -- `ensure_server`. Its lifecycle is not evidence about the
+    -- config-driven command, and neither the version probe nor fallback
+    -- latch may mutate config because that foreign server changed state.
+    if not is_derived_server(rec.server) then return end
+    if not probe.started then
+      local path = pmacs.editor.file_path()
+      start_probe(path and M.root_for(path) or nil)
+    end
     -- **Arm ONCE, capturing buffer and server together.** Setting
     -- `buf_key` on every Lean load meant a second Lean buffer opened
     -- before the verdict silently became the rebuild target while the
@@ -632,6 +704,10 @@ pmacs.hook.add("buffer.after-load", function()
   -- that produced no attachment is a failure.
   local cfg = pmacs.lsp.config.lean4
   if not cfg or not cfg.command then return end
+  if not probe.started then
+    local path = pmacs.editor.file_path()
+    start_probe(path and M.root_for(path) or nil)
+  end
 
   -- No attachment for a Lean buffer with a configured command means
   -- `ensure_server` could not spawn at all — a synchronous ENOENT,
@@ -662,7 +738,7 @@ pmacs.hook.add("process.after-tick", function()
   -- Repair the active buffer if the latch invalidated it. Cheap when
   -- there is nothing to do, and bounded to one attempt per buffer.
   repair_active_if_stale()
-  poll_fallback()
+  poll_fallbacks()
 end)
 
 -- Test seam: acceptance drives the latch deterministically rather than

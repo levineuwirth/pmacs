@@ -265,7 +265,7 @@ If it does not, stop and repair the remote/fetch configuration.
 - Ships `builtin/runtime/lean.lua` (new), one `include_str!` line in
   `src/editor.rs`, `pmacs.lsp._attach_buffer` exported from `lsp.lua`,
   a `leanprogress` mode plus `waitForDiagnostics` validation on
-  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (36 tests).
+  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (40 tests).
   No protocol change.
 - **Stage 1's acceptance 12 is half superseded and was rewritten, not
   deleted.** It asserted `pmacs.lsp.config.lean4 == nil` to catch a
@@ -359,9 +359,29 @@ If it does not, stop and repair the remote/fetch configuration.
   assertion counted TABLE KEYS, which cannot distinguish "once per
   buffer" from "every tick for one buffer" — cardinality stays 1 either
   way. Now a numeric attempt counter; the bite shows **174 vs 1**.
+- **Round-6 review: four P1s and one P2, suite 40/40.** (1) General
+  point-of-use healing treated a crashed OnCrash server as absent and
+  spawned beside it while its old id still had `next_restart_at` armed;
+  `attach_buffer` now forgets a terminal record before replacement.
+  `attachment_for_request` remains non-attaching and preserves the
+  record, so a same-id restart can recover instead of being orphaned.
+  (2) The fallback watch was scalar, while Q#LN15 permits simultaneous
+  per-root servers and lsp.lua can create them without passing through
+  Lean's repair function. Watches are now per-SID and discover every
+  config-driven Lean server from a private origin table. (3) The shipped
+  `lean.wait-for-diagnostics` command bypassed both safe resolvers and
+  still consumed a stopped record; it now uses a command-safe resolver,
+  waits asynchronously for a healed replacement to initialize, and the
+  test requires the real request to finish. (4) When no config swap
+  occurred, one failed root still swept a healthy root; that arm now
+  retires only the SID whose verdict fired. (5) `label` is public and
+  unreserved, therefore not ownership. lsp.lua records successful
+  config-driven spawns privately, and every Lean lifecycle decision keys
+  on that origin fact; the user-server pin deliberately collides on
+  `default-lean4`.
 - **DURABLE LESSON — "the test that passes" vs "the test that
-  discriminates."** Six tests across three rounds were written, run
-  green, and only bite-testing showed they pinned nothing. **Carry this
+  discriminates."** Green tests across six rounds repeatedly pinned only
+  a nearby helper or an absence, and only biting exposed it. **Carry this
   to `docs/agent-handoff.md` when the lane lands.** The concrete shapes,
   all from this branch:
   1. R1 acceptance 36 asserted "every server is terminal" — pinning the
@@ -389,6 +409,11 @@ If it does not, stop and repair the remote/fetch configuration.
      not the things attempted against (bite: 174 vs 1).
   9. A NONEXISTENT executable only exercises synchronous ENOENT. To
      reach "spawned, then died", the fixture must actually spawn.
+  10. Calling the two SAFE HELPERS directly does not pin a shipped
+      command that bypasses both. Drive the command registry entry and
+      require its terminal result — replacing a dead record with a
+      `starting` server is still not success if the request is issued
+      before initialize.
   Rule: **a test is not evidence until the mutation it targets has been
   shown to fail it.**
 - **SECOND DURABLE LESSON — a scope error repeats until the scope is
@@ -424,10 +449,10 @@ If it does not, stop and repair the remote/fetch configuration.
   works. Only a parseable version below 3.1.0 triggers it; the
   server-failure latch covers the rest.
 - Verification on this branch: `cargo fmt --check` clean; strict
-  workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
-  lean4 server 36/36; lean4 stage 1 9/9; dispatch seams 15/15;
+  workspace Clippy clean; 1,829 default + 2,003 CRDT library tests;
+  lean4 server 40/40; lean4 stage 1 9/9; dispatch seams 15/15;
   multi-root 13/13; M4 121; required GPU 155; **isolated-config
-  workspace sweep 3,225 across 94 suites, zero failures**;
+  serial workspace sweep 3,229 across 94 suites, zero failures**;
   `git diff --check` clean. (Round 1 of
   this entry recorded 17/17 and 3,206 — the PRE-fix counts — after the
   fixes were pushed. The ledger's protocol is that verification

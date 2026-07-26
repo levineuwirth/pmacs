@@ -607,6 +607,12 @@ local function project_root_for(language, path)
   return dir_of(path), "fallback"
 end
 
+-- Servers created by the automatic config-driven path. This is the
+-- ownership fact a caller-supplied `label` cannot provide: labels are
+-- public, unreserved display strings, while entries here are written
+-- only after this module itself successfully spawns a server.
+local default_servers = {}
+
 local function ensure_server(language, path)
   local cfg = pmacs.lsp.config[language]
   if not cfg or not cfg.command then return nil end
@@ -660,7 +666,30 @@ local function ensure_server(language, path)
     cwd = root,
     root_uri = key_uri,
   })
-  if ok then return sid end
+  if ok then
+    default_servers[tostring(sid)] = language
+    return sid
+  end
+  return nil
+end
+
+-- Internal ownership seam for builtins whose lifecycle follows the
+-- config-driven server set (currently Lean's one-shot fallback). A
+-- user-managed server may deliberately use the same language id, label,
+-- command, and root; none of those make it ours.
+function pmacs.lsp._is_default_server(sid, language)
+  local owned_language = default_servers[tostring(sid)]
+  return owned_language ~= nil
+    and (language == nil or owned_language == language)
+end
+
+local function server_state_kind(sid)
+  if not sid then return nil end
+  for _, info in ipairs(pmacs.lsp.list()) do
+    if tostring(info.id) == tostring(sid) then
+      return info.state and info.state.kind
+    end
+  end
   return nil
 end
 
@@ -669,14 +698,8 @@ end
 -- forgotten, or was spawned against a now-replaced `pmacs.lsp.config`
 -- entry — get rebuilt on the next attach attempt.
 local function server_is_live(sid)
-  if not sid then return false end
-  for _, info in ipairs(pmacs.lsp.list()) do
-    if tostring(info.id) == tostring(sid) then
-      local kind = info.state and info.state.kind
-      return kind ~= "crashed" and kind ~= "stopped"
-    end
-  end
-  return false
+  local kind = server_state_kind(sid)
+  return kind ~= nil and kind ~= "crashed" and kind ~= "stopped"
 end
 
 local function server_is_initialized(sid)
@@ -811,6 +834,15 @@ local function attach_buffer(buf)
   local existing = attachments[key]
   if existing and server_is_live(existing.server) then return existing end
   if existing then
+    local kind = server_state_kind(existing.server)
+    if kind == "crashed" or kind == "stopped" then
+      -- A terminal OnCrash client may still have `next_restart_at`
+      -- armed. Spawning beside it creates two same-root servers when
+      -- the old id restarts. `forget` is the terminal-state operation:
+      -- it removes the client and cancels that pending restart before
+      -- the replacement is created.
+      pcall(pmacs.lsp.forget, existing.server)
+    end
     attachments[key] = nil
     -- Unsent edits targeted the dead attachment; the did_open below
     -- carries the full current text, superseding them.
@@ -896,6 +928,14 @@ local function attached_for_active()
   return attach_buffer(buf)
 end
 
+-- Internal command-path resolver for builtin request producers outside
+-- this module. Unlike `active_attachment` it may replace a dead record;
+-- unlike `attachment_for_request` it is called only from an explicit
+-- user command, where attach-on-use is the intended policy.
+function pmacs.lsp._attachment_for_command()
+  return attached_for_active()
+end
+
 -- Pure, side-effect-free attachment lookup for the active buffer:
 -- returns the live record (with `.uri`) when a server is already
 -- attached, else nil. Unlike `attached_for_active`, it never *triggers*
@@ -964,8 +1004,10 @@ function pmacs.lsp.attachment_for_request()
   -- perturb LSP state), so a dead record reads as "no attachment"
   -- rather than triggering a rebuild.
   if not server_is_live(rec.server) then
-    attachments[key] = nil
-    pending_did_change[key] = nil
+    -- Preserve the record. A crashed OnCrash server may restart under
+    -- the SAME id; clearing the map here would orphan that recovered
+    -- server, while this non-attaching lookup has no authority to
+    -- cancel the restart or create a replacement.
     return nil
   end
   flush_did_change(key)
