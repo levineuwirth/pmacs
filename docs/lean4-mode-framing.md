@@ -46,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial.
+Revision 1 — initial. Current revision: **7**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -288,11 +288,15 @@ landed and its citations are historical record, not navigation.
 
 Stages 3a and 3b landed (#167, #170). Re-scouting Stage 4 against `main`
 @ `d400f30` produced **six findings that change the plan** and three
-that confirm it. The pmacs-side facts were verified in a worktree at
+that confirm it. (Round 6 found five more, four of them internal to this
+revision; read that section too before trusting a rev-6 statement.) The pmacs-side facts were verified in a worktree at
 that commit; the upstream facts were verified by downloading and reading
 `leanprover/vscode-lean4` at commit `17d1d08` (2026-05-29) — the
 algorithm, not its documentation, since the `lean4-unicode-input`
-package ships no README.
+package ships no README. *(Round 6: it does, at `src/README.md` — see
+that section. Corrections to round 5's own numbers are marked inline
+below rather than rewritten, per the standing rule that revision
+entries are record, not navigation.)*
 
 1. **Stage 4 violated this document's own splitting rule — the same way
    Stage 3 did.** §4 says "no PR in this arc mixes a cross-cutting
@@ -377,6 +381,14 @@ package ships no README.
    needs a `doNotTrackNewAbbr` guard and why §2.11 records that pmacs
    does not.
 
+   *Corrected in round 6.* **119** symbols are multi-codepoint, of which
+   26 carry `$CURSOR`; "93" was the non-`$CURSOR` subset stated as a
+   total. **Three** values contain a backslash — the `\` → `\` identity
+   entry was missed. And this entry's biggest omission is not a number:
+   the shortest-key rule needs a **tie-break by source declaration
+   order**, which the README round 5 said did not exist states outright.
+   §2.11 and Q#LN11 carry the corrected facts.
+
 Confirmations, recorded because each was load-bearing and unverified:
 
 7. **`take_typed_edit`'s one-shot contract is unchanged**
@@ -403,6 +415,70 @@ Citation drift repaired per COHERENCE §25, on the same terms as round
 **9507**/**9527**. Left as written: the pre-#161 numbers inside Q#LN15
 and the revision-history entries above, which are historical record
 rather than navigation.
+
+### Round 6 (rev 6 → rev 7)
+
+The 4a/4b split held; five P1s against the revision's own content, all
+real, all reproduced. Four share a root: **rev 6 verified its external
+facts and under-verified its internal ones.**
+
+1. **Stage 4a's declared footprint excluded the tests its acceptance
+   required.** Q#LN10 listed three production files while 46a–46e demand
+   chain-specific tests that cannot live in
+   `tests/auto_pair_acceptance.rs` — criterion 46 requires that file
+   byte-identical. Footprint now names
+   `tests/typed_edit_chain_acceptance.rs` and adds it to the PR's gates.
+2. **Pending state had the wrong owner.** §2.11 reasoned "no
+   multi-cursor, therefore one point" and Q#LN22 keyed pending
+   abbreviations by buffer. pmacs is multi-frontend: `EditorCore.views`
+   is per-`FrontendId` with its own active window, `take_typed_edit` is
+   *already* frontend-keyed, and `pmacs.frontend.id()` exists. Two
+   frontends on one Lean buffer — the TUI-plus-GPU case this project
+   ships — would share one slot. Worse, `buffer.after-switch` takes no
+   arguments, so a buffer-keyed clear-on-switch lets any frontend
+   discard another's pending abbreviation. Now keyed
+   `(frontend, buffer)` with a window check, frontend-scoped
+   after-switch clearing, a `frontend.detached` purge, and acceptance
+   45i — which the buffer-keyed design passes every other criterion
+   without.
+3. **The shortest-match rule was missing its tie-break, and rev 6's
+   research method is why.** Upstream keeps declaration order among
+   equal-length shortest keys. The README states it in one sentence —
+   and rev 6 asserted "the package ships no README" after a 404 on the
+   package root, without checking the directory listing it had already
+   fetched, which shows `README.md` under `src/`. **A 404 on a guessed
+   path is not evidence of absence.** The rule is load-bearing: 101
+   prefixes have equal-shortest candidates resolving to *different*
+   symbols (`f` → `f<` not `f>`; `"` picks `"A` from eleven). A `pairs`-
+   iterated Lua map cannot express it, so Q#LN11 now emits an ordered
+   sequence and Q#LN22 sorts by `(#key, source rank)`.
+4. **The generator's rejection rule rejected the current table.** "Abort
+   on keys needing Lua escaping" would reject `\` and the eleven `"X`
+   keys — and acceptance 45d requires `\` to work. Replaced with
+   canonical lossless escaping; the generator aborts only on duplicate
+   keys, invalid UTF-8, and a failed self-round-trip. Relatedly, 45g
+   claimed the suite compares against `abbreviations.json`, which is not
+   shipped; it now pins self-consistency properties and leaves
+   source fidelity to the generator, where the source is in hand.
+5. **Durable and volatile state were not reconciled** —
+   `docs/agent-handoff.md` still anchored `main` at `d152120` with
+   neither #167 nor #170, while `docs/active-work.md` kept full merged
+   Stage 3a/3b histories against its own instruction to remove merged
+   entries, under a stale July 25 snapshot date. Round 5 updated the
+   ledger and skipped the handoff; per CLAUDE.md both are required
+   reading, and the one that outranks the other was the one left wrong.
+
+Corrections carried in the same revision, each verified against the
+data: the README exists (finding 3); there are **119** multi-codepoint
+symbols, of which 26 carry `$CURSOR` — rev 6's "93" was the
+non-`$CURSOR` subset reported as a total; **three** values contain a
+backslash (`\`, `n`, `setminus`), not two; Q#LN22 now states the rule
+acceptance 45d depended on, that an unclaimed terminating `\` is
+reprocessed as a new leader; acceptance 38 now says the terminator is
+retained, so undo restores `\alpha ` with its space; the coherence
+section cites golden-journey **step 5** ("Edit immediately"), not step
+4; and §8's config-registry prior art points at Q#LN22, where the gate
+now lives.
 
 ## 1. What ships
 
@@ -828,8 +904,15 @@ them from the store needs a Rust-side policy, not a Lua filter. Q#LN18.
 Scouted 2026-07-26 against `leanprover/vscode-lean4` @ `17d1d08`,
 package `lean4-unicode-input`, files `AbbreviationProvider.ts`,
 `TrackedAbbreviation.ts`, `AbbreviationRewriter.ts`,
-`AbbreviationConfig.ts`, and `abbreviations.json`. The package ships no
-README, so the algorithm below is read off the source. Apache-2.0.
+`AbbreviationConfig.ts`, `abbreviations.json`, and — round 6 — the
+package README at `lean4-unicode-input/src/README.md`. Apache-2.0.
+
+**Rev 6 first claimed this package ships no README. It does**, at
+`src/README.md` rather than the package root, and the 404 on the root
+path was taken as absence without checking the directory listing that
+was already in hand. That cost the tie rule below: the README states it
+in one sentence, and reading only the code left it as an inference from
+`Array.prototype.sort`'s stability rather than a documented contract.
 
 **Resolution.** `findSymbolsByAbbreviationPrefix(p)` collects every key
 having `p` as a prefix, sorts them by **key length ascending**, and maps
@@ -844,6 +927,32 @@ Verified against the table: `alpha` → `α`, `alp` → `α` (via `alpha`),
 `al` → `∀` (via `all`, *not* `alpha` — shortest wins, and this is
 surprising enough to be worth an acceptance criterion), `alp7` → `α7`
 via rule 2, `a` → `α` (`a` is itself a key, among 29 prefix matches).
+
+**The tie rule, and why it is a constraint on the vendored format.**
+When several shortest keys have equal length, upstream takes **the one
+declared first in `abbreviations.json`**. The README says so outright;
+the code achieves it because `Object.keys()` yields JSON insertion order
+and `Array.prototype.sort` is stable. Ties are not rare: **101 prefixes
+have equal-shortest candidates that resolve to *different* symbols**.
+`f` picks `f<` → `‹` over `f>` → `›`; `"` picks `"A` → `Ä` from eleven
+equal-length candidates; `(` picks `()` over `(=`, `(b`, `((`, `([`.
+
+A Lua table iterated with `pairs` has no order at all, so **a generated
+`{ [key] = symbol }` map cannot express this contract** — it would
+resolve these 101 prefixes nondeterministically, and worse, *stably
+wrong* per build. Q#LN11 therefore carries source rank alongside the
+symbol.
+
+**Two things the README explains that the code does not.** `Tab` is the
+manual early-replacement trigger upstream binds, which is why
+`getReplacementText`'s shortest-prefix rule is user-visible at all
+rather than an internal detail. And the `[]_`/`{}_` entries in the table
+are not symbols anyone types — they are **decoys**, added so that `\[`
+is not uniquely-and-completely matching and therefore does not eagerly
+expand before the user can type the second `[`. That is the same
+collision Q#LN22 handles from the pairing side, solved upstream by
+editing the data. Anyone regenerating the table must not "clean up"
+those entries.
 
 **Tracking.** The leader `\` is inserted into the buffer like any other
 character, and the tracked range starts after it; the replaced range
@@ -881,8 +990,10 @@ abbreviation the cursor has left. pmacs has no cursor-motion hook
 (round-5 finding 3), so this seam does not exist here and Q#LN22 makes
 abandonment lazy instead.
 
-**The re-arm guard pmacs does not need.** `setminus` → `\` and `n` →
-`\n`, so an expansion can insert a backslash; upstream sets
+**The re-arm guard pmacs does not need.** Three values contain a
+backslash — `\` → `\`, `n` → `\n`, and `setminus` → `\` (rev 6 first
+said two, dropping the `\` → `\` identity entry) — so an expansion can
+insert a backslash; upstream sets
 `doNotTrackNewAbbr` across the replace so that backslash does not open a
 new abbreviation. In pmacs the expansion is a programmatic `buf:replace`
 that arms no typed-edit record, so the chain sees nothing and cannot
@@ -891,9 +1002,25 @@ contract, not by accident — and the acceptance must pin it, because a
 future consumer that inferred from buffer text rather than provenance
 would reintroduce the bug.
 
-**What pmacs does not have to carry.** Multi-cursor. Upstream tracks a
-`Set<TrackedAbbreviation>` and sorts changes bottom-up for that reason;
-pmacs has one point, so one pending abbreviation per buffer.
+**What pmacs does not have to carry.** Multi-cursor within a frontend.
+Upstream tracks a `Set<TrackedAbbreviation>` and sorts changes bottom-up
+for that reason; pmacs has one point per frontend view.
+
+**What pmacs has instead, and rev 6 got wrong.** Rev 6 read "no
+multi-cursor" as "one point" and keyed pending state by buffer alone.
+**pmacs is multi-frontend**: `EditorCore.views` is a
+`HashMap<FrontendId, FrontendView>`, each with its own active window and
+cursor; `take_typed_edit` is already keyed by frontend
+(`typed_edit_armed: Option<(FrontendId, TypedEditRecord)>`, matched
+against `active_frontend`); the record carries `window` as well as
+`buffer`; and `pmacs.frontend.id()` is exposed to Lua. Two frontends
+editing the same Lean buffer — the ordinary TUI-plus-GPU case, not an
+exotic one — would share a single buffer-keyed pending slot, so one
+could extend, expand, or silently clear the other's half-typed
+abbreviation. `buffer.after-switch` makes it worse: it fires with no
+arguments, so a buffer-keyed clear-on-switch would let *any* frontend's
+navigation discard a pending abbreviation belonging to another. Q#LN22
+keys the state accordingly.
 
 ## 3. Decisions
 
@@ -1340,11 +1467,27 @@ claim a reader must be able to check without reconstructing
 `src/editor.rs`'s include list.
 
 **Stage 4a ships this and nothing else.** Its whole content is:
-`typed_edit.lua`, `pair.lua` re-expressed as one registered consumer,
-and the `include_str!` line. Round 5's finding 1 is why this is a PR and
-not a first commit — `pair.lua` is every language's auto-pairing, and a
-reviewer looking at a Lean PR should not have to also review a rewrite
-of it.
+
+| File | Change |
+|---|---|
+| `builtin/runtime/typed_edit.lua` | new — the chain owner |
+| `builtin/runtime/pair.lua` | re-expressed as one registered consumer |
+| `src/editor.rs` | one `include_str!` line, before `pair.lua`'s |
+| `tests/typed_edit_chain_acceptance.rs` | new — criteria 46a–46e |
+| `tests/auto_pair_acceptance.rs` | **unchanged, zero lines** |
+
+Rev 6 listed only the first three and then required criteria 46a–46e,
+which no existing suite can host: the auto-pairing suite must stay
+untouched (that is the whole point of criterion 46), so the chain's own
+behavior — take-once, priority order, claim-stops-chain, throw
+containment — has nowhere to live. A declared footprint that excludes
+the tests its own acceptance demands is not a footprint. The new suite
+joins the required gate list for this PR alongside
+`tests/auto_pair_acceptance.rs`.
+
+Round 5's finding 1 is why this is a PR and not a first commit —
+`pair.lua` is every language's auto-pairing, and a reviewer looking at a
+Lean PR should not have to also review a rewrite of it.
 
 **The no-behavior-change claim must be pinned, not asserted.** The full
 `tests/auto_pair_acceptance.rs` suite is a required gate for 4a and must
@@ -1377,9 +1520,23 @@ file rather than estimated:
 | 305 keys that are proper prefixes of another | which keys can expand eagerly |
 | 1,550 keys uniquely-and-completely matching | the eager-expansion set |
 | 26 values containing `$CURSOR` | point placement |
-| 93 multi-codepoint values | the replace is not one-char-for-many |
+| 119 multi-codepoint symbols (26 of them `$CURSOR`-bearing) | the replace is not one-char-for-many |
+| 101 prefixes with disagreeing equal-shortest ties | why the format carries source rank |
+
+(Rev 6 gave the multi-codepoint figure as 93, which was the count
+*excluding* the `$CURSOR` entries — a subset reported as a total.)
 
 vscode-lean4 is Apache-2.0.
+
+**Format: an ordered array, not a map.** §2.11's tie rule makes source
+order semantic, and a Lua `{ [key] = symbol }` table iterated with
+`pairs` cannot carry it. The generated file emits a **sequence** —
+`{ {key, symbol}, ... }` in `abbreviations.json` order — plus a derived
+`key → index` lookup built at load time for the exact-match case.
+Resolution sorts candidates by `(#key, index)`, so the 101 ties resolve
+the way upstream resolves them and the file's own line order is the
+audit trail. A map-shaped emit would be nondeterministic across builds
+and, once a hash order happened to be stable, *stably wrong*.
 
 Vendor it as a generated `builtin/runtime/lean_abbrev.lua` with a header
 recording source repo, commit, license, entry count, and the
@@ -1405,12 +1562,29 @@ so the file is self-describing to whoever next touches it. A refresh is
 an ordinary PR with a visible diff — which is the point: the diff is the
 review.
 
-**The generator must reject a table it cannot faithfully encode.** Keys
-are ASCII today but nothing upstream promises that; a key containing a
-character the emitted Lua would have to escape, or a duplicate after
-normalization, aborts the regeneration rather than silently emitting a
-table that disagrees with its source. Same discipline as Q#LN20's
-refusal to hand back a lossy path.
+**Escaping is canonical and lossless, not a rejection trigger.** Rev 6
+said the generator aborts on "a key containing a character the emitted
+Lua would have to escape." **That rule rejects the current table**: `\`
+is a key, `"` begins eleven keys (`"A` → `Ä` …), and acceptance 45d
+requires `\` to work. The generator instead emits every key and symbol
+through one canonical Lua string escaper — `\\`, `\"`, `\n`, `\r`,
+`\t`, and `\ddd` for any other control byte, everything else literal
+UTF-8 — chosen so the emit is byte-deterministic across runs.
+
+What the generator *does* abort on, because these are real corruption
+rather than syntax:
+
+- a duplicate key after decoding (JSON permits it; the table must not),
+- a key or symbol that is not well-formed UTF-8,
+- a round-trip mismatch: the generator re-parses its own output and
+  compares the full ordered sequence against the source, entry for
+  entry, and fails if they differ anywhere.
+
+That last check is what makes the artifact trustworthy, and it belongs
+in the generator rather than in the acceptance suite — the suite cannot
+see `abbreviations.json`, which is not shipped. Same discipline as
+Q#LN20's refusal to hand back a lossy path: refuse rather than emit
+something plausible.
 
 ### Q#LN21 — Stage 4b: the expansion's undo is cross-peer-degraded; ship it, name it
 
@@ -1466,23 +1640,54 @@ that an edit was made.
 reconstruction of it:
 
 - `\` typed in a `lean4` buffer opens a pending abbreviation: `{ buffer,
-  start_offset, text = "" }`, one per buffer, keyed on `rec.buffer`.
+  window, start_offset, text = "" }`, keyed on **`(frontend, buffer)`** —
+  see below.
 - A subsequent self-insert `c` is claimed iff at least one key has
   `text .. c` as a prefix; then `text = text .. c`. If it is also
   uniquely-and-completely matching (one of the 1,550), expand now.
 - If no key extends `text .. c`, expand `text` **first**, then let `c`
   land normally — the chain does *not* claim `c`.
-- Expansion resolves through §2.11's three-rule `getReplacementText`,
-  including the suffix rule (`\alp7` → `α7`).
+- **A terminating `c` that is itself `\` is then reprocessed as a new
+  leader**, opening a fresh pending abbreviation at its position. This
+  is the rule acceptance 45d depends on (`\alpha\to` → `α→`) and rev 6
+  specified the acceptance without specifying the rule; upstream gets it
+  from `processChange`, where a `finished` abbreviation reports
+  `isAffected = false` and so does not suppress the new-leader branch.
+  Note this is *not* the `\\` case: there the pending text is empty, `\`
+  extends rather than terminates, and the result is one literal
+  backslash with no pending state left open.
+- Expansion resolves through §2.11's rules — shortest key wins, ties
+  broken by source rank, unmatchable tail appended (`\alp7` → `α7`).
 - `$CURSOR` is stripped from the symbol and its index becomes the point.
+
+**Ownership is per frontend, not per buffer** (§2.11). The key is
+`(pmacs.frontend.id(), rec.buffer)`, and the stored `window` must still
+match `rec.window` for the state to be usable — a frontend that moved
+the same buffer into a different window is no longer typing where the
+pending span is. Two consequences the buffer-only design got wrong:
+
+- `buffer.after-switch` fires with **no arguments**, so it cannot say
+  whose switch it was. The subscriber reads `pmacs.frontend.id()` at
+  callback time — documented as "the frontend that produced the most
+  recent dispatched input event" — and clears **only that frontend's**
+  entries. A blanket clear would let one frontend's navigation discard
+  another's half-typed abbreviation.
+- `frontend.detached` fires with the raw frontend id and is the purge
+  seam, exactly as `killring.lua` uses it (Q#KR11). Without it a
+  detached frontend's pending state leaks for the life of the session.
+
+This costs one table level and buys correctness in the ordinary
+TUI-plus-GPU configuration, which is not an exotic setup — it is the
+one this project ships two frontends for.
 
 **Abandonment is lazy, because there is no cursor-motion hook** (round-5
 finding 3). Pending state is validated at the next typed edit and
-discarded when any of these no longer holds: the record's buffer is the
-pending buffer; `rec.effective_start` equals `start_offset + 1 +
-#text` (the point is still at the end of the pending span); and the
-buffer's `revision()` advanced by exactly the pending edit. `buffer.
-after-switch` clears it eagerly since that hook *does* exist. The
+discarded when any of these no longer holds: the record's buffer and
+window are the pending ones; `rec.effective_start` equals `start_offset
++ 1 + #text` (the point is still at the end of the pending span); and
+the buffer's `revision()` advanced by exactly the pending edit.
+`buffer.after-switch` clears the acting frontend's entries eagerly,
+since that hook *does* exist. The
 practical difference from upstream: a user who clicks away mid-`\alp`
 and types elsewhere gets the pending state dropped rather than expanded.
 Upstream expands it. **This is a deliberate divergence** — expanding
@@ -2138,6 +2343,11 @@ substrate pin, filed under Stage 4 only because Stage 4 was one stage.
 Per the no-renumbering rule above, round 5's additions take letter
 suffixes on both sides of the split.
 
+46a–46e live in a **new `tests/typed_edit_chain_acceptance.rs`**, which
+is part of Stage 4a's declared footprint (Q#LN10) and a required gate
+for its PR. They cannot live in `tests/auto_pair_acceptance.rs`, which
+criterion 46 requires to stay byte-identical.
+
 46. **Provenance-refactor pin:** the full `tests/auto_pair_acceptance.rs`
     suite passes **unmodified**. A suite edited to accommodate the
     refactor proves nothing; the diff for 4a must show zero lines
@@ -2164,8 +2374,12 @@ suffixes on both sides of the split.
 
 **Stage 4b — the Unicode input method**
 
-38. `\alpha` + space yields `α`; the whole expansion is a single undo
-    step, and one undo restores `\alpha` rather than `\alph`.
+38. `\alpha` + space yields `α ` — the space lands first and the
+    expansion runs in the following `buffer.after-edit`, so the
+    terminator is **retained**, not consumed. The expansion is a single
+    undo step: one undo restores `\alpha ` (with its space), not
+    `\alph`. Rev 6 wrote the post-undo text as `\alpha`, which would be
+    true only if the terminator were swallowed.
 39. `\<>` yields `⟨⟩` with the point between them, from the `$CURSOR`
     placeholder.
 40. **Pair-collision pin (Q#LN22).** `\[[]]` yields `⟦⟧`: each `[` is
@@ -2211,6 +2425,14 @@ suffixes on both sides of the split.
     because the expansion is a programmatic replace that arms no record.
     Bites against a future consumer that infers pending state from
     buffer text instead of provenance.
+45i. **Pending state is per frontend (Q#LN22).** Two frontends attached
+    to the same `lean4` buffer: A types `\al`, B types `\to` + space in
+    the same buffer. B's expansion yields `→` and leaves A's `\al`
+    pending and intact; A then typing `l` + space still yields `∀`.
+    Plus: B switching buffers does not clear A's pending state, and a
+    `frontend.detached` for B purges B's entries only. Bites against the
+    buffer-keyed design rev 6 specified — which passes every
+    single-frontend criterion above.
 45f. **Both producers, and the CI-darkness stated.** The dispatch path
     is pinned by the criteria above. The optimistic CRDT producer
     (round-5 finding 4) is pinned by a separate criterion driving
@@ -2222,11 +2444,30 @@ suffixes on both sides of the split.
     verified only locally and name the command. Silence here is the
     failure mode — a green CI would otherwise read as covering the path
     most users take.
-45g. **Table integrity.** The generated `lean_abbrev.lua` round-trips:
-    its entry count matches the header's declared count, and a spot set
-    of entries (`alpha`, `to`, `<>`, `+ `, `\`, `n`, `setminus`) matches
-    `abbreviations.json` byte-for-byte. Bites against a generator that
-    silently drops or mangles keys (Q#LN11).
+45g. **Table integrity — what the suite can actually check.**
+    `abbreviations.json` is not shipped, so the suite cannot diff
+    against it and rev 6's "matches byte-for-byte" was unbuildable; a
+    count plus seven spot entries could not prove 1,855 round-trip
+    anyway. The full source-fidelity check belongs to the generator
+    (Q#LN11: re-parse own output, compare the ordered sequence entry for
+    entry, fail on any difference). What the suite pins instead are
+    self-consistency properties that a corrupt emit breaks:
+    - the loaded sequence's length equals the header's declared count,
+      and equals the declared count for the recorded upstream commit;
+    - every key is unique, and the derived `key → index` lookup has the
+      same cardinality as the sequence (a collision would silently drop
+      entries);
+    - every key and symbol is well-formed UTF-8, and no symbol contains
+      `$CURSOR` more than once;
+    - the resolution spot-set behaves: `alpha`, `to`, `<>`, `+ `, `\`,
+      `n`, `setminus`, and the tie cases from 45h.
+45h. **Tie-break by source order (§2.11).** `\f` + space yields `‹` —
+    `f<` and `f>` are both length 2, and `f<` is declared first. Same
+    for `\"` + space → `Ä`, first of eleven equal-length candidates.
+    **This is the criterion that bites a map-shaped vendored table**:
+    with `pairs` iteration it passes or fails by hash order, so it must
+    also be run against a deliberately reversed sequence and shown to
+    fail. 101 prefixes are exposed to this rule.
 
 **Stage 5 — the goal view**
 
@@ -2294,7 +2535,7 @@ suffixes on both sides of the split.
   discipline on transformed source edits, and Q#AP1's optimistic-classifier
   limitation. Stage 4a generalizes the first; 4b is built on all three.
 - **#127 (config registry)** — `pmacs.config.define` and the
-  source-buffer-resolution correction. Q#LN10's gate follows
+  source-buffer-resolution correction. Q#LN22's gate follows
   `editing.auto-pair` exactly.
 - **#129 (mode system)** — mode-scoped keymaps for Stage 5.
 - **#155 (bottom panel)** — `pmacs.window.display` and the panel adopter
@@ -2381,9 +2622,10 @@ PR.
 (config registry) secondarily, by adding one option in the established
 shape rather than a new switch mechanism.
 
-**Golden journey (§2).** No step is touched by 4a. 4b improves step 4
-(editing) for Lean specifically and changes nothing for any other
-language: the pending-abbreviation state exists only in `lean4` buffers.
+**Golden journey (§2).** No step is touched by 4a. 4b improves **step 5
+("Edit immediately")** for Lean specifically and changes nothing for any
+other language — rev 6 cited step 4, which is "Understand the visible
+interface" and is untouched by both stages: the pending-abbreviation state exists only in `lean4` buffers.
 Neither stage changes launch, open, or attach.
 
 **Interaction islands (§6).** **None added, and this is the load-bearing
