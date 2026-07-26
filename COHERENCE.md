@@ -1223,7 +1223,13 @@ Primitive-by-primitive against the list above:
   dispatchable"). `Buffer::set_generated_contents` (write + discard
   history + assert `read_only`, in one authorized call) now fixes this
   for the terminal snapshot; `*compilation*` and listview panels have
-  not yet adopted it and remain emptiable.
+  not yet adopted it and remain emptiable. **A second half of the same
+  caveat, found in round 3: a rope write is only half of an edit.** The
+  owner-authorized write must be fanned out to the windows showing the
+  buffer and queued for replica mirrors, or the displaying window keeps
+  a line index describing the previous contents and the next paint
+  indexes the new rope with stale ranges. Adoption is therefore not a
+  one-line swap.
 - **Diagnostics collection** ✓ — `DiagnosticStore` + signs + unified
   `error.next` source.
 - **Transient selector** ✓ — the minibuffer (though its `source`

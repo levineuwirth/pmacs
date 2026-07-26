@@ -526,31 +526,43 @@ impl Buffer {
     /// Discarding history is not tidiness. Without it every refresh pushes
     /// undo entries holding full rope clones that nothing can ever pop —
     /// `read_only` guarantees they are unreachable — so a periodically
-    /// refreshed buffer would grow without bound.
+    /// refreshed buffer would grow without bound. In CRDT mode the same
+    /// retention lives in loro's `UndoManager`, so both are cleared.
+    ///
+    /// # The returned edit must be fanned out
+    ///
+    /// One whole-buffer [`EditOp::Replace`] is applied, and its [`Edit`]
+    /// is returned rather than swallowed, because a rope write is only
+    /// half of an edit. Callers **must** route the result through their
+    /// normal edit-notification path (for the Lua surface,
+    /// `notify_buffer_edit_to_windows`). A window already displaying the
+    /// buffer keeps a stale `TextView` line cache otherwise, and the next
+    /// paint indexes the new rope with old ranges; and in CRDT mode the
+    /// op never reaches replica mirrors, so their optimistic edits are
+    /// generated against content the owner has already replaced.
     ///
     /// [`read_only`]: Self::set_read_only
-    pub fn set_generated_contents(&mut self, bytes: &[u8]) -> Result<(), BufferError> {
+    pub fn set_generated_contents(&mut self, bytes: &[u8]) -> Result<Edit, BufferError> {
         self.read_only = false;
-        let result = self.replace_whole_buffer(bytes);
+        let result = self.apply_edit_skip_intercepts(EditOp::Replace {
+            range: Range::new(0, self.len()),
+            bytes,
+        });
         // Cleared even on failure: a partial replace must not leave a
         // half-applied edit reachable through an undo the owner cannot see.
-        self.undo.clear();
-        self.redo.clear();
+        self.clear_history();
         self.read_only = true;
         result
     }
 
-    fn replace_whole_buffer(&mut self, bytes: &[u8]) -> Result<(), BufferError> {
-        let len = self.len();
-        if len > 0 {
-            self.apply_edit_skip_intercepts(EditOp::Delete {
-                range: Range::new(0, len),
-            })?;
+    /// Drop undo and redo history in whichever mode this buffer is in.
+    fn clear_history(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+        #[cfg(feature = "crdt")]
+        if let Some(crdt) = self.crdt.as_ref() {
+            crdt.clear_undo_history();
         }
-        if !bytes.is_empty() {
-            self.apply_edit_skip_intercepts(EditOp::Insert { pos: 0, bytes })?;
-        }
-        Ok(())
     }
 
     fn ensure_writable(&self) -> Result<(), BufferError> {
@@ -2045,6 +2057,33 @@ mod tests {
         assert!(
             matches!(buf.undo(), Err(BufferError::NothingToUndo)),
             "ten renders must leave an empty undo stack, not ten entries"
+        );
+    }
+
+    /// Review round 3, P2. In CRDT mode the v0.1 stacks are bypassed
+    /// entirely, so clearing them proves nothing: the history the
+    /// primitive promises to discard lives in loro's `UndoManager`.
+    /// The lock is lifted deliberately — `read_only` stops the replay,
+    /// but the contract is that there is nothing left to replay.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn generated_writes_accumulate_no_crdt_history_either() {
+        let mut buf =
+            Buffer::new_with_crdt(BufferId::next(), "*generated*", 1).expect("crdt construction");
+        for i in 0..10 {
+            buf.set_generated_contents(format!("render {i}").as_bytes())
+                .expect("write");
+        }
+        assert_eq!(rope_string(&buf), "render 9");
+        assert!(
+            !buf.crdt_state().expect("crdt-backed").can_undo(),
+            "the UndoManager must have nothing recorded"
+        );
+
+        buf.set_read_only(false);
+        assert!(
+            matches!(buf.undo(), Err(BufferError::NothingToUndo)),
+            "CRDT-mode undo must find no history either"
         );
     }
 

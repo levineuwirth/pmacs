@@ -329,7 +329,10 @@ local function render_snapshot(record)
   -- replaced a freshly rendered snapshot with an empty buffer.
   -- `set_generated_contents` writes, discards the history, and leaves
   -- `read_only` asserted, so undo/redo and remote CRDT imports are all
-  -- refused at the rope.
+  -- refused at the rope. Its binding also fans the resulting edit out to
+  -- the windows showing this buffer and to replica mirrors (review round
+  -- 3) — a rope write alone leaves a displaying window indexing the new
+  -- contents with stale line offsets.
   pmacs.buffer.set_generated_contents(record.buffer, text)
 end
 
@@ -345,18 +348,22 @@ local function claim_snapshot(term_buf)
   local record = { terminal = term_buf, buffer = buf }
   handles[#handles + 1] = record
 
-  -- Q#TC6a — BOTH calls, and the second is the load-bearing one.
+  -- Q#TC6a — BOTH calls, and the protection is now LAYERED. Review
+  -- round 2 changed what each one is for.
   --
-  -- An intercept guards the dispatch/edit path only. It does NOT set
-  -- `Buffer::read_only` (deliberately independent), and no Lua binding
-  -- sets that flag at all, so an optimistic CRDT op from a semantic
-  -- frontend bypasses the intercept AND passes `ensure_writable()` —
-  -- mutating the daemon buffer in lockstep with the mirror, with no
-  -- divergence to notice. `set_round_trip_input` prevents that at the
-  -- only point it can be prevented: `dispatch_idle_for` reports false
-  -- while this buffer is focused, so the frontend never applies
-  -- optimistically and never emits the op. It is the guard, not
-  -- hardening.
+  -- `set_generated_contents` leaves `read_only` asserted at the rope, so
+  -- on the DAEMON side undo, redo, ordinary edits and imported CRDT ops
+  -- are all refused by `ensure_writable()`. The intercept below is no
+  -- longer the daemon's guard; it survives to give a dispatching edit a
+  -- named error instead of a bare refusal.
+  --
+  -- `set_round_trip_input` still guards the half `read_only` cannot
+  -- reach: a semantic frontend applies optimistically in its own MIRROR
+  -- before the daemon ever sees the op. `dispatch_idle_for` reports
+  -- false while this buffer is focused, so the mirror never mutates and
+  -- no op is emitted to be refused. That is the layering — rope-level
+  -- read-only protects the daemon copy, round-trip input protects the
+  -- replica copy — and neither substitutes for the other.
   pmacs.buffer.add_intercept(buf, function()
     error(name .. " is read-only")
   end)

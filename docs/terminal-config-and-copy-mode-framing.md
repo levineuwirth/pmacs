@@ -6,7 +6,10 @@
 `terminal-copy-mode` off `main` @ `cf54270`; no protocol change.**
 
 **Stage 2 ships eight of its nine criteria, plus 18a and 18b added in review
-round 1.** Criterion 17's semantic-frontend end-to-end pin is deliberately
+round 1 and 16c-16e in rounds 2-3.** Rounds 2 and 3 changed the design, not
+just the code: the snapshot is now genuinely `read_only` at the rope, so
+**Q#TC6a's analysis below is superseded in part** — read the box at its head
+before the analysis. Q#TC6a's conclusion survives; two of its premises do not. Criterion 17's semantic-frontend end-to-end pin is deliberately
 absent — see the note under it — because a faithful version requires the real
 `pmacs-gpu` optimistic path, and therefore the `a37` foundation, which CI never
 compiles and which skips silently. Both halves of the *mechanism* it guards are
@@ -348,6 +351,32 @@ ordinary document buffer, so:
 and `set_round_trip_input` is the ONLY thing standing between a replica
 frontend and unauthorized mutation.**
 
+> **SUPERSEDED IN PART BY IMPLEMENTATION (review rounds 2-3). Read this
+> box before the analysis below it.** The reasoning is still the correct
+> account of the substrate *as it stood when this was written*, and its
+> conclusion about round-trip input still holds. Two of its premises no
+> longer do:
+>
+> - "**No Lua binding sets `read_only` at all**" — one does now.
+>   `pmacs.buffer.set_generated_contents` leaves it asserted, so on the
+>   daemon side undo, redo, ordinary edits and imported CRDT ops are all
+>   refused by `ensure_writable()`. That closed a real defect: undo
+>   bypasses the intercept chain, so `M-x buffer.undo` emptied the
+>   snapshot.
+> - "**`set_round_trip_input` is the ONLY thing**" — it is now the only
+>   thing standing between a replica and *mirror* mutation, which is the
+>   half `read_only` cannot reach. A semantic frontend applies
+>   optimistically in its own mirror before the daemon sees the op; a
+>   daemon-side refusal cannot prevent that, it can only make the two
+>   copies disagree.
+>
+> The protection is therefore **layered, not singular**: rope-level
+> read-only protects the daemon copy, round-trip input protects the
+> replica copy, and neither substitutes for the other. The intercept
+> survives only to give a dispatching edit a named error. The Deferred
+> lane below records what this leaves open for `*compilation*` and
+> listview, which have **not** adopted the primitive.
+
 The established idiom is two calls: `listview.lua:106` and `compile.lua:272`
 each pair `pmacs.buffer.add_intercept` with
 `pmacs.buffer.set_round_trip_input(buf, true)`. Revision 2 described the
@@ -382,7 +411,8 @@ Two things follow, and both are recorded rather than fixed here:
   genuinely immutable at the rope/CRDT boundary the way terminal identity
   buffers are, turning round-trip back into real defence in depth. That is a
   substrate change affecting listview and compile as much as this snapshot, so
-  it is named in Deferred with its own lane.
+  it is named in Deferred with its own lane. **Done for this snapshot only**,
+  and not by exposing the setter — see the Deferred lane and the box above.
 
 **Q#TC7 — the materializer reuses the existing serializer.** A whole-range
 variant of `copy_selection_bytes` over `retained_rows` inherits the criterion
@@ -532,10 +562,19 @@ additive, on its own binding, and does not replace scroll-and-select.
   rely on intercept-plus-round-trip and are still emptiable by
   `M-x buffer.undo`. The primitive they need now exists and is proven, so
   the remaining work is adoption plus a streaming-friendly variant
-  (`*compilation*` appends rather than replacing wholesale). The CRDT half
-  is also still open: `set_generated_contents` clears the v0.1 stacks, and
-  in CRDT mode `read_only` is what refuses undo, since loro's
-  `UndoManager` has no clear exposed through `CrdtState`.
+  (`*compilation*` appends rather than replacing wholesale).
+
+  **The CRDT half is closed too** (review round 3). Clearing the v0.1
+  stacks proves nothing in CRDT mode, where they are bypassed entirely and
+  the history lives in loro's `UndoManager`. `read_only` would stop that
+  history being *replayed* but not *retained* — a panel refreshed on a
+  timer still grows without bound, which is the condition the contract
+  says it eliminates. `UndoManager` exposes no `clear`, but it needs none:
+  a manager records only what happens after it is constructed, which
+  `CrdtState::from_bytes` already relies on to keep the seed insert out of
+  undo. `CrdtState::clear_undo_history` rebinds a fresh manager to the same
+  doc, and `set_generated_contents` clears whichever history the buffer
+  actually has.
 
 ## Acceptance
 
@@ -615,6 +654,23 @@ additive, on its own binding, and does not replace scroll-and-select.
     M-x path, plus the chord, plus redo — and paired with an assertion that
     the owner's own refresh still works, since that is what plain
     `read_only` would have broken.
+16d. **A generated write reaches the window, not just the rope** (review
+    round 3). `set_generated_contents` returns one whole-buffer `Replace`
+    and its binding fans it out; swallowing it leaves a displaying
+    window's `TextView` line index describing the *previous* contents.
+    Pinned by **painting** — a shrinking write, so the stale offsets point
+    past the buffer end and the next render trips
+    `assertion failed: end <= self.len()` in `src/rope.rs`, which is the
+    reported crash rather than merely stale pixels. Driven through the Lua
+    binding copy mode itself calls, so it covers every future owner of the
+    primitive.
+16e. **The same write is queued for replica mirrors** (review round 3,
+    CRDT half). The dropped fan-out also skipped
+    `queue_daemon_origin_crdt_op`, so a replica's mirror never imports the
+    owner's write and its optimistic edits are generated against content
+    already replaced. Pinned through the real copy-mode refresh on an
+    upgraded snapshot. `crdt`-gated, therefore dark in CI — 16d is the half
+    that actually runs there.
 16. **Ungated, runs in CI:** focusing the snapshot buffer makes
     `dispatch_idle_for` report **false**. This is the whole mechanism Q#TC6a
     depends on, it needs no CRDT, and it fails the moment
@@ -644,9 +700,13 @@ additive, on its own binding, and does not replace scroll-and-select.
     What IS pinned instead, ungated and in CI: acceptance 16 asserts the
     guard is armed (`dispatch_idle` false while the snapshot is focused, so
     no replica can apply optimistically or emit), and acceptance 16b asserts
-    the hazard is real by showing the snapshot buffer's `is_read_only()` is
-    **false** despite the intercept — i.e. nothing at the rope/CRDT boundary
-    would stop such an op if one arrived. Together those cover both halves of
+    the buffer is `is_read_only()` **true** at the rope, so an op that did
+    arrive at the daemon would be refused by `ensure_writable()` rather
+    than applied. (Rounds 1-2 asserted **false** here, documenting the
+    hazard; round 2 closed it, and the assertion was flipped with it.
+    That does not make 17 redundant — a daemon-side refusal cannot stop a
+    replica mutating its own mirror, which is precisely what
+    `set_round_trip_input` is for.) Together those cover both halves of
     Q#TC6a's *mechanism*. What remains unproven is only the end-to-end wire
     behaviour of a real GPU frontend, and it stays an explicit obligation of
     the CI `crdt`-coverage lane rather than being quietly dropped.

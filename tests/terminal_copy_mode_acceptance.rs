@@ -441,6 +441,160 @@ fn acc16c_undo_cannot_empty_the_snapshot_by_chord_or_by_command() {
     state.process_supervisor.borrow_mut().shutdown();
 }
 
+/// Snapshot buffer id, by name, from the Rust side.
+#[cfg(feature = "crdt")]
+fn snapshot_buffer_id(state: &EditorState) -> pmacs::buffer::BufferId {
+    let core = state.core.borrow();
+    let reg = core.registry.borrow();
+    reg.ids()
+        .iter()
+        .copied()
+        .find(|id| reg.get(*id).is_ok_and(|b| b.name() == SNAPSHOT_NAME))
+        .expect("snapshot buffer exists")
+}
+
+/// Rendered cells of the active window (the `m4_acceptance` grid helper;
+/// cross-crate test code can't import it).
+fn render_active_window_to_grid(
+    state: &mut EditorState,
+    rows: u32,
+    cols: u32,
+) -> Vec<pmacs::cell::Cell> {
+    use pmacs::cell::{Cell, CellGrid};
+    use pmacs::view::{View, Viewport};
+    use pmacs::window::Rect;
+
+    let mut core = state.core.borrow_mut();
+    let active = core.active_window_id();
+    let registry = core.registry.clone();
+    let win = core.windows.get_mut(&active).expect("active window");
+    let rect = Rect::new(0, 0, rows, cols);
+    let mut backing = vec![Cell::default(); (rows * cols) as usize];
+    let reg = registry.borrow();
+    let buf = reg.get(win.buffer_id).expect("buffer in registry");
+    let viewport = Viewport {
+        buffer_start: 0,
+        buffer_end: buf.len(),
+        cell_origin: rect.origin,
+        cell_size: CellSize::new(rows, cols),
+        gutter_w: 0,
+        folds: None,
+    };
+    let mut grid = CellGrid {
+        cells: &mut backing,
+        stride: cols,
+        size: CellSize::new(rows, cols),
+    };
+    win.text_view.render(buf, viewport, &mut grid);
+    backing
+}
+
+fn grid_row(cells: &[pmacs::cell::Cell], row: u32, cols: u32) -> String {
+    (0..cols)
+        .map(|c| match cells[(row * cols + c) as usize].glyph {
+            Glyph::Char(ch) => ch,
+            _ => ' ',
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+/// Review round 3, P1. A rope write is only half of an edit: the window
+/// showing the buffer holds a `TextView` line index that only `on_edit`
+/// maintains, so a write that reaches the rope without the notification
+/// leaves the two disagreeing.
+///
+/// Pinned by PAINTING, because that is where the disagreement bites: with
+/// the fan-out dropped, the next render indexes the new rope with the old
+/// line offsets. A shrinking write is used deliberately — stale offsets
+/// then point past the buffer end, which is the reported crash rather than
+/// merely stale pixels.
+///
+/// Driven through `pmacs.buffer.set_generated_contents`, the seam copy
+/// mode's refresh actually calls, so it also covers `*compilation*` and
+/// any other owner that adopts the primitive later.
+#[test]
+fn acc16d_a_generated_write_notifies_the_window_that_displays_it() {
+    let mut state = EditorState::new();
+    exec(
+        &state,
+        r"
+        GEN = pmacs.buffer.create('*generated-probe*')
+        pmacs.buffer.set_generated_contents(GEN, 'alpha\nbeta\ngamma\ndelta\nepsilon\n')
+        pmacs.window.switch_buffer(GEN)
+        ",
+    );
+    let painted = render_active_window_to_grid(&mut state, 6, 20);
+    assert_eq!(
+        grid_row(&painted, 0, 20),
+        "alpha",
+        "precondition: the window paints the generated buffer"
+    );
+
+    exec(
+        &state,
+        r"pmacs.buffer.set_generated_contents(GEN, 'CHANGED\n')",
+    );
+    let painted = render_active_window_to_grid(&mut state, 6, 20);
+    assert_eq!(
+        grid_row(&painted, 0, 20),
+        "CHANGED",
+        "the window must paint the refreshed contents"
+    );
+    assert_eq!(
+        grid_row(&painted, 1, 20),
+        "",
+        "and nothing of the longer contents it replaced"
+    );
+}
+
+/// Review round 3, P1, CRDT half. The same dropped fan-out also skips
+/// `queue_daemon_origin_crdt_op`, so replica mirrors never import the
+/// owner's write and their optimistic edits are generated against content
+/// the owner has already replaced.
+///
+/// Gated because `upgrade_to_crdt` is — and therefore dark in CI, which
+/// never enables the feature. The default-configuration half above is the
+/// one that actually runs there.
+#[cfg(feature = "crdt")]
+#[test]
+fn acc16e_a_refresh_queues_the_owners_write_for_replica_mirrors() {
+    let mut state = EditorState::new();
+    let terminal = open_fill_terminal(&mut state);
+    focus_terminal(&state, terminal);
+    exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
+
+    let snapshot = snapshot_buffer_id(&state);
+    {
+        let core = state.core.borrow();
+        let mut reg = core.registry.borrow_mut();
+        let buffer = reg.get_mut(snapshot).expect("snapshot buffer");
+        // `read_only` refuses the upgrade's own bookkeeping path the same
+        // way it refuses everything else, so lift it around the upgrade.
+        buffer.set_read_only(false);
+        buffer.upgrade_to_crdt(2).expect("upgrade");
+        buffer.set_read_only(true);
+    }
+    state.core.borrow_mut().pending_crdt_ops.clear();
+
+    emit_into_child(&mut state, terminal, "MIRRORME");
+    exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
+
+    let queued: Vec<_> = state
+        .core
+        .borrow()
+        .pending_crdt_ops
+        .iter()
+        .map(|(_, id, _)| *id)
+        .collect();
+    assert!(
+        queued.contains(&snapshot),
+        "the owner's refresh must be queued for broadcast; queued: {queued:?}"
+    );
+    state.process_supervisor.borrow_mut().shutdown();
+}
+
 /// Acceptance 18: re-invoking refreshes in place, and the lifecycle runs
 /// both directions.
 #[test]

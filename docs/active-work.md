@@ -768,9 +768,52 @@ If it does not, stop and repair the remote/fetch configuration.
     and acc16b.
   - **Still open:** `*compilation*` and listview remain emptiable by
     `M-x buffer.undo`; the primitive they need now exists and is proven,
-    so the remainder is adoption plus a streaming-friendly variant. In
-    CRDT mode `read_only` is what refuses undo, since loro's `UndoManager`
-    exposes no clear through `CrdtState`.
+    so the remainder is adoption plus a streaming-friendly variant.
+- **Review round 3 — one P1 and two P2s, all on the round-2 primitive.**
+  The lesson: **a rope write is only half of an edit, and "discard
+  history" means whichever history the buffer actually has.**
+  - **P1 — the binding swallowed the edit.** `set_generated_contents`
+    returned `()`, so nothing called `notify_buffer_edit_to_windows`.
+    Two consequences, both reproduced by the reviewer: in the default
+    build a window showing the buffer kept a `TextView` line index
+    describing the *previous* contents, and the next paint indexed the
+    new rope with stale ranges — `assertion failed: end <= self.len()`
+    in `src/rope.rs`; in the CRDT build `pending_crdt_ops` stayed empty,
+    so replica mirrors never received the owner's write. The prior
+    `buf:delete`/`buf:insert` pair had done this fan-out for free.
+    Fixed by applying **one whole-buffer `Replace`**, returning its
+    `Edit`, and notifying from the binding.
+  - **P2 — "discard history" was false in CRDT mode.** The v0.1 stacks
+    are bypassed entirely there; the history lives in loro's
+    `UndoManager`. `read_only` stops the replay but not the retention,
+    which is the memory cost the contract claims to eliminate.
+    `UndoManager` has no `clear`, but needs none — it records only what
+    happens after construction, the property `CrdtState::from_bytes`
+    already uses to keep the seed insert out of undo. New
+    `CrdtState::clear_undo_history` rebinds a fresh manager to the
+    same doc.
+  - **P2 — the docs described the pre-fix architecture.** Q#TC6a said no
+    Lua binding sets `read_only` and round-trip input is the only guard;
+    the acceptance text still said `is_read_only() == false` while 16b
+    had been flipped to `true`; `terminal.lua`'s comment repeated the
+    obsolete claim. The architecture is **layered** and now says so:
+    rope-level read-only protects the daemon copy, round-trip input
+    protects the replica's optimistic mirror, and neither substitutes
+    for the other. Q#TC6a carries a superseded-in-part box rather than
+    being silently rewritten.
+  - New pins: **acc16d** paints the window after a *shrinking* generated
+    write (the stale offsets then point past the end, which is the
+    reported crash rather than stale pixels); **acc16e** asserts the
+    refresh is queued for mirrors through the real copy-mode path
+    (`crdt`-gated, therefore dark in CI — 16d is the half that runs);
+    plus a CRDT `buffer.rs` unit test that ten renders leave the
+    `UndoManager` with nothing recorded.
+  - Bites: dropping the notify panics acc16d at `rope.rs:145` and fails
+    acc16e with `queued: []`; dropping the `UndoManager` rebind fails
+    the new unit test on `can_undo`.
+  - **Still open:** the fan-out obligation makes `*compilation*`/listview
+    adoption more than a one-line swap — recorded in `COHERENCE.md` §14
+    alongside the undo half.
 - Load-bearing decisions, each forced by scouted ground truth:
   - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
     no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
