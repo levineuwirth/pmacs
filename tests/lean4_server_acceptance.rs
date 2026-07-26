@@ -1371,3 +1371,274 @@ fn r4_attribution_names_the_exact_command_and_its_arguments() {
          want substring: {expected}\n  saw: {status:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Round-5 review. All fail against 7c37bdc.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r5_a_fallback_that_dies_after_spawning_is_bounded_and_reported() {
+    // The once-per-buffer guard bounds calls to `_attach_buffer`, not
+    // the server it produced. `ensure_server` never forwards
+    // `cfg.restart`, so the fallback inherits `OnCrash` and a binary
+    // that exits before `initialize` is respawned forever — silently,
+    // because `latched` has already disabled the primary's poll. The
+    // prior failing-fallback test used a NONEXISTENT executable, which
+    // only exercises synchronous ENOENT.
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent_primary = fx.dir("bin/no-such-lake");
+    let dying_fallback = fx.root.join("bin/dying-lean");
+    std::fs::create_dir_all(dying_fallback.parent().unwrap()).unwrap();
+    std::fs::write(&dying_fallback, "#!/bin/sh\nexit 4\n").unwrap();
+    std::fs::set_permissions(&dying_fallback, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut state = editor(&fx);
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.lean4.command = "{}"
+            pmacs.lsp.config.lean4.args = {{ "serve" }}
+            pmacs.lean._fallback = {{ command = "{}", args = {{}} }}
+            "#,
+            lua_str(&absent_primary),
+            lua_str(&dying_fallback)
+        ),
+    );
+
+    open(&state, &file);
+    tick_for(&mut state, 1600);
+
+    // Nothing may be respawning: `attempt` counts spawns per server.
+    let worst_attempt: i64 = eval(
+        &state,
+        r"
+        local worst = 0
+        for _, s in ipairs(pmacs.lsp.list()) do
+          local a = s.attempt or 0
+          if a > worst then worst = a end
+        end
+        return worst
+        ",
+    );
+    assert!(
+        worst_attempt <= 1,
+        "a dying fallback must not be respawned indefinitely; saw \
+         attempt {worst_attempt}"
+    );
+    let status = state.core.borrow().status.clone();
+    assert!(
+        status.contains("did not stay up") || status.contains("did not start"),
+        "and the second failure is reported; saw {status:?}"
+    );
+}
+
+#[test]
+fn r5_a_user_spawned_lean_server_is_not_retired_by_the_fallback() {
+    // `retire_*` selected on `language_id == "lean4"`, which also names
+    // servers the user spawned themselves from `init.lua`. Those are not
+    // derived from `pmacs.lsp.config.lean4` and stopping them is a
+    // destructive side effect on state this module does not own.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/no-such-lake");
+    let mut state = editor(&fx);
+    with_fallback(&state, &absent);
+    exec(
+        &state,
+        &format!(
+            r#"
+            _G.mine = pmacs.lsp.spawn({{
+              label = "my-own-lean",
+              language_id = "lean4",
+              command = "{}",
+              args = {{}},
+            }})
+            "#,
+            fake_lsp_path()
+        ),
+    );
+    settle(&mut state);
+
+    open(&state, &file);
+    tick_for(&mut state, 600);
+
+    let mine_alive: bool = eval(
+        &state,
+        r#"
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(_G.mine) then
+            local k = s.state and s.state.kind
+            return k ~= "stopped" and k ~= "crashed"
+          end
+        end
+        return false
+        "#,
+    );
+    assert!(
+        mine_alive,
+        "a user-spawned Lean server survives a config-driven fallback — \
+         it was never derived from that config"
+    );
+}
+
+#[test]
+fn r5_no_swap_means_no_repair_attempts() {
+    // When the config already names the fallback, `swap_to_fallback`
+    // returns false and `fire_latch` returns early — but `latched` is
+    // true, so a repair gated on `latched` retried the UNCHANGED
+    // configuration and reported it as a fallback failure.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent = fx.dir("bin/no-such-lean");
+    let mut state = editor(&fx);
+    // Config and fallback are the SAME missing command, so no swap is
+    // possible.
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.lean4.command = "{}"
+            pmacs.lsp.config.lean4.args = {{}}
+            pmacs.lean._fallback = {{ command = "{}", args = {{}} }}
+            "#,
+            lua_str(&absent),
+            lua_str(&absent)
+        ),
+    );
+
+    open(&state, &file);
+    tick_for(&mut state, 400);
+
+    let attempts: i64 = eval(&state, "return pmacs.lean._probe.repair_attempts");
+    assert_eq!(
+        attempts, 0,
+        "no swap happened, so there is nothing to apply and no repair \
+         should be attempted"
+    );
+    let status = state.core.borrow().status.clone();
+    assert!(
+        !status.contains("falling back"),
+        "and nothing claims a fallback occurred; saw {status:?}"
+    );
+}
+
+#[test]
+fn r5_repair_is_attempted_at_most_once_per_buffer_by_count() {
+    // Counting keys in the `repaired` table cannot distinguish
+    // "once per buffer" from "every tick for one buffer" — the
+    // cardinality stays 1 either way. Count the ATTEMPTS.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let absent_primary = fx.dir("bin/no-such-lake");
+    let absent_fallback = fx.dir("bin/no-such-lean");
+    let mut state = editor(&fx);
+    exec(
+        &state,
+        &format!(
+            r#"
+            pmacs.lsp.config.lean4.command = "{}"
+            pmacs.lsp.config.lean4.args = {{ "serve" }}
+            pmacs.lean._fallback = {{ command = "{}", args = {{}} }}
+            "#,
+            lua_str(&absent_primary),
+            lua_str(&absent_fallback)
+        ),
+    );
+
+    open(&state, &file);
+    // Many ticks; a per-tick retry would climb without bound.
+    tick_for(&mut state, 900);
+
+    let attempts: i64 = eval(&state, "return pmacs.lean._probe.repair_attempts");
+    assert_eq!(
+        attempts, 1,
+        "exactly one repair attempt across many ticks for one buffer"
+    );
+}
+
+#[test]
+fn r5_a_dead_attachment_is_never_handed_to_a_command() {
+    // Buffers live in other frontends get no `buffer.after-switch` here,
+    // so an eager sweep keyed on the ambient active buffer cannot reach
+    // them. Healing at the point of USE is frontend-agnostic:
+    // `attached_for_active` must not return a record whose server is
+    // gone.
+    let fx = Fixture::new();
+    fx.toolchain("pkg", "v4.9.0\n");
+    let file = fx.write("pkg/A.lean", "def a := 1\n");
+    let mut state = editor(&fx);
+    // A working primary, so we get a live attachment first.
+    exec(
+        &state,
+        &format!("pmacs.lsp.config.lean4.command = \"{}\"", fake_lsp_path()),
+    );
+    open(&state, &file);
+    settle(&mut state);
+    let first: String = attached_sid(&state);
+    assert_ne!(first, "none", "precondition: attached");
+
+    // Retire it out from under the buffer, as the latch does globally,
+    // WITHOUT any switch or repair tick.
+    exec(
+        &state,
+        r"
+        local rec = pmacs.lsp.active_attachment()
+        pcall(pmacs.lsp.stop, rec.server)
+        ",
+    );
+    for _ in 0..40 {
+        state.tick_processes();
+        state.tick_lsp();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Now a command resolves its attachment. It must not get the dead
+    // one; it must rebuild.
+    // `attachment_for_request` is deliberately non-attaching, so a dead
+    // record must read as "no attachment" rather than being handed over.
+    let for_request: String = eval(
+        &state,
+        r#"
+        local rec = pmacs.lsp.attachment_for_request()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.state and s.state.kind)
+          end
+        end
+        return "gone"
+        "#,
+    );
+    assert_eq!(
+        for_request, "none",
+        "a non-attaching resolve must not hand back a dead server"
+    );
+
+    // And the attaching path rebuilds rather than returning the corpse.
+    let rebuilt: String = eval(
+        &state,
+        r#"
+        pmacs.lsp._attach_buffer()
+        local rec = pmacs.lsp.active_attachment()
+        if not rec then return "none" end
+        for _, s in ipairs(pmacs.lsp.list()) do
+          if tostring(s.id) == tostring(rec.server) then
+            return tostring(s.state and s.state.kind)
+          end
+        end
+        return "gone"
+        "#,
+    );
+    assert!(
+        rebuilt != "stopped" && rebuilt != "crashed" && rebuilt != "gone" && rebuilt != "none",
+        "the attaching path rebuilds against a live server; saw \
+         {rebuilt:?}"
+    );
+}

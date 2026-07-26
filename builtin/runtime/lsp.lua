@@ -871,6 +871,21 @@ local function attached_for_active()
   if not buf then return nil end
   local key = tostring(buf)
   local rec = attachments[key]
+  -- A record whose server is dead is worse than no record: every
+  -- command below issues requests against it and gets silence. Rebuild
+  -- instead, which is what `attach_buffer` does for a stale attachment
+  -- anyway — this just stops the dead record short-circuiting that.
+  --
+  -- Load-bearing for anything that retires a server out from under open
+  -- buffers (Arc 8 Stage 3b's fallback latch retires every Lean server
+  -- at once). Buffers in OTHER frontends get no `buffer.after-switch`
+  -- in this one, so an eager repair sweep keyed on the ambient active
+  -- buffer cannot reach them; healing at the point of USE is
+  -- frontend-agnostic, because whichever frontend runs the command is
+  -- the active one while it runs.
+  if rec and not server_is_live(rec.server) then
+    rec = nil
+  end
   if rec then
     -- Every interactive command resolves its attachment here before
     -- issuing requests; flushing now means the server answers those
@@ -942,6 +957,17 @@ function pmacs.lsp.attachment_for_request()
   local key = tostring(buf)
   local rec = attachments[key]
   if not rec then return nil end
+  -- Same liveness rule as `attached_for_active`: a record naming a dead
+  -- server is worse than none, because the caller issues a request
+  -- against it and waits for a reply that cannot come. Unlike that
+  -- function this one is deliberately non-attaching (it must not
+  -- perturb LSP state), so a dead record reads as "no attachment"
+  -- rather than triggering a rebuild.
+  if not server_is_live(rec.server) then
+    attachments[key] = nil
+    pending_did_change[key] = nil
+    return nil
+  end
   flush_did_change(key)
   return rec
 end

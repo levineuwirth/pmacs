@@ -265,7 +265,7 @@ If it does not, stop and repair the remote/fetch configuration.
 - Ships `builtin/runtime/lean.lua` (new), one `include_str!` line in
   `src/editor.rs`, `pmacs.lsp._attach_buffer` exported from `lsp.lua`,
   a `leanprogress` mode plus `waitForDiagnostics` validation on
-  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (31 tests).
+  `pmacs_fake_lsp`, and `tests/lean4_server_acceptance.rs` (36 tests).
   No protocol change.
 - **Stage 1's acceptance 12 is half superseded and was rewritten, not
   deleted.** It asserted `pmacs.lsp.config.lean4 == nil` to catch a
@@ -334,6 +334,31 @@ If it does not, stop and repair the remote/fetch configuration.
   argument-inclusive attribution was implemented but pinned only by
   "contains the command name", so a mutation dropping every argument
   still passed.
+- **Round-5 review: one P1 plus a frontend scope hole, and four more.**
+  (1) A fallback that SPAWNS and then dies retried forever: the
+  once-per-buffer guard bounds `_attach_buffer`, not the server it
+  produced, and `ensure_server` never forwards `cfg.restart` so the
+  fallback inherits `OnCrash` — respawned by the manager with no
+  ceiling, silently, because `latched` had disabled the primary's poll.
+  The fallback now gets its own one-shot die-before-initialize watch.
+  (2) **Simultaneous frontends**: both repair triggers read the ambient
+  `pmacs.window.buffer()`, and the daemon restores `active_frontend` to
+  the last-dispatched one before `tick_processes`, so a Lean buffer
+  active in ANOTHER frontend gets no `after-switch` and stays stale.
+  Fixed at the right seam — **make CONSUMPTION safe**: both
+  `attached_for_active` and `attachment_for_request` now refuse a record
+  whose server is dead (the former rebuilds, the latter reports none,
+  since it must not perturb LSP state). Healing at the point of use is
+  frontend-agnostic, because whichever frontend runs a command is active
+  while it runs. (3) The retirement sweep selected on `language_id`, so
+  it stopped USER-spawned Lean servers too; it now keys on the
+  `default-lean4` label `ensure_server` stamps, which is the derivation
+  discriminator. (4) `probe.latched` gated repair even when NO swap
+  occurred, so an already-fallback config was retried and misreported.
+  Split out `probe.fallback_installed`. (5) The once-per-buffer
+  assertion counted TABLE KEYS, which cannot distinguish "once per
+  buffer" from "every tick for one buffer" — cardinality stays 1 either
+  way. Now a numeric attempt counter; the bite shows **174 vs 1**.
 - **DURABLE LESSON — "the test that passes" vs "the test that
   discriminates."** Six tests across three rounds were written, run
   green, and only bite-testing showed they pinned nothing. **Carry this
@@ -359,6 +384,11 @@ If it does not, stop and repair the remote/fetch configuration.
   7. Asserting on a field that no longer exists (`_probe.reattach_from`
      after a refactor) reads as nil and passes for nothing. Assert
      positive facts — a count, a command string — not absences.
+  8. Counting DISTINCT KEYS cannot bound REPEATED WORK: a per-tick retry
+     on one buffer keeps `#repaired == 1` forever. Count the attempts,
+     not the things attempted against (bite: 174 vs 1).
+  9. A NONEXISTENT executable only exercises synchronous ENOENT. To
+     reach "spawned, then died", the fixture must actually spawn.
   Rule: **a test is not evidence until the mutation it targets has been
   shown to fail it.**
 - **SECOND DURABLE LESSON — a scope error repeats until the scope is
@@ -395,9 +425,9 @@ If it does not, stop and repair the remote/fetch configuration.
   server-failure latch covers the rest.
 - Verification on this branch: `cargo fmt --check` clean; strict
   workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
-  lean4 server 31/31; lean4 stage 1 9/9; dispatch seams 15/15;
+  lean4 server 36/36; lean4 stage 1 9/9; dispatch seams 15/15;
   multi-root 13/13; M4 121; required GPU 155; **isolated-config
-  workspace sweep 3,220 across 94 suites, zero failures**;
+  workspace sweep 3,225 across 94 suites, zero failures**;
   `git diff --check` clean. (Round 1 of
   this entry recorded 17/17 and 3,206 — the PRE-fix counts — after the
   fixes were pushed. The ledger's protocol is that verification
