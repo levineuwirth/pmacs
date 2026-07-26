@@ -1523,11 +1523,28 @@ sees the exact record via `_capture_records`, and that the Q#AP7 ordering
 against `lsp.lua`'s `didChange` flush still holds.
 
 **What 4a deliberately does not do.** It does not change the `all-must-
-succeed` contract, so a consumer that throws still fails the fan-out for
-everyone. The chain owner therefore `pcall`s each consumer and reports
-through `pmacs.editor.set_status`, matching `pair.lua`'s existing
-never-throw-from-after-edit discipline — this is behavior-preserving for
-pairing (which already never throws) and is the guardrail 4b needs.
+succeed` contract. What that contract actually does on a throw was
+stated wrongly through rev 7 and is corrected here, because this
+paragraph is the authority the module comment, criterion 46d, the test,
+and the ledger all descend from: `run_all_must_succeed`
+(`src/hook.rs:332`) **collects** the error and continues to the hook's
+remaining subscribers, marking only the run as failed. An uncontained
+throw inside the chain therefore does **not** stop `lsp.lua` from
+flushing `didChange`. What it does stop is every LATER consumer in the
+chain — the chain is one subscriber, and a throw abandons the rest of
+its loop.
+
+That is a narrower consequence than rev 7 claimed and still worth
+containing, because the failure is silent in the direction that matters:
+a consumer that throws disables the consumers behind it with no signal
+at the seam where they were registered. The chain owner therefore
+`pcall`s each consumer and reports through `pmacs.editor.set_status`,
+matching `pair.lua`'s existing never-throw-from-after-edit discipline —
+this is behavior-preserving for pairing (which already never throws) and
+is the guardrail 4b needs. The **rendering** of the caught error is
+protected the same way: a Lua error may be any value, including a table
+whose `__tostring` throws, so `tostring` outside the `pcall` would
+reintroduce the escape the containment exists to prevent.
 
 ### Q#LN11 — Stage 4b data: vendor the table, generated, attributed
 
