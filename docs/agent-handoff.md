@@ -171,10 +171,20 @@ commands, read `docs/active-work.md` immediately after this file.
     `bottom_panel_stage1_acceptance` 46; kill ring 30; compile 67; M4 121;
     required GPU 152; initial-target 14 CRDT; all three vterm suites; folding
     Stage 2 48. All 12 CI checks green at merge.
-  - **Stage 2 (the GPU panel band) needs its own re-framing** before
-    implementation and takes the next available protocol version; the
-    framing's §1.3 census of 23 transitive active-context reads is its map.
-    Stage 3 is the adopter default flip.
+  - **Stage 2 (the GPU panel band) is FRAMED** —
+    `docs/bottom-panel-stage2-framing.md`, four review rounds, no open
+    items. It takes protocol **v21** and ships as two serial slices:
+    **2A** classified census routing + per-window painter extraction (no
+    wire change), then **2B** the wire, the daemon projection, the band,
+    and the negotiated `panel_capable` flip. Parent acceptance 37–55
+    remains authoritative. Stage 3 is the adopter default flip.
+  - **The §1.3 census is CLASSIFIED, not uniformly redirected.** Only the
+    Projection class (#1–#12, #21–#22) routes through
+    `primary_document_window`; focus/input (#13–#15, #23), focus chrome
+    and surface-routed (#16–#19), and focus/session (#20) keep their own
+    authorities. Rerouting them breaks remote-op validation and
+    application, `DispatchIdle`, presence, focused
+    search/menu/completion routing, and terminal bell ownership.
 - **GPU initial target LANDED — #148**
   (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
