@@ -23,6 +23,8 @@
 //! the SIL Open Font License 1.1 (see `fonts/OFL.txt`).
 
 mod attach;
+mod math_layout;
+mod math_parse;
 mod terminal;
 
 use std::collections::HashMap;
@@ -222,6 +224,13 @@ fn build_font_system(extra_sources: &[&'static [u8]]) -> (FontSystem, FontDefaul
     let bundled_id = *bundled_ids
         .first()
         .expect("bundled JetBrains Mono contains one face");
+    // Inline-math slice (Q#MS7): the math glyphs draw through
+    // cosmic-text, so the same bytes the layout engine measures must
+    // resolve as a family here — the F8b pin. Proportional, so the
+    // same-family monospace filter below cannot touch it.
+    db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(
+        math_layout::LATIN_MODERN_MATH,
+    )));
     let extra_ids: Vec<fontdb::ID> = extra_sources
         .iter()
         .flat_map(|bytes| db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(*bytes))))
@@ -272,6 +281,22 @@ fn query_normal_face(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> 
         weight: fontdb::Weight::NORMAL,
         stretch: fontdb::Stretch::Normal,
         style: fontdb::Style::Normal,
+    })
+}
+
+/// The family name the bundled math font resolves to in fontdb; the
+/// draw pass pins `Attrs` to it so drawn advances come from the same
+/// face layout measured (framing F8b).
+const MATH_FONT_FAMILY: &str = "Latin Modern Math";
+
+/// The Q#MS10 fit budget at the given code metrics, derived from the
+/// bundled code face's baseline placement (the framing's pinned rule).
+/// A custom `set_font` family shifts the painted baseline slightly; v0
+/// accepts that — boxes draw against the real shaped baseline, so only
+/// the fit margin is approximate.
+fn math_code_budget(fm: FontMetrics) -> (f32, f32) {
+    ttf_parser::Face::parse(JETBRAINS_MONO, 0).map_or((0.0, 0.0), |face| {
+        math_layout::line_box_budget(&face, fm.code_font_size(), fm.code_line_height())
     })
 }
 
@@ -341,6 +366,19 @@ const TERMINAL_CURSOR_RGBA: [f32; 4] = [0.85, 0.85, 0.9, 0.55];
 /// B1.
 const CARET_WIDTH: f32 = 2.0;
 const CARET_COLOR: [f32; 4] = [0.90, 0.90, 0.96, 0.90];
+
+/// Math ink (Q#MS6): the plain code text color, as glyph color for
+/// the mini-buffers and quad rgba for the fraction rule. Colour-by-
+/// context is the parent arc's deferred Q#IM2.
+const MATH_INK_COLOR: Color = Color::rgb(230, 230, 235);
+const MATH_INK_RGBA: [f32; 4] = [230.0 / 255.0, 230.0 / 255.0, 235.0 / 255.0, 1.0];
+
+/// Line-height factor for a math glyph's mini-buffer: roomy enough
+/// that a lone glyph's ascender/descender never clips against the
+/// buffer's own line box. Positioning ignores it — the `TextArea` top
+/// is set from the mini-buffer's SHAPED `line_y`, so the glyph's
+/// baseline lands exactly where layout put it.
+const MATH_GLYPH_LINE_FACTOR: f32 = 2.0;
 /// Extra source lines shaped beyond the visible window so a 1-line
 /// scroll doesn't always re-slice and the bottom partial line renders
 /// (Q#S3). Kept small — overscan is wasted shaping.
@@ -728,7 +766,22 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         let _ = client.send_key(ProtocolKey::Char(chord), Modifiers::CTRL | Modifiers::ALT);
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // Quiet-observation mode. `PMACS_GPU_PROBE_OBSERVE_MS` makes the probe
+    // send NO input and request NO resize, and observe for exactly that long
+    // instead of stopping at its usual condition.
+    //
+    // This exists because the ordinary probe cannot see a frame storm: it
+    // stops as soon as it has watched a resize land, so a session emitting a
+    // frame every tick and one emitting three in total both satisfy it. A
+    // fixed window over a child that produces no output turns "how many
+    // frames did the daemon send?" into a number worth asserting on.
+    let observe_window = std::env::var("PMACS_GPU_PROBE_OBSERVE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis);
+    let quiet = observe_window.is_some();
+    let deadline = std::time::Instant::now()
+        + observe_window.unwrap_or_else(|| std::time::Duration::from_secs(20));
     let mut sent_input = false;
     let mut sent_resize = false;
     while std::time::Instant::now() < deadline {
@@ -778,13 +831,17 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                     if pixels.iter().any(|&b| b != first) {
                         facts.rendered_nonuniform_frames += 1;
                     }
-                    if !sent_input && facts.frames >= 1 {
+                    if facts.last_frame_text.contains(PROBE_INPUT_CHAR) {
+                        facts.input_echo_observed = true;
+                    }
+                    if !quiet && !sent_input && facts.frames >= 1 {
                         sent_input = true;
                         // Real child input over the real wire.
-                        let _ = client.send_key(ProtocolKey::Char('x'), Modifiers::NONE);
+                        let _ =
+                            client.send_key(ProtocolKey::Char(PROBE_INPUT_CHAR), Modifiers::NONE);
                         let _ = client.send_key(ProtocolKey::Enter, Modifiers::NONE);
                     }
-                    if !sent_resize && facts.frames >= 2 {
+                    if !quiet && !sent_resize && facts.frames >= 2 {
                         sent_resize = true;
                         state.resize(700, 500);
                         if let Some((buffer_id, size)) = state.terminal_declaration_if_changed()
@@ -800,7 +857,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                         facts.observed_resized_frame = true;
                     }
                 }
-                if facts.observed_resized_frame && facts.rendered_nonuniform_frames >= 2 {
+                if !quiet && facts.observed_resized_frame && facts.rendered_nonuniform_frames >= 2 {
                     break;
                 }
             }
@@ -832,6 +889,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let _ = writeln!(out, "resized_cols={}", facts.resized_cols);
     let _ = writeln!(out, "last_title={}", facts.last_title.unwrap_or_default());
     let _ = writeln!(out, "last_frame_text={}", facts.last_frame_text);
+    let _ = writeln!(out, "input_echo_observed={}", facts.input_echo_observed);
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
         eprintln!(
@@ -1037,8 +1095,19 @@ struct ProbeFacts {
     resized_cols: u32,
     last_title: Option<String>,
     last_frame_text: String,
+    /// Whether any frame carried the probe's own typed character back.
+    ///
+    /// Latched ACROSS frames, not read off the final one: a later geometry
+    /// change reflows the screen, so "the echo arrived" and "the echo is
+    /// still on the last frame" are different questions and only the first
+    /// one is about input reaching the child.
+    input_echo_observed: bool,
     disconnect: Option<String>,
 }
+
+/// The character the probe types into the child. Distinct from anything the
+/// acceptance children print themselves, so its appearance is unambiguous.
+const PROBE_INPUT_CHAR: char = 'x';
 
 /// One-line printable text of a terminal frame, for probe reporting.
 fn frame_probe_text(frame: &TerminalFrame) -> String {
@@ -1486,6 +1555,21 @@ struct State {
     /// frames re-shape ONLY lines whose styling actually changed, and
     /// lets scroll reuse retained lines wholesale.
     line_chunk_cache: Vec<Vec<RichChunk>>,
+    /// Per-shaped-line math suppression state, in lockstep with
+    /// `line_chunk_cache`: the detected spans with the Q#MS5 gate bit
+    /// each was built under (the line-reuse predicate's third input
+    /// beside content and styling), and the placed boxes the draw
+    /// pass paints into the reserved spacer rectangles.
+    line_math_cache: Vec<MathLineState>,
+    /// The MATH layout engine over the bundled font, or `None` when
+    /// the font failed to yield math metrics at startup — a hard
+    /// error in the math path only (Q#MS7): spans render as source
+    /// and the editor keeps running.
+    math_engine: Option<math_layout::MathLayout<'static>>,
+    /// `(above_baseline, below_baseline)` budget a math box must fit
+    /// (Q#MS10), derived by `math_layout::line_box_budget` from the
+    /// CODE font's baseline placement. Recomputed when metrics change.
+    math_budget: (f32, f32),
     /// Absolute source-line index of `buffer.lines[0]`.
     shaped_top: usize,
     bg_vertex_buffer: ReusableVertexBuffer,
@@ -1536,6 +1620,12 @@ struct State {
     /// Dedicated text renderer for the minibuffer dropdown (its own
     /// layer over the buffer, like the menu's).
     mb_text_renderer: TextRenderer,
+    /// Dedicated text renderer for inline-math glyphs (Q#MS6): each
+    /// `MathItem::Glyph` draws from its own mini-buffer positioned at
+    /// layout's exact x/baseline, so an accumulated shaping advance
+    /// can never move a glyph off its measured origin — the same
+    /// per-run argument the terminal renderer made.
+    math_text_renderer: TextRenderer,
     /// Minibuffer dropdown background + selection quads (Q#MB1).
     mb_bg_vertex_buffer: ReusableVertexBuffer,
     /// Arc 1a Q#C5 — the live in-buffer completion popup (protocol
@@ -3015,6 +3105,17 @@ impl State {
         // filter, generic defaults, THEN FontSystem construction so
         // its monospace-ID set sees the final database.
         let (mut font_system, font_defaults) = build_font_system(extra_font_sources);
+        // Inline-math slice (Q#MS7): the layout engine over the bundled
+        // Latin Modern Math. Failure is surfaced once and disables only
+        // the math path — spans keep rendering as source.
+        let math_engine = match math_layout::MathLayout::new(math_layout::LATIN_MODERN_MATH) {
+            Ok(engine) => Some(engine),
+            Err(e) => {
+                eprintln!("pmacs-gpu: bundled math font unusable ({e:?}); inline math disabled");
+                None
+            }
+        };
+        let math_budget = math_code_budget(fm);
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let mut viewport = Viewport::new(&device, &cache);
@@ -3033,6 +3134,9 @@ impl State {
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         // Q#MB1 — a third renderer for the minibuffer dropdown layer.
         let mb_text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        // Inline-math slice (Q#MS6) — a renderer for the math glyph layer.
+        let math_text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         // Arc 1a Q#C5 — a renderer for the completion dropdown layer.
         let completion_text_renderer =
@@ -3188,6 +3292,9 @@ impl State {
             styled_redraw_deadline: None,
             hit_map_dirty: false,
             line_chunk_cache: Vec::new(),
+            line_math_cache: Vec::new(),
+            math_engine,
+            math_budget,
             shaped_top: 0,
             bg_vertex_buffer: ReusableVertexBuffer::new(),
             squiggle_vertex_buffer: ReusableVertexBuffer::new(),
@@ -3208,6 +3315,7 @@ impl State {
             menu_bg_vertex_buffer: ReusableVertexBuffer::new(),
             mb_buffer,
             mb_text_renderer,
+            math_text_renderer,
             mb_bg_vertex_buffer: ReusableVertexBuffer::new(),
             completion: None,
             completion_buffer,
@@ -3432,6 +3540,12 @@ impl State {
         // `moved == false`, so deferring wrapped-run repair here
         // would leave a newly wrapped caret off-screen indefinitely.
         self.ensure_caret_painted();
+        // Q#MS5/F4: the text applied above re-chunked under the OLD
+        // caret; the effective caret only just moved. Suppression keys
+        // on `own_cursor`, so re-run the compare — without this, a
+        // typed char that lands the caret against a span boundary
+        // renders one keystroke stale.
+        self.refresh_math_suppression();
         let viewport = self.viewport_send_if_changed(predicted.buffer_id);
         CrdtOpSend {
             buffer_id: predicted.buffer_id,
@@ -3930,7 +4044,13 @@ impl State {
                 // in `render()`. No decoration change needs a
                 // reshape, so none triggers one — diagnostic
                 // publishes no longer pay set_rich_text +
-                // shape_until_scroll.
+                // shape_until_scroll... with ONE exception since the
+                // inline-math slice: a Selection endpoint is a Q#MS11
+                // suppression gate, so a selection change re-runs the
+                // per-line compare when the slice could hold math
+                // (no-op for every other decoration kind and for
+                // math-free text).
+                self.refresh_math_suppression();
                 self.request_redraw();
                 None
             }
@@ -4125,6 +4245,13 @@ impl State {
                 // the band never scrolled into view.
                 if moved {
                     self.ensure_caret_painted();
+                    // Q#MS5: the caret is a suppression input now. A
+                    // move that crosses a math-span boundary must
+                    // re-chunk the affected lines even when no scroll
+                    // or edit follows — the follow above only reshapes
+                    // on scroll, and a retained line under the stale
+                    // suppression state is the #120 edge.
+                    self.refresh_math_suppression();
                     if let Some(vp) = self.viewport_send_if_changed(buffer_id) {
                         return Some(vp);
                     }
@@ -4897,18 +5024,65 @@ impl State {
         }
     }
 
+    /// The shaped slice's math substitutions, read back from the
+    /// per-line chunk caches and rebased to slice-relative offsets —
+    /// the spacer text and suppressed range are both in the cached
+    /// `MathBox` chunks, so the hit map reproduces the shaped state
+    /// exactly instead of re-planning under a possibly-newer caret.
+    fn cached_math_subs_for_slice(&self, vstart: u64, vend: u64) -> Vec<MathSubstitution> {
+        let mut subs = Vec::new();
+        if self.math_engine.is_none() {
+            return subs;
+        }
+        let (top, ranges) = self.slice_line_ranges(vstart, vend);
+        if top != self.shaped_top || ranges.len() != self.line_chunk_cache.len() {
+            // The caches describe a different slice; a math-blind map
+            // (boxes unclickable at worst) beats a wrong one.
+            return subs;
+        }
+        for (i, &(ls, _)) in ranges.iter().enumerate() {
+            let base = ls - vstart;
+            for chunk in &self.line_chunk_cache[i] {
+                if let ChunkSource::MathBox { start, end } = chunk.source {
+                    subs.push(MathSubstitution {
+                        span: math_parse::MathSpan {
+                            start: (base + start) as usize,
+                            end: (base + end) as usize,
+                        },
+                        spacer: chunk.text.clone(),
+                        boxed: math_layout::MathBox {
+                            width: 0.0,
+                            ascent: 0.0,
+                            descent: 0.0,
+                            items: Vec::new(),
+                        },
+                    });
+                }
+            }
+        }
+        subs
+    }
+
     fn hit_test_source_byte(&mut self, x: f64, y: f64) -> Option<u64> {
         self.current_buffer_id?;
         if self.hit_map_dirty {
             // Q#R2 — a per-line reshape deferred this; rebuild from
             // the same chunk source the shaped buffer was built from.
             let (vstart, vend) = self.view_range;
+            // B1': the hit map must see the SAME math suppressions the
+            // shaped lines carry, so the slice-wide substitution list
+            // is read back from the per-line caches (never recomputed
+            // — a caret that moved since the last reshape must not
+            // make the map disagree with the glyphs), rebased from
+            // line-relative to slice-relative offsets.
+            let subs = self.cached_math_subs_for_slice(vstart, vend);
             let rich = clipped_chunks_for_range(
                 &self.current_text,
                 &self.current_spans,
                 &self.current_adornments,
                 vstart,
                 vend,
+                &subs,
             );
             let (hit_runs, projected_line_starts) = build_hit_runs(&rich);
             self.current_hit_runs = hit_runs;
@@ -5048,15 +5222,19 @@ impl State {
         let Some(shaped_idx) = line_idx.checked_sub(self.shaped_top) else {
             return false;
         };
-        if shaped_idx >= self.buffer.lines.len() || shaped_idx >= self.line_chunk_cache.len() {
+        if shaped_idx >= self.buffer.lines.len()
+            || shaped_idx >= self.line_chunk_cache.len()
+            || shaped_idx >= self.line_math_cache.len()
+        {
             // E.g. typing on the phantom empty line after a trailing
             // newline — no BufferLine exists for it; full reshape
             // handles those shapes correctly.
             return false;
         }
-        let chunks = self.chunks_for_line(line_start, content_end);
+        let (chunks, math) = self.chunks_for_line(line_start, content_end);
         self.buffer.lines[shaped_idx] = line_from_chunks(&chunks, &self.resolved_family);
         self.line_chunk_cache[shaped_idx] = chunks;
+        self.line_math_cache[shaped_idx] = math;
         self.view_range = (vstart, vend);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         // The edited line's wrap count can shrink under a retained
@@ -5097,14 +5275,148 @@ impl State {
         (top, ranges)
     }
 
-    fn chunks_for_line(&self, line_start: u64, content_end: u64) -> Vec<RichChunk> {
-        clipped_chunks_for_range(
+    fn chunks_for_line(
+        &self,
+        line_start: u64,
+        content_end: u64,
+    ) -> (Vec<RichChunk>, MathLineState) {
+        let (subs, mut state) = self.math_plan_for_line(line_start, content_end);
+        let chunks = clipped_chunks_for_range(
             &self.current_text,
             &self.current_spans,
             &self.current_adornments,
             line_start,
             content_end,
-        )
+            &subs,
+        );
+        state.placed = placed_math_boxes(&chunks, &subs);
+        (chunks, state)
+    }
+
+    /// The line's math suppression plan (Q#MS3/Q#MS4). Detection runs
+    /// here — the chunk-build path, never the edit path — and the gate
+    /// reads the EFFECTIVE caret (`own_cursor`, which optimistic edits
+    /// predict forward) plus the own-selection endpoints, so
+    /// suppression cannot flap during an unconfirmed edit (framing
+    /// Q#MS5/F4). Any failure — parse, layout, fit, degenerate spacer —
+    /// leaves that span as source (Q#MS8).
+    fn math_plan_for_line(
+        &self,
+        line_start: u64,
+        content_end: u64,
+    ) -> (Vec<MathSubstitution>, MathLineState) {
+        let mut subs = Vec::new();
+        let mut state = MathLineState::default();
+        let Some(engine) = self.math_engine.as_ref() else {
+            return (subs, state);
+        };
+        let Some(line) = self
+            .current_text
+            .get(line_start as usize..content_end as usize)
+        else {
+            return (subs, state);
+        };
+        if !line.as_bytes().contains(&b'$') {
+            return (subs, state);
+        }
+        let spans = math_parse::detect_math_spans(line);
+        if spans.is_empty() {
+            return (subs, state);
+        }
+        let gates = self.math_gate_positions(line_start, content_end);
+        let advance = self.mono_advance();
+        for span in spans {
+            let gated = gates
+                .iter()
+                .any(|&p| span.start as u64 <= p && p <= span.end as u64);
+            state.gates.push((span, gated));
+            if gated {
+                continue;
+            }
+            let Ok(node) = math_parse::parse(&line[span.interior()]) else {
+                continue;
+            };
+            let Ok(boxed) = engine.layout(&node, self.fm.code_font_size()) else {
+                continue;
+            };
+            let Some(fitted) =
+                math_layout::fit_to_line(&boxed, self.math_budget.0, self.math_budget.1)
+            else {
+                continue;
+            };
+            let spacer = math_layout::spacer_for_width(fitted.width, advance);
+            if spacer.is_empty() {
+                continue;
+            }
+            subs.push(MathSubstitution {
+                span,
+                spacer,
+                boxed: fitted,
+            });
+        }
+        (subs, state)
+    }
+
+    /// Line-relative byte positions whose presence inside a span
+    /// unsuppresses it: the effective caret and both own-selection
+    /// endpoints (Q#MS5 generalised by Q#MS11 — "you are addressing
+    /// this text" and "you see this text" are the same condition).
+    fn math_gate_positions(&self, line_start: u64, content_end: u64) -> Vec<u64> {
+        let mut gates = Vec::new();
+        let mut push = |byte: u64| {
+            if byte >= line_start && byte <= content_end {
+                gates.push(byte - line_start);
+            }
+        };
+        if let Some(own) = self.own_cursor
+            && Some(own.buffer_id) == self.current_buffer_id
+        {
+            push(own.byte);
+        }
+        for d in &self.current_decorations {
+            if d.kind == DecorationKind::Selection {
+                push(d.range.start);
+                push(d.range.end);
+            }
+        }
+        gates
+    }
+
+    /// Whether a retained line's cached gate bits match the current
+    /// effective caret/selection — the suppression input to the
+    /// line-reuse predicate beside content and styling (Q#MS5; a
+    /// retained line shaped under the opposite suppression state is
+    /// the #120 stale-mirror failure). Content is unchanged on every
+    /// reuse path, so the cached span set is authoritative and only
+    /// the gate bits can differ.
+    fn math_gates_match(&self, line_start: u64, content_end: u64, state: &MathLineState) -> bool {
+        if state.gates.is_empty() {
+            return true;
+        }
+        let gates = self.math_gate_positions(line_start, content_end);
+        state.gates.iter().all(|&(span, was_gated)| {
+            let now = gates
+                .iter()
+                .any(|&p| span.start as u64 <= p && p <= span.end as u64);
+            now == was_gated
+        })
+    }
+
+    /// Caret or selection motion can flip a span's Q#MS5 gate without
+    /// any content change, which the frame-driven refresh paths never
+    /// see; re-run the per-line chunk compare when the visible slice
+    /// could hold math at all. Cheap when it cannot (one `$` scan).
+    fn refresh_math_suppression(&mut self) {
+        if self.math_engine.is_none() || self.terminal.is_some() {
+            return;
+        }
+        let (vstart, vend) = self.view_range;
+        let Some(slice) = self.current_text.get(vstart as usize..vend as usize) else {
+            return;
+        };
+        if slice.as_bytes().contains(&b'$') {
+            self.refresh_changed_lines();
+        }
     }
 
     /// Rebuild the shaped slice, reusing any retained line whose
@@ -5127,30 +5439,52 @@ impl State {
             .into_iter()
             .map(Some)
             .collect();
+        let mut old_math: Vec<Option<MathLineState>> = std::mem::take(&mut self.line_math_cache)
+            .into_iter()
+            .map(Some)
+            .collect();
         let mut lines = Vec::with_capacity(ranges.len());
         let mut cache = Vec::with_capacity(ranges.len());
+        let mut math = Vec::with_capacity(ranges.len());
         let mut any_reused = false;
         for (i, &(ls, ce)) in ranges.iter().enumerate() {
             let abs = new_top + i;
             let reused = abs.checked_sub(old_top).and_then(|j| {
-                if j < old_lines.len() && j < old_cache.len() {
-                    old_lines[j].take().zip(old_cache[j].take())
+                if j < old_lines.len() && j < old_cache.len() && j < old_math.len() {
+                    // Reuse is sound only when suppression state is a
+                    // third invariant beside content and styling
+                    // (Q#MS5): a caret-follow scroll lands here with a
+                    // caret that may have crossed a span boundary, and
+                    // a retained line shaped under the opposite
+                    // suppression state is the #120 stale-mirror
+                    // failure (framing acceptance 11).
+                    if !self.math_gates_match(ls, ce, old_math[j].as_ref()?) {
+                        return None;
+                    }
+                    Some((
+                        old_lines[j].take()?,
+                        old_cache[j].take()?,
+                        old_math[j].take()?,
+                    ))
                 } else {
                     None
                 }
             });
-            if let Some((line, chunks)) = reused {
+            if let Some((line, chunks, m)) = reused {
                 any_reused = true;
                 lines.push(line);
                 cache.push(chunks);
+                math.push(m);
             } else {
-                let chunks = self.chunks_for_line(ls, ce);
+                let (chunks, m) = self.chunks_for_line(ls, ce);
                 lines.push(line_from_chunks(&chunks, &self.resolved_family));
                 cache.push(chunks);
+                math.push(m);
             }
         }
         self.buffer.lines = lines;
         self.line_chunk_cache = cache;
+        self.line_math_cache = math;
         self.shaped_top = new_top;
         self.buffer
             .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
@@ -5181,6 +5515,7 @@ impl State {
         if (vstart, vend) != self.view_range
             || top != self.shaped_top
             || ranges.len() != self.line_chunk_cache.len()
+            || ranges.len() != self.line_math_cache.len()
             || ranges.len() != self.buffer.lines.len()
         {
             self.reshape();
@@ -5188,12 +5523,17 @@ impl State {
         }
         let mut any = false;
         for (i, &(ls, ce)) in ranges.iter().enumerate() {
-            let chunks = self.chunks_for_line(ls, ce);
+            let (chunks, m) = self.chunks_for_line(ls, ce);
             if chunks != self.line_chunk_cache[i] {
                 self.buffer.lines[i] = line_from_chunks(&chunks, &self.resolved_family);
                 self.line_chunk_cache[i] = chunks;
                 any = true;
             }
+            // Always current, even when the chunks are unchanged: an
+            // unsuppressible span's gate bit can flip with no chunk
+            // difference, and a stale bit would defeat the reuse
+            // comparison later.
+            self.line_math_cache[i] = m;
         }
         if any {
             self.buffer.shape_until_scroll(&mut self.font_system, false);
@@ -6145,13 +6485,16 @@ impl State {
         let (top, ranges) = self.slice_line_ranges(vstart, vend);
         let mut lines = Vec::with_capacity(ranges.len());
         let mut cache = Vec::with_capacity(ranges.len());
+        let mut math = Vec::with_capacity(ranges.len());
         for &(ls, ce) in &ranges {
-            let chunks = self.chunks_for_line(ls, ce);
+            let (chunks, m) = self.chunks_for_line(ls, ce);
             lines.push(line_from_chunks(&chunks, &self.resolved_family));
             cache.push(chunks);
+            math.push(m);
         }
         self.buffer.lines = lines;
         self.line_chunk_cache = cache;
+        self.line_math_cache = math;
         self.shaped_top = top;
         self.buffer
             .set_scroll(Scroll::new(0, self.code_scroll_residual, 0.0));
@@ -6414,6 +6757,9 @@ impl State {
             scale,
             advance_ratio,
         };
+        // The Q#MS10 fit budget follows the code metrics; the reshape
+        // below rebuilds every line's math plan against it.
+        self.math_budget = math_code_budget(self.fm);
         // The default family already has an exact, pre-preference
         // geometry path: a shaped glyph when present, otherwise the
         // ratio-scaled baseline constant. Keep using it so resetting
@@ -6673,6 +7019,16 @@ impl State {
         // status band and the popup layers above it stay, because they
         // are buffer-independent chrome the daemon still drives.
         let terminal_mode = self.terminal.is_some();
+        // Inline-math ink (Q#MS6): glyph mini-buffers plus fraction-rule
+        // quads. The rules ride the bg quad batch AFTER the decoration
+        // washes, so a selection/search wash under a rendered box never
+        // paints over its fraction bar; the glyphs get their own layer
+        // in the code z-slot below.
+        let (math_buffers, math_rules) = if terminal_mode {
+            (Vec::new(), Vec::new())
+        } else {
+            self.build_math_paint()
+        };
         // The band's strip rides the bg quad batch so it draws under
         // the band text (text renders after the first quad draw).
         let mut bg_vertices = if terminal_mode {
@@ -6680,6 +7036,11 @@ impl State {
         } else {
             self.decoration_background_vertex_bytes()
         };
+        bg_vertices.extend(rects_to_vertex_bytes(
+            &math_rules,
+            self.config.width,
+            self.config.height,
+        ));
         bg_vertices.extend(self.status_band_vertex_bytes());
         let bg_vertex_count = (bg_vertices.len() / QUAD_VERTEX_STRIDE as usize) as u32;
         let bg_buffer = self
@@ -6864,6 +7225,37 @@ impl State {
                 &mut self.swash_cache,
             )
             .expect("text_renderer prepare");
+
+        // Inline-math glyph layer (Q#MS6): one TextArea per glyph,
+        // clipped by the same code-area bounds as the code layer.
+        let math_areas: Vec<TextArea> = math_buffers
+            .iter()
+            .map(|(buf, left, top)| TextArea {
+                buffer: buf,
+                left: *left,
+                top: *top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: gutter_clip_left,
+                    top: 0,
+                    right: text_bounds_right,
+                    bottom: text_area_bottom(self.config.height, self.fm).round() as i32,
+                },
+                default_color: MATH_INK_COLOR,
+                custom_glyphs: &[],
+            })
+            .collect();
+        self.math_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                math_areas,
+                &mut self.swash_cache,
+            )
+            .expect("math text_renderer prepare");
 
         // UX gutter: prepare the line-number layer in the reserved left
         // strip (empty when off → renders nothing). Same `top` + line
@@ -7106,6 +7498,11 @@ impl State {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("text_renderer render");
+            // Inline-math glyphs share the code layer's z-slot: over
+            // the washes and rule quads, under the caret and popups.
+            self.math_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("math text_renderer render");
             // Vterm Stage 3 — terminal glyphs sit in the code layer's
             // z-slot: over the cell backgrounds and underlines, under
             // the cursor block.
@@ -7404,6 +7801,90 @@ impl State {
     /// its visual run is scrolled outside the drawable code window
     /// (the caret quad has no `TextBounds` clip of its own, so the
     /// drawable intersection gates it here).
+    /// The frame's math ink (Q#MS6): one shaped mini-buffer per
+    /// `MathItem::Glyph` — `(buffer, left, top)` in window pixels —
+    /// plus the fraction-rule quads. Origins come from the REAL shaped
+    /// spacer glyph and the run's REAL baseline, and each mini-buffer
+    /// is positioned by the baseline cosmic-text actually produced for
+    /// it, so measured and drawn geometry share one origin (F8b: the
+    /// family is pinned to the bundled math font layout measured).
+    fn build_math_paint(&mut self) -> (Vec<(Buffer, f32, f32)>, Vec<MinimapRect>) {
+        let mut pending: Vec<(char, f32, f32, f32)> = Vec::new();
+        let mut rules: Vec<MinimapRect> = Vec::new();
+        if self.line_math_cache.iter().all(|m| m.placed.is_empty()) {
+            return (Vec::new(), rules);
+        }
+        let text_left = self.text_left();
+        for run in self.buffer.layout_runs() {
+            let Some(state) = self.line_math_cache.get(run.line_i) else {
+                continue;
+            };
+            for placed in &state.placed {
+                // The run holding the spacer's FIRST glyph anchors the
+                // box. A spacer split by soft wrap draws whole at that
+                // origin — the one-rectangle model Q#MS4 reserves.
+                let Some(anchor) = run
+                    .glyphs
+                    .iter()
+                    .find(|g| g.start as u64 == placed.projected_start)
+                else {
+                    continue;
+                };
+                let origin_x = text_left + anchor.x;
+                let baseline_px = TEXT_TOP + run.line_y;
+                for item in &placed.boxed.items {
+                    match *item {
+                        math_layout::MathItem::Glyph {
+                            ch,
+                            x,
+                            baseline,
+                            size_px,
+                        } => {
+                            // Box space is y-up around the baseline;
+                            // screen space is y-down.
+                            pending.push((ch, origin_x + x, baseline_px - baseline, size_px));
+                        }
+                        math_layout::MathItem::Rule {
+                            x,
+                            y,
+                            width,
+                            thickness,
+                        } => {
+                            rules.push(MinimapRect {
+                                x: origin_x + x,
+                                y: baseline_px - y - thickness / 2.0,
+                                w: width,
+                                h: thickness,
+                                color: MATH_INK_RGBA,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let mut buffers = Vec::with_capacity(pending.len());
+        for (ch, x, baseline_px, size_px) in pending {
+            let mut buf = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(size_px, size_px * MATH_GLYPH_LINE_FACTOR),
+            );
+            buf.set_size(&mut self.font_system, None, None);
+            buf.set_text(
+                &mut self.font_system,
+                ch.encode_utf8(&mut [0u8; 4]),
+                &Attrs::new().family(Family::Name(MATH_FONT_FAMILY)),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            let Some(line_y) = buf.layout_runs().next().map(|r| r.line_y) else {
+                continue;
+            };
+            buffers.push((buf, x, baseline_px - line_y));
+        }
+        (buffers, rules)
+    }
+
     fn caret_vertex_bytes(&mut self) -> Vec<u8> {
         // Q#MB1 — while the minibuffer is open the caret lives in the
         // band at the input cursor, not in the buffer.
@@ -7648,6 +8129,17 @@ impl State {
             let Some(projected_hi) = source_to_projected(chunks, source_hi - line_base) else {
                 continue;
             };
+            // Q#MS11: a wash that INTERSECTS a suppressed span covers
+            // the span's WHOLE reserved rectangle — the box has no
+            // interior byte map, so a partial wash cannot be placed
+            // honestly, and a match strictly inside the span would
+            // otherwise produce a zero-width interval (both endpoints
+            // collapse onto the box's left edge).
+            let (projected_lo, projected_hi) = widen_over_math_chunks(
+                chunks,
+                (source_lo - line_base, source_hi - line_base),
+                (projected_lo, projected_hi),
+            );
             let mut min_x: Option<f32> = None;
             let mut max_x: Option<f32> = None;
             for glyph in run.glyphs {
@@ -7720,6 +8212,13 @@ enum ChunkSource {
     /// Injected adornment text (inlay hint) anchored at this slice
     /// byte offset. Hits inside it snap to the anchor.
     Adornment { anchor: u64 },
+    /// A suppressed inline-math span (Q#MS4). The chunk's text is SPACER
+    /// spaces reserving the laid-out box's width — a `RichChunk`'s only
+    /// width is its text, so there is no zero-glyph strut to reserve with
+    /// (framing F2). `start`..`end` is the suppressed source range,
+    /// delimiters included; hits inside snap to `start`, the same rule
+    /// `Adornment` uses, because the box has no interior byte map.
+    MathBox { start: u64, end: u64 },
 }
 
 /// One run of the projected→source hit map (Q#M2), built by
@@ -7732,6 +8231,154 @@ struct ProjectedRun {
     /// Run length in projected bytes.
     len: u64,
     source: ChunkSource,
+}
+
+/// One math span scheduled for suppression on a line: the detected
+/// span (line-relative), the spacer text reserving its box's width
+/// (Q#MS4), and the fitted box the draw pass paints.
+#[derive(Clone, Debug, PartialEq)]
+struct MathSubstitution {
+    span: math_parse::MathSpan,
+    spacer: String,
+    boxed: math_layout::MathBox,
+}
+
+/// Per-line math state cached beside the line's chunks.
+#[derive(Clone, Debug, PartialEq, Default)]
+struct MathLineState {
+    /// Every detected span with the Q#MS5/Q#MS11 gate bit it was
+    /// built under (`true` = a caret/selection endpoint was inside,
+    /// so the span rendered as source). The line-reuse predicate
+    /// compares these against the CURRENT gate to refuse a retained
+    /// line shaped under the opposite suppression state — the #120
+    /// stale-line edge (framing acceptance 11).
+    gates: Vec<(math_parse::MathSpan, bool)>,
+    /// Suppressed spans' placements for the draw pass, in projected
+    /// byte space within this shaped line.
+    placed: Vec<PlacedMathBox>,
+}
+
+/// A suppressed span's box, addressed by its spacer's projected byte
+/// range so the draw pass can find its pixel origin in the shaped
+/// line's glyphs.
+#[derive(Clone, Debug, PartialEq)]
+struct PlacedMathBox {
+    projected_start: u64,
+    projected_len: u64,
+    boxed: math_layout::MathBox,
+}
+
+#[cfg(test)]
+mod math_chunk_tests {
+    use super::*;
+
+    fn spacer_chunk(start: u64, end: u64, spaces: usize) -> RichChunk {
+        RichChunk {
+            text: " ".repeat(spaces),
+            color: None,
+            source: ChunkSource::MathBox { start, end },
+        }
+    }
+
+    /// Q#MS4: hits anywhere inside a suppressed span snap to its start, the
+    /// same rule `Adornment` uses, because the box has no interior byte map.
+    #[test]
+    fn hits_inside_a_math_box_snap_to_the_span_start() {
+        // `ab` + `$x^2$` suppressed to 3 spacer columns + `cd`
+        let chunks = vec![
+            RichChunk {
+                text: "ab".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 0 },
+            },
+            spacer_chunk(2, 7, 3),
+            RichChunk {
+                text: "cd".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 7 },
+            },
+        ];
+        let (runs, _) = build_hit_runs(&chunks);
+        assert_eq!(projected_to_source(&runs, 0), Some(0));
+        assert_eq!(projected_to_source(&runs, 1), Some(1));
+        // Every boundary within the spacer maps to the span start (2).
+        for projected in 2..=4 {
+            assert_eq!(
+                projected_to_source(&runs, projected),
+                Some(2),
+                "projected {projected} must snap to the span start"
+            );
+        }
+        // Past the box, ordinary source mapping resumes.
+        assert_eq!(projected_to_source(&runs, 5), Some(7));
+        assert_eq!(projected_to_source(&runs, 6), Some(8));
+    }
+
+    /// The inverse direction: a caret anywhere in the suppressed range sits
+    /// at the box's left edge, and text after it accounts for the full
+    /// reserved width (acceptance 10's "shifts by the quantized difference").
+    #[test]
+    fn source_positions_inside_a_math_box_map_to_its_left_edge() {
+        let chunks = vec![
+            RichChunk {
+                text: "ab".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 0 },
+            },
+            spacer_chunk(2, 7, 3),
+            RichChunk {
+                text: "cd".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 7 },
+            },
+        ];
+        assert_eq!(source_to_projected(&chunks, 0), Some(0));
+        assert_eq!(source_to_projected(&chunks, 2), Some(2));
+        // Interior source bytes collapse onto the left edge. `end` (7) is
+        // EXCLUSIVE and therefore NOT interior — an earlier revision of this
+        // test asserted Some(2) for it and pinned the bug.
+        assert_eq!(source_to_projected(&chunks, 4), Some(2));
+        assert_eq!(source_to_projected(&chunks, 6), Some(2));
+        assert_eq!(source_to_projected(&chunks, 7), Some(5), "end is exclusive");
+        assert_eq!(source_to_projected(&chunks, 8), Some(6));
+    }
+
+    /// A box at the END of a line has no following chunk to catch the
+    /// trailing boundary, which is exactly where the interior-snap rule used
+    /// to send a click back to the span start.
+    #[test]
+    fn a_line_final_math_box_maps_its_trailing_boundary_after_the_span() {
+        let chunks = vec![
+            RichChunk {
+                text: "ab".to_owned(),
+                color: None,
+                source: ChunkSource::Source { start: 0 },
+            },
+            spacer_chunk(2, 7, 3),
+        ];
+        let (runs, _) = build_hit_runs(&chunks);
+        assert_eq!(projected_to_source(&runs, 2), Some(2), "interior snaps");
+        assert_eq!(projected_to_source(&runs, 4), Some(2), "interior snaps");
+        assert_eq!(
+            projected_to_source(&runs, 5),
+            Some(7),
+            "the trailing boundary lands after the span, not on its start"
+        );
+    }
+
+    /// A math chunk carries generated spacer text, so tab expansion must
+    /// leave it alone rather than treating a space as a source tab.
+    #[test]
+    fn tab_expansion_preserves_a_math_chunk_untouched() {
+        let chunks = vec![spacer_chunk(0, 5, 4)];
+        let expanded = expand_chunk_tabs(chunks);
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].text, "    ");
+        assert!(matches!(
+            expanded[0].source,
+            ChunkSource::MathBox { start: 0, end: 5 }
+        ));
+    }
 }
 
 /// Build the projected→source run map plus the projected text's line
@@ -7774,6 +8421,11 @@ fn projected_to_source(runs: &[ProjectedRun], projected: u64) -> Option<u64> {
         ChunkSource::Source { start } => Some(start + within),
         ChunkSource::SourceTab { start } => Some(start + u64::from(within > 0)),
         ChunkSource::Adornment { anchor } => Some(anchor),
+        // Q#MS4: interior boundaries snap to the span start, since the box
+        // has no interior byte map. The TRAILING boundary is not interior —
+        // it maps after the span, matching `SourceTab`'s rule and keeping a
+        // click past a line-final box off the span start.
+        ChunkSource::MathBox { start, end } => Some(if within >= run.len { end } else { start }),
     }
 }
 
@@ -7805,6 +8457,17 @@ fn source_to_projected(chunks: &[RichChunk], source: u64) -> Option<u64> {
             }
             ChunkSource::Adornment { anchor } => {
                 if source <= anchor {
+                    return Some(projected);
+                }
+            }
+            ChunkSource::MathBox { end, .. } => {
+                // `end` is EXCLUSIVE: it is the first byte AFTER the span, so
+                // it must NOT claim the box's left edge. Letting it fall
+                // through gives it the position past the reserved width —
+                // which also keeps caret geometry continuous and stops a
+                // search match starting at `end` from washing a box it does
+                // not intersect (Q#MS11).
+                if source < end {
                     return Some(projected);
                 }
             }
@@ -9012,6 +9675,7 @@ fn clipped_chunks_for_range(
     adornments: &[InlineAdornment],
     start: u64,
     end: u64,
+    math: &[MathSubstitution],
 ) -> Vec<RichChunk> {
     let range_text = &text[start as usize..end as usize];
     let spans: Vec<StyleSpan> = spans
@@ -9032,13 +9696,14 @@ fn clipped_chunks_for_range(
             a
         })
         .collect();
-    projected_rich_chunks(range_text, &spans, &adornments)
+    projected_rich_chunks(range_text, &spans, &adornments, math)
 }
 
 fn projected_rich_chunks(
     text: &str,
     spans: &[StyleSpan],
     adornments: &[InlineAdornment],
+    math: &[MathSubstitution],
 ) -> Vec<RichChunk> {
     let text_len = text.len() as u64;
     // Every boundary used to slice `text` must be snapped to a UTF-8
@@ -9092,7 +9757,113 @@ fn projected_rich_chunks(
             source: ChunkSource::Source { start: 0 },
         });
     }
+    // Q#MS4: substitute suppressed math spans BEFORE tab expansion — a
+    // literal tab inside a span vanishes with the span's source bytes,
+    // and tabs outside keep their `SourceTab` provenance.
+    let chunks = substitute_math_spans(chunks, math);
     expand_chunk_tabs(chunks)
+}
+
+/// Replace each suppressed span's source bytes with ONE spacer chunk
+/// (Q#MS4). Spans are disjoint and ordered (detection scans left to
+/// right); a span split across style-boundary chunks emits its spacer
+/// at the first overlap and swallows the rest. Adornment chunks pass
+/// through — they consume no source bytes — so a hint anchored inside
+/// a suppressed span surfaces beside the box rather than vanishing.
+fn substitute_math_spans(chunks: Vec<RichChunk>, subs: &[MathSubstitution]) -> Vec<RichChunk> {
+    if subs.is_empty() {
+        return chunks;
+    }
+    let mut out = Vec::with_capacity(chunks.len() + subs.len());
+    let mut emitted = vec![false; subs.len()];
+    for chunk in chunks {
+        let ChunkSource::Source { start } = chunk.source else {
+            out.push(chunk);
+            continue;
+        };
+        let end = start + chunk.text.len() as u64;
+        let mut pos = start;
+        while pos < end {
+            // The first span not entirely before `pos`.
+            let idx = subs.partition_point(|s| s.span.end as u64 <= pos);
+            let cut = match subs.get(idx) {
+                Some(s) if (s.span.start as u64) <= pos => {
+                    // Inside a suppressed span: emit its spacer once.
+                    if !emitted[idx] {
+                        emitted[idx] = true;
+                        out.push(RichChunk {
+                            text: s.spacer.clone(),
+                            color: None,
+                            source: ChunkSource::MathBox {
+                                start: s.span.start as u64,
+                                end: s.span.end as u64,
+                            },
+                        });
+                    }
+                    pos = (s.span.end as u64).min(end);
+                    continue;
+                }
+                Some(s) => (s.span.start as u64).min(end),
+                None => end,
+            };
+            // Verbatim source up to the next span (or chunk end). Span
+            // boundaries sit on ASCII `$`, so the slice is char-safe.
+            out.push(RichChunk {
+                text: chunk.text[(pos - start) as usize..(cut - start) as usize].to_owned(),
+                color: chunk.color,
+                source: ChunkSource::Source { start: pos },
+            });
+            pos = cut;
+        }
+    }
+    out
+}
+
+/// Q#MS11's intersection rule for wash geometry: widen a projected
+/// interval to cover the FULL projected extent of every math chunk
+/// whose suppressed source range intersects the wash's source range.
+/// Non-intersecting boxes are untouched — the round-3 F1 fix keeps a
+/// wash that merely starts at a span's exclusive `end` off the box.
+fn widen_over_math_chunks(
+    chunks: &[RichChunk],
+    (source_lo, source_hi): (u64, u64),
+    (mut projected_lo, mut projected_hi): (u64, u64),
+) -> (u64, u64) {
+    let mut projected = 0u64;
+    for chunk in chunks {
+        let len = chunk.text.len() as u64;
+        if let ChunkSource::MathBox { start, end } = chunk.source
+            && source_lo < end
+            && start < source_hi
+        {
+            projected_lo = projected_lo.min(projected);
+            projected_hi = projected_hi.max(projected + len);
+        }
+        projected += len;
+    }
+    (projected_lo, projected_hi)
+}
+
+/// Pair each post-expansion `MathBox` chunk with its fitted box, in
+/// projected byte space — the draw pass's addressing.
+fn placed_math_boxes(chunks: &[RichChunk], subs: &[MathSubstitution]) -> Vec<PlacedMathBox> {
+    let mut placed = Vec::new();
+    let mut projected = 0u64;
+    for chunk in chunks {
+        if let ChunkSource::MathBox { start, end } = chunk.source
+            && let Some(sub) = subs
+                .iter()
+                .find(|s| s.span.start as u64 == start && s.span.end as u64 == end)
+        {
+            placed.push(PlacedMathBox {
+                projected_start: projected,
+                projected_len: chunk.text.len() as u64,
+                boxed: sub.boxed.clone(),
+            });
+        }
+        projected += chunk.text.len() as u64;
+    }
+    placed
 }
 
 /// Expand display tabs after source styling and adornment insertion.
@@ -9139,6 +9910,9 @@ fn expand_chunk_tabs(chunks: Vec<RichChunk>) -> Vec<RichChunk> {
                     },
                     ChunkSource::Adornment { anchor } => ChunkSource::Adornment { anchor },
                     ChunkSource::SourceTab { start } => ChunkSource::SourceTab { start },
+                    // A suppressed math span's spacer text is generated, not
+                    // source, so it holds no tab byte to expand.
+                    ChunkSource::MathBox { start, end } => ChunkSource::MathBox { start, end },
                 },
             });
             column += tab_width;
@@ -9164,6 +9938,9 @@ fn offset_chunk_source(source: ChunkSource, byte_offset: u64) -> ChunkSource {
         },
         ChunkSource::SourceTab { start } => ChunkSource::SourceTab { start },
         ChunkSource::Adornment { anchor } => ChunkSource::Adornment { anchor },
+        // The suppressed range is already in slice coordinates and is never
+        // split, so a within-chunk offset does not move it.
+        ChunkSource::MathBox { start, end } => ChunkSource::MathBox { start, end },
     }
 }
 
@@ -9991,6 +10768,7 @@ mod tests {
             &adornments,
             0,
             text.len() as u64,
+            &[],
         ));
 
         // Line ranges as the surgery computes them: content excludes
@@ -10004,6 +10782,7 @@ mod tests {
                 &adornments,
                 start,
                 content_end,
+                &[],
             )));
         }
 
@@ -10015,12 +10794,12 @@ mod tests {
 
         // The boundary hint landed on line 0 (before its newline), not
         // line 1.
-        let line0 = clipped_chunks_for_range(text, &spans, &adornments, 0, 10);
+        let line0 = clipped_chunks_for_range(text, &spans, &adornments, 0, 10, &[]);
         assert!(
             line0.iter().any(|c| c.text == "<eol>"),
             "newline-anchored hint belongs to the line it terminates"
         );
-        let line1 = clipped_chunks_for_range(text, &spans, &adornments, 11, 22);
+        let line1 = clipped_chunks_for_range(text, &spans, &adornments, 11, 22, &[]);
         assert!(
             line1.iter().all(|c| c.text != "<eol>"),
             "newline-anchored hint must not duplicate onto the next line"
@@ -10085,7 +10864,7 @@ mod tests {
     #[test]
     fn tab_projection_uses_shared_stops_and_unicode_columns() {
         let projected = |text: &str| {
-            projected_rich_chunks(text, &[], &[])
+            projected_rich_chunks(text, &[], &[], &[])
                 .into_iter()
                 .map(|chunk| chunk.text)
                 .collect::<String>()
@@ -10112,6 +10891,7 @@ mod tests {
             "1234567\tX",
             &[span(7, 8, red)],
             &[adornment(0, AdornmentPlacement::AtOffset, "\t")],
+            &[],
         );
         assert_eq!(
             chunks
@@ -10152,7 +10932,7 @@ mod tests {
 
     #[test]
     fn source_tab_projection_boundaries_are_bidirectional() {
-        let chunks = projected_rich_chunks("\tX", &[], &[]);
+        let chunks = projected_rich_chunks("\tX", &[], &[], &[]);
         let (runs, _) = build_hit_runs(&chunks);
 
         assert_eq!(source_to_projected(&chunks, 0), Some(0));
@@ -10175,6 +10955,7 @@ mod tests {
             "X",
             &[],
             &[adornment(0, AdornmentPlacement::AtOffset, "\t")],
+            &[],
         );
         let (runs, _) = build_hit_runs(&chunks);
 
@@ -10428,6 +11209,7 @@ mod tests {
                 span(4, 9, CellColor::Indexed(2)),
             ],
             &[],
+            &[],
         );
         let rendered: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
         assert_eq!(rendered, text, "chunks must reassemble the original text");
@@ -10464,6 +11246,7 @@ mod tests {
             "abcd",
             &[],
             &[adornment(2, AdornmentPlacement::AtOffset, "X")],
+            &[],
         );
 
         assert_eq!(chunk_texts(&chunks), vec!["ab", "X", "cd"]);
@@ -10477,6 +11260,7 @@ mod tests {
             "abcd",
             &[span(2, 4, CellColor::Indexed(1))],
             &[adornment(2, AdornmentPlacement::AtOffset, "X")],
+            &[],
         );
 
         assert_eq!(chunk_texts(&chunks), vec!["ab", "X", "cd"]);
@@ -10501,6 +11285,7 @@ mod tests {
                 adornment(4, AdornmentPlacement::EndOfLine, "end"),
                 resource_adornment(2, AdornmentPlacement::AtOffset),
             ],
+            &[],
         );
 
         assert_eq!(chunk_texts(&chunks), vec!["abcd"]);
@@ -10512,6 +11297,7 @@ mod tests {
             "abcd",
             &[],
             &[adornment(99, AdornmentPlacement::AtOffset, "X")],
+            &[],
         );
 
         assert_eq!(chunk_texts(&chunks), vec!["abcd", "X"]);
@@ -10922,6 +11708,400 @@ mod tests {
         assert!(
             px.iter().any(|&b| b != first),
             "frame is a single uniform value — nothing appears to have rendered"
+        );
+    }
+
+    // --- Inline-math slice acceptance (framing §5, criteria 5–11/14/15) --
+    //
+    // Everything here renders through the REAL `render_to_view`
+    // composition to offscreen pixels: a layout engine wired to
+    // nothing cannot pass these (the framing's central vacuity worry).
+
+    /// The first suppressed span's spacer chunk in the shaped slice:
+    /// `(span_start, span_end, spacer_text)`, line-relative.
+    fn math_chunk(state: &State) -> Option<(u64, u64, String)> {
+        state.line_chunk_cache.iter().flatten().find_map(|c| {
+            if let ChunkSource::MathBox { start, end } = c.source {
+                Some((start, end, c.text.clone()))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Pixel x-extents of the first placed box and of its full spacer:
+    /// `(box_left, box_right, spacer_right)`.
+    fn box_pixels(state: &State) -> Option<(f32, f32, f32)> {
+        let placed = state
+            .line_math_cache
+            .iter()
+            .flat_map(|m| &m.placed)
+            .next()?;
+        let lo = placed.projected_start;
+        let hi = lo + placed.projected_len;
+        for run in state.buffer.layout_runs() {
+            let Some(anchor) = run.glyphs.iter().find(|g| g.start as u64 == lo) else {
+                continue;
+            };
+            let left = state.text_left() + anchor.x;
+            let spacer_right = run
+                .glyphs
+                .iter()
+                .filter(|g| (g.start as u64) >= lo && (g.start as u64) < hi)
+                .map(|g| g.x + g.w)
+                .fold(anchor.x, f32::max);
+            return Some((
+                left,
+                left + placed.boxed.width,
+                state.text_left() + spacer_right,
+            ));
+        }
+        None
+    }
+
+    /// Whether the pixel at `(x, y)` differs from the frame's own
+    /// background sample by more than anti-aliasing noise. Relative to
+    /// a sampled corner pixel, so the sRGB target encoding is
+    /// irrelevant.
+    fn differs_from_bg(px: &[u8], width: u32, bg: [u8; 3], x: u32, y: u32) -> bool {
+        let i = ((y * width + x) * 4) as usize;
+        px[i].abs_diff(bg[0]) > 25
+            || px[i + 1].abs_diff(bg[1]) > 25
+            || px[i + 2].abs_diff(bg[2]) > 25
+    }
+
+    fn bg_sample(px: &[u8], width: u32) -> [u8; 3] {
+        let i = ((8 * width + 8) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    }
+
+    fn region(px: &[u8], width: u32, x0: u32, x1: u32, y0: u32, y1: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for y in y0..y1 {
+            out.extend_from_slice(
+                &px[((y * width + x0) * 4) as usize..((y * width + x1) * 4) as usize],
+            );
+        }
+        out
+    }
+
+    /// Acceptance 5 + 10 (first half): a suppressed span draws INK the
+    /// same projected text without math does not, while every pixel
+    /// left of the box is identical — so the difference is the drawn
+    /// box, not a reflow artifact.
+    #[test]
+    fn math_box_renders_ink_where_a_plain_spacer_renders_none() {
+        let Some(mut state) = headless_or_skip(480, 120, "before $x^2$ after") else {
+            return;
+        };
+        // No caret anywhere: every gate is empty, the span suppresses.
+        let with_math = state.render_offscreen();
+        let (_, _, spacer) = math_chunk(&state).expect("the span must suppress");
+        let (bl, br, _) = box_pixels(&state).expect("the box is placed");
+        // A buffer holding the LITERAL projected text — spacer spaces
+        // in place of the math — shapes the identical glyph stream
+        // with an empty box region.
+        let plain_text = format!("before {spacer} after");
+        let Some(mut plain_state) = headless_or_skip(480, 120, &plain_text) else {
+            return;
+        };
+        let plain = plain_state.render_offscreen();
+        let bg = bg_sample(&with_math, 480);
+        let (y0, y1) = (TEXT_TOP as u32, (TEXT_TOP + BASE_CODE_LINE_HEIGHT) as u32);
+        let box_cols = (bl.floor() as u32).saturating_sub(1)..(br.ceil() as u32 + 1);
+        let math_ink = (y0..y1)
+            .flat_map(|y| box_cols.clone().map(move |x| (x, y)))
+            .filter(|&(x, y)| differs_from_bg(&with_math, 480, bg, x, y))
+            .count();
+        let plain_ink = (y0..y1)
+            .flat_map(|y| box_cols.clone().map(move |x| (x, y)))
+            .filter(|&(x, y)| differs_from_bg(&plain, 480, bg, x, y))
+            .count();
+        assert!(
+            math_ink > 4,
+            "the box region must hold drawn math ink ({math_ink} px)"
+        );
+        assert_eq!(
+            plain_ink, 0,
+            "the spacer-only control renders nothing there"
+        );
+        // Text BEFORE the span occupies identical pixels (acceptance 10).
+        let cut = bl.floor() as u32 - 1;
+        assert_eq!(
+            region(&with_math, 480, 0, cut, y0, y1),
+            region(&plain, 480, 0, cut, y0, y1),
+            "pixels left of the box must not move"
+        );
+    }
+
+    /// Acceptance 6: the fraction bar is a drawn rule — a contiguous
+    /// horizontal ink run spanning most of the box, with operand ink
+    /// above and below it.
+    #[test]
+    fn a_fraction_draws_rule_pixels_between_its_operand_rows() {
+        let Some(mut state) = headless_or_skip(480, 120, r"x $\frac{ab}{cd}$ y") else {
+            return;
+        };
+        let px = state.render_offscreen();
+        let (bl, br, _) = box_pixels(&state).expect("fraction renders");
+        let bg = bg_sample(&px, 480);
+        let cols = bl.floor() as u32..br.ceil() as u32;
+        let band = TEXT_TOP as u32..(TEXT_TOP + BASE_CODE_LINE_HEIGHT) as u32;
+        let run_len = |y: u32| {
+            let mut best = 0u32;
+            let mut cur = 0u32;
+            for x in cols.clone() {
+                if differs_from_bg(&px, 480, bg, x, y) {
+                    cur += 1;
+                    best = best.max(cur);
+                } else {
+                    cur = 0;
+                }
+            }
+            best
+        };
+        let width = br - bl;
+        let rule_row = band
+            .clone()
+            .find(|&y| f64::from(run_len(y)) >= f64::from(width) * 0.8)
+            .expect("some row must carry the full-width rule run");
+        let ink_in_rows = |rows: std::ops::Range<u32>| {
+            rows.flat_map(|y| cols.clone().map(move |x| (x, y)))
+                .filter(|&(x, y)| differs_from_bg(&px, 480, bg, x, y))
+                .count()
+        };
+        assert!(
+            ink_in_rows(band.start..rule_row.saturating_sub(1)) > 0,
+            "numerator ink above the rule"
+        );
+        assert!(
+            ink_in_rows(rule_row + 2..band.end) > 0,
+            "denominator ink below the rule"
+        );
+    }
+
+    /// Acceptance 7 + 9 + 15: with the caret inside the span — driven
+    /// through the REAL `CursorByte` arm, which owns the suppression
+    /// refresh — the frame is pixel-identical to math being disabled
+    /// wholesale; moving the caret out re-renders the math.
+    #[test]
+    fn caret_inside_a_span_shows_source_exactly_as_if_math_were_disabled() {
+        let Some(mut state) = headless_or_skip(480, 120, "before $x^2$ after") else {
+            return;
+        };
+        let buf = BufferId::next();
+        state.current_buffer_id = Some(buf);
+        state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: buf,
+            byte_pos: 9,
+        });
+        let caret_inside = state.render_offscreen();
+        let engine = state.math_engine.take();
+        state.reshape();
+        let disabled = state.render_offscreen();
+        assert_eq!(
+            caret_inside, disabled,
+            "caret-inside must render the raw source, exactly"
+        );
+        // Direction two: engine back, caret out — math returns.
+        state.math_engine = engine;
+        state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: buf,
+            byte_pos: 0,
+        });
+        let caret_outside = state.render_offscreen();
+        assert!(
+            math_chunk(&state).is_some(),
+            "the span suppresses again once the caret leaves"
+        );
+        assert_ne!(caret_outside, disabled, "the math box is drawn again");
+    }
+
+    /// Acceptance 9 + 15 (+ the round-3 F3 uncoverable-glyph path) on
+    /// pixels: every failure mode renders exactly as if math were
+    /// disabled — no panic, no half-rendered box.
+    #[test]
+    fn failures_and_display_math_render_as_source() {
+        for text in [r"$\frac{a$ x", r"$\unknown{}$ x", "$$x$$", "$x日$ y"] {
+            let Some(mut state) = headless_or_skip(480, 120, text) else {
+                return;
+            };
+            let with_engine = state.render_offscreen();
+            assert!(
+                math_chunk(&state).is_none(),
+                "{text:?} must not suppress anything"
+            );
+            state.math_engine = None;
+            state.reshape();
+            let disabled = state.render_offscreen();
+            assert_eq!(with_engine, disabled, "{text:?} must render as source");
+        }
+    }
+
+    /// Acceptance 8: clicks inside the rendered box land on the span's
+    /// start byte; the surrounding text's mapping is unchanged.
+    #[test]
+    fn a_click_inside_a_rendered_box_lands_on_the_span_start() {
+        let Some(mut state) = headless_or_skip(480, 120, "before $x^2$ after") else {
+            return;
+        };
+        state.current_buffer_id = Some(BufferId::next());
+        let _ = state.render_offscreen();
+        let (bl, _, spacer_right) = box_pixels(&state).expect("box placed");
+        let y = f64::from(TEXT_TOP + 5.0);
+        assert_eq!(
+            state.hit_test_source_byte(f64::from(bl + 2.0), y),
+            Some(7),
+            "a click just inside the box snaps to the span start"
+        );
+        assert_eq!(
+            state.hit_test_source_byte(f64::from(f32::midpoint(bl, spacer_right)), y),
+            Some(7),
+            "mid-box clicks snap to the span start"
+        );
+        assert_eq!(
+            state.hit_test_source_byte(f64::from(state.text_left() + 1.0), y),
+            Some(0),
+            "text before the box maps as ordinary source"
+        );
+        // Just past the reserved width, BEFORE the following space
+        // glyph's midpoint: cosmic-text rounds a click to the nearest
+        // caret boundary, so a mid-glyph click legitimately rounds
+        // forward — the boundary under test is the box's trailing
+        // edge, which the round-3 F1 fix maps after the span.
+        assert_eq!(
+            state.hit_test_source_byte(f64::from(spacer_right + 1.0), y),
+            Some(12),
+            "the first click past the reserved width lands after the span"
+        );
+    }
+
+    /// Acceptance 11's scroll-reuse bite: a line retained by the
+    /// scroll path while the caret's gate state changed must be
+    /// rebuilt, not reused — with suppression missing from the reuse
+    /// predicate, the stale source-state line survives and this fails.
+    #[test]
+    fn scroll_reuse_refuses_a_line_shaped_under_a_stale_caret_gate() {
+        let Some(mut state) = headless_or_skip(480, 160, "$x^2$\nsecond line\nthird line") else {
+            return;
+        };
+        let buf = BufferId::next();
+        state.current_buffer_id = Some(buf);
+        state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: buf,
+            byte_pos: 2,
+        });
+        assert!(
+            math_chunk(&state).is_none(),
+            "caret inside: the span renders as source"
+        );
+        let source_frame = state.render_offscreen();
+        // The caret leaves the span by a path that reaches the scroll
+        // rebuild WITHOUT any refresh in between: reuse must refuse
+        // the retained line because its gate bit is stale.
+        state.own_cursor = Some(OwnCursor {
+            buffer_id: buf,
+            byte: 8,
+        });
+        state.rebuild_lines_reusing_scroll();
+        assert!(
+            math_chunk(&state).is_some(),
+            "the stale-gated line must be rebuilt, not reused"
+        );
+        let rebuilt_frame = state.render_offscreen();
+        assert_ne!(source_frame, rebuilt_frame, "the math box is drawn");
+    }
+
+    /// Acceptance 10 (second half): suppression toggling reflows ONLY
+    /// the affected line, and the text after the span shifts by
+    /// exactly the quantized projection difference.
+    #[test]
+    fn suppression_reflow_is_confined_to_the_affected_line() {
+        let Some(mut state) = headless_or_skip(480, 160, "before $x^2$ after\nsecond line") else {
+            return;
+        };
+        let buf = BufferId::next();
+        state.current_buffer_id = Some(buf);
+        let _ = state.render_offscreen();
+        let (_, _, spacer) = math_chunk(&state).expect("suppressed");
+        let spacer_len = spacer.len() as u64;
+        // Projected position of the 'a' in "after" (byte 13) while the
+        // box is rendered...
+        let suppressed_projected = state.code_byte_to_projected(13).expect("maps").1 as u64;
+        let suppressed_frame = state.render_offscreen();
+        // ...and with the caret inside (raw source).
+        state.apply_attach_message(InstanceMessage::CursorByte {
+            buffer_id: buf,
+            byte_pos: 9,
+        });
+        assert!(math_chunk(&state).is_none());
+        let raw_projected = state.code_byte_to_projected(13).expect("maps").1 as u64;
+        let raw_frame = state.render_offscreen();
+        assert_eq!(
+            suppressed_projected,
+            raw_projected + spacer_len - 5,
+            "text after the span shifts by exactly the quantized difference \
+             (spacer {spacer_len} vs 5 source bytes)"
+        );
+        // The second line's pixel band is untouched by the toggle.
+        let (y0, y1) = (
+            (TEXT_TOP + BASE_CODE_LINE_HEIGHT) as u32,
+            (TEXT_TOP + 2.0 * BASE_CODE_LINE_HEIGHT) as u32,
+        );
+        assert_eq!(
+            region(&suppressed_frame, 480, 0, 480, y0, y1),
+            region(&raw_frame, 480, 0, 480, y0, y1),
+            "no other line moves"
+        );
+    }
+
+    /// Acceptance 14: a selection ENDPOINT inside a span unsuppresses
+    /// it (pixel-identical to math-disabled with the same selection);
+    /// a selection ENCLOSING the span leaves it rendered and washes
+    /// the whole reserved rectangle (Q#MS11's intersection rule).
+    #[test]
+    fn selection_endpoints_gate_and_enclosing_selections_wash_the_box() {
+        let Some(mut state) = headless_or_skip(480, 120, "before $x^2$ after") else {
+            return;
+        };
+        state.current_buffer_id = Some(BufferId::next());
+        // (a) endpoint at byte 9, inside the span.
+        state.current_decorations = vec![Decoration {
+            range: ByteRange { start: 9, end: 14 },
+            kind: DecorationKind::Selection,
+        }];
+        state.reshape();
+        assert!(
+            math_chunk(&state).is_none(),
+            "an endpoint inside the span unsuppresses it"
+        );
+        let gated = state.render_offscreen();
+        let engine = state.math_engine.take();
+        state.reshape();
+        let disabled = state.render_offscreen();
+        assert_eq!(gated, disabled, "gated == raw source with the same wash");
+        // (b) both endpoints outside: the span stays rendered and the
+        // wash covers the whole reserved rectangle.
+        state.math_engine = engine;
+        state.current_decorations = vec![Decoration {
+            range: ByteRange { start: 0, end: 18 },
+            kind: DecorationKind::Selection,
+        }];
+        state.reshape();
+        assert!(
+            math_chunk(&state).is_some(),
+            "an enclosing selection leaves the span rendered"
+        );
+        let washed = state.render_offscreen();
+        state.current_decorations.clear();
+        state.reshape();
+        let unwashed = state.render_offscreen();
+        let (bl, br, _) = box_pixels(&state).expect("box placed");
+        let (y0, y1) = (TEXT_TOP as u32, (TEXT_TOP + BASE_CODE_LINE_HEIGHT) as u32);
+        assert_ne!(
+            region(&washed, 480, bl as u32, br.ceil() as u32, y0, y1),
+            region(&unwashed, 480, bl as u32, br.ceil() as u32, y0, y1),
+            "the wash tints the box's reserved rectangle"
         );
     }
 

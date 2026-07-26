@@ -71,8 +71,8 @@ use crossbeam::channel as cb_channel;
 use serde::{Deserialize, Serialize};
 
 use crate::fs::{
-    FsDirEntry, FsError, chmod_blocking, read_dir_blocking, remove_blocking, rename_blocking,
-    stat_blocking,
+    FsDirEntry, FsDirListing, FsError, ReadDirTolerance, chmod_blocking, read_dir_blocking,
+    remove_blocking, rename_blocking, stat_blocking,
 };
 use crate::message_bus::{BusEnd, MessageBus, SchemaRegistry};
 use crate::syntax::{self as syntax_mod, ParseRequest, ParseTreeBundle};
@@ -220,9 +220,10 @@ enum ReplyKind {
     /// T M4.1.
     Parse { duration_ms: u64 },
     /// `dispatch_fs_read_dir` completed; payload is the directory
-    /// listing. The Vec is `Serialize` so it crosses the bus
-    /// directly --- no side handoff like parse trees need. T M8.1.
-    ReadDir(Vec<FsDirEntry>),
+    /// listing. The listing is `Serialize` so it crosses the bus
+    /// directly --- no side handoff like parse trees need. T M8.1; its
+    /// per-entry error channel is dired Q#DR6.
+    ReadDir(FsDirListing),
     /// `dispatch_fs_stat` completed; payload is the per-path
     /// metadata. T M8.1.
     Stat(FsDirEntry),
@@ -266,10 +267,11 @@ pub enum JobResult {
         duration_ms: u64,
     },
     /// `dispatch_fs_read_dir` produced a directory listing. The
-    /// Lua boundary in [`crate::lua_bindings`] turns the Vec into a
-    /// per-entry table when `_take_result` consumes the result.
-    /// T M8.1.
-    ReadDir(Vec<FsDirEntry>),
+    /// Lua boundary in [`crate::lua_bindings`] turns the entries into
+    /// per-entry tables when `_take_result` consumes the result, and
+    /// keys the result *shape* on whether the listing carries a
+    /// per-entry error channel. T M8.1 / dired Q#DR6.
+    ReadDir(FsDirListing),
     /// `dispatch_fs_stat` produced metadata for a single path. The
     /// Lua boundary turns the [`FsDirEntry`] into the same table
     /// shape `read_dir` entries use. T M8.1.
@@ -832,11 +834,21 @@ impl AsyncRuntime {
     /// `lstat`-style metadata. Polls cancel every batch of
     /// entries; supersede follows the same rule as the other
     /// dispatchers. T M8.1.
-    pub fn dispatch_fs_read_dir(&self, path: PathBuf, supersede: Option<&str>) -> JobId {
+    ///
+    /// `tolerance` selects the per-entry contract (dired Q#DR6):
+    /// [`ReadDirTolerance::Fatal`] is the original all-or-nothing
+    /// listing, [`ReadDirTolerance::PerEntry`] carries per-entry
+    /// failures alongside the entries that survived.
+    pub fn dispatch_fs_read_dir(
+        &self,
+        path: PathBuf,
+        tolerance: ReadDirTolerance,
+        supersede: Option<&str>,
+    ) -> JobId {
         let (id, cancel) = self.allocate(JobKind::FsReadDir, supersede, None);
         let bus = self.workers.clone();
         self.pool.dispatch(move |_pool| {
-            let kind = run_fs_read_dir(&cancel, &path);
+            let kind = run_fs_read_dir(&cancel, &path, tolerance);
             let _ = bus.send(ASYNC_REPLY_TOPIC, &WorkerReply { job_id: id, kind });
         });
         id
@@ -1038,8 +1050,8 @@ impl AsyncRuntime {
                         ReplyKind::Parse { duration_ms } => {
                             PendingState::Complete(JobResult::Parse { duration_ms })
                         }
-                        ReplyKind::ReadDir(entries) => {
-                            PendingState::Complete(JobResult::ReadDir(entries))
+                        ReplyKind::ReadDir(listing) => {
+                            PendingState::Complete(JobResult::ReadDir(listing))
                         }
                         ReplyKind::Stat(entry) => PendingState::Complete(JobResult::Stat(entry)),
                         ReplyKind::Json(v) => PendingState::Complete(JobResult::Json(v)),
@@ -1295,9 +1307,13 @@ fn run_sleep(cancel: &CancellationToken, total: Duration) -> ReplyKind {
 /// [`FsError::Cancelled`] becomes [`ReplyKind::Cancelled`];
 /// [`FsError::Io`] becomes [`ReplyKind::Error`] with the
 /// human-readable message attached.
-fn run_fs_read_dir(cancel: &CancellationToken, path: &Path) -> ReplyKind {
-    match read_dir_blocking(path, cancel) {
-        Ok(entries) => ReplyKind::ReadDir(entries),
+fn run_fs_read_dir(
+    cancel: &CancellationToken,
+    path: &Path,
+    tolerance: ReadDirTolerance,
+) -> ReplyKind {
+    match read_dir_blocking(path, cancel, tolerance) {
+        Ok(listing) => ReplyKind::ReadDir(listing),
         Err(FsError::Cancelled) => ReplyKind::Cancelled,
         Err(e @ (FsError::Io { .. } | FsError::NonUtf8Path { .. })) => {
             ReplyKind::Error(e.to_string())

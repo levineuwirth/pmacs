@@ -237,7 +237,7 @@ candidates, ranked:
 
 | Font | Table quality | License | Notes |
 |------|--------------|---------|-------|
-| **Latin Modern Math** | Full | OFL (GUST) | Reference, ships with TeX Live, most widely tested |
+| **Latin Modern Math** | Full | **GUST Font License** (not OFL) | Reference, ships with TeX Live, most widely tested; ~717 KiB. Bundled by #158 as `pmacs-gpu/fonts/latinmodern-math.otf` |
 | **STIX Two Math** | Full | OFL | Broader Unicode coverage |
 | **Cambria Math** | Full | Proprietary | Ships with Office; unavailable on Linux |
 | **Libertinus Math** | Full | OFL | Derivative of Latin Modern, wider |
