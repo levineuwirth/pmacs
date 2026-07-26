@@ -837,20 +837,23 @@ If it does not, stop and repair the remote/fetch configuration.
     daemon refusal arrives after the frontend has already applied
     optimistically and painted. It buys divergence instead of silent
     agreement; it does not prevent the mutation the user sees.
-  - **Gate-run flake identified and attributed, not waved off.**
+  - **Gate-run flake observed and scoped without overclaiming its cause.**
     `cargo test --lib --features crdt` failed ~1 run in 5 on
     `process::tests::setsid_escapee_is_not_reaped_and_teardown_reclaims_readers`
     — `active_reader_probe` returning `None` at `process.rs:3179`
     ("live runtime probe"). **Pre-existing and unrelated:** this branch
     does not touch `src/process.rs` (last changed by the Darwin PTY
-    signal-name fix), and the test passes 10/10 standalone, failing only
-    under full-suite parallelism. It is **another instance of the known
-    `drain_until` trap** — draining for `Started` to learn the pid also
-    ticks, and a tick reaps the leader, so the probe that follows finds
-    nothing live. Same module and same signature as the earlier
-    `signal`-says-"is not running" case. This also explains the
-    unattributed "2 failed" CRDT run recorded in round 2. Belongs to the
-    CI `crdt`-coverage lane, which is where the whole class lives.
+    signal-name fix), and the test passed 10/10 standalone; the observed
+    failures were during parallel full-suite runs. That localizes the
+    trigger to suite load or interaction, but does **not** distinguish
+    parallelism from another full-suite effect — no serial full-suite bite
+    was run. The leading code-path explanation is the known `drain_until`
+    trap: draining for `Started` also ticks, and a tick can reap the leader
+    before the following `active_reader_probe`. That is an inference from
+    the failure site and control flow, not yet a falsified root cause.
+    It belongs to the CI `crdt`-coverage lane for discrimination. The two
+    round-2 CRDT failures had no captured test names; this flake is a
+    plausible candidate for them, but they remain **unattributed**.
 - Load-bearing decisions, each forced by scouted ground truth:
   - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
     no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
