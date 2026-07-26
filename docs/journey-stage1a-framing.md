@@ -1,7 +1,7 @@
 # Journey Stage 1a — open a directory, on one path
 
-**Status: framing, rev 6 — APPROVED at rev 5; rev 6 records
-corrections found during implementation.**
+**Status: framing, rev 8 — APPROVED at rev 5; revs 6–8 record
+corrections found during implementation and review of PR #182.**
 **Serves `COHERENCE.md` §2 (the golden product journey), §19 (coherence
 acceptance tests), §20 Priority 1.**
 
@@ -146,6 +146,30 @@ acceptance tests), §20 Priority 1.**
     (preflight moved after the callback) fails P1 and P2 and nothing
     else; mutation C (drop the `ScopedFrontend` arm) fails N4b and
     nothing else.
+
+- rev 8 (2026-07-26) — **review of PR #182.** One implementation gap and
+  two stale claims:
+  - **dired did not honor the captured window.** §4.4 specified
+    `display{ window = dest:window() }`; the implementation still ended
+    in `pmacs.window.switch_buffer`, which targets whatever window the
+    *scoped frontend* has selected. The scope pins the frontend; it does
+    not pin the window. So a split or panel that took focus while
+    `read_dir` was pending received the listing, and `prev` was captured
+    from it too — with every preflight check passing, because the
+    captured window was still live and still held its captured buffer.
+    Fixed in both places (`display` and the `prev` read), and **N4c**
+    added. The suite's routing pins all varied *frontend* identity;
+    none varied the selected window within one frontend, which is why
+    23 green pins missed it.
+  - **The §0 scorecard row still graded §2 "Broken at entry"** while §2's
+    own ground truth had been rewritten — the scorecard is a second copy
+    of the same claim and §25's update protocol covers both. §19's row
+    and ground truth were stale in the same way (this PR creates the
+    first cross-subsystem suite) and are corrected too.
+  - **P4 still said "leaves exactly one buffer"**, the exact claim rev 6
+    corrected as false everywhere else. Restated to what it actually
+    pins — the file is in the *active window* — matching the test that
+    was already written correctly.
 
 ---
 
@@ -741,6 +765,15 @@ is **removed rather than recast**: it proved nothing N1 does not.
 - **N5** Bootstrap with a deliberately **non-scratch** LOCAL primary
   document buffer: the reply's `buffer_id` is that buffer, and after
   quiescence the window shows dired (Q#JR9, §4.5).
+- **N4c — the captured *window*, not the captured frontend's selected
+  one (added rev 8).** One frontend, two windows: capture a destination,
+  then split and move focus to the other window and give it a buffer of
+  its own, then run dired's handler path with the captured destination.
+  The listing lands in the captured window, the focused window is
+  untouched, and `q` returns to the buffer the *captured* window showed.
+  Falsified independently by restoring `switch_buffer` in dired's
+  `display` and by reading `prev` from the ambient window — both were
+  verified to fail only this pin.
 - **N6 — `commit_to` scopes and restores, on every exit path.** Three
   cases, each asserting that **both** the scoped override and
   `core.active_frontend` return to their prior values: (a) `fn` returns
@@ -826,10 +859,16 @@ entire claim. P3–P8 are preservation pins in the strict sense.
   that handle's `prev`, entries, and cursor untouched.
   *Mutation:* restore the ambient `handle.prev = pmacs.window.buffer()`
   outside the scope (§2.5 step 4).
-- **P4 — the startup scratch is still dropped (Q#JR3).**
-  `EditorState::open` leaves exactly one buffer.
+- **P4 — startup shows the file in the *active window* (Q#JR3, corrected
+  rev 6, restated rev 8).** `EditorState::open` displays the loaded
+  buffer in the active window and no window is left showing the startup
+  scratch. It does **not** assert a buffer count: `replace_active_buffer`
+  does not drop the scratch buffer, and rev 5's "leaves exactly one
+  buffer" wording — which survived rev 6's correction here by oversight,
+  caught in review of PR #182 — asserted a guarantee the editor does not
+  make.
   *Mutation:* replace `replace_active_buffer` with a bare
-  `install_buffer_in_window`.
+  `install_buffer_in_window` into some other window.
 - **P5 — the `NotFound` arm survives the refactor.** A nonexistent path
   yields an empty path-backed buffer with `[new file]` and fires no hook.
   *Mutation:* delete the `NotFound` arm from `resolve_target_buffer`.

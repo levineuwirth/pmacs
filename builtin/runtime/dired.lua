@@ -571,7 +571,15 @@ end
 -- deliberately so (Q#DR10): the next directory is the same kind of
 -- thing as the current one and belongs in the same slot, while a file
 -- is not a dired buffer and belongs in the document area.
-local function display(handle, opts, departed)
+--
+-- `captured` (Journey Stage 1a, Q#JR14) is the destination window a
+-- background open must land in. It is NOT the same as "wherever the
+-- scoped frontend is looking now": the scope fixes the *frontend*, and
+-- within one frontend the selected window can still have moved to
+-- another split while the listing was in flight. The preflight cannot
+-- catch that -- the captured window is still live and still holds its
+-- captured buffer -- so honoring it is this function's job.
+local function display(handle, opts, departed, captured)
   local side = nil
   if departed ~= nil then
     -- Dired's own window, not the request's: walking a tree in a side
@@ -587,6 +595,11 @@ local function display(handle, opts, departed)
     -- both the substrate's documented policy and Emacs's, so dired does
     -- not try to unpin the user's panel.
     pmacs.window.display(handle.buf, { side = side, select = true })
+  elseif captured ~= nil then
+    -- `select = true` because the rest of the commit -- seat_cursor via
+    -- `pmacs.editor.move_to_line` -- acts on the frontend's ACTIVE
+    -- window, so the seat would land in the wrong window otherwise.
+    pmacs.window.display(handle.buf, { window = captured, select = true })
   else
     pmacs.window.switch_buffer(handle.buf)
   end
@@ -641,6 +654,13 @@ local function open_directory(path, opts, departed)
   -- inside it is refused (Q#JR14b), because a yield would restore the
   -- scope while this coroutine is still parked.
   local function commit()
+    -- The captured window, read once. Everything below that would
+    -- otherwise consult "the active window" must consult THIS instead:
+    -- the scope pins the frontend, not the selected window, and a split
+    -- or panel can take focus within that frontend while the listing is
+    -- in flight (Q#JR14).
+    local captured = opts.dest ~= nil and opts.dest:window() or nil
+
     local handle = claim_handle(canonical)
     handle.entries = entries
     handle.errors = errors
@@ -652,14 +672,19 @@ local function open_directory(path, opts, departed)
     if departed ~= nil then
       handle.prev = departed.prev
     else
-      local active = pmacs.window.buffer()
+      local active
+      if captured ~= nil then
+        active = pmacs.window.buffer(captured)
+      else
+        active = pmacs.window.buffer()
+      end
       if active ~= nil and handle_for_buffer(active) == nil then
         handle.prev = active
       end
     end
 
     paint(handle)
-    display(handle, opts, departed)
+    display(handle, opts, departed, captured)
     -- Seating happens after the display: `switch_buffer` zeroes the
     -- window cursor, so an earlier seat would be discarded.
     seat_cursor(handle, opts.select_name, 1)

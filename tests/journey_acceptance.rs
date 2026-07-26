@@ -570,6 +570,81 @@ fn commit_to_outranks_an_interactive_origin() {
     assert_eq!(local_window(&s), local_win);
 }
 
+/// **N4c** — the commit lands in the *captured window*, not merely in
+/// the captured frontend's currently selected one.
+///
+/// Review finding on PR #182. Every other routing pin here varies
+/// frontend identity; none varied the selected window *within* one
+/// frontend, and dired's commit still ended in `switch_buffer`, which
+/// targets whatever window the scoped frontend has active. The preflight
+/// cannot catch this — the captured window is still live and still holds
+/// its captured buffer — so a split that took focus while `read_dir` was
+/// pending got the listing, and `prev` was captured from it too.
+///
+/// Both halves are asserted: where the listing lands, and where `q`
+/// goes. Falsified by restoring `pmacs.window.switch_buffer` in dired's
+/// `display`, or by reading `prev` from the ambient window.
+#[test]
+fn a_background_open_uses_the_captured_window_not_the_selected_one() {
+    let td = project();
+    let mut s = EditorState::new();
+    exec(&s, "pmacs.lsp.config = {}");
+    capture_dest(&mut s, td.path());
+
+    let target = local_window(&s);
+    let origin = buffer_in(&s, target).expect("the captured window's buffer");
+
+    // Split, move focus to the OTHER window, and give it a buffer of its
+    // own. The captured window is untouched, so every preflight check
+    // still passes -- which is exactly why this needs its own pin.
+    exec(
+        &s,
+        "local captured = dest:window()
+         pmacs.window.split_horizontal()
+         while pmacs.window.current() == captured do pmacs.window.focus_next() end
+         pmacs.window.switch_buffer(pmacs.buffer.create('*elsewhere*'))",
+    );
+    let elsewhere = local_window(&s);
+    assert_ne!(elsewhere, target, "focus must have moved to another window");
+    let elsewhere_buffer = buffer_in(&s, elsewhere);
+
+    // dired's real handler path, with the captured destination.
+    exec(
+        &s,
+        &format!(
+            "pmacs.async(function()
+               pmacs.dired.open({:?}, {{ dest = dest }})
+             end)",
+            canon(td.path())
+        ),
+    );
+    pump(&mut s);
+
+    assert_eq!(
+        buffer_in(&s, elsewhere),
+        elsewhere_buffer,
+        "the window that took focus mid-listing must be untouched"
+    );
+    assert_eq!(
+        local_window(&s),
+        target,
+        "the commit must select the captured window"
+    );
+    assert!(
+        active_name(&s).starts_with("*dired:"),
+        "and the listing must be in it; got {:?}",
+        active_name(&s)
+    );
+
+    // `prev` came from the captured window too, not from `*elsewhere*`.
+    type_char(&mut s, 'q');
+    assert_eq!(
+        buffer_in(&s, target),
+        Some(origin),
+        "`q` must return to the buffer the CAPTURED window showed"
+    );
+}
+
 /// **N6a** — the scope is restored when the callback returns normally.
 ///
 /// Falsified by dropping the guard's restore, or by never swapping

@@ -331,10 +331,11 @@ If it does not, stop and repair the remote/fetch configuration.
   --check` clean.
 - Stage 4b (the input method) is NOT in this PR and not started.
 
-## Journey Stage 1a — IMPLEMENTED on branch, gates run, PR pending
+## Journey Stage 1a — PR #182 OPEN, review round 1 closed
 
-- Framing `docs/journey-stage1a-framing.md` **rev 7** (four review
-  rounds, then two correction revisions found during implementation).
+- Framing `docs/journey-stage1a-framing.md` **rev 8** (four review
+  rounds, two correction revisions found during implementation, one from
+  review round 1 of PR #182).
   Branch `journey-stage1a-directory-open`, rebased onto `githubsucks/main`
   @ `74301d1`.
 - Recovery: `git fetch githubsucks && git checkout
@@ -355,6 +356,11 @@ If it does not, stop and repair the remote/fetch configuration.
   preflight moved after the callback → P1 + P2 fail, nothing else; drop
   the `ScopedFrontend` arm from `acting_frontend` → N4b fails, nothing
   else. That last mutation is why N4b exists — it left N4 green.
+  Round 1 of PR #182 added two more: dired's `display` back to
+  `switch_buffer`, and `prev` read from the ambient window → each fails
+  **N4c** alone. **The scope pins the frontend, not the window** — every
+  routing pin before N4c varied frontend identity and none varied the
+  selected window within one frontend, so 23 green pins missed it.
 - Ordering: PR #177 MERGED (2026-07-26), so 1a was unblocked. 1a lands
   before dired Stage 2. When 1a lands, Stage 2 must re-scout and revise
   its framing around the scoped `pmacs.window.commit_to` boundary before

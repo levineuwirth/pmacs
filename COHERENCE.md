@@ -95,7 +95,7 @@ remain open to them.
 
 | § | Concern | Grade | One-line state |
 |---|---|---|---|
-| 2 | Golden product journey | **Broken at entry** | `pmacs .` exits 1; only "launch" and "edit" pass cleanly zero-config |
+| 2 | Golden product journey | **Runs to step 5** | `pmacs .` opens the directory (Journey Stage 1a); thin from step 6 on |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
 | 5 | Unified discoverability | **Substrate without surface** | Best-in-class registration metadata; almost no way for a user to reach it |
@@ -112,7 +112,7 @@ remain open to them.
 | 16 | Semantic frontend | **Strong** | v6..=v20 negotiated protocol; degradation practiced; TUI/GPU share the model |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
 | 18 | Onboarding | **Missing** | No welcome, no tutorial; `C-h` deletes a word; `M-x` is the only door in |
-| 19 | Coherence acceptance tests | **Missing (culture ready)** | Superb per-arc acceptance discipline; zero cross-subsystem journey tests |
+| 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` exists (steps 2, 3, 5); the other five scenarios are still unwritten |
 
 Three cross-cutting patterns explain most of the table; they are
 detailed in §1.1–§1.3: **substrate without surface**, **the silence
@@ -1452,20 +1452,24 @@ subsystems, complementing (not replacing) subsystem tests:
 
 ### Ground truth
 
-**Grade: missing — but the culture that would make them excellent is the
-project's strongest process asset.**
+**Grade: started — the first suite exists; five of the six scenarios
+above do not.**
 
-Zero cross-subsystem journey tests exist. Every acceptance suite in the
-tree pins one subsystem's contract (superbly — bite-verified,
-falsified-by-revert, vacuity-checked). Several of the scenarios above
-are currently *untestable* because the behavior doesn't exist (install
-in-session, disable, open a directory); the ones that are testable
-(first launch, command discovery, worker cancellation, remote
-attach/reconnect) could be written today and would immediately pin the
-journey against regression. The first coherence acceptance suite should
-be the §2 journey itself, growing a step at a time as steps become
-real — that is how "the journey is a release gate" stops being
-aspirational.
+At audit time zero cross-subsystem journey tests existed. **Journey
+Stage 1a created `tests/journey_acceptance.rs`**, the §2 journey itself,
+seeded with steps 2 (launch unconfigured), 3 (open a real project), and
+5 (edit immediately), and declared a ratchet: stages add rows, none
+removes them. That is the "first launch" scenario, partially — missing
+tools still have no actionable guidance to assert.
+
+The rest is unchanged. Every other acceptance suite in the tree pins one
+subsystem's contract (superbly — bite-verified, falsified-by-revert,
+vacuity-checked). Command discovery, workspace lifecycle, worker
+ownership, package lifecycle, and remote execution have no
+cross-subsystem suite; several remain *untestable* because the behavior
+doesn't exist (install in-session, disable). Steps 6–12 join
+`journey_acceptance.rs` as later stages make them real — that is how
+"the journey is a release gate" stops being aspirational.
 
 (Related lesson already in the handoff: `compile_mode_acceptance`
 accidentally reads the real user config — an *unintentional*
