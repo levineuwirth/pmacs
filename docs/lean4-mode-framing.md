@@ -46,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial. Current revision: **7**.
+Revision 1 — initial. Current revision: **8**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -479,6 +479,29 @@ retained, so undo restores `\alpha ` with its space; the coherence
 section cites golden-journey **step 5** ("Edit immediately"), not step
 4; and §8's config-registry prior art points at Q#LN22, where the gate
 now lives.
+
+### Round 7 (rev 7 → rev 8)
+
+One P1 remained in the new multi-frontend acceptance, plus two
+documentation cleanups.
+
+1. **Acceptance 45i contradicted Q#LN22's conservative abandonment
+   rule.** It required frontend A's pending abbreviation to survive
+   frontend B editing the same buffer, but `buffer:revision()` is
+   buffer-global and advances on every edit. B's first edit therefore
+   invalidates A's record under the exact-revision guard. The criterion
+   now separates the two contracts: another frontend cannot consume A's
+   record, but any intervening edit to their shared buffer invalidates
+   it lazily; navigation and detachment remain frontend-scoped when no
+   shared-buffer edit intervenes. The pending record now names its
+   `expected_revision` explicitly so the validation rule is buildable.
+   Preserving A's record through peer edits would require translating
+   and validating its span across arbitrary edits, a substantially
+   larger substrate change that Stage 4b does not take on.
+2. **The volatile ledger retained rev 6's undercount.** Its table facts
+   now say 119 multi-codepoint symbols — 26 `$CURSOR`-bearing and 93
+   others — matching §2.11 and Q#LN11.
+3. **§9.1's revision label was stale.** It now names rev 8.
 
 ## 1. What ships
 
@@ -1640,8 +1663,9 @@ that an edit was made.
 reconstruction of it:
 
 - `\` typed in a `lean4` buffer opens a pending abbreviation: `{ buffer,
-  window, start_offset, text = "" }`, keyed on **`(frontend, buffer)`** —
-  see below.
+  window, start_offset, text = "", expected_revision }`, keyed on
+  **`(frontend, buffer)`** — see below. `expected_revision` is the
+  buffer's revision after that leader edit.
 - A subsequent self-insert `c` is claimed iff at least one key has
   `text .. c` as a prefix; then `text = text .. c`. If it is also
   uniquely-and-completely matching (one of the 1,550), expand now.
@@ -1685,7 +1709,14 @@ finding 3). Pending state is validated at the next typed edit and
 discarded when any of these no longer holds: the record's buffer and
 window are the pending ones; `rec.effective_start` equals `start_offset
 + 1 + #text` (the point is still at the end of the pending span); and
-the buffer's `revision()` advanced by exactly the pending edit.
+the buffer's `revision()` equals `expected_revision + 1`, meaning the
+current typed edit is the only edit since this frontend last extended
+the pending abbreviation. A claimed extension stores the current
+revision as the new `expected_revision`. This is deliberately
+conservative across frontends: any intervening edit to the shared
+buffer invalidates the pending record even if it occurred elsewhere.
+Keeping the record alive would require translating and validating its
+span through arbitrary peer edits, substrate Stage 4b does not add.
 `buffer.after-switch` clears the acting frontend's entries eagerly,
 since that hook *does* exist. The
 practical difference from upstream: a user who clicks away mid-`\alp`
@@ -2425,14 +2456,19 @@ criterion 46 requires to stay byte-identical.
     because the expansion is a programmatic replace that arms no record.
     Bites against a future consumer that infers pending state from
     buffer text instead of provenance.
-45i. **Pending state is per frontend (Q#LN22).** Two frontends attached
-    to the same `lean4` buffer: A types `\al`, B types `\to` + space in
-    the same buffer. B's expansion yields `→` and leaves A's `\al`
-    pending and intact; A then typing `l` + space still yields `∀`.
-    Plus: B switching buffers does not clear A's pending state, and a
-    `frontend.detached` for B purges B's entries only. Bites against the
-    buffer-keyed design rev 6 specified — which passes every
-    single-frontend criterion above.
+45i. **Pending state is per frontend, with conservative shared-buffer
+    invalidation (Q#LN22).** Two frontends share a `lean4` buffer at
+    distinct points. A types `\al`; B types `p`. B's `p` lands normally
+    at B's point rather than extending A's record. Because that edit
+    advances the shared buffer's revision, A then typing `l` + space
+    leaves literal `\all ` rather than expanding: A's stale record is
+    abandoned lazily. In a fresh setup, A types `\al`, B switches
+    buffers **without editing the shared buffer**, and A typing `l` +
+    space still yields `∀`; B's switch clears only B's entries. Finally,
+    `frontend.detached` for B purges B's entries only and does not clear
+    a still-valid A record. Bites both against the buffer-keyed design
+    rev 6 specified and against the impossible rev-7 promise that
+    pending state survives arbitrary peer edits.
 45f. **Both producers, and the CI-darkness stated.** The dispatch path
     is pinned by the criteria above. The optimistic CRDT producer
     (round-5 finding 4) is pinned by a separate criterion driving
@@ -2615,7 +2651,7 @@ uncapped event queue, the dropped `cfg.restart`, and — unchanged from
 languages other than Lean, and §4's rule is what keeps them out of a Lean
 PR.
 
-### 9.1 Coherence impact — stages 4a and 4b (rev 6)
+### 9.1 Coherence impact — stages 4a and 4b (rev 8)
 
 **Sections served.** §6 (interaction islands) primarily, and in the
 *preventing* direction rather than the fixing one — see below. §11

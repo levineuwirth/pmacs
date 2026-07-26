@@ -64,17 +64,17 @@ If it does not, stop and repair the remote/fetch configuration.
   histories were pruned from this ledger in round 6, per this file's own
   instruction to remove entries when their PR merges; the durable facts
   now live in `docs/agent-handoff.md` §1's Lean 4 bullet, which is where
-  a fresh machine should read them. `docs/lean4-mode-framing.md` rev 7
+  a fresh machine should read them. `docs/lean4-mode-framing.md` rev 8
   carries the decisions.
 
-### Stage 4 — framing rev 7, split into 4a/4b (branch `lean4-stage4a-typed-edit-chain`)
+### Stage 4 — framing rev 8, split into 4a/4b (branch `lean4-stage4a-typed-edit-chain`)
 
 - Stages 3a and 3b **merged as #167** (`main` @ `6f348c9`) and **#170**
   (`main` @ `d400f30`), 2026-07-26. Both were integrated against a main
   that had advanced 50 commits mid-review; the only conflict either time
   was this ledger's own lane headings, resolved by keeping both sides.
 - Worktree `../pmacs-lean-stage4`, branched off `main` @ `d400f30`.
-  Framing-only so far: `docs/lean4-mode-framing.md` **revision 7**. No
+  Framing-only so far: `docs/lean4-mode-framing.md` **revision 8**. No
   code. Awaiting user approval before implementation, per the workflow.
 - **Round 6 review found five P1s, four of them internal to rev 6** —
   facts about pmacs the revision asserted without checking, while its
@@ -93,6 +93,15 @@ If it does not, stop and repair the remote/fetch configuration.
   the upstream package ships no README after fetching the package root,
   with the directory listing showing `src/README.md` already in hand.
   The README states the tie rule in one sentence.
+- **Round 7 review found one remaining P1 in acceptance 45i.** Rev 7
+  required A's pending abbreviation to survive B editing the same
+  buffer, while Q#LN22 also required an exact buffer-revision advance.
+  Those cannot both hold: revisions are buffer-global and every edit
+  bumps them. Rev 8 keeps the conservative guard and separates
+  ownership from survival — B cannot consume A's record, but B editing
+  the shared buffer invalidates A lazily; B switching buffers or
+  detaching remains frontend-scoped when no shared-buffer edit
+  intervenes.
 - **Round 5 re-scout split Stage 4 into 4a (substrate) and 4b (Lean).**
   4a is the typed-edit consumer chain — `builtin/runtime/typed_edit.lua`
   plus `pair.lua` re-expressed as one registered consumer, no behavior
@@ -130,7 +139,8 @@ If it does not, stop and repair the remote/fetch configuration.
 - Table facts re-derived at `17d1d08`: 1,855 entries, 36,861 bytes, all
   keys ASCII, **64** keys carry a `lean4` pair-set char, **305** keys are
   proper prefixes of another (so 1,550 expand eagerly), **26** values
-  carry `$CURSOR`, **93** are multi-codepoint.
+  carry `$CURSOR`, and **119** are multi-codepoint — the 26
+  `$CURSOR`-bearing values plus 93 others.
 - Citation sweep per COHERENCE §25: five live citations moved in the 50
   commits since rev 5 — `take_typed_edit` 12827→12990,
   `handle_server_requests` 1549→1815, `fs.stat` 93→133,
