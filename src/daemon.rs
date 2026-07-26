@@ -4043,6 +4043,143 @@ mod tests {
         );
     }
 
+    /// Arc 8 Stage 4b acceptance 45f: the Lean abbreviation expander
+    /// works on the OPTIMISTIC producer, not only on `dispatch_key`.
+    ///
+    /// This is the path most users take and the one no other Stage 4b
+    /// test covers. `classify_key` (`src/optimistic.rs`) returns
+    /// `Insert(c)` for `\` and for every ASCII letter — only the nine
+    /// built-in pair chars are excluded (Q#AP1) — so on a CRDT frontend
+    /// `\alpha` arrives here as six source-peer optimistic inserts,
+    /// while the expansion is a single daemon-peer replace spanning all
+    /// six. That asymmetry is the accepted undo degradation of Q#LN21;
+    /// what this pins is that the expansion happens at all.
+    ///
+    /// It lives in `--lib` deliberately: the gate list runs
+    /// `--features crdt` only for `cargo test --lib`, so a crdt-gated
+    /// INTEGRATION test would be dark in CI and dark in the gates both.
+    ///
+    /// The source frontend needs a REGISTERED WINDOW on the edited
+    /// buffer or nothing is armed at all — `handle_remote_crdt_op`
+    /// arms the record only when the source's active window displays
+    /// the buffer, so a source with no view fails closed and silently.
+    /// A version of this test without the view below passed six
+    /// fan-outs with a nil record and proved nothing.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn the_optimistic_producer_also_expands_a_lean_abbreviation() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use crate::window::{FrontendView, Layout, Window, WindowId};
+
+        let dir = std::env::temp_dir().join(format!("pmacs-lean-opt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("a.lean");
+        std::fs::write(&path, "").expect("write fixture");
+
+        let source = FrontendId(77);
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .eval(Some("test"), "pmacs.lsp.config = {}")
+            .expect("clear lsp config");
+        editor
+            .lua_host
+            .eval(
+                Some("test-open"),
+                &format!(
+                    "pmacs.buffer.find_or_open({:?}); pmacs.editor.goto_byte(0)",
+                    path.display().to_string()
+                ),
+            )
+            .expect("open the lean fixture");
+
+        let buffer_id = editor.core.borrow().active_window().buffer_id;
+        {
+            let mut core = editor.core.borrow_mut();
+            let mut reg = core.registry.borrow_mut();
+            reg.get_mut(buffer_id)
+                .expect("active buffer")
+                .upgrade_to_crdt(2)
+                .expect("upgrade to crdt");
+            drop(reg);
+
+            // The replica's own window on the shared buffer.
+            let text_view = {
+                let registry = core.registry.clone();
+                let reg = registry.borrow();
+                crate::text_view::TextView::new(reg.get(buffer_id).expect("buffer"))
+            };
+            let win_id = WindowId::next();
+            core.windows
+                .insert(win_id, Window::new(win_id, buffer_id, text_view));
+            core.register_frontend_view(
+                source,
+                FrontendView {
+                    layout: Layout::single(win_id),
+                    active: win_id,
+                    fold_projection: true,
+                    panel_capable: true,
+                    frame_geometry: None,
+                    panel_hidden: false,
+                },
+            );
+        }
+
+        let snapshot_bytes = {
+            let core = editor.core.borrow();
+            let reg = core.registry.borrow();
+            reg.get(buffer_id)
+                .expect("buffer")
+                .crdt_state()
+                .expect("crdt-backed")
+                .export_snapshot()
+                .expect("export snapshot")
+        };
+        let peer = loro::LoroDoc::new();
+        peer.set_peer_id(77).expect("set peer id");
+        peer.import(&snapshot_bytes).expect("import snapshot");
+
+        // One op per keystroke, exactly as the attach loop's
+        // optimistic-apply branch produces them.
+        for (i, ch) in "\\alpha".chars().enumerate() {
+            let v_before = peer.oplog_vv();
+            peer.get_text("body")
+                .insert(i, &ch.to_string())
+                .expect("peer insert");
+            let op_bytes = peer
+                .export(loro::ExportMode::updates(&v_before))
+                .expect("export op");
+            super::handle_remote_crdt_op(
+                &mut editor,
+                source,
+                buffer_id,
+                crate::rope::CrdtOp {
+                    peer_id: 77,
+                    bytes: op_bytes,
+                },
+            );
+        }
+
+        let text = match editor
+            .lua_host
+            .eval(
+                Some("test-readback"),
+                "local b = pmacs.window.buffer(); return b:slice(0, b:len())",
+            )
+            .expect("read buffer text")
+        {
+            mlua::Value::String(s) => String::from_utf8_lossy(&s.as_bytes()).into_owned(),
+            other => panic!("expected buffer text, got {other:?}"),
+        };
+        assert_eq!(
+            text, "α",
+            "the abbreviation expanded on the optimistic path — the \
+             record the expander reads is armed by handle_remote_crdt_op, \
+             not only by dispatch_key"
+        );
+    }
+
     /// Q#AI9 (PR #109 round 1): the optimistic-apply arm clears an
     /// EMPTY anchor on the source window — the GPU always takes this
     /// path, and the TUI attach mirror tracks no selection state, so

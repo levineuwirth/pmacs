@@ -554,6 +554,27 @@ impl EditorState {
                 include_str!("../builtin/runtime/pair.lua"),
             )
             .expect("load pair builtin chunk");
+        // Arc 8 Stage 4b: the Lean 4 Unicode input method. The vendored
+        // abbreviation table first — lean_input.lua reads it at chunk
+        // load to build its prefix and eager-key indexes. Both load
+        // after typed_edit.lua, which they register into.
+        //
+        // Load order does NOT decide whether abbreviation expansion or
+        // auto-pairing sees a keystroke first — the chain's priority
+        // does (50 vs 100), which is why Stage 4a exists. It matters
+        // only that the chain itself is already there.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/lean_abbrev.lua"),
+                include_str!("../builtin/runtime/lean_abbrev.lua"),
+            )
+            .expect("load lean_abbrev builtin chunk");
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/lean_input.lua"),
+                include_str!("../builtin/runtime/lean_input.lua"),
+            )
+            .expect("load lean_input builtin chunk");
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/lsp.lua"),

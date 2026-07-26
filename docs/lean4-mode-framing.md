@@ -46,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial. Current revision: **8**.
+Revision 1 — initial. Current revision: **12**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -502,6 +502,110 @@ documentation cleanups.
    now say 119 multi-codepoint symbols — 26 `$CURSOR`-bearing and 93
    others — matching §2.11 and Q#LN11.
 3. **§9.1's revision label was stale.** It now names rev 8.
+
+### Round 9 (rev 8 → rev 9)
+
+Found during Stage 4b implementation, by simulating Q#LN22's state
+machine over all 1,855 vendored entries and re-reading upstream's
+`TrackedAbbreviation.ts` and `AbbreviationProvider.ts` at `17d1d08`.
+**Three acceptance criteria named examples that the real table
+contradicts** — every one of them written from what the abbreviation
+*looks* like rather than from whether the table makes it eager.
+
+1. **Acceptance 41 was false.** `\to` does not expand eagerly: `to` is a
+   proper prefix of `top`, `to0`, `toa` and others, so upstream's
+   `isAbbreviationUniqueAndComplete` is false and `to` is not among the
+   1,550 eager keys. The criterion now uses `\alpha`, which has no
+   extension, and additionally pins that `\to` alone does **not**
+   expand — the false half is worth an assertion because it reads as
+   correct until the table is consulted.
+2. **Acceptance 42 was false.** `\zzzz` + space yields `ζzzz `, not
+   literal text: `z` opens a pending abbreviation (`ze`, `zeta`,
+   `zsqrtd`) and the second `z` finishes it. Exactly six printable
+   characters open no key — `$ % , ; @ W` — and the criterion now uses
+   `\WWWW`.
+3. **Acceptance 38's undo claim was false for its own example.**
+   `alpha` is eager, so `\alpha` expands before the space is typed and
+   the space is a separate edit; one undo removes the space rather than
+   restoring `\alpha `. The criterion now states the finish path and the
+   eager path separately, since "one expansion is one undo step" is true
+   of both while the text an undo restores is not.
+
+The mechanism (Q#LN11, Q#LN21, Q#LN22) needed no change — these were
+errors in the examples chosen to pin it, which is why a simulation over
+the real data found them and four review rounds over the prose did not.
+
+### Round 10 (rev 9 → rev 10)
+
+Review of the Stage 4b implementation. Three defects in the expander,
+all of them about what happens AROUND the expansion rather than about
+resolving an abbreviation, plus one stale count.
+
+1. **A pair character that terminates an abbreviation never reached
+   auto-pairing.** Q#LN22 already said the terminator is not claimed;
+   the implementation claimed it whenever an expansion succeeded, so
+   `\alp(` gave `α(`. Not claiming is necessary and not sufficient —
+   the chain hands each consumer a copy of the record made before any
+   consumer ran, so expanding inside the chain invalidates the copy
+   pairing is holding and the closer is lost anyway. Q#LN22 now
+   specifies the deferred subscriber and the span that stops before the
+   terminator; acceptance 45j pins all three failure modes.
+2. **Post-insert point motion was mistaken for a valid pending span.**
+   The relevance check compared buffer and window but not
+   `ed.cursor() == rec.post_cursor`, so a redefined self-insert that
+   inserts and then moves the point still expanded — and teleported the
+   point back. Pairing has made this three-part check since #110.
+   Acceptance 45k.
+3. **Cursor placement could move the wrong buffer.** A buffer intercept
+   may switch buffers during `buf:replace`; the unguarded `goto_byte`
+   afterwards moved the switched-to buffer's point. `repair_cursor` is
+   the precedent. Acceptance 45l.
+4. **The coherence census contradicted itself** — nine settings in one
+   paragraph, eight three paragraphs below.
+
+Acceptance 45m was added with them: the expansion now runs on its own
+`buffer.after-edit` subscriber, which is a new instance of Q#AP7 and
+was unpinned.
+
+### Round 11 (rev 10 → rev 11)
+
+One P1 in the round-10 fix, and one stale comment.
+
+1. **The deferred expansion was not tied to the fan-out that queued
+   it.** `buffer.after-edit` fan-outs nest — the typed-edit contract
+   supports a consumer calling `pmacs.hook.run` — and a nested run
+   re-enters the expander's subscriber while the OUTER chain is still
+   mid-list. A consumer at priority 75 running one nested fan-out made
+   `\alp(` yield `α(` again: the nested pass expanded, and outer
+   pairing then resumed with a record the replace had invalidated.
+   Round 10's own failure mode, reached through re-entrancy instead of
+   claiming. Q#LN22 now specifies matching chain invocations against
+   expander invocations so only the outermost pass expands; acceptance
+   45n pins it.
+2. **A test comment still described the discarded span design** — it
+   said the expansion replaces the span "INCLUDING the terminator",
+   which round 10 deliberately stopped doing. The behaviour it asserts
+   was correct; only the explanation was stale.
+
+### Round 12 (rev 11 → rev 12)
+
+One P1: round 11's counter was in the wrong place.
+
+1. **The nesting count lived in the expander, which is optional.** A
+   consumer at a lower priority can claim and stop the chain before the
+   expander runs, while that fan-out's deferred-expansion subscriber
+   still runs — so the nested pass went uncounted, looked like the
+   outermost one, expanded early, and outer pairing resumed with an
+   invalidated record. `\alp(` gave `α(` again. The count now comes
+   from a no-op consumer at the minimum priority, which runs first in
+   every chain invocation that reaches any consumer; acceptance 45o
+   pins the short-circuit path that 45n does not reach.
+
+The pattern across rounds 10–12 is worth naming: each fix was correct
+about the failure it was shown and wrong about the boundary of the
+mechanism it relied on — the chain's copy semantics, then its
+re-entrancy, then its short-circuit. **A queue that outlives the thing
+that filled it needs to name that thing, not approximate it.**
 
 ## 1. What ships
 
@@ -1686,8 +1790,9 @@ reconstruction of it:
 - A subsequent self-insert `c` is claimed iff at least one key has
   `text .. c` as a prefix; then `text = text .. c`. If it is also
   uniquely-and-completely matching (one of the 1,550), expand now.
-- If no key extends `text .. c`, expand `text` **first**, then let `c`
-  land normally — the chain does *not* claim `c`.
+- If no key extends `text .. c`, `c` TERMINATES the abbreviation: the
+  chain does *not* claim it, and the expansion of `text` is
+  **deferred** until after the chain has run (round 10; see below).
 - **A terminating `c` that is itself `\` is then reprocessed as a new
   leader**, opening a fresh pending abbreviation at its position. This
   is the rule acceptance 45d depends on (`\alpha\to` → `α→`) and rev 6
@@ -1700,6 +1805,69 @@ reconstruction of it:
 - Expansion resolves through §2.11's rules — shortest key wins, ties
   broken by source rank, unmatchable tail appended (`\alp7` → `α7`).
 - `$CURSOR` is stripped from the symbol and its index becomes the point.
+
+**The expansion is deferred past the chain, and its span stops before
+the terminator** (round 10). "Not claiming the terminator" is necessary
+and not sufficient: a pair character is a legal terminator (`\alp(` must
+give `α()`), and the chain hands every consumer a *copy* of the record
+made before any consumer ran. So expanding inside the chain and then
+declining leaves auto-pairing holding offsets the replace has already
+invalidated — pairing declines and the closer is silently lost, which a
+probe confirmed. Claiming the terminator instead suppresses pairing
+outright. Neither is recoverable from inside the chain.
+
+The expander therefore records the pending expansion and performs it on
+its **own `buffer.after-edit` subscriber**, registered after
+typed_edit.lua's and before lsp.lua's. A claim by any consumer stops the
+chain but not a separate subscriber — which is the point, since pairing
+claims the terminator it reacts to. The replaced span covers the leader
+and the typed text only; whatever pairing did lands after it and
+survives untouched. One undo restores the same text either way, because
+the terminator was always its own insert.
+
+**The deferred expansion must belong to its own fan-out** (round 11).
+`buffer.after-edit` fan-outs NEST — Q#AP9 and typed_edit.lua's header
+both say so explicitly, and a consumer may call `pmacs.hook.run`. A
+nested run re-enters every subscriber, including the deferred
+expansion's, while the OUTER chain is still walking its consumer list
+and pairing has not yet seen the terminator. A nested pass that
+performed the expansion would reproduce the exact bug deferring exists
+to fix, reached through the chain's documented re-entrancy seam instead
+of through claiming.
+
+The nesting level is counted by a **no-op consumer registered at the
+minimum priority**, matched off in the expander's subscriber. Only the
+outermost pass expands; a nested one leaves the expansion queued. No
+new seam in typed_edit.lua, which is merged substrate.
+
+Where the count lives is the whole difficulty, and two plausible places
+are both wrong (round 12):
+
+- **A subscriber registered beside the expander's is too late.** The
+  entire nested fan-out completes inside the OUTER chain's subscriber,
+  before any subscriber registered after it runs.
+- **The expander itself is optional.** A lower-priority consumer may
+  claim and stop the chain before the expander is reached, so a nested
+  pass would go uncounted while its `run_deferred` still ran — and
+  would then look like the outermost one.
+
+A minimum-priority consumer runs first in every chain invocation that
+reaches any consumer at all. Its guarantee is exactly the ordering
+contract the chain already rests on, and it degrades safely: the only
+thing that can skip it is a claim ahead of it, which skips the expander
+too, so nothing is queued in that fan-out either.
+
+Two guards this exposes, both of which pairing already carries:
+
+- The relevance check is **three-part**, not two: buffer, window, **and
+  `ed.cursor() == rec.post_cursor`**. A redefined self-insert can insert
+  the completing character and then move the point, and expanding over a
+  span the user has left teleports them back into it.
+- Cursor placement after the replace is **context-guarded**. A buffer
+  intercept may switch window or buffer while `buf:replace` runs; an
+  unguarded `goto_byte` then moves the point of a buffer that has
+  nothing to do with the expansion. `pair.lua`'s `repair_cursor` is the
+  precedent.
 
 **Ownership is per frontend, not per buffer** (§2.11). The key is
 `(pmacs.frontend.id(), rec.buffer)`, and the stored `window` must still
@@ -2452,12 +2620,25 @@ criterion 46 requires to stay byte-identical.
 
 **Stage 4b — the Unicode input method**
 
-38. `\alpha` + space yields `α ` — the space lands first and the
-    expansion runs in the following `buffer.after-edit`, so the
-    terminator is **retained**, not consumed. The expansion is a single
-    undo step: one undo restores `\alpha ` (with its space), not
-    `\alph`. Rev 6 wrote the post-undo text as `\alpha`, which would be
-    true only if the terminator were swallowed.
+38. **Terminators are retained, and one expansion is one undo step —
+    but which text an undo restores depends on the path.** Rev 8 stated
+    a single rule here and it is wrong against the real table, because
+    it assumed `\alpha` takes the finish path when `alpha` is in the
+    1,550-key eager set (round 9; see 41).
+    - *Finish path.* `\alp` + space yields `α `: the space lands first
+      and the expansion runs later in the same `buffer.after-edit`
+      fan-out, so the terminator is **retained**, not consumed. It sits
+      OUTSIDE the replaced span, which covers only the leader and the
+      typed text (round 10) — the observable text and the post-undo
+      text are the same either way, because the terminator was its own
+      insert. One undo restores `\alp ` — with its space, not `\al`.
+      Rev 6 wrote the post-undo text without the terminator, which
+      would be true only if the terminator were swallowed.
+    - *Eager path.* `\alpha` yields `α` with no terminator typed, and a
+      following space is a **separate** edit. One undo removes the
+      space; a second restores `\alpha`. Asserting the finish-path undo
+      text here would fail, which is the trap this split exists to
+      record.
 39. `\<>` yields `⟨⟩` with the point between them, from the `$CURSOR`
     placeholder.
 40. **Pair-collision pin (Q#LN22).** `\[[]]` yields `⟦⟧`: each `[` is
@@ -2467,9 +2648,21 @@ criterion 46 requires to stay byte-identical.
     only completed expansions rather than pending extensions — **both
     failure modes must be shown**, since they are distinct bugs with the
     same symptom.
-41. `\to` yields `→` eagerly on uniqueness, with no terminator typed.
-42. A prefix with no match (`\zzzz` + space) is left as literal text; no
-    edit is made.
+41. **Eager expansion on uniqueness**, with no terminator typed:
+    `\alpha` yields `α` the moment the final `a` lands. Rev 8 used `\to`
+    here and that is false against the real table (round 9): `to` is a
+    proper prefix of `top`, `to0`, `toa` and others, so
+    `isAbbreviationUniqueAndComplete` is false and `to` is **not** in
+    the 1,550-key eager set. `\to` alone stays `\to`; `\to` + space
+    yields `→ ` by the finish path. Both are asserted, because the
+    wrong one reads as correct until the table is consulted.
+42. A prefix that opens no key at all — `\WWWW` + space — is left as
+    literal text and **no edit is made**. Rev 8 used `\zzzz`, which
+    expands (round 9): `z` opens a pending abbreviation because `ze`,
+    `zeta` and `zsqrtd` exist, and the second `z` finishes it, giving
+    `ζzzz `. Exactly six printable characters open no key: `$ % , ; @
+    W`. Bites against an implementation that treats "no complete match"
+    as "no pending state".
 43. **Lazy abandonment (Q#LN22).** Because there is no cursor-motion
     hook, this asserts what pmacs can actually detect: after `\alp`, an
     explicit `goto_byte` elsewhere followed by typing `h` inserts a
@@ -2544,6 +2737,49 @@ criterion 46 requires to stay byte-identical.
       `$CURSOR` more than once;
     - the resolution spot-set behaves: `alpha`, `to`, `<>`, `+ `, `\`,
       `n`, `setminus`, and the tie cases from 45h.
+45j. **A pair character that TERMINATES an abbreviation still pairs**
+    (round 10). `\alp(` yields `α()` with the point between the pair.
+    Bites three ways, all of which produce different wrong answers:
+    claiming the terminator gives `α(`; expanding inside the chain and
+    then declining also gives `α(`, because the replace invalidates the
+    record copy pairing is holding; and pairing running first gives
+    `\alp()` unexpanded. Criterion 40 is the same collision from the
+    other side, and passing it says nothing about this one.
+45k. **The relevance check is three-part.** A redefined
+    `buffer.self-insert` that inserts the completing character and then
+    moves the point must not expand: `\alph` + `a` under such an
+    override leaves literal `\alpha` with the point where the command
+    put it. Bites against checking only buffer and window — the
+    expansion would otherwise teleport the point back into a span the
+    user has left.
+45l. **Cursor placement is context-guarded.** A buffer intercept that
+    switches buffers during `buf:replace` must not have the
+    switched-to buffer's point moved. Bites against an unguarded
+    `goto_byte`, which translates the LEAN buffer's pre-edit point
+    through the LEAN buffer's edit and applies it to whatever is
+    ambient.
+45m. **Q#AP7 for the deferred subscriber.** The expansion runs on a
+    second `buffer.after-edit` subscriber, so it inherits pairing's
+    flush-ordering obligation: no `didChange` may ever carry the
+    unexpanded text. Pinned with the `sighelp` fake server and `(` as
+    the trigger — the flush carrying the terminator carries `α()`.
+    Falsified by loading lean_input.lua after lsp.lua.
+45n. **A nested fan-out must not expand early** (round 11). A consumer
+    registered BETWEEN the expander and pairing that calls
+    `pmacs.hook.run("buffer.after-edit")` once still yields `α()` for
+    `\alp(`. Bites against a deferred slot consumed by whichever
+    fan-out happens to reach it: the nested pass would expand, and the
+    outer chain would then hand pairing a record the replace had
+    invalidated — the round-10 failure again, through the chain's
+    documented re-entrancy seam rather than through claiming.
+45o. **A nested fan-out that never reaches the expander must not
+    expand early either** (round 12). Same shape as 45n, but the nested
+    pass is short-circuited by a consumer at priority 25 that claims
+    when the record is nil — so the expander never runs on it. Bites
+    against counting fan-outs in the expander, which is optional by
+    construction: the uncounted nested pass looks outermost, expands,
+    and outer pairing resumes with an invalidated record. 45n passes
+    against that bug, which is why both are pinned.
 45h. **Tie-break by source order (§2.11).** `\f` + space yields `‹` —
     `f<` and `f>` are both length 2, and `f<` is declared first. Same
     for `\"` + space → `Ä`, first of eleven equal-length candidates.
@@ -2698,7 +2934,7 @@ uncapped event queue, the dropped `cfg.restart`, and — unchanged from
 languages other than Lean, and §4's rule is what keeps them out of a Lean
 PR.
 
-### 9.1 Coherence impact — stages 4a and 4b (rev 8)
+### 9.1 Coherence impact — stages 4a and 4b (rev 12)
 
 **Sections served.** §6 (interaction islands) primarily, and in the
 *preventing* direction rather than the fixing one — see below. §11
