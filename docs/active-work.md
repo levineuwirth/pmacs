@@ -378,7 +378,10 @@ If it does not, stop and repair the remote/fetch configuration.
   unreserved, therefore not ownership. lsp.lua records successful
   config-driven spawns privately, and every Lean lifecycle decision keys
   on that origin fact; the user-server pin deliberately collides on
-  `default-lean4`.
+  `default-lean4`. All five bites against `19f48d4` discriminate: the
+  old files produce 2 same-root servers, a fallback attempt of 4, a
+  shipped command still targeting `stopped`, retirement of the healthy
+  root, and retirement of the colliding user server, respectively.
 - **DURABLE LESSON — "the test that passes" vs "the test that
   discriminates."** Green tests across six rounds repeatedly pinned only
   a nearby helper or an absence, and only biting exposed it. **Carry this
