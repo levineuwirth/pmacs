@@ -106,15 +106,32 @@ If it does not, stop and repair the remote/fetch configuration.
   the disposition test; stubbing the leader observation fails three
   tests including the one-event pin; a hardcoded target fails four; a
   wrong exit code fails two.
+- **The sweep found a real defect in these tests, not a flake.**
+  `observing_the_leader_does_not_consume_the_exit_event` failed with
+  "process ProcessId(26) is not running": the pid helper drained for
+  `Started`, and **`drain_until` ticks**. A tick can observe an
+  immediately-exiting child and move the record out of `Running`, after
+  which `signal` never reaches the diagnostic at all, so the bounded
+  loop spun to its limit. It passed standalone because the drain
+  returned on `Started` before `poll_one` saw the exit; only load lost
+  the race. Fast-exiting children now read the pid straight from the
+  supervisor record (no tick), and the loop fails fast if the record
+  left `Running`. **Verified under matched load: 0/15 with all 16 cores
+  saturated, while the old ticking helper fails 1/10 — the fix is
+  load-bearing.**
 - Verification: fmt, `git diff --check`, strict workspace clippy clean;
   lib 1,838 + CRDT 2,015 (both +6, exactly the new tests); GPU 202; M4
-  121; bottom-panel 46; compile-mode 67; vterm 9/6/5; sweep 3,256 across
-  93 suites with two load-contention flakes that pass 3/3 isolated
-  (`read_dir_supersede_cancels_in_flight_predecessor`, known
-  pre-existing, and
-  `headless_snapshot_round_trip_summary_restores_the_minimap`). The
-  second is structurally unreachable from this diff: `pmacs-gpu` depends
-  on `pmacs-protocol`, never on `pmacs`.
+  121; bottom-panel 46; compile-mode 67; vterm 9/6/5; **isolated-config
+  `--no-fail-fast` sweep 3,258 across 93 suites, zero failures**.
+  Earlier sweeps on this branch showed two failures and then one; the
+  totals reconcile (3,256/2 → 3,257/1 → 3,258/0, same test count). The
+  two that were genuinely unrelated —
+  `read_dir_supersede_cancels_in_flight_predecessor` (known
+  pre-existing) and
+  `headless_snapshot_round_trip_summary_restores_the_minimap` — are
+  load-contention flakes; the second is structurally unreachable from
+  this diff, since `pmacs-gpu` depends on `pmacs-protocol` and never on
+  `pmacs`.
 - **Parked, each with its reason:** all tolerance rules (need the
   evidence this PR produces); `terminate` idempotence for an
   already-reaped process (independent fix, different failure, one
