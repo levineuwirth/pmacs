@@ -558,8 +558,19 @@ pub struct FrontendView {
     /// store. Reckoning in visible lines unconditionally would make that
     /// GPU session's cursor skip lines it is still showing, so every
     /// command/event-time visible-line reckoning is gated on the
-    /// **acting** frontend's flag. Render-time clamps need no gate: a
-    /// semantic session never enters `paint_frame`.
+    /// **acting** frontend's flag.
+    ///
+    /// **Render-time clamps used to need no gate, on the premise that a
+    /// semantic session never enters `paint_frame`. The bottom-panel
+    /// band breaks that premise** (Q#BP17): the daemon projects a
+    /// semantic frontend's side window through the same per-window
+    /// painter. So the extracted painters
+    /// (`prepare_window_cursor_visible`, `paint_window_content`) take the
+    /// visible-line map as a **parameter**, and the panel path passes
+    /// `None` when the *owning* frontend's `fold_projection` is false.
+    /// That path must not call `EditorCore::fold_map_for_window`, which
+    /// gates on the **active** frontend — correct for command-time
+    /// reckoning, wrong for painting another frontend's panel.
     ///
     /// Set at attach from the negotiated selected-render bit (grid ⇒
     /// `true`, semantic ⇒ `false`), cleared with the view at detach, and

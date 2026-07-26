@@ -757,10 +757,72 @@ If it does not, stop and repair the remote/fetch configuration.
   - `pmacs-gpu` itself failed 201/202 once under the same load and passed
     202/202 on immediate rerun.
 
-## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 IN FRAMING
+## Bottom-panel lane (Arc 7) — Stage 1 + framing MERGED; Stage 2A IN REVIEW
 
-Stage 1 is on `main`. **Stage 2 is in framing**, no implementation in
-flight.
+Stage 1 and the Stage 2 framing are on `main`. **Stage 2A is
+implemented and in review.**
+
+- **Stage 2A — portable branch `githubsucks/bottom-panel-stage2a`**,
+  worktree `../pmacs-bp-stage2a`, **canonical `main` @ `cf54270`
+  integrated** (review round 1, finding 4 — the terminal-config lane
+  #173 also changes `src/editor.rs`, so gates were rerun on the merge
+  result, not the old combination). Five commits: the classified census
+  routing, the painter extraction + acceptance, the lane record, then
+  the round-1, round-2 and round-3 review fixes. **No protocol change; no behavior
+  change for any frontend today** — with `panel_capable = false` for
+  semantic sessions, `primary_document_window` returns `view.active`
+  in every existing configuration, so this is seam adoption that
+  becomes load-bearing in 2B.
+- Verification on the merge result: `cargo fmt --check` clean; strict
+  workspace Clippy clean; **1,832 default + 2,015 CRDT** library tests;
+  `bottom_panel_stage2a_acceptance` **17**; bottom-panel Stage 1 46;
+  statusline segments 8 CRDT; m11_5 semantic 2 CRDT; GPU initial target
+  14 CRDT; terminal config 12 CRDT; vterm Stage 1/2 10 / 6; folding
+  Stage 2 48; M4 121; required GPU 202; `git diff --check` clean.
+- **Every routed producer is now pinned at a seam its production caller
+  uses, and each pin was falsified by revert**: #1 follow, #2 lazy CRDT
+  upgrade, #3 `CursorByte`, #5 decorations, #7 `Viewport` (aligns
+  without focusing), #8 `Pointer` (aligns and focuses), #9 the
+  terminal-context gate, #12 statusline, #21 the publication filter,
+  plus the focus-class negatives. #1/#3/#21 required extracting three
+  named helpers, because their only production caller is
+  `dispatcher_loop`, which no test can drive.
+- **Three lessons about the TESTS, not the code, all from review:**
+  (a) a *structural* test comparing the two authorities directly does
+  **not** catch a misrouted consumer — only consumer-level assertions
+  do; (b) a daemon-path test must `register_session` or the event is
+  dropped at the uninstalled-session check before reaching the code
+  under test; (c) a discriminating fixture must make the two routings
+  DISAGREE — comparing two non-terminal buffers, or two windows with no
+  selection, yields the same answer either way and proves nothing.
+  Round 2 found four of my own pins vacuous by exactly these shapes, and
+  round 3 found two more problems of the same family: a pin placed at a
+  HELPER while production called it from a producer (reverting only the
+  producer's call site left every test green), and a socket-pair
+  assertion whose blocking read made a regression HANG instead of fail.
+  Both now assert at the producer, with read timeouts on every read.
+- **Review round 1 closed: 4 P1 + 2 P2, all real.** The P1s were a
+  stale-`Pointer` focus steal (the failed-alignment arm returned the
+  window, so #8's activation focused it before `dispatch_pointer`
+  rejected the buffer), the missing A2A-2 two-context fan-out, a census
+  suite that asserted the AUTHORITY rather than the CONSUMERS, and the
+  missing main integration. **Two of the new pins were themselves
+  vacuous on the first attempt** — the dispatcher test passed because an
+  unregistered session is dropped at `daemon.rs:1962` before reaching
+  the aligner, and the painter test was a fixed-point check that
+  survived deleting `text_view.render`. Both now fail under their own
+  bite.
+- **`vterm_stage3_acceptance::a37` is a pre-existing flake here**, not a
+  Stage 2A regression: measured **6/8 failures on the base commit** and
+  **7/8 on the branch** in matched isolated samples. It needs a real
+  daemon + real PTY + headless GPU and is documented load-sensitive.
+  It also silently returns `ok` unless `pmacs-gpu` has been built, and
+  is `crdt`-gated so CI never runs it at all.
+- **Two suites are dark without `--features crdt`**:
+  `m11_5_semantic_acceptance` reports **0 tests** and
+  `gpu_initial_target_acceptance` reports **1** in the default config.
+  Both are semantic-census suites, so Stage 2A must be gated with the
+  feature on or its most relevant coverage never executes.
 
 - Stage 1 merged as **#155** (`main` @ `e745068`, 2026-07-24, after two
   review rounds). No protocol change. Durable substrate facts live in

@@ -215,10 +215,25 @@ pub enum StatuslineEvaluationTarget {
         /// Frontend whose entire visible layout is evaluated.
         frontend_id: FrontendId,
     },
-    /// Only the frontend's active window, iff it still displays the declared
-    /// semantic viewport buffer.
+    /// The frontend's **primary document window**, iff it still displays
+    /// the declared semantic viewport buffer, **plus its visible side
+    /// window** when one exists (bottom-panel Q#BP8 / A2A-2).
+    ///
+    /// Two contexts, not one: the document result feeds the semantic
+    /// `StatuslineSegments` wire, while the side result paints in the
+    /// panel's own mode line. Unprojected document splits run no
+    /// callbacks, and a derived-hidden side (Q#BP2b) is omitted because
+    /// it has no mode line to paint this frame.
+    ///
+    /// The document context is captured **first**; consumers must still
+    /// select by window identity rather than position, since only one of
+    /// the two may reach the single semantic statusline slot.
+    ///
+    /// `active` on each context reports **actual focus**, so a document
+    /// provider truthfully observes `active = false` while a panel owns
+    /// focus (Q#BP14, parent acceptance 42).
     Semantic {
-        /// Frontend whose focused daemon window is evaluated.
+        /// Frontend whose document (and visible side) window is evaluated.
         frontend_id: FrontendId,
         /// Buffer declared by the semantic viewport.
         declared_buffer: BufferId,
@@ -639,9 +654,20 @@ fn capture_target_contexts(
                 .views
                 .get(&frontend_id)
                 .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
+            // Bottom-panel §1.3 #12 — Projection. This LOOKUP resolves
+            // the primary document window: with a panel focused,
+            // `view.active` would name the panel and the declared-buffer
+            // check would clear the document's statusline.
+            //
+            // `active` is NOT rerouted with it (Q#BP14/parent 42): it
+            // reports ACTUAL focus, so a document provider truthfully
+            // observes `active = false` while the panel owns focus.
+            let window_id = core
+                .primary_document_window(frontend_id)
+                .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
             let window = core
                 .windows
-                .get(&view.active)
+                .get(&window_id)
                 .ok_or(StatuslineNoMessageReason::ContextUnavailable)?;
             if buffers.get(window.buffer_id).is_err() {
                 return Err(StatuslineNoMessageReason::BufferUnavailable);
@@ -649,12 +675,46 @@ fn capture_target_contexts(
             if window.buffer_id != declared_buffer {
                 return Err(StatuslineNoMessageReason::DeclaredBufferMismatch);
             }
-            Ok(vec![StatuslineContext {
+            let mut contexts = vec![StatuslineContext {
                 frontend_id,
                 window_id: window.id,
                 buffer_id: window.buffer_id,
-                active: true,
-            }])
+                active: window.id == view.active,
+            }];
+            // Bottom-panel Q#BP8 / A2A-2 — the semantic fan-out is the
+            // primary document PLUS the frontend's visible side window,
+            // and nothing else: unprojected document splits run no
+            // callbacks. The document result feeds the semantic
+            // `StatuslineSegments`; the side result paints in the panel's
+            // own mode line.
+            //
+            // A derived-hidden side window is omitted (Q#BP2b): it has no
+            // mode line to paint this frame, so evaluating providers for
+            // it would invoke callbacks for a surface nobody can see.
+            if !view.panel_hidden {
+                for side_id in view.layout.iter_ids() {
+                    if side_id == window.id {
+                        continue;
+                    }
+                    let Some(side) = core.windows.get(&side_id) else {
+                        return Err(StatuslineNoMessageReason::ContextUnavailable);
+                    };
+                    if !side.is_side() {
+                        continue;
+                    }
+                    if buffers.get(side.buffer_id).is_err() {
+                        return Err(StatuslineNoMessageReason::BufferUnavailable);
+                    }
+                    contexts.push(StatuslineContext {
+                        frontend_id,
+                        window_id: side.id,
+                        buffer_id: side.buffer_id,
+                        // Same rule as the document context: ACTUAL focus.
+                        active: side.id == view.active,
+                    });
+                }
+            }
+            Ok(contexts)
         }
     }
 }
