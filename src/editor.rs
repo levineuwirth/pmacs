@@ -415,6 +415,18 @@ impl EditorState {
                 include_str!("../builtin/runtime/listview.lua"),
             )
             .expect("load listview builtin chunk");
+        // The typed-edit consumer chain (Arc 8 Stage 4a, Q#LN10) —
+        // ORDERING CONTRACT: typed_edit.lua must load BEFORE pair.lua,
+        // which registers a consumer into it, and therefore before
+        // lsp.lua. It owns the single `buffer.after-edit` subscriber
+        // that reads the one-shot typed-edit record, so its
+        // registration position is what preserves Q#AP7 below.
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/typed_edit.lua"),
+                include_str!("../builtin/runtime/typed_edit.lua"),
+            )
+            .expect("load typed_edit builtin chunk");
         // Auto-pairing (Arc 2, Q#AP7) — ORDERING CONTRACT: pair.lua
         // must load BEFORE lsp.lua. Hook callbacks run in registration
         // order, and lsp.lua's `buffer.after-edit` callback flushes
@@ -424,6 +436,9 @@ impl EditorState {
         // the closer stays unsynchronized until the next edit (hook
         // edits don't re-fire the hook). pair.lua's `pmacs.lsp.*`
         // lookups are lazy and nil-guarded for the same reason.
+        // Since Stage 4a the closer is inserted from the chain's
+        // subscriber rather than pair.lua's own, which is registered
+        // one chunk earlier — strictly safer for this contract.
         lua_host
             .eval(
                 Some("@pmacs/builtin/runtime/pair.lua"),
