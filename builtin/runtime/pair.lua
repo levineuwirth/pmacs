@@ -4,20 +4,30 @@
 -- next char is already `)` steps over it instead of doubling it. The
 -- carrier is a `buffer.after-edit` reaction (Q#AP1): the opener stays
 -- a genuine single-codepoint self-insert — the classification
--- signature help depends on — and this hook inserts (or swallows) the
--- closer as a second edit. Provenance is the exact one-shot typed-edit
--- record (`pmacs.editor.take_typed_edit()`, Q#AP9), not buffer-text
--- inference: pastes, programmatic edits, manual hook runs, and a stale
--- `this_command` have no record and never pair, and a transformed,
--- relocated, or context-switching source self-insert fails closed.
+-- signature help depends on — and this reaction inserts (or swallows)
+-- the closer as a second edit. Provenance is the exact one-shot
+-- typed-edit record (`pmacs.editor.take_typed_edit()`, Q#AP9), not
+-- buffer-text inference: pastes, programmatic edits, manual hook runs,
+-- and a stale `this_command` have no record and never pair, and a
+-- transformed, relocated, or context-switching source self-insert fails
+-- closed.
 --
--- This chunk loads BEFORE lsp.lua (Q#AP7): registration order is hook
--- execution order, and lsp.lua's after-edit callback synchronously
--- flushes didChange on the signature-trigger path — the closer must
--- already be in the buffer when that callback runs. Everything under
--- `pmacs.lsp` is therefore looked up lazily at callback time.
+-- Since Arc 8 Stage 4a (Q#LN10) pairing no longer subscribes to
+-- `buffer.after-edit` itself. It registers on the typed-edit chain
+-- (`builtin/runtime/typed_edit.lua`), which owns the single subscriber
+-- and the single one-shot read. Everything above still holds — the
+-- record is the same record — but the chain, not this file, decides
+-- who sees it and in what order.
 --
--- Framing: docs/auto-pairing-framing.md.
+-- This chunk loads AFTER typed_edit.lua (it registers into it) and
+-- BEFORE lsp.lua (Q#AP7): registration order is hook execution order,
+-- and lsp.lua's after-edit callback synchronously flushes didChange on
+-- the signature-trigger path — the closer must already be in the
+-- buffer when that callback runs. Everything under `pmacs.lsp` is
+-- therefore looked up lazily at callback time.
+--
+-- Framing: docs/auto-pairing-framing.md; Stage 4a in
+-- docs/lean4-mode-framing.md Q#LN10.
 
 pmacs.pair = pmacs.pair or {}
 
@@ -40,7 +50,7 @@ local ed = pmacs.editor
 
 -- Per-buffer on/off switch (Q#CR8's flagship adopter). Read against the
 -- SOURCE buffer of the typed edit, never the currently active one — see
--- the hook body below, which resolves it the same way `set_for` resolves
+-- the consumer body below, which resolves it the same way `set_for` resolves
 -- the buffer's pair set (round 2, finding 2): `rec.buffer`, not
 -- `pmacs.window.buffer()`.
 pmacs.config.define {
@@ -214,28 +224,36 @@ end
 -- Acceptance tests flip `_capture_records` on; each fan-out then
 -- publishes the record it observed (or nil) to `_last_record`, which
 -- is how tests read the exact codepoint / effective triple and prove
--- one-shot-ness (this callback registers first and consumes it).
+-- one-shot-ness (the chain takes the record before any other
+-- `buffer.after-edit` subscriber can, and hands it here).
 pmacs.pair._capture_records = false
 
-pmacs.hook.add("buffer.after-edit", function()
+-- The typed-edit consumer (Arc 8 Stage 4a, Q#LN10). `rec` is the one
+-- record `typed_edit.lua` read for this fan-out — possibly nil, which
+-- is why the capture seam below is updated before the nil guard.
+-- Returns whether pairing CLAIMED the keystroke: true once it has
+-- committed to reacting (a skip-over or a closer insert, landed or
+-- intercept-rejected), false on every decline. Pairing is last of the
+-- builtin consumers, so nothing currently observes that value; it is
+-- stated correctly so it stays correct when something does.
+local function on_typed_edit(rec)
   -- One-shot provenance (Q#AP9). Absence — paste, programmatic edit,
   -- manual hook run, rejected insert, a post-insert mutation by the
   -- command, stale `this_command` — is a silent non-event; only a
   -- live record for a pair-set character that then fails a gate
   -- reports.
-  local rec = ed.take_typed_edit and ed.take_typed_edit()
   if pmacs.pair._capture_records then pmacs.pair._last_record = rec end
-  if not rec then return end
-  if not (ed.this_command and ed.this_command() == "buffer.self-insert") then return end
+  if not rec then return false end
+  if not (ed.this_command and ed.this_command() == "buffer.self-insert") then return false end
 
   -- The master switch, per-buffer (Q#CR4): the SOURCE buffer of the
   -- typed edit, resolved buffer-local -> global -> default(true). A
   -- second buffer of the same language is untouched by a buffer-local
   -- override here (acceptance 29).
-  if not pmacs.config.get("editing.auto-pair", rec.buffer) then return end
+  if not pmacs.config.get("editing.auto-pair", rec.buffer) then return false end
 
   local buf = pmacs.window.buffer()
-  if not buf then return end
+  if not buf then return false end
 
   -- Relevance first (PR #110 round 1, finding 2): pairing has no
   -- interest in characters outside the set, so a transformed or
@@ -247,14 +265,14 @@ pmacs.hook.add("buffer.after-edit", function()
   -- Rust.
   local ch = rec.char
   local openers, closers = maps_for(set_for(rec.buffer))
-  if not (openers[ch] or closers[ch]) then return end
+  if not (openers[ch] or closers[ch]) then return false end
 
   -- Fail closed on a transformed source self-insert (Q#AP3): the
   -- intercept's positional result stands as produced; pairing on top
   -- of a relocated or expanded opener would compound it.
   if not rec.clean then
     ed.set_status("auto-pair skipped: source self-insert transformed")
-    return
+    return false
   end
   -- Fail closed when the source edit's context is no longer current:
   -- an intercept switched window/buffer, or something moved the
@@ -268,14 +286,14 @@ pmacs.hook.add("buffer.after-edit", function()
     or pmacs.window.current() ~= rec.window
     or ed.cursor() ~= rec.post_cursor then
     ed.set_status("auto-pair skipped: source context changed")
-    return
+    return false
   end
   -- Region guard (Q#AP3/Q#AP6): on the dispatch route type-over has
   -- already consumed and cleared the region. A region surviving the
   -- edit means the TUI's selection-blind optimistic gate let a custom
   -- pair char through (named deferral) — reacting would pile a closer
   -- onto an unconsumed region.
-  if ed.region() ~= nil then return end
+  if ed.region() ~= nil then return false end
 
   local cursor = rec.post_cursor
 
@@ -294,19 +312,19 @@ pmacs.hook.add("buffer.after-edit", function()
       if not ok then
         -- The duplicate stays (e.g. `())`); report, no retry.
         ed.set_status("auto-pair skip rejected by buffer intercept")
-        return
+        return true
       end
       if estart ~= cursor or estop ~= cursor + #ch or einserted ~= 0 then
         ed.set_status("auto-pair skip altered by buffer intercept")
         repair_cursor(win0, buf, cursor, estart, estop, einserted)
       end
-      return
+      return true
     end
   end
 
   local closer = openers[ch]
-  if not closer then return end
-  if not should_pair(buf, cursor, closers) then return end
+  if not closer then return false end
+  if not should_pair(buf, cursor, closers) then return false end
 
   local win0 = pmacs.window.current()
   local ok, estart, estop, einserted = pcall(function()
@@ -315,7 +333,7 @@ pmacs.hook.add("buffer.after-edit", function()
   if not ok then
     -- Nothing landed; the opener stands alone.
     ed.set_status("auto-pair closer rejected by buffer intercept")
-    return
+    return true
   end
   if estart ~= cursor or estop ~= cursor or einserted ~= #closer then
     ed.set_status("auto-pair closer altered by buffer intercept")
@@ -324,4 +342,11 @@ pmacs.hook.add("buffer.after-edit", function()
   -- Clean path: no cursor motion — the insert landed at the cursor
   -- and Lua mutators move no cursors, so it already sits between the
   -- pair; the daemon's per-tick CursorByte re-grounds both frontends.
-end)
+  return true
+end
+
+pmacs.typed_edit.add_consumer {
+  name = "auto-pair",
+  priority = 100,
+  fn = on_typed_edit,
+}

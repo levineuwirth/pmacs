@@ -1,8 +1,18 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-25, after the inline-math slice (#158) landed —
-the first mathematical typesetting in pmacs — following find-file (#162),
-the dired arc's Stage 0, and COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
+**Last updated: 2026-07-26, after Lean 4 Stage 4a (#179) — the typed-edit
+consumer chain — and bottom-panel Stage 2A (#177), the classified census
+routing that makes every Projection-class consumer ask
+`primary_document_window`; following the bottom-panel Stage 2 framing
+(#175), terminal configuration Stage 1 (#173) — profiles, scrollback, a
+per-terminal configurable escape key, and the `C-c t` opening binding —
+Lean 4 stages 3a and 3b (#167, #170), pmacs' first Lean language server;
+the GPU terminal input fix (#166), the double terminal-layout sync that
+made a GPU terminal untypable; the CRDT undo repro (#157), the
+inline-math landed-doc refresh (#172), the inline-math slice (#158), the
+first mathematical typesetting in pmacs; dired Stage 1 (#165), Lean 4
+Stage 2 (#161), the dired framing pair (#163/#164), find-file (#162) —
+the dired arc's Stage 0 — COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
 minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
 inline-math re-scout (#154), the vterm PTY-flake fix (#153), and the
 GPU initial-target doc refresh (#152); and before that GPU
@@ -25,15 +35,19 @@ reads it the way you just did.
 For volatile branches, checkpoints, verification, and recovery
 commands, read `docs/active-work.md` immediately after this file.
 
-## 1. Where the project stands (2026-07-25)
+## 1. Where the project stands (2026-07-26)
 
-- `main` @ `d152120` (the bottom-panel landed-doc refresh #156 atop the
-  inline-math slice #158, dired Stage 1 #165, the GPU terminal input fix
-  #166, Lean 4 Stage 2 #161, the dired framing #164, COHERENCE.md #163,
-  find-file #162, Lean 4 Stage 1 #160, minimap blank-slab #159,
-  bottom-panel Stage 1 #155). Protocol unchanged at **v20**. The bullets
-  below describe the arcs in their own terms; this line is the
-  head-of-`main` anchor.
+- `main` @ `a27f646` (Lean 4 Stage 4a #179 atop bottom-panel Stage 2A
+  #177, the bottom-panel Stage 2 framing #175, terminal configuration
+  Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a #167, the CRDT undo repro
+  #157, the inline-math landed-doc refresh #172, the bottom-panel
+  landed-doc refresh #156, the inline-math slice #158, dired Stage 1
+  #165, the GPU terminal input fix #166, Lean 4 Stage 2 #161, the dired
+  framing #164, COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160,
+  minimap blank-slab #159, bottom-panel Stage 1 #155). Protocol unchanged
+  at **v20** — bottom-panel Stage 2A deliberately carries no wire change;
+  v21 arrives with Stage 2B. The bullets below describe the arcs in their
+  own terms; this line is the head-of-`main` anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -42,6 +56,72 @@ commands, read `docs/active-work.md` immediately after this file.
   interaction islands added, config-registry adoption, background-work
   attribution. Its §2 grades the golden journey **broken at step 3**
   (`pmacs .` exits 1).
+- **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b LANDED**
+  (`docs/lean4-mode-framing.md`; #160, #161, #167, #170; merge
+  `d400f30`). pmacs edits Lean 4: `arborium-lean` highlighting, a
+  `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
+  server with a Lake-aware outermost root, a lazy toolchain probe, a
+  one-shot `lean --server` fallback, and `waitForDiagnostics`. **No
+  protocol change in any stage** (still v20).
+  - **Two of the four stages contained no Lean at all**, and that is the
+    arc's organizing rule: *no PR mixes a cross-cutting substrate change
+    with Lean feature content.* Stage 2 made LSP server affinity
+    per-project-root (`ensure_server` had been reusing one server across
+    roots — a correctness bug for every language, not just Lean). Stage
+    3a added notification/response subscription seams to
+    `handle_server_requests`, the single shared LSP event drain, plus
+    `pmacs.fs.canonicalize`.
+  - **Two consecutive re-scouts found that rule broken by the stage
+    being scouted** — Stage 3 in round 4, Stage 4 in round 5, each time
+    by a risk column that contradicted its own prose. The rule is not
+    self-enforcing. Re-check every remaining stage's risk column at
+    scout time.
+  - **A configured LSP root must be a canonical absolute path.** It
+    reaches `file_uri_for` verbatim and that URI is the affinity key, so
+    one package opened by two spellings spawns two servers. Stage 3a's
+    `pmacs.fs.canonicalize` is the primitive; it returns nil rather than
+    a lossy path for non-UTF-8 input.
+  - **`LspManager::stop` on an already-terminal client strands it in
+    `ShuttingDown` forever** — `server_is_live` then counts it live so
+    nothing rebuilds against it, and `forget` refuses it for not being
+    terminal. *Stopping a dead server is what makes it un-replaceable.*
+    Stage 3b works around it by dispatching on state (`forget` when
+    terminal, `stop` when live); merely skipping the call leaves
+    `next_restart_at` armed. The real fix is unframed substrate work.
+  - **`elan` shims lie**: `lake --version` and `lean --version` can both
+    fail ("no default toolchain configured") on a machine where Lean
+    otherwise works, so `command -v lake` is worthless as a capability
+    check. Lean acceptance is fake-server; live smokes must be PATH-
+    **and** success-gated.
+  - Stage 3b took six review rounds, and **the same defect appeared four
+    times**: "the fallback silently doesn't happen," as no re-attach,
+    then re-attach cleared by an unrelated buffer, then satisfied by the
+    very server being replaced, then repairing one buffer while the rest
+    stayed stale. Each fix was locally right; none asked what a *global*
+    config swap invalidates. The durable lesson is to heal at
+    **consumption** — the point where a stale record is handed out — not
+    at the moment of the swap.
+  - **Stage 4a (typed-edit consumer chain) is implemented and in review
+    as PR #179** (branch `lean4-stage4a-typed-edit-chain`, framing rev
+    8). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
+    single `buffer.after-edit` subscriber and the single one-shot read,
+    `pair.lua` becomes its first registered consumer, and
+    `tests/auto_pair_acceptance.rs` is unchanged by zero lines
+    (criterion 46, verified at the diff). No protocol change, no Lean
+    content. The three decisions that turned out load-bearing rather
+    than stylistic: consumers are called **even when the record is
+    nil** (three existing auto-pair tests assert the non-event through
+    it, and 4b abandons stale pending state on it); each consumer gets
+    its **own copy** of the record, because pairing reads `rec.char`
+    and a declining consumer could otherwise forge it; and the fan-out
+    iterates a **snapshot**, because a consumer that registers a
+    lower-priority one shifts itself forward under `ipairs` and runs
+    twice.
+  - Remaining: Stage 4b (the Unicode input method) is framed and
+    awaiting approval — not started; stages 5 (goal panel), 6 (`#eval`
+    output channel), and 7 (module hierarchy) are framed but not
+    scouted against current `main`.
+
 - **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
   merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
   frontend. **No protocol change (still v20); the whole slice lives in
@@ -691,6 +771,44 @@ commands, read `docs/active-work.md` immediately after this file.
     DAP, 8 GPU splits, plus the `.ipynb` arc (its JSON-grammar
     prerequisite shipped in #123).
 
+- **GPU terminal input LANDED — #166** (`main` @ `b889873`;
+  `docs/gpu-terminal-input-framing.md` rev 2; one review round). The
+  dispatcher applied **both** terminal-layout syncs to **every** attached
+  frontend each tick. A semantic session satisfies both conditions — a
+  `term_sizes` entry from `AttachRequest` *and* a terminal declaration — so
+  its PTY was resized twice per tick forever: the grid arm installed the TUI
+  placement size, the semantic arm the declared content rectangle, each arm's
+  `old_size == size` guard seeing only what the other had just written. The
+  child took a `SIGWINCH` storm at tick cadence, which made typing into a GPU
+  terminal impossible while output kept flowing. TUI was structurally
+  unaffected.
+  - `EditorInstance::sync_terminal_layout` is split into
+    `sync_terminal_controller_liveness` (frontend-kind **neutral**: panel
+    reconcile + release of a controller whose window moved away — reads only
+    views/windows/controller, never a grid size) and
+    `sync_terminal_grid_geometry` (**grid only**: TUI placement + resize).
+    `sync_terminal_layout` survives as the composition, so `editor::run` and
+    `LOCAL` are byte-identical.
+  - `daemon::sync_terminal_layouts_for_tick` is the extracted loop body:
+    liveness for every frontend once per tick, then **exactly one** geometry
+    arm keyed on `semantic_states` membership — the same fact session
+    establishment uses, so the arms cannot both fire.
+  - **The trap, kept in a comment:** the release on a missing
+    `window_placements` entry reads like liveness and is grid geometry. A
+    semantic frontend has no placement entry at all, so moving it into the
+    neutral half would release a GPU controller every tick.
+  - Why not the one-line guard: the grid arm was also the **only** per-tick
+    controller-liveness release a semantic frontend got, and
+    `sync_semantic_terminal_layout` cannot take it over — the buffer-follow
+    snapshot clears the viewport declaration, so that arm stops running in
+    exactly the switch-away case that needs the release.
+  - No protocol change (v20). Gates: 1,829 default + 2,006 CRDT library
+    tests; vterm Stage 1/2/3 10/6/9 CRDT; bottom-panel 46; M4 121; required
+    GPU 155; isolated-config workspace sweep 3,177 across 92 suites.
+  - **Known gap, its own lane:** CI never enables `crdt`, so the Stage 3
+    real-path acceptance (including `a37`) is not compiled there. #166's unit
+    pins are not `crdt`-gated and do run. See `docs/active-work.md`.
+
 ## 2. How we work (the part that must not drift)
 
 The user is expert and reviews deeply — they falsify framings and find
@@ -817,6 +935,34 @@ final variant — its own round-trip cannot detect a discriminant shift.
 
 ## 5. Hard-won ops lessons
 
+- **A test that skips on a missing precondition reports `ok`, and a gate log
+  cannot tell that apart from a pass.** `vterm_stage3_acceptance::a37` — the
+  only acceptance driving a real daemon, a real PTY and a real wgpu render
+  together — derives `pmacs-gpu` from `CARGO_BIN_EXE_pmacs` and, when that
+  binary is absent from the target directory, prints a skip and returns.
+  A fresh worktree reports the suite 9/9 **in 0.17 s having never run it**;
+  a real run takes ~4 s. `PMACS_REQUIRE_GPU=1` is what promotes the skip to
+  a failure, and the standing gate list applies that flag to
+  `cargo test -p pmacs-gpu`, a *different package*. Two habits follow:
+  build the workspace before believing any suite that reaches for a sibling
+  binary, and **judge such a suite by its elapsed time**, not its verdict.
+- **Before attributing a red test to your branch, run it on the merge base.**
+  `a37` failed on the #173 branch, which looked like a regression; it failed
+  identically on the PR's own base and on two intermediate commits, and had
+  *passed* on that same base twenty minutes earlier. The variable was machine
+  load from a second agent compiling continuously. Load-sensitive tests make
+  both verdicts uninformative in isolation, so the base-commit run is the
+  cheapest way to tell a regression from weather — and it is much cheaper
+  than the bisect it replaces.
+- **A daemon-side fix is not deployed until the daemon is restarted from a
+  tree that contains it.** #166's reporter rebuilt and saw no change: the
+  running daemon had been started from a shared checkout still on a pre-fix
+  branch, and `pmacs --gpu` attaches to whatever process already owns the
+  socket. Rebuilding a binary does nothing to a running process. When
+  validating a daemon-side fix by hand, check the running process's binary
+  path and start time against the tree you think you fixed —
+  `ps -eo pid,lstart,args | grep '[p]macs --daemon'` — before concluding the
+  fix failed.
 - **Two operations that must be alternatives are not made alternatives by
   being adjacent.** The dispatcher applied its grid and semantic
   terminal-layout syncs to every attached frontend; a semantic session
