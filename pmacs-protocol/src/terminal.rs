@@ -12,13 +12,18 @@
 //! that single structural policy. A second implementation of these rules
 //! in a frontend is a bug, not a convenience.
 //!
-//! This module owns the crate's only `unicode-width` use: glyph column
-//! width and wide-continuation topology cannot be checked without it.
+//! Glyph column width and wide-continuation topology moved to
+//! [`crate::wire_grid`] in bottom-panel Stage 2B, which is now the
+//! crate's only non-test `unicode-width` use: those rules are shared
+//! with [`crate::panel::PanelFrame`]. The 512 per-axis PTY caps,
+//! metadata, selection spans, and the `at_bottom`/`scroll_offset`
+//! coupling stay here, because a panel does not inherit them.
 
-use crate::cell::{Cell, CellCoord, CellSize, Glyph};
+use crate::cell::{Cell, CellCoord, CellSize};
 use crate::ids::BufferId;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+#[cfg(test)]
+use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
 // Shared limits
@@ -217,6 +222,58 @@ pub enum TerminalFrameError {
     },
 }
 
+/// Bounds a terminal frame enforces on its cell grid.
+///
+/// The per-axis caps are the PTY-specific half of the split: a panel
+/// frame shares every other rule but not these, because a panel is
+/// sized by the frontend's surface rather than by a pty window size.
+const TERMINAL_GRID_LIMITS: crate::wire_grid::WireGridLimits = crate::wire_grid::WireGridLimits {
+    max_rows: MAX_TERMINAL_ROWS as u32,
+    max_cols: MAX_TERMINAL_COLS as u32,
+    max_visible_cells: MAX_TERMINAL_VISIBLE_CELLS,
+    max_glyph_bytes: MAX_TERMINAL_FRAME_GLYPH_BYTES,
+};
+
+/// Map a shared wire-grid failure onto this message's error type.
+///
+/// The variants and their text are unchanged by the Stage 2B factoring:
+/// every existing terminal-frame assertion still observes exactly what
+/// it observed before.
+fn terminal_grid_error(error: crate::wire_grid::WireGridError) -> TerminalFrameError {
+    use crate::wire_grid::WireGridError;
+    match error {
+        WireGridError::Size {
+            rows,
+            cols,
+            max_rows,
+            max_cols,
+        } => TerminalFrameError::Size {
+            rows,
+            cols,
+            max_rows,
+            max_cols,
+        },
+        WireGridError::Area { area, max } => TerminalFrameError::Area { area, max },
+        WireGridError::CellCount { expected, actual } => {
+            TerminalFrameError::CellCount { expected, actual }
+        }
+        WireGridError::Cursor {
+            row,
+            col,
+            rows,
+            cols,
+        } => TerminalFrameError::Cursor {
+            row,
+            col,
+            rows,
+            cols,
+        },
+        WireGridError::Glyph { index, reason } => TerminalFrameError::Glyph { index, reason },
+        WireGridError::Attachment { index } => TerminalFrameError::Attachment { index },
+        WireGridError::GlyphBudget { max } => TerminalFrameError::GlyphBudget { max },
+    }
+}
+
 impl TerminalFrame {
     /// Check every structural rule a terminal frame must satisfy.
     ///
@@ -224,23 +281,13 @@ impl TerminalFrame {
     /// by a frontend after decode. It is pure: a rejected frame mutates
     /// nothing, so callers get atomic rejection for free.
     pub fn validate(&self) -> Result<(), TerminalFrameError> {
-        let area = self.checked_area()?;
-        if self.cells.len() != area {
-            return Err(TerminalFrameError::CellCount {
-                expected: area,
-                actual: self.cells.len(),
-            });
-        }
-        if let Some(cursor) = self.cursor
-            && (cursor.row >= self.size.rows || cursor.col >= self.size.cols)
-        {
-            return Err(TerminalFrameError::Cursor {
-                row: cursor.row,
-                col: cursor.col,
-                rows: self.size.rows,
-                cols: self.size.cols,
-            });
-        }
+        crate::wire_grid::validate_wire_grid(
+            self.size,
+            &self.cells,
+            self.cursor,
+            TERMINAL_GRID_LIMITS,
+        )
+        .map_err(terminal_grid_error)?;
         if let Some(title) = &self.title {
             validate_metadata("title", title)?;
         }
@@ -249,113 +296,11 @@ impl TerminalFrame {
             TerminalProcessState::Crashed(text) => validate_metadata("crash", text)?,
             TerminalProcessState::Running | TerminalProcessState::Exited(_) => {}
         }
-        self.validate_cells()?;
         self.validate_selection()?;
         if self.at_bottom != (self.scroll_offset == 0) {
             return Err(TerminalFrameError::BottomState {
                 at_bottom: self.at_bottom,
                 scroll_offset: self.scroll_offset,
-            });
-        }
-        Ok(())
-    }
-
-    /// Declared cell area, checked against both shared bounds.
-    fn checked_area(&self) -> Result<usize, TerminalFrameError> {
-        let rows = self.size.rows;
-        let cols = self.size.cols;
-        if rows == 0
-            || cols == 0
-            || rows > u32::from(MAX_TERMINAL_ROWS)
-            || cols > u32::from(MAX_TERMINAL_COLS)
-        {
-            return Err(TerminalFrameError::Size {
-                rows,
-                cols,
-                max_rows: u32::from(MAX_TERMINAL_ROWS),
-                max_cols: u32::from(MAX_TERMINAL_COLS),
-            });
-        }
-        // Both factors are bounded above by 512, so the product cannot
-        // overflow; `checked_mul` keeps that an assertion rather than an
-        // assumption a later bound change could quietly break.
-        let area = rows
-            .checked_mul(cols)
-            .and_then(|area| usize::try_from(area).ok())
-            .ok_or(TerminalFrameError::Area {
-                area: usize::MAX,
-                max: MAX_TERMINAL_VISIBLE_CELLS,
-            })?;
-        if area > MAX_TERMINAL_VISIBLE_CELLS {
-            return Err(TerminalFrameError::Area {
-                area,
-                max: MAX_TERMINAL_VISIBLE_CELLS,
-            });
-        }
-        Ok(area)
-    }
-
-    /// Glyph legality, wide-continuation topology, and the glyph budget.
-    fn validate_cells(&self) -> Result<(), TerminalFrameError> {
-        let cols = self.size.cols as usize;
-        let mut glyph_bytes = 0usize;
-        // Columns still owed to the preceding wide lead on this row.
-        let mut pending_continuation = false;
-        for (index, cell) in self.cells.iter().enumerate() {
-            if cell.attachment.is_some() {
-                return Err(TerminalFrameError::Attachment { index });
-            }
-            let col = index % cols;
-            if col == 0 && pending_continuation {
-                // A wide lead in the final column would have to be
-                // completed on the next row, which is not a footprint a
-                // terminal grid can express.
-                return Err(TerminalFrameError::Glyph {
-                    index: index - 1,
-                    reason: "wide glyph has no continuation column on its row",
-                });
-            }
-            match &cell.glyph {
-                Glyph::Continuation => {
-                    if !pending_continuation {
-                        return Err(TerminalFrameError::Glyph {
-                            index,
-                            reason: "continuation without a preceding wide glyph",
-                        });
-                    }
-                    pending_continuation = false;
-                }
-                Glyph::Char(ch) => {
-                    if pending_continuation {
-                        return Err(TerminalFrameError::Glyph {
-                            index,
-                            reason: "wide glyph is not followed by its continuation",
-                        });
-                    }
-                    let width = char_display_width(*ch).ok_or(TerminalFrameError::Glyph {
-                        index,
-                        reason: "glyph is a control or zero-width character",
-                    })?;
-                    glyph_bytes = add_glyph_bytes(glyph_bytes, ch.len_utf8())?;
-                    pending_continuation = width == 2;
-                }
-                Glyph::Cluster(bytes) => {
-                    if pending_continuation {
-                        return Err(TerminalFrameError::Glyph {
-                            index,
-                            reason: "wide glyph is not followed by its continuation",
-                        });
-                    }
-                    let width = cluster_display_width(bytes, index)?;
-                    glyph_bytes = add_glyph_bytes(glyph_bytes, bytes.len())?;
-                    pending_continuation = width == 2;
-                }
-            }
-        }
-        if pending_continuation {
-            return Err(TerminalFrameError::Glyph {
-                index: self.cells.len() - 1,
-                reason: "wide glyph has no continuation column on its row",
             });
         }
         Ok(())
@@ -395,73 +340,6 @@ impl TerminalFrame {
     }
 }
 
-/// Column width of a leading `Char` glyph, or `None` when it cannot lead.
-fn char_display_width(ch: char) -> Option<usize> {
-    if ch.is_control() {
-        return None;
-    }
-    match UnicodeWidthChar::width(ch) {
-        Some(1) => Some(1),
-        Some(2) => Some(2),
-        _ => None,
-    }
-}
-
-/// Column width of a leading `Cluster` glyph.
-///
-/// Width is clamped into `1..=2` exactly as the terminal screen clamps it
-/// when it writes the cluster: a base plus combining marks may measure
-/// wider than two columns, and the screen occupies two. Clamping in one
-/// place and measuring in another is how a frame that renders correctly
-/// gets rejected on the wire.
-fn cluster_display_width(bytes: &[u8], index: usize) -> Result<usize, TerminalFrameError> {
-    if bytes.is_empty() {
-        return Err(TerminalFrameError::Glyph {
-            index,
-            reason: "cluster is empty",
-        });
-    }
-    if bytes.len() > MAX_TERMINAL_GRAPHEME_BYTES {
-        return Err(TerminalFrameError::Glyph {
-            index,
-            reason: "cluster exceeds the per-cluster byte limit",
-        });
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| TerminalFrameError::Glyph {
-        index,
-        reason: "cluster is not valid UTF-8",
-    })?;
-    if text.chars().any(char::is_control) {
-        return Err(TerminalFrameError::Glyph {
-            index,
-            reason: "cluster carries a control character",
-        });
-    }
-    let width = UnicodeWidthStr::width(text);
-    if width == 0 {
-        return Err(TerminalFrameError::Glyph {
-            index,
-            reason: "cluster occupies no columns",
-        });
-    }
-    Ok(width.min(2))
-}
-
-/// Accumulate glyph bytes under the aggregate bound with checked addition.
-fn add_glyph_bytes(total: usize, add: usize) -> Result<usize, TerminalFrameError> {
-    let next = total
-        .checked_add(add)
-        .ok_or(TerminalFrameError::GlyphBudget {
-            max: MAX_TERMINAL_FRAME_GLYPH_BYTES,
-        })?;
-    if next > MAX_TERMINAL_FRAME_GLYPH_BYTES {
-        return Err(TerminalFrameError::GlyphBudget {
-            max: MAX_TERMINAL_FRAME_GLYPH_BYTES,
-        });
-    }
-    Ok(next)
-}
-
 /// Length and control-character rules shared by title and process text.
 fn validate_metadata(field: &'static str, text: &str) -> Result<(), TerminalFrameError> {
     if text.len() > MAX_TERMINAL_METADATA_BYTES {
@@ -482,7 +360,10 @@ fn validate_metadata(field: &'static str, text: &str) -> Result<(), TerminalFram
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cell::{Color, Style, UnderlineStyle};
+    // `Glyph` is no longer used by this module's production code — the
+    // glyph rules moved to `crate::wire_grid` — but these tests still
+    // construct frames cell by cell.
+    use crate::cell::{Color, Glyph, Style, UnderlineStyle};
     use crate::message::InstanceMessage;
     use crate::transport::MAX_FRAME_BYTES;
 

@@ -40,8 +40,10 @@ pub mod cell;
 pub mod crdt;
 pub mod ids;
 pub mod message;
+pub mod panel;
 pub mod terminal;
 pub mod transport;
+pub mod wire_grid;
 
 /// Logical display columns between fixed buffer-text tab stops.
 ///
@@ -67,9 +69,14 @@ pub use message::{
     StatuslineSegment, StyleSegment, StyleSpan, ThemeFace, is_builtin_pair_char,
     is_modeline_face_name, is_supported_protocol_version, is_ui_face_name, negotiate_capabilities,
 };
+pub use panel::{MAX_PANEL_VISIBLE_CELLS, PanelFrame, PanelFrameError, PanelFramePayload};
 pub use terminal::{
     MAX_TERMINAL_COLS, MAX_TERMINAL_FRAME_GLYPH_BYTES, MAX_TERMINAL_GRAPHEME_BYTES,
     MAX_TERMINAL_METADATA_BYTES, MAX_TERMINAL_ROWS, MAX_TERMINAL_VISIBLE_CELLS, TerminalFrame,
     TerminalFrameError, TerminalProcessState, TerminalSelectionSpan,
 };
 pub use transport::{MAX_FRAME_BYTES, TransportError, read_message, write_message};
+pub use wire_grid::{
+    MAX_WIRE_GRID_GLYPH_BYTES, MAX_WIRE_GRID_GRAPHEME_BYTES, WireGridError, WireGridLimits,
+    checked_area, validate_wire_grid,
+};

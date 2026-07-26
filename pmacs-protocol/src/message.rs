@@ -442,6 +442,69 @@ pub enum FrontendEvent {
         /// Modifiers held during the gesture.
         mods: Modifiers,
     },
+    /// Bottom panel Stage 2 (protocol v21): the frontend's authoritative
+    /// cell-equivalent layout capacity (Q#BP15a).
+    ///
+    /// Valid **without** a side window — the daemon needs columns before
+    /// it can paint a first panel frame, so gating this on panel
+    /// presence would deadlock the first open. "Without" refers to
+    /// side-window presence only; the protocol and session gates still
+    /// apply, and the event is accepted only from an authenticated,
+    /// negotiated panel-capable semantic session.
+    ///
+    /// Sent immediately after attach acceptance and refreshed on window
+    /// resize, font change, and scale change. `geometry_epoch` is
+    /// frontend-owned because a font or scale change can invalidate an
+    /// old panel frame while `total` is **identical**, which daemon-side
+    /// value dedup cannot detect.
+    FrontendCellGeometry {
+        /// Which frontend declared this (untrusted; checked against the
+        /// transport source).
+        frontend_id: FrontendId,
+        /// Monotonic frontend-owned declaration id; `0` is reserved for
+        /// "never declared" and is rejected on the wire.
+        geometry_epoch: u64,
+        /// Whole-cell capacity of the frontend's frame.
+        total: CellSize,
+    },
+    /// Bottom panel Stage 2 (protocol v21): requested fixed panel rows
+    /// from a divider drag (Q#BP15a).
+    ///
+    /// Rows are the only size component; the epochs are identities, not
+    /// geometry. Accepted only for the currently visible `Present` panel
+    /// matching both the latest geometry declaration and the current
+    /// presentation epoch, then clamped by Q#BP2's interactive
+    /// preference.
+    PanelResizeRows {
+        /// Which frontend produced the drag (untrusted, as above).
+        frontend_id: FrontendId,
+        /// Geometry declaration this request is measured against.
+        geometry_epoch: u64,
+        /// Presentation identity this request addresses.
+        panel_epoch: u64,
+        /// Requested fixed panel rows.
+        rows: u32,
+    },
+    /// Bottom panel Stage 2 (protocol v21): a pointer gesture a semantic
+    /// frontend hit-tested to a panel CELL (Q#BP16).
+    ///
+    /// Carries both epochs so a gesture aimed at a panel that has since
+    /// been replaced or reopened cannot be applied to its successor.
+    /// Unlike [`Self::Pointer`], accepting this **activates the panel**.
+    PanelPointer {
+        /// Which frontend produced the gesture (untrusted, as above).
+        frontend_id: FrontendId,
+        /// Geometry declaration this gesture was hit-tested against.
+        geometry_epoch: u64,
+        /// Presentation identity this gesture addresses.
+        panel_epoch: u64,
+        /// Cell the pointer is over, within the declared panel grid.
+        coord: CellCoord,
+        /// Which gesture step this is.
+        kind: MouseKind,
+        /// Modifiers held during the gesture.
+        mods: Modifiers,
+    },
 }
 
 /// Gesture step for [`FrontendEvent::Pointer`]. Double-click
@@ -488,7 +551,10 @@ impl FrontendEvent {
             | Self::Pointer { frontend_id, .. }
             | Self::MenuPointer { frontend_id, .. }
             | Self::TerminalResize { frontend_id, .. }
-            | Self::TerminalPointer { frontend_id, .. } => *frontend_id,
+            | Self::TerminalPointer { frontend_id, .. }
+            | Self::FrontendCellGeometry { frontend_id, .. }
+            | Self::PanelResizeRows { frontend_id, .. }
+            | Self::PanelPointer { frontend_id, .. } => *frontend_id,
         }
     }
 }
@@ -1143,6 +1209,20 @@ pub enum InstanceMessage {
     /// Appended after [`Self::TerminalFrame`], the final v19 variant, so no
     /// legacy postcard discriminant moves.
     InitialTargetResult(InitialTargetResult),
+    /// Bottom panel Stage 2 (protocol v21): the daemon's painted
+    /// projection of one side window, or its authoritative absence
+    /// (Q#BP15).
+    ///
+    /// `Absent` is sent on close **and** on hide: the receiver retains
+    /// its last valid frame, so silence would leave a stale band on
+    /// screen indefinitely. `Absent` is duplicate-suppressed like any
+    /// payload, and applying it clears the last declared panel size and
+    /// presentation epoch before any later event can validate against
+    /// them.
+    ///
+    /// Appended after [`Self::InitialTargetResult`], the final v20
+    /// variant, so no existing postcard discriminant moves.
+    PanelFrame(crate::panel::PanelFramePayload),
 }
 
 /// One resolved UI face for [`InstanceMessage::ThemeFacts`]: a full
@@ -1565,7 +1645,17 @@ pub enum ResourceBody {
 /// handshake extension is read only from v20 semantic sessions; the result is
 /// sent only when such a session requested a target. v6–v19 handshakes and
 /// message discriminants remain unchanged.
-pub const PROTOCOL_VERSION: u32 = 20;
+///
+/// Bottom panel Stage 2 (Q#BP9): bumped 20 → 21 for
+/// [`InstanceMessage::PanelFrame`] and
+/// [`FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`].
+/// All four are appended after their enum's previous final variant, so
+/// no v6–v20 discriminant moves and the encoding of every existing
+/// message is byte-identical. The new traffic is gated in both
+/// directions: a v20 peer neither receives `PanelFrame` nor is placed in
+/// a side window, because denying only the events would leave its
+/// window invisible.
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
@@ -1643,8 +1733,12 @@ pub const PROTOCOL_VERSION: u32 = 20;
 /// GPU initial target (Q#GT4): extended to `[6, ..., 20]`. v20 semantic
 /// sessions send a bounded bootstrap envelope after `AttachRequest`; legacy
 /// and non-semantic sessions retain their existing handshake shape.
+///
+/// Bottom panel Stage 2 (Q#BP9): extended to `[6, ..., 21]`. v21 peers
+/// may exchange panel traffic; v20 peers interoperate with it simply
+/// absent, and are never placed in a side window.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] =
-    &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+    &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
 
 /// T M10.5: predicate for the handshake check. Returns `true` if
 /// `peer_version` is in [`SUPPORTED_PROTOCOL_VERSIONS`].

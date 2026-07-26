@@ -8904,6 +8904,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::StatuslineSegments { .. } => "StatuslineSegments",
         InstanceMessage::TerminalFrame(_) => "TerminalFrame",
         InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
+        InstanceMessage::PanelFrame(_) => "PanelFrame",
     }
 }
 

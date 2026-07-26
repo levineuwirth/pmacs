@@ -3313,6 +3313,20 @@ fn apply_event(
                  (grid terminals resize through the Stage 2 layout path)"
             );
         }
+        FrontendEvent::FrontendCellGeometry { .. }
+        | FrontendEvent::PanelResizeRows { .. }
+        | FrontendEvent::PanelPointer { .. } => {
+            // Bottom panel Stage 2 — panel declarations belong to
+            // negotiated panel-capable semantic sessions and are routed
+            // by the authenticated source in `handle_dispatcher_event`.
+            // A grid session has no panel band at all, so one arriving
+            // here is a protocol violation; drop it rather than letting
+            // a payload-trusted id reach a view.
+            eprintln!(
+                "pmacs daemon: panel declaration from a grid session; dropping \
+                 (grid sessions negotiate no panel band)"
+            );
+        }
     }
 }
 
