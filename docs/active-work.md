@@ -435,6 +435,35 @@ If it does not, stop and repair the remote/fetch configuration.
   trailing newline); making re-invoke create a fresh buffer fails 18;
   dropping the kill-with-terminal teardown fails 18; removing the
   intercept fails 16b. Each failed exactly one test.
+- **Review round 1 — four findings, all real, and they rhyme in pairs.**
+  Two P1 implementation defects and two P2 vacuous pins, all four tracing
+  to one root: **a name is not an identity, and a context-free readout is
+  not a state observation.**
+  - *P1 — a foreign same-named buffer was adopted and clobbered.* Snapshot
+    writes use `bypass_intercept`, so found-by-name adoption overwrote a
+    user's buffer; the reviewer reproduced "do not clobber" becoming 23
+    newlines. Fixed by dired's F7 rule: **ownership means "in our own
+    handle table"**, and a taken name yields a `<2>` variant.
+  - *P1 — snapshot identity was keyed by terminal NAME.*
+    `TerminalManager::open` uniquifies only the *derived* name, so an
+    explicit `name = "*same*"` lets two valid terminals share one; they
+    then shared a snapshot, `q` returned to the wrong terminal, and
+    killing either removed it. Now keyed by comparing buffer handles in an
+    array — `BufferIdLua` implements `__eq` but each wrapper is a distinct
+    table key, so **comparison works and hashing does not**.
+  - *P2 — the refresh pins were vacuous.* 19 compared a quiet terminal's
+    snapshot against itself and 18 counted buffers, so both passed with
+    `render_snapshot` replaced by a no-op. Now the test types a marker
+    into the `cat` child, requires it **absent** first, then refreshes.
+  - *P2 — the tail-follow pin could not observe view state.*
+    `manager.snapshot(buffer_id)` is context-free and always reads the
+    live screen, so it reported "at the tail" for a view forced to the
+    oldest retained row. Now read through `snapshot_for_view`'s
+    `at_bottom` and projected cells.
+- **Four more bites, all discriminating.** Restoring adopt-by-name fails
+  18a *and* 18b; restoring name-keyed identity fails 18b; making
+  `render_snapshot` a no-op fails **both** 18 and 19 (the vacuity,
+  demonstrated); and forcing the view off the tail fails 20.
 - Load-bearing decisions, each forced by scouted ground truth:
   - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
     no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;

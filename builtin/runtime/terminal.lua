@@ -221,11 +221,56 @@ pmacs.keymap.bind { scope = "global", sequence = "C-c t", command = "terminal" }
 local raw_copy_retained = assert(terminal._copy_retained,
   "pmacs.terminal._copy_retained is required")
 
--- snapshot buffer name -> { terminal = <buf>, buffer = <buf> }
+-- An ARRAY of `{ terminal = <buf>, buffer = <buf> }`, scanned linearly and
+-- compared with `==`, following dired's handle table (F7).
 --
--- Keyed by NAME, not by buffer handle: handles are not stable table keys,
--- and a name survives the user killing the snapshot (listview precedent).
-local snapshots = {}
+-- Not `snapshots[name]`, and not `snapshots[buf]`, for two separate
+-- reasons — both of which were live defects in review round 1:
+--
+--  * **A terminal name is not a unique key.** `TerminalManager::open`
+--    uniquifies only the DERIVED name; an explicitly passed
+--    `name = "*same*"` is inserted verbatim
+--    (`src/terminal/session.rs`, `if spec.name.is_some()`). Two valid
+--    terminals can therefore share a name, and a name-keyed table gives
+--    them one snapshot between them: the second invocation silently
+--    retargets it, `q` returns to the wrong terminal, and killing either
+--    one removes the shared buffer.
+--  * **A buffer handle is not a stable table key.** `BufferIdLua`
+--    implements `__eq` but each wrapper is a distinct table key, so
+--    `snapshots[buf]` would miss on a freshly minted handle for the same
+--    buffer. Comparison works; hashing does not. Hence the scan.
+local handles = {}
+
+-- Compact dead entries first, so a command in a killed snapshot sees
+-- "not in copy mode" rather than operating on dead state.
+local function live_handles()
+  local live = {}
+  for _, h in ipairs(handles) do
+    local term_ok, term_valid = pcall(h.terminal.is_valid, h.terminal)
+    local snap_ok, snap_valid = pcall(h.buffer.is_valid, h.buffer)
+    if term_ok and term_valid and snap_ok and snap_valid then
+      live[#live + 1] = h
+    end
+  end
+  handles = live
+  return live
+end
+
+local function handle_for_terminal(term_buf)
+  if term_buf == nil then return nil end
+  for _, h in ipairs(live_handles()) do
+    if h.terminal == term_buf then return h end
+  end
+  return nil
+end
+
+local function handle_for_snapshot(buf)
+  if buf == nil then return nil end
+  for _, h in ipairs(live_handles()) do
+    if h.buffer == buf then return h end
+  end
+  return nil
+end
 
 local function buffer_name(buf)
   local ok, described = pcall(pmacs.describe.buffer, buf)
@@ -233,7 +278,7 @@ local function buffer_name(buf)
   return nil
 end
 
-local function find_buffer_by_name(name)
+local function buffer_named(name)
   for _, id in ipairs(pmacs.buffer.list()) do
     local ok, described = pcall(pmacs.describe.buffer, id)
     if ok and described and described.name == name then return id end
@@ -244,9 +289,29 @@ end
 -- `*terminal:bash*` -> `*terminal-copy: terminal:bash*`. The surrounding
 -- asterisks are stripped before nesting so the result reads as one
 -- generated-buffer name rather than two.
-local function snapshot_name_for(term_buf)
+local function snapshot_base_name(term_buf)
   local name = buffer_name(term_buf) or "terminal"
   return string.format("*terminal-copy: %s*", (name:gsub("^%*", ""):gsub("%*$", "")))
+end
+
+-- How far the `<2>`, `<3>`, ... disambiguation walks before giving up.
+local NAME_VARIANT_LIMIT = 99
+
+-- `pmacs.buffer.create` takes any caller-chosen name, so a foreign buffer
+-- may already be called `*terminal-copy: sh*` — and two same-named
+-- terminals legitimately produce the same base name. Painting into a
+-- buffer we did not create would clobber a user's data through
+-- `bypass_intercept`, so **found-by-name is NOT adoption**: ownership
+-- means "this buffer is in the handle table above", exactly as in dired.
+local function unique_snapshot_name(term_buf)
+  local name = snapshot_base_name(term_buf)
+  if buffer_named(name) == nil then return name end
+  for i = 2, NAME_VARIANT_LIMIT do
+    local candidate = string.format("%s<%d>", name, i)
+    if buffer_named(candidate) == nil then return candidate end
+  end
+  error(string.format(
+    "terminal.copy-mode: %s is taken and no free variant remains", name), 0)
 end
 
 -- Q#TC7: the snapshot text comes from the SAME serializer selection-copy
@@ -262,19 +327,17 @@ local function render_snapshot(record)
   if #text > 0 then buf:insert(0, text, { bypass_intercept = true }) end
 end
 
-local function ensure_snapshot(term_buf)
-  local name = snapshot_name_for(term_buf)
-  local record = snapshots[name]
-  if record and record.buffer:is_valid() then
-    -- Q#TC8: re-invoking refreshes IN PLACE. Retarget the terminal too,
-    -- in case a terminal buffer was recreated under the same name.
-    record.terminal = term_buf
-    return record
-  end
+local function claim_snapshot(term_buf)
+  -- Q#TC8: re-invoking against the same terminal refreshes IN PLACE.
+  -- Identity is the terminal BUFFER, so two same-named terminals get two
+  -- snapshots and neither can retarget the other's.
+  local existing = handle_for_terminal(term_buf)
+  if existing then return existing end
 
-  local buf = find_buffer_by_name(name) or pmacs.buffer.create(name)
-  record = { terminal = term_buf, buffer = buf }
-  snapshots[name] = record
+  local name = unique_snapshot_name(term_buf)
+  local buf = pmacs.buffer.create(name)
+  local record = { terminal = term_buf, buffer = buf }
+  handles[#handles + 1] = record
 
   -- Q#TC6a — BOTH calls, and the second is the load-bearing one.
   --
@@ -298,9 +361,11 @@ local function ensure_snapshot(term_buf)
   pmacs.keymap.bind { scope = "buffer", buffer = buf,
     sequence = "q", command = "terminal.copy-quit" }
 
-  -- Q#TC8 lifecycle, both directions. Killing the terminal takes its
-  -- snapshot with it; killing the snapshot alone leaves the terminal
-  -- running and merely forgets the record, so a later invoke rebuilds.
+  -- Q#TC8 lifecycle, both directions. Killing the terminal takes ITS
+  -- snapshot with it — `record`, captured here, not "whatever is
+  -- currently filed under this name"; killing the snapshot alone leaves
+  -- the terminal running, and `live_handles` compacts the entry out so a
+  -- later invoke rebuilds.
   --
   -- `on_removed` is sound here because every user-facing kill path
   -- routes through `pmacs.buffer.kill`, which fires the callbacks. The
@@ -310,14 +375,8 @@ local function ensure_snapshot(term_buf)
   -- alive, which is what makes reading back a finished command's output
   -- work at all.
   pcall(pmacs.buffer.on_removed, term_buf, function()
-    local current = snapshots[name]
-    if current and current.buffer:is_valid() then
-      pcall(pmacs.buffer.kill, current.buffer)
-    end
-    snapshots[name] = nil
-  end)
-  pcall(pmacs.buffer.on_removed, buf, function()
-    snapshots[name] = nil
+    local ok, valid = pcall(record.buffer.is_valid, record.buffer)
+    if ok and valid then pcall(pmacs.buffer.kill, record.buffer) end
   end)
 
   return record
@@ -325,11 +384,7 @@ end
 
 -- The snapshot record whose buffer the active window shows, or nil.
 local function snapshot_for_current_buffer()
-  local buf = pmacs.window.buffer()
-  if not buf then return nil end
-  local name = buffer_name(buf)
-  if not name then return nil end
-  return snapshots[name]
+  return handle_for_snapshot(pmacs.window.buffer())
 end
 
 function terminal.copy_mode(term_buf)
@@ -338,7 +393,7 @@ function terminal.copy_mode(term_buf)
   if not terminal.is_terminal(term_buf) then
     error("terminal.copy-mode: the current buffer is not a terminal", 0)
   end
-  local record = ensure_snapshot(term_buf)
+  local record = claim_snapshot(term_buf)
   render_snapshot(record)
   pmacs.window.switch_buffer(record.buffer)
   return record.buffer

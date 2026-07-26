@@ -123,16 +123,66 @@ fn open_fill_terminal(state: &mut EditorState) -> pmacs::buffer::BufferId {
     buffer
 }
 
+fn viewport() -> CellSize {
+    CellSize::new(10, 40)
+}
+
 /// Give LOCAL a window on the terminal and register/claim its view, which
 /// is what makes `dispatch_key`'s terminal transport arm reachable.
-fn focus_terminal(state: &EditorState, buffer: pmacs::buffer::BufferId) {
+/// Returns the view key, so assertions can read the *projected* view
+/// rather than the context-free live screen.
+fn focus_terminal(state: &EditorState, buffer: pmacs::buffer::BufferId) -> TerminalViewKey {
     state.core.borrow_mut().switch_active_buffer(buffer).ok();
     let window = state.core.borrow().active_window_id();
     let key = TerminalViewKey::new(FrontendId::LOCAL, window, buffer);
     let mut manager = state.terminal_manager.borrow_mut();
     manager.register_view(key);
     manager.claim_controller(key);
-    let _ = manager.snapshot_for_view(key, CellSize::new(10, 40));
+    let _ = manager.snapshot_for_view(key, viewport());
+    key
+}
+
+/// Make the child produce NEW output, so a refresh has something to find.
+///
+/// The child is `exec cat`, so typing into the focused terminal echoes
+/// back. Without this, "refresh" tests compare a quiet terminal against
+/// itself and pass with the render replaced by a no-op — the defect review
+/// round 1 found in acceptance 18 and 19.
+fn emit_into_child(state: &mut EditorState, terminal: pmacs::buffer::BufferId, marker: &str) {
+    focus_terminal(state, terminal);
+    for ch in marker.chars() {
+        press(state, KeyCode::Char(ch), KeyModifiers::NONE);
+    }
+    assert!(
+        tick_until(state, marker, terminal),
+        "the child must echo {marker:?} back onto the live screen"
+    );
+}
+
+/// What the registered VIEW currently projects — which, unlike
+/// `manager.snapshot(buffer)`, depends on where the view is anchored.
+fn view_text(state: &EditorState, key: TerminalViewKey) -> String {
+    let mut manager = state.terminal_manager.borrow_mut();
+    let Some(snapshot) = manager.snapshot_for_view(key, viewport()) else {
+        return String::new();
+    };
+    let mut text = String::new();
+    for cell in &snapshot.cells {
+        match &cell.glyph {
+            Glyph::Char(c) => text.push(*c),
+            Glyph::Cluster(b) => text.push_str(&String::from_utf8_lossy(b)),
+            Glyph::Continuation => {}
+        }
+    }
+    text
+}
+
+fn view_at_bottom(state: &EditorState, key: TerminalViewKey) -> bool {
+    state
+        .terminal_manager
+        .borrow_mut()
+        .snapshot_for_view(key, viewport())
+        .is_some_and(|snapshot| snapshot.at_bottom)
 }
 
 fn buffer_text_by_name(state: &EditorState, name: &str) -> Option<String> {
@@ -336,13 +386,30 @@ fn acc18_reinvoke_refreshes_in_place_and_lifecycle_runs_both_ways() {
 
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
     let count_after_first = buffer_count(&state);
+    assert!(
+        !buffer_text_by_name(&state, SNAPSHOT_NAME)
+            .expect("snapshot")
+            .contains("REINVOKE"),
+        "precondition: the marker has not been emitted yet"
+    );
 
+    // Advance the world, then re-invoke. Counting buffers alone is
+    // vacuous: it passes with the render replaced by a no-op, so the
+    // refresh must be observed by CONTENT that only exists after the
+    // first snapshot was taken.
+    emit_into_child(&mut state, terminal, "REINVOKE");
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
+    assert!(
+        buffer_text_by_name(&state, SNAPSHOT_NAME)
+            .expect("snapshot")
+            .contains("REINVOKE"),
+        "re-invoking must actually re-serialize, not just reuse the buffer"
+    );
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
     assert_eq!(
         buffer_count(&state),
         count_after_first,
-        "re-invoking must refresh in place, not accumulate buffers"
+        "...and it must refresh IN PLACE, not accumulate buffers"
     );
 
     // Killing the snapshot alone leaves the terminal running.
@@ -402,23 +469,51 @@ fn acc19_escape_c_t_enters_copy_mode_and_g_and_q_work() {
         "C-c C-t must enter copy mode"
     );
 
-    // `g` re-snapshots in place.
-    let before = buffer_text_by_name(&state, SNAPSHOT_NAME).expect("snapshot");
-    press(&mut state, KeyCode::Char('g'), KeyModifiers::NONE);
-    let after = buffer_text_by_name(&state, SNAPSHOT_NAME).expect("snapshot");
-    assert_eq!(before, after, "a quiet terminal re-snapshots identically");
-    assert_eq!(
-        active_buffer_name(&state),
-        SNAPSHOT_NAME,
-        "g must not move us"
-    );
-
     // `q` returns to the source terminal.
     press(&mut state, KeyCode::Char('q'), KeyModifiers::NONE);
     assert_eq!(
         active_buffer_name(&state),
         terminal_name,
         "q must return to the terminal the snapshot was taken from"
+    );
+
+    // Now advance the world and come back WITHOUT re-invoking copy mode,
+    // so the snapshot is genuinely stale. Comparing a quiet terminal's
+    // snapshot against itself is vacuous — it passes with `render_snapshot`
+    // replaced by a no-op.
+    emit_into_child(&mut state, terminal, "AFTER-G");
+    exec(
+        &state,
+        &format!(
+            r"
+            for _, id in ipairs(pmacs.buffer.list()) do
+              local ok, d = pcall(pmacs.describe.buffer, id)
+              if ok and d and d.name == {SNAPSHOT_NAME:?} then
+                pmacs.window.switch_buffer(id)
+              end
+            end
+            "
+        ),
+    );
+    assert!(
+        !buffer_text_by_name(&state, SNAPSHOT_NAME)
+            .expect("snapshot")
+            .contains("AFTER-G"),
+        "the snapshot must still be stale before `g` — otherwise the next \
+         assertion proves nothing"
+    );
+
+    press(&mut state, KeyCode::Char('g'), KeyModifiers::NONE);
+    assert!(
+        buffer_text_by_name(&state, SNAPSHOT_NAME)
+            .expect("snapshot")
+            .contains("AFTER-G"),
+        "`g` must re-snapshot from the live terminal"
+    );
+    assert_eq!(
+        active_buffer_name(&state),
+        SNAPSHOT_NAME,
+        "g must not move us"
     );
     state.process_supervisor.borrow_mut().shutdown();
 }
@@ -430,7 +525,7 @@ fn acc19_escape_c_t_enters_copy_mode_and_g_and_q_work() {
 fn acc20_live_terminal_keys_are_unchanged_while_a_snapshot_exists() {
     let mut state = EditorState::new();
     let terminal = open_fill_terminal(&mut state);
-    focus_terminal(&state, terminal);
+    let key = focus_terminal(&state, terminal);
     exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
 
     // Back to the terminal; its five live bindings must still resolve.
@@ -453,11 +548,25 @@ fn acc20_live_terminal_keys_are_unchanged_while_a_snapshot_exists() {
         );
     }
 
-    // The terminal is still following its tail: the child's last output is
-    // visible without scrolling.
+    // The terminal still FOLLOWS ITS TAIL while a snapshot exists.
+    //
+    // Read through the registered view, not `manager.snapshot(buffer)`:
+    // that call is context-free and always returns the live screen, so it
+    // reports "at the tail" even for a view forced to the oldest retained
+    // row. The projected view is the only thing that can distinguish them.
     assert!(
-        screen_text(&state, terminal).contains("DONE"),
-        "the live terminal keeps following its tail"
+        view_at_bottom(&state, key),
+        "precondition: the view starts at the tail"
+    );
+    emit_into_child(&mut state, terminal, "TAILMARK");
+    assert!(
+        view_at_bottom(&state, key),
+        "new child output must not knock the view off the tail"
+    );
+    assert!(
+        view_text(&state, key).contains("TAILMARK"),
+        "the freshest output must be visible in the PROJECTED view: {:?}",
+        view_text(&state, key)
     );
     state.process_supervisor.borrow_mut().shutdown();
 }
@@ -499,6 +608,149 @@ fn acc21_describe_key_reports_the_truth_for_the_snapshot_bindings() {
         resolved.as_deref(),
         Some("terminal.copy-quit"),
         "the snapshot's q must not leak into the terminal buffer"
+    );
+    state.process_supervisor.borrow_mut().shutdown();
+}
+
+/// Acceptance 18a (review round 1, P1): a foreign buffer that happens to
+/// carry the snapshot's name is **never adopted**.
+///
+/// `pmacs.buffer.create` takes any caller-chosen name, and snapshot writes
+/// use `bypass_intercept`, so found-by-name adoption clobbers a user's
+/// data outright. Ownership means "in copy mode's own handle table"
+/// (dired's F7 rule); a taken name gets a `<2>` variant instead.
+#[test]
+fn acc18a_a_foreign_same_named_buffer_is_never_adopted_or_clobbered() {
+    let mut state = EditorState::new();
+    let terminal = open_fill_terminal(&mut state);
+    focus_terminal(&state, terminal);
+
+    // A user's buffer, sitting exactly where the snapshot wants to go.
+    exec(
+        &state,
+        &format!(
+            r"
+            FOREIGN = pmacs.buffer.create({SNAPSHOT_NAME:?})
+            FOREIGN:insert(0, 'do not clobber')
+            "
+        ),
+    );
+
+    exec(&state, "pmacs.terminal.copy_mode(TERM_BUF)");
+
+    let foreign_text: String = eval(&state, r"return FOREIGN:slice(0, FOREIGN:len())");
+    assert_eq!(
+        foreign_text, "do not clobber",
+        "the foreign buffer must be untouched"
+    );
+    assert_ne!(
+        active_buffer_name(&state),
+        SNAPSHOT_NAME,
+        "copy mode must not display the foreign buffer"
+    );
+    assert_eq!(
+        active_buffer_name(&state),
+        format!("{SNAPSHOT_NAME}<2>"),
+        "a taken name must yield a unique variant"
+    );
+    assert!(
+        buffer_text_by_name(&state, &format!("{SNAPSHOT_NAME}<2>"))
+            .expect("variant snapshot")
+            .contains("LINE200"),
+        "the variant is the real snapshot"
+    );
+    state.process_supervisor.borrow_mut().shutdown();
+}
+
+/// Acceptance 18b (review round 1, P1): snapshot identity is the terminal
+/// BUFFER, not its name.
+///
+/// `TerminalManager::open` uniquifies only the *derived* name — an
+/// explicit `name = ...` is inserted verbatim — so two valid terminals can
+/// share a name. Keying snapshots by name gives them one buffer between
+/// them: the second invocation retargets it, `q` returns to the wrong
+/// terminal, and killing either one removes the shared snapshot.
+#[test]
+fn acc18b_two_same_named_terminals_get_two_independent_snapshots() {
+    let mut state = EditorState::new();
+    exec(&state, FILL_PROFILE);
+
+    let before = terminal_buffers(&state);
+    exec(
+        &state,
+        r#"TERM_A = pmacs.terminal.open { profile = "fill", name = "*same*" }"#,
+    );
+    exec(
+        &state,
+        r#"TERM_B = pmacs.terminal.open { profile = "fill", name = "*same*" }"#,
+    );
+    let fresh: Vec<_> = terminal_buffers(&state)
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(fresh.len(), 2, "two terminals opened under one name");
+
+    // Distinguish them by content, since their names are identical.
+    emit_into_child(&mut state, fresh[0], "AAAA");
+    emit_into_child(&mut state, fresh[1], "BBBB");
+
+    focus_terminal(&state, fresh[0]);
+    let snap_a: String = eval(
+        &state,
+        r"local b = pmacs.terminal.copy_mode(TERM_A); return (pmacs.describe.buffer(b)).name",
+    );
+    focus_terminal(&state, fresh[1]);
+    let snap_b: String = eval(
+        &state,
+        r"local b = pmacs.terminal.copy_mode(TERM_B); return (pmacs.describe.buffer(b)).name",
+    );
+
+    assert_ne!(
+        snap_a, snap_b,
+        "two terminals must not share one snapshot buffer"
+    );
+    let text_a = buffer_text_by_name(&state, &snap_a).expect("snapshot A");
+    let text_b = buffer_text_by_name(&state, &snap_b).expect("snapshot B");
+    assert!(
+        text_a.contains("AAAA") && !text_a.contains("BBBB"),
+        "snapshot A must hold only A's output: {:?}",
+        &text_a[text_a.len().saturating_sub(60)..]
+    );
+    assert!(
+        text_b.contains("BBBB") && !text_b.contains("AAAA"),
+        "snapshot B must hold only B's output"
+    );
+
+    // `q` from each snapshot returns to ITS OWN terminal, which is only
+    // observable through the buffer id — the two names are the same.
+    exec(
+        &state,
+        &format!(
+            r"
+            for _, id in ipairs(pmacs.buffer.list()) do
+              local ok, d = pcall(pmacs.describe.buffer, id)
+              if ok and d and d.name == {snap_b:?} then pmacs.window.switch_buffer(id) end
+            end
+            "
+        ),
+    );
+    press(&mut state, KeyCode::Char('q'), KeyModifiers::NONE);
+    let returned_is_b: bool = eval(&state, r"return pmacs.window.buffer() == TERM_B");
+    assert!(
+        returned_is_b,
+        "q from B's snapshot must return to terminal B"
+    );
+
+    // Killing terminal A removes only A's snapshot.
+    exec(&state, "pmacs.terminal.terminate(TERM_A)");
+    exec(&state, "pmacs.buffer.kill(TERM_A)");
+    assert!(
+        buffer_text_by_name(&state, &snap_a).is_none(),
+        "A's snapshot dies with A"
+    );
+    assert!(
+        buffer_text_by_name(&state, &snap_b).is_some(),
+        "B's snapshot must SURVIVE — a shared buffer would have gone too"
     );
     state.process_supervisor.borrow_mut().shutdown();
 }

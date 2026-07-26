@@ -5,12 +5,19 @@
 (`main` @ `cf54270`, 2026-07-26). Stage 2 implemented on branch
 `terminal-copy-mode` off `main` @ `cf54270`; no protocol change.**
 
-**Stage 2 ships eight of its nine criteria.** Criterion 17's semantic-frontend
-end-to-end pin is deliberately absent — see the note under it — because a
-faithful version requires the real `pmacs-gpu` optimistic path, and therefore
-the `a37` foundation, which CI never compiles and which skips silently. Both
-halves of the *mechanism* it guards are pinned ungated instead (16, 16b). No
-other criterion is partial.
+**Stage 2 ships eight of its nine criteria, plus 18a and 18b added in review
+round 1.** Criterion 17's semantic-frontend end-to-end pin is deliberately
+absent — see the note under it — because a faithful version requires the real
+`pmacs-gpu` optimistic path, and therefore the `a37` foundation, which CI never
+compiles and which skips silently. Both halves of the *mechanism* it guards are
+pinned ungated instead (16, 16b). No other criterion is partial.
+
+**Review round 1 found four defects, and the pair of them rhymes.** Two were
+implementation (18a's foreign-buffer clobber, 18b's name-keyed identity) and
+two were vacuous pins (18/19's refresh, 20's tail-follow) — and all four trace
+to the same root: **a name is not an identity, and a context-free readout is
+not a state observation.** The name mistake produced both P1s; the readout
+mistake produced both P2s.
 
 Revision 4 gives the escape-key cache an owner and a lifecycle (Q#TC4c) —
 revision 3 named the key but not the storage, and two implementations
@@ -608,11 +615,40 @@ additive, on its own binding, and does not replace scroll-and-select.
 18. Re-invoking against the same terminal refreshes in place; the buffer count
     does not grow (Q#TC8). Killing the snapshot leaves the terminal running;
     killing the terminal removes the snapshot.
+
+    **The refresh half must be observed by CONTENT, not by buffer count**
+    (review round 1). Counting buffers, or comparing a quiet terminal's
+    snapshot against itself, passes with `render_snapshot` replaced by a
+    no-op. The child is `exec cat`, so the test types a marker into the
+    focused terminal, requires it **absent** from the existing snapshot, and
+    only then re-invokes — the "advance the world" discipline.
+18a. **A foreign buffer carrying the snapshot's name is never adopted.**
+    `pmacs.buffer.create` accepts any caller-chosen name, and snapshot writes
+    use `bypass_intercept`, so found-by-name adoption silently overwrites a
+    user's data — reproduced in review round 1 as "do not clobber" becoming
+    23 newlines. Ownership means **"in copy mode's own handle table"**, which
+    is dired's F7 rule; a taken name yields a `<2>` variant.
+18b. **Snapshot identity is the terminal BUFFER, not its name.**
+    `TerminalManager::open` uniquifies only the *derived* name — an explicit
+    `name = ...` is inserted verbatim — so two valid terminals can share one.
+    A name-keyed table hands them a single snapshot: the second invocation
+    retargets it, `q` returns to the wrong terminal, and killing either one
+    removes the shared buffer. Keyed instead by comparing buffer handles in
+    an array, because `BufferIdLua` implements `__eq` but each wrapper is a
+    distinct table key — comparison works, hashing does not.
 19. `C-t` in a terminal buffer (physically `C-c C-t`) enters copy mode; `g`
     refreshes the snapshot from the live terminal and `q` returns to the source
     terminal (Q#TC8a).
 20. The live terminal's own keys are unchanged while a snapshot exists
     (Q#TC9), and the terminal keeps following its tail.
+
+    **Tail-following must be read through the registered VIEW.** Review
+    round 1: `TerminalManager::snapshot(buffer_id)` is context-free and
+    always returns the live screen, so it reports "at the tail" even for a
+    view forced to the oldest retained row — falsified by doing exactly
+    that and watching the assertion still pass. `snapshot_for_view`'s
+    `at_bottom` plus its projected cells are the only observables that can
+    tell the two apart.
 21. The dispatch-shadow count is **unchanged at six** — pinned by asserting
     `describe-key` reports the truth for the snapshot buffer's `g` and `q`,
     which is the observable difference between the buffer-local idiom and a
