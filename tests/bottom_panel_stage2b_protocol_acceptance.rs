@@ -218,7 +218,7 @@ fn appending_panel_events_does_not_move_the_previous_final_event_discriminant() 
 
 #[test]
 fn a_panel_wider_than_512_columns_is_legal_while_a_terminal_is_not() {
-    let wide = MAX_TERMINAL_COLS as u32 + 1;
+    let wide = u32::from(MAX_TERMINAL_COLS) + 1;
 
     // The panel does not inherit the PTY per-axis cap: a 4K surface at a
     // small font is legitimately this wide, and the area bound is what
@@ -231,7 +231,7 @@ fn a_panel_wider_than_512_columns_is_legal_while_a_terminal_is_not() {
     assert!(matches!(
         terminal.validate(),
         Err(TerminalFrameError::Size { cols, max_cols, .. })
-            if cols == wide && max_cols == MAX_TERMINAL_COLS as u32
+            if cols == wide && max_cols == u32::from(MAX_TERMINAL_COLS)
     ));
 }
 

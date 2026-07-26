@@ -60,7 +60,7 @@ pub struct WireGridLimits {
 ///
 /// Callers map these onto their own message-specific error types so
 /// existing wire errors keep their exact variants and text.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WireGridError {
     /// Rows or columns are zero or above this grid's bounds.
     Size {
