@@ -494,14 +494,14 @@ implemented and in review.**
   #173 also changes `src/editor.rs`, so gates were rerun on the merge
   result, not the old combination). Five commits: the classified census
   routing, the painter extraction + acceptance, the lane record, then
-  the round-1 and round-2 review fixes. **No protocol change; no behavior
+  the round-1, round-2 and round-3 review fixes. **No protocol change; no behavior
   change for any frontend today** — with `panel_capable = false` for
   semantic sessions, `primary_document_window` returns `view.active`
   in every existing configuration, so this is seam adoption that
   becomes load-bearing in 2B.
 - Verification on the merge result: `cargo fmt --check` clean; strict
-  workspace Clippy clean; **1,832 default + 2,014 CRDT** library tests;
-  `bottom_panel_stage2a_acceptance` **16**; bottom-panel Stage 1 46;
+  workspace Clippy clean; **1,832 default + 2,015 CRDT** library tests;
+  `bottom_panel_stage2a_acceptance` **17**; bottom-panel Stage 1 46;
   statusline segments 8 CRDT; m11_5 semantic 2 CRDT; GPU initial target
   14 CRDT; terminal config 12 CRDT; vterm Stage 1/2 10 / 6; folding
   Stage 2 48; M4 121; required GPU 202; `git diff --check` clean.
@@ -521,7 +521,12 @@ implemented and in review.**
   under test; (c) a discriminating fixture must make the two routings
   DISAGREE — comparing two non-terminal buffers, or two windows with no
   selection, yields the same answer either way and proves nothing.
-  Round 2 found four of my own pins vacuous by exactly these shapes.
+  Round 2 found four of my own pins vacuous by exactly these shapes, and
+  round 3 found two more problems of the same family: a pin placed at a
+  HELPER while production called it from a producer (reverting only the
+  producer's call site left every test green), and a socket-pair
+  assertion whose blocking read made a regression HANG instead of fail.
+  Both now assert at the producer, with read timeouts on every read.
 - **Review round 1 closed: 4 P1 + 2 P2, all real.** The P1s were a
   stale-`Pointer` focus steal (the failed-alignment arm returned the
   window, so #8's activation focused it before `dispatch_pointer`

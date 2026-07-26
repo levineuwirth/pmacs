@@ -625,6 +625,22 @@ impl SemanticRenderState {
         // post-evaluation face inventory must then precede the authoritative
         // segment replacement in this same frame. Unsupported peers skip the
         // evaluator entirely and therefore pay no Lua callback/dynamic-face cost.
+        // Bottom-panel A2A-2, round 3: the document identity used to
+        // FILTER the results must be the PRE-CALLBACK one. Both outcome
+        // arms carry phase-1 contexts, and a provider that closes the
+        // primary document split changes `primary_document_window`
+        // mid-evaluation — reading it after the fact would compare
+        // phase-1 contexts against a replacement identity, match
+        // nothing, and silently suppress the authoritative clear.
+        let statusline_document_window = self
+            .peer_knows_statusline_segments
+            .then(|| {
+                state
+                    .core
+                    .borrow()
+                    .primary_document_window(self.frontend_id)
+            })
+            .flatten();
         let statusline_evaluation = self.peer_knows_statusline_segments.then(|| {
             evaluate_statusline(
                 state.lua_host.lua(),
@@ -810,11 +826,7 @@ impl SemanticRenderState {
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         if let Some(evaluation) = statusline_evaluation {
-            let document_window = state
-                .core
-                .borrow()
-                .primary_document_window(self.frontend_id);
-            self.emit_statusline_segments(evaluation, document_window, &mut out);
+            self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
         out
     }
@@ -859,6 +871,16 @@ impl SemanticRenderState {
         // Evaluate callbacks before `ThemeFacts` for the same reason the
         // document path does: a callback may register a face, and the
         // face inventory must precede the segment text that names it.
+        // Same pre-callback capture as the document path (round 3).
+        let statusline_document_window = self
+            .peer_knows_statusline_segments
+            .then(|| {
+                state
+                    .core
+                    .borrow()
+                    .primary_document_window(self.frontend_id)
+            })
+            .flatten();
         let statusline_evaluation = self.peer_knows_statusline_segments.then(|| {
             evaluate_statusline(
                 state.lua_host.lua(),
@@ -885,7 +907,12 @@ impl SemanticRenderState {
         // a verdict we hold.
         if self.last_terminal_frame.as_ref() == Some(&frame) {
             self.terminal_error_latched = false;
-            out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+            out.extend(self.terminal_chrome(
+                state,
+                buffer_id,
+                statusline_evaluation,
+                statusline_document_window,
+            ));
             return Some(out);
         }
         match frame.validate() {
@@ -909,7 +936,12 @@ impl SemanticRenderState {
             }
         }
 
-        out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+        out.extend(self.terminal_chrome(
+            state,
+            buffer_id,
+            statusline_evaluation,
+            statusline_document_window,
+        ));
         Some(out)
     }
 
@@ -924,6 +956,7 @@ impl SemanticRenderState {
         state: &EditorState,
         buffer_id: BufferId,
         statusline_evaluation: Option<StatuslineEvaluation>,
+        statusline_document_window: Option<crate::window::WindowId>,
     ) -> Vec<InstanceMessage> {
         let mut out = Vec::new();
         out.extend(self.status_facts_msg(state, buffer_id));
@@ -933,11 +966,7 @@ impl SemanticRenderState {
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         if let Some(evaluation) = statusline_evaluation {
-            let document_window = state
-                .core
-                .borrow()
-                .primary_document_window(self.frontend_id);
-            self.emit_statusline_segments(evaluation, document_window, &mut out);
+            self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
         out
     }

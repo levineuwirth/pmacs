@@ -3483,6 +3483,96 @@ mod tests {
         );
     }
 
+    /// Bottom-panel §1.3 #21 through the REAL producer (round 3).
+    ///
+    /// A semantic peer with a FOCUSED PANEL must still receive the
+    /// snapshot for the buffer on its DOCUMENT surface, and must NOT
+    /// receive one for a buffer visible only in its panel. Asserting the
+    /// helper alone was insufficient: reverting the producer's call site
+    /// to focused-window routing left every helper-level test green.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn snapshot_publication_follows_the_document_under_a_focused_panel() {
+        let (editor, fid, document, panel) = panel_focused_semantic_fixture();
+        let (doc_buf, panel_buf) = {
+            let core = editor.core.borrow();
+            (
+                core.windows[&document].buffer_id,
+                core.windows[&panel].buffer_id,
+            )
+        };
+        assert_ne!(doc_buf, panel_buf, "fixture: distinct buffers");
+
+        let caps = crate::protocol::NegotiatedCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        };
+        let mut registry = SessionRegistry::new();
+        registry.register_session(
+            fid,
+            crate::presence::SessionState::new(PROTOCOL_VERSION, caps, 0),
+        );
+
+        // The DOCUMENT buffer's snapshot must be delivered.
+        {
+            let (server, mut client) = UnixStream::pair().expect("socketpair");
+            // A read timeout on the DELIVERY read too. Without it a
+            // regression that suppresses the snapshot makes this test
+            // HANG rather than fail, which is strictly worse than a red
+            // assertion — found by biting this very test.
+            client
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("delivery timeout");
+            let mut streams = HashMap::from([(fid, server)]);
+            let message = InstanceMessage::BufferSnapshot {
+                buffer_id: doc_buf,
+                crdt_snapshot: vec![1, 2, 3],
+            };
+            publish_buffer_snapshot_to_replicas(
+                &editor,
+                doc_buf,
+                &message,
+                &registry,
+                &mut streams,
+                &mut HashMap::new(),
+            );
+            let delivered: InstanceMessage =
+                read_message(&mut client).expect("the document snapshot must arrive");
+            assert_eq!(
+                delivered, message,
+                "#21: a buffer on the DOCUMENT surface must still be published while a \
+                 panel holds focus"
+            );
+        }
+
+        // The PANEL-only buffer's snapshot must NOT be delivered.
+        {
+            let (server, mut client) = UnixStream::pair().expect("socketpair");
+            let mut streams = HashMap::from([(fid, server)]);
+            let message = InstanceMessage::BufferSnapshot {
+                buffer_id: panel_buf,
+                crdt_snapshot: vec![4, 5, 6],
+            };
+            publish_buffer_snapshot_to_replicas(
+                &editor,
+                panel_buf,
+                &message,
+                &registry,
+                &mut streams,
+                &mut HashMap::new(),
+            );
+            client
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("timeout");
+            assert!(
+                read_message::<InstanceMessage>(&mut client).is_err(),
+                "#21: a buffer visible only in a PANEL must not replace the peer's \
+                 document mirror"
+            );
+        }
+    }
+
     // ---- GPU terminal input: the double terminal-layout sync -------------
     //
     // These drive `sync_terminal_layouts_for_tick` — the REAL dispatcher loop
@@ -4827,15 +4917,13 @@ mod tests {
             "#3: CursorByte must describe the DOCUMENT surface"
         );
 
-        // #21 publication recipient filter, both directions.
-        assert!(
-            peer_displays_buffer_as_document(&editor, fid, doc_buf),
-            "#21: a buffer visible in the document must still receive publications              while a panel holds focus"
-        );
-        assert!(
-            !peer_displays_buffer_as_document(&editor, fid, panel_buf),
-            "#21: a buffer visible only in a panel must NOT replace the document mirror"
-        );
+        // #21 is deliberately NOT asserted here. Round 3: pinning it at
+        // this helper left the real producer free to regress — reverting
+        // the call site inside `publish_buffer_snapshot_to_replicas`
+        // kept both this test and the existing socket-pair test green.
+        // It is pinned through the producer instead, in
+        // `snapshot_publication_follows_the_document_under_a_focused_panel`.
+        let _ = panel_buf;
     }
 
     /// Bottom-panel §1.3 #2 — the sharpest census case: the lazy CRDT

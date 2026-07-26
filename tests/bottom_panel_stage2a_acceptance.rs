@@ -784,3 +784,115 @@ fn consumer_decorations_follow_the_document_selection_not_the_panel() {
         "a selection living in the focused PANEL must not decorate the document viewport"
     );
 }
+
+#[test]
+fn a_provider_closing_the_document_split_still_clears_the_statusline() {
+    use pmacs::protocol::{ByteRange, InstanceMessage};
+    use pmacs::semantic_render::SemanticRenderState;
+
+    // Round 3 finding 1. `authoritative_empty` carries PHASE-1 contexts,
+    // so the identity used to filter them must be the PRE-CALLBACK one.
+    // A provider that closes the primary document split changes
+    // `primary_document_window` mid-evaluation; reading it afterwards
+    // compares phase-1 contexts against a replacement identity, matches
+    // nothing, and silently suppresses the authoritative clear — leaving
+    // stale statusline text on screen forever.
+    //
+    // Driven on LOCAL, because the Lua window API acts on the ACTIVE
+    // FRONTEND: a synthetic semantic view would be untouched by
+    // `pmacs.window.close()` and the identity would never change, which
+    // is exactly how the first version of this test came back vacuous.
+    // TWO document windows plus the panel: closing the only document
+    // window is structurally refused (Q#BP6 forbids a lone side window
+    // as a resting state), so the first attempt could not change the
+    // identity at all. Distinct buffers make the target selectable from
+    // a Lua provider, which has no focus-by-id.
+    let s = editor();
+    exec(
+        &s,
+        "DOC_A = pmacs.buffer.create(\"*doc-a*\")
+         DOC_B = pmacs.buffer.create(\"*doc-b*\")
+         pmacs.window.display(DOC_A, {})
+         pmacs.window.split_horizontal()
+         pmacs.window.focus_next()
+         pmacs.window.display(DOC_B, {})",
+    );
+    let (_origin, panel) = focused_panel(&s);
+    let (document, doc_buf) = {
+        let core = s.core.borrow();
+        let win = core
+            .primary_document_window(FrontendId::LOCAL)
+            .expect("a primary document window");
+        (win, core.windows[&win].buffer_id)
+    };
+    assert_ne!(document, panel);
+
+    let mut sem = SemanticRenderState::for_peer(FrontendId::LOCAL, 18);
+    sem.set_viewport(doc_buf, ByteRange { start: 0, end: 0 }, 0);
+
+    // Seed a baseline payload so a CLEAR is observable as a change.
+    exec(
+        &s,
+        r"_G.SL_SEED = pmacs.statusline.register {
+              name='seed', side='left', priority=10,
+              fn=function() return 'OLD' end,
+          }",
+    );
+    let seeded = sem.render_frame(&s);
+    assert!(
+        seeded
+            .iter()
+            .any(|m| matches!(m, InstanceMessage::StatuslineSegments { .. })),
+        "non-vacuity: a baseline payload must exist before we test its clear"
+    );
+
+    // A provider that unregisters itself (making the evaluation
+    // Invalidated) AND closes the captured document window. `close()`
+    // closes the ACTIVE window and Lua has no focus-by-id, so step
+    // around the ring until the captured buffer is current.
+    s.lua_host
+        .lua()
+        .globals()
+        .set("TARGET_BUF", pmacs::lua_bindings::BufferIdLua(doc_buf))
+        .expect("expose the target buffer");
+    exec(
+        &s,
+        r"_G.SL_CLOSER = pmacs.statusline.register {
+              name='closer', side='left', priority=100,
+              fn=function()
+                  pmacs.statusline.unregister(SL_CLOSER)
+                  for _ = 1, 8 do
+                      if pmacs.window.buffer() == TARGET_BUF then break end
+                      pmacs.window.focus_next()
+                  end
+                  pmacs.window.close()
+                  return 'STALE'
+              end,
+          }",
+    );
+
+    let msgs = sem.render_frame(&s);
+
+    // The fixture must actually have changed the identity, or this test
+    // discriminates nothing.
+    assert_ne!(
+        s.core.borrow().primary_document_window(FrontendId::LOCAL),
+        Some(document),
+        "fixture: the callback must really have changed the document identity"
+    );
+
+    let cleared = msgs.iter().any(|m| match m {
+        InstanceMessage::StatuslineSegments {
+            buffer_id,
+            left,
+            right,
+            ..
+        } => *buffer_id == doc_buf && left.is_empty() && right.is_empty(),
+        _ => false,
+    });
+    assert!(
+        cleared,
+        "an invalidated evaluation must still publish the authoritative EMPTY clear for \
+         the phase-1 document identity, even when a callback closed that window; got {msgs:?}"
+    );
+}
