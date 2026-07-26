@@ -339,7 +339,8 @@ the journey.
 
 ### Ground truth: the journey today
 
-**Grade: broken at step 3.** Verified empirically at audit time:
+**Grade: reaches step 5; thin from step 6 on.** Was **broken at step 3**
+at audit time:
 
 ```
 $ ./target/release/pmacs .
@@ -347,15 +348,23 @@ pmacs: Is a directory (os error 21)
 EXIT=1
 ```
 
-The literal first arrow of the diagram above fails. `load_file`
+The literal first arrow of the diagram above failed. `load_file`
 (`src/file_io.rs:81-87`) does `File::open` (succeeds on a directory)
 then `read_to_end` → EISDIR, which is not `NotFound`, so
-`EditorState::open` returns `Err` and `main` prints and exits
-(`src/main.rs:411-414`). Multiple file arguments are also rejected
-(`"multiple files not yet supported"`, `src/main.rs:227`). Everything
-from step 6 onward is gated on a file being open, and the only
-zero-config way to open one is naming it on the command line — which
-requires already knowing the path.
+`EditorState::open` returned `Err` and `main` printed and exited.
+
+**Journey Stage 1a fixed that arrow** (`docs/journey-stage1a-framing.md`).
+`resolve_target_buffer` now answers `ResolvedTarget::Directory` *ahead*
+of the load, `pmacs .` lists the directory in dired, `RET` visits a
+file, and a self-insert lands in it — steps 3 and 5 run end to end,
+pinned by `tests/journey_acceptance.rs`. Which surface opens a directory
+is a `path.open-directory` chain with dired as a replaceable fallback,
+so this did not grow a second directory surface.
+
+Still true: multiple file arguments are rejected (`"multiple files not
+yet supported"`, `src/main.rs:227`), and everything from step 6 onward
+is gated on a file being open — but the zero-config way to open one is
+no longer "already know the path".
 
 Full verdict table:
 
@@ -363,7 +372,7 @@ Full verdict table:
 |---|---|---|---|
 | 1 | Install | **Partial** | Source build only: `cargo build --release --workspace --features pmacs/crdt` (`README.md`). No binaries, no packaging. Runtime deps (`/bin/sh`, git, tar, coreutils) documented, never checked at runtime |
 | 2 | Launch unconfigured | **Works** | `EditorState::new()` → empty `*scratch*`; missing config is not an error (`src/config.rs:7-9`); recentf/saveplace/autosave default-on |
-| 3 | Open real project | **Missing at the CLI** | `pmacs .` still exits 1 (above): `load_file` does `File::open` (which succeeds on a directory) then `read_to_end` → EISDIR, which is not `NotFound`, so `resolve_target_buffer`'s create-a-`[new file]` arm never fires. Dired Stage 1 (merged #165) supplies the buffer a directory should resolve *to*; routing `pmacs .` into it is Journey Stage 1's work, which must not invent a second directory surface |
+| 3 | Open real project | **Works at the CLI** | Journey Stage 1a: `resolve_target_buffer` answers `ResolvedTarget::Directory` before the EISDIR-producing load, and `EditorState::open` / the daemon bootstrap dispatch the `path.open-directory` chain, whose fallback is dired (#165's buffer, reached rather than duplicated). Startup no longer fails: an unreadable directory, a crashed resolver, and a cleared handler all report on the status line and leave the session running. Because the listing is async and the bootstrap is synchronous, the commit runs against a destination captured at request time (`pmacs.window.commit_to`) rather than against the ambient frontend |
 | 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments; but no welcome text (`EditorCore::new` sets `status: String::new()`), no cheat sheet, and `C-h` deletes a word (§18) |
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
@@ -1474,14 +1483,18 @@ missing runtime entity — a real arc).
 ### Priority 1: Protect the golden product journey
 
 Establish the end-to-end workflow; treat regressions as release
-blockers. **State: broken at step 3 (§2). Mostly wiring, and unusually
-cheap:** directory-argument handling (the remaining half of step 3 —
-dired Stage 1 landed the buffer it should resolve to); a find-file
-surface (**done**: #162 open-by-path, #165 browsing); surfacing the
-LSP spawn failure with guidance (§1.2); a
+blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
+and unusually cheap:** directory-argument handling (**done**: Journey
+Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
+browsing); surfacing the LSP spawn failure with guidance (§1.2); a
 compile keybinding + `cargo build`/`test` default from the existing
-`ProjectKind::Cargo`; a terminal keybinding; a welcome buffer. The
-journey acceptance suite (§19) is the ratchet that keeps it fixed.
+`ProjectKind::Cargo`; a terminal keybinding (**done**: `C-c t`, #173); a
+welcome buffer. The journey acceptance suite (§19) is the ratchet that
+keeps it fixed — it **exists now** (`tests/journey_acceptance.rs`,
+Stage 1a), seeded with steps 2, 3, and 5.
+
+Journey Stage 1b is the named remainder: the compile binding + Cargo
+defaults, LSP spawn guidance, and the welcome buffer.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1545,11 +1558,13 @@ Candidate arc cuts, honoring one-feature-one-branch-one-PR and the
 framing workflow (each needs its own scout + framing before any
 implementation — this list is direction, not commitment):
 
-1. **Journey Stage 1** (P1): directory open + compile defaults +
-   LSP-failure surfacing + bindings + welcome buffer + the first
-   journey acceptance suite. Dired Stage 1 has landed (#165), so the
-   buffer a directory resolves *to* already exists; this arc routes
-   `pmacs .` into it rather than growing a second directory surface.
+1. **Journey Stage 1** (P1): split at the new-Rust-primitive line.
+   **Stage 1a — landed**: directory open, the `EditorState::open` →
+   `resolve_target_buffer` unification, the destination-scope substrate,
+   and the first journey acceptance suite. It routes `pmacs .` into
+   #165's dired buffer rather than growing a second directory surface.
+   **Stage 1b — remaining**: compile defaults, LSP-failure surfacing,
+   bindings, welcome buffer.
 2. **Discovery surface** (P4): the describe/list/where-is command
    family, M-x rich rows, help unification, help prefix.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime

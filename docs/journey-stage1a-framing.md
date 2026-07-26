@@ -114,6 +114,39 @@ acceptance tests), §20 Priority 1.**
     it asserted nothing about `run`. Q#JR12 is downgraded to an
     observation.
 
+- rev 7 (2026-07-26) — **found while writing the `commit_to` suite and
+  bite-testing it.** Three, all confirmed:
+  - **N4 did not pin what its comment claimed.** Deleting the
+    `ScopedFrontend` arm from `acting_frontend` left N4 green, because
+    `ScopedFrontend::enter` *also* swaps `core.active_frontend` and the
+    ambient fallback then answers correctly on its own. The arm is
+    load-bearing in exactly one situation — a commit reached from inside
+    an interactive command, where the origin sits between the override
+    and the ambient value and would otherwise win. **N4b** is added,
+    driven through `dispatch_key` (the only thing that establishes an
+    interactive origin), and the mutation now bites it. The general
+    lesson is the §6.0 one again from a new angle: two mechanisms that
+    agree on the common path make either one look load-bearing.
+  - **`commit_to`'s forged-destination message was unreachable.** With
+    the parameter typed `mlua::AnyUserData`, mlua rejected a table during
+    argument conversion, so a caller who fabricated one got "error
+    converting Lua table to userdata" — true, but naming neither the rule
+    nor how to obtain a real destination. The parameter is now
+    `mlua::Value` and the pointed message actually fires. The refusal is
+    unchanged; only its legibility is.
+  - **P1 and P2 also fail on full revert**, since `commit_to` does not
+    exist on the pre-image. §6.0's "legitimately green on the pre-image"
+    does not describe them. They stay in the P list because their
+    *discriminating* falsifier is the named mutation, not the revert: a
+    revert-only check cannot distinguish "validates" from "validates in
+    time", which is the entire claim. Noted at each pin rather than
+    silently mislabelled.
+  - Bite results recorded: mutation A (scope stops swapping
+    `core.active_frontend`) fails N6a and P3 and nothing else; mutation B
+    (preflight moved after the callback) fails P1 and P2 and nothing
+    else; mutation C (drop the `ScopedFrontend` arm) fails N4b and
+    nothing else.
+
 ---
 
 ## 0.5. Coherence impact (`COHERENCE.md` §20, required since #163)
@@ -697,6 +730,14 @@ is **removed rather than recast**: it proved nothing N1 does not.
   in **A's** captured window, and B's active buffer and window are
   unchanged. Falsified by reverting `commit_to` to the ambient
   `switch_buffer`.
+- **N4b — the scope outranks an *interactive origin*, added rev 7.** N4
+  alone does not pin `acting_frontend`'s ordering claim: with the
+  `ScopedFrontend` arm deleted, N4 still passes, because `enter` also
+  swaps `core.active_frontend`. The arm matters only when an interactive
+  origin is set, which sits between the override and the ambient value.
+  A command dispatched by frontend B calls `commit_to` with A's
+  destination; the commit must still land in A's window. Falsified by
+  deleting the arm, or by ordering it after the interactive origin.
 - **N5** Bootstrap with a deliberately **non-scratch** LOCAL primary
   document buffer: the reply's `buffer_id` is that buffer, and after
   quiescence the window shows dired (Q#JR9, §4.5).
@@ -711,7 +752,11 @@ is **removed rather than recast**: it proved nothing N1 does not.
 - **N6b — `commit_to` refuses a forged destination.** A Lua-constructed
   table with plausible `frontend`/`window`/`buffer` fields is rejected as
   a type error, and userdata cannot be constructed from Lua (Q#JR14d).
-  Falsified by accepting a table.
+  Falsified by accepting a table. *Rev 7:* the parameter is typed
+  `mlua::Value` and `commit_to` performs the check itself, so the refusal
+  names the rule — typed as `AnyUserData`, mlua rejected the table during
+  argument conversion with a message naming neither the rule nor the
+  remedy, leaving the pointed one unreachable.
 - **N6c — a declining listener cannot redirect the destination.** Two
   listeners: the first receives `dest`, attempts mutation inside `pcall`,
   observes the read-only rejection, and declines; the second verifies
@@ -745,6 +790,13 @@ is **removed rather than recast**: it proved nothing N1 does not.
   the dired buffer, whose intercept rejects every edit, `dired.lua:506`.)
 
 ### 6.2 Preservation pins (P), each with its falsifying mutation
+
+*Rev 7 correction:* **P1 and P2 also fail on full revert** — `commit_to`
+does not exist on the pre-image, so §6.0's "legitimately green on the
+pre-image" does not describe them. They stay here because their
+*discriminating* falsifier is the named mutation: a revert-only check
+cannot distinguish "validates" from "validates in time", which is their
+entire claim. P3–P8 are preservation pins in the strict sense.
 
 - **P1 — precondition failure is atomic (the blocker's negative half).**
   **Three** destination failures, each asserted the same way — after

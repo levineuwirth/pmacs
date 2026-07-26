@@ -370,7 +370,7 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
             "commit_to",
             lua.create_function(
                 move |lua,
-                      (dest, body): (mlua::AnyUserData, mlua::Function)|
+                      (dest, body): (mlua::Value, mlua::Function)|
                       -> mlua::Result<mlua::MultiValue> {
                     // Journey Stage 1a (Q#JR14). Preflight FIRST, then
                     // scope, then run. The ordering is the whole point:
@@ -381,9 +381,21 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                     // mutations too late and leaves a hidden buffer
                     // behind, so every destination precondition is
                     // checked before the callback is invoked at all.
+                    //
+                    // Typed as `Value` rather than `AnyUserData` so this
+                    // message is REACHABLE: with the narrower type mlua
+                    // rejects a table during argument conversion, and a
+                    // caller who fabricated one got "error converting Lua
+                    // table to userdata" — true, but it names neither the
+                    // rule nor how to get a real destination.
+                    let dest = match &dest {
+                        mlua::Value::UserData(userdata) => {
+                            userdata.borrow::<super::DirectoryDestinationLua>().ok()
+                        }
+                        _ => None,
+                    };
                     let dest = dest
-                        .borrow::<super::DirectoryDestinationLua>()
-                        .map_err(|_| {
+                        .ok_or_else(|| {
                             mlua::Error::runtime(
                                 "pmacs.window.commit_to: expected a destination captured by \
                                  the editor (it cannot be constructed from Lua)",

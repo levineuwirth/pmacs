@@ -331,24 +331,41 @@ If it does not, stop and repair the remote/fetch configuration.
   --check` clean.
 - Stage 4b (the input method) is NOT in this PR and not started.
 
-## Journey Stage 1a — framing rev 5 APPROVED; branch cut, implementing
+## Journey Stage 1a — IMPLEMENTED on branch, gates run, PR pending
 
-- Approved framing: `docs/journey-stage1a-framing.md` **rev 5** (four
-  review rounds). Branch `journey-stage1a-directory-open`, framing
-  committed as its first commit. No PR yet.
+- Framing `docs/journey-stage1a-framing.md` **rev 7** (four review
+  rounds, then two correction revisions found during implementation).
+  Branch `journey-stage1a-directory-open`, rebased onto `githubsucks/main`
+  @ `74301d1`.
 - Recovery: `git fetch githubsucks && git checkout
-  journey-stage1a-directory-open`. The framing now travels; the
-  implementation does not until it is committed and pushed.
-- Ordering: PR #177 MERGED (2026-07-26), so 1a is unblocked. 1a lands
+  journey-stage1a-directory-open`. Everything below is committed and
+  pushed; nothing depends on a worktree or `/tmp`.
+- **Ships:** the directory arm on `resolve_target_buffer`,
+  `EditorState::open` rewritten as a caller of it (the unification), the
+  `path.open-directory` chain + `pmacs.path.directory_handler` fallback
+  slot, `pmacs.window.commit_to` with its scoped frontend and preflight,
+  the nonconstructible destination userdata, the daemon bootstrap arm,
+  and `tests/journey_acceptance.rs` (23 pins). No protocol change —
+  still v20.
+- **Doc updates ride the PR** per COHERENCE §25: §2 grade + step-3
+  verdict row, §20 Priority 1 + the arc list, the GPU initial-target
+  framing's Q#GT6 / acceptance 10 supersession, handoff §1.
+- **Bite results** (each mutation run against the full suite): scope
+  stops swapping `core.active_frontend` → N6a + P3 fail, nothing else;
+  preflight moved after the callback → P1 + P2 fail, nothing else; drop
+  the `ScopedFrontend` arm from `acting_frontend` → N4b fails, nothing
+  else. That last mutation is why N4b exists — it left N4 green.
+- Ordering: PR #177 MERGED (2026-07-26), so 1a was unblocked. 1a lands
   before dired Stage 2. When 1a lands, Stage 2 must re-scout and revise
   its framing around the scoped `pmacs.window.commit_to` boundary before
   its implementation branch is cut. That revision is a prerequisite, not
   a review-time discovery.
-- Implementation order inside the branch (framing §12): scoped frontend
-  override + shared eligibility predicate first (separable, testable
-  without dired), then `commit_to` and the opaque destination, then the
-  directory arm and resolver chain, then the journey suite, then the
-  doc updates COHERENCE §25 requires.
+- **Named deferrals carried out of this stage:** dired's *interactive*
+  paths (`C-x d`, tree descent, refresh) still rely on the ambient
+  frontend a tick later and are not migrated onto captured destinations;
+  the stale startup scratch buffer is still not removed (only the false
+  doc comment is corrected); `resolve_target_buffer`'s directory arm has
+  no picker, only the chain that leaves room for one.
 
 ## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 

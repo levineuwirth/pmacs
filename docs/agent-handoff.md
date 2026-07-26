@@ -54,8 +54,51 @@ commands, read `docs/active-work.md` immediately after this file.
   standard new work is evaluated against. Per `CLAUDE.md`, **every new
   framing doc must state its coherence impact** — journey steps touched,
   interaction islands added, config-registry adoption, background-work
-  attribution. Its §2 grades the golden journey **broken at step 3**
-  (`pmacs .` exits 1).
+  attribution. Its §2 grades the golden journey; **Journey Stage 1a
+  moved that grade off "broken at step 3"** — see the arc bullet below.
+- **Journey arc (P1) — Stage 1a LANDED**
+  (`docs/journey-stage1a-framing.md`). `pmacs .` opens a directory
+  instead of exiting 1, on **one** path: `resolve_target_buffer` gained a
+  `ResolvedTarget::Directory` arm *ahead* of the load, `EditorState::open`
+  became a caller of it rather than a parallel implementation, and the
+  daemon/GPU bootstrap shares the same arm. Which surface handles a
+  directory is the `path.open-directory` chain with dired as a
+  replaceable fallback slot. `tests/journey_acceptance.rs` is the new
+  cross-subsystem ratchet (steps 2, 3, 5 seeded; **stages add rows, none
+  removes them**). No protocol change.
+  - **A hook a builtin subscribes to can never be first-claimant-wins
+    for users.** `HookRegistry::add` only appends and builtins load
+    before `init.lua`, so a dired subscription would always claim before
+    any user listener. That is why dired is a *slot*
+    (`pmacs.path.directory_handler`) and not a subscriber — and why
+    clearing the slot has to leave startup succeeding with a status,
+    not exiting 1.
+  - **A raise and a `false` are indistinguishable in `proceed`.**
+    `run_short_circuit` returns `proceed = false` for both; only
+    `HookOutcome.errors` separates them, and it decides whether to
+    *report*, not whether to fall back. Getting this backwards produces a
+    fallback that runs after a user's resolver crashed mid-handling.
+  - **The listing is async; the bootstrap is synchronous.** The whole
+    post-await commit therefore runs against a destination captured at
+    request time (`pmacs.window.commit_to`), which preflights every
+    precondition *before* invoking the callback — dired mutates handle
+    state, `prev`, and paint long before it reaches anything that could
+    refuse, so validating at display time is four mutations too late.
+    Awaiting inside a commit is refused: a yield would restore the scope
+    while the coroutine is still parked.
+  - **The scope swaps `core.active_frontend`, not just an override** —
+    `pmacs.window.buffer()`'s no-arg arm reads the ambient active buffer
+    directly, so dired's `prev` capture would otherwise follow whatever
+    frontend happened to be dispatching. The override *also* exists, and
+    is load-bearing in exactly one case: a commit reached from inside an
+    interactive command, where the origin would otherwise outrank the
+    ambient value. Bite-testing found N4 green without it.
+  - **`replace_active_buffer` does not drop the startup scratch buffer**,
+    despite its doc comment having claimed so for as long as it has
+    existed. Its body is one `switch_active_buffer` call. The comment is
+    corrected here; changing the lifetime is separate work.
+  - Stage 1b is the named remainder: compile binding + Cargo defaults,
+    LSP spawn guidance, welcome buffer.
 - **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b LANDED**
   (`docs/lean4-mode-framing.md`; #160, #161, #167, #170; merge
   `d400f30`). pmacs edits Lean 4: `arborium-lean` highlighting, a
