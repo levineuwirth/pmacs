@@ -23,14 +23,14 @@ here too until #172 removed it — that is the update those two owe.)
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `ccf29e3` (the CRDT undo repro #157 atop the
-  inline-math landed-doc refresh #172, the bottom-panel landed-doc
-  refresh #156, the inline-math slice #158, dired Stage 1 #165, the GPU
-  terminal input fix #166, Lean 4 Stage 2 #161, the dired framing #164,
-  COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160, and the minimap
-  blank-slab fix #159; protocol v20). **Lanes below that name an older
-  base have not been re-based; derive their integration surface from
-  `git diff <their base>..main`.**
+  `githubsucks/main` @ `c93f9ee` (the bottom-panel Stage 2 framing #175
+  atop the CRDT undo repro #157, the inline-math landed-doc refresh #172,
+  the bottom-panel landed-doc refresh #156, the inline-math slice #158,
+  dired Stage 1 #165, the GPU terminal input fix #166, Lean 4 Stage 2
+  #161, the dired framing #164, COHERENCE.md #163, find-file #162, Lean 4
+  Stage 1 #160, and the minimap blank-slab fix #159; protocol v20).
+  **Lanes below that name an older base have not been re-based; derive
+  their integration surface from `git diff <their base>..main`.**
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -64,7 +64,11 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `d152120` or a newer intentional main.
+The `git log` command must expose `c93f9ee` — the base named above — or a
+newer intentional main. Keep this threshold and the canonical-base line in
+step: a recovery check that accepts an older commit than the base it
+declares canonical will pass on a tree the rest of this file does not
+describe.
 If it does not, stop and repair the remote/fetch configuration.
 
 ## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
