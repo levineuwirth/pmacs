@@ -46,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial. Current revision: **8**.
+Revision 1 — initial. Current revision: **9**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -502,6 +502,38 @@ documentation cleanups.
    now say 119 multi-codepoint symbols — 26 `$CURSOR`-bearing and 93
    others — matching §2.11 and Q#LN11.
 3. **§9.1's revision label was stale.** It now names rev 8.
+
+### Round 9 (rev 8 → rev 9)
+
+Found during Stage 4b implementation, by simulating Q#LN22's state
+machine over all 1,855 vendored entries and re-reading upstream's
+`TrackedAbbreviation.ts` and `AbbreviationProvider.ts` at `17d1d08`.
+**Three acceptance criteria named examples that the real table
+contradicts** — every one of them written from what the abbreviation
+*looks* like rather than from whether the table makes it eager.
+
+1. **Acceptance 41 was false.** `\to` does not expand eagerly: `to` is a
+   proper prefix of `top`, `to0`, `toa` and others, so upstream's
+   `isAbbreviationUniqueAndComplete` is false and `to` is not among the
+   1,550 eager keys. The criterion now uses `\alpha`, which has no
+   extension, and additionally pins that `\to` alone does **not**
+   expand — the false half is worth an assertion because it reads as
+   correct until the table is consulted.
+2. **Acceptance 42 was false.** `\zzzz` + space yields `ζzzz `, not
+   literal text: `z` opens a pending abbreviation (`ze`, `zeta`,
+   `zsqrtd`) and the second `z` finishes it. Exactly six printable
+   characters open no key — `$ % , ; @ W` — and the criterion now uses
+   `\WWWW`.
+3. **Acceptance 38's undo claim was false for its own example.**
+   `alpha` is eager, so `\alpha` expands before the space is typed and
+   the space is a separate edit; one undo removes the space rather than
+   restoring `\alpha `. The criterion now states the finish path and the
+   eager path separately, since "one expansion is one undo step" is true
+   of both while the text an undo restores is not.
+
+The mechanism (Q#LN11, Q#LN21, Q#LN22) needed no change — these were
+errors in the examples chosen to pin it, which is why a simulation over
+the real data found them and four review rounds over the prose did not.
 
 ## 1. What ships
 
@@ -2452,12 +2484,22 @@ criterion 46 requires to stay byte-identical.
 
 **Stage 4b — the Unicode input method**
 
-38. `\alpha` + space yields `α ` — the space lands first and the
-    expansion runs in the following `buffer.after-edit`, so the
-    terminator is **retained**, not consumed. The expansion is a single
-    undo step: one undo restores `\alpha ` (with its space), not
-    `\alph`. Rev 6 wrote the post-undo text as `\alpha`, which would be
-    true only if the terminator were swallowed.
+38. **Terminators are retained, and one expansion is one undo step —
+    but which text an undo restores depends on the path.** Rev 8 stated
+    a single rule here and it is wrong against the real table, because
+    it assumed `\alpha` takes the finish path when `alpha` is in the
+    1,550-key eager set (round 9; see 41).
+    - *Finish path.* `\alp` + space yields `α `: the space lands first
+      and the expansion runs in the following `buffer.after-edit`, so
+      the terminator is **retained**, not consumed, and it is inside the
+      replaced span. One undo restores `\alp ` — with its space, not
+      `\al`. Rev 6 wrote the post-undo text without the terminator,
+      which would be true only if the terminator were swallowed.
+    - *Eager path.* `\alpha` yields `α` with no terminator typed, and a
+      following space is a **separate** edit. One undo removes the
+      space; a second restores `\alpha`. Asserting the finish-path undo
+      text here would fail, which is the trap this split exists to
+      record.
 39. `\<>` yields `⟨⟩` with the point between them, from the `$CURSOR`
     placeholder.
 40. **Pair-collision pin (Q#LN22).** `\[[]]` yields `⟦⟧`: each `[` is
@@ -2467,9 +2509,21 @@ criterion 46 requires to stay byte-identical.
     only completed expansions rather than pending extensions — **both
     failure modes must be shown**, since they are distinct bugs with the
     same symptom.
-41. `\to` yields `→` eagerly on uniqueness, with no terminator typed.
-42. A prefix with no match (`\zzzz` + space) is left as literal text; no
-    edit is made.
+41. **Eager expansion on uniqueness**, with no terminator typed:
+    `\alpha` yields `α` the moment the final `a` lands. Rev 8 used `\to`
+    here and that is false against the real table (round 9): `to` is a
+    proper prefix of `top`, `to0`, `toa` and others, so
+    `isAbbreviationUniqueAndComplete` is false and `to` is **not** in
+    the 1,550-key eager set. `\to` alone stays `\to`; `\to` + space
+    yields `→ ` by the finish path. Both are asserted, because the
+    wrong one reads as correct until the table is consulted.
+42. A prefix that opens no key at all — `\WWWW` + space — is left as
+    literal text and **no edit is made**. Rev 8 used `\zzzz`, which
+    expands (round 9): `z` opens a pending abbreviation because `ze`,
+    `zeta` and `zsqrtd` exist, and the second `z` finishes it, giving
+    `ζzzz `. Exactly six printable characters open no key: `$ % , ; @
+    W`. Bites against an implementation that treats "no complete match"
+    as "no pending state".
 43. **Lazy abandonment (Q#LN22).** Because there is no cursor-motion
     hook, this asserts what pmacs can actually detect: after `\alp`, an
     explicit `goto_byte` elsewhere followed by typing `h` inserts a
@@ -2698,7 +2752,7 @@ uncapped event queue, the dropped `cfg.restart`, and — unchanged from
 languages other than Lean, and §4's rule is what keeps them out of a Lean
 PR.
 
-### 9.1 Coherence impact — stages 4a and 4b (rev 8)
+### 9.1 Coherence impact — stages 4a and 4b (rev 9)
 
 **Sections served.** §6 (interaction islands) primarily, and in the
 *preventing* direction rather than the fixing one — see below. §11

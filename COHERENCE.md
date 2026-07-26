@@ -1022,12 +1022,15 @@ layering, provenance, and adoption have not followed.**
   `ConfigValue`s; `describe-setting`'s "Source:" names where `define()`
   ran. The inspection view sketched above is currently impossible to
   render.
-- **Adoption is eight settings**: `editing.auto-pair` (pair.lua),
+- **Adoption is nine settings**: `editing.auto-pair` (pair.lua),
   `editing.trim-on-save` (editops.lua), `autosave.interval-ms`
   (autosave.lua), `window.panel-height` + `window.min-height`
-  (window.lua), and `terminal.default-profile` +
+  (window.lua), `terminal.default-profile` +
   `terminal.scrollback-rows` + `terminal.escape-key` (terminal.lua,
-  #173). Everything else a user might set — theme, fonts, LSP
+  #173), and `lean.abbrev` (lean_input.lua, Arc 8 Stage 4b) — a
+  `live` boolean read against the typed edit's SOURCE buffer, the
+  `editing.auto-pair` shape including its correction to resolve
+  `rec.buffer` rather than the active buffer. Everything else a user might set — theme, fonts, LSP
   server config, killring size, recentf/saveplace/desktop enables,
   pair sets, comment strings, `pmacs.parse.*` — lives in raw Lua
   outside the registry and is therefore invisible to `describe-setting`

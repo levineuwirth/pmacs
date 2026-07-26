@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-26, after Lean 4 stages 3a and 3b (#167, #170)
-landed — pmacs' first Lean language server — following the inline-math
+**Last updated: 2026-07-26, after Lean 4 Stage 4a (#179) landed — the
+typed-edit consumer chain, the substrate the Unicode input method
+registers on — atop stages 3a and 3b (#167, #170), pmacs' first Lean
+language server, and following the inline-math
 slice (#158), the first mathematical typesetting in pmacs, and find-file (#162),
 the dired arc's Stage 0, and COHERENCE.md (#163), Lean 4 Stage 1 (#160), the
 minimap blank-slab fix (#159), bottom-panel Stage 1 (#155), the
@@ -88,9 +90,9 @@ commands, read `docs/active-work.md` immediately after this file.
     config swap invalidates. The durable lesson is to heal at
     **consumption** — the point where a stale record is handed out — not
     at the moment of the swap.
-  - **Stage 4a (typed-edit consumer chain) is implemented and in review
-    as PR #179** (branch `lean4-stage4a-typed-edit-chain`, framing rev
-    8). It is substrate only: `builtin/runtime/typed_edit.lua` owns the
+  - **Stage 4a (typed-edit consumer chain) MERGED as #179** (`main` @
+    `a27f646`, two review rounds). It is substrate only:
+    `builtin/runtime/typed_edit.lua` owns the
     single `buffer.after-edit` subscriber and the single one-shot read,
     `pair.lua` becomes its first registered consumer, and
     `tests/auto_pair_acceptance.rs` is unchanged by zero lines
@@ -104,10 +106,36 @@ commands, read `docs/active-work.md` immediately after this file.
     iterates a **snapshot**, because a consumer that registers a
     lower-priority one shifts itself forward under `ipairs` and runs
     twice.
-  - Remaining: Stage 4b (the Unicode input method) is framed and
-    awaiting approval — not started; stages 5 (goal panel), 6 (`#eval`
-    output channel), and 7 (module hierarchy) are framed but not
-    scouted against current `main`.
+  - **Round 8's durable lesson: `run_all_must_succeed` does NOT abort
+    the fan-out.** `src/hook.rs:332` collects each callback's error and
+    continues to the remaining subscribers, marking only the run
+    failed — so an uncontained throw inside a hook subscriber does not
+    stop `lsp.lua` from flushing didChange. Two framing revisions
+    asserted the opposite to justify a `pcall`. The guard was right and
+    the reason was wrong, and by the time review caught it the wrong
+    reason had been copied into a module comment, an acceptance
+    criterion, a test comment, and the ledger. **Correct the source a
+    rationale derives from, not only the sites that quote it.**
+  - **Stage 4b (the Unicode input method) is implemented and in review**
+    (branch `lean4-stage4b-input-method`, framing rev 9): a vendored
+    1,855-entry table generated from `leanprover/vscode-lean4@17d1d08`
+    by `scripts/regen-lean-abbrev`, plus a consumer registered on the
+    Stage 4a chain at priority 50, ahead of pairing. Its durable facts:
+    the table must stay an ORDERED SEQUENCE (equal-length ties resolve
+    by source declaration order, which a `pairs`-iterated map cannot
+    express); a generator round-trip check must re-read the BYTES ON
+    DISK, because comparing in-memory strings cannot see an encoding
+    applied by the write itself; and an expansion that SHRINKS the
+    buffer must place the point explicitly, or every later self-insert
+    is silently rejected and the editor looks dead.
+  - **Round 9 corrected three approved acceptance criteria** by
+    simulating the state machine over all 1,855 entries rather than
+    re-reading the prose. Four review rounds over the text had not
+    found them, because each named an example that reads as obviously
+    right and is wrong only against the data.
+  - Remaining: stages 5 (goal panel), 6 (`#eval` output channel), and 7
+    (module hierarchy) are framed but not scouted against current
+    `main`.
 
 - **Inline math LANDED — #158** (`docs/inline-math-slice-framing.md` rev 3;
   merge `5aa9044`). pmacs renders `$…$` as typeset mathematics in the GPU
