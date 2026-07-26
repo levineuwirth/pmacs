@@ -346,8 +346,9 @@ If it does not, stop and repair the remote/fetch configuration.
   `path.open-directory` chain + `pmacs.path.directory_handler` fallback
   slot, `pmacs.window.commit_to` with its scoped frontend and preflight,
   the nonconstructible destination userdata, the daemon bootstrap arm,
-  and `tests/journey_acceptance.rs` (23 pins). No protocol change —
-  still v20.
+  and `tests/journey_acceptance.rs` (**24 pins** as of rev 8 — a count,
+  not a constant; re-read it rather than quoting this line). No protocol
+  change — still v20.
 - **Doc updates ride the PR** per COHERENCE §25: §2 grade + step-3
   verdict row, §20 Priority 1 + the arc list, the GPU initial-target
   framing's Q#GT6 / acceptance 10 supersession, handoff §1.
