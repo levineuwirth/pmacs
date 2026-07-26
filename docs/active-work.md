@@ -14,13 +14,16 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `d400f30` (Lean 4 Stage 3b #170 atop Stage 3a
-  #167, the bottom-panel landed-doc refresh #156, the inline-math slice
-  #158, dired Stage 1 #165, the GPU terminal input fix #166, Lean 4
-  Stage 2 #161, the dired framing #164, COHERENCE.md #163, find-file
-  #162, Lean 4 Stage 1 #160, and the minimap blank-slab fix #159;
-  protocol v20). The previous snapshot named `d152120`; the recovery
-  check below accepts it or anything newer.
+  `githubsucks/main` @ `a27f646` (Lean 4 Stage 4a #179 atop bottom-panel
+  Stage 2A #177, the bottom-panel Stage 2 framing #175, terminal
+  configuration Stage 1 #173, Lean 4 Stage 3b #170, Stage 3a #167, the
+  CRDT undo repro #157, the inline-math landed-doc refresh #172, the
+  bottom-panel landed-doc refresh #156, the inline-math slice #158,
+  dired Stage 1 #165, the GPU terminal input fix #166, Lean 4 Stage 2
+  #161, the dired framing #164, COHERENCE.md #163, find-file #162, Lean 4
+  Stage 1 #160, and the minimap blank-slab fix #159; protocol v20). The
+  previous snapshot named `d152120`; the recovery check below accepts it
+  or anything newer.
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -143,7 +146,7 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b MERGED; Stage 4a IN REVIEW
+## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b, 4a MERGED; 4b is next
 
 - **Stages 1, 2, 3a and 3b are MERGED** — #160 (`main` @ `0827dd1`),
   #161 (`46a1b8f`), #167 (`6f348c9`), #170 (`d400f30`). Their full
@@ -159,9 +162,12 @@ If it does not, stop and repair the remote/fetch configuration.
   (`main` @ `d400f30`), 2026-07-26. Both were integrated against a main
   that had advanced 50 commits mid-review; the only conflict either time
   was this ledger's own lane headings, resolved by keeping both sides.
-- Worktree `../pmacs-lean-stage4`, branched off `main` @ `d400f30`.
-  Framing-only so far: `docs/lean4-mode-framing.md` **revision 8**. No
-  code. Awaiting user approval before implementation, per the workflow.
+- **Stage 4a merged as #179** (`main` @ `a27f646`, 2026-07-26) — the
+  typed-edit consumer chain. Worktree `../pmacs-lean-stage4`, branched
+  off `main` @ `d400f30`; retained, carrying nothing unmerged.
+  `docs/lean4-mode-framing.md` **revision 8** remains the approved
+  framing. **Stage 4b (the Lean-specific half) is framed and not
+  started.**
 - **Round 6 review found five P1s, four of them internal to rev 6** —
   facts about pmacs the revision asserted without checking, while its
   external (upstream) facts held. Fixed in rev 7: Stage 4a's footprint
@@ -458,68 +464,109 @@ If it does not, stop and repair the remote/fetch configuration.
   resolve *to*, and `pmacs .` should route into it rather than growing a
   second directory surface.
 
-## GPU terminal input lane — IN REVIEW
+## The CRDT half of the test corpus is dark in CI — NEEDS A LANE
 
-- Portable branch: `githubsucks/gpu-terminal-input`, worktree
-  `../pmacs-gui-term-input`, based on `githubsucks/main` @ `46a1b8f`.
-- Approved framing: `docs/gpu-terminal-input-framing.md` revision 2,
-  committed as the branch's first commit (`9a0df21`). Bug fix, not a
-  feature; **no protocol change (stays v20)**.
-- Reported as "text input within the terminal doesn't work on GUI, this is
-  fine in TUI". Root cause: the dispatcher applied **both** terminal-layout
-  syncs to **every** attached frontend, and a semantic session satisfies both
-  conditions (a `term_sizes` entry from `AttachRequest` *and* a terminal
-  declaration). Its PTY was resized twice per tick forever — grid arm installs
-  the TUI placement size, semantic arm installs the declared content
-  rectangle, each arm's idempotence guard seeing only what the other just
-  wrote — so the child took a `SIGWINCH` storm at tick cadence.
-- **The fix is a split, not a guard.** The grid arm is also the only per-tick
-  controller-liveness release a semantic frontend gets, and
-  `sync_semantic_terminal_layout` cannot take that over: the buffer-follow
-  snapshot clears the viewport declaration (`on_buffer_snapshot_sent`), so
-  that arm stops running in exactly the switch-away case that needs the
-  release. `sync_terminal_layout` is therefore split into a
-  frontend-kind-neutral half (panel reconcile + liveness) and a grid-only
-  geometry half, with the loop body extracted to
-  `sync_terminal_layouts_for_tick` so the exclusivity is structural and tests
-  drive the real thing.
-- **Trap for anyone touching this again:** the release at the "no
-  `window_placements` entry" arm reads like liveness and is grid geometry. A
-  semantic frontend has no placement entry at all, so moving it into the
-  neutral half releases a GPU controller every tick.
-- Bite-verified against **two** pre-images, because the naive guard fixes the
-  storm and introduces the leak:
+- **No branch, no framing yet.** Found while gating #166, then measured
+  properly during the vterm as-framed audit. Deliberately kept out of #166 so
+  a CI change would not arrive after review approval.
+- **Root cause:** `.github/workflows/ci.yml` never enables the `crdt` feature
+  anywhere — zero hits across the workflow directory. The `test` job runs
+  `cargo test --all-targets --no-default-features --features luajit|lua54`.
+  Every `#[cfg(feature = "crdt")]` test is therefore **not compiled** in CI,
+  not merely skipped.
+- **Measured, `--list` under CI's exact flags versus the same flags plus
+  `crdt`: 3,024 vs 3,288 — 264 tests dark.** Per target:
 
-  | pin | `main` | naive guard | the split |
-  |---|---|---|---|
-  | settle (acc 2+3) | FAIL | pass | pass |
-  | controller release (acc 6) | pass | FAIL | pass |
-  | grid still resizes (acc 5) | pass | pass | pass |
+  | dark | CI | full | target |
+  |---:|---:|---:|---|
+  | 177 | 1,832 | 2,009 | **the library itself** (`src/lib.rs`) |
+  | 21 | 15 | 36 | `m5_5_acceptance` |
+  | 13 | 1 | 14 | `gpu_invocation_acceptance` |
+  | 13 | 1 | 14 | `gpu_initial_target_acceptance` |
+  | 8 | 0 | 8 | `m10_11_acceptance` |
+  | 6 | 0 | 6 | `auto_pair_crdt_acceptance` |
+  | 6 | 0 | 6 | `m10_2_perf` |
+  | 4 | 5 | 9 | `vterm_stage3_acceptance` |
+  | 4 | 0 | 4 | `m10_10_perf` |
+  | 3 | 0 | 3 | `compile_mode_crdt_acceptance` |
+  | 2 | 22 | 24 | `theme_faces_acceptance` |
+  | 2 | 0 | 2 | `m11_5_semantic_acceptance` |
+  | 1 | 9 | 10 | `vterm_stage1_acceptance` |
+  | 1 | 7 | 8 | `statusline_segments_acceptance` |
+  | 1 | 10 | 11 | `gpu_font_acceptance` |
+  | 1 | 0 | 1 | `auto_indent_crdt_acceptance` |
+  | 1 | 0 | 1 | `m10_11_perf` |
 
-- Real-path evidence: a quiet child trapping `SIGWINCH` reports **144 frames
-  in 4 s and `WINCH 1..12` on screen** against the pre-fix tree, versus a
-  settled screen with the fix.
-- **Deliberately out of scope, named:** interactive-shell echo on a raw-mode
-  PTY (Q#GT5 — reproduces in-process too, so it is not the GUI/TUI
-  asymmetry), and a geometry change appearing to clear the visible screen
-  (reproduces pre-fix; why acceptance 4 latches its observation across
-  frames).
-- Verification on this branch: `cargo fmt --check` clean; strict workspace
-  Clippy clean; 1,829 default + 2,006 CRDT library tests; vterm Stage 1/2/3
-  10 / 6 / 9 CRDT; bottom-panel Stage 1 46; M4 121; required GPU 155;
-  **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
-  `git diff --check` clean. Gates were run against the committed tree.
+- **The single worst line is the library.** `cargo test --lib --features crdt`
+  is a REQUIRED local gate in `CLAUDE.md`, and CI has never run it. 177
+  library tests — the whole CRDT half — are developer-machine-only.
+- **Ten suites run zero or one test in CI**, including `gpu_initial_target`
+  (#148's entire acceptance, 1/14), `gpu_invocation` (#141's, 1/14), and
+  `a37`, the Vterm Stage 3 real-daemon/real-PTY/real-wgpu path that #135
+  built specifically because "a decoded-message fixture would prove none of
+  the three fit together".
+- **⚠ `a37` will report green in the new job without running, unless the
+  job builds `pmacs-gpu` AND sets `PMACS_REQUIRE_GPU=1`.** Measured
+  2026-07-26 while gating #173. `a37_real_daemon_real_pty_and_headless_gpu_
+  render_one_terminal_session` derives its sibling binary path from
+  `CARGO_BIN_EXE_pmacs`, and on a missing binary it `eprintln!`s a skip and
+  **returns `ok`**. A fresh worktree running
+  `cargo test --features crdt --test vterm_stage3_acceptance` reports **9/9
+  in 0.17 s having never run it**; a real run takes ~4 s. Only
+  `PMACS_REQUIRE_GPU=1` promotes that skip to a failure, and `CLAUDE.md`
+  applies that flag to `cargo test -p pmacs-gpu` — a **different package**,
+  so the required local gate does not cover a37 either. The `gpu-render`
+  job already sets the flag, which is what makes fix-shape part 2 sound;
+  state it as a **requirement** of that job rather than inheriting it by
+  luck, because a `crdt` leg added to the plain `test` job would run a37
+  vacuously.
+- **`a37` is also load-sensitive, which changes how to read the expected
+  first-run failures.** It passed at `d152120` and failed at that *same
+  commit* twenty minutes later, with a second agent saturating the machine
+  with `rustc` in between; it then failed identically on `d152120`,
+  `04c5ad1`, and the #173 merge commit, which is how #173 established the
+  failure was not its own. The signature is `last_frame_text` all spaces
+  with `rendered_nonuniform_frames` nonzero — frames arrive, content does
+  not. `pmacs-gpu`'s own suite flaked the same way under the same load
+  (201/202, then 202/202 on immediate rerun). **So a red a37 on the first
+  CI run is ambiguous by construction**: before treating it as a real
+  failure, run the same command on the merge base, and prefer serialized
+  execution for this suite over retry-until-green.
+- **Sort deliberate from accidental before proposing a fix.** Some of the 264
+  are perf suites that are `#[ignore]`d by default and belong to their own
+  jobs (`m10_2_perf` 6, `m10_11_perf` 1). `m10_10_perf` has **no** `#[ignore]`
+  and no CI job naming it, so it looks accidental. This classification is not
+  finished and is the lane's first task.
+- **Fix shape, two parts** (the flag combination is verified to work:
+  `--no-default-features --features luajit,crdt` lists 10 vterm Stage 1 tests
+  versus 9 without):
+  1. a `crdt` leg on the `test` job for the non-GPU suites and the library;
+  2. the GPU-requiring `crdt` suites onto the existing `gpu-render` job, which
+     already has lavapipe and `PMACS_REQUIRE_GPU=1` —
+     `vterm_stage3_acceptance`, `gpu_invocation_acceptance`,
+     `gpu_initial_target_acceptance`, `gpu_font_acceptance`.
+- **Expect first-run failures, and budget for them.** These would execute in
+  CI for the first time ever: real PTY timing on CI runners, wgpu under
+  lavapipe, and daemon-socket tests at unfamiliar concurrency. Start
+  ubuntu-only and decide about macOS from evidence. A red first run is the
+  lane working, not the lane failing.
+- Mitigating fact, verified rather than assumed: #166's three unit pins are
+  **not** `crdt`-gated and do run under CI's exact flags, including the
+  controller-release pin whose only job is catching the plausible wrong fix.
 
-## Terminal config + copy mode arc — Stage 1 IN REVIEW
+## Terminal config + copy mode arc — Stage 1 MERGED; Stage 2 is next
 
 - Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
   **revision 4** (four review rounds), committed as the first commit of
   Stage 1's branch. Two stages, two branches, two PRs; **no protocol
   change**.
-- **Stage 1 = `githubsucks/terminal-config`**, worktree
-  `../pmacs-terminal-config`, based on `githubsucks/main` @ `d152120`
-  and merged up to `c93f9ee` during review round 1. Profiles,
-  scrollback, escape key, and the `C-c t` opening binding.
+- **Stage 1 MERGED as #173** (`main` @ `cf54270`, 2026-07-26, one review
+  round, all twelve checks green). Branch `githubsucks/terminal-config`
+  and worktree `../pmacs-terminal-config` retained. Profiles, scrollback,
+  a per-terminal configurable escape key, and the `C-c t` opening
+  binding; no protocol change. Main was integrated **twice** during the
+  single review round (`ccf29e3`, then `c93f9ee` after the first merge
+  left the PR conflicting) — see the no-CI-while-conflicting fact below.
 - **Stage 2 = `terminal-copy-mode`, not started.** Branch it off `main`
   after Stage 1 merges: no dependency, but both edit
   `builtin/runtime/terminal.lua`.
@@ -604,22 +651,34 @@ If it does not, stop and repair the remote/fetch configuration.
   - `pmacs-gpu` itself failed 201/202 once under the same load and passed
     202/202 on immediate rerun.
 
-## Bottom-panel lane (Arc 7) — Stage 1 + framing MERGED; Stage 2A IN REVIEW
+## Bottom-panel lane (Arc 7) — Stages 1, 2A + framing MERGED; 2B is next
 
-Stage 1 and the Stage 2 framing are on `main`. **Stage 2A is
-implemented and in review.**
+Stage 1, the Stage 2 framing, and Stage 2A are all on `main`. **Stage 2B
+has not started.**
 
-- **Stage 2A — portable branch `githubsucks/bottom-panel-stage2a`**,
-  worktree `../pmacs-bp-stage2a`, **canonical `main` @ `cf54270`
-  integrated** (review round 1, finding 4 — the terminal-config lane
-  #173 also changes `src/editor.rs`, so gates were rerun on the merge
-  result, not the old combination). Five commits: the classified census
-  routing, the painter extraction + acceptance, the lane record, then
-  the round-1, round-2 and round-3 review fixes. **No protocol change; no behavior
-  change for any frontend today** — with `panel_capable = false` for
-  semantic sessions, `primary_document_window` returns `view.active`
-  in every existing configuration, so this is seam adoption that
-  becomes load-bearing in 2B.
+- **Stage 2A MERGED as #177** (`main` @ `0a3fcd1`, 2026-07-26, all twelve
+  checks green at `8424172`, three review rounds). Branch
+  `githubsucks/bottom-panel-stage2a` and worktree `../pmacs-bp-stage2a`
+  are retained and carry nothing unmerged. Five commits: the classified
+  census routing, the painter extraction + acceptance, the lane record,
+  then the round-1, round-2 and round-3 review fixes. **No protocol
+  change; no behavior change for any frontend today** — with
+  `panel_capable = false` for semantic sessions,
+  `primary_document_window` returns `view.active` in every existing
+  configuration, so this is seam adoption that becomes load-bearing in
+  2B.
+- **Stage 2B is approved and unstarted.** It branches from `main`, **not
+  stacked on 2A**, per the framing §9. Scope: protocol v21, the daemon
+  panel projection, the GPU band, and the negotiated `panel_capable`
+  flip. `docs/bottom-panel-stage2-framing.md` §7.2 carries its five
+  acceptance criteria (A2B-1..5) plus the reassertion of parent
+  criterion 52, and §8 records **no open items**, so 2B needs no further
+  framing round. Its sharpest trap is §5.3's three-boundary split: the
+  GPU `text_area_bottom` is `status_band_top`,
+  `geometry_capacity_bottom` and `document_text_bottom` at once, and a
+  blanket rewrite moves the status chrome along with the document while
+  still satisfying an "everything moved" assertion — hence A2B-4's
+  contrast form.
 - Verification on the merge result: `cargo fmt --check` clean; strict
   workspace Clippy clean; **1,832 default + 2,015 CRDT** library tests;
   `bottom_panel_stage2a_acceptance` **17**; bottom-panel Stage 1 46;
@@ -778,6 +837,23 @@ git worktree add --track \
 
 ## Closed since the last snapshot
 
+- **GPU terminal input (the double terminal-layout sync) — MERGED as #166**
+  (`main` @ `b889873`, 2026-07-25, one review round, all twelve checks green
+  after a macOS PTY-timing rerun). The dispatcher applied **both**
+  terminal-layout syncs to **every** attached frontend; a semantic session
+  satisfies both conditions, so its PTY was resized twice per tick forever and
+  the child took a `SIGWINCH` storm that made a GPU terminal untypable while
+  output still flowed. `sync_terminal_layout` is now split into a
+  frontend-kind-neutral half (panel reconcile + controller liveness) and a
+  grid-only geometry half, with the loop body extracted to
+  `sync_terminal_layouts_for_tick` so the exclusivity is structural. No
+  protocol change (v20). Durable lessons are in `docs/agent-handoff.md` §5;
+  the framing (`docs/gpu-terminal-input-framing.md` rev 2) carries three
+  falsified hypotheses, the two-pre-image bite matrix, and two named
+  out-of-scope items (Q#GT5 interactive-shell echo on a raw PTY, which
+  reproduces in-process and so is not the GUI/TUI asymmetry; and a geometry
+  change appearing to clear the visible screen, which reproduces pre-fix).
+  Branch `gpu-terminal-input` and worktree `../pmacs-gui-term-input` retained.
 - **Inline-math slice — MERGED as #158** (`main` @ `5aa9044`,
   2026-07-25). Detect → parse → layout → draw for `$…$`, entirely inside
   `pmacs-gpu`, no protocol change. Verified by the user's manual pass on
