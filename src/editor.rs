@@ -891,10 +891,19 @@ impl EditorState {
     ///
     /// * **The window install.** `resolve_target_buffer` deliberately
     ///   does not touch windows, so the caller places the buffer.
-    ///   Startup uses [`Self::replace_active_buffer`] specifically
-    ///   because it drops the just-created scratch buffer; an
-    ///   `install_buffer_in_window` here would leave a stray `*scratch*`
-    ///   behind every `pmacs FILE` (Q#JR3).
+    ///   Startup uses [`Self::replace_active_buffer`], which switches
+    ///   the ACTIVE window — an `install_buffer_in_window` into some
+    ///   other window would load the file and leave the user looking at
+    ///   scratch (Q#JR3).
+    ///
+    ///   It does **not** destroy the scratch buffer, despite what
+    ///   `replace_active_buffer`'s own doc comment has long claimed:
+    ///   that function only calls `switch_active_buffer`, which
+    ///   reassigns the window's `buffer_id` and removes nothing. The
+    ///   startup scratch survives in the registry, and did before this
+    ///   stage too. Changing that is buffer-lifetime work with its own
+    ///   consequences (what else may hold the id, what `C-x b` should
+    ///   list) and is deliberately not smuggled in here.
     /// * **Firing the hook outside the core borrow.** Listeners
     ///   re-enter `pmacs.editor.*`, which re-borrows the core
     ///   (Q#JR1a) — the same reason the daemon bootstrap and
@@ -1068,9 +1077,18 @@ impl EditorState {
         }
     }
 
-    /// Switch the active window to `buffer_id`, dropping any old
-    /// scratch buffer if the active window's previous buffer has no
-    /// other windows referencing it. Returns silently on a stale id.
+    /// Switch the active window to `buffer_id`. Returns silently on a
+    /// stale id.
+    ///
+    /// **Corrected (Journey Stage 1a).** This comment previously claimed
+    /// it dropped "any old scratch buffer if the active window's
+    /// previous buffer has no other windows referencing it". It never
+    /// did: the body is one `switch_active_buffer` call, which reassigns
+    /// `aw.buffer_id` and removes nothing from the registry. The claim
+    /// was load-bearing enough that a framing decision (Q#JR3) and an
+    /// acceptance pin were written against it before anyone checked the
+    /// body. Removing the stale scratch may well be worth doing; it is
+    /// separate work, and this comment no longer promises it.
     fn replace_active_buffer(&self, buffer_id: crate::buffer::BufferId) {
         let mut core = self.core.borrow_mut();
         let _ = core.switch_active_buffer(buffer_id);

@@ -31,8 +31,10 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::editor::EditorState;
 use pmacs::editor_core::normalize_buffer_path;
+use pmacs::protocol::FrontendId;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -63,6 +65,35 @@ fn pump(s: &mut EditorState) {
         assert!(Instant::now() < deadline, "async pump deadline exceeded");
         s.tick_async();
     }
+}
+
+fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+    KeyEvent {
+        code,
+        modifiers: mods,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }
+}
+
+fn press(s: &mut EditorState, code: KeyCode) {
+    s.dispatch_key(FrontendId::LOCAL, key(code, KeyModifiers::NONE));
+}
+
+fn type_char(s: &mut EditorState, c: char) {
+    s.dispatch_key(FrontendId::LOCAL, key(KeyCode::Char(c), KeyModifiers::NONE));
+}
+
+/// The 0-based line an entry renders on, found by its trailing name
+/// column -- the same shape `dired_acceptance` uses.
+fn line_of(s: &EditorState, name: &str) -> usize {
+    let text = active_text(s);
+    for (index, line) in text.lines().enumerate() {
+        if line.trim_end().ends_with(name) {
+            return index;
+        }
+    }
+    panic!("no listing line for {name:?} in:\n{text}");
 }
 
 /// A project a journey can plausibly be run against.
@@ -333,11 +364,18 @@ fn journey_a_raising_resolver_suppresses_the_fallback_and_reports() {
 // Step 5 — edit immediately
 // ---------------------------------------------------------------------------
 
-/// **N11** — the journey's step-3-into-step-5 path: start on a
-/// directory, visit a listed file, and type into *that* file.
+/// **N11** — the journey's step-3-into-step-5 path, through the real
+/// input path at every step: start on a directory, press `RET` on a
+/// listed file, then type a character into it.
+///
+/// Rev 6 correction: this previously called `display_file` and
+/// `buf:insert` directly, so it stayed green with dired's `RET` binding,
+/// its entry dispatch, or the editor's self-insert path all broken —
+/// which is most of what "the journey works" is supposed to mean. Both
+/// gestures are now dispatched as keys.
 ///
 /// Deliberately not a self-insert into the dired buffer, whose intercept
-/// rejects every edit — asserting an edit lands there would contradict
+/// rejects every edit: asserting an edit lands there would contradict
 /// the read-only contract rather than pin the journey.
 #[test]
 fn journey_step5_editing_a_file_reached_through_the_directory() {
@@ -345,21 +383,24 @@ fn journey_step5_editing_a_file_reached_through_the_directory() {
     let mut s = launch(td.path());
     assert!(active_name(&s).starts_with("*dired:"));
 
-    let target = td.path().join("alpha.txt");
-    exec(
-        &s,
-        &format!(
-            "pmacs.window.display_file({:?}, {{ select = true }})",
-            target.display().to_string()
-        ),
-    );
+    // Seat on the entry, then VISIT it with the real key.
+    let line = line_of(&s, "alpha.txt");
+    exec(&s, &format!("pmacs.editor.move_to_line({line})"));
+    press(&mut s, KeyCode::Enter);
     pump(&mut s);
 
-    exec(&s, "pmacs.window.buffer():insert(0, 'EDITED ')");
+    assert_eq!(
+        active_name(&s),
+        td.path().join("alpha.txt").display().to_string(),
+        "RET on a listed file must visit it"
+    );
+
+    // And type into it with the real key.
+    type_char(&mut s, 'X');
     let text = active_text(&s);
     assert!(
-        text.starts_with("EDITED "),
-        "the edit must land in the visited file's buffer; got {text:?}"
+        text.starts_with('X'),
+        "a self-insert must land in the visited file's buffer; got {text:?}"
     );
     assert!(
         buffer_count(&s) >= 2,
@@ -466,26 +507,21 @@ fn preservation_an_unreadable_file_reports_with_its_path() {
     );
 }
 
-/// **P7** — a directory argument suppresses desktop restore, on the same
-/// reasoning a file argument does (Q#DS7): a positional argument means
-/// "open this", not "restore my session".
-///
-/// *Mutation:* pass `false` for `had_file` on the directory path.
-#[test]
-fn preservation_a_directory_argument_suppresses_desktop_restore() {
-    let td = project();
-    let mut s = launch(td.path());
-    // Arm the restore AFTER startup, then confirm the startup path
-    // treated its argument as a positional open: `had_file` is what
-    // `run` passes, and a directory must set it.
-    let had_file = true;
-    s.restore_desktop_if_armed(had_file);
-    assert!(
-        !status(&s).contains("desktop-restore"),
-        "a positional directory argument must not trigger a restore; got {:?}",
-        status(&s)
-    );
-}
+// **P7 — removed in rev 6, not weakened.**
+//
+// Q#JR12 said a directory argument must suppress desktop restore, and
+// rev 5 carried a pin for it. There is nothing to pin. `run` computes
+// `had_file = file.is_some()` (`editor.rs:3152`) and a directory path is
+// `Some` like any other, so the suppression is structural: no
+// directory-specific branch exists that could get it wrong, and the
+// named mutation ("pass false for `had_file` on the directory path")
+// would require inventing the branch first.
+//
+// The rev 5 test also never armed desktop restore and hard-coded
+// `had_file = true` after startup, so it asserted nothing about `run`'s
+// decision and would have passed against any implementation. Keeping a
+// green test that cannot fail is worse than having none: it reads as
+// coverage. Q#JR12 is downgraded to an observation in the framing.
 
 /// **P6** — `display_file` keeps its directory-is-an-error contract and
 /// does not enter the resolver chain.

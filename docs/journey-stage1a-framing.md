@@ -1,6 +1,7 @@
 # Journey Stage 1a — open a directory, on one path
 
-**Status: framing, rev 5, awaiting approval.**
+**Status: framing, rev 6 — APPROVED at rev 5; rev 6 records
+corrections found during implementation.**
 **Serves `COHERENCE.md` §2 (the golden product journey), §19 (coherence
 acceptance tests), §20 Priority 1.**
 
@@ -75,6 +76,43 @@ acceptance tests), §20 Priority 1.**
     unchanged and declines, and only the fallback commits.
   - The dired accessor spelling, revision heading, and Stage 2 ledger
     claim are corrected.
+
+- rev 6 (2026-07-26) — **corrections found while implementing**, not a
+  new design round. Four, all confirmed against the tree:
+  - **Q#JR3 was false.** `replace_active_buffer` does *not* drop the
+    startup scratch buffer; its body is one `switch_active_buffer` call,
+    which reassigns `aw.buffer_id` and removes nothing. The claim came
+    from that function's own doc comment (`editor.rs:1071`), which has
+    been wrong for as long as it has existed, and rev 5 propagated it
+    into §2.2, §3, P4, and the decision list without checking the body.
+    Corrected in all four places; the stale comment is corrected in this
+    PR too, since this PR would otherwise add *more* false references to
+    it. **Actually removing the stale scratch is separate work** —
+    buffer-lifetime changes have their own consequences (what else holds
+    the id, what `C-x b` lists) and are not smuggled into a directory-open
+    stage.
+  - **The daemon bootstrap could report the wrong buffer** (§4.5). The
+    directory arm captured `dest.buffer`, ran the resolver chain
+    *synchronously*, then returned the captured id — so a handler that
+    opened something synchronously (through `commit_to`, the supported
+    way) had already replaced the window's buffer, and the reply would
+    pair one buffer's snapshot with another's identity. The early return
+    also skipped the post-hook revalidation this framing claimed stayed
+    active. Rev 6 decides: **report what the window actually holds after
+    the dispatch**, and rehome through `non_side_target` exactly as the
+    file arm does.
+  - **N11 tested neither `RET` nor self-insert.** It called
+    `display_file` and `buf:insert` directly, so it stayed green with
+    dired's `RET` binding, its entry dispatch, and the editor's
+    self-insert path all broken — most of what "the journey works" means.
+    Both gestures are now dispatched as real keys.
+  - **P7 was vacuous and is removed, not weakened.** Q#JR12 has nothing
+    to pin: `run` computes `had_file = file.is_some()` and a directory
+    path is `Some` like any other, so suppression is structural and the
+    named mutation would require inventing the branch first. The rev 5
+    test additionally never armed restore and hard-coded `had_file`, so
+    it asserted nothing about `run`. Q#JR12 is downgraded to an
+    observation.
 
 ---
 
@@ -160,7 +198,7 @@ daemon bootstrap (`daemon.rs:1641`). **Local startup is not one of them**
 | Displayed name | `path.display()` raw (`editor.rs:772`) | `path.display()` raw |
 | `NotFound` arm | empty path-backed buffer, `[new file]` | identical |
 | Dedup | none | `find_buffer_for_path` |
-| Window install | `replace_active_buffer` — drops the startup scratch (`editor.rs:797`) | none; caller installs |
+| Window install | `replace_active_buffer` — switches the ACTIVE window (`editor.rs:797`). **It does not drop the startup scratch** (rev 6): its body is one `switch_active_buffer` call, which reassigns `aw.buffer_id` and removes nothing. The doc comment claiming otherwise was wrong before this stage and is corrected in this PR | none; caller installs |
 | Error type | `io::Error`, bare | `String`, prefixed `cannot open {path}: ` |
 
 **The two agree on every observable except the error prefix and the
@@ -319,7 +357,9 @@ invariant rather than working around it.
 ## 3. The unification (Q#JR1)
 
 `EditorState::open` becomes a thin caller of `resolve_target_buffer`,
-keeping `replace_active_buffer` (which drops the startup scratch, Q#JR3)
+keeping `replace_active_buffer` (which switches the **active** window,
+Q#JR3 as corrected in rev 6 — it does not destroy the old scratch, and
+never did)
 and keeping its "fire the hook after the core borrow ends" structure
 (`editor.rs:786-795`) — listeners re-enter `pmacs.editor.*` and re-borrow
 the core (Q#JR1a).
@@ -328,9 +368,15 @@ the core (Q#JR1a).
 `pmacs /root/secret` names the file, which today's bare message does not.
 This is the *only* user-visible change from the unification (§2.2).
 
-**Q#JR12** — a directory argument counts as "had a file argument" and
-suppresses desktop restore, on Q#DS7's reasoning: a positional argument
-means "open this", not "restore my session".
+**Q#JR12 (downgraded to an observation, rev 6)** — a directory argument
+suppresses desktop restore, on Q#DS7's reasoning that a positional
+argument means "open this" rather than "restore my session". This needs
+no work and cannot be pinned: `run` computes `had_file = file.is_some()`
+(`editor.rs:3152`), and a directory path is `Some` like any other, so
+there is no directory-specific branch that could get it wrong. Rev 5
+carried an acceptance for it; that test never armed restore and
+hard-coded `had_file`, asserting nothing, and is removed rather than
+repaired.
 
 ---
 
@@ -538,9 +584,26 @@ problem is solved.
 ### 4.5 Q#JR9 — what the bootstrap reply names, and what it shows
 
 `open_initial_target` on a `Directory` installs nothing: it dispatches the
-resolver, then replies `Opened { buffer_id }` naming the buffer the fresh
-view's primary document window already holds. §2.8's reassert reasserts
-that same buffer — already correct, therefore harmless.
+resolver, then replies `Opened { buffer_id }` naming **whatever the
+destination window holds once that dispatch returns** — re-read, not the
+id captured beforehand (Q#JR9b, rev 6).
+
+The distinction is not academic. The chain runs **synchronously**.
+dired's handler defers, because its listing must await; a user's resolver
+is under no such obligation, and one that opens something synchronously
+through `commit_to` — the supported way to do it — has already replaced
+the window's buffer by the time the reply is built. Reporting the
+captured id would pair one buffer's snapshot with another's identity, and
+the frontend would render a document nobody asked for.
+
+Re-reading also subsumes the case where a hook closed the window, so this
+arm rehomes through `non_side_target` exactly as the file arm's reassert
+does, rather than returning early and skipping that check — which rev 5's
+implementation did while this section claimed the revalidation stayed
+active.
+
+Absent a synchronous claimant the re-read yields the buffer the window
+already held, which is the ordinary case.
 
 **That buffer is not necessarily `*scratch*`.** `build_fresh_frontend_view`
 clones **LOCAL's primary document buffer** (`daemon.rs:2997`) — M10.9 made
@@ -723,8 +786,13 @@ is **removed rather than recast**: it proved nothing N1 does not.
   window unchanged; `find_file_accepting_a_directory_reports_instead_of_raising`
   passes unmodified.
   *Mutation:* route `display_file` into the resolver chain.
-- **P7 — desktop restore stays suppressed (Q#JR12).**
-  *Mutation:* pass `false` for `had_file` on the directory path.
+- **P7 — REMOVED in rev 6.** Q#JR12 is structural: `run` computes
+  `had_file = file.is_some()` and a directory path is `Some` like any
+  other, so there is no directory-specific branch to break and the named
+  mutation would have to invent one first. Rev 5's test never armed
+  restore and hard-coded `had_file`, so it could not fail against any
+  implementation. Removed rather than repaired — a green test that cannot
+  fail reads as coverage.
 - **P8 — startup errors name the file (Q#JR4).** A non-`NotFound`,
   non-directory failure produces a message containing `cannot open` and
   the path. *(Legitimately N-shaped for the prefix, P-shaped for the
@@ -851,7 +919,12 @@ discovered late.
 - **Q#JR1** `EditorState::open` adopts `resolve_target_buffer` wholesale.
 - **Q#JR1a** The hook fires outside the core borrow.
 - **Q#JR2** *Withdrawn (rev 2)* — its premise was false.
-- **Q#JR3** The scratch drop (`replace_active_buffer`) is preserved.
+- **Q#JR3 (corrected rev 6)** Startup keeps using
+  `replace_active_buffer`, which switches the **active** window — not
+  because it drops the old scratch (it does not, and never did) but
+  because an `install_buffer_in_window` elsewhere would load the file
+  while leaving the user looking at scratch. Removing the stale scratch
+  buffer is separate work.
 - **Q#JR4** Startup errors gain the `cannot open {path}: ` prefix.
 - **Q#JR5** `resolve_target_buffer` returns a typed `ResolvedTarget`.
 - **Q#JR5b** Both `HookKind` types are written path-qualified.
@@ -860,12 +933,17 @@ discovered late.
   builtins do not subscribe; dired is a replaceable fallback slot.
 - **Q#JR8** `ResolvedTarget::Directory` carries an explicitly normalized
   path.
-- **Q#JR9** The bootstrap reply names the window's pre-existing buffer —
-  LOCAL's primary document buffer, not necessarily scratch. Accepted and
-  documented.
+- **Q#JR9** The bootstrap reply names the destination window's buffer —
+  absent a synchronous claimant, LOCAL's primary document buffer, not
+  necessarily scratch. Accepted and documented.
+- **Q#JR9b (rev 6)** That id is **re-read after the dispatch**, and the
+  arm rehomes through `non_side_target` rather than returning early: a
+  synchronous resolver may already have replaced the buffer.
 - **Q#JR10** An unclaimed directory with the handler cleared exits 0 with
   a status message.
-- **Q#JR12** A directory argument suppresses desktop restore.
+- **Q#JR12 (observation, rev 6)** A directory argument suppresses
+  desktop restore structurally, via `had_file = file.is_some()`. No work,
+  no pin.
 - **Q#JR13** `display_file` keeps its directory-is-an-error contract.
 - **Q#JR14** The destination `{frontend, window, buffer}` is captured at
   resolve time; `commit_to` preflights and scopes the **entire**

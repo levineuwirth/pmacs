@@ -1661,11 +1661,51 @@ fn open_initial_target(
             let dest = editor
                 .capture_directory_destination(frontend_id, origin_window)
                 .ok_or_else(|| format!("cannot open {}: no document window", path.display()))?;
-            let buffer_id = dest.buffer;
             editor.dispatch_directory_open(&path, dest);
             editor.reconcile_panel_layout(frontend_id);
+
+            // The reply must name what the window ACTUALLY holds now, not
+            // what it held before the dispatch.
+            //
+            // The chain runs synchronously. dired's handler defers (it
+            // spawns a coroutine for the listing), but a user's resolver
+            // is under no such obligation: a handler that opens something
+            // synchronously -- through `commit_to`, which is exactly the
+            // supported way to do it -- has already replaced this
+            // window's buffer by the time we get here. Reporting the
+            // captured id would then send the snapshot of one buffer and
+            // the identity of another, and the frontend would render a
+            // document nobody asked for.
+            //
+            // Re-reading also covers the case a hook closed the window,
+            // which is why this rehomes through `non_side_target` exactly
+            // as the file arm's reassert does rather than returning early
+            // and skipping that check.
+            let mut core = editor.core.borrow_mut();
+            core.active_frontend = frontend_id;
+            let destination = if core
+                .views
+                .get(&frontend_id)
+                .is_some_and(|view| view.layout.iter_ids().contains(&origin_window))
+            {
+                origin_window
+            } else {
+                core.non_side_target(frontend_id)
+                    .map_err(|error| format!("cannot reselect {}: {error}", path.display()))?
+            };
+            core.focus_window(frontend_id, destination);
+            let buffer_id = core
+                .windows
+                .get(&destination)
+                .map(|window| window.buffer_id)
+                .ok_or_else(|| format!("cannot reselect {}: window died", path.display()))?;
             return Ok(OpenedInitialTarget {
                 buffer_id,
+                // False whether or not the chain replaced the buffer: an
+                // untouched destination is pre-existing and already
+                // published, and a buffer a synchronous handler installed
+                // went through the ordinary display path, which publishes
+                // on its own terms.
                 publish_to_replicas: false,
             });
         }
@@ -4921,6 +4961,177 @@ mod tests {
             editor.core.borrow().views[&fid].active,
             document,
             "non-vacuity: the document window is a real, distinct focus target"
+        );
+    }
+
+    /// **N2** (Journey Stage 1a) — a DIRECTORY initial target reaches
+    /// readiness instead of failing.
+    ///
+    /// This deliberately supersedes the directory half of the GPU
+    /// initial-target framing's Q#GT6 and its acceptance 10, which
+    /// required `IsADirectory` to fail before window creation.
+    /// Permission-denied and every other pre-readiness failure keep that
+    /// contract.
+    #[test]
+    fn initial_target_directory_reaches_ready() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("alpha.txt"), b"alpha\n").expect("write");
+
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .lua()
+            .load("pmacs.lsp.config = {}")
+            .exec()
+            .expect("wipe lsp config");
+        let fid = FrontendId(131);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        let opened = open_initial_target(
+            &mut editor,
+            fid,
+            InitialTarget {
+                path: dir.path().as_os_str().as_bytes().to_vec(),
+                cwd: dir.path().as_os_str().as_bytes().to_vec(),
+            },
+        )
+        .expect("a directory target must reach readiness, not fail");
+
+        // The reply names a live buffer in a live document window: a
+        // valid, ready session. The listing arrives later, asynchronously.
+        let core = editor.core.borrow();
+        assert!(
+            core.registry.borrow().contains(opened.buffer_id),
+            "the reported buffer must exist so its snapshot can be sent"
+        );
+        let active = core.views[&fid].active;
+        assert_eq!(
+            core.windows[&active].buffer_id, opened.buffer_id,
+            "the reported buffer is the one the document window shows"
+        );
+    }
+
+    /// **N5** — the bootstrap buffer is not necessarily `*scratch*`.
+    ///
+    /// `build_fresh_frontend_view` clones LOCAL's PRIMARY DOCUMENT
+    /// buffer, so when LOCAL holds a real document the fresh session
+    /// briefly displays and snapshots it. Q#JR9 accepts that rather than
+    /// introducing a placeholder; this observes it instead of assuming.
+    #[test]
+    fn initial_target_directory_reports_a_non_scratch_primary() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let doc = dir.path().join("already-open.txt");
+        std::fs::write(&doc, b"local document\n").expect("write");
+
+        // LOCAL holds a real document, not scratch.
+        let mut editor = EditorState::open(doc.clone()).expect("open");
+        editor
+            .lua_host
+            .lua()
+            .load("pmacs.lsp.config = {}")
+            .exec()
+            .expect("wipe lsp config");
+        let local_primary = editor
+            .core
+            .borrow()
+            .primary_document_buffer(FrontendId::LOCAL)
+            .expect("LOCAL always has a document window");
+
+        let fid = FrontendId(132);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        let opened = open_initial_target(
+            &mut editor,
+            fid,
+            InitialTarget {
+                path: dir.path().as_os_str().as_bytes().to_vec(),
+                cwd: dir.path().as_os_str().as_bytes().to_vec(),
+            },
+        )
+        .expect("a directory target must reach readiness");
+
+        assert_eq!(
+            opened.buffer_id, local_primary,
+            "the bootstrap reply names LOCAL's primary document buffer, \
+             which is a real document here rather than *scratch*"
+        );
+    }
+
+    /// **N2b (rev 6)** — a resolver that claims SYNCHRONOUSLY is reported
+    /// correctly.
+    ///
+    /// The bug this pins: the arm captured the destination buffer id
+    /// *before* dispatching the chain and reported that. The chain runs
+    /// synchronously, so a handler that opens something immediately —
+    /// through `commit_to`, the supported way — had already replaced the
+    /// window's buffer, and the reply paired one buffer's snapshot with
+    /// another's identity.
+    ///
+    /// Falsified by reporting the captured id instead of re-reading.
+    #[test]
+    fn initial_target_directory_reports_what_a_synchronous_handler_installed() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let mut editor = EditorState::new();
+        editor
+            .lua_host
+            .lua()
+            .load(
+                "pmacs.lsp.config = {}
+                 claimed = pmacs.buffer.create('*claimed*')
+                 pmacs.path.set_directory_handler(function(path, dest)
+                   pmacs.window.commit_to(dest, function()
+                     pmacs.window.display(claimed, { select = true })
+                   end)
+                 end)",
+            )
+            .exec()
+            .expect("install a synchronous handler");
+
+        let fid = FrontendId(133);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+
+        let opened = open_initial_target(
+            &mut editor,
+            fid,
+            InitialTarget {
+                path: dir.path().as_os_str().as_bytes().to_vec(),
+                cwd: dir.path().as_os_str().as_bytes().to_vec(),
+            },
+        )
+        .expect("a claimed directory target must reach readiness");
+
+        // Compare by NAME: the reported id must be the handler's buffer,
+        // and naming it is what makes the failure legible when it is not.
+        let core = editor.core.borrow();
+        let reported_name = core
+            .registry
+            .borrow()
+            .get(opened.buffer_id)
+            .expect("the reported buffer exists")
+            .name()
+            .to_string();
+        assert_eq!(
+            reported_name, "*claimed*",
+            "the reply must name what the handler installed, not the \
+             buffer captured before the dispatch"
+        );
+        let active = core.views[&fid].active;
+        assert_eq!(
+            core.windows[&active].buffer_id, opened.buffer_id,
+            "…and that buffer is what the window shows"
         );
     }
 
