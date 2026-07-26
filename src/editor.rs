@@ -436,6 +436,17 @@ impl EditorState {
                 include_str!("../builtin/runtime/lsp.lua"),
             )
             .expect("load lsp builtin chunk");
+        // Arc 8 Stage 3b: the Lean 4 language server. Loaded after
+        // lsp.lua because it registers `pmacs.lsp.config.lean4`,
+        // subscribes on the Stage 3a notification seam, and adds a
+        // `buffer.after-load` hook that must run AFTER lsp.lua's own
+        // (it reads the attachment lsp.lua creates).
+        lua_host
+            .eval(
+                Some("@pmacs/builtin/runtime/lean.lua"),
+                include_str!("../builtin/runtime/lean.lua"),
+            )
+            .expect("load lean builtin chunk");
         // Arc 1a: the in-buffer completion popup driver. Loaded after
         // lsp.lua because it drives `pmacs.lsp.request_completion` /
         // `pmacs.lsp.attachment_for_request` and after the framework

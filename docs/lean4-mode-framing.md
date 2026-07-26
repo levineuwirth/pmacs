@@ -6,8 +6,9 @@ pmacs has no Lean support of any kind: `grep -rin lean` over `*.rs`,
 plain buffer — no grammar, no major mode, no comment syntax, no pair set,
 no server.
 
-This lane closes that in seven stages. Stage boundaries are drawn where
+This lane closes that in eight stages. Stage boundaries are drawn where
 the *substrate* changes, not where the feature list does — see §4.
+§9 states the lane's coherence impact per `COHERENCE.md` §20.
 
 ## 0. Why this lane, why now
 
@@ -24,7 +25,7 @@ the *substrate* changes, not where the feature list does — see §4.
   first consumer of a non-standard LSP method family. Stage 6 adds a
   severity-routing policy to `LspServerSpec`.
 - The user's stated north star is **matching or exceeding what VS Code
-  does with Lean**. §5's bet 6 scores honestly how close seven stages get
+  does with Lean**. §5's bet 6 scores honestly how close the eight stages get
   and names precisely what is still missing.
 
 Parallel-safety: Stage 1 touches `Cargo.toml`, `src/syntax.rs`,
@@ -34,10 +35,13 @@ Stage 3 (the other open lane) touches `pmacs-gpu/*` and
 `src/semantic_render.rs`. None of the three footprints overlap; the only
 file Stage 1 shares with anything is `Cargo.toml`, at one line.
 
-Stages 1 and 2 are independent of each other and **can** run as sibling
-worktrees — they share no file. Per the #126/#127 lesson, that split is
-recorded here, before either starts, rather than discovered during a
-rebase.
+Stages 1 and 2 were independent of each other and could have run as
+sibling worktrees — they shared no file. Both have since landed (#160,
+#161). **Stages 3a and 3b are not independent**: 3b's subscriber is
+written against the seam 3a adds, and both touch
+`builtin/runtime/lsp.lua`. They are strictly sequential — recorded here,
+per the #126/#127 lesson, before either starts rather than discovered
+during a rebase.
 
 ## 0.1 Revision history
 
@@ -81,7 +85,7 @@ round 2 renumbered the stages, so a rev-1 "Stage 4" is now Stage 5.)*
 5. **Q#LN8's resolver must honor the search boundary.** A Lua
    `lean-toolchain` walk that ignores `pmacs.project.search_boundary()`
    breaks the contract `detect_project_within` exists to enforce and makes
-   the Stage 3 outermost-root test non-hermetic.
+   the Stage 3b outermost-root test non-hermetic.
 
 ### Round 2 (rev 2 → rev 3) — scope expansion
 
@@ -168,11 +172,121 @@ Six findings against the round-2 expansion. All revision edits.
    preserving user-supplied `env`/`settings`/`init_options`/`root`.
 6. Wording: `\{}` expands to `{$CURSOR}`; `⦃⦄` comes from `\{{}}`.
 
+### Round 4 (rev 4 → rev 5) — Stage 3 re-scout and split
+
+Stages 1 and 2 landed (#160, #161). Re-scouting Stage 3 against `main`
+@ `46a1b8f` — six merged PRs past the rev-4 snapshot (#159–#164) —
+produced three findings that change the plan and four that confirm it.
+Every fact below was verified in a worktree at that commit; the two
+marked *probed* were established by running Lua in a fresh
+`EditorState`, not by grep.
+
+1. **Stage 3 violated this document's own splitting rule.** §4 says "no
+   PR in this arc mixes a cross-cutting substrate change with Lean
+   feature content" and "a reviewer looking at Stage 3 sees only Lean" —
+   while §4's own risk column for Stage 3 read *"two `lsp.lua`
+   generalizations."* Those cannot both be true. One of the two landed
+   as Stage 2; the other is Q#LN9's dispatch seams, which modify
+   `handle_server_requests` — confirmed the **only** production drain of
+   LSP events (`LspManager::take_all_events` has no non-test caller). By
+   the same test that justified splitting Stage 2 out, that is
+   cross-cutting substrate. **Stage 3 is now 3a (substrate, no Lean) and
+   3b (Lean).**
+2. **The Lean resolver could not satisfy the contract Stage 2
+   documented.** #161 established that a configured root — string or
+   resolver return — must be a canonical absolute path, because it
+   reaches `file_uri_for` verbatim and that URI is the affinity key.
+   *Probed:* `pmacs.editor.file_path()` is **not** canonical. Opening
+   `<tmp>/linkpkg/sub/./../sub/a.lean`, where `linkpkg` symlinks to
+   `pkg`, yields `<tmp>/linkpkg/sub/a.lean` — lexical `.`/`..` collapse
+   only, symlinks unresolved. No canonicalize binding is exposed to Lua,
+   and `pmacs.project.detect` canonicalizes but returns nil without a
+   marker. So a Lean resolver walking up from the buffer's path returns
+   a non-canonical root, and one package opened by two spellings spawns
+   two `lake serve` processes — reintroducing precisely the bug Stage 2
+   exists to prevent. New Q#LN20 adds `pmacs.fs.canonicalize`; it rides
+   3a because it is substrate, and it retires the footgun for every
+   future function-valued root rather than only Lean's.
+3. **`pmacs.fs.stat` is unusable in the resolver.** It is asynchronous —
+   `fs.lua:93` returns an awaitable handle — and the resolver runs
+   synchronously inside `ensure_server` ← `attach_buffer` ← the
+   `buffer.after-load` hook, where there is no coroutine to await on.
+   *Probed:* the `io` and `os` stdlib **are** exposed in the sandbox
+   (`type(io.open) == "function"`; `terminal.lua` already uses
+   `os.getenv`), and `io.open` returns nil for a missing path. So the
+   marker walk is implementable, but through the Lua stdlib rather than
+   the pmacs fs API — the opposite of what a reader would assume.
+   Q#LN8 now says so, with the one edge that matters: `io.open`
+   **succeeds on a directory**, so a bare existence check would accept
+   a `lean-toolchain` *directory* as a marker.
+
+Confirmations, recorded because each was load-bearing and unverified:
+
+4. **Q#LN7's "stop the failing server first" is necessary, not
+   defensive.** The spec default is `LspRestartPolicy::OnCrash`, and the
+   termination handler calls `should_restart(policy)`
+   (`matches!(OnCrash | Always)`) — which, unlike the
+   `termination_warrants_restart` helper beside it, never consults the
+   exit code. `maybe_restart` re-fires on every elapsed backoff with **no
+   attempt ceiling**, so a broken `lake` respawns forever. `stop()` sets
+   `restart = Never` (`src/lsp.rs:1349`), which is exactly what disarms
+   it. Acceptance 36 pins a real mechanism.
+5. **The response seam works as designed.** `Response` events are pushed
+   unconditionally (`src/lsp.rs:2652`) — the typed-store absorb above
+   does not consume them — and reach Lua as `{kind = "response",
+   request_id = <number>, method, result, error}`, with
+   `pmacs.lsp.send_request` returning that same numeric id. So
+   `on_response(sid, request_id, fn)` is keyable as specified.
+6. **The seams' contract is narrower than rev 4 implied, and the
+   narrowing is load-bearing.** `handle_server_requests` builds its sid
+   list from `attachments`, and `push_event` appends with no cap. So a
+   subscriber fires only for a server with a live attachment, and an
+   unattached server's event queue grows unboundedly.
+
+   *Corrected during implementation (rev 5, round 2).* Rev 5 first
+   claimed the reachable leak was a killed buffer. **That was wrong.**
+   The Rust core fires exactly five hooks — `buffer.after-edit`,
+   `buffer.after-load`, `buffer.after-switch`, `frontend.detached`,
+   `process.after-tick` — and **there is no buffer-kill hook at all**,
+   so `lsp.lua` never tears an attachment down and the drain keeps
+   reaching that server. The premise was right and the inference was
+   not: it needed attachments to be removed on kill, and nothing
+   removes them.
+
+   The reachable leak is a different path with the same root cause.
+   `attach_buffer` drops a sid from `attachments` the moment
+   `server_is_live` reports false, rebuilding against a fresh server —
+   so the `crashed` / `stopped` event that should trigger a purge is
+   **precisely the one most likely to go undrained**. An event-driven
+   purge leaks exactly when it matters. Q#LN9 therefore drives the
+   purge off `pmacs.lsp.list()`, which enumerates the manager directly
+   and is unaffected by attachment bookkeeping.
+7. **The `cfg.restart` gap is still open** (recorded landing #161):
+   `ensure_server` never forwards `pmacs.lsp.config[lang].restart` to
+   `pmacs.lsp.spawn`, so the field is silently dropped on auto-attach.
+   Stage 3b is the first stage that would benefit from setting it, and
+   Q#LN7 now records why it deliberately does not need it.
+
+Citation drift repaired per COHERENCE §25. Round 4's first pass stated
+the `project_root_for` correction in this section without editing the
+citation in §2.5 — the correction and the fix are different acts, and
+noting one is not doing the other. Review caught a second stale citation
+(`handle_server_requests`), which prompted a full sweep of every
+`file:line` from §2.4 onward; it found four more. All six:
+`project_root_for` 513 → **592** (and it now returns `root, source`
+rather than a bare root), `ensure_server` 527 → **610**,
+`handle_server_requests` 1448 → **1549**, `take_typed_edit`
+12798 → **12827**, `pair.lua` 213 → **229**, and `compile.lua`
+264 → **266**. Verified good and left alone: `listview.lua:138`,
+`src/lsp.rs:264`, `src/diag.rs:50`, `src/process.rs:193`,
+`src/project.rs:145`, and the `mod.rs` binding-block citations. The
+pre-#161 line numbers inside Q#LN15 are left as written: that stage has
+landed and its citations are historical record, not navigation.
 
 ## 1. What ships
 
-Seven stages. The north star is VS Code parity; the honest statement of
-where that lands is in §5, bet 6.
+Eight stages, after round 4 split Stage 3. The north star is VS Code
+parity; the honest statement of where that lands is in §5, bet 6.
 
 **Stage 1 — grammar, mode, and the editing table stakes.** `.lean` files
 highlight, carry a `lean4` major mode, and get comment-toggle and
@@ -185,13 +299,21 @@ Independently valuable for every language pmacs supports; a prerequisite
 for Lean being usable across more than one Lake package. Split out
 precisely *because* it is cross-cutting — see §4.
 
-**Stage 3 — the Lean language server.** `pmacs.lsp.config.lean4` drives
+**Stage 3a — LSP dispatch seams and a path canonicalizer.** Pure
+substrate, no Lean content, split from Stage 3 in round 4 for the reason
+Stage 2 was: it changes machinery every language runs through.
+`handle_server_requests` gains notification and response arms with a
+pending-response purge, so a `send_request` reply is no longer drained
+and dropped; `pmacs.fs.canonicalize` gives Lua the one primitive a
+function-valued `config.root` needs to honor the canonical-path contract
+#161 could only document.
+
+**Stage 3b — the Lean language server.** `pmacs.lsp.config.lean4` drives
 `lake serve` with a Lake-aware outermost root, a lazy toolchain probe and
-a one-shot `lean --server` fallback, and a notification-subscription seam
-so `$/lean/fileProgress` has an owner. Adds
-`textDocument/waitForDiagnostics`. Diagnostics, hover, completion,
-goto-definition, document symbols, and semantic tokens all arrive through
-the existing typed surfaces.
+a one-shot `lean --server` fallback, and subscribes `$/lean/fileProgress`
+on 3a's seam. Adds `textDocument/waitForDiagnostics`. Diagnostics, hover,
+completion, goto-definition, document symbols, and semantic tokens all
+arrive through the existing typed surfaces.
 
 **Stage 4 — the Unicode input method.** Typing `\alpha` produces `α`,
 `\to` produces `→`, `\<>` produces `⟨⟩` with the point between them.
@@ -214,6 +336,13 @@ any other language.
 panel.
 
 ## 2. Ground truth (scouted 2026-07-24, `main` @ `e745068`)
+
+Stage 3's facts were **re-verified 2026-07-25 against `main` @
+`46a1b8f`**, six merged PRs later; what changed is recorded in §0.1's
+round 4 rather than rewritten in place, so a reader can see which
+claims moved. Facts for stages 4–7 still carry the 2026-07-24 date and
+should be re-scouted before those stages are framed for
+implementation.
 
 ### 2.1 Crate facts (external, verified by downloading and reading both)
 
@@ -363,7 +492,7 @@ and pin it.*
   params }` and `Response { id, result, error, method }` variants. Unknown
   server methods are delivered, not dropped.
 - **But `events_take` has exactly one consumer**: `handle_server_requests`
-  at `builtin/runtime/lsp.lua:1448`, driven off `pmacs._async.tick`. It
+  at `builtin/runtime/lsp.lua:1549`, driven off `pmacs._async.tick`. It
   `take`s — a drain. Its `if/elseif` chain handles five `request` methods
   and `initialized`, and **ignores every `notification` and every
   `response`**. A second module calling `events_take` would steal events
@@ -379,7 +508,7 @@ and pin it.*
 
 ### 2.5 Project-root detection
 
-`project_root_for` (`builtin/runtime/lsp.lua:513`) resolves:
+`project_root_for` (`builtin/runtime/lsp.lua:592`) resolves:
 `pmacs.lsp.config[language].root` → `pmacs.project.detect` → the file's own
 directory. Two gaps for Lean:
 
@@ -407,7 +536,7 @@ directory. Two gaps for Lean:
    then reports import errors for the whole file.
 
 Third, and the reason Stage 2 exists: `ensure_server`
-(`builtin/runtime/lsp.lua:527`) reuses any live server with a matching
+(`builtin/runtime/lsp.lua:610`) reuses any live server with a matching
 `language_id` regardless of the new file's project, so **the first `.lean`
 file opened fixes the root for every later `.lean` file.** For most
 languages that is an inconvenience; for Lean, where `lake serve` is bound
@@ -424,10 +553,10 @@ changes loose-file behavior for every language.
 
 `builtin/runtime/pair.lua` is the whole precedent for "react to a typed
 character": subscribe to `buffer.after-edit`, gate on
-`ed.this_command() == "buffer.self-insert"` (`pair.lua:213`), then take the
+`ed.this_command() == "buffer.self-insert"` (`pair.lua:229`), then take the
 exact provenance record.
 
-`pmacs.editor.take_typed_edit()` (`src/lua_bindings/mod.rs:12798`) returns
+`pmacs.editor.take_typed_edit()` (`src/lua_bindings/mod.rs:12827`) returns
 `{ buffer, window, codepoint, char, requested_start, requested_end,
 effective_start, effective_end, inserted_len, post_cursor, clean }` — or
 nil. Its doc comment is explicit:
@@ -456,7 +585,7 @@ cross-peer-degraded**. Lean's `⟨⟩` is outside that set.
   shows the adopter shape, gated on `spec.display == "panel"`.
   `pmacs.window.params()` and `pmacs.window.quit()` complete the surface.
 - Read-only generated buffers use the listview idiom, documented at
-  `builtin/runtime/compile.lua:264`: an erroring `pmacs.buffer.add_intercept`
+  `builtin/runtime/compile.lua:266`: an erroring `pmacs.buffer.add_intercept`
   for user edits, with module writes passing `{ bypass_intercept = true }`.
 - **Note for whoever picks this up on another machine:** the ledgers are
   stale about this. `docs/active-work.md:57` still heads the lane "Stage 1
@@ -528,7 +657,7 @@ PATH, both are executable, and both fail. So:
   old, and lake working but the directory is not a Lake package. Only the
   third is a *version* question.
 - **Acceptance cannot assume a working Lean toolchain exists.** Every
-  Stage 3+ test runs against the fake LSP server; a live `lake serve`
+  Stage 3b+ test runs against the fake LSP server; a live `lake serve`
   smoke is PATH-gated *and* success-gated, following the #123 JSON/YAML
   provider-smoke pattern.
 
@@ -706,6 +835,27 @@ consulted before configuring.
    the failing server *first*, then swaps the config, then spawns — the
    fallback is a fresh server, not a restart of the old one.
 
+   Round 4 verified this is necessary rather than defensive. The spec
+   default is `LspRestartPolicy::OnCrash` (`src/lsp.rs:165`), and the
+   termination handler calls `should_restart(policy)` — which, unlike the
+   `termination_warrants_restart` helper beside it, never consults the
+   exit code. `maybe_restart` re-fires on every elapsed backoff with **no
+   attempt ceiling**, so a broken `lake` respawns indefinitely.
+   `pmacs.lsp.stop` sets `restart = Never` on the way out
+   (`src/lsp.rs:1349`), which is precisely what disarms it. Acceptance 36
+   is pinning a live mechanism, not a hypothetical one.
+
+   **Why the latch does not just set `restart = "never"` on the spawn.**
+   It cannot: `ensure_server` never forwards `cfg.restart` to
+   `pmacs.lsp.spawn` — `lua_to_lsp_spec` reads the key but the spawn
+   table never sets it — so the field is silently dropped on every
+   auto-attach today. That gap was found landing #161 and is not Stage
+   3's to close (it changes behavior for every language that has set
+   `restart` believing it worked; `statusline_segments_acceptance` a12 is
+   one such caller). The stop-then-spawn ordering is correct regardless of
+   how that gap is eventually resolved, which is the reason to prefer it
+   over a fix that depends on the gap closing first.
+
    **The swap is a field update, not a table replacement.** It rewrites
    only `command` and `args`, preserving any user-supplied `env`,
    `settings`, `init_options`, and `root` on `pmacs.lsp.config.lean4`. A
@@ -732,18 +882,87 @@ fallback. That is a one-line status message, once per session, and it
 buys not blocking every other user's first attach behind a process
 round-trip.
 
+**Attribution (COHERENCE §9).** The probe is background work that spawns
+an OS process, and `ProcessSpec.label` is the only identity a process
+carries — caller-supplied and unvalidated, but it is what
+`pmacs.process.list` renders. The probe spawns as `lean:lake-version-probe`
+rather than inheriting a default, so a user who looks at the process list
+while wondering why their editor touched `lake` finds an answer with an
+owner in it. Both the probe's verdict and the latch firing report through
+`pmacs.editor.set_status` — the channel that exists — per §1.2's rule and
+its corollary: each is pinned by a test that observes the channel, since a
+report through `pmacs.error` would be a dead sixteenth call site.
+
 No `init_options`. Per §2.8, `hasWidgets?` defaults to false and that is
 the correct value for a client that reads plain goals out of standard
 messages.
 
 ### Q#LN8 — Lake-aware root via a **function-valued** `config.root`
 
-Generalize `project_root_for` (`builtin/runtime/lsp.lua:513`) so
-`pmacs.lsp.config[lang].root` may be a `function(path) -> string|nil` as
-well as a string, and implement Lean's resolver in
-`builtin/runtime/lean.lua`: walk up from the file's directory collecting
-every ancestor containing `lean-toolchain`, and return the **outermost**;
-fall back to `pmacs.project.detect`, then the file's directory.
+**The generalization landed in Stage 2 (#161).** `project_root_for` is
+now `builtin/runtime/lsp.lua:592` and returns `root, source`;
+`config[lang].root` already accepts a `function(path) -> string|nil`,
+with per-directory memoization keyed weakly on the resolver itself. What
+remains for Stage 3b is Lean's resolver in `builtin/runtime/lean.lua`:
+walk up from the file's directory collecting every ancestor containing
+`lean-toolchain`, and return the **outermost**; decline (return nil) when
+there is none, which falls through to `pmacs.project.detect` and then the
+file's directory.
+
+**How the walk tests for the marker — and why not the obvious way.**
+`pmacs.fs.stat` is asynchronous: it returns an awaitable handle
+(`builtin/runtime/fs.lua:93`) that only settles under `:await()` inside a
+coroutine. The resolver has no coroutine. It runs synchronously inside
+`ensure_server` ← `attach_buffer` ← the `buffer.after-load` hook, so
+awaiting is not merely slow there, it is unavailable — and blocking the
+attach on filesystem I/O is the cost rev 1 refused for the probe. The
+walk therefore uses the **Lua stdlib**: `io.open(dir .. "/lean-toolchain",
+"r")`, which returns nil for a missing path. Round 4 probed that `io` and
+`os` are exposed in the sandbox rather than assuming it; `terminal.lua`
+already depends on `os.getenv`.
+
+One edge, probed: **`io.open` succeeds on a directory** (the handle opens;
+`read` returns nil without raising). A `lean-toolchain` *directory* would
+therefore read as a marker under an `io.open` truth test — wrong, and
+wrong silently.
+
+The fix is **not** "read a byte and require it to be non-nil", which was
+this section's first answer and is wrong in the other direction: an
+**empty** `lean-toolchain` file also reads nil at EOF, so that rule
+declines a marker that exists. Marker semantics here are `lean4-mode`'s
+`locate-dominating-file` semantics — *existence*, not content — and a
+`lean-toolchain` can legitimately be empty. The discriminator is
+`read`'s **second** return, probed on LuaJIT 2.1:
+
+| Path | `io.open` | `f:read(1)` | Verdict |
+|---|---|---|---|
+| file with content | handle | `"l"`, no error | marker |
+| **empty file** | handle | `nil`, **no error** | **marker** |
+| directory | handle | `nil`, `"Is a directory"` | decline |
+| missing | `nil` | — | decline |
+
+So: `local data, err = f:read(1)` and decline only on a non-nil `err`.
+The rule is robust across platforms without needing to be re-probed on
+each, because both directory behaviors are declines — a platform whose
+`fopen` refuses a directory outright fails at `io.open`, and one that
+opens it fails at `read`. There is no platform on which a directory both
+opens and yields a byte.
+
+Acceptance 24a and 24b pin the two halves, and each must be shown to
+fail against the implementation that satisfies only the other —
+otherwise "handles directories" is satisfiable by the version that
+breaks empty files, which is exactly how this section's first answer got
+written.
+
+**The result must be canonical.** #161's contract: a configured root
+reaches `file_uri_for` verbatim and that URI is the affinity key, so two
+spellings of one package are two servers. The path handed to the resolver
+is *not* canonical (round 4, finding 2), and Lua had no canonicalizer —
+hence Q#LN20. The resolver canonicalizes the file's directory **once**,
+before the walk, and strips components from there: every ancestor of a
+canonical path is itself canonical, so one call suffices. If
+canonicalization fails (a deleted file, a broken symlink), the resolver
+declines rather than returning a path it cannot vouch for.
 
 **The walk stops at `pmacs.project.search_boundary()`.** This is not
 optional politeness: `detect_project_within` (`src/project.rs:213`) exists
@@ -777,7 +996,7 @@ write-only API from Lua.**
 Rev 2 specified only the notification half. That was a hole, since
 Q#LN16 (`waitForDiagnostics`), Q#LN19 (`imports` / `importedBy`), and
 Q#LN12's typed goal request all await replies. Both halves ship in
-Stage 3.
+Stage 3a.
 
 ```lua
 pmacs.lsp.on_notification(method, fn)          -- fn(sid, params); persistent
@@ -808,9 +1027,80 @@ directions: a Lean subscriber must not cause `workspace/applyEdit` to be
 missed, and a raising subscriber must not stop later events in the same
 drain.
 
-Stage 3 registers `$/lean/fileProgress` on the notification seam and
+**The seam's contract, stated because round 4 found it narrower than rev
+4 implied: subscribers fire only for servers with a live buffer
+attachment.** `handle_server_requests` builds its sid list from
+`attachments`, so a server with no attached buffer is never drained — and
+`push_event` appends with no cap, so that server's queue grows
+unboundedly. Both facts are pre-existing and neither is Stage 3a's to
+fix. What they change is where the purge may be wired.
+
+**The purge must not ride the drain.** `attach_buffer` removes a sid
+from `attachments` as soon as `server_is_live` reports false and rebuilds
+the attachment against a fresh server, so a `crashed` / `stopped` event
+is the event *least* likely to be drained — the drain stops visiting
+that server at almost exactly the moment the event is queued. A purge
+triggered by observing that event therefore leaks in the case it exists
+to handle.
+
+So the purge polls **`pmacs.lsp.list()`** after each drain instead. That
+call enumerates the manager directly and is unaffected by attachment
+bookkeeping, which is what makes it the right authority: a sid that is
+absent, terminal, or running a new generation settles its pending
+one-shots with an error, whether or not anything ever drained it.
+Acceptance 34's second half exercises a server that is in **no**
+attachment, because that is the shape an event-driven purge fails and a
+polled one survives.
+
+The uncapped queue is recorded as a named deferral (§6) rather than fixed
+here: bounding it is a policy question about which events may be dropped,
+and answering it inside a seam PR would be the kind of smuggling §4
+forbids.
+
+Stage 3b registers `$/lean/fileProgress` on the notification seam and
 `waitForDiagnostics` on the response seam; stages 5 and 7 use the response
 seam for `plainGoal` and the hierarchy calls.
+
+### Q#LN20 — `pmacs.fs.canonicalize` (Stage 3a)
+
+A synchronous binding wrapping `std::fs::canonicalize`, returning the
+resolved absolute path or nil. Roughly fifteen lines.
+
+It exists because #161 documented an obligation Lua cannot discharge. A
+configured root — string or resolver return — is fed to `file_uri_for`
+verbatim, and that URI is the server-affinity key; the `"detected"` arm is
+canonicalized for free because `pmacs.project.detect` canonicalizes before
+walking, but the `"config"` arm is not. Round 4 probed that
+`pmacs.editor.file_path()` collapses `.` and `..` lexically while leaving
+symlinks intact, so a resolver walking up from it returns a non-canonical
+root. Opening one Lake package through a symlinked path and through the
+real path would spawn two `lake serve` processes — the bug Stage 2 was
+built to prevent, re-entered through Stage 3b's door.
+
+**Synchronous, deliberately, and this is the one thing to get right.**
+The whole reason `pmacs.fs.stat` cannot serve here is that it is async
+(Q#LN8), so a canonicalizer that returned an awaitable would fail for the
+same reason and leave the obligation undischarged. It is one `stat`-class
+syscall on a path the editor is already opening; `pmacs.project.detect`
+performs the same work synchronously today, on the same hook, so this
+adds no blocking class that the attach path does not already have.
+
+Why this rather than the two alternatives considered in round 4:
+
+- *Accept it as a named degradation* — document that a symlinked open
+  spawns a second server and pin the behavior. Rejected: it reopens the
+  defect Stage 2 closed, and the failure is invisible (two servers, both
+  apparently working, twice the memory, diagnostics split between them).
+- *Anchor the walk on `pmacs.project.detect`'s canonical root* — free, no
+  new surface. Rejected as incorrect, not merely inelegant: `detect` is
+  innermost-wins over its own marker set, so with `.git` at `~/code` and
+  the Lake package at `~/code/proj`, anchoring at `~/code` and walking
+  *up* never sees `~/code/proj/lean-toolchain`. It resolves the wrong root
+  in a layout that is entirely ordinary.
+
+The binding is general, not Lean-shaped: it serves every future
+function-valued `root`, and it is what lets #161's doc comment stop
+warning about a footgun and start naming a fix.
 
 ### Q#LN10 — Stage 4 mechanism: one shared provenance read, not two
 
@@ -922,8 +1212,9 @@ stage numbers and was wrong three ways):
 | Stage | Rust |
 |---|---|
 | 1 | `Cargo.toml` + `BUILTIN_LANGUAGES` entry + Q#LN4's four capture entries |
-| 2 | `lsp.list()` row builder (`mod.rs:9919`) |
-| 3 | **none** — Lua only |
+| 2 | `lsp.list()` row builder (`mod.rs:9926`) |
+| 3a | `pmacs.fs.canonicalize` (Q#LN20) — the seams themselves are Lua only |
+| 3b | **none** — Lua only |
 | 4 | **none** — Lua only |
 | 5 | `request_plain_goal` + its binding |
 | 6 | `LspServerSpec` severity-policy field and its publish-path honoring |
@@ -978,7 +1269,7 @@ rough edge but a correctness failure: `lake serve` is bound to one Lake
 package, so the second package a user opens gets a server that cannot
 resolve its imports.
 
-The change is small and spans two files:
+The change was small and spanned two files (Stage 2, landed as #161):
 
 - **`src/lua_bindings/mod.rs:9919`** — the `lsp.list()` row builder sets
   `id`/`label`/`language_id`/`command`/`state`/`attempt`. Add `root_uri`
@@ -1045,7 +1336,7 @@ elaboration is memory-hungry. rust-analyzer has the same property and no
 editor caps it by default. No cap ships here; `pmacs.lsp.stop` is the
 manual escape, and an LRU reaping policy is named in §6.
 
-### Q#LN16 — `textDocument/waitForDiagnostics` (Stage 3)
+### Q#LN16 — `textDocument/waitForDiagnostics` (Stage 3b)
 
 A plain request (no position, so no `outbound_position` concern — Q#LN12
 does not apply). It resolves when the server has finished elaborating the
@@ -1125,28 +1416,48 @@ never lands.
 |---|---|---|---|
 | 1 | grammar, mode, comments, pairs, md fences | new crate; **global capture table** | — |
 | 2 | multi-root server affinity | **`ensure_server`, shared by every language** | — |
-| 3 | `lake serve` + probe/latch, Lake root, notification seam, `waitForDiagnostics` | two `lsp.lua` generalizations | 1, 2 |
+| 3a | notification/response seams + purge; `pmacs.fs.canonicalize` | **the shared event drain, run by every language** | — |
+| 3b | `lake serve` + probe/latch, Lake root, `waitForDiagnostics` | none — Lean-only files plus one config entry | 1, 2, 3a |
 | 4 | Unicode input method | **refactors `pair.lua`'s provenance read** | 1 |
-| 5 | goal panel | new typed LSP request; panel adopter | 3 |
-| 6 | `#eval` / `#check` output channel | **new `LspServerSpec` policy field** | 3, 5 |
-| 7 | module hierarchy | listview adopter + one typed Rust request | 3 |
+| 5 | goal panel | new typed LSP request; panel adopter | 3a, 3b |
+| 6 | `#eval` / `#check` output channel | **new `LspServerSpec` policy field** | 3b, 5 |
+| 7 | module hierarchy | listview adopter + one typed Rust request | 3a, 3b |
 
-Three of the seven carry risk that is *not* about Lean — stages 1, 2, and
-6 each change something every language touches. That is the organizing
-principle of the split: **no PR in this arc mixes a cross-cutting
-substrate change with Lean feature content.** A reviewer looking at Stage
-2 sees only `ensure_server`; a reviewer looking at Stage 3 sees only Lean.
+Four of the eight carry risk that is *not* about Lean — stages 1, 2, 3a,
+and 6 each change something every language touches. That is the
+organizing principle of the split: **no PR in this arc mixes a
+cross-cutting substrate change with Lean feature content.** A reviewer
+looking at Stage 2 sees only `ensure_server`; a reviewer looking at Stage
+3b sees only Lean.
+
+Round 4 found Stage 3 breaking that rule while stating it — the row above
+used to read "two `lsp.lua` generalizations" for a stage the prose called
+Lean-only. One generalization shipped as Stage 2; extracting the other as
+3a is what makes the claim true again. The rule is only worth writing
+down if it survives contact with a stage that is inconvenient to split.
 
 Ordering notes:
 
 - **Stage 2 has no Lean in it and could ship independently of this arc.**
   It is sequenced here because Lean is the language that makes its absence
-  a correctness bug rather than an inconvenience, and because Stage 3's
+  a correctness bug rather than an inconvenience, and because Stage 3b's
   acceptance would otherwise have to encode the broken behavior.
-- **Stage 4 does not depend on stages 2–3** and could run in parallel, but
-  should not: both touch `lsp.lua`/`pair.lua`-adjacent runtime files, and
-  the #126/#127 lesson is that parallel-safety requires the file split be
-  agreed *before* either lane starts. Sequential is cheaper.
+- **Stage 3a likewise has no Lean in it**, and the same reasoning applies
+  one level down: the response seam is a hole in `send_request` for every
+  language — Lean is merely the first caller that needs a reply. It is
+  sequenced before 3b because 3b's `waitForDiagnostics` and file-progress
+  subscription both consume it, and because a Lean PR that also rewrote
+  the shared drain could not be reviewed on either axis.
+- **3a and 3b cannot run as sibling worktrees.** 3b's Lean subscriber is
+  written against the seam 3a adds, and both touch
+  `builtin/runtime/lsp.lua`. Unlike stages 1 and 2, this pair is strictly
+  sequential — recorded here, per the #126/#127 lesson, rather than
+  discovered in a rebase.
+- **Stage 4 does not depend on stages 2, 3a, or 3b** and could run in
+  parallel, but should not: both touch `lsp.lua`/`pair.lua`-adjacent
+  runtime files, and the #126/#127 lesson is that parallel-safety
+  requires the file split be agreed *before* either lane starts.
+  Sequential is cheaper.
 - **Stage 6 depends on Stage 5** only for the read-only generated-buffer
   and panel machinery, which Stage 5 establishes. If Stage 5 slips, Stage
   6 can carry that machinery itself at the cost of duplicating it.
@@ -1185,7 +1496,7 @@ Stated so they can be scored, per house style.
    inside `buffer.after-edit` re-enters the hook in a way pairing does not
    already survive. Confidence: medium — pairing does the same thing, but
    over a single codepoint rather than a multi-byte span.
-6. **These seven stages reach rough VS Code parity for everything except
+6. **These eight stages reach rough VS Code parity for everything except
    the interactive infoview.** Scored honestly rather than aspirationally.
    What lands: highlighting, goal view, Unicode input, diagnostics,
    hover, completion, goto-definition, symbols, semantic tokens, `#eval`
@@ -1225,6 +1536,36 @@ What remains deferred:
   unbounded `lake serve` growth possible. No editor caps this by default
   and pmacs will not either in this arc, but the policy question is now
   live in a way it was not before.
+- **The uncapped LSP event queue** — `push_event` appends without a
+  bound, and `handle_server_requests` drains only servers with a live
+  buffer attachment, so an unattached server's events accumulate for the
+  life of the session (round 4, finding 6). Bounding it means deciding
+  which events may be dropped, which is a policy question with
+  user-visible consequences for diagnostics and progress; Stage 3a states
+  the seam's contract around the behavior rather than changing it.
+- **`LspManager::stop` on an already-terminal server strands it.** The
+  not-initialized branch terminates the (already-dead) process and sets
+  `ShuttingDown { shutdown_request_id: None }` on the premise that "the
+  next exit observation cleans up" — but for a `Crashed` client the exit
+  has already been observed, which is what produced that state. No
+  further event arrives, so the client sits in `ShuttingDown`
+  permanently: `server_is_live` counts it as live (neither crashed nor
+  stopped), so `attach_buffer` never rebuilds against it, and
+  `LspManager::forget` refuses it for not being terminal. **Stopping a
+  dead server is what makes it un-replaceable.** Found implementing
+  Stage 3b's latch, which works around it by dispatching on state:
+  `forget` for a terminal server (it requires terminal state, and
+  removing the client also drops the `next_restart_at` the crash armed),
+  `stop` for a live one. Merely *skipping* the call is not enough — that
+  leaves the restart timer running and the broken command respawns
+  underneath the fallback. The fix belongs in `stop` (treat an
+  already-terminal client as a no-op, or drive it straight to `Stopped`)
+  and changes behavior for every language, so it does not ride a Lean PR.
+- **Forwarding `cfg.restart` through `ensure_server`** — read by
+  `lua_to_lsp_spec`, never set by the spawn table, so silently dropped on
+  every auto-attach (found landing #161). Fixing it changes behavior for
+  every language whose config sets the field believing it works. Q#LN7 is
+  designed not to need it.
 - **Block-comment toggle** (`/- -/`) and **docstring awareness**
   (`/-- -/`) — confirmed as owned by the comment arc's framing, not this
   one.
@@ -1309,58 +1650,113 @@ What remains deferred:
     the markerless one's server carries the fallback directory as `cwd`
     while matching on a nil affinity key.
 
-**Stage 3 — the Lean language server**
+**Stage 3a — dispatch seams and the canonicalizer (no Lean content)**
 
-22. Opening a `.lean` file inside a Lake package spawns one server with
-    `cwd` and `rootUri` at the package root.
-23. **Outermost-root pin:** a file under
-    `<pkg>/.lake/packages/dep/…` whose ancestor chain contains two
-    `lean-toolchain` files resolves to `<pkg>`, not to `dep`. Run with
-    `pmacs.project.set_search_boundary` at the fixture root so the
-    assertion is hermetic.
-24. **Boundary pin:** with the search boundary set at the fixture root, a
-    `lean-toolchain` planted in an ancestor *above* the boundary is not
-    reached — the resolver stops at the boundary rather than walking past
-    it.
-25. A string-valued `pmacs.lsp.config.lean4.root` still works — the Q#LN8
-    generalization is strictly additive.
-26. `didOpen` carries `languageId = "lean4"`.
-27. **Fallback-latch pin (Q#LN7):** a `lake` stub that exits non-zero —
-    reproducing §2.9's shimmed-elan state — causes exactly **one** restart
-    against `lean --server`, and a second failure surfaces an error rather
-    than looping. The latch does not re-arm within the session.
-28. **Probe pin:** a `lake` stub reporting version 3.0.0 triggers the
-    fallback; one reporting 3.1.0 does not. A stub that never exits does
-    not block the attach — the optimistic `lake serve` spawn proceeds.
-29. A `$/lean/fileProgress` notification delivered through the fake server
-    reaches a registered `on_notification` subscriber.
-30. **Dispatch-integrity pin:** with a Lean subscriber registered, a
-    `workspace/applyEdit` request in the same drain is still handled — no
-    event is stolen.
-31. A subscriber that raises does not prevent later events in the same
-    drain from being processed.
-32. **Response-seam pin (Q#LN9).** A `send_request` reply reaches its
-    registered `on_response` one-shot, and the one-shot is **removed
-    before** invocation — a raising handler is not re-entered. Bites
-    against rev 2, where no Lua consumed `ev.kind == "response"` at all
-    and the reply was dropped.
-33. **Response dispatch-integrity pin.** With a response subscriber
-    registered, `workspace/applyEdit` in the same drain is still handled;
-    a raising response handler does not stop later events in that drain.
-    Mirrors the notification-side pins above.
-34. **Pending-purge pin.** A server that dies with a response outstanding
-    invokes the pending one-shot with an error and clears it — the
-    registration does not leak and the awaiting caller does not hang.
-35. **Config-preservation pin (Q#LN7).** After the fallback latch fires,
-    user-supplied `env` / `settings` / `init_options` / `root` on
-    `pmacs.lsp.config.lean4` survive; only `command` and `args` change.
-36. **No-respawn-loop pin.** The latch stops the failing server before
-    spawning the fallback, so `RestartPolicy` does not respawn the broken
-    command underneath it.
-37. `textDocument/waitForDiagnostics` resolves through the response seam
-    (Q#LN16). **PATH-and-success-gated live smoke:** if `lake serve`
-    starts successfully a real elaboration completes and diagnostics
-    arrive; skipped otherwise, never failed.
+Driven against `pmacs_fake_lsp` through an already-shipped language, for
+the same reason Stage 2's suite was: the drain is shared by every
+language, and a suite that reaches it only through Lean would understate
+the blast radius.
+
+- **29.** A notification delivered through the fake server reaches a registered
+  `on_notification` subscriber.
+- **30.** **Dispatch-integrity pin:** with a subscriber registered, a
+  `workspace/applyEdit` request in the same drain is still handled — no
+  event is stolen.
+- **31.** A subscriber that raises does not prevent later events in the same
+  drain from being processed.
+- **32.** **Response-seam pin (Q#LN9).** A `send_request` reply reaches its
+  registered `on_response` one-shot, and the one-shot is **removed
+  before** invocation — a raising handler is not re-entered. Bites
+  against rev 2, where no Lua consumed `ev.kind == "response"` at all
+  and the reply was dropped.
+- **33.** **Response dispatch-integrity pin.** With a response subscriber
+  registered, `workspace/applyEdit` in the same drain is still handled;
+  a raising response handler does not stop later events in that drain.
+  Mirrors the notification-side pins above.
+- **34.** **Pending-purge pin, both edges.** A server that dies with a
+  response outstanding invokes the pending one-shot with an error and
+  clears it. **And** a server that is in **no attachment** does the
+  same, rather than stranding the registration behind a drain that never
+  visits it. The second half must be shown to fail against a purge
+  wired to a death event seen in the drain; otherwise this criterion is
+  satisfied by the implementation that leaks. (Rev 5 first worded the
+  second edge as a killed buffer; there is no buffer-kill hook, so
+  nothing removes the attachment and that path does not leak. Corrected
+  in round 2 — see §0.1 finding 6.)
+- **34a.** **Canonicalizer pin (Q#LN20).** `pmacs.fs.canonicalize` resolves a
+  symlinked and dot-segmented path to the same string as the real path,
+  and returns nil for a nonexistent one. Fixture builds the symlink
+  rather than assuming one exists.
+- **34b.** **Affinity-through-canonicalization pin.** With a function-valued
+  `root` that canonicalizes, the same project opened by its real path
+  and through a symlink reuses **one** server. Falsified by a resolver
+  that returns the path verbatim, which yields two — this is the
+  regression Q#LN20 exists to prevent, so it is asserted at the
+  affinity layer, not just at the binding.
+
+**Stage 3b — the Lean language server**
+
+- **22.** Opening a `.lean` file inside a Lake package spawns one server with
+  `cwd` and `rootUri` at the package root.
+- **23.** **Outermost-root pin:** a file under
+  `<pkg>/.lake/packages/dep/…` whose ancestor chain contains two
+  `lean-toolchain` files resolves to `<pkg>`, not to `dep`. Run with
+  `pmacs.project.set_search_boundary` at the fixture root so the
+  assertion is hermetic.
+- **24.** **Boundary pin:** with the search boundary set at the fixture root, a
+  `lean-toolchain` planted in an ancestor *above* the boundary is not
+  reached — the resolver stops at the boundary rather than walking past
+  it.
+- **24a.** **Marker-is-a-file pin (Q#LN8).** A `lean-toolchain`
+  *directory* does not mark a root. Bites against the bare `io.open`
+  truth test, which round 4 probed succeeds on directories — the shape
+  that would pass every other criterion here while being wrong.
+- **24b.** **Empty-marker pin (Q#LN8).** An **empty** `lean-toolchain`
+  file *does* mark a root — marker semantics are existence, not content.
+  Bites against the read-a-byte-and-require-non-nil rule, which declines
+  it at EOF. 24a and 24b must each be shown to fail against the
+  implementation that satisfies only the other; a suite carrying just
+  one of them is satisfied by a resolver that is silently wrong for the
+  other case.
+- **25.** A string-valued `pmacs.lsp.config.lean4.root` still works — the Q#LN8
+  generalization is strictly additive.
+- **26.** `didOpen` carries `languageId = "lean4"`.
+- **27.** **Fallback-latch pin (Q#LN7):** a `lake` stub that exits non-zero —
+  reproducing §2.9's shimmed-elan state — causes exactly **one** restart
+  against `lean --server`, and a second failure surfaces an error rather
+  than looping. The latch does not re-arm within the session.
+- **28.** **Probe pin:** a `lake` stub reporting version 3.0.0 triggers the
+  fallback; one reporting 3.1.0 does not. A stub that never exits does
+  not block the attach — the optimistic `lake serve` spawn proceeds.
+- **35.** **Config-preservation pin (Q#LN7).** After the fallback latch fires,
+  user-supplied `env` / `settings` / `init_options` / `root` on
+  `pmacs.lsp.config.lean4` survive; only `command` and `args` change.
+- **36.** **No-respawn-loop pin.** The latch stops the failing server before
+  spawning the fallback, so `RestartPolicy` does not respawn the broken
+  command underneath it.
+- **36a.** **Attribution pin (COHERENCE §9/§1.2).** The probe process
+  appears in `pmacs.process.list` under a Lean-owned label, and the
+  latch firing leaves a status-line trace. Both assert through the
+  channel a user can actually observe; a report added through
+  `pmacs.error` alone must fail this.
+- **37.** `textDocument/waitForDiagnostics` resolves through the response seam
+  (Q#LN16), **carrying both `uri` and `version`** — Lean's
+  `WaitForDiagnosticsParams` requires the document version, and a fake
+  server that echoes any payload will hide its absence, so the fixture
+  must reject a request that omits it.
+  **PATH-and-success-gated live smoke:** if `lake serve` starts
+  successfully a real elaboration completes and diagnostics arrive;
+  skipped otherwise, never failed.
+
+These two sections are bulleted with explicit labels rather than
+numbered, because the split leaves each stage's criteria non-contiguous
+(3b runs 22–28 then 35–37) and a markdown ordered list renumbers from
+its first item regardless of what is written. Keeping the labels literal
+means **every rev-4 number still denotes what it denoted in rev 4** —
+"acceptance 34", "acceptance 27" — and the four criteria added in this
+revision take letter suffixes rather than displacing anything. Round 3's
+finding 4 was stale cross-references surviving a renumber; not
+renumbering is the cheaper way to not repeat it.
 
 **Stage 4 — the Unicode input method**
 
@@ -1447,7 +1843,7 @@ What remains deferred:
 - **#146 (HTML+CSS)** — the global capture table, and the requirement to
   pin retro-paint in both directions. Q#LN4 is that lesson applied.
 - **#123 (JSON/YAML)** — declarative `pmacs.lsp.config` entries with a
-  fake-server delivery proof plus PATH-gated live smokes. Stage 3 follows
+  fake-server delivery proof plus PATH-gated live smokes. Stage 3b follows
   it, with the extra success-gate §2.9 forces.
 - **#110 (auto-pairing)** — `take_typed_edit()` provenance, the fail-closed
   discipline on transformed source edits, and Q#AP1's optimistic-classifier
@@ -1465,3 +1861,70 @@ What remains deferred:
   which Q#LN17 registers into.
 - **#94/#95 (LSP panels)** — `pmacs.listview.open` and the
   references/outline panel shape that Stage 7 reuses wholesale.
+
+## 9. Coherence impact (COHERENCE §20)
+
+Required of every framing since #163. Stated for stages 3a and 3b, the
+work this revision authorizes; the earlier stages predate the rule and
+are not retrofitted here.
+
+**Sections served.** §1.2 (the silence asymmetry) primarily, and §7
+(first-class workspaces) indirectly — per-root affinity is the workspace
+concern arriving one language at a time. §9 (worker identity) is touched
+but not advanced.
+
+**Golden journey (§2).** No step is touched. Neither stage changes what
+happens between launching pmacs and editing a file; Lean is not on the
+journey's critical path, and 3a is invisible to a user who has no Lean
+installed. Stage 3b does make §2's step-3 grade slightly *worse* in one
+narrow way, and it is honest to say so: a preconfigured-but-missing
+`lake` is one more instance of the silent-spawn-failure class, on a
+toolchain many users will not have. Q#LN7's status-line reports on the
+probe verdict and the latch cover the Lean-specific paths, but they do
+not fix the general failure — that remains Priority 1 work with its own
+framing, as §1.2's frequency note already records.
+
+**Interaction islands (§6).** None added. Stage 3b introduces no keymap,
+no modal surface, and no dispatch shadow. Its one user-facing command
+(`M-x lean-wait-for-diagnostics`, Q#LN16) registers through the ordinary
+command table and is reachable from `M-x` like everything else.
+
+**Config registry (§11).** Neither stage adds a `pmacs.config` option.
+`pmacs.lsp.config.lean4` joins the existing declarative server table
+alongside sixteen other languages — deliberately *not* the typed registry,
+because moving one language's entry there while the other sixteen stay
+put would fragment the surface rather than unify it. Migrating
+`pmacs.lsp.config` wholesale is a config-arc concern; this lane must not
+create a precedent that makes it harder. Stage 4's `lean.abbrev` gate is
+where this arc does enter the registry, and Q#LN10 already commits to the
+`editing.auto-pair` shape.
+
+**Background-work attribution (§9).** Three pieces of background work,
+each with a named owner and an observable trace:
+
+| Work | Identity | Trace |
+|---|---|---|
+| `lake --version` probe | `ProcessSpec.label = "lean:lake-version-probe"`, visible in `pmacs.process.list` | status line on a verdict that triggers fallback |
+| the fallback latch | the server it stops/spawns is already in `pmacs.lsp.list()` | status line on firing |
+| root resolution | none — synchronous, inside the attach | status line on resolver failure (shipped #161) |
+
+This is attribution within the identity layer §9 says is absent, not a
+fix for its absence: the probe carries a label because
+`ProcessSpec.label` is the only field available, and §9's own ground
+truth calls that "caller-supplied, unvalidated convention." Owner/purpose
+/parent fields remain unbuilt, and nothing here joins the four activity
+planes. What this lane commits to is not *worsening* the ratio — every
+background action it adds is nameable in some user-visible view on the
+day it ships.
+
+**Debt this revision retires.** Q#LN20 closes the gap #161 could only
+document: a configured root reaching `file_uri_for` uncanonicalized. That
+was coherence debt of exactly §1.3's compounding kind — a correct
+substrate with a footgun the next caller was expected to disarm by
+reading a comment.
+
+**Debt this revision names rather than pays.** Three, all in §6: the
+uncapped event queue, the dropped `cfg.restart`, and — unchanged from
+#161 — surfacing the spawn failure itself. Each is a behavior change for
+languages other than Lean, and §4's rule is what keeps them out of a Lean
+PR.

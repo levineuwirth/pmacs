@@ -305,36 +305,50 @@ fn acc11b_an_unknown_fence_name_still_injects_nothing() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn acc12_stage1_ships_no_lsp_config_and_spawns_no_process() {
-    // Stage 1 is grammar + Lua tables only. Opening a Lean file must not
-    // reach for `lake`, `lean`, or `elan` — the LSP arrives in Stage 3, and
-    // even then it is fallible by design (Q#LN7).
+fn acc12_opening_lean_spawns_no_process_without_a_server_config() {
+    // **Superseded in half by Stage 3b.** This criterion originally also
+    // asserted `pmacs.lsp.config.lean4 == nil`, guarding against a Stage-3
+    // front-run. Stage 3b *is* Stage 3: `builtin/runtime/lean.lua` now ships
+    // that config deliberately, and its shape is pinned by
+    // `tests/lean4_server_acceptance.rs`. Asserting the absence here would
+    // now pin the opposite of the intended behavior, so it is gone rather
+    // than weakened.
+    //
+    // What survives is the half that was always about *restraint*, and it
+    // matters more now than it did in Stage 1 — it is what holds Q#LN7's
+    // "not at init" promise. `pmacs.lsp.config` is a declarative table, and
+    // spawning a process at startup for every user, Lean-using or not, is
+    // the cost rev 1 refused. Both the `lake serve` spawn and the
+    // `lake --version` probe are gated on a real Lean attachment.
 
-    // The load-bearing assertion, and it must run against a PRISTINE editor.
-    // The shared `editor()` helper wipes `pmacs.lsp.config` before any
-    // buffer opens, so an assertion about the server list under that harness
-    // holds for every language regardless of what Stage 1 ships — it could
-    // not fail for the regression it names. This checks the real claim
-    // directly: no builtin runtime file defines a Lean server config. A
-    // Stage-3 front-run adding `pmacs.lsp.config.lean4` fails here.
+    // Constructing an editor touches no process, even though the Lean
+    // config now exists and names `lake`.
     let pristine = EditorState::new();
-    let no_lean_config: bool = eval(&pristine, "return pmacs.lsp.config.lean4 == nil");
-    assert!(
-        no_lean_config,
-        "Stage 1 defines no `pmacs.lsp.config.lean4`; the LSP is Stage 3"
+    let at_init: i64 = eval(&pristine, "return #pmacs.process.list()");
+    assert_eq!(
+        at_init, 0,
+        "constructing an editor must not probe or spawn for Lean"
     );
-    // Non-vacuity: the same lookup finds the configs that DO ship, so this
-    // is not passing because `pmacs.lsp.config` is empty or absent.
-    let rust_config_exists: bool = eval(&pristine, "return pmacs.lsp.config.rust ~= nil");
+    // Non-vacuity for the assertion above: the config really is present and
+    // really does name a command, so "nothing spawned" is restraint rather
+    // than an empty table having nothing to act on.
+    let names_lake: bool = eval(
+        &pristine,
+        "return pmacs.lsp.config.lean4 ~= nil and pmacs.lsp.config.lean4.command == \"lake\"",
+    );
     assert!(
-        rust_config_exists,
-        "the config table is populated, so the lean4 absence above is meaningful"
+        names_lake,
+        "Stage 3b ships a lean4 config naming `lake`, so the no-spawn \
+         assertion above is meaningful"
     );
 
-    // And nothing is spawned by opening the file. This half retains its
-    // value under the wiped config: a direct probe spawn from `lean.lua`
-    // would show up here whatever `pmacs.lsp.config` contains.
+    // And opening a Lean buffer with no server configured spawns nothing —
+    // the `editor()` helper wipes `pmacs.lsp.config`, so this catches a
+    // probe that fires off the mode rather than off an attachment.
     let s = editor_visiting("Basic.lean", "def x : Nat := 1\n");
     let procs: i64 = eval(&s, "return #pmacs.process.list()");
-    assert_eq!(procs, 0, "opening a Lean buffer spawns no child process");
+    assert_eq!(
+        procs, 0,
+        "with no server configured, opening a Lean buffer spawns nothing"
+    );
 }

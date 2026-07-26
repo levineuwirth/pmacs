@@ -325,4 +325,28 @@ function fs.watch(path, callback, opts)
   return watch
 end
 
+-- pmacs.fs.canonicalize(path) -> string | nil
+--
+-- Arc 8 Stage 3a (framing Q#LN20). The **only synchronous** function on
+-- this module, and deliberately so: its consumer is a function-valued
+-- `pmacs.lsp.config[lang].root`, invoked from `ensure_server` <-
+-- `attach_buffer` <- the `buffer.after-load` hook, where there is no
+-- coroutine and therefore nothing to `:await()` on. Every other
+-- primitive here returns a Handle; this one cannot, or it would be
+-- unusable at the one call site that needs it — the same trap
+-- `pmacs.fs.stat` falls into for that caller.
+--
+-- Resolves symlinks and `.` / `..`, returning an absolute path, or nil
+-- if the path does not exist or cannot be resolved. Nil is a normal
+-- answer, not an error: callers routinely ask about paths that may have
+-- been deleted.
+--
+-- Why it exists: a configured LSP root reaches `file_uri_for` verbatim
+-- and that URI is the server-affinity key (PR #161), so one project
+-- opened through a symlink and through its real path would otherwise
+-- spawn two servers. `pmacs.editor.file_path()` collapses `.` and `..`
+-- lexically but leaves symlinks intact, so the resolver cannot get a
+-- canonical path any other way.
+fs.canonicalize = pmacs._fs.canonicalize
+
 pmacs.fs = fs
