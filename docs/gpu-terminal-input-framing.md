@@ -81,7 +81,11 @@ character:
 | | frames for a static screen | typed `Z` ever visible at the prompt |
 |---|---|---|
 | `main` today | **730** in a 20 s window | **no** |
-| with the guard | **2** | (see Q#GT5 — a separate question) |
+| with the fix | **2** | yes |
+
+Bet B2 is **scored TRUE**: with the fix deployed, the reporter confirmed
+typing into a GPU terminal works. The earlier caveat here pointed at Q#GT5,
+which is now retracted — see "Deferred (named)".
 
 The TUI is unaffected: a grid session has no semantic terminal declaration, so
 only one arm ever runs for it. This is a **frontend-kind** defect, which is
@@ -281,11 +285,12 @@ change. Stays v20.
   snapshot that signals the switch-away). Hence the split in Q#GT1. Recorded
   rather than deleted: the failure mode is one a reviewer or a future
   simplification will re-propose.
-- **B2.** The user's reported symptom is this defect. *Partially scored: the
-  storm is proven and GUI-only, and its shape (line editor unusable, output
-  still flowing) matches the report. Not fully scored until the user, or an
-  acceptance running the **user's own shell**, confirms typing works after the
-  fix. Q#GT5 is the reason this bet is stated rather than assumed.*
+- **B2 — SCORED TRUE 2026-07-25.** "The user's reported symptom is this
+  defect." Confirmed in real use after the fix was deployed: typing into a GPU
+  terminal works. The confirmation needed a daemon **restart** built from a
+  tree containing the fix — the first attempt reported no change because a
+  pre-fix daemon still owned the socket, which is worth remembering whenever a
+  daemon-side fix is being validated by hand.
 - **B3.** No other pair of per-frontend-kind daemon operations is applied as
   siblings rather than alternatives. *Scored by an explicit audit of the
   dispatcher's per-frontend loop during implementation — this defect's shape
@@ -294,7 +299,14 @@ change. Stays v20.
 
 ## Deferred (named)
 
-- Interactive-shell echo on a raw-mode PTY (Q#GT5) — its own scout.
+- ~~Interactive-shell echo on a raw-mode PTY (Q#GT5)~~ — **RETRACTED
+  2026-07-25.** The observation behind it (a `bash --norc -i` fixture not
+  echoing typed characters) does not reproduce in real use: with the fix
+  deployed, typing into a GPU terminal echoes normally. The fixture was almost
+  certainly measuring its own timing — polling a published screen snapshot
+  before readline had finished initialising — not a product behaviour. Recorded
+  as retracted rather than deleted so nobody re-derives it from the framing's
+  earlier revision and spends a scout on it.
 - **A geometry change appears to clear the visible screen.** Observed while
   building acceptance 4: after the probe's deliberate 25×92 → 20×71 resize,
   the next frame's visible grid is entirely blank even though the content
