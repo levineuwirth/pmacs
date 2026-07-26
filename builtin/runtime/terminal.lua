@@ -49,6 +49,18 @@ local function bind_terminal_keys(buffer)
   bind("C-v", "terminal.page-down")
   bind("M-<", "terminal.scroll-oldest")
   bind("M->", "terminal.scroll-bottom")
+  -- Q#TC8a/Q#TC9: copy mode is ADDITIVE. The live keys above are
+  -- unchanged; this is one more leaf beside them. `C-t` is globally
+  -- `edit.transpose-chars`, which is meaningless in a read-only
+  -- terminal buffer, and binding it buffer-locally is the scoped
+  -- idiom rather than a shadow — `keymap.bind`'s strictness rejects
+  -- binding a PREFIX of an existing sequence within a scope, not
+  -- cross-scope shadowing.
+  --
+  -- Physically typed as `C-c C-t`: in a terminal every unescaped key
+  -- goes to the child, so terminal-local bindings are reached through
+  -- the escape. That also matches emacs-libvterm's own chord.
+  bind("C-t", "terminal.copy-mode")
 end
 
 -- Q#TC1: profiles are a raw Lua table, not a config setting. The
@@ -189,6 +201,180 @@ pmacs.command.define {
 -- Named limitation: unreachable from INSIDE a terminal window, where
 -- `C-c` is consumed as the escape. `M-x terminal` still works there.
 pmacs.keymap.bind { scope = "global", sequence = "C-c t", command = "terminal" }
+
+-- === Copy mode (Stage 2, Q#TC6) =========================================
+--
+-- `terminal.copy-mode` MATERIALIZES the retained rows into an ordinary
+-- read-only document buffer instead of adding a modal state to the
+-- terminal. That choice is the whole design:
+--
+--  * isearch, motion, selection, `M-w` and the kill ring all work with no
+--    new substrate — the snapshot is a rope, so `SearchStore` and the
+--    existing match painting apply unchanged;
+--  * "keys must not reach the child" dissolves structurally rather than
+--    being guarded: the transport arm keys on `is_terminal(buffer)`, and
+--    a snapshot buffer is not a terminal, so it never fires;
+--  * the dispatch-shadow count stays at SIX (`COHERENCE.md` §6) and
+--    `describe-key` keeps telling the truth, because the bindings are
+--    buffer-local and inspectable.
+
+local raw_copy_retained = assert(terminal._copy_retained,
+  "pmacs.terminal._copy_retained is required")
+
+-- snapshot buffer name -> { terminal = <buf>, buffer = <buf> }
+--
+-- Keyed by NAME, not by buffer handle: handles are not stable table keys,
+-- and a name survives the user killing the snapshot (listview precedent).
+local snapshots = {}
+
+local function buffer_name(buf)
+  local ok, described = pcall(pmacs.describe.buffer, buf)
+  if ok and described then return described.name end
+  return nil
+end
+
+local function find_buffer_by_name(name)
+  for _, id in ipairs(pmacs.buffer.list()) do
+    local ok, described = pcall(pmacs.describe.buffer, id)
+    if ok and described and described.name == name then return id end
+  end
+  return nil
+end
+
+-- `*terminal:bash*` -> `*terminal-copy: terminal:bash*`. The surrounding
+-- asterisks are stripped before nesting so the result reads as one
+-- generated-buffer name rather than two.
+local function snapshot_name_for(term_buf)
+  local name = buffer_name(term_buf) or "terminal"
+  return string.format("*terminal-copy: %s*", (name:gsub("^%*", ""):gsub("%*$", "")))
+end
+
+-- Q#TC7: the snapshot text comes from the SAME serializer selection-copy
+-- uses, so soft wraps, wide glyphs, clusters and trailing blanks cannot
+-- drift between the two.
+local function render_snapshot(record)
+  local text = raw_copy_retained(record.terminal) or ""
+  local buf = record.buffer
+  local len = buf:len()
+  -- Snapshot writes bypass the read-only intercept; everything else is
+  -- rejected by it.
+  if len > 0 then buf:delete(0, len, { bypass_intercept = true }) end
+  if #text > 0 then buf:insert(0, text, { bypass_intercept = true }) end
+end
+
+local function ensure_snapshot(term_buf)
+  local name = snapshot_name_for(term_buf)
+  local record = snapshots[name]
+  if record and record.buffer:is_valid() then
+    -- Q#TC8: re-invoking refreshes IN PLACE. Retarget the terminal too,
+    -- in case a terminal buffer was recreated under the same name.
+    record.terminal = term_buf
+    return record
+  end
+
+  local buf = find_buffer_by_name(name) or pmacs.buffer.create(name)
+  record = { terminal = term_buf, buffer = buf }
+  snapshots[name] = record
+
+  -- Q#TC6a — BOTH calls, and the second is the load-bearing one.
+  --
+  -- An intercept guards the dispatch/edit path only. It does NOT set
+  -- `Buffer::read_only` (deliberately independent), and no Lua binding
+  -- sets that flag at all, so an optimistic CRDT op from a semantic
+  -- frontend bypasses the intercept AND passes `ensure_writable()` —
+  -- mutating the daemon buffer in lockstep with the mirror, with no
+  -- divergence to notice. `set_round_trip_input` prevents that at the
+  -- only point it can be prevented: `dispatch_idle_for` reports false
+  -- while this buffer is focused, so the frontend never applies
+  -- optimistically and never emits the op. It is the guard, not
+  -- hardening.
+  pmacs.buffer.add_intercept(buf, function()
+    error(name .. " is read-only")
+  end)
+  pmacs.buffer.set_round_trip_input(buf, true)
+
+  pmacs.keymap.bind { scope = "buffer", buffer = buf,
+    sequence = "g", command = "terminal.copy-refresh" }
+  pmacs.keymap.bind { scope = "buffer", buffer = buf,
+    sequence = "q", command = "terminal.copy-quit" }
+
+  -- Q#TC8 lifecycle, both directions. Killing the terminal takes its
+  -- snapshot with it; killing the snapshot alone leaves the terminal
+  -- running and merely forgets the record, so a later invoke rebuilds.
+  --
+  -- `on_removed` is sound here because every user-facing kill path
+  -- routes through `pmacs.buffer.kill`, which fires the callbacks. The
+  -- terminal manager's own `prune` does not — but it never removes a
+  -- buffer either; it REACTS to one already gone from the registry. A
+  -- child exiting therefore leaves both the terminal and its snapshot
+  -- alive, which is what makes reading back a finished command's output
+  -- work at all.
+  pcall(pmacs.buffer.on_removed, term_buf, function()
+    local current = snapshots[name]
+    if current and current.buffer:is_valid() then
+      pcall(pmacs.buffer.kill, current.buffer)
+    end
+    snapshots[name] = nil
+  end)
+  pcall(pmacs.buffer.on_removed, buf, function()
+    snapshots[name] = nil
+  end)
+
+  return record
+end
+
+-- The snapshot record whose buffer the active window shows, or nil.
+local function snapshot_for_current_buffer()
+  local buf = pmacs.window.buffer()
+  if not buf then return nil end
+  local name = buffer_name(buf)
+  if not name then return nil end
+  return snapshots[name]
+end
+
+function terminal.copy_mode(term_buf)
+  term_buf = term_buf or pmacs.window.buffer()
+  assert(term_buf, "terminal.copy-mode: no active buffer")
+  if not terminal.is_terminal(term_buf) then
+    error("terminal.copy-mode: the current buffer is not a terminal", 0)
+  end
+  local record = ensure_snapshot(term_buf)
+  render_snapshot(record)
+  pmacs.window.switch_buffer(record.buffer)
+  return record.buffer
+end
+
+pmacs.command.define {
+  name = "terminal.copy-mode",
+  description = "Open a searchable read-only snapshot of this terminal's scrollback.",
+  fn = function() return terminal.copy_mode() end,
+}
+
+pmacs.command.define {
+  name = "terminal.copy-refresh",
+  description = "Re-snapshot the source terminal into this copy buffer.",
+  fn = function()
+    local record = snapshot_for_current_buffer()
+    if not record then return end
+    if not record.terminal:is_valid() then
+      pmacs.editor.set_status("terminal.copy-refresh: the source terminal is gone")
+      return
+    end
+    render_snapshot(record)
+  end,
+}
+
+pmacs.command.define {
+  name = "terminal.copy-quit",
+  description = "Return to the terminal this copy buffer was taken from.",
+  fn = function()
+    local record = snapshot_for_current_buffer()
+    if not record then return end
+    if record.terminal:is_valid() then
+      pmacs.window.switch_buffer(record.terminal)
+    end
+  end,
+}
 
 pmacs.command.define {
   name = "terminal.copy-selection",

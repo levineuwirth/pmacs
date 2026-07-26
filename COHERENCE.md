@@ -368,7 +368,7 @@ Full verdict table:
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
 | 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing PR #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
-| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173). Named limitation: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
+| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Partial** | `M-x compile.run` works, defaults cwd to detected project root, parses Rust `-->` errors — but no keybinding, an **empty first prompt** (`initial = last and last.cmdline or ""`, `builtin/runtime/compile.lua:1134-1138`), and no `cargo build`/`cargo test` suggestion despite `ProjectKind::Cargo` existing (`src/project.rs:77`) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
 | 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
@@ -658,6 +658,25 @@ Facts that define the gap:
   a terminal buffer. Since #173 that chord is `terminal.escape-key`
   rather than a hardcoded `C-c`, so a user can *move* which prefix is
   eaten; they cannot make the shadow stop eating one.
+- **A worked example that a modal-*looking* feature need not become a
+  shadow.** Terminal copy mode (Stage 2 of the terminal-config arc) is
+  the case that most invited a seventh rung: it wants motion, search and
+  its own `g`/`q` inside a surface where every unescaped key otherwise
+  goes to a child process. It resolves to the buffer-local keymap idiom
+  instead, by **materializing** the retained scrollback into an ordinary
+  read-only document buffer. The keys-must-not-reach-the-child problem
+  then dissolves structurally rather than being guarded: the transport
+  arm keys on `is_terminal(buffer_id)`, and a snapshot buffer is not a
+  terminal, so the arm never fires. No new precedence rung, no new
+  hand-synced guard-list entry, and `describe-key` keeps reporting the
+  truth — pinned by asserting exactly that for the snapshot's `g` and
+  `q`, which is the observable difference between the idiom and a
+  shadow. **The count stays at six.**
+
+  The transferable rule: when a feature wants a keymap over *content*,
+  ask whether the content can become a buffer. The shadows that exist
+  are the cases where it genuinely cannot (a minibuffer prompt, a
+  live search prompt) — not the cases where nobody tried.
 - **No transient-keymap mechanism exists to migrate to.** `KeymapStack`
   has exactly three fixed scopes — `Buffer(BufferId)`, `Mode(String)`,
   `Global` (`src/keymap_stack.rs:37-44`); resolution order buffer →
@@ -1041,6 +1060,19 @@ layering, provenance, and adoption have not followed.**
   scalars. It is the clearest evidence yet that table-valued settings
   are the blocking prerequisite: the terminal is now half-registered,
   and no settings UI can render the half that matters most.
+- **The missing `scope = "global"` flag has its second live case.** After
+  `autosave.interval-ms`, the terminal's two *open-time* settings —
+  `terminal.default-profile` and `terminal.scrollback-rows` — are read
+  before their terminal's identity buffer exists, so a buffer-local
+  override can never be consulted. The registry accepts `set_local` on
+  them anyway, because `Live` mutability is all it can express. Nothing
+  breaks; the setting simply has no effect, which is the worst shape a
+  configuration surface can take. `terminal.escape-key` is the contrast
+  that shows this is a real distinction rather than a blanket wish: it
+  *deliberately* supports buffer-locals, and per-terminal escapes are a
+  feature. So the argument for both deferrals is now **cumulative and
+  concrete** rather than hypothetical — two adopters, two distinct
+  missing primitives, one feature.
 - **No persistence**: settings changed at runtime do not survive
   restart (the `custom-file` split-brain question is a named deferral).
 - The three-level separation holds in principle today (registry /

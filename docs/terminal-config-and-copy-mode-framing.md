@@ -1,9 +1,16 @@
 # Terminal configuration and copy mode
 
 **Revision 4 — scouted against canonical `main` @ `b889873` (protocol v20),
-2026-07-25. APPROVED after four review rounds. Stage 1 is implemented on
-branch `terminal-config` (PR #173); Stage 2 (`terminal-copy-mode`) is
-framed but not started, and branches off `main` after Stage 1 merges.**
+2026-07-25. APPROVED after four review rounds. Stage 1 MERGED as #173
+(`main` @ `cf54270`, 2026-07-26). Stage 2 implemented on branch
+`terminal-copy-mode` off `main` @ `cf54270`; no protocol change.**
+
+**Stage 2 ships eight of its nine criteria.** Criterion 17's semantic-frontend
+end-to-end pin is deliberately absent — see the note under it — because a
+faithful version requires the real `pmacs-gpu` optimistic path, and therefore
+the `a37` foundation, which CI never compiles and which skips silently. Both
+halves of the *mechanism* it guards are pinned ungated instead (16, 16b). No
+other criterion is partial.
 
 Revision 4 gives the escape-key cache an owner and a lifecycle (Q#TC4c) —
 revision 3 named the key but not the storage, and two implementations
@@ -576,6 +583,28 @@ additive, on its own binding, and does not replace scroll-and-select.
     emitted, bypasses the Lua intercept, passes `ensure_writable()`, and
     mutates **both sides** — a buffer the editor calls read-only silently
     accepts an edit.
+
+    **NOT PINNED as specified, deliberately, and this is the one gap in
+    Stage 2.** A faithful test has to drive the *real* `pmacs-gpu` binary:
+    the optimistic apply lives only in `pmacs-gpu/src/main.rs`
+    (`optimistic_crdt_insert` / `optimistic_insert_text`), and the headless
+    `SemanticClient` the other semantic tests use has no optimistic path at
+    all, so it cannot produce the op whose absence is the claim. That means
+    building on the `a37` foundation — which is `crdt`-gated so CI never
+    compiles it, **returns `ok` without running** when `pmacs-gpu` is absent
+    from the target directory, and is load-sensitive enough to pass and fail
+    at the same commit twenty minutes apart. A second test on that footing
+    would add the appearance of coverage without the substance.
+
+    What IS pinned instead, ungated and in CI: acceptance 16 asserts the
+    guard is armed (`dispatch_idle` false while the snapshot is focused, so
+    no replica can apply optimistically or emit), and acceptance 16b asserts
+    the hazard is real by showing the snapshot buffer's `is_read_only()` is
+    **false** despite the intercept — i.e. nothing at the rope/CRDT boundary
+    would stop such an op if one arrived. Together those cover both halves of
+    Q#TC6a's *mechanism*. What remains unproven is only the end-to-end wire
+    behaviour of a real GPU frontend, and it stays an explicit obligation of
+    the CI `crdt`-coverage lane rather than being quietly dropped.
 18. Re-invoking against the same terminal refreshes in place; the buffer count
     does not grow (Q#TC8). Killing the snapshot leaves the terminal running;
     killing the terminal removes the snapshot.

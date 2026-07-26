@@ -8836,6 +8836,25 @@ fn install_terminal(
         )?;
     }
 
+    {
+        let manager = manager.clone();
+        terminal.set(
+            "_copy_retained",
+            // Q#TC7: returns the whole retained range as a string, through
+            // the same serializer selection-copy uses. Takes an explicit
+            // buffer rather than resolving the active view, because copy
+            // mode reads a terminal that may not be displayed — and
+            // because the caller already holds the handle it keyed its
+            // snapshot on.
+            lua.create_function(move |lua, buffer: BufferIdLua| {
+                let Some(bytes) = manager.borrow().copy_retained(buffer.0) else {
+                    return Ok(None);
+                };
+                Ok(Some(lua.create_string(&bytes)?))
+            })?,
+        )?;
+    }
+
     pmacs.set("terminal", terminal)
 }
 

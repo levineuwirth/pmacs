@@ -389,19 +389,52 @@ If it does not, stop and repair the remote/fetch configuration.
   **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
   `git diff --check` clean. Gates were run against the committed tree.
 
-## Terminal config + copy mode arc — Stage 1 IN REVIEW
+## Terminal config + copy mode arc — Stage 1 MERGED; Stage 2 IN REVIEW
 
 - Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
   **revision 4** (four review rounds), committed as the first commit of
   Stage 1's branch. Two stages, two branches, two PRs; **no protocol
   change**.
-- **Stage 1 = `githubsucks/terminal-config`**, worktree
-  `../pmacs-terminal-config`, based on `githubsucks/main` @ `d152120`
-  and merged up to `c93f9ee` during review round 1. Profiles,
-  scrollback, escape key, and the `C-c t` opening binding.
-- **Stage 2 = `terminal-copy-mode`, not started.** Branch it off `main`
-  after Stage 1 merges: no dependency, but both edit
-  `builtin/runtime/terminal.lua`.
+- **Stage 1 MERGED as #173** (`main` @ `cf54270`, 2026-07-26, one review
+  round, twelve checks green). Branch `githubsucks/terminal-config` and
+  worktree `../pmacs-terminal-config` retained.
+- **Stage 2 = `githubsucks/terminal-copy-mode`**, worktree
+  `../pmacs-terminal-copy-mode`, based on `githubsucks/main` @
+  `cf54270`. Copy mode: `M-x terminal.copy-mode` / `C-c C-t`.
+- **Stage 2 ships eight of nine criteria, and the missing one is named.**
+  Criterion 17 (a real semantic frontend proving neither daemon buffer
+  nor mirror mutates) is **not pinned**: the optimistic apply exists only
+  in `pmacs-gpu/src/main.rs`, and the headless `SemanticClient` every
+  other semantic test uses has no optimistic path, so a faithful test
+  must drive the real GPU binary — the `a37` foundation, which CI never
+  compiles, silently skips without the binary, and is load-sensitive. A
+  second test on that footing buys the appearance of coverage. Both
+  halves of the mechanism are pinned **ungated** instead: acceptance 16
+  (the guard is armed — `dispatch_idle` false while the snapshot is
+  focused) and 16b (the hazard is real — the snapshot's `is_read_only()`
+  is **false** despite the intercept, so nothing at the rope/CRDT
+  boundary would stop an op that did arrive). The wire-level half is an
+  explicit obligation of the CI `crdt`-coverage lane.
+- Load-bearing Stage 2 decisions:
+  - **The snapshot MATERIALIZES into an ordinary buffer**, so isearch,
+    motion, selection and the kill ring work with no new substrate, and
+    "keys must not reach the child" dissolves structurally — the
+    transport arm keys on `is_terminal(buffer_id)` and a snapshot is not
+    a terminal. **The dispatch-shadow count stays at six.**
+  - **One serializer, not two** (Q#TC7): `copy_retained` builds a
+    whole-range *selection* and hands it to `copy_selection_bytes`.
+  - **`prune` reacts to removal rather than causing it** — it filters on
+    `!registry.contains(buffer_id)`, so a child exiting does NOT remove
+    the terminal buffer. That is why `on_removed` is a sound teardown
+    hook, and why a finished command's output stays readable.
+- **Five bites, five different wrong implementations.** Removing
+  `set_round_trip_input` fails acceptance 16 **in the default
+  configuration** (the whole reason that pin is ungated); a naive
+  independently-written serializer fails all four unit pins, with the
+  diffs naming each drift mode (broken soft wrap, untrimmed blanks,
+  trailing newline); making re-invoke create a fresh buffer fails 18;
+  dropping the kill-with-terminal teardown fails 18; removing the
+  intercept fails 16b. Each failed exactly one test.
 - Load-bearing decisions, each forced by scouted ground truth:
   - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
     no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
