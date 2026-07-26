@@ -55,6 +55,75 @@ git status --short --branch
 The `git log` command must expose `d152120` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
+## PTY terminate diagnostic lane — IN REVIEW (PR #176)
+
+- Portable branch: `githubsucks/pty-terminate-eperm`; worktree
+  `../pmacs-math-slice`. **PR #176**, base `main`, based on `ccf29e3`
+  with `c93f9ee` (#175) merged in.
+- Approved framing: `docs/process-signal-tolerance-framing.md`
+  **revision 4**, after three review rounds.
+- **Diagnostic only. No disposition change.** Every call that failed
+  before still fails, with no state transition and no reap-ledger
+  arming. `src/process.rs` is the only source file touched.
+- **Why nothing is fixed:** revisions 1–3 each proposed a *tolerance*
+  rule and all three were rejected as unsound in the same way — each
+  concluded something about a process from something that was not about
+  that process. Rev 1 from an errno alone (EPERM means the caller lacks
+  permission, not that the id was recycled); rev 2 from `try_wait`,
+  which observes the spawned **leader** while a PTY signal targets
+  `-tcgetpgrp(...)`, entities that diverge exactly when job control has
+  moved the terminal; rev 3 from group-directed **ESRCH**, which proves
+  only that the selected foreground group vanished.
+- **Two facts that killed the original argument.** `group = true` is
+  *rejected* for PTY mode at spawn (`src/process.rs:1428-1429`), so the
+  reap ledger never applies to the PTY path at all; and the ledger
+  comment (`:1075`) says EPERM "cannot happen for our own children" and
+  drops the entry for **bounded growth** — not a ruling that EPERM means
+  dead.
+- **The CI evidence never established the child had exited.** The probe's
+  last source statement is a file write and CPython teardown does not
+  synchronise with it, so no tolerance rule could even be shown to fix
+  the symptom. That is the whole reason the lane is diagnostic.
+- What ships: a failing `kill` now reports five separate facts — target
+  source, target kind/value, spawn-time group, errno, and the leader's
+  real `try_wait` state. The test seam injects the **kill result only**,
+  never the observation, so the real `ChildHandle::try_wait` runs against
+  the real child.
+- **Not "strictly additive".** `try_wait` reaps and caches, so an exited
+  child may be reaped earlier than otherwise. Safe because
+  `portable-pty` 0.9.0 returns a `std::process::Child` on Unix and
+  delegates `try_wait` to it, so `poll_one` still sees the cached
+  status — pinned by an exactly-one-terminal-event test rather than
+  assumed.
+- Round-1 review fixes: the exited-child tests no longer use a fixed
+  sleep as proof of exit (nix's `waitid` is unavailable on macOS and
+  `libc::waitid` needs `unsafe`, which the crate forbids), instead
+  driving the production diagnostic in a bounded loop until it observes
+  the exit; and every assertion is now exact message equality built from
+  the kernel-assigned pid, since the substring forms would have accepted
+  a hardcoded target or a wrong exit code.
+- Bites, all verified rather than assumed: tolerating the failure fails
+  the disposition test; stubbing the leader observation fails three
+  tests including the one-event pin; a hardcoded target fails four; a
+  wrong exit code fails two.
+- Verification: fmt, `git diff --check`, strict workspace clippy clean;
+  lib 1,838 + CRDT 2,015 (both +6, exactly the new tests); GPU 202; M4
+  121; bottom-panel 46; compile-mode 67; vterm 9/6/5; sweep 3,256 across
+  93 suites with two load-contention flakes that pass 3/3 isolated
+  (`read_dir_supersede_cancels_in_flight_predecessor`, known
+  pre-existing, and
+  `headless_snapshot_round_trip_summary_restores_the_minimap`). The
+  second is structurally unreachable from this diff: `pmacs-gpu` depends
+  on `pmacs-protocol`, never on `pmacs`.
+- **Parked, each with its reason:** all tolerance rules (need the
+  evidence this PR produces); `terminate` idempotence for an
+  already-reaped process (independent fix, different failure, one
+  feature per PR); and `signal_target`'s read-then-kill of `tcgetpgrp`
+  — still the most likely real fix site.
+- **The lane closes when this merges.** It does not wait for the flake
+  to recur; the next occurrence carries its own evidence under whoever's
+  PR, and a Stage B framing follows then.
+
 ## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
 
 - Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
