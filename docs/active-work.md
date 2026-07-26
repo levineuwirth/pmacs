@@ -57,7 +57,7 @@ git status --short --branch
 The `git log` command must expose `d152120` or a newer intentional main.
 If it does not, stop and repair the remote/fetch configuration.
 
-## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b MERGED; Stage 4 IN FRAMING
+## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b MERGED; Stage 4a IN REVIEW
 
 - **Stages 1, 2, 3a and 3b are MERGED** — #160 (`main` @ `0827dd1`),
   #161 (`46a1b8f`), #167 (`6f348c9`), #170 (`d400f30`). Their full
@@ -146,8 +146,58 @@ If it does not, stop and repair the remote/fetch configuration.
   `handle_server_requests` 1549→1815, `fs.stat` 93→133,
   `detect_buffer_language` 452→457, `send_request`/`send_notification`
   9342/9361→9507/9527.
-- Verification: none yet — the branch carries no code. `git diff --check`
-  clean.
+### Stage 4a — the typed-edit consumer chain (IMPLEMENTED, same branch)
+
+- Footprint exactly as Q#LN10 declares it: `builtin/runtime/typed_edit.lua`
+  (new, 112 lines), `pair.lua` re-expressed as one consumer,
+  `src/editor.rs` +15 (the `include_str!` and its ordering comment), and
+  `tests/typed_edit_chain_acceptance.rs` (new, 9 tests).
+  **`tests/auto_pair_acceptance.rs` is UNCHANGED — `git diff --stat
+  main...HEAD -- tests/auto_pair_acceptance.rs` is empty.** That is
+  criterion 46 checked at the diff, which is the only way it means
+  anything.
+- **The chain calls consumers even when the record is nil.** This is a
+  decision, not an implementation detail: three existing auto-pairing
+  tests assert `pmacs.pair._last_record == nil` after a record-less
+  fan-out (paste, programmatic insert, nested manual `hook.run`), so
+  skipping consumers on nil fails them. Stage 4b needs the same
+  delivery to abandon a pending abbreviation an unrelated edit
+  invalidated.
+- **Ordered insertion, not `table.sort`** — Lua's sort is not stable, and
+  "ties broken by registration order" is a stated contract.
+- **The chain `pcall`s each consumer** and reports through
+  `set_status`. `buffer.after-edit` is all-must-succeed, so an
+  uncontained throw fails the fan-out for every other subscriber
+  including lsp.lua's didChange flush.
+- **Every acceptance test is bite-verified by mutation**, per the
+  standing rule that a test is not evidence until the mutation it
+  targets has been shown to fail it:
+
+  | Mutation | Tests it fails |
+  |---|---|
+  | append instead of ordered insert | 5 chain |
+  | `>=` instead of `>` in the insert scan | 1 chain (tiebreak) |
+  | re-take the record per consumer | 4 chain |
+  | ignore the claim return value | 1 chain |
+  | drop the `pcall` | 1 chain |
+  | skip consumers when `rec == nil` | 1 chain + **3 auto-pair** |
+  | load `typed_edit.lua` after `lsp.lua` | 1 chain + **2 auto-pair** (Q#AP7) |
+
+  The first attempt at the last bite was WORTHLESS as written: moving
+  only `typed_edit.lua` past `lsp.lua` left `pair.lua` calling a nil
+  `add_consumer`, so the runtime failed to load and all 9 tests died —
+  loud, but not a test of the flush-ordering property. Moving
+  `typed_edit.lua` AND `pair.lua` past `lsp.lua` is the faithful
+  falsification: registration succeeds, the hook lands late, and exactly
+  the three ordering tests fail. **A bite that kills everything has not
+  isolated anything.**
+- Verification on this branch (commit-then-gate, so this describes the
+  pushed tree): `cargo fmt --check` clean; strict workspace Clippy
+  clean; 1,832 default + 2,009 CRDT library tests; auto-pair 45/45;
+  typed-edit chain 9/9; M4 121; required GPU 202; **isolated-config
+  workspace sweep 3,328 across 97 suites, zero failures** with
+  `grep -c basedpyright` = 0; `git diff --check` clean.
+- Stage 4b (the input method) is NOT in this PR and not started.
 
 ## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)
 
