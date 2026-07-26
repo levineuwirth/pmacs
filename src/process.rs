@@ -810,7 +810,7 @@ fn observe_leader(proc: &mut ManagedProcess) -> LeaderObservation {
 fn signal_failure_report(
     target: SignalTarget,
     leader_pid: u32,
-    errno: &nix::errno::Errno,
+    errno: nix::errno::Errno,
     leader: &LeaderObservation,
 ) -> String {
     let expected = if target.source.is_group() {
@@ -1074,7 +1074,7 @@ impl ProcessSupervisor {
             // disposition is unchanged — this still returns `Err`,
             // with no state transition and no ledger arming.
             let leader = observe_leader(proc);
-            return Err(signal_failure_report(target, pid, &errno, &leader));
+            return Err(signal_failure_report(target, pid, errno, &leader));
         }
         if matches!(signal, Signal::SIGTERM | Signal::SIGKILL | Signal::SIGHUP) {
             proc.state = ProcessState::Exiting {
