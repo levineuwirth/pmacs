@@ -1627,18 +1627,57 @@ fn open_initial_target(
     // create and select a side window, and bootstrap must reassert the
     // requested buffer in a document window rather than overwriting a
     // panel merely because it became `view.active`.
-    let (origin_window, buffer_id, fire) = {
+    let (origin_window, resolved) = {
         let mut core = editor.core.borrow_mut();
         core.active_frontend = frontend_id;
         let origin_window = core
             .primary_document_window(frontend_id)
             .ok_or_else(|| "attaching frontend has no document window".to_string())?;
-        let (buffer_id, fire) = core.resolve_target_buffer(&path)?;
+        let resolved = core.resolve_target_buffer(&path)?;
+        (origin_window, resolved)
+    };
+
+    // Journey Stage 1a (Q#JR6/Q#JR9): a DIRECTORY installs nothing.
+    //
+    // Nothing can be installed, because the listing that satisfies a
+    // directory open is asynchronous and this block is synchronous — the
+    // frontend is blocked on `InitialTargetResult` and will not create
+    // its window until it arrives, so there is no tick in which a
+    // listing could settle. The reply therefore names the buffer the
+    // fresh view's document window ALREADY holds, which is a valid,
+    // ready session; the listing replaces it a tick or more later.
+    //
+    // That buffer is NOT necessarily `*scratch*`: `build_fresh_frontend_view`
+    // clones LOCAL's primary document buffer. If LOCAL holds a real
+    // document, this session briefly displays and snapshots it. Accepted
+    // and documented rather than papered over with a placeholder buffer,
+    // which would need reaping and would be fought by the reassert below.
+    //
+    // `publish_to_replicas` is false for the same reason an `AfterSwitch`
+    // dedup sets it false: this buffer is pre-existing and already
+    // published, not freshly loaded here.
+    let (buffer_id, fire) = match resolved {
+        crate::editor_core::ResolvedTarget::Directory { path } => {
+            let dest = editor
+                .capture_directory_destination(frontend_id, origin_window)
+                .ok_or_else(|| format!("cannot open {}: no document window", path.display()))?;
+            let buffer_id = dest.buffer;
+            editor.dispatch_directory_open(&path, dest);
+            editor.reconcile_panel_layout(frontend_id);
+            return Ok(OpenedInitialTarget {
+                buffer_id,
+                publish_to_replicas: false,
+            });
+        }
+        crate::editor_core::ResolvedTarget::Buffer { id, fire } => (id, fire),
+    };
+
+    {
+        let mut core = editor.core.borrow_mut();
         core.install_buffer_in_window(origin_window, buffer_id)
             .map_err(|error| format!("cannot select {}: {error}", path.display()))?;
         core.focus_window(frontend_id, origin_window);
-        (origin_window, buffer_id, fire)
-    };
+    }
 
     match fire {
         crate::editor_core::HookKind::AfterLoad => {

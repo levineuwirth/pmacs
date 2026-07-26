@@ -598,7 +598,7 @@ end
 
 pmacs.dired = pmacs.dired or {}
 
-local OPEN_OPTS = { display = true, select_name = true }
+local OPEN_OPTS = { display = true, select_name = true, dest = true }
 
 -- Open `path`'s dired buffer, replacing `departed` (a handle) in the
 -- window it occupies when this is a navigation rather than a fresh
@@ -629,35 +629,63 @@ local function open_directory(path, opts, departed)
   local sort_mode = (handle_for_path(canonical) or {}).sort_mode or SORT_MODES[1]
   local entries, errors = read_listing(canonical, sort_mode)
 
-  local handle = claim_handle(canonical)
-  handle.entries = entries
-  handle.errors = errors
-  handle.sort_mode = sort_mode
+  -- Everything from here down MUTATES: it claims or finds a handle,
+  -- creates a buffer, reads the ambient buffer for `prev`, and paints.
+  -- None of it is undoable, and none of it may run against a
+  -- destination that has gone away -- so when the caller captured one
+  -- (Journey Stage 1a, Q#JR14), the whole commit runs inside
+  -- `pmacs.window.commit_to`, which validates the destination BEFORE
+  -- invoking this and scopes the acting frontend for its extent.
+  --
+  -- Note the await above is deliberately OUTSIDE the commit: awaiting
+  -- inside it is refused (Q#JR14b), because a yield would restore the
+  -- scope while this coroutine is still parked.
+  local function commit()
+    local handle = claim_handle(canonical)
+    handle.entries = entries
+    handle.errors = errors
+    handle.sort_mode = sort_mode
 
-  -- `q` returns to the buffer you came from, never to another dired
-  -- buffer (which would trap `q` walking back down the tree); on a
-  -- descent the arriving buffer inherits the departing one's origin.
-  if departed ~= nil then
-    handle.prev = departed.prev
-  else
-    local active = pmacs.window.buffer()
-    if active ~= nil and handle_for_buffer(active) == nil then
-      handle.prev = active
+    -- `q` returns to the buffer you came from, never to another dired
+    -- buffer (which would trap `q` walking back down the tree); on a
+    -- descent the arriving buffer inherits the departing one's origin.
+    if departed ~= nil then
+      handle.prev = departed.prev
+    else
+      local active = pmacs.window.buffer()
+      if active ~= nil and handle_for_buffer(active) == nil then
+        handle.prev = active
+      end
     end
+
+    paint(handle)
+    display(handle, opts, departed)
+    -- Seating happens after the display: `switch_buffer` zeroes the
+    -- window cursor, so an earlier seat would be discarded.
+    seat_cursor(handle, opts.select_name, 1)
+    kill_departed(departed, handle)
+    return handle.buf
   end
 
-  paint(handle)
-  display(handle, opts, departed)
-  -- Seating happens after the display: `switch_buffer` zeroes the
-  -- window cursor, so an earlier seat would be discarded.
-  seat_cursor(handle, opts.select_name, 1)
-  kill_departed(departed, handle)
-  return handle.buf
+  if opts.dest == nil then
+    -- Interactive path (`C-x d`, tree descent, refresh): the acting
+    -- frontend is still ambient a tick later, which is what dired has
+    -- always relied on. Migrating these onto a captured destination too
+    -- is a named deferral, not this stage's work.
+    return commit()
+  end
+
+  local ok, result = pmacs.window.commit_to(opts.dest, commit)
+  if not ok then
+    error(string.format("destination is gone (%s)", tostring(result)))
+  end
+  return result
 end
 
 function pmacs.dired.open(path, opts)
   return open_directory(path, opts, nil)
 end
+
 
 -- Every interactive entry point funnels through here: spawn the
 -- coroutine the await needs, and turn a failure into a status message
@@ -669,6 +697,20 @@ local function open_async(path, opts, departed, where)
     if not ok then report(where or "dired", err) end
   end)
 end
+
+-- Journey Stage 1a (Q#JR7): dired is the DEFAULT directory surface, not
+-- a `path.open-directory` subscriber.
+--
+-- It cannot be a subscriber and still be replaceable. `HookRegistry.add`
+-- only appends, and builtins load before `init.lua`, so a dired
+-- subscription would always run first and always claim -- no user
+-- listener could ever win. The hook is therefore the user's chain and
+-- this slot is the fallback the editor consults when that chain
+-- declines. Replace it to change what opens a directory; set it to nil
+-- to disable directory opening entirely.
+pmacs.path.set_directory_handler(function(path, dest)
+  open_async(path, { dest = dest }, nil, "dired")
+end)
 
 -- ---------------------------------------------------------------------------
 -- Commands

@@ -44,8 +44,22 @@ use crate::window::{DEFAULT_PANEL_ROWS, MIN_WINDOW_OUTER_ROWS, Side, WindowId};
 /// call falls back to the ambient active frontend, exactly as the
 /// terminal surface does.
 pub(crate) fn acting_frontend(lua: &Lua, core: &SharedCore) -> FrontendId {
-    lua.app_data_ref::<crate::editor::InteractiveCommandOrigin>()
-        .and_then(|origin| origin.current())
+    // Journey Stage 1a (Q#JR14e): the background scope wins.
+    //
+    // Order is deliberate — scoped override, then interactive origin,
+    // then ambient. A `commit_to` callback runs for the frontend that
+    // *requested* the work, and it must win over whatever happens to be
+    // dispatching when the worker settles. It is a separate slot rather
+    // than a reuse of the interactive origin because that origin is
+    // authenticated user-command authority (the pre-edit unfold guard,
+    // command-boundary rotation, and the terminal surface all key off
+    // it), and a background continuation must not acquire it.
+    lua.app_data_ref::<crate::editor::ScopedFrontend>()
+        .and_then(|scope| scope.current())
+        .or_else(|| {
+            lua.app_data_ref::<crate::editor::InteractiveCommandOrigin>()
+                .and_then(|origin| origin.current())
+        })
         .unwrap_or_else(|| core.borrow().active_frontend_key())
 }
 
@@ -353,6 +367,111 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
     {
         let cc = core.clone();
         win.set(
+            "commit_to",
+            lua.create_function(
+                move |lua,
+                      (dest, body): (mlua::AnyUserData, mlua::Function)|
+                      -> mlua::Result<mlua::MultiValue> {
+                    // Journey Stage 1a (Q#JR14). Preflight FIRST, then
+                    // scope, then run. The ordering is the whole point:
+                    // an async handler mutates real state (dired claims
+                    // a buffer, registers a handle, captures `prev`, and
+                    // paints) long before it reaches any call that could
+                    // refuse. Validating at display time is four
+                    // mutations too late and leaves a hidden buffer
+                    // behind, so every destination precondition is
+                    // checked before the callback is invoked at all.
+                    let dest = dest
+                        .borrow::<super::DirectoryDestinationLua>()
+                        .map_err(|_| {
+                            mlua::Error::runtime(
+                                "pmacs.window.commit_to: expected a destination captured by \
+                                 the editor (it cannot be constructed from Lua)",
+                            )
+                        })?
+                        .0;
+
+                    // 1. The requesting frontend still has a layout.
+                    let refusal = {
+                        let core = cc.borrow();
+                        if !core.views.contains_key(&dest.frontend) {
+                            Some("requesting frontend is gone".to_string())
+                        } else if !core
+                            .views
+                            .get(&dest.frontend)
+                            .is_some_and(|view| view.layout.iter_ids().contains(&dest.window))
+                        {
+                            // 2. The destination window is still live in it.
+                            Some(format!("window {} is gone", dest.window.raw()))
+                        } else if core
+                            .windows
+                            .get(&dest.window)
+                            .is_some_and(|w| w.buffer_id != dest.buffer)
+                        {
+                            // 3. Stale intent (Q#JR14c): the user
+                            //    replaced the buffer while the work was
+                            //    in flight. Their action is newer
+                            //    information than the request, so the
+                            //    request loses.
+                            Some(format!(
+                                "window {} now shows another buffer",
+                                dest.window.raw()
+                            ))
+                        } else if !core.window_accepts_buffer(dest.window, None) {
+                            // 4. Replaceability (Q#JR14f). `None`
+                            //    because the replacement does not exist
+                            //    yet — passing the captured buffer would
+                            //    approve a window dedicated to *it*, and
+                            //    the handler's different buffer would be
+                            //    refused later, after mutating.
+                            Some(format!("window {} is dedicated", dest.window.raw()))
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(reason) = refusal {
+                        let mut out = mlua::MultiValue::new();
+                        out.push_back(mlua::Value::String(lua.create_string(reason.as_bytes())?));
+                        out.push_front(mlua::Value::Boolean(false));
+                        return Ok(out);
+                    }
+
+                    let scope = lua
+                        .app_data_ref::<crate::editor::ScopedFrontend>()
+                        .ok_or_else(|| {
+                            mlua::Error::runtime(
+                                "pmacs.window.commit_to: no frontend scope installed",
+                            )
+                        })?
+                        .clone();
+                    let commit = lua
+                        .app_data_ref::<crate::editor::CommitScopeActive>()
+                        .ok_or_else(|| {
+                            mlua::Error::runtime(
+                                "pmacs.window.commit_to: no commit scope installed",
+                            )
+                        })?
+                        .clone();
+                    // Both the override and the core's ambient
+                    // `active_frontend` are restored when this guard
+                    // drops -- on the normal return AND on a raising
+                    // callback, which is why the result is captured
+                    // rather than `?`-propagated through the drop.
+                    let result = {
+                        let _guard = scope.enter(&cc, &commit, dest.frontend);
+                        body.call::<mlua::MultiValue>(())
+                    };
+                    let mut out = result?;
+                    out.push_front(mlua::Value::Boolean(true));
+                    Ok(out)
+                },
+            )?,
+        )?;
+    }
+
+    {
+        let cc = core.clone();
+        win.set(
             "display",
             lua.create_function(
                 move |lua, (buffer, opts): (BufferIdLua, Option<Table>)| -> mlua::Result<u64> {
@@ -397,10 +516,33 @@ pub(crate) fn install(lua: &Lua, core: &SharedCore, win: &Table) -> mlua::Result
                         .probe_display_target(fid, existing, explicit_window)
                         .map_err(mlua::Error::runtime)?;
                     // 3. Load, dedup, or create the path-backed buffer.
-                    let (buffer_id, fire) = cc
+                    //
+                    // Journey Stage 1a (Q#JR13): a DIRECTORY raises here
+                    // and does NOT enter the directory resolver chain.
+                    // `display_file` is "put this file in a window", not
+                    // a CLI router — and `find-file`'s accept arm
+                    // (`builtin/commands/default.lua`) wraps this call in
+                    // a `pcall` whose comment guarantees that "only a
+                    // real failure (a directory, a permission error)
+                    // reaches here", pinned by
+                    // `find_file_accepting_a_directory_reports_instead_of_raising`.
+                    // Routing it into dired would silently change what
+                    // `C-x C-f` on a directory does. Opening dired from
+                    // find-file is a named deferral, not a side effect of
+                    // the CLI work.
+                    let (buffer_id, fire) = match cc
                         .borrow_mut()
                         .resolve_target_buffer(&path_buf)
-                        .map_err(mlua::Error::runtime)?;
+                        .map_err(mlua::Error::runtime)?
+                    {
+                        crate::editor_core::ResolvedTarget::Buffer { id, fire } => (id, fire),
+                        crate::editor_core::ResolvedTarget::Directory { path } => {
+                            return Err(mlua::Error::runtime(format!(
+                                "pmacs.window.display_file: {} is a directory",
+                                path.display()
+                            )));
+                        }
+                    };
                     // 4. Enter Q#BP4's transaction, so any hook observes
                     //    the DOCUMENT TARGET as active.
                     let mut request = DisplayRequest::new(buffer_id);
