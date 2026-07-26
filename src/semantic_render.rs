@@ -985,10 +985,18 @@ impl SemanticRenderState {
             StatuslineEvaluationOutcome::Invalidated {
                 authoritative_empty,
             } => {
-                for context in authoritative_empty
-                    .into_iter()
-                    .filter(|context| context.frontend_id == frontend_id)
-                {
+                // Bottom-panel A2A-2: the clear must be filtered by
+                // DOCUMENT WINDOW exactly like the Ready arm. The
+                // semantic peer has ONE statusline slot, so publishing
+                // the panel context's clear here replaces the document's
+                // payload with the panel's — the same misrouting the
+                // Ready arm was fixed for, on the clear path.
+                //
+                // A panel's own clear belongs to the future panel
+                // painter (`PanelFrame`, Stage 2B), not to this wire.
+                for context in authoritative_empty.into_iter().filter(|context| {
+                    context.frontend_id == frontend_id && Some(context.window_id) == document_window
+                }) {
                     self.emit_statusline_payload(context.buffer_id, Vec::new(), Vec::new(), out);
                 }
             }
@@ -2949,11 +2957,15 @@ mod tests {
             "stale evaluation retains the prior baseline until snapshot reset"
         );
 
+        // Bottom-panel A2A-2: the clear is filtered by DOCUMENT window
+        // identity, so the context under test must BE the document
+        // window — passing `None` here would assert nothing.
+        let document_window = crate::window::WindowId::next();
         let invalidated = || StatuslineEvaluation {
             outcome: StatuslineEvaluationOutcome::Invalidated {
                 authoritative_empty: vec![crate::statusline::StatuslineContext {
                     frontend_id: FrontendId::LOCAL,
-                    window_id: crate::window::WindowId::next(),
+                    window_id: document_window,
                     buffer_id,
                     active: true,
                 }],
@@ -2961,13 +2973,13 @@ mod tests {
             new_failures: Vec::new(),
         };
         let mut replacement = Vec::new();
-        semantic.emit_statusline_segments(invalidated(), None, &mut replacement);
+        semantic.emit_statusline_segments(invalidated(), Some(document_window), &mut replacement);
         assert_eq!(
             statusline_of(&replacement),
             Some((buffer_id, Vec::new(), Vec::new()))
         );
         let mut unchanged = Vec::new();
-        semantic.emit_statusline_segments(invalidated(), None, &mut unchanged);
+        semantic.emit_statusline_segments(invalidated(), Some(document_window), &mut unchanged);
         assert!(
             unchanged.is_empty(),
             "the empty invalidation became baseline"

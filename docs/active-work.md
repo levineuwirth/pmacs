@@ -492,27 +492,36 @@ implemented and in review.**
   worktree `../pmacs-bp-stage2a`, **canonical `main` @ `cf54270`
   integrated** (review round 1, finding 4 — the terminal-config lane
   #173 also changes `src/editor.rs`, so gates were rerun on the merge
-  result, not the old combination). Two commits: the classified census routing, then the
-  painter extraction + acceptance. **No protocol change; no behavior
+  result, not the old combination). Five commits: the classified census
+  routing, the painter extraction + acceptance, the lane record, then
+  the round-1 and round-2 review fixes. **No protocol change; no behavior
   change for any frontend today** — with `panel_capable = false` for
   semantic sessions, `primary_document_window` returns `view.active`
   in every existing configuration, so this is seam adoption that
   becomes load-bearing in 2B.
-- Verification on this branch: `cargo fmt --check` clean; strict
-  workspace Clippy clean; **1,832 default + 2,009 CRDT** library tests;
-  new `bottom_panel_stage2a_acceptance` 10/10; bottom-panel Stage 1
-  46; statusline segments 7 default / 8 CRDT; m11_5 semantic 2 CRDT;
-  GPU initial target 14 CRDT; vterm Stage 1/2 10 / 6; folding Stage 2
-  48; M4 121; required GPU 202; `git diff --check` clean.
-- **Both key routings were falsified by revert.** Rerouting
-  `dispatch_idle_for` (#14, Focus) through `primary_document_window`
-  fails `focus_class_dispatch_idle_still_tracks_the_focused_window`;
-  reverting the statusline lookup (#12, Projection) to `view.active`
-  fails the document-context test. Worth recording: the *structural*
-  test `focus_and_projection_disagree_in_the_same_state` did **not**
-  catch the first bite — it compares the two authorities directly, so
-  only a consumer-level assertion catches a misrouted consumer. Keep
-  both kinds.
+- Verification on the merge result: `cargo fmt --check` clean; strict
+  workspace Clippy clean; **1,832 default + 2,014 CRDT** library tests;
+  `bottom_panel_stage2a_acceptance` **16**; bottom-panel Stage 1 46;
+  statusline segments 8 CRDT; m11_5 semantic 2 CRDT; GPU initial target
+  14 CRDT; terminal config 12 CRDT; vterm Stage 1/2 10 / 6; folding
+  Stage 2 48; M4 121; required GPU 202; `git diff --check` clean.
+- **Every routed producer is now pinned at a seam its production caller
+  uses, and each pin was falsified by revert**: #1 follow, #2 lazy CRDT
+  upgrade, #3 `CursorByte`, #5 decorations, #7 `Viewport` (aligns
+  without focusing), #8 `Pointer` (aligns and focuses), #9 the
+  terminal-context gate, #12 statusline, #21 the publication filter,
+  plus the focus-class negatives. #1/#3/#21 required extracting three
+  named helpers, because their only production caller is
+  `dispatcher_loop`, which no test can drive.
+- **Three lessons about the TESTS, not the code, all from review:**
+  (a) a *structural* test comparing the two authorities directly does
+  **not** catch a misrouted consumer — only consumer-level assertions
+  do; (b) a daemon-path test must `register_session` or the event is
+  dropped at the uninstalled-session check before reaching the code
+  under test; (c) a discriminating fixture must make the two routings
+  DISAGREE — comparing two non-terminal buffers, or two windows with no
+  selection, yields the same answer either way and proves nothing.
+  Round 2 found four of my own pins vacuous by exactly these shapes.
 - **Review round 1 closed: 4 P1 + 2 P2, all real.** The P1s were a
   stale-`Pointer` focus steal (the failed-alignment arm returned the
   window, so #8's activation focused it before `dispatch_pointer`

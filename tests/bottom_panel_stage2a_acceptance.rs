@@ -32,6 +32,14 @@ fn exec(s: &EditorState, src: &str) {
     s.lua_host.lua().load(src.to_string()).exec().unwrap();
 }
 
+fn side_window_of(core: &pmacs::editor_core::EditorCore, fid: FrontendId) -> Option<WindowId> {
+    core.views[&fid].layout.iter_ids().into_iter().find(|id| {
+        core.windows
+            .get(id)
+            .is_some_and(|w| w.params.side.is_some())
+    })
+}
+
 fn side_window(s: &EditorState) -> Option<WindowId> {
     let core = s.core.borrow();
     core.views[&FrontendId::LOCAL]
@@ -540,48 +548,239 @@ fn consumer_line_numbers_follow_the_document_not_the_focused_panel() {
 }
 
 #[test]
-fn consumer_statusline_segments_name_the_document_window() {
-    use pmacs::protocol::ByteRange;
+fn consumer_statusline_segments_carry_the_document_payload_not_the_panel() {
+    use pmacs::protocol::{ByteRange, InstanceMessage};
     use pmacs::semantic_render::SemanticRenderState;
 
-    // §1.3 #12 at the producer: the wire segments must be selected by
-    // the DOCUMENT window even though the fan-out now also evaluates the
-    // visible side window (A2A-2).
+    // §1.3 #12 / A2A-2 at the WIRE. Round 2 finding: the previous
+    // version discarded `render_frame`'s output and only reasserted
+    // `primary_document_window`, so restoring the producer's
+    // "first context for my frontend" selector left it green.
+    //
+    // The peer must negotiate v18 or no `StatuslineSegments` is emitted
+    // at all and the assertion would be vacuous a second way.
     let s = editor();
-    let (fid, doc_win, _panel_win, doc_buf) = semantic_frontend_with_focused_panel(&s);
+    let (fid, _doc_win, _panel_win, doc_buf) = semantic_frontend_with_focused_panel(&s);
+    let panel_buf = {
+        let core = s.core.borrow();
+        let panel = side_window_of(&core, fid).expect("panel");
+        core.windows[&panel].buffer_id
+    };
 
-    let mut sem = SemanticRenderState::new(fid);
+    // One provider so a payload exists to misroute.
+    exec(
+        &s,
+        "pmacs.statusline.register({ name = \"probe\", side = \"left\",
+             face = \"ui.modeline\", fn = function(ctx) return \"X\" end })",
+    );
+
+    let mut sem = SemanticRenderState::for_peer(fid, 18);
     sem.set_viewport(doc_buf, ByteRange { start: 0, end: 0 }, 0);
-    // Not asserting on message presence (a peer that never negotiated
-    // v18 emits none); asserting the routing input the producer uses.
-    let _ = sem.render_frame(&s);
+    let msgs = sem.render_frame(&s);
 
-    assert_eq!(
-        s.core.borrow().primary_document_window(fid),
-        Some(doc_win),
-        "the producer's document-window selector must name the document"
+    let targets: Vec<_> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            InstanceMessage::StatuslineSegments { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !targets.is_empty(),
+        "non-vacuity: a v18 peer with a registered provider must emit StatuslineSegments"
+    );
+    assert!(
+        targets.iter().all(|b| *b == doc_buf),
+        "every StatuslineSegments must target the DOCUMENT buffer; got {targets:?}          (document {doc_buf:?}, panel {panel_buf:?})"
+    );
+    assert!(
+        !targets.contains(&panel_buf),
+        "the panel's context must never reach the document statusline wire"
     );
 }
 
 #[test]
-fn consumer_terminal_declaration_cannot_be_claimed_by_a_focused_panel() {
-    // §1.3 #6/#10/#11 through the real guard: with the panel focused,
-    // a declaration naming the PANEL's buffer must be refused, because
-    // the full-window terminal surface is the document window.
-    let s = editor();
-    let (fid, _doc_win, panel_win, doc_buf) = semantic_frontend_with_focused_panel(&s);
-    let panel_buf = s.core.borrow().windows[&panel_win].buffer_id;
+fn consumer_terminal_declaration_resolves_the_document_not_the_focused_panel() {
+    use pmacs::terminal::TerminalSpec;
+
+    // §1.3 #6/#10/#11 through the real guard. Round 2 finding: the
+    // previous version compared two NON-terminal buffers, so both the
+    // old and new routings returned `false` and it could not
+    // discriminate. Make the DOCUMENT window hold a real terminal: the
+    // document routing then answers `true` while the old `view.active`
+    // routing (which names the focused panel) answers `false`.
+    let mut s = editor();
+    let (fid, doc_win, _panel_win, _doc_buf) = semantic_frontend_with_focused_panel(&s);
+
+    let mut spec = TerminalSpec::new("/bin/sh");
+    spec.rows = 10;
+    spec.cols = 40;
+    let term_buf = s.open_terminal(spec).expect("a real terminal session");
+
+    // Install the terminal in the DOCUMENT window; the panel keeps its
+    // own non-terminal buffer and keeps focus.
+    {
+        let mut core = s.core.borrow_mut();
+        core.install_buffer_in_window(doc_win, term_buf)
+            .expect("install the terminal in the document window");
+    }
+    let panel_buf = {
+        let core = s.core.borrow();
+        let panel = side_window_of(&core, fid).expect("panel");
+        core.windows[&panel].buffer_id
+    };
 
     assert!(
-        !s.semantic_terminal_declaration_is_active(fid, panel_buf),
-        "a focused panel's buffer must not become the document terminal declaration"
+        s.semantic_terminal_declaration_is_active(fid, term_buf),
+        "the DOCUMENT window's terminal must be declarable while the panel owns focus"
     );
-    // Non-vacuity: the document buffer is not a terminal either, so pin
-    // that the guard resolves the DOCUMENT window by asserting the
-    // window identity the resolver used.
+    assert!(
+        !s.semantic_terminal_declaration_is_active(fid, panel_buf),
+        "the focused panel's own buffer must never claim the document declaration"
+    );
+}
+
+#[test]
+fn invalidated_statusline_clears_only_the_document_not_the_panel() {
+    use pmacs::protocol::{ByteRange, InstanceMessage};
+    use pmacs::semantic_render::SemanticRenderState;
+
+    // Round 2 finding 1. The `Invalidated` arm emits an
+    // authoritative-empty payload for EVERY context of the frontend.
+    // Once A2A-2's fan-out yields document + panel, that publishes two
+    // clears on a wire with ONE statusline slot, so the panel's payload
+    // replaces the document's. This is the live, observable half of the
+    // routing bug — the `Ready` arm happens to be safe today only
+    // because the document context is captured first.
+    let s = editor();
+    let (fid, _doc_win, _panel_win, doc_buf) = semantic_frontend_with_focused_panel(&s);
+    let panel_buf = {
+        let core = s.core.borrow();
+        let panel = side_window_of(&core, fid).expect("panel");
+        core.windows[&panel].buffer_id
+    };
+    assert_ne!(doc_buf, panel_buf, "fixture: the two buffers must differ");
+
+    // A provider that unregisters itself mid-evaluation is the canonical
+    // registry-mutation invalidation.
+    exec(
+        &s,
+        r"_G.SL_SELF = pmacs.statusline.register {
+              name='self-remove', side='left', priority=100,
+              fn=function() pmacs.statusline.unregister(SL_SELF); return 'STALE' end,
+          }",
+    );
+
+    let mut sem = SemanticRenderState::for_peer(fid, 18);
+    sem.set_viewport(doc_buf, ByteRange { start: 0, end: 0 }, 0);
+    let msgs = sem.render_frame(&s);
+
+    let targets: Vec<_> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            InstanceMessage::StatuslineSegments { buffer_id, .. } => Some(*buffer_id),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !targets.contains(&panel_buf),
+        "an invalidated evaluation must not clear the PANEL's context on the \
+         document statusline wire; got {targets:?} (document {doc_buf:?}, \
+         panel {panel_buf:?})"
+    );
+}
+
+#[test]
+fn the_semantic_fan_out_captures_the_document_first() {
+    use pmacs::statusline::{
+        StatuslineEvaluationOutcome, StatuslineEvaluationTarget, evaluate_statusline,
+    };
+
+    // The `Ready` arm selects by window identity, so capture order is not
+    // load-bearing for correctness — but it IS load-bearing for the
+    // falsifiability of that selector, so pin it explicitly rather than
+    // leaving a silent dependency. If a future change reorders the
+    // fan-out, this fails and whoever reads it learns why it mattered.
+    let s = editor();
+    let (fid, doc_win, _panel_win, doc_buf) = semantic_frontend_with_focused_panel(&s);
+
+    let evaluation = evaluate_statusline(
+        s.lua_host.lua(),
+        &s.core,
+        &s.statusline_registry,
+        StatuslineEvaluationTarget::Semantic {
+            frontend_id: fid,
+            declared_buffer: doc_buf,
+        },
+    );
+
+    match evaluation.outcome {
+        StatuslineEvaluationOutcome::Ready(windows) => {
+            assert_eq!(windows.len(), 2, "document + visible side window");
+            assert_eq!(
+                windows[0].context.window_id, doc_win,
+                "the DOCUMENT context must be captured first"
+            );
+        }
+        other => panic!("expected Ready, got {other:?}"),
+    }
+}
+
+#[test]
+fn consumer_decorations_follow_the_document_selection_not_the_panel() {
+    use pmacs::protocol::{ByteRange, InstanceMessage};
+    use pmacs::semantic_render::SemanticRenderState;
+
+    // §1.3 #5 — Projection. A selection made inside a FOCUSED PANEL must
+    // not paint selection decorations into the document's viewport.
+    //
+    // To DISCRIMINATE, the panel must display the SAME buffer the
+    // viewport declares and hold a NON-EMPTY selection while the
+    // document holds none. With different buffers (the first attempt)
+    // both routings emit nothing and the test proves nothing.
+    let s = editor();
+    let (fid, doc_win, panel_win, doc_buf) = semantic_frontend_with_focused_panel(&s);
+
+    exec(&s, "PROBE = pmacs.buffer.list()[1]");
+    {
+        let mut core = s.core.borrow_mut();
+        // Put real text in the document buffer so a span exists.
+        {
+            let reg = core.registry.borrow();
+            let _ = reg.get(doc_buf).expect("doc");
+        }
+        // The panel shows the document's buffer and selects a range.
+        core.install_buffer_in_window(panel_win, doc_buf)
+            .expect("panel shows the document buffer");
+        let panel = core.windows.get_mut(&panel_win).expect("panel");
+        panel.selection = Some(pmacs::window::Selection { anchor: 0 });
+        panel.cursor = 4;
+        // The document window selects nothing.
+        let doc = core.windows.get_mut(&doc_win).expect("doc");
+        doc.selection = None;
+        doc.cursor = 0;
+    }
+
+    let mut sem = SemanticRenderState::for_peer(fid, 18);
+    sem.set_viewport(doc_buf, ByteRange { start: 0, end: 8 }, 0);
+    let msgs = sem.render_frame(&s);
+
+    let selection_decorations: usize = msgs
+        .iter()
+        .filter_map(|m| match m {
+            InstanceMessage::Decorations { segments, .. } => Some(
+                segments
+                    .iter()
+                    .map(|seg| seg.decorations.len())
+                    .sum::<usize>(),
+            ),
+            _ => None,
+        })
+        .sum();
     assert_eq!(
-        s.core.borrow().primary_document_buffer(fid),
-        Some(doc_buf),
-        "the terminal resolver's window must be the document window"
+        selection_decorations, 0,
+        "a selection living in the focused PANEL must not decorate the document viewport"
     );
 }

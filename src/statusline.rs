@@ -215,10 +215,25 @@ pub enum StatuslineEvaluationTarget {
         /// Frontend whose entire visible layout is evaluated.
         frontend_id: FrontendId,
     },
-    /// Only the frontend's active window, iff it still displays the declared
-    /// semantic viewport buffer.
+    /// The frontend's **primary document window**, iff it still displays
+    /// the declared semantic viewport buffer, **plus its visible side
+    /// window** when one exists (bottom-panel Q#BP8 / A2A-2).
+    ///
+    /// Two contexts, not one: the document result feeds the semantic
+    /// `StatuslineSegments` wire, while the side result paints in the
+    /// panel's own mode line. Unprojected document splits run no
+    /// callbacks, and a derived-hidden side (Q#BP2b) is omitted because
+    /// it has no mode line to paint this frame.
+    ///
+    /// The document context is captured **first**; consumers must still
+    /// select by window identity rather than position, since only one of
+    /// the two may reach the single semantic statusline slot.
+    ///
+    /// `active` on each context reports **actual focus**, so a document
+    /// provider truthfully observes `active = false` while a panel owns
+    /// focus (Q#BP14, parent acceptance 42).
     Semantic {
-        /// Frontend whose focused daemon window is evaluated.
+        /// Frontend whose document (and visible side) window is evaluated.
         frontend_id: FrontendId,
         /// Buffer declared by the semantic viewport.
         declared_buffer: BufferId,
