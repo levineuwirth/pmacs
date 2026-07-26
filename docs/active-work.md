@@ -1,6 +1,6 @@
 # Active work — cross-machine resume ledger
 
-**Snapshot: 2026-07-25.** This file records volatile work that has not
+**Snapshot: 2026-07-26.** This file records volatile work that has not
 landed on `main`. Read it after `docs/agent-handoff.md`. Remove completed
 entries when their PR merges; do not let this become a second permanent
 backlog.
@@ -14,11 +14,13 @@ backlog.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `d152120` (the bottom-panel landed-doc refresh #156
-  atop the inline-math slice #158, dired Stage 1 #165, the GPU terminal
-  input fix #166, Lean 4 Stage 2 #161, the dired framing #164,
-  COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160, and the minimap
-  blank-slab fix #159; protocol v20).
+  `githubsucks/main` @ `d400f30` (Lean 4 Stage 3b #170 atop Stage 3a
+  #167, the bottom-panel landed-doc refresh #156, the inline-math slice
+  #158, dired Stage 1 #165, the GPU terminal input fix #166, Lean 4
+  Stage 2 #161, the dired framing #164, COHERENCE.md #163, find-file
+  #162, Lean 4 Stage 1 #160, and the minimap blank-slab fix #159;
+  protocol v20). The previous snapshot named `d152120`; the recovery
+  check below accepts it or anything newer.
 - On the transfer source, `origin/main` named a release mirror at
   `d3fa632` and lagged badly. On the current destination, `origin` names
   the canonical URL. This difference is why all recovery begins by
@@ -141,139 +143,172 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Lean 4 lane (Arc 8) — Stage 1 MERGED; Stage 2 IN REVIEW (PR #161)
+## Lean 4 lane (Arc 8) — Stages 1, 2, 3a, 3b MERGED; Stage 4a IN REVIEW
 
-- Stage 1 **merged as #160** (`main` @ `0827dd1`, 2026-07-25, one review
-  round, all twelve checks green). Branch `githubsucks/lean4-stage1`
-  retained; it was worked in the shared checkout (no sibling worktree).
-- Approved framing: `docs/lean4-mode-framing.md` revision 4, committed as
-  the branch's first commit (`a382965`) after three review rounds. **Seven
-  stages**, 19 decisions (Q#LN1–19), 64 acceptance criteria. North star:
-  match or exceed VS Code's Lean support.
-- **Stage 1 implemented; no wire change (protocol stays v20), no LSP, no
-  frontend change.** Four commits: framing, grammar, theme captures,
-  editing surface + acceptance.
-  - `Cargo.toml` + `src/syntax.rs`: `arborium-lean` 2.18 and one
-    `BUILTIN_LANGUAGES` entry named **`lean4`** (Q#LN2 — the name becomes
-    the `didOpen` language_id), claiming `.lean` only.
-  - `src/highlight.rs`: four capture entries — `constructor`, `character`,
-    `keyword.conditional`, `warning`.
-  - `builtin/runtime/{comment,pair,syntax}.lua`: `--` comments, the
-    `⟨⟩ ⦃⦄ ⟮⟯` pair set, the `lean` → `lean4` modeline alias.
-  - `tests/lean4_stage1_acceptance.rs` plus unit tests in `syntax.rs` /
-    `highlight.rs`: 12 criteria, 17 tests.
-- **Q#LN1's open obligation is discharged.** `tree-sitter-lean4` is
-  unusable (depends on `tree-sitter ^0.25` directly against our 0.26,
-  exports no `LANGUAGE` const despite its README, packages no queries);
-  `arborium-lean` rides `tree-sitter-language 0.1` with a pre-generated
-  ABI-15 parser. `cargo tree -d` shows no duplicate core. The parse smoke
-  pins the failure mode that matters: `→`/`∀`/`≥` must produce
-  `(arrow)`/`(forall)`/`(comparison)`, since a mismatched-core build
-  degrades silently on exactly those characters rather than failing loudly.
-- **Q#LN4 is a deliberate retro-paint of seven language entries**, not
-  four: `tree_sitter_javascript::HIGHLIGHT_QUERY` is concatenated
-  base-first into javascriptreact/typescript/typescriptreact. Its shape is
-  "every capitalized identifier" (`#match? "^[A-Z]"`) plus every Lua table
-  brace — not "constructors". Pinned in both directions per #146.
-- Implementation findings not in the framing:
-  - `warning` had to move from bold red to bold **bright** red: `number`
-    is plain `fg(1)`, so `sorry` and an adjacent numeric literal were the
-    same colour. Found by writing the test.
-  - `Some(1)` is **not** `@constructor` — in call position a narrower
-    `@function` pattern wins. Only bare or pattern-position capitalized
-    identifiers reach it. Pinned so the blast-radius claim stays honest.
-  - Lean node kinds nest: `module > declaration > def|theorem`.
-  - `pmacs.parse.injection_aliases` is a documented **write-only** Lua
-    proxy (canonical map is Rust-side), so fence tests must drive
-    `_parse_now` and inspect layer languages, never read the table back.
-- **Review round 1 addressed.** The finding: acc12's server-list assertion
-  could not fail for the regression it named — the shared `editor()`
-  helper wipes `pmacs.lsp.config` before any buffer opens, so
-  `#pmacs.lsp.list() == 0` holds for every language regardless of what
-  Stage 1 ships. It now asserts against a **pristine** `EditorState` that
-  `pmacs.lsp.config.lean4` is nil, with a non-vacuity check that the same
-  lookup finds `rust`; bite-verified by adding a `lean4` config to
-  `lsp.lua` and watching it fail. Also fixed a stale column in a
-  `highlight.rs` comment.
-- Verification on this branch: `cargo fmt --check` clean; strict workspace
-  Clippy clean; 1,826 default + 2,003 CRDT library tests; lean4 Stage 1
-  9/9; comment toggle 14; auto-pair 45; injection 4; M4 121; required GPU
-  152; **isolated-config workspace sweep 3,150 across 90 suites**;
-  `git diff --check` clean. The sweep needs an isolated `XDG_CONFIG_HOME`
-  for the reason recorded in the bottom-panel lane below.
-### Stage 2 — multi-root LSP server affinity (Q#LN15)
+- **Stages 1, 2, 3a and 3b are MERGED** — #160 (`main` @ `0827dd1`),
+  #161 (`46a1b8f`), #167 (`6f348c9`), #170 (`d400f30`). Their full
+  histories were pruned from this ledger in round 6, per this file's own
+  instruction to remove entries when their PR merges; the durable facts
+  now live in `docs/agent-handoff.md` §1's Lean 4 bullet, which is where
+  a fresh machine should read them. `docs/lean4-mode-framing.md` rev 8
+  carries the decisions.
 
-- Portable branch: `githubsucks/lsp-multi-root-affinity`, shared checkout,
-  based on `githubsucks/main` @ `0827dd1`. Named for the substrate, not
-  for Lean: **the diff contains no Lean content**, because `ensure_server`
-  is the one server-affinity function every LSP language shares and a
-  cross-cutting change to it must not be reviewable only as a Lean
-  feature.
-- Three files, no protocol change: `src/lua_bindings/mod.rs` (the
-  `lsp.list()` row builder gains `root_uri` + `cwd`),
-  `builtin/runtime/lsp.lua` (`project_root_for` returns `root, source`;
-  `ensure_server` hoists it above the reuse loop and matches on it),
-  `tests/lsp_multi_root_acceptance.rs` (9 tests, acceptance 13–21).
-- **The rule that keeps this from regressing every other language: the
-  affinity key is the root only when a root was actually FOUND.**
-  `project_root_for` never returns nil for a file with a path — its last
-  resort is the file's own directory — so a naive `(language_id, root)`
-  key gives every directory of loose scratch files its own server, for
-  every language. `source` is `"config" | "detected" | "fallback"` and
-  only the first two become a key.
-- **Wire-identical for the fallback case, and that is provable rather
-  than hoped.** Matching is on the spawned spec's `root_uri` (nil matching
-  nil), so the fallback spawn passes `root_uri = nil`; `cwd` still carries
-  the directory and `build_initialize` derives the identical `rootUri`
-  from `cwd` when the field is None, using a percent-encoder with the same
-  allowed set as Lua's `file_uri_for`. `build_initialize` (`src/lsp.rs`)
-  is the **only** reader of `spec.root_uri` in the tree.
-- Deliberate behavior change, asserted not discovered: a server
-  hand-spawned from `init.lua` with only `cwd` set also reads back nil, so
-  a root-bearing attach will not adopt it.
-- `config[language].root` may now be a `function(path) -> string|nil`,
-  memoized per directory — needed because the hoist puts root resolution
-  on every attach rather than every spawn. The memo is keyed **weakly by
-  the resolver function itself**, so replacing `config[lang].root` cannot
-  serve a root the previous resolver computed. This is Q#LN8's
-  generalization landing early; the Lean resolver that uses it is Stage 3.
-- Bite-verified three ways: 5/9 fail against the pre-change `lsp.lua`,
-  8/9 against the pre-change `mod.rs`, and — the one that matters most —
-  installing the naive always-key-on-root variant fails acceptance 20 and
-  21 exactly as Q#LN15 part 2 predicts. The four that survive the first
-  bite (13, 15, 16, 19) are the regression pins; passing on both sides is
-  their job.
-- Every fixture sets `pmacs.project.set_search_boundary` at its own
-  tempdir root. Without it the marker walk climbs to the filesystem root
-  and a stray `.git` above the temp directory turns the markerless cases
-  into detected ones — the assertions would still pass while testing
-  nothing.
-- **Found but not fixed here (pre-existing, own lane):** `ensure_server`
-  never forwards `cfg.restart` to `pmacs.lsp.spawn`, so a
-  `restart = "never"` in `pmacs.lsp.config[lang]` is silently dropped on
-  the auto-attach path. At least one existing test sets it believing it
-  takes effect. Out of scope for a PR whose acceptance 16 pins existing
-  attach behavior as unchanged.
-- **Review round 1 addressed.** The blocker was process, not design: the
-  test file was committed *before* `cargo fmt` ran, so the fix sat
-  uncommitted in the working tree and the branch as pushed failed the
-  first gate. The reported "fmt clean" described the worktree, not the
-  branch — gate results are only meaningful when run against the pushed
-  tree. Also added the two pins review asked for (a **string** `config
-  .root` as an affinity key — acc17 only covered the function form; and
-  `root = false` reading as unset), each bite-verified against exactly
-  the mutation it targets and neither against the other. And documented
-  the canonicalization obligation: the `"detected"` arm is canonicalized
-  for free, a **configured** root is not, so on macOS a resolver
-  returning `/var/…` and a detected `/private/var/…` are different keys
-  for one directory. Stage 3's Lean resolver is the first real consumer,
-  so the obligation is written at the point of use.
-- Verification on this branch: `cargo fmt --check` clean; strict
-  workspace Clippy clean; 1,826 default + 2,003 CRDT library tests;
-  multi-root 11/11; M4 121; statusline 7; completion popup 9; auto-pair
-  45; required GPU 155; **isolated-config workspace sweep 3,164 across 91
-  suites**; `git diff --check` clean. The sweep needs an isolated
-  `XDG_CONFIG_HOME` and `-- --skip basedpyright`.
+### Stage 4 — framing rev 8, split into 4a/4b (branch `lean4-stage4a-typed-edit-chain`)
+
+- Stages 3a and 3b **merged as #167** (`main` @ `6f348c9`) and **#170**
+  (`main` @ `d400f30`), 2026-07-26. Both were integrated against a main
+  that had advanced 50 commits mid-review; the only conflict either time
+  was this ledger's own lane headings, resolved by keeping both sides.
+- Worktree `../pmacs-lean-stage4`, branched off `main` @ `d400f30`.
+  Framing-only so far: `docs/lean4-mode-framing.md` **revision 8**. No
+  code. Awaiting user approval before implementation, per the workflow.
+- **Round 6 review found five P1s, four of them internal to rev 6** —
+  facts about pmacs the revision asserted without checking, while its
+  external (upstream) facts held. Fixed in rev 7: Stage 4a's footprint
+  omitted the test file its own acceptance requires; pending
+  abbreviation state was keyed by buffer when pmacs is **multi-frontend**
+  (`EditorCore.views` is per-`FrontendId`, `take_typed_edit` is already
+  frontend-keyed, and `buffer.after-switch` fires with NO arguments, so
+  a buffer-keyed clear lets any frontend discard another's pending
+  state); the shortest-match rule was missing its **tie-break by source
+  declaration order**, which 101 prefixes depend on and a `pairs`-
+  iterated Lua map cannot express; and the generator's "abort on keys
+  needing escaping" rule **rejects the real table** (`\` is a key, `"`
+  begins eleven).
+- **A 404 on a guessed path is not evidence of absence.** Rev 6 declared
+  the upstream package ships no README after fetching the package root,
+  with the directory listing showing `src/README.md` already in hand.
+  The README states the tie rule in one sentence.
+- **Round 7 review found one remaining P1 in acceptance 45i.** Rev 7
+  required A's pending abbreviation to survive B editing the same
+  buffer, while Q#LN22 also required an exact buffer-revision advance.
+  Those cannot both hold: revisions are buffer-global and every edit
+  bumps them. Rev 8 keeps the conservative guard and separates
+  ownership from survival — B cannot consume A's record, but B editing
+  the shared buffer invalidates A lazily; B switching buffers or
+  detaching remains frontend-scoped when no shared-buffer edit
+  intervenes.
+- **Round 5 re-scout split Stage 4 into 4a (substrate) and 4b (Lean).**
+  4a is the typed-edit consumer chain — `builtin/runtime/typed_edit.lua`
+  plus `pair.lua` re-expressed as one registered consumer, no behavior
+  change. 4b is the input method. The split is forced by §4's own rule,
+  which Stage 4's risk column ("refactors `pair.lua`'s provenance read")
+  broke while the prose called the stage Lean-only.
+- **This is the SECOND consecutive re-scout to find that rule broken**
+  (round 4 found it for Stage 3). Rev 5 had even noticed the shape and
+  answered it with a commit boundary. **A commit boundary is not a review
+  boundary.** Re-check every remaining stage against §4 at scout time;
+  the rule is not self-enforcing.
+- **Rev 5's expansion semantics were wrong in three ways**, found by
+  reading `leanprover/vscode-lean4` @ `17d1d08` rather than inferring
+  from behavior. Resolution is *shortest key having the input as a
+  prefix* (`\al` → `∀` from `all`, not `alpha`); there is **no
+  terminator list** (`'+ '` is a key, so space extends after `\+`; `'\'`
+  is a key, so `\\` → `\`); and an unmatchable tail is **appended**,
+  not dropped (`\alp7` → `α7`).
+- **There is no cursor-motion hook**, so rev 5's acceptance 43 ("moving
+  the cursor out abandons it") was not buildable. Abandonment is lazy —
+  validated at the next typed edit — and the criterion now asserts what
+  pmacs can actually detect. Upstream drives this off `changeSelections`;
+  that seam does not exist here.
+- **`dispatch_key` is only half the production path for 4b.** The
+  auto-pair suite gets away with dispatch-only because Q#AP1 removed the
+  pair chars from the optimistic classifiers; `\` and the letters are
+  NOT excluded, so on a CRDT frontend the optimistic producer is the real
+  path. That producer is `#[cfg(feature = "crdt")]` and CI never enables
+  `crdt`, and the gate list runs `--features crdt` only for `--lib` — a
+  crdt-gated integration test is **dark twice over**.
+- The whole expansion has cross-peer-degraded undo (Q#LN21): six
+  source-peer optimistic inserts replaced by one daemon-peer op.
+  `set_round_trip_input` would fix it and is rejected — it also disables
+  `dispatch_idle`, so RET stops inserting a newline.
+- Table facts re-derived at `17d1d08`: 1,855 entries, 36,861 bytes, all
+  keys ASCII, **64** keys carry a `lean4` pair-set char, **305** keys are
+  proper prefixes of another (so 1,550 expand eagerly), **26** values
+  carry `$CURSOR`, and **119** are multi-codepoint — the 26
+  `$CURSOR`-bearing values plus 93 others.
+- Citation sweep per COHERENCE §25: five live citations moved in the 50
+  commits since rev 5 — `take_typed_edit` 12827→12990,
+  `handle_server_requests` 1549→1815, `fs.stat` 93→133,
+  `detect_buffer_language` 452→457, `send_request`/`send_notification`
+  9342/9361→9507/9527.
+### Stage 4a — the typed-edit consumer chain (IMPLEMENTED, same branch)
+
+- Footprint exactly as Q#LN10 declares it: `builtin/runtime/typed_edit.lua`
+  (new), `pair.lua` re-expressed as one consumer,
+  `src/editor.rs` +15 (the `include_str!` and its ordering comment), and
+  `tests/typed_edit_chain_acceptance.rs` (new, 13 tests).
+  **`tests/auto_pair_acceptance.rs` is UNCHANGED — `git diff --stat
+  main...HEAD -- tests/auto_pair_acceptance.rs` is empty.** That is
+  criterion 46 checked at the diff, which is the only way it means
+  anything.
+- **The chain calls consumers even when the record is nil.** This is a
+  decision, not an implementation detail: three existing auto-pairing
+  tests assert `pmacs.pair._last_record == nil` after a record-less
+  fan-out (paste, programmatic insert, nested manual `hook.run`), so
+  skipping consumers on nil fails them. Stage 4b needs the same
+  delivery to abandon a pending abbreviation an unrelated edit
+  invalidated.
+- **Ordered insertion, not `table.sort`** — Lua's sort is not stable, and
+  "ties broken by registration order" is a stated contract.
+- **The chain `pcall`s each consumer** and reports through
+  `set_status`. Rev 7 justified this by claiming an uncontained throw
+  would fail the fan-out for every other subscriber including lsp.lua's
+  didChange flush; **that is wrong** — `run_all_must_succeed`
+  (`src/hook.rs:332`) collects errors and continues, so the other
+  subscribers still run. The real consequence is narrower and still
+  worth containing: the throw skips every LATER consumer in the chain.
+  The rendering is protected too, because a Lua error may be a table
+  whose `__tostring` throws.
+- **Round 8 (review) findings, all fixed on this branch:** each consumer
+  now gets its **own shallow copy** of the record (the same table let a
+  declining consumer rewrite `rec.char`, which pairing reads — typing
+  `x` could produce `x)`); the fan-out iterates a **snapshot** (a
+  consumer registering a lower-priority one shifted itself forward under
+  `ipairs` and ran twice, unbounded if repeated); `tostring` moved
+  inside the containment; **non-finite and non-integer priorities are
+  rejected** (NaN is a number and every ordered comparison with it is
+  false, so it landed wherever the insertion scan gave up and silently
+  voided the ordering contract); and `add_consumer` now returns a handle
+  with `remove_consumer` beside it, so re-evaluating a config no longer
+  leaks callbacks the way `pmacs.hook.add` does (COHERENCE §13).
+- **Every acceptance test is bite-verified by mutation**, per the
+  standing rule that a test is not evidence until the mutation it
+  targets has been shown to fail it:
+
+  | Mutation | Tests it fails |
+  |---|---|
+  | append instead of ordered insert | 5 chain |
+  | `>=` instead of `>` in the insert scan | 1 chain (tiebreak) |
+  | re-take the record per consumer | 4 chain |
+  | ignore the claim return value | 1 chain |
+  | drop the `pcall` | 1 chain |
+  | skip consumers when `rec == nil` | 1 chain + **3 auto-pair** |
+  | load `typed_edit.lua` after `lsp.lua` | 1 chain + **2 auto-pair** (Q#AP7) |
+  | hand every consumer the same record table | 1 chain (46f) |
+  | iterate the live array instead of a snapshot | 1 chain (46g) |
+  | render the error outside the `pcall` | 1 chain (46d) |
+  | accept any Lua number as a priority | 1 chain (46h) |
+  | make `remove_consumer` a no-op | 2 chain (46g, 46h) |
+
+  The first attempt at the last bite was WORTHLESS as written: moving
+  only `typed_edit.lua` past `lsp.lua` left `pair.lua` calling a nil
+  `add_consumer`, so the runtime failed to load and all 9 tests died —
+  loud, but not a test of the flush-ordering property. Moving
+  `typed_edit.lua` AND `pair.lua` past `lsp.lua` is the faithful
+  falsification: registration succeeds, the hook lands late, and exactly
+  the three ordering tests fail. **A bite that kills everything has not
+  isolated anything.**
+- Verification on this branch (commit-then-gate, so this describes the
+  pushed tree): `cargo fmt --check` clean; strict workspace Clippy
+  clean; 1,832 default + 2,009 CRDT library tests; auto-pair 45/45;
+  typed-edit chain 13/13 (and 13/13 again under `--no-default-features
+  --features lua54`, since the fixes touch `math.huge`, `%`, and
+  `__tostring` behavior that differs between the backends); M4 121;
+  required GPU 202; **isolated-config workspace sweep 3,332 across 97
+  suites, zero failures** with `grep -c basedpyright` = 0; `git diff
+  --check` clean.
+- Stage 4b (the input method) is NOT in this PR and not started.
 
 ## Dired lane — Stage 0 MERGED; Stage 1 IN REVIEW (PR #165)
 
@@ -475,10 +510,166 @@ If it does not, stop and repair the remote/fetch configuration.
   **isolated-config workspace sweep 3,177 across 92 suites, zero failures**;
   `git diff --check` clean. Gates were run against the committed tree.
 
-## Bottom-panel lane (Arc 7) — Stage 1 MERGED; Stage 2 IN FRAMING
+## Terminal config + copy mode arc — Stage 1 IN REVIEW
 
-Stage 1 is on `main`. **Stage 2 is in framing**, no implementation in
-flight.
+- Approved framing: `docs/terminal-config-and-copy-mode-framing.md`
+  **revision 4** (four review rounds), committed as the first commit of
+  Stage 1's branch. Two stages, two branches, two PRs; **no protocol
+  change**.
+- **Stage 1 = `githubsucks/terminal-config`**, worktree
+  `../pmacs-terminal-config`, based on `githubsucks/main` @ `d152120`
+  and merged up to `c93f9ee` during review round 1. Profiles,
+  scrollback, escape key, and the `C-c t` opening binding.
+- **Stage 2 = `terminal-copy-mode`, not started.** Branch it off `main`
+  after Stage 1 merges: no dependency, but both edit
+  `builtin/runtime/terminal.lua`.
+- Load-bearing decisions, each forced by scouted ground truth:
+  - profiles are a **raw Lua table** — `ConfigValue` is four scalars with
+    no table kind, so they join `pmacs.lsp.config` / `pmacs.pair.sets`;
+  - the **two open-time settings resolve through the global chain**,
+    because they are read before the identity buffer exists; only
+    `terminal.escape-key` resolves per buffer;
+  - the escape cache lives on **`TerminalSession`** so its lifetime is
+    the terminal's. `value_epoch` alone is not a sufficient key: it does
+    not advance when focus moves between terminals with different
+    buffer-local values;
+  - repeating the escape sends **that chord**, not a hardcoded `0x03`.
+- **Four bites, each against a different plausible wrong
+  implementation** — hardcoded ETX fails acc6/9; epoch-only cache key
+  fails acc7; single last-entry cache fails acc8's parse count; removing
+  the invalid-value fallback fails acc10. The first version of acc7
+  passed against the epoch-only bite because it asserted only that
+  terminal A still worked; the discriminating assertion is that **each**
+  terminal honors its own chord and not the other's.
+- Test instruments worth reusing: `cat -v` is the echo probe, because the
+  screen rejects C0 controls before they reach cells so a raw echoed
+  `Ctrl-X` is invisible; and the probe **counts occurrences** rather than
+  testing presence, because a single-character probe collides with the
+  child's own banner text.
+- **Review round 1 (2026-07-25) — five findings, all real, all fixed.**
+  One blocker and two majors were the same failure in three places: a
+  claim asserted somewhere cheaper than where it lives.
+  - *Blocker — `COHERENCE.md` was stale in four places, not the three
+    reported.* Step 8 still read "no keybinding"; §11 still read "five
+    settings"; and §6's dispatch table still cited
+    `is_terminal_escape_chord`, **a symbol this PR deletes**. §25 makes
+    that update ride the PR. A PR that changes audited ground truth has
+    to re-grep the audit for its own symbols, not only for its topic.
+  - *Major — acceptance 5 was vacuous.* It asserted a registry
+    round-trip, so it stayed green with the setting's **only** consumer
+    deleted. It now opens a real terminal whose child overflows the
+    24-row screen, scrolls the view to its oldest retained row, and
+    asserts `LINE001` is present at 10,000 and absent at 0. **Asserting
+    a value was stored is not asserting anything reads it.**
+  - *Major — acceptance 8a asserted the session count, not the cache.*
+    An editor-side map with no purge hook — the exact rejected design —
+    leaks *while* sessions drain, so it passed. Fixed with a
+    `TerminalManager::escape_caches()` seam. **A lifecycle claim needs a
+    lifecycle observable.**
+  - *Moderate — `table.sort` over user-controlled profile keys.* A
+    table holding both a string and a numeric key raised `attempt to
+    compare number with string` **on the unknown-profile path**,
+    replacing the diagnostic being asked for; `%q` raised likewise on a
+    non-string `profile` argument. Both are partial functions applied to
+    user input **on a diagnostic path** — the error reporter was the
+    thing that failed.
+  - *Minor — the committed framing still said "not yet approved".*
+- **Three new bites, each falsified by revert**: deleting the scrollback
+  consumer fails acc5 (and only acc5); restoring the raw-key sort
+  reproduces `attempt to compare string with number` verbatim; and
+  implementing the rejected editor-side map fails the new acc8a at
+  `left: 2, right: 1` **while passing the old session-count version** —
+  which is the review finding demonstrated rather than argued.
+- Verification after the round-1 fixes, on the tree merged with
+  `githubsucks/main` @ `c93f9ee`: `cargo fmt --check` clean; strict
+  workspace Clippy clean; 1,832 default + 2,009 CRDT library tests;
+  `terminal_config_acceptance` **12/12 in both configurations**; vterm
+  Stage 1/2 9+10 / 6+6; config registry 16+16; bottom-panel Stage 1
+  46+46; M4 121; required GPU 202; `git diff --check` clean.
+  - `compile_mode_acceptance` fails 11/67 against the **real** user
+    config and passes 67/67 with an isolated `XDG_CONFIG_HOME` — the
+    known pre-existing trap, not this branch.
+  - **`vterm_stage3_acceptance::a37` fails on this machine — and fails
+    identically on the PR's own base `d152120`**, so it is not this
+    branch's regression. It is load-sensitive: it passed at `d152120`
+    once and failed at that same commit twenty minutes later, with a
+    second agent saturating the machine with `rustc` in between. Two
+    ways it lies, both worth knowing: it **silently returns `ok` when
+    `pmacs-gpu` is not built** in the same target dir (only
+    `PMACS_REQUIRE_GPU=1` promotes that skip to a failure, and the gate
+    list applies that flag to `-p pmacs-gpu`, a *different* package), and
+    it is **crdt-gated, so CI has never run it at all**. A green a37 in
+    a gate log means nothing unless the binary was built and the flag
+    was set. Needs its own lane; see the CI `crdt`-coverage lane on #168.
+  - `pmacs-gpu` itself failed 201/202 once under the same load and passed
+    202/202 on immediate rerun.
+
+## Bottom-panel lane (Arc 7) — Stage 1 + framing MERGED; Stage 2A IN REVIEW
+
+Stage 1 and the Stage 2 framing are on `main`. **Stage 2A is
+implemented and in review.**
+
+- **Stage 2A — portable branch `githubsucks/bottom-panel-stage2a`**,
+  worktree `../pmacs-bp-stage2a`, **canonical `main` @ `cf54270`
+  integrated** (review round 1, finding 4 — the terminal-config lane
+  #173 also changes `src/editor.rs`, so gates were rerun on the merge
+  result, not the old combination). Five commits: the classified census
+  routing, the painter extraction + acceptance, the lane record, then
+  the round-1, round-2 and round-3 review fixes. **No protocol change; no behavior
+  change for any frontend today** — with `panel_capable = false` for
+  semantic sessions, `primary_document_window` returns `view.active`
+  in every existing configuration, so this is seam adoption that
+  becomes load-bearing in 2B.
+- Verification on the merge result: `cargo fmt --check` clean; strict
+  workspace Clippy clean; **1,832 default + 2,015 CRDT** library tests;
+  `bottom_panel_stage2a_acceptance` **17**; bottom-panel Stage 1 46;
+  statusline segments 8 CRDT; m11_5 semantic 2 CRDT; GPU initial target
+  14 CRDT; terminal config 12 CRDT; vterm Stage 1/2 10 / 6; folding
+  Stage 2 48; M4 121; required GPU 202; `git diff --check` clean.
+- **Every routed producer is now pinned at a seam its production caller
+  uses, and each pin was falsified by revert**: #1 follow, #2 lazy CRDT
+  upgrade, #3 `CursorByte`, #5 decorations, #7 `Viewport` (aligns
+  without focusing), #8 `Pointer` (aligns and focuses), #9 the
+  terminal-context gate, #12 statusline, #21 the publication filter,
+  plus the focus-class negatives. #1/#3/#21 required extracting three
+  named helpers, because their only production caller is
+  `dispatcher_loop`, which no test can drive.
+- **Three lessons about the TESTS, not the code, all from review:**
+  (a) a *structural* test comparing the two authorities directly does
+  **not** catch a misrouted consumer — only consumer-level assertions
+  do; (b) a daemon-path test must `register_session` or the event is
+  dropped at the uninstalled-session check before reaching the code
+  under test; (c) a discriminating fixture must make the two routings
+  DISAGREE — comparing two non-terminal buffers, or two windows with no
+  selection, yields the same answer either way and proves nothing.
+  Round 2 found four of my own pins vacuous by exactly these shapes, and
+  round 3 found two more problems of the same family: a pin placed at a
+  HELPER while production called it from a producer (reverting only the
+  producer's call site left every test green), and a socket-pair
+  assertion whose blocking read made a regression HANG instead of fail.
+  Both now assert at the producer, with read timeouts on every read.
+- **Review round 1 closed: 4 P1 + 2 P2, all real.** The P1s were a
+  stale-`Pointer` focus steal (the failed-alignment arm returned the
+  window, so #8's activation focused it before `dispatch_pointer`
+  rejected the buffer), the missing A2A-2 two-context fan-out, a census
+  suite that asserted the AUTHORITY rather than the CONSUMERS, and the
+  missing main integration. **Two of the new pins were themselves
+  vacuous on the first attempt** — the dispatcher test passed because an
+  unregistered session is dropped at `daemon.rs:1962` before reaching
+  the aligner, and the painter test was a fixed-point check that
+  survived deleting `text_view.render`. Both now fail under their own
+  bite.
+- **`vterm_stage3_acceptance::a37` is a pre-existing flake here**, not a
+  Stage 2A regression: measured **6/8 failures on the base commit** and
+  **7/8 on the branch** in matched isolated samples. It needs a real
+  daemon + real PTY + headless GPU and is documented load-sensitive.
+  It also silently returns `ok` unless `pmacs-gpu` has been built, and
+  is `crdt`-gated so CI never runs it at all.
+- **Two suites are dark without `--features crdt`**:
+  `m11_5_semantic_acceptance` reports **0 tests** and
+  `gpu_initial_target_acceptance` reports **1** in the default config.
+  Both are semantic-census suites, so Stage 2A must be gated with the
+  feature on or its most relevant coverage never executes.
 
 - Stage 1 merged as **#155** (`main` @ `e745068`, 2026-07-24, after two
   review rounds). No protocol change. Durable substrate facts live in

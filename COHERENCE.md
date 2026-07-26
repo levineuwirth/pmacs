@@ -368,7 +368,7 @@ Full verdict table:
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
 | 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing PR #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
-| 8 | Open terminal | **Works but undiscoverable** | Full PTY with scrollback + modeline segment — reachable only as `M-x terminal`, no keybinding. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
+| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173). Named limitation: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Partial** | `M-x compile.run` works, defaults cwd to detected project root, parses Rust `-->` errors — but no keybinding, an **empty first prompt** (`initial = last and last.cmdline or ""`, `builtin/runtime/compile.lua:1134-1138`), and no `cargo build`/`cargo test` suggestion despite `ProjectKind::Cargo` existing (`src/project.rs:77`) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
 | 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
@@ -378,6 +378,13 @@ A journey observation worth keeping verbatim from the audit:
 **keybinding coverage is inverted relative to frequency** — `C-c @
 C-M-s` opens all folds, while opening a file, opening a terminal, and
 running a build have no bindings at all.
+
+Two of that observation's three examples have since been answered —
+opening a file by `C-x C-f` (#162) and opening a terminal by `C-c t`
+(#173). **Running a build still has no binding**, and the underlying
+inversion is a standing bias in how new work gets bound, not three
+isolated omissions: the quote stays as written because it names the
+pattern, and the pattern is not retired until step 9 is.
 
 ---
 
@@ -639,7 +646,7 @@ Everything funnels through one function: `EditorInstance::dispatch_key`
 | 3 | query-replace | `editor.rs:945` | `QueryReplaceKey::from_chord` (`editor.rs:2967`) | **full shadow** |
 | 4 | Minibuffer | `editor.rs:951` | `MinibufferAction::from_chord` (`src/minibuffer.rs:468`) | **full shadow** |
 | 5 | Completion popup | `editor.rs:958-971` | `CompletionPopupKey::from_chord` (`editor.rs:3056`) | **partial shadow** (control chords only; skipped while a multi-key prefix is pending) |
-| 6 | Terminal transport + `C-c` escape | `editor.rs:973-1010` | `is_terminal_escape_chord` (`editor.rs:4355`) | **partial, transport-level** |
+| 6 | Terminal transport + configurable escape | `editor.rs:973-1010` | `EditorState::terminal_escape_chord` → `TerminalManager::escape_chord` (`src/terminal/session.rs`) | **partial, transport-level** |
 | 7 | Ordinary dispatch | `editor.rs:1018-1032` | `KeymapStack::resolve` | the only inspectable layer |
 
 Facts that define the gap:
@@ -647,8 +654,10 @@ Facts that define the gap:
 - **Full shadows eat every key**, including unrecognized ones (each
   decoder has an `Ignore`/`Dismiss` fallback arm). While a terminal
   buffer is focused and unescaped, *all* keys encode to the child —
-  `C-c`-leading user bindings are **structurally unreachable** in a
-  terminal buffer.
+  bindings led by the escape chord are **structurally unreachable** in
+  a terminal buffer. Since #173 that chord is `terminal.escape-key`
+  rather than a hardcoded `C-c`, so a user can *move* which prefix is
+  eaten; they cannot make the shadow stop eating one.
 - **No transient-keymap mechanism exists to migrate to.** `KeymapStack`
   has exactly three fixed scopes — `Buffer(BufferId)`, `Mode(String)`,
   `Global` (`src/keymap_stack.rs:37-44`); resolution order buffer →
@@ -1013,20 +1022,29 @@ layering, provenance, and adoption have not followed.**
   `ConfigValue`s; `describe-setting`'s "Source:" names where `define()`
   ran. The inspection view sketched above is currently impossible to
   render.
-- **Adoption is five settings**: `editing.auto-pair` (pair.lua),
+- **Adoption is eight settings**: `editing.auto-pair` (pair.lua),
   `editing.trim-on-save` (editops.lua), `autosave.interval-ms`
   (autosave.lua), `window.panel-height` + `window.min-height`
-  (window.lua). Everything else a user might set — theme, fonts, LSP
+  (window.lua), and `terminal.default-profile` +
+  `terminal.scrollback-rows` + `terminal.escape-key` (terminal.lua,
+  #173). Everything else a user might set — theme, fonts, LSP
   server config, killring size, recentf/saveplace/desktop enables,
   pair sets, comment strings, `pmacs.parse.*` — lives in raw Lua
   outside the registry and is therefore invisible to `describe-setting`
   and any future settings UI. The migration list is already written:
   `docs/config-registry-framing.md` "named deferrals" (table-valued
   settings are the hard prerequisite for LSP/pair/comment tables).
+- **The table-valued gap now has a named, shipped instance.**
+  `pmacs.terminal.profiles` (#173) is a raw Lua table sitting beside
+  three registered scalars *for the same feature*, because a profile is
+  inherently `{ command, args, cwd, env }` and the registry stores four
+  scalars. It is the clearest evidence yet that table-valued settings
+  are the blocking prerequisite: the terminal is now half-registered,
+  and no settings UI can render the half that matters most.
 - **No persistence**: settings changed at runtime do not survive
   restart (the `custom-file` split-brain question is a named deferral).
 - The three-level separation holds in principle today (registry /
-  hooks+keymaps / packages), but with five settings registered, level 1
+  hooks+keymaps / packages), but with eight settings registered, level 1
   is effectively empty — users need executable Lua for nearly every
   ordinary preference, which is the exact failure the section warns
   about.

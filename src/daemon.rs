@@ -1145,10 +1145,7 @@ fn dispatcher_loop(
                     .session_state(*fid)
                     .is_some_and(|s| s.negotiated_capabilities.semantic_render)
                 {
-                    let active_now = {
-                        let core = editor.core.borrow();
-                        core.active_window_for(*fid).map(|w| w.buffer_id)
-                    };
+                    let active_now = document_buffer_to_follow(editor, *fid);
                     if let Some(active_now) = active_now
                         && last_active_buffer_sent.get(fid) != Some(&active_now)
                     {
@@ -1429,17 +1426,15 @@ fn dispatcher_loop(
                     && session_registry
                         .session_state(*fid)
                         .is_some_and(|s| s.negotiated_capabilities.crdt_replica)
+                    && let Some((buffer_id, byte_pos)) = document_cursor_byte(editor, *fid)
                 {
-                    let core = editor.core.borrow();
-                    if let Some(window) = core.active_window_for(*fid) {
-                        let cursor_byte_msg = InstanceMessage::CursorByte {
-                            buffer_id: window.buffer_id,
-                            byte_pos: window.cursor,
-                        };
-                        if let Err(e) = write_message(stream, &cursor_byte_msg) {
-                            eprintln!("pmacs: write CursorByte for {fid:?} failed: {e}");
-                            write_failed = true;
-                        }
+                    let cursor_byte_msg = InstanceMessage::CursorByte {
+                        buffer_id,
+                        byte_pos,
+                    };
+                    if let Err(e) = write_message(stream, &cursor_byte_msg) {
+                        eprintln!("pmacs: write CursorByte for {fid:?} failed: {e}");
+                        write_failed = true;
                     }
                 }
             }
@@ -2038,12 +2033,17 @@ fn handle_dispatcher_event(
                     // straight back off it. The declared buffer is
                     // checked too — a terminal has no byte viewport to
                     // honor from any direction.
+                    // Bottom-panel §1.3 #9 — Projection. The gate asks
+                    // "is this frontend's DOCUMENT surface a terminal",
+                    // so it tests the primary document window. A focused
+                    // TERMINAL PANEL must not suppress the still-visible
+                    // document's viewport.
                     let terminal_context = {
                         let manager = editor.terminal_manager.borrow();
                         let core = editor.core.borrow();
                         let active = core
-                            .active_window_for(source)
-                            .is_some_and(|window| manager.is_terminal(window.buffer_id));
+                            .primary_document_buffer(source)
+                            .is_some_and(|document| manager.is_terminal(document));
                         active || manager.is_terminal(buffer_id)
                     };
                     if semantic_states.contains_key(&source) && !terminal_context {
@@ -2056,7 +2056,11 @@ fn handle_dispatcher_event(
                         // LOCAL's attach-time buffer (often a scratch the
                         // user isn't viewing), so arrow keys moved an
                         // off-screen cursor and the caret never tracked.
-                        align_semantic_window_to_buffer(editor, source, buffer_id);
+                        // Bottom-panel §1.3 #7 — Projection, and it must
+                        // NOT move focus. Routing this through the
+                        // focused window would let an ordinary document
+                        // viewport overwrite a focused panel's buffer.
+                        align_primary_document_window(editor, source, buffer_id);
                         if let Some(sem) = semantic_states.get_mut(&source) {
                             sem.set_viewport(buffer_id, visible, generation);
                         }
@@ -2121,7 +2125,11 @@ fn handle_dispatcher_event(
                     // aligns to the buffer the frontend says it was
                     // displaying: a click can race a buffer switch.
                     if semantic_states.contains_key(&source) {
-                        align_semantic_window_to_buffer(editor, source, buffer_id);
+                        // Bottom-panel §1.3 #8 — Projection + focus. A
+                        // click in the DOCUMENT area means "work here",
+                        // so unlike `Viewport` (#7) this one also takes
+                        // focus out of a panel.
+                        align_and_activate_primary_document_window(editor, source, buffer_id);
                         if kind == PointerKind::Context {
                             // Q#CM1 — right-click opens the context menu
                             // at the hit byte (needs the Lua builder, so
@@ -2359,9 +2367,15 @@ fn ensure_active_buffer_crdt_backed(
     editor: &EditorState,
     fid: FrontendId,
 ) -> Option<crate::buffer::BufferId> {
+    // Bottom-panel §1.3 #2 — Projection, and the sharpest case in the
+    // census. The upgrade BROADCASTS a `BufferSnapshot` to every
+    // replica, so keying it on focus would mean focusing a fresh
+    // generated panel buffer swaps every peer's document mirror to it.
+    // A panel buffer that genuinely needs CRDT backing gets it when it
+    // is displayed as a document, not as a side effect of focus.
     let buffer_id_opt = {
         let core = editor.core.borrow();
-        core.active_window_for(fid).map(|w| w.buffer_id)
+        core.primary_document_buffer(fid)
     };
     let buffer_id = buffer_id_opt?;
     let core = editor.core.borrow();
@@ -2493,11 +2507,7 @@ fn publish_buffer_snapshot_to_replicas(
             continue;
         }
         if session.negotiated_capabilities.semantic_render {
-            let displays_buffer = editor
-                .core
-                .borrow()
-                .active_window_for(*peer_id)
-                .is_some_and(|window| window.buffer_id == buffer_id);
+            let displays_buffer = peer_displays_buffer_as_document(editor, *peer_id, buffer_id);
             if !displays_buffer {
                 continue;
             }
@@ -2936,38 +2946,112 @@ fn handle_remote_crdt_op(
 /// whole switch. This is the input/display alignment fix for B1: the
 /// frontend's *declared* buffer becomes the buffer its keys edit and
 /// its `CursorByte` reports.
-fn align_semantic_window_to_buffer(
+/// The buffer a semantic frontend DISPLAYS AS ITS DOCUMENT — the
+/// buffer-follow / `BufferSnapshot` re-send target (bottom-panel §1.3
+/// #1, Projection).
+///
+/// Not the focused buffer: focusing a panel must re-send no snapshot and
+/// must never swap the replica's document mirror. Named as its own
+/// function so the rule is pinnable — its only caller is
+/// `dispatcher_loop`, which no test can drive.
+#[cfg(feature = "crdt")]
+fn document_buffer_to_follow(
+    editor: &EditorState,
+    fid: FrontendId,
+) -> Option<crate::buffer::BufferId> {
+    editor.core.borrow().primary_document_buffer(fid)
+}
+
+/// The `(buffer, byte)` a semantic replica's authoritative `CursorByte`
+/// describes (bottom-panel §1.3 #3, Projection).
+///
+/// Q#BP14's vocabulary split: "active buffer" in the replica is a
+/// DOCUMENT-SURFACE term, not an input-focus term, so a focused panel
+/// must not retarget the document caret at the panel's buffer.
+fn document_cursor_byte(
+    editor: &EditorState,
+    fid: FrontendId,
+) -> Option<(crate::buffer::BufferId, u64)> {
+    let core = editor.core.borrow();
+    let win_id = core.primary_document_window(fid)?;
+    let window = core.windows.get(&win_id)?;
+    Some((window.buffer_id, window.cursor))
+}
+
+/// Whether `peer_id` displays `buffer_id` on its DOCUMENT surface — the
+/// `BufferSnapshot` publication recipient filter (bottom-panel §1.3 #21,
+/// Projection).
+///
+/// Testing the focused window instead would both miss a buffer visible
+/// in the document while a panel holds focus, and replace the peer's
+/// document mirror for a buffer visible only in a panel.
+fn peer_displays_buffer_as_document(
+    editor: &EditorState,
+    peer_id: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+) -> bool {
+    editor.core.borrow().primary_document_buffer(peer_id) == Some(buffer_id)
+}
+
+/// Align a semantic frontend's **primary document window** to the
+/// buffer it declared (bottom-panel §1.3 #7, Q#BP14).
+///
+/// **Never touches `view.active`.** This is why rejecting panel-named
+/// events does not fix the *document* event: with a panel focused, an
+/// ordinary document `Viewport` routed through the focused window would
+/// overwrite the panel's buffer with the document buffer. Returns the
+/// window it aligned so the `Pointer` path (#8) can activate it.
+fn align_primary_document_window(
     editor: &mut EditorState,
     fid: FrontendId,
     buffer_id: crate::buffer::BufferId,
-) {
+) -> Option<crate::window::WindowId> {
     use crate::text_view::TextView;
 
-    let text_view = {
+    let (win_id, text_view) = {
         let core = editor.core.borrow();
-        let Some(win_id) = core.views.get(&fid).map(|v| v.active) else {
-            return;
-        };
+        let win_id = core.primary_document_window(fid)?;
         if core.windows.get(&win_id).map(|w| w.buffer_id) == Some(buffer_id) {
-            return; // Already displaying this buffer.
+            return Some(win_id); // Already displaying this buffer.
         }
         let reg = core.registry.borrow();
         let Ok(buf) = reg.get(buffer_id) else {
-            return; // Unknown buffer — leave the window as-is.
+            // Unknown buffer — leave the window as-is, and report
+            // FAILURE. Returning the window here would let a stale or
+            // forged `Pointer` naming a dead buffer take focus out of a
+            // panel via #8's activation, *before* `dispatch_pointer`
+            // rejects the mismatched buffer. Alignment did not happen,
+            // so no caller may treat this as a document gesture.
+            return None;
         };
-        TextView::new(buf)
+        (win_id, TextView::new(buf))
     };
 
     let mut core = editor.core.borrow_mut();
-    let Some(win_id) = core.views.get(&fid).map(|v| v.active) else {
-        return;
-    };
     if let Some(win) = core.windows.get_mut(&win_id) {
         win.buffer_id = buffer_id;
         win.text_view = text_view;
         win.cursor = 0;
         win.selection = None;
         win.overlays.clear();
+    }
+    Some(win_id)
+}
+
+/// Align the primary document window **and take focus to it**
+/// (bottom-panel §1.3 #8, Q#BP14).
+///
+/// A click in the document area means "work here", so it moves focus
+/// out of a panel. This is the one place projection and focus
+/// legitimately move together — every other Projection consumer must
+/// use [`align_primary_document_window`] alone.
+fn align_and_activate_primary_document_window(
+    editor: &mut EditorState,
+    fid: FrontendId,
+    buffer_id: crate::buffer::BufferId,
+) {
+    if let Some(win_id) = align_primary_document_window(editor, fid, buffer_id) {
+        editor.core.borrow_mut().focus_window(fid, win_id);
     }
 }
 
@@ -3397,6 +3481,96 @@ mod tests {
             read_message::<InstanceMessage>(&mut semantic_client).is_err(),
             "a semantic peer displaying another buffer must receive no snapshot"
         );
+    }
+
+    /// Bottom-panel §1.3 #21 through the REAL producer (round 3).
+    ///
+    /// A semantic peer with a FOCUSED PANEL must still receive the
+    /// snapshot for the buffer on its DOCUMENT surface, and must NOT
+    /// receive one for a buffer visible only in its panel. Asserting the
+    /// helper alone was insufficient: reverting the producer's call site
+    /// to focused-window routing left every helper-level test green.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn snapshot_publication_follows_the_document_under_a_focused_panel() {
+        let (editor, fid, document, panel) = panel_focused_semantic_fixture();
+        let (doc_buf, panel_buf) = {
+            let core = editor.core.borrow();
+            (
+                core.windows[&document].buffer_id,
+                core.windows[&panel].buffer_id,
+            )
+        };
+        assert_ne!(doc_buf, panel_buf, "fixture: distinct buffers");
+
+        let caps = crate::protocol::NegotiatedCapabilities {
+            multi_frontend: true,
+            crdt_replica: true,
+            semantic_render: true,
+        };
+        let mut registry = SessionRegistry::new();
+        registry.register_session(
+            fid,
+            crate::presence::SessionState::new(PROTOCOL_VERSION, caps, 0),
+        );
+
+        // The DOCUMENT buffer's snapshot must be delivered.
+        {
+            let (server, mut client) = UnixStream::pair().expect("socketpair");
+            // A read timeout on the DELIVERY read too. Without it a
+            // regression that suppresses the snapshot makes this test
+            // HANG rather than fail, which is strictly worse than a red
+            // assertion — found by biting this very test.
+            client
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("delivery timeout");
+            let mut streams = HashMap::from([(fid, server)]);
+            let message = InstanceMessage::BufferSnapshot {
+                buffer_id: doc_buf,
+                crdt_snapshot: vec![1, 2, 3],
+            };
+            publish_buffer_snapshot_to_replicas(
+                &editor,
+                doc_buf,
+                &message,
+                &registry,
+                &mut streams,
+                &mut HashMap::new(),
+            );
+            let delivered: InstanceMessage =
+                read_message(&mut client).expect("the document snapshot must arrive");
+            assert_eq!(
+                delivered, message,
+                "#21: a buffer on the DOCUMENT surface must still be published while a \
+                 panel holds focus"
+            );
+        }
+
+        // The PANEL-only buffer's snapshot must NOT be delivered.
+        {
+            let (server, mut client) = UnixStream::pair().expect("socketpair");
+            let mut streams = HashMap::from([(fid, server)]);
+            let message = InstanceMessage::BufferSnapshot {
+                buffer_id: panel_buf,
+                crdt_snapshot: vec![4, 5, 6],
+            };
+            publish_buffer_snapshot_to_replicas(
+                &editor,
+                panel_buf,
+                &message,
+                &registry,
+                &mut streams,
+                &mut HashMap::new(),
+            );
+            client
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("timeout");
+            assert!(
+                read_message::<InstanceMessage>(&mut client).is_err(),
+                "#21: a buffer visible only in a PANEL must not replace the peer's \
+                 document mirror"
+            );
+        }
     }
 
     // ---- GPU terminal input: the double terminal-layout sync -------------
@@ -4385,7 +4559,7 @@ mod tests {
 
     /// B1 input/display alignment: a semantic frontend's window is bound
     /// to LOCAL's attach-time buffer, but the buffer it *displays* is
-    /// the one it declares via `Viewport`. `align_semantic_window_to_buffer`
+    /// the one it declares via `Viewport`. `align_primary_document_window`
     /// re-points the window so keys edit the displayed buffer — without
     /// it, arrow keys moved an off-screen cursor in the wrong buffer and
     /// the caret never tracked.
@@ -4423,7 +4597,9 @@ mod tests {
         );
 
         // The frontend declares it is displaying the file buffer.
-        align_semantic_window_to_buffer(&mut editor, fid, file);
+        // Bottom-panel §1.3 #7: `Viewport` takes the projection-only
+        // aligner, which never touches `view.active`.
+        align_primary_document_window(&mut editor, fid, file);
         assert_eq!(
             editor
                 .core
@@ -4580,6 +4756,383 @@ mod tests {
         assert_ne!(
             core.windows[&panel].buffer_id, opened.buffer_id,
             "the panel was not overwritten with the target"
+        );
+    }
+
+    /// Bottom-panel §1.3 #8, review round 1 finding 1: a STALE document
+    /// `Pointer` must not steal focus out of a panel.
+    ///
+    /// Driven through `handle_dispatcher_event` — the real dispatcher
+    /// seam — because the defect lived in the *pair* of alignment and
+    /// activation, not in either alone. `align_primary_document_window`
+    /// once returned the window even when the named buffer was gone, so
+    /// #8's activation focused the document before `dispatch_pointer`
+    /// ever rejected the mismatched buffer.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_stale_document_pointer_does_not_steal_focus_from_a_panel() {
+        use crate::editor::EditorState;
+        use crate::protocol::FrontendId;
+        use crate::window::{FrontendView, Layout, LayoutNode, Orientation, Window, WindowParams};
+        use pmacs_protocol::{Modifiers, PointerKind};
+
+        let mut editor = EditorState::new();
+        let fid = FrontendId(88);
+
+        // One document window + one focused bottom panel.
+        let (document, panel, dead_buffer) = {
+            let mut core = editor.core.borrow_mut();
+            let doc_buf = core.active_window().buffer_id;
+            let panel_buf = core.registry.borrow_mut().create("*panel*");
+            // A buffer id that names nothing: the stale-pointer payload.
+            let dead_buffer = crate::buffer::BufferId::from_raw(999_999);
+
+            let document = crate::window::WindowId::next();
+            let panel_id = crate::window::WindowId::next();
+            let (doc_view, panel_view) = {
+                let reg = core.registry.borrow();
+                (
+                    crate::text_view::TextView::new(reg.get(doc_buf).expect("doc")),
+                    crate::text_view::TextView::new(reg.get(panel_buf).expect("panel")),
+                )
+            };
+            core.windows
+                .insert(document, Window::new(document, doc_buf, doc_view));
+            let mut panel = Window::new(panel_id, panel_buf, panel_view);
+            let mut params = WindowParams::default();
+            params.side = Some(crate::window::Side::Bottom);
+            params.fixed_rows = Some(4);
+            panel.params = params;
+            core.windows.insert(panel_id, panel);
+            core.register_frontend_view(
+                fid,
+                FrontendView {
+                    layout: Layout {
+                        root: LayoutNode::Split {
+                            orientation: Orientation::Horizontal,
+                            children: vec![LayoutNode::Leaf(document), LayoutNode::Leaf(panel_id)],
+                            weights: vec![1, 1],
+                        },
+                    },
+                    active: panel_id,
+                    fold_projection: false,
+                    panel_capable: true,
+                    frame_geometry: None,
+                    panel_hidden: false,
+                },
+            );
+            (document, panel_id, dead_buffer)
+        };
+
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(fid, crate::semantic_render::SemanticRenderState::new(fid));
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        term_sizes.insert(fid, CellSize::new(24, 80));
+        let mut last_idle = HashMap::new();
+        let mut last_active = HashMap::new();
+        let mut bells = HashMap::new();
+        // The dispatcher drops any event from an UNINSTALLED session
+        // (#148's defense-in-depth membership check), so the session must
+        // be registered or this test passes for the wrong reason — it did,
+        // on the first attempt.
+        let mut registry = SessionRegistry::new();
+        registry.register_session(
+            fid,
+            crate::presence::SessionState {
+                negotiated_protocol_version: pmacs_protocol::PROTOCOL_VERSION,
+                negotiated_capabilities: crate::protocol::NegotiatedCapabilities {
+                    semantic_render: true,
+                    crdt_replica: true,
+                    ..Default::default()
+                },
+                color_slot: 0,
+            },
+        );
+
+        handle_dispatcher_event(
+            DispatcherEvent::FrontendEvent {
+                source: fid,
+                event: FrontendEvent::Pointer {
+                    frontend_id: fid,
+                    buffer_id: dead_buffer,
+                    byte: 0,
+                    kind: PointerKind::Down,
+                    mods: Modifiers::default(),
+                },
+            },
+            &mut editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_idle,
+            &mut last_active,
+            &mut bells,
+            &mut registry,
+        );
+
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "a stale Pointer naming a dead buffer must NOT move focus out of the panel"
+        );
+        assert_ne!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "non-vacuity: the document window is a real, distinct focus target"
+        );
+    }
+
+    /// Bottom-panel §1.3 #1/#3/#21 — the three Projection producers whose
+    /// only production caller is `dispatcher_loop`, pinned at the named
+    /// seams that loop calls. Round 2 finding: reverting any of them to
+    /// `active_window_for` previously left every test green.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn tick_producers_describe_the_document_while_a_panel_is_focused() {
+        let (editor, fid, document, panel) = panel_focused_semantic_fixture();
+        let (doc_buf, panel_buf, doc_cursor) = {
+            let core = editor.core.borrow();
+            (
+                core.windows[&document].buffer_id,
+                core.windows[&panel].buffer_id,
+                core.windows[&document].cursor,
+            )
+        };
+        assert_ne!(doc_buf, panel_buf, "fixture: distinct buffers");
+
+        // #1 buffer-follow / BufferSnapshot re-send target.
+        assert_eq!(
+            document_buffer_to_follow(&editor, fid),
+            Some(doc_buf),
+            "#1: the follow target must be the DOCUMENT buffer, not the focused panel's"
+        );
+
+        // #3 CursorByte.
+        assert_eq!(
+            document_cursor_byte(&editor, fid),
+            Some((doc_buf, doc_cursor)),
+            "#3: CursorByte must describe the DOCUMENT surface"
+        );
+
+        // #21 is deliberately NOT asserted here. Round 3: pinning it at
+        // this helper left the real producer free to regress — reverting
+        // the call site inside `publish_buffer_snapshot_to_replicas`
+        // kept both this test and the existing socket-pair test green.
+        // It is pinned through the producer instead, in
+        // `snapshot_publication_follows_the_document_under_a_focused_panel`.
+        let _ = panel_buf;
+    }
+
+    /// Bottom-panel §1.3 #2 — the sharpest census case: the lazy CRDT
+    /// upgrade BROADCASTS a snapshot, so keying it on focus would let
+    /// focusing a fresh generated panel buffer swap every peer's mirror.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn lazy_crdt_upgrade_never_targets_a_focused_panel_buffer() {
+        let (editor, fid, document, panel) = panel_focused_semantic_fixture();
+        let (doc_buf, panel_buf) = {
+            let core = editor.core.borrow();
+            (
+                core.windows[&document].buffer_id,
+                core.windows[&panel].buffer_id,
+            )
+        };
+
+        let upgraded = ensure_active_buffer_crdt_backed(&editor, fid);
+        assert_eq!(
+            upgraded,
+            Some(doc_buf),
+            "#2: the upgrade must target the DOCUMENT buffer"
+        );
+        assert_ne!(
+            upgraded,
+            Some(panel_buf),
+            "#2: focusing a panel must never trigger its buffer's upgrade+broadcast"
+        );
+    }
+
+    /// Bottom-panel §1.3 #7 vs #8 — `Viewport` aligns WITHOUT moving
+    /// focus; only `Pointer` activates. Driven through the real
+    /// dispatcher seam.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn viewport_aligns_the_document_without_taking_focus_from_the_panel() {
+        let (mut editor, fid, document, panel) = panel_focused_semantic_fixture();
+        let other = {
+            let mut core = editor.core.borrow_mut();
+            core.registry.borrow_mut().create("*other*")
+        };
+
+        dispatch_one_semantic_event(
+            &mut editor,
+            fid,
+            FrontendEvent::Viewport {
+                frontend_id: fid,
+                buffer_id: other,
+                visible: pmacs_protocol::ByteRange { start: 0, end: 0 },
+                generation: 0,
+            },
+        );
+
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "#7: a document Viewport must NOT move focus out of the panel"
+        );
+        assert_eq!(
+            editor.core.borrow().windows[&document].buffer_id,
+            other,
+            "#7: it must still have ALIGNED the document window to the declared buffer"
+        );
+    }
+
+    /// Shared fixture: a semantic frontend with a document window and a
+    /// FOCUSED bottom panel. `panel_capable` is set explicitly because
+    /// Stage 1 ships `false` for semantic sessions and 2B flips it for a
+    /// v21-negotiated peer.
+    #[cfg(feature = "crdt")]
+    fn panel_focused_semantic_fixture() -> (
+        crate::editor::EditorState,
+        FrontendId,
+        crate::window::WindowId,
+        crate::window::WindowId,
+    ) {
+        use crate::window::{FrontendView, Layout, LayoutNode, Orientation, Window, WindowParams};
+
+        let editor = crate::editor::EditorState::new();
+        let fid = FrontendId(91);
+        let (document, panel) = {
+            let mut core = editor.core.borrow_mut();
+            let doc_buf = core.active_window().buffer_id;
+            let panel_buf = core.registry.borrow_mut().create("*panel*");
+            let document = crate::window::WindowId::next();
+            let panel = crate::window::WindowId::next();
+            let (doc_view, panel_view) = {
+                let reg = core.registry.borrow();
+                (
+                    crate::text_view::TextView::new(reg.get(doc_buf).expect("doc")),
+                    crate::text_view::TextView::new(reg.get(panel_buf).expect("panel")),
+                )
+            };
+            core.windows
+                .insert(document, Window::new(document, doc_buf, doc_view));
+            let mut panel_window = Window::new(panel, panel_buf, panel_view);
+            let mut params = WindowParams::default();
+            params.side = Some(crate::window::Side::Bottom);
+            params.fixed_rows = Some(4);
+            panel_window.params = params;
+            core.windows.insert(panel, panel_window);
+            core.register_frontend_view(
+                fid,
+                FrontendView {
+                    layout: Layout {
+                        root: LayoutNode::Split {
+                            orientation: Orientation::Horizontal,
+                            children: vec![LayoutNode::Leaf(document), LayoutNode::Leaf(panel)],
+                            weights: vec![1, 1],
+                        },
+                    },
+                    active: panel,
+                    fold_projection: false,
+                    panel_capable: true,
+                    frame_geometry: None,
+                    panel_hidden: false,
+                },
+            );
+            (document, panel)
+        };
+        editor.sync_frame_geometry(fid, CellSize::new(24, 80));
+        (editor, fid, document, panel)
+    }
+
+    /// Drive ONE authenticated semantic event through the real
+    /// dispatcher. The session must be registered or the event is
+    /// dropped at the uninstalled-session check before reaching any
+    /// handler.
+    #[cfg(feature = "crdt")]
+    fn dispatch_one_semantic_event(
+        editor: &mut crate::editor::EditorState,
+        fid: FrontendId,
+        event: FrontendEvent,
+    ) {
+        let mut render_states = HashMap::new();
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(fid, crate::semantic_render::SemanticRenderState::new(fid));
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        term_sizes.insert(fid, CellSize::new(24, 80));
+        let mut last_idle = HashMap::new();
+        let mut last_active = HashMap::new();
+        let mut bells = HashMap::new();
+        let mut registry = SessionRegistry::new();
+        registry.register_session(
+            fid,
+            crate::presence::SessionState {
+                negotiated_protocol_version: pmacs_protocol::PROTOCOL_VERSION,
+                negotiated_capabilities: crate::protocol::NegotiatedCapabilities {
+                    semantic_render: true,
+                    crdt_replica: true,
+                    ..Default::default()
+                },
+                color_slot: 0,
+            },
+        );
+        handle_dispatcher_event(
+            DispatcherEvent::FrontendEvent { source: fid, event },
+            editor,
+            &mut render_states,
+            &mut semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_idle,
+            &mut last_active,
+            &mut bells,
+            &mut registry,
+        );
+    }
+
+    /// Bottom-panel §1.3 #9 — Projection. The `Viewport` terminal-context
+    /// gate asks "is this frontend's DOCUMENT surface a terminal", so a
+    /// focused TERMINAL PANEL must not suppress the still-visible
+    /// document's viewport.
+    #[cfg(feature = "crdt")]
+    #[test]
+    fn a_focused_terminal_panel_does_not_suppress_the_document_viewport() {
+        use crate::terminal::TerminalSpec;
+
+        let (mut editor, fid, document, panel) = panel_focused_semantic_fixture();
+        let other = editor.core.borrow().registry.borrow_mut().create("*other*");
+
+        // A REAL terminal in the focused panel.
+        let mut spec = TerminalSpec::new("/bin/sh");
+        spec.rows = 10;
+        spec.cols = 40;
+        let term_buf = editor.open_terminal(spec).expect("a real terminal");
+        editor
+            .core
+            .borrow_mut()
+            .install_buffer_in_window(panel, term_buf)
+            .expect("terminal into the panel");
+        editor.core.borrow_mut().focus_window(fid, panel);
+
+        dispatch_one_semantic_event(
+            &mut editor,
+            fid,
+            FrontendEvent::Viewport {
+                frontend_id: fid,
+                buffer_id: other,
+                visible: pmacs_protocol::ByteRange { start: 0, end: 0 },
+                generation: 0,
+            },
+        );
+
+        assert_eq!(
+            editor.core.borrow().windows[&document].buffer_id,
+            other,
+            "#9: a focused TERMINAL panel must not suppress the document viewport —              the document window should still have aligned to the declared buffer"
         );
     }
 }

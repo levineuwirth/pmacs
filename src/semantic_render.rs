@@ -625,6 +625,22 @@ impl SemanticRenderState {
         // post-evaluation face inventory must then precede the authoritative
         // segment replacement in this same frame. Unsupported peers skip the
         // evaluator entirely and therefore pay no Lua callback/dynamic-face cost.
+        // Bottom-panel A2A-2, round 3: the document identity used to
+        // FILTER the results must be the PRE-CALLBACK one. Both outcome
+        // arms carry phase-1 contexts, and a provider that closes the
+        // primary document split changes `primary_document_window`
+        // mid-evaluation — reading it after the fact would compare
+        // phase-1 contexts against a replacement identity, match
+        // nothing, and silently suppress the authoritative clear.
+        let statusline_document_window = self
+            .peer_knows_statusline_segments
+            .then(|| {
+                state
+                    .core
+                    .borrow()
+                    .primary_document_window(self.frontend_id)
+            })
+            .flatten();
         let statusline_evaluation = self.peer_knows_statusline_segments.then(|| {
             evaluate_statusline(
                 state.lua_host.lua(),
@@ -810,7 +826,7 @@ impl SemanticRenderState {
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         if let Some(evaluation) = statusline_evaluation {
-            self.emit_statusline_segments(evaluation, &mut out);
+            self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
         out
     }
@@ -855,6 +871,16 @@ impl SemanticRenderState {
         // Evaluate callbacks before `ThemeFacts` for the same reason the
         // document path does: a callback may register a face, and the
         // face inventory must precede the segment text that names it.
+        // Same pre-callback capture as the document path (round 3).
+        let statusline_document_window = self
+            .peer_knows_statusline_segments
+            .then(|| {
+                state
+                    .core
+                    .borrow()
+                    .primary_document_window(self.frontend_id)
+            })
+            .flatten();
         let statusline_evaluation = self.peer_knows_statusline_segments.then(|| {
             evaluate_statusline(
                 state.lua_host.lua(),
@@ -881,7 +907,12 @@ impl SemanticRenderState {
         // a verdict we hold.
         if self.last_terminal_frame.as_ref() == Some(&frame) {
             self.terminal_error_latched = false;
-            out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+            out.extend(self.terminal_chrome(
+                state,
+                buffer_id,
+                statusline_evaluation,
+                statusline_document_window,
+            ));
             return Some(out);
         }
         match frame.validate() {
@@ -905,7 +936,12 @@ impl SemanticRenderState {
             }
         }
 
-        out.extend(self.terminal_chrome(state, buffer_id, statusline_evaluation));
+        out.extend(self.terminal_chrome(
+            state,
+            buffer_id,
+            statusline_evaluation,
+            statusline_document_window,
+        ));
         Some(out)
     }
 
@@ -920,6 +956,7 @@ impl SemanticRenderState {
         state: &EditorState,
         buffer_id: BufferId,
         statusline_evaluation: Option<StatuslineEvaluation>,
+        statusline_document_window: Option<crate::window::WindowId>,
     ) -> Vec<InstanceMessage> {
         let mut out = Vec::new();
         out.extend(self.status_facts_msg(state, buffer_id));
@@ -929,7 +966,7 @@ impl SemanticRenderState {
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
         if let Some(evaluation) = statusline_evaluation {
-            self.emit_statusline_segments(evaluation, &mut out);
+            self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
         out
     }
@@ -941,6 +978,7 @@ impl SemanticRenderState {
     fn emit_statusline_segments(
         &mut self,
         evaluation: StatuslineEvaluation,
+        document_window: Option<crate::window::WindowId>,
         out: &mut Vec<InstanceMessage>,
     ) {
         let to_wire = |segments: Vec<crate::statusline::EvaluatedStatuslineSegment>| {
@@ -955,10 +993,16 @@ impl SemanticRenderState {
         let frontend_id = self.frontend_id;
         match evaluation.outcome {
             StatuslineEvaluationOutcome::Ready(windows) => {
-                if let Some(window) = windows
-                    .into_iter()
-                    .find(|window| window.context.frontend_id == frontend_id)
-                {
+                // Bottom-panel A2A-2: the fan-out now yields the primary
+                // document AND the visible side window, so the wire
+                // segments must be selected by WINDOW IDENTITY. Taking
+                // "the first context for my frontend" would silently
+                // depend on capture order and could ship the panel's
+                // mode-line text as the document status band.
+                if let Some(window) = windows.into_iter().find(|window| {
+                    window.context.frontend_id == frontend_id
+                        && Some(window.context.window_id) == document_window
+                }) {
                     self.emit_statusline_payload(
                         window.context.buffer_id,
                         to_wire(window.left),
@@ -970,10 +1014,18 @@ impl SemanticRenderState {
             StatuslineEvaluationOutcome::Invalidated {
                 authoritative_empty,
             } => {
-                for context in authoritative_empty
-                    .into_iter()
-                    .filter(|context| context.frontend_id == frontend_id)
-                {
+                // Bottom-panel A2A-2: the clear must be filtered by
+                // DOCUMENT WINDOW exactly like the Ready arm. The
+                // semantic peer has ONE statusline slot, so publishing
+                // the panel context's clear here replaces the document's
+                // payload with the panel's — the same misrouting the
+                // Ready arm was fixed for, on the clear path.
+                //
+                // A panel's own clear belongs to the future panel
+                // painter (`PanelFrame`, Stage 2B), not to this wire.
+                for context in authoritative_empty.into_iter().filter(|context| {
+                    context.frontend_id == frontend_id && Some(context.window_id) == document_window
+                }) {
                     self.emit_statusline_payload(context.buffer_id, Vec::new(), Vec::new(), out);
                 }
             }
@@ -1345,9 +1397,13 @@ impl SemanticRenderState {
         state: &EditorState,
         buffer_id: BufferId,
     ) -> Option<InstanceMessage> {
+        // Bottom-panel §1.3 #4 — Projection. `LineNumbers` describes the
+        // replica's DOCUMENT surface; a focused panel must not replace
+        // the document's gutter mode with the panel window's.
         let mode = {
             let core = state.core.borrow();
-            core.active_window_for(self.frontend_id)
+            core.primary_document_window(self.frontend_id)
+                .and_then(|win_id| core.windows.get(&win_id))
                 .map_or(crate::window::LineNumberMode::Off, |w| w.line_numbers)
         };
         if self.last_line_numbers == Some(mode) {
@@ -1703,7 +1759,12 @@ impl SemanticRenderState {
         // Emitting CurrentLine here forced a whole-buffer line table on
         // every frame even though pmacs-gpu ignores its own current-line
         // wash.
-        if let Some(win) = core.active_window_for(self.frontend_id)
+        // Bottom-panel §1.3 #5 — Projection. Selection decorations
+        // belong to the document surface the viewport describes; a
+        // selection made inside a focused panel must not paint into it.
+        if let Some(win) = core
+            .primary_document_window(self.frontend_id)
+            .and_then(|win_id| core.windows.get(&win_id))
             && win.buffer_id == vp.buffer_id
             && let Some((lo, hi)) = win.region()
             && let Some(range) = clip_to_viewport(lo, hi, vp)
@@ -2916,6 +2977,7 @@ mod tests {
                 ),
                 new_failures: Vec::new(),
             },
+            None,
             &mut stale,
         );
         assert!(stale.is_empty(), "phase-1 stale evaluation emits nothing");
@@ -2924,11 +2986,15 @@ mod tests {
             "stale evaluation retains the prior baseline until snapshot reset"
         );
 
+        // Bottom-panel A2A-2: the clear is filtered by DOCUMENT window
+        // identity, so the context under test must BE the document
+        // window — passing `None` here would assert nothing.
+        let document_window = crate::window::WindowId::next();
         let invalidated = || StatuslineEvaluation {
             outcome: StatuslineEvaluationOutcome::Invalidated {
                 authoritative_empty: vec![crate::statusline::StatuslineContext {
                     frontend_id: FrontendId::LOCAL,
-                    window_id: crate::window::WindowId::next(),
+                    window_id: document_window,
                     buffer_id,
                     active: true,
                 }],
@@ -2936,13 +3002,13 @@ mod tests {
             new_failures: Vec::new(),
         };
         let mut replacement = Vec::new();
-        semantic.emit_statusline_segments(invalidated(), &mut replacement);
+        semantic.emit_statusline_segments(invalidated(), Some(document_window), &mut replacement);
         assert_eq!(
             statusline_of(&replacement),
             Some((buffer_id, Vec::new(), Vec::new()))
         );
         let mut unchanged = Vec::new();
-        semantic.emit_statusline_segments(invalidated(), &mut unchanged);
+        semantic.emit_statusline_segments(invalidated(), Some(document_window), &mut unchanged);
         assert!(
             unchanged.is_empty(),
             "the empty invalidation became baseline"
