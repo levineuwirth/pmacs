@@ -175,7 +175,8 @@ If it does not, stop and repair the remote/fetch configuration.
 
 ### Stage 4b — the Unicode input method (branch `lean4-stage4b-input-method`)
 
-- Framing `docs/lean4-mode-framing.md` **revision 9**, approved. Stage
+- Framing `docs/lean4-mode-framing.md` **revision 10** (round 10 =
+  review of the implementation). Stage
   4a (the typed-edit consumer chain) MERGED as #179; this branch is 4b,
   the Lean content that registers on it.
 - Footprint: `scripts/regen-lean-abbrev` (new, the generator),
@@ -183,7 +184,7 @@ If it does not, stop and repair the remote/fetch configuration.
   from `leanprover/vscode-lean4@17d1d08`, Apache-2.0),
   `builtin/runtime/lean_input.lua` (new, the consumer at priority 50),
   `src/editor.rs` (two `include_str!` blocks),
-  `tests/lean_input_acceptance.rs` (new, 25 tests), and one
+  `tests/lean_input_acceptance.rs` (new, 29 tests), and one
   `#[cfg(feature = "crdt")]` `--lib` test in `src/daemon.rs`
   (acceptance 45f). No protocol change (Q#LN14). Entirely Lua apart
   from the load sites and that one test.
@@ -239,11 +240,31 @@ If it does not, stop and repair the remote/fetch configuration.
   | `buffer.after-switch` clears every frontend | 1 |
   | delete the `buffer.after-switch` subscriber | 1 |
   | `frontend.detached` purges every frontend | 1 |
+  | claim the terminator | 1 |
+  | expand inside the chain, then decline | 2 |
+  | drop the `cursor() == post_cursor` check | 1 |
+  | place the point without the context guard | 1 |
+  | load lean_input.lua after lsp.lua | 1 |
 
   Acceptance 45f bit by construction: without a registered window for
   the source frontend it ran six fan-outs with a nil record and proved
   nothing, because `handle_remote_crdt_op` arms nothing unless the
   source's active window displays the buffer.
+- **Round 10 (review) found three defects, all about what happens
+  AROUND the expansion rather than about resolving an abbreviation.** A
+  pair character that TERMINATES an abbreviation never reached pairing
+  (`\alp(` gave `α(`): the first revision claimed the terminator, and
+  merely declining is not enough either, because the chain hands each
+  consumer a copy of the record made before any consumer ran — so
+  expanding inside the chain invalidates pairing's copy and the closer
+  is lost anyway (verified by mutation, not assumed). The expansion now
+  runs on **its own `buffer.after-edit` subscriber** after the chain,
+  with a span that stops before the terminator. That is a new instance
+  of Q#AP7, so it is now pinned with the sighelp fake server.
+  Post-insert point motion was also mistaken for a valid span (the
+  relevance check needs `cursor() == post_cursor`, as pairing's has
+  since #110), and cursor placement could move a buffer an intercept
+  had switched to.
 - Undo is cross-peer-degraded on CRDT frontends and that is ACCEPTED,
   named in the module header (Q#LN21): six source-peer optimistic
   inserts replaced by one daemon-peer op. `set_round_trip_input` would

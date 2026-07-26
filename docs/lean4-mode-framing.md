@@ -46,7 +46,7 @@ during a rebase.
 
 ## 0.1 Revision history
 
-Revision 1 — initial. Current revision: **9**.
+Revision 1 — initial. Current revision: **10**.
 
 ### Round 1 (rev 1 → rev 2)
 
@@ -534,6 +534,38 @@ contradicts** — every one of them written from what the abbreviation
 The mechanism (Q#LN11, Q#LN21, Q#LN22) needed no change — these were
 errors in the examples chosen to pin it, which is why a simulation over
 the real data found them and four review rounds over the prose did not.
+
+### Round 10 (rev 9 → rev 10)
+
+Review of the Stage 4b implementation. Three defects in the expander,
+all of them about what happens AROUND the expansion rather than about
+resolving an abbreviation, plus one stale count.
+
+1. **A pair character that terminates an abbreviation never reached
+   auto-pairing.** Q#LN22 already said the terminator is not claimed;
+   the implementation claimed it whenever an expansion succeeded, so
+   `\alp(` gave `α(`. Not claiming is necessary and not sufficient —
+   the chain hands each consumer a copy of the record made before any
+   consumer ran, so expanding inside the chain invalidates the copy
+   pairing is holding and the closer is lost anyway. Q#LN22 now
+   specifies the deferred subscriber and the span that stops before the
+   terminator; acceptance 45j pins all three failure modes.
+2. **Post-insert point motion was mistaken for a valid pending span.**
+   The relevance check compared buffer and window but not
+   `ed.cursor() == rec.post_cursor`, so a redefined self-insert that
+   inserts and then moves the point still expanded — and teleported the
+   point back. Pairing has made this three-part check since #110.
+   Acceptance 45k.
+3. **Cursor placement could move the wrong buffer.** A buffer intercept
+   may switch buffers during `buf:replace`; the unguarded `goto_byte`
+   afterwards moved the switched-to buffer's point. `repair_cursor` is
+   the precedent. Acceptance 45l.
+4. **The coherence census contradicted itself** — nine settings in one
+   paragraph, eight three paragraphs below.
+
+Acceptance 45m was added with them: the expansion now runs on its own
+`buffer.after-edit` subscriber, which is a new instance of Q#AP7 and
+was unpinned.
 
 ## 1. What ships
 
@@ -1718,8 +1750,9 @@ reconstruction of it:
 - A subsequent self-insert `c` is claimed iff at least one key has
   `text .. c` as a prefix; then `text = text .. c`. If it is also
   uniquely-and-completely matching (one of the 1,550), expand now.
-- If no key extends `text .. c`, expand `text` **first**, then let `c`
-  land normally — the chain does *not* claim `c`.
+- If no key extends `text .. c`, `c` TERMINATES the abbreviation: the
+  chain does *not* claim it, and the expansion of `text` is
+  **deferred** until after the chain has run (round 10; see below).
 - **A terminating `c` that is itself `\` is then reprocessed as a new
   leader**, opening a fresh pending abbreviation at its position. This
   is the rule acceptance 45d depends on (`\alpha\to` → `α→`) and rev 6
@@ -1732,6 +1765,37 @@ reconstruction of it:
 - Expansion resolves through §2.11's rules — shortest key wins, ties
   broken by source rank, unmatchable tail appended (`\alp7` → `α7`).
 - `$CURSOR` is stripped from the symbol and its index becomes the point.
+
+**The expansion is deferred past the chain, and its span stops before
+the terminator** (round 10). "Not claiming the terminator" is necessary
+and not sufficient: a pair character is a legal terminator (`\alp(` must
+give `α()`), and the chain hands every consumer a *copy* of the record
+made before any consumer ran. So expanding inside the chain and then
+declining leaves auto-pairing holding offsets the replace has already
+invalidated — pairing declines and the closer is silently lost, which a
+probe confirmed. Claiming the terminator instead suppresses pairing
+outright. Neither is recoverable from inside the chain.
+
+The expander therefore records the pending expansion and performs it on
+its **own `buffer.after-edit` subscriber**, registered after
+typed_edit.lua's and before lsp.lua's. A claim by any consumer stops the
+chain but not a separate subscriber — which is the point, since pairing
+claims the terminator it reacts to. The replaced span covers the leader
+and the typed text only; whatever pairing did lands after it and
+survives untouched. One undo restores the same text either way, because
+the terminator was always its own insert.
+
+Two guards this exposes, both of which pairing already carries:
+
+- The relevance check is **three-part**, not two: buffer, window, **and
+  `ed.cursor() == rec.post_cursor`**. A redefined self-insert can insert
+  the completing character and then move the point, and expanding over a
+  span the user has left teleports them back into it.
+- Cursor placement after the replace is **context-guarded**. A buffer
+  intercept may switch window or buffer while `buf:replace` runs; an
+  unguarded `goto_byte` then moves the point of a buffer that has
+  nothing to do with the expansion. `pair.lua`'s `repair_cursor` is the
+  precedent.
 
 **Ownership is per frontend, not per buffer** (§2.11). The key is
 `(pmacs.frontend.id(), rec.buffer)`, and the stored `window` must still
@@ -2490,11 +2554,14 @@ criterion 46 requires to stay byte-identical.
     it assumed `\alpha` takes the finish path when `alpha` is in the
     1,550-key eager set (round 9; see 41).
     - *Finish path.* `\alp` + space yields `α `: the space lands first
-      and the expansion runs in the following `buffer.after-edit`, so
-      the terminator is **retained**, not consumed, and it is inside the
-      replaced span. One undo restores `\alp ` — with its space, not
-      `\al`. Rev 6 wrote the post-undo text without the terminator,
-      which would be true only if the terminator were swallowed.
+      and the expansion runs later in the same `buffer.after-edit`
+      fan-out, so the terminator is **retained**, not consumed. It sits
+      OUTSIDE the replaced span, which covers only the leader and the
+      typed text (round 10) — the observable text and the post-undo
+      text are the same either way, because the terminator was its own
+      insert. One undo restores `\alp ` — with its space, not `\al`.
+      Rev 6 wrote the post-undo text without the terminator, which
+      would be true only if the terminator were swallowed.
     - *Eager path.* `\alpha` yields `α` with no terminator typed, and a
       following space is a **separate** edit. One undo removes the
       space; a second restores `\alpha`. Asserting the finish-path undo
@@ -2598,6 +2665,33 @@ criterion 46 requires to stay byte-identical.
       `$CURSOR` more than once;
     - the resolution spot-set behaves: `alpha`, `to`, `<>`, `+ `, `\`,
       `n`, `setminus`, and the tie cases from 45h.
+45j. **A pair character that TERMINATES an abbreviation still pairs**
+    (round 10). `\alp(` yields `α()` with the point between the pair.
+    Bites three ways, all of which produce different wrong answers:
+    claiming the terminator gives `α(`; expanding inside the chain and
+    then declining also gives `α(`, because the replace invalidates the
+    record copy pairing is holding; and pairing running first gives
+    `\alp()` unexpanded. Criterion 40 is the same collision from the
+    other side, and passing it says nothing about this one.
+45k. **The relevance check is three-part.** A redefined
+    `buffer.self-insert` that inserts the completing character and then
+    moves the point must not expand: `\alph` + `a` under such an
+    override leaves literal `\alpha` with the point where the command
+    put it. Bites against checking only buffer and window — the
+    expansion would otherwise teleport the point back into a span the
+    user has left.
+45l. **Cursor placement is context-guarded.** A buffer intercept that
+    switches buffers during `buf:replace` must not have the
+    switched-to buffer's point moved. Bites against an unguarded
+    `goto_byte`, which translates the LEAN buffer's pre-edit point
+    through the LEAN buffer's edit and applies it to whatever is
+    ambient.
+45m. **Q#AP7 for the deferred subscriber.** The expansion runs on a
+    second `buffer.after-edit` subscriber, so it inherits pairing's
+    flush-ordering obligation: no `didChange` may ever carry the
+    unexpanded text. Pinned with the `sighelp` fake server and `(` as
+    the trigger — the flush carrying the terminator carries `α()`.
+    Falsified by loading lean_input.lua after lsp.lua.
 45h. **Tie-break by source order (§2.11).** `\f` + space yields `‹` —
     `f<` and `f>` are both length 2, and `f<` is declared first. Same
     for `\"` + space → `Ä`, first of eleven equal-length candidates.
@@ -2752,7 +2846,7 @@ uncapped event queue, the dropped `cfg.restart`, and — unchanged from
 languages other than Lean, and §4's rule is what keeps them out of a Lean
 PR.
 
-### 9.1 Coherence impact — stages 4a and 4b (rev 9)
+### 9.1 Coherence impact — stages 4a and 4b (rev 10)
 
 **Sections served.** §6 (interaction islands) primarily, and in the
 *preventing* direction rather than the fixing one — see below. §11

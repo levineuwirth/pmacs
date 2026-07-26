@@ -132,7 +132,14 @@ commands, read `docs/active-work.md` immediately after this file.
     (branch `lean4-stage4b-input-method`, framing rev 9): a vendored
     1,855-entry table generated from `leanprover/vscode-lean4@17d1d08`
     by `scripts/regen-lean-abbrev`, plus a consumer registered on the
-    Stage 4a chain at priority 50, ahead of pairing. Its durable facts:
+    Stage 4a chain at priority 50, ahead of pairing. **A consumer
+    cannot both edit and let a later consumer act on the same
+    keystroke**: the chain hands each consumer a copy of the record made
+    before any consumer ran, so an edit invalidates every copy still to
+    be used. The expansion therefore runs on a SECOND
+    `buffer.after-edit` subscriber after the chain — which is how a
+    pair character that terminates an abbreviation still pairs
+    (`\alp(` → `α()`). Its other durable facts:
     the table must stay an ORDERED SEQUENCE (equal-length ties resolve
     by source declaration order, which a `pairs`-iterated map cannot
     express); a generator round-trip check must re-read the BYTES ON

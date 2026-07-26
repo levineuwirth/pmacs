@@ -8,10 +8,12 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use pmacs::editor::EditorState;
+use pmacs::lua_bindings::StateDir;
 use pmacs::protocol::FrontendId;
 use pmacs::window::{FrontendView, Layout, Window, WindowId};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 fn fresh_dir() -> PathBuf {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -47,6 +49,10 @@ fn text(s: &EditorState) -> String {
         "local b = pmacs.window.buffer(); return b:slice(0, b:len())",
     );
     String::from_utf8_lossy(&b.as_bytes()).into_owned()
+}
+
+fn cursor(s: &EditorState) -> i64 {
+    eval(s, "return pmacs.editor.cursor()")
 }
 
 fn type_as(s: &mut EditorState, fid: FrontendId, chars: &str) {
@@ -177,6 +183,33 @@ fn a_pending_abbreviation_is_never_corrupted_by_auto_pairing() {
 }
 
 #[test]
+fn a_pair_character_that_terminates_an_abbreviation_still_pairs() {
+    // The other half of the collision, and the one the first revision
+    // of this file got wrong. `(` does not extend `alp`, so it
+    // TERMINATES — and a terminator is an ordinary character that
+    // pairing is entitled to react to.
+    //
+    // Claiming the terminator suppresses pairing entirely (`α(`).
+    // Expanding before declining is no better: the replace makes
+    // pairing's copy of the record stale, so pairing declines and the
+    // closer is silently lost. Only deferring the expansion past the
+    // chain gives both.
+    let (mut s, _f) = lean_editor();
+    type_str(&mut s, "\\alp(");
+    assert_eq!(
+        text(&s),
+        "α()",
+        "the abbreviation expanded AND the terminator paired"
+    );
+    assert_eq!(
+        cursor(&s),
+        3,
+        "and the point sits between the pair — after α (2 bytes) and \
+         the opener"
+    );
+}
+
+#[test]
 fn a_pair_character_outside_a_pending_abbreviation_still_pairs() {
     // The other direction: claiming extensions must not disable pairing
     // in Lean buffers generally.
@@ -268,6 +301,93 @@ fn switching_buffers_clears_pending_state_eagerly() {
         "\\alpha",
         "without the switch this would have eagerly expanded to α; \
          `buffer.after-switch` cleared the record"
+    );
+}
+
+#[test]
+fn a_self_insert_that_moves_the_point_afterwards_does_not_expand() {
+    // Buffer and window matching is not enough. A redefined
+    // `buffer.self-insert` may insert the completing character and THEN
+    // move the point; expanding over a span the user has left teleports
+    // them back into it. Pairing makes the same three-part check
+    // (`ed.cursor() ~= rec.post_cursor`) for the same reason.
+    let (mut s, _f) = lean_editor();
+    type_str(&mut s, "\\alph");
+    exec(
+        &s,
+        r#"
+        pmacs.command.unregister("buffer.self-insert")
+        pmacs.command.define {
+          name = "buffer.self-insert",
+          description = "test override: insert, then move the point away",
+          fn = function(cp)
+            pmacs.editor.insert_char_over_region(cp)
+            pmacs.editor.goto_byte(0)
+          end,
+        }
+        "#,
+    );
+
+    type_str(&mut s, "a");
+    assert_eq!(
+        text(&s),
+        "\\alpha",
+        "the record died with the point that left it — no expansion"
+    );
+    assert_eq!(cursor(&s), 0, "and the point stayed where it was moved to");
+}
+
+#[test]
+fn an_intercept_that_switches_buffers_does_not_move_the_other_points() {
+    // A buffer intercept may switch window or buffer while the replace
+    // runs. An unguarded `goto_byte` afterwards moves the point of
+    // whatever it switched TO — a buffer with nothing to do with this
+    // expansion. Pairing's `repair_cursor` guards the same way.
+    let (mut s, f) = lean_editor();
+    let dir = fresh_dir();
+    let other = dir.join("other.lean");
+    std::fs::write(&other, "0123456789").unwrap();
+    let od = other.display().to_string();
+    let fd = f.display().to_string();
+
+    exec(&s, &format!("pmacs.buffer.find_or_open({od:?})"));
+    exec(&s, &format!("pmacs.buffer.find_or_open({fd:?})"));
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    exec(
+        &s,
+        &format!(
+            r#"
+            _G.SWITCHED = false
+            pmacs.buffer.add_intercept(pmacs.window.buffer(), function(op)
+              if op.kind == "replace" and not _G.SWITCHED then
+                _G.SWITCHED = true
+                pmacs.buffer.find_or_open({od:?})
+              end
+              return nil
+            end)
+            "#
+        ),
+    );
+
+    type_str(&mut s, "\\alpha");
+    let switched: bool = eval(&s, "return _G.SWITCHED");
+    assert!(switched, "the intercept must actually have fired");
+    assert_eq!(
+        text(&s),
+        "0123456789",
+        "we are now in the buffer the intercept switched to"
+    );
+    // Whatever point the switch left in that buffer, the expansion must
+    // not have moved it. Unguarded, `goto_byte` runs against the
+    // ambient buffer and translates the LEAN buffer's pre-edit point
+    // (6) through the LEAN buffer's replace, landing at 2 here — a
+    // number with no meaning in this buffer at all.
+    assert_eq!(
+        cursor(&s),
+        0,
+        "its point is untouched — the expansion's cursor placement is \
+         guarded on the window and buffer still being the ones it \
+         edited"
     );
 }
 
@@ -564,6 +684,127 @@ fn the_vendored_table_is_self_consistent() {
     let to_eager: bool = eval(&s, "return pmacs.lean_input._is_eager('to')");
     assert!(alpha_eager, "`alpha` has no extension");
     assert!(!to_eager, "`to` is extended by `top`, `to0`, `toa`, …");
+}
+
+// ---------------------------------------------------------------------------
+// Q#AP7 for the deferred expansion: it must land before lsp.lua flushes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_expansion_reaches_the_first_did_change() {
+    // The expansion runs on its OWN `buffer.after-edit` subscriber,
+    // after the typed-edit chain. That makes it a new instance of the
+    // Q#AP7 obligation pairing already carries: lsp.lua's subscriber
+    // flushes `didChange` SYNCHRONOUSLY on the signature-trigger path,
+    // and `(` is a trigger. A server told about `\alp(` instead of
+    // `α()` stays wrong until the next edit — diagnostics, semantic
+    // tokens and inlay hints all frozen at stale byte positions.
+    //
+    // Falsified by loading lean_input.lua after lsp.lua in
+    // `src/editor.rs`: the expansion would then arrive in the SECOND
+    // didChange, or not at all.
+    let dir = fresh_dir();
+    let sink = dir.join("changes.jsonl");
+    let sink_disp = sink.display().to_string();
+    let fake = env!("CARGO_BIN_EXE_pmacs_fake_lsp").to_owned();
+
+    let f = dir.join("a.lean");
+    std::fs::write(&f, "").unwrap();
+    let mut s = EditorState::new();
+    s.lua_host.lua().remove_app_data::<StateDir>();
+    s.lua_host.lua().set_app_data(StateDir(dir.clone()));
+    exec(&s, "pmacs.lsp.config = {}");
+    exec(
+        &s,
+        &format!(
+            "pmacs.lsp.config.lean4 = {{
+               command = '{fake}',
+               env = {{
+                 PMACS_FAKE_LSP_MODE = 'sighelp',
+                 PMACS_FAKE_LSP_CHANGE_SINK = '{sink_disp}',
+               }},
+             }}"
+        ),
+    );
+
+    let fd = f.display().to_string();
+    exec(&s, &format!("pmacs.buffer.find_or_open({fd:?})"));
+    exec(&s, "pmacs.editor.goto_byte(0)");
+    let initialized = "(function() \
+       for _,r in ipairs(pmacs.lsp.list()) do \
+         if r.state and r.state.kind=='initialized' then return true end \
+       end \
+       return false \
+     end)()";
+    assert!(pump_lua_flag(&mut s, initialized, 5), "fake server init");
+
+    type_str(&mut s, "\\alp(");
+    assert_eq!(text(&s), "α()", "precondition: the expansion happened");
+
+    // Wait for the flush that carries the `(` keystroke. Earlier
+    // keystrokes have already produced their own didChanges, so
+    // `changes[0]` is NOT the one under test — asserting on it compares
+    // against `\al` and fails for the wrong reason.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let changes = loop {
+        s.tick_processes();
+        s.tick_lsp();
+        s.tick_async();
+        let c = did_change_texts(&sink);
+        if c.iter().any(|t| t.contains('α')) {
+            break c;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no didChange carrying the expansion reached the fake server;              got {:?}",
+            did_change_texts(&sink)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        !changes.iter().any(|t| t == "\\alp("),
+        "no didChange may ever carry the UNEXPANDED text — one would          mean lsp.lua flushed before the deferred expansion ran (Q#AP7).          Got {changes:?}"
+    );
+    assert_eq!(
+        changes.last().map(String::as_str),
+        Some("α()"),
+        "the flush that carries the terminator carries the expansion          and pairing's closer with it"
+    );
+}
+
+fn pump_lua_flag(state: &mut EditorState, flag: &str, secs: u64) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        state.tick_processes();
+        state.tick_lsp();
+        state.tick_async();
+        let done: bool = state
+            .lua_host
+            .lua()
+            .load(format!("return ({flag}) == true"))
+            .eval()
+            .unwrap_or(false);
+        if done {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The `text` of every `textDocument/didChange` line in the sink, in
+/// arrival order.
+fn did_change_texts(sink: &std::path::Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(sink) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("textDocument/didChange"))
+        .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_owned))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
