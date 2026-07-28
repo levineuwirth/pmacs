@@ -459,57 +459,71 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## dired Stage 2 framing lane — PR #171 OPEN, STALE, DO NOT MERGE AS-IS
+## dired Stage 2 framing lane — PR #171 AT REVISION 5, AWAITING APPROVAL
 
-- Portable branch: `githubsucks/dired-stage2-framing` (head `ab42a79`,
-  four framing commits); worktree `../pmacs-dired-stage1`. **PR #171**,
-  base `main`. Framing only — `docs/dired-stage2-framing.md`, 1,570
-  lines, no runtime code.
-- **Measured 2026-07-28: 4 commits ahead of `main`, 153 behind**, merge
-  base `c8ec8f3`. GitHub reports it mergeable, and its old CI run is
-  green — **both facts are about a tree nobody has looked at in 153
-  commits**, and the document still says PROPOSED.
-- **The commit history embodies three review rounds. That is not the
-  same as approval**, and GitHub records no formal review or comment on
-  it. Do not read the round count as a green light.
-- **Its dependencies moved materially underneath it**, which is the real
-  reason not to merge. Note that dired Stage 1 (#165) and find-file
-  (#162) are its *base*, not new arrivals — the merge base `c8ec8f3`
-  **is** #165's merge commit. Eighteen PRs landed after it, and at least
-  three change ground the framing stands on:
-  - **#178 gave generated buffers a write invariant**
-    (`Buffer::set_generated_contents`). Dired's listing is a generated
-    buffer, and dired is named in the handoff as one of the writer
-    mechanisms that has **not** adopted it. Stage 2's marks and
-    operations write that buffer constantly.
-  - **#182 (Journey Stage 1a) made `resolve_target_buffer` the single
-    directory-open path**, with dired demoted to a *replaceable slot*
-    (`pmacs.path.directory_handler`) rather than a hook subscriber. Any
-    Stage 2 claim about how a directory reaches dired is now describing
-    a mechanism that no longer exists in that form.
-  - **#179/#181 landed the typed-edit consumer chain**, which is the
-    fan-out a rename transaction has to survive.
-
-  Re-scout against `6bee09d`, publish a new revision, and get explicit
-  framing approval before any implementation. **The re-scout is under
-  way** on the existing branch, so PR #171 keeps its three-round
-  history; the product is a revision 5, not a new document. (`main` has
-  since advanced to `0442d78`, but the only difference is the test-only
-  #174, so no re-scout conclusion turns on it.)
-- **The rename problem the framing must still answer**, restated because
-  it is the hard part: a rename is a transaction across **five** path
-  owners — the buffer path, the buffer name, the URI-keyed LSP stores
-  plus `DiagnosticView` (whose URI is set once at construction), dired's
-  pathless handles, and a captured Lua local that no transaction can
-  reach.
+- Portable branch: `githubsucks/dired-stage2-framing` (head `e7f811b`);
+  worktree `../pmacs-dired-stage1`. **PR #171**, base `main`, integrated
+  up to `main` @ `ad41cf1`. Framing only —
+  `docs/dired-stage2-framing.md`, now **2,304 lines**, no runtime code.
+- **Status: PROPOSED, never formally approved.** GitHub records no
+  formal review on it. The commit history embodies four revisions and
+  three review rounds; **that is not the same as approval**, and it must
+  not be read as one.
+- **Rev 4 was scouted at `c8ec8f3`, which is dired Stage 1's own merge
+  commit (#165)** — so dired Stage 1 and find-file (#162) were always
+  its base, not new arrivals. Eighteen PRs landed on top before the
+  re-scout. Rev 5 is that re-scout, against `6bee09d` and then
+  integrated forward.
+- **Seven of rev 4's own claims about pmacs were wrong**, which is the
+  lane's most transferable lesson: a framing can verify all its external
+  facts and still be wrong about the codebase it is for. The load-bearing
+  one: §5 named `drain_external_cancelled` but cited `lsp.rs:1596`.
+  **Those are two different functions 35 lines apart** —
+  `drain_external_cancelled` (`:1561`) is the unconditional
+  server-scoped drain and is the right precedent;
+  `drain_cancelled_externals` (`:1596`) is a per-tick token/timeout
+  sweep. A rename flips no token, so following the line number yields a
+  `forget_uri` whose drain half is a silent no-op and the awaiting
+  coroutine hangs forever — exactly the failure that step exists to
+  prevent.
+- **The rename path-owner census is SIX, not five.** The sixth is
+  `lean.lua`'s `M.file_progress`, a URI-keyed Lua module table living in
+  no Rust store, so `forget_uri` structurally cannot reach it. That is
+  the first case outside dired proving the **hook**, not the Rust
+  method, is the mechanism that scales. The other five: buffer path,
+  buffer name, the URI-keyed LSP stores plus `DiagnosticView` (URI set
+  once at construction), dired's pathless handles, and a captured Lua
+  local no transaction can reach.
+- **The journey ratchet is split across two files**, and both are gates:
+  `tests/journey_acceptance.rs` (24 tests, "stages add rows, none
+  removes them", seven rows asserting on dired) and
+  `gpu_invocation_acceptance.rs`, where #183 actually put the GPU row.
+  A scout that checks only the first will think #183 added nothing.
+- **`open_directory` now commits under `pmacs.window.commit_to`, whose
+  scope REFUSES an `await`** (#182). That directly constrains the
+  serialize-and-await batch contract the framing proposes.
+- **The typed-edit chain does not reach dired** — verified rather than
+  assumed. Its lessons bind the framing's two *new* hooks instead.
+- **Scope has MOVED OUT of this lane.** Rev 5 added Q#DR25 to adopt
+  `set_generated_contents` at the head of 2b, because dired's listing is
+  a generated buffer whose paint bypasses an intercept over a still
+  writable rope. That turned out to be a **class bug, not dired's** —
+  the same idiom is in listview, compile and search/grep — so it is now
+  owned by the generated-buffer immutability lane. **#171 needs a
+  revision 6 that defers Q#DR25 to that lane** once its framing is
+  approved; do not implement Q#DR25 from this document.
 - Intended serial implementation once approved: **2a** rename/delete
   reconciliation substrate with no dired UI, **2b** marks and
   operations, **2c** mkdir/copy/recursive-delete primitives, then Stage
-  3 wdired.
+  3 wdired. The re-scout re-examined this cut and it holds unchanged.
 - **Ownership warning:** dired 2a overlaps `src/editor_core.rs`,
   `builtin/runtime/lsp.lua`, and the URI-keyed LSP state with other
   coherence work. Do not run it concurrently with Journey Stage 1b
   without assigning those files to one lane first.
+- **Two live bugs on `main` this lane confirmed but does NOT fix**, both
+  now owned elsewhere: `apply_resource_op`'s delete arm destroys unsaved
+  work (no dirty check anywhere on the path), and `View` still lacks
+  `rename_resource`.
 
 ## Parked lane: kill-ring browser + persistence
 
