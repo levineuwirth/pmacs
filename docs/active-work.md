@@ -171,7 +171,7 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Journey/GPU directory-target ratchet — PR #183 REGATING REVIEW ROUND 1
+## Journey/GPU directory-target ratchet — PR #183 GATED AFTER REVIEW ROUND 1
 
 - **Approved correction, not new product behavior.** GPU initial-target
   framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
@@ -198,10 +198,9 @@ If it does not, stop and repair the remote/fetch configuration.
   Stage 2 rev-5 recovery bullet named rev 4's framing branch. And the
   durable handoff still named pre-Journey `main` even though this ledger
   had advanced. The first is now a post-quiescence transport assertion;
-  the latter two are corrected in this revision. The touched suite is
-  green **15/15**; the full gate matrix is being rerun before this round
-  closes.
-- **Pre-review full gate matrix was green at `486ce16`:**
+  the latter two are corrected in this revision. The complete matrix
+  below is green on the corrected tree.
+- **Post-review full gate matrix is green at `ec4191f`:**
   - `cargo fmt --check`;
   - strict workspace clippy;
   - library **1,849 passed / 3 ignored**;
@@ -217,6 +216,10 @@ If it does not, stop and repair the remote/fetch configuration.
 - **Gate diagnostics retained:** initial fresh-worktree attempts without
   the documented `pmacs-gpu` prerequisite and without out-of-sandbox
   Unix-socket permission were setup failures, not product evidence.
+  During the review rerun, an in-sandbox library attempt reproduced the
+  latter setup failure as `EPERM` in three attach socket tests; the
+  authoritative out-of-sandbox rerun passed all **1,849** non-ignored
+  tests.
   The first full-workspace attempt then exhausted the `/tmp` filesystem
   quota while linking. Moving only the disposable Cargo target to disk
   let the sweep run; its first completed pass exposed one transient
