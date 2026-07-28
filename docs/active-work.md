@@ -171,7 +171,7 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Journey/GPU directory-target ratchet — PR #183 GATED AFTER REVIEW ROUND 1
+## Journey/GPU directory-target ratchet — PR #183 REGATING PUBLIC PATH
 
 - **Approved correction, not new product behavior.** GPU initial-target
   framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
@@ -186,12 +186,15 @@ If it does not, stop and repair the remote/fetch configuration.
   <https://github.com/levineuwirth/pmacs/pull/183>. It is intentionally
   open and unmerged pending user review.
 - **Scope is one acceptance ratchet:** remove `"."` from the four
-  genuinely invalid cases and add a transport-level positive which
-  requires snapshot-first + `InitialTargetResult::Opened` for `"."`,
-  then consumes the post-quiescence replacement snapshot and requires
-  dired's canonical header plus a known directory entry before proving
-  the same daemon can open a following file target. No production
-  source, protocol, framing decision, or coherence grade changes.
+  genuinely invalid cases and drive the public `pmacs --gpu .` root
+  broker through the real managed GPU connector. The positive requires
+  snapshot-first + `InitialTargetResult::Opened`, then consumes the
+  post-quiescence replacement snapshot and requires dired's canonical
+  header plus a known directory entry before proving the same daemon can
+  open a following file target. The private display-less acceptance
+  probe now reports its snapshot count and final materialized text so
+  that public path is observable. No normal frontend/daemon behavior,
+  protocol, framing decision, or coherence grade changes.
 - **Review round 1: three findings, all real and corrected.** The
   first test stopped at the deliberately pre-existing bootstrap
   document, so it did not pin the resolver's later dired commit. The
@@ -200,6 +203,14 @@ If it does not, stop and repair the remote/fetch configuration.
   had advanced. The first is now a post-quiescence transport assertion;
   the latter two are corrected in this revision. The complete matrix
   below is green on the corrected tree.
+- **Live public-path check tightened that correction further.** A user
+  report that `pmacs --gpu .` differed from `pmacs .` did not reproduce:
+  the live default daemon delivered both snapshots, and a traced
+  windowed invocation applied both and displayed dired. It nevertheless
+  exposed that the corrected acceptance still attached a raw protocol
+  client rather than invoking the public root broker and real GPU
+  connector. The test now covers those surfaces and passes **15/15**;
+  its full matrix is being rerun before this revision is pushed.
 - **Post-review full gate matrix is green at `ec4191f`:**
   - `cargo fmt --check`;
   - strict workspace clippy;
