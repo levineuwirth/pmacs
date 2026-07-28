@@ -109,7 +109,7 @@ remain open to them.
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
 | 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real shared primitive; bottom panel landed (#155) |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
-| 16 | Semantic frontend | **Strong** | v6..=v20 negotiated protocol; degradation practiced; TUI/GPU share the model |
+| 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
 | 18 | Onboarding | **Missing** | No welcome, no tutorial; `C-h` deletes a word; `M-x` is the only door in |
 | 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` exists (steps 2, 3, 5); the other five scenarios are still unwritten |
@@ -1340,9 +1340,13 @@ facto privileged implementation.
 **Grade: strong — the healthiest concern in this document, and most of
 its asks are already practiced.**
 
-- Versioned, negotiated protocol `SUPPORTED=[6..=20]` with deliberate
+- Versioned protocol schema `SUPPORTED=[6..=21]` with deliberate
   encoding-breaking bumps, both-frontends support required per bump,
-  and byte-pin discipline for appended variants (handoff §4).
+  and byte-pin discipline for appended variants (handoff §4). The v21
+  bottom-panel family is reserved but dark in Stage 2B-1: because
+  `Hello` is server-first, the production daemon still advertises v20
+  so shipped v20 clients remain attachable; compatible v21 activation
+  belongs to Stage 2B-3.
 - Two genuine frontends share the conceptual model; CRDT concurrent
   editing with presence across them; remote attach + reconnect.
 - **Graceful per-frontend degradation is practiced, not aspirational**:

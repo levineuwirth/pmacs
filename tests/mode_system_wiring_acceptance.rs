@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use pmacs::cell::{Cell, CellSize, Glyph};
 use pmacs::protocol::{
-    AttachRequest, FrontendEvent, FrontendId, Hello, InstanceMessage, Key, KeyEvent, Modifiers,
-    PROTOCOL_VERSION,
+    ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendEvent, FrontendId, Hello, InstanceMessage,
+    Key, KeyEvent, Modifiers,
 };
 use pmacs::transport::{read_message, write_message};
 
@@ -75,11 +75,11 @@ fn attach(daemon: &TestDaemon) -> (Client, Grid) {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set daemon handshake timeout");
     let hello: Hello = read_message(&mut stream).expect("read daemon Hello");
-    assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
     write_message(
         &mut stream,
         &AttachRequest {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: hello.protocol_version,
             frontend_capabilities: build_default_caps(),
             initial_size: CellSize::new(ROWS, COLS),
         },

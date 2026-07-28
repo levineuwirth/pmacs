@@ -5,17 +5,28 @@
 //! projection, the epoch state machine, and the GPU band are later
 //! slices of this stage and are not exercised here.
 
+mod common;
+
+use std::time::Duration;
+
 use pmacs_protocol::cell::{Cell, CellCoord, CellSize, Color, Glyph, Style, UnderlineStyle};
-use pmacs_protocol::message::{FrontendEvent, InstanceMessage, Modifiers, MouseButton, MouseKind};
+use pmacs_protocol::message::{
+    AttachRequest, FrontendEvent, Hello, InstanceMessage, Modifiers, MouseButton, MouseKind,
+};
 use pmacs_protocol::panel::{
     MAX_PANEL_VISIBLE_CELLS, PanelFrame, PanelFrameError, PanelFramePayload,
 };
 use pmacs_protocol::terminal::{
     MAX_TERMINAL_COLS, TerminalFrame, TerminalFrameError, TerminalProcessState,
 };
-use pmacs_protocol::transport::MAX_FRAME_BYTES;
+use pmacs_protocol::transport::{MAX_FRAME_BYTES, read_message, write_message};
 use pmacs_protocol::wire_grid::{MAX_WIRE_GRID_GLYPH_BYTES, MAX_WIRE_GRID_GRAPHEME_BYTES};
-use pmacs_protocol::{BufferId, FrontendId, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS};
+use pmacs_protocol::{
+    ADVERTISED_PROTOCOL_VERSION, BufferId, FrontendId, PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+};
+
+use common::daemon::{TestDaemon, build_default_caps};
 
 fn cell(ch: char) -> Cell {
     Cell {
@@ -98,9 +109,52 @@ fn terminal_frame(rows: u32, cols: u32) -> TerminalFrame {
 fn the_panel_stage_takes_protocol_v21() {
     assert_eq!(PROTOCOL_VERSION, 21);
     assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&21));
-    // v20 stays supported: a v20 peer interoperates with panel traffic
-    // simply absent rather than being refused the handshake.
+    // The wire family is reserved before it is activated: the production
+    // server-first Hello must remain acceptable to already-shipped v20
+    // clients throughout the dark protocol and daemon slices.
+    assert_eq!(ADVERTISED_PROTOCOL_VERSION, 20);
     assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&20));
+}
+
+#[test]
+fn a_new_daemon_keeps_an_existing_v20_client_attachable() {
+    let daemon = TestDaemon::spawn();
+    let mut stream = daemon.connect();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set handshake timeout");
+
+    // This is the rejection point in an already-shipped client: it reads the
+    // daemon's unsolicited Hello before it is able to identify its own
+    // supported range or send AttachRequest.
+    let hello: Hello = read_message(&mut stream).expect("read daemon Hello");
+    let v20_client_supported_versions = 6..=20;
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
+    assert!(
+        v20_client_supported_versions.contains(&hello.protocol_version),
+        "an existing v20 client would reject the server-first Hello"
+    );
+
+    write_message(
+        &mut stream,
+        &AttachRequest {
+            protocol_version: hello.protocol_version,
+            frontend_capabilities: build_default_caps(),
+            initial_size: CellSize::new(24, 80),
+        },
+    )
+    .expect("write v20 AttachRequest");
+
+    assert!(
+        matches!(
+            read_message::<InstanceMessage>(&mut stream).expect("read initial grid"),
+            InstanceMessage::CellDelta {
+                full_grid: true,
+                ..
+            }
+        ),
+        "the daemon must establish the v20 session, not merely send an acceptable Hello"
+    );
 }
 
 #[test]
@@ -483,7 +537,7 @@ fn panel_budget_boundary_frames() -> (PanelFrame, PanelFrame) {
     let mut over = exact.clone();
     // One more byte of glyph, nothing else changed.
     let last = over.cells.len() - 1;
-    over.cells[last] = maximal_cell(Glyph::Cluster(cluster_of_len(3).into_boxed_slice()));
+    over.cells[last] = maximal_cell(Glyph::Cluster(cluster_of_len(2).into_boxed_slice()));
 
     (exact, over)
 }
@@ -507,6 +561,20 @@ fn maximum_legal_panel_frame_encodes_below_the_transport_cap() {
     assert_eq!(
         glyph_bytes, MAX_WIRE_GRID_GLYPH_BYTES,
         "the measured fixture must spend the whole aggregate budget"
+    );
+    let over_glyph_bytes = over
+        .cells
+        .iter()
+        .map(|cell| match &cell.glyph {
+            Glyph::Char(ch) => ch.len_utf8(),
+            Glyph::Cluster(bytes) => bytes.len(),
+            Glyph::Continuation => 0,
+        })
+        .sum::<usize>();
+    assert_eq!(
+        over_glyph_bytes,
+        MAX_WIRE_GRID_GLYPH_BYTES + 1,
+        "the rejecting twin must be exactly one byte over the aggregate budget"
     );
 
     // One byte over is rejected, which is what makes `exact` maximal.

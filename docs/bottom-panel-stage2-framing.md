@@ -1,10 +1,13 @@
 # Bottom panel Stage 2 — the GPU panel band (framing)
 
-**Revision 5 — APPROVED 2026-07-27; 2A merged, 2B-1 in progress.
-Ground truth: canonical `main` @ `c2d56ff`, protocol v20 on `main` and
-v21 on `bottom-panel-stage2b`.** Revisions 1–4 were
-pre-implementation; rev 5 records the three-way slice of Stage 2B
-(§0.0, §7.2, §9) after its first slice was already built.
+**Revision 6 — PR #184 review correction; the underlying Stage 2
+framing remains APPROVED 2026-07-27. 2A is merged and 2B-1 is under
+review. Ground truth: canonical `main` @ `7fd646d`, protocol v20 on
+`main`; `bottom-panel-stage2b` reserves the v21 schema while its
+server-first production handshake continues to advertise v20.**
+Revisions 1–4 were pre-implementation; rev 5 recorded the three-way
+slice of Stage 2B after its first slice was already built; rev 6
+corrects that slice's mixed-version and gate contracts.
 
 Stage 1 (#155, merge `e745068`) gave pmacs window placement, window
 parameters, TUI side windows, the divider, and the adopter `display`
@@ -29,7 +32,33 @@ geometries), Q#BP16 (pointer transport), Q#BP17 (fold projection), and
 
 ## 0. Revision history
 
-### 0.0 Rev 4 → rev 5 — the three-way slice of 2B (not a review round)
+### 0.0 Rev 5 → rev 6 — PR #184 review round 2, four findings closed
+
+- **R6-1 (P1) — v21 is reserved, not advertised, in 2B-1.** The
+  protocol's handshake is server-first. An existing v20 TUI or GPU
+  frontend rejects a `Hello { protocol_version: 21 }` before it can
+  send an `AttachRequest`, so rev 5's claim that a v21 daemon and v20
+  peer "still negotiate 20" was impossible. 2B-1 therefore extends the
+  schema and accepted-version ladder to v21 while the production daemon
+  continues advertising v20. A real-daemon acceptance emulates the
+  shipped v20 rejection point and then requires the attachment to reach
+  its initial grid. **2B-3 owns both a compatibility-preserving
+  activation mechanism and the production move to v21; it may not
+  simply change the unsolicited `Hello` to 21.**
+- **R6-2 (P2) — durable protocol claims move with the wire.**
+  `COHERENCE.md` and `docs/agent-handoff.md` now distinguish v21 schema
+  support from the still-v20 production handshake.
+- **R6-3 (P2) — the gate contract names the actual decomposition.**
+  §9 now names 2B-1's
+  `bottom_panel_stage2b_protocol_acceptance` suite and the exact planned
+  daemon/GPU suite names for 2B-2 and 2B-3 instead of the nonexistent
+  `bottom_panel_stage2b_acceptance`.
+- **R6-4 (P2) — "one byte over" means exactly one.** The panel and
+  copied terminal boundary fixtures replace a one-byte cluster with a
+  two-byte cluster, and each independently asserts a total of
+  `limit + 1`.
+
+### 0.1 Rev 4 → rev 5 — the three-way slice of 2B (not a review round)
 
 This revision changes no decision. It splits one approved
 implementation slice into three and reallocates the acceptance
@@ -68,18 +97,17 @@ criteria across them.
   2 and 3 are written.
 - **R5-4 — two of the three slices ship dark, deliberately.** Nothing
   in 2B-1 or 2B-2 is reachable by a user: `panel_capable` stays
-  `false` for every negotiated semantic session until 2B-3, so a v21
-  daemon and a v21 GPU frontend negotiate 21 and behave exactly as
-  they do at v20. This is the same posture 2A took ("seam adoption
-  that becomes load-bearing in 2B") and it carries the same
-  obligation: **the version bump advertises a capability whose only
-  distinguishing feature is unreachable until 2B-3 lands.** That is
-  safe for compatibility — the variants are appended, the ladder is
-  extended, and a v20 peer still negotiates 20 — but it means the arc
-  must not stall between 2B-1 and 2B-3. Recorded here so a stall is
-  visible as a decision rather than inherited as a default.
+  `false` for every negotiated semantic session until 2B-3. Rev 5
+  incorrectly described that posture as a production v21 negotiation
+  that remained compatible with v20 clients; rev 6 R6-1 supersedes
+  that claim. The actual dark posture keeps the server-first
+  production handshake on v20 while the v21 schema is reserved. This
+  is the same posture 2A took ("seam adoption that becomes
+  load-bearing in 2B"), and it means the arc must not stall between
+  2B-1 and 2B-3. Recorded here so a stall is visible as a decision
+  rather than inherited as a default.
 
-### 0.1 Round 3 (rev 3 → rev 4) — 1 blocking, 1 high, 1 medium, all closed
+### 0.2 Round 3 (rev 3 → rev 4) — 1 blocking, 1 high, 1 medium, all closed
 
 - **R3-1 (blocker).** Rev 3's three-boundary model was right but its
   call-site table was wrong in five places, and each error was a real
@@ -107,7 +135,7 @@ criteria across them.
   `cell.attachment.is_some()` rejection. It is now classified — and
   **shared**, with the reasoning pinned.
 
-### 0.2 Round 2 (rev 2 → rev 3) — 1 blocking, 2 high, 1 medium, all closed
+### 0.3 Round 2 (rev 2 → rev 3) — 1 blocking, 2 high, 1 medium, all closed
 
 - **R2-1 (blocker).** Rev 2's "one document-bottom seam" conflated two
   boundaries that must **diverge** once a panel exists. Several sites it
@@ -134,7 +162,7 @@ criteria across them.
 - Both §8 open items are decided (§5.3): `BASE_DIVIDER_HEIGHT = 4.0` at
   scale 1.0, and `TEXT_TOP` stays unscaled.
 
-### 0.3 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
+### 0.4 Round 1 (rev 1 → rev 2) — 2 blocking, 3 high, 3 revision points, all closed
 
 - **R1-1 (blocker).** Rev 1 said all 23 census reads route through
   `primary_document_window`. That contradicts Q#BP14, which routes only
@@ -181,9 +209,10 @@ criteria across them.
 | Byte pin `InstanceMessage::InitialTargetResult` | `pmacs-protocol/src/message.rs:1145` | Holds — still the enum's final variant |
 | Byte pin `FrontendEvent::TerminalPointer` | final variant of its enum | Holds |
 
-**Protocol is still v20** (`pmacs-protocol/src/message.rs:1568`); no
-intervening PR bumped it. Q#BP9's conditional resolves: **Stage 2 is
-v21**, no reservation was taken and none was needed.
+**Protocol was still v20 at this re-scout**; no intervening PR had
+bumped it. Q#BP9's conditional resolved: **Stage 2 reserves v21**.
+Rev 6 R6-1 adds the server-first compatibility constraint discovered
+during 2B-1 review.
 
 Fifteen PRs merged between the parent's last re-scout (`47581f4`) and
 this one: #149, #150, #152–#155, #158–#166. Nothing in the parent's
@@ -375,13 +404,18 @@ undedicated (Q#BP2c). "It receives no new events" is insufficient — if
 the daemon nevertheless places that frontend's window in a side panel
 it cannot render, the window becomes invisible. The gate is on
 placement, not only on transport. Parent acceptance 51 pins the mixed
-session.
+session. **The production daemon does not advertise v21 in 2B-1 or
+2B-2.** Because `Hello` is server-first, 2B-3 must add or prove a
+compatibility-preserving way to activate v21 before applying this rule;
+merely advertising 21 would strand already-shipped v20 clients before
+they can identify themselves.
 
 ## 4. Revisions to the parent framing
 
 Only these; everything else stands.
 
-- **Q#BP9 resolves to v21.**
+- **Q#BP9 resolves to the v21 schema, with production advertisement
+  held at v20 until 2B-3 supplies compatible activation.**
 - **Q#BP15a's epoch ownership is specified** by §3.1's table and API
   split, replacing the parent's one-line "frontend-owned" statement.
 - **Q#BP8's statusline criterion splits** per §3.3: one read reroutes,
@@ -741,7 +775,10 @@ consumer, no capability change.
   becomes 21, `SUPPORTED_PROTOCOL_VERSIONS` accepts `6..=21` and
   rejects 22, and any test whose *name* encodes the old number is
   renamed. A ladder pin that passes across a bump was not pinning the
-  version.
+  version. **`ADVERTISED_PROTOCOL_VERSION` remains 20 in 2B-1 and
+  2B-2** because the unsolicited `Hello` precedes any client version
+  signal. A real daemon must remain attachable by a client whose
+  supported range ends at 20.
 - **Shared bounds are aliased, not duplicated.** Every constant the
   terminal screen and the panel validator both enforce is one
   definition with the other as an alias, so truncation and validation
@@ -790,9 +827,11 @@ production negotiation until 2B-3.
 
 #### 7.2.3 Slice 2B-3 — the GPU band and the capability flip
 
-**Authority: `pmacs-gpu`, plus the negotiation rule.** This is the only
-slice a user can observe, and the only one that closes the journey
-divergence in §6.
+**Authority: `pmacs-gpu`, plus the compatibility-preserving negotiation
+activation.** This is the only slice a user can observe, and the only
+one that closes the journey divergence in §6. It must not advertise
+v21 in the server-first `Hello` until an existing v20 client can still
+attach.
 
 - **46** (band + divider shrink the document text area by exactly their
   pixel height; carets, hits, and scroll geometry respect the reduced
@@ -838,7 +877,10 @@ divergence in §6.
   its chrome.
 - **A2B-5.** `panel_capable` is true only for a v21+ negotiated
   authenticated semantic session; a v20 semantic session is never
-  **placed** in a side window, not merely denied the events.
+  **placed** in a side window, not merely denied the events. The same
+  acceptance must attach an actual v20 client to the production daemon
+  after v21 activation, so the new path cannot pass by breaking the old
+  handshake before placement is evaluated.
 
 ## 8. Open items
 
@@ -866,17 +908,20 @@ stacked, and each is cut from `main`.
   installed.
 - **Stage 2B-1 — the v21 wire layer.** Branch `bottom-panel-stage2b`.
   The four wire shapes, the version bump, the shared cell-grid
-  validator, and the version-ladder move. **No producer, no consumer,
-  no capability change** — `panel_capable` stays `false`.
+  validator, and the version-ladder move. The v21 schema is reserved
+  while the production daemon continues advertising v20. **No
+  producer, no consumer, no capability change** — `panel_capable`
+  stays `false`.
 - **Stage 2B-2 — the daemon panel projection and epoch machine.** Cut
   from `main` after 2B-1 merges. Produces `PanelFrame` and owns
   stale-event rejection, exercised through a **test-only**
   panel-capable semantic view. Still no production flip.
 - **Stage 2B-3 — the GPU band and the negotiated flip.** Cut from
   `main` after 2B-2 merges. The three-boundary text-area split, the
-  divider, pointer routing, and `panel_capable = true` for a v21+
-  negotiated authenticated semantic session. **This is the slice that
-  changes what a user sees**, and it repeats 2A's and 2B-2's relevant
+  divider, pointer routing, the compatibility-preserving v21
+  activation, and `panel_capable = true` for a v21+ negotiated
+  authenticated semantic session. **This is the slice that changes
+  what a user sees**, and it repeats 2A's and 2B-2's relevant
   assertions through the real capability flip.
 
 **Each slice runs the full gate set below, not a subset of it.** A
@@ -889,9 +934,16 @@ Gates for each slice: the standing suite from `CLAUDE.md`, plus the **touched
 acceptance suites named explicitly** — the standing rule is to run the
 suites a change touches, and "standing suite" does not name them:
 
-- `bottom_panel_stage1_acceptance` — the substrate both slices build on.
-- `bottom_panel_stage2a_acceptance` / `bottom_panel_stage2b_acceptance`
-  — new, one per slice.
+- `bottom_panel_stage1_acceptance` — the substrate all four Stage 2
+  slices build on.
+- `bottom_panel_stage2a_acceptance` — Stage 2A's classified census and
+  painter extraction.
+- `bottom_panel_stage2b_protocol_acceptance` — Stage 2B-1's v21 schema,
+  server-first v20 compatibility, byte pins, and shared validation.
+- `bottom_panel_stage2b_daemon_acceptance` — the exact suite name
+  reserved for Stage 2B-2's projection and epoch machine.
+- `bottom_panel_stage2b_gpu_acceptance` — the exact suite name reserved
+  for Stage 2B-3's band, compatible activation, and capability flip.
 - `statusline_segments_acceptance` — the fan-out target change (§3.3).
 - `m11_5_semantic_acceptance` — the semantic census (§3.2).
 - `gpu_initial_target_acceptance` — parent criterion 55.

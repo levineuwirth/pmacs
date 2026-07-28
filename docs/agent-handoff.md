@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-28, after the Journey/GPU directory-target
-ratchet (#183), following Journey Stage 1a (#182), which made directory
+**Last updated: 2026-07-28, during bottom-panel Stage 2B-1 PR #184
+review; the canonical landed base remains the Journey/GPU
+directory-target ratchet (#183), following Journey Stage 1a (#182),
+which made directory
 startup one coherent local/daemon/GPU path and incorporated the terminal
 configuration + copy mode landed-doc work (#180); following terminal
 copy mode (#178) — `C-c C-t`
@@ -58,9 +60,11 @@ commands, read `docs/active-work.md` immediately after this file.
   #165, the GPU terminal input fix #166, Lean 4 Stage 2 #161, the dired
   framing #164, COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160,
   minimap blank-slab #159, bottom-panel Stage 1 #155). Protocol unchanged
-  at **v20** — bottom-panel Stage 2A deliberately carries no wire change;
-  v21 arrives with Stage 2B. The bullets below describe the arcs in their
-  own terms; this line is the head-of-`main` anchor.
+  at **v20** — bottom-panel Stage 2A deliberately carries no wire change.
+  The in-review Stage 2B-1 reserves the v21 schema but keeps the
+  server-first production `Hello` at v20; compatible activation belongs
+  to Stage 2B-3. The bullets below describe the arcs in their own terms;
+  this line is the head-of-`main` anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -395,9 +399,14 @@ commands, read `docs/active-work.md` immediately after this file.
     unchanged, which is the additivity gate for the `read_dir` change; M4
     121; required GPU 155; isolated-`XDG_CONFIG_HOME` workspace sweep
     3,205 across 93 suites. 15 claims bite-verified.
-- Protocol **v20** (`SUPPORTED=[6..=20]`; v16 = `ThemeFacts`, v17 =
-  `FontFacts`, v18 = `StatuslineSegments`, v19 = terminal frames/events, v20 =
-  the GPU initial-target semantic bootstrap family).
+- Canonical `main` is protocol **v20** (`SUPPORTED=[6..=20]`; v16 =
+  `ThemeFacts`, v17 = `FontFacts`, v18 = `StatuslineSegments`, v19 =
+  terminal frames/events, v20 = the GPU initial-target semantic
+  bootstrap family). Bottom-panel Stage 2B-1's in-review schema is v21
+  (`SUPPORTED=[6..=21]`), but its production daemon deliberately
+  advertises v20: the handshake is server-first, so advertising 21
+  would make shipped v20 GPU/TUI clients reject before
+  `AttachRequest`. Stage 2B-3 owns compatible production activation.
 - **Bottom panel Stage 1 (window placement + TUI side windows) LANDED —
   #155** (`docs/bottom-panel-framing.md` rev 4; merge `e745068`; two review
   rounds). **No protocol change (still v20).** Arc 7's substrate: pmacs now
@@ -463,14 +472,18 @@ commands, read `docs/active-work.md` immediately after this file.
     required GPU 152; initial-target 14 CRDT; all three vterm suites; folding
     Stage 2 48. All 12 CI checks green at merge.
   - **Stage 2 (the GPU panel band) is FRAMED** —
-    `docs/bottom-panel-stage2-framing.md` rev 5, four review rounds, no
-    open items; the rev-5 implementation split was explicitly approved
-    2026-07-27. It takes protocol **v21** and ships as four serial
+    `docs/bottom-panel-stage2-framing.md` rev 6, four framing review
+    rounds, no open framing items; the rev-5 implementation split was
+    explicitly approved 2026-07-27 and rev 6 records PR #184's
+    server-first compatibility and gate correction. It reserves
+    protocol **v21** and ships as four serial
     implementation slices: **2A** classified census routing +
     per-window painter extraction (no wire change), **2B-1** the wire,
     **2B-2** the daemon projection and epoch machine, then **2B-3** the
-    GPU band and negotiated `panel_capable` flip. Parent acceptance
-    37–55 remains authoritative. Stage 3 is the adopter default flip.
+    GPU band, compatible v21 activation, and negotiated
+    `panel_capable` flip. Production attachment remains v20 through
+    2B-1 and 2B-2. Parent acceptance 37–55 remains authoritative.
+    Stage 3 is the adopter default flip.
   - **The §1.3 census is CLASSIFIED, not uniformly redirected.** Only the
     Projection class (#1–#12, #21–#22) routes through
     `primary_document_window`; focus/input (#13–#15, #23), focus chrome
@@ -1201,12 +1214,17 @@ buffer owns a path's recovery slot; only recover/discard release
 unclaimed crash data; adopt clears the old owner's skip cache.
 
 **Protocol** — encoding-breaking bumps are deliberate and versioned. Canonical
-`main` is `[6..=20]`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
+`main` is `[6..=20]`. The in-review bottom-panel 2B-1 schema extends support
+to `[6..=21]`, while `ADVERTISED_PROTOCOL_VERSION` stays 20 until 2B-3
+provides compatibility-preserving activation; the server-first `Hello`
+cannot advertise 21 without stranding existing v20 clients before
+`AttachRequest`. v15 = `CompletionPopup` + `StatusFacts.message`; v16 =
 `ThemeFacts`; v17 = `FontFacts`; v18 = `StatuslineSegments`; v19 = the vterm
 terminal family; v20 = semantic `SessionBootstrapRequest` plus appended
-`InitialTargetResult`. New wire surface ⇒ bump + both-frontends support +
-acceptance. An APPENDED variant must be guarded by a byte pin on the PREVIOUS
-final variant — its own round-trip cannot detect a discriminant shift.
+`InitialTargetResult`; v21 reserves the panel frame/event family. New wire
+surface ⇒ bump + both-frontends support + acceptance. An APPENDED variant
+must be guarded by a byte pin on the PREVIOUS final variant — its own
+round-trip cannot detect a discriminant shift.
 
 **Fake LSP** (`src/bin/pmacs_fake_lsp.rs`) modes: `fullonly`,
 `rangeonly`, `rangeonly16` (UTF-16 + fail-closed bounds validation),

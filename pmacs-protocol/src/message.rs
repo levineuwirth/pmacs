@@ -1665,6 +1665,16 @@ pub enum ResourceBody {
 /// window invisible.
 pub const PROTOCOL_VERSION: u32 = 21;
 
+/// Protocol version placed in the daemon's server-first [`Hello`].
+///
+/// Bottom-panel Stage 2B-1 reserves the additive v21 wire family, but
+/// production attachment remains on v20 until the Stage 2B-3 capability
+/// activation can preserve compatibility with existing v20 frontends.
+/// Those frontends reject an unknown server-first version before they can
+/// send [`AttachRequest`], so advertising [`PROTOCOL_VERSION`] here would
+/// make the otherwise-dark protocol slice user-visible.
+pub const ADVERTISED_PROTOCOL_VERSION: u32 = 20;
+
 /// T M10.5: the set of protocol versions a v1.0 binary accepts on
 /// the wire. v0.1 binaries only accepted `[1]`; v1.0 binaries accept
 /// `[1, 2]` so the version asymmetry the §sec:m10-backward-compat
@@ -1742,9 +1752,12 @@ pub const PROTOCOL_VERSION: u32 = 21;
 /// sessions send a bounded bootstrap envelope after `AttachRequest`; legacy
 /// and non-semantic sessions retain their existing handshake shape.
 ///
-/// Bottom panel Stage 2 (Q#BP9): extended to `[6, ..., 21]`. v21 peers
-/// may exchange panel traffic; v20 peers interoperate with it simply
-/// absent, and are never placed in a side window.
+/// Bottom panel Stage 2 (Q#BP9): extended to `[6, ..., 21]`. Stage 2B-1
+/// reserves and validates the v21 wire while production daemons continue
+/// to send [`ADVERTISED_PROTOCOL_VERSION`] in their server-first
+/// [`Hello`]. The later capability-activation slice owns moving production
+/// negotiation to v21 without making existing v20 frontends reject the
+/// handshake.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[u32] =
     &[6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
 
@@ -2126,7 +2139,10 @@ pub fn negotiate_capabilities(
 /// frontend will use as the `FrontendId` on every event it sends.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Hello {
-    /// The instance's `PROTOCOL_VERSION`.
+    /// The protocol version this attachment should use.
+    ///
+    /// This can deliberately trail [`PROTOCOL_VERSION`] while an additive
+    /// wire family is reserved but not yet activated in production.
     pub protocol_version: u32,
     /// `FrontendId` assigned to this attachment by the instance. The
     /// frontend stamps this onto subsequent events. v0.1 daemons start

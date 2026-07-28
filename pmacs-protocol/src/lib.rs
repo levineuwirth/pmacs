@@ -57,17 +57,18 @@ pub use cell::{
 pub use crdt::CrdtOp;
 pub use ids::{BufferId, ByteRange, FrontendId, Position};
 pub use message::{
-    AdornmentContent, AdornmentPlacement, AttachRequest, BUILTIN_PAIR_CHARS, BlockAdornment,
-    CompletionPopupRow, CursorState, Decoration, DecorationKind, DecorationSegment,
-    FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello, InitialTarget, InitialTargetResult,
-    InlineAdornment, InstanceCapabilities, InstanceIdentity, InstanceMessage, InstanceSignal, Key,
-    KeyEvent, LineNumberMode, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES,
-    MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDER_NAME_BYTES, MAX_STATUSLINE_PROVIDERS,
-    MAX_STATUSLINE_SEGMENT_BYTES, MAX_STATUSLINE_TOTAL_TEXT_BYTES, MenuPromptRow, Modifiers,
-    MouseButton, MouseEvent, MouseKind, NegotiatedCapabilities, PROTOCOL_VERSION, PointerKind,
-    ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot, SessionBootstrapRequest,
-    StatuslineSegment, StyleSegment, StyleSpan, ThemeFace, is_builtin_pair_char,
-    is_modeline_face_name, is_supported_protocol_version, is_ui_face_name, negotiate_capabilities,
+    ADVERTISED_PROTOCOL_VERSION, AdornmentContent, AdornmentPlacement, AttachRequest,
+    BUILTIN_PAIR_CHARS, BlockAdornment, CompletionPopupRow, CursorState, Decoration,
+    DecorationKind, DecorationSegment, FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello,
+    InitialTarget, InitialTargetResult, InlineAdornment, InstanceCapabilities, InstanceIdentity,
+    InstanceMessage, InstanceSignal, Key, KeyEvent, LineNumberMode, MAX_INITIAL_TARGET_ERROR_BYTES,
+    MAX_INITIAL_TARGET_PATH_BYTES, MAX_STATUSLINE_FACE_BYTES, MAX_STATUSLINE_PROVIDER_NAME_BYTES,
+    MAX_STATUSLINE_PROVIDERS, MAX_STATUSLINE_SEGMENT_BYTES, MAX_STATUSLINE_TOTAL_TEXT_BYTES,
+    MenuPromptRow, Modifiers, MouseButton, MouseEvent, MouseKind, NegotiatedCapabilities,
+    PROTOCOL_VERSION, PointerKind, ResourceBody, SUPPORTED_PROTOCOL_VERSIONS, SelectionSnapshot,
+    SessionBootstrapRequest, StatuslineSegment, StyleSegment, StyleSpan, ThemeFace,
+    is_builtin_pair_char, is_modeline_face_name, is_supported_protocol_version, is_ui_face_name,
+    negotiate_capabilities,
 };
 pub use panel::{MAX_PANEL_VISIBLE_CELLS, PanelFrame, PanelFrameError, PanelFramePayload};
 pub use terminal::{

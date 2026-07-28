@@ -305,13 +305,15 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 GATED; PR #184 OPEN FOR REVIEW
+## Bottom-panel lane (Arc 7) — 2B-1 REVIEW FIX IN PROGRESS; PR #184 OPEN
 
 Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
 revision 5's three-way split of 2B was explicitly approved on
-2026-07-27. **Stage 2B-1 is implemented, integrated with canonical
-`main` @ `7fd646d`, and fully gated at `c8895a8`; it has no remaining
-dependency. PR #184 is open and must not merge before user review.**
+2026-07-27; revision 6 records PR #184's review correction. **Stage
+2B-1 is implemented and integrated with canonical `main` @ `7fd646d`.
+The previous head was fully gated at `c8895a8`, but review round 2 found
+four issues and the corrected head must run the full gate again. PR
+#184 is open and must not merge before user review.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
   `githubsucks/main` @ `7fd646d` by merge because review had begun.
@@ -320,14 +322,27 @@ dependency. PR #184 is open and must not merge before user review.**
   and gate checkpoint is committed and pushed; nothing depends on a
   worktree or `/tmp`. PR #184:
   <https://github.com/levineuwirth/pmacs/pull/184>.
-- **Ships only the v21 wire layer:** the four wire shapes, version bump,
-  shared cell-grid validator, and version-ladder move. It has no
-  producer, consumer, or capability change; `panel_capable` stays
-  `false`, so this slice changes no user-visible journey grade.
+- **Ships only the reserved v21 wire layer:** the four wire shapes,
+  schema version, shared cell-grid validator, and accepted-version
+  ladder move. The production daemon continues advertising v20 because
+  its `Hello` is server-first; v21 activation belongs to 2B-3. This
+  slice has no producer, consumer, or capability change;
+  `panel_capable` stays `false`, so it changes no user-visible journey
+  grade and existing v20 clients remain attachable.
 - **Review round 1 closed:** two P1s and one P2, all corrected at
   `9b364ad`: `PanelFrame` now identifies its buffer, the transport
   ratchet covers the actual attach path rather than a detached codec
   assertion, and shared grid bounds have one validator.
+- **Review round 2 found four issues; fixes are in progress:** the
+  server-first `Hello` made the advertised v20↔v21 compatibility
+  one-way; `COHERENCE.md` and `docs/agent-handoff.md` still named only
+  v20 schema support; framing §9 named a nonexistent aggregate 2B
+  suite instead of the three exact 2B slice suites; and the panel plus
+  copied terminal "one byte over" fixtures were actually two bytes
+  over. The correction keeps production advertisement at v20, adds a
+  real-daemon existing-v20-client acceptance, updates all three durable
+  records, names the exact slice suites, and asserts both rejecting
+  fixtures are exactly `limit + 1`.
 - **The full gate found and corrected two 2B-1 omissions:** the
   statusline version ladder still pinned v20/rejected v21, and Vterm
   Stage 3 pinned v20 both structurally and in its real headless probe.
@@ -350,7 +365,7 @@ dependency. PR #184 is open and must not merge before user review.**
   `pmacs --gpu .` path, consumed the asynchronous dired snapshot, and
   retained the managed daemon before the wait so failure cleanup remains
   effective. The code integration auto-composed.
-- **The complete post-integration gate is green at `c8895a8`:**
+- **The previous complete post-integration gate was green at `c8895a8`:**
   formatting; strict workspace Clippy; library **1,849 passed + 3
   ignored default** and **2,034 passed + 4 ignored CRDT**; bottom-panel
   Stage 1 / 2A / 2B-1 **46 / 17 / 15**; folding Stage 2 **48**; GPU font
@@ -438,8 +453,9 @@ dependency. PR #184 is open and must not merge before user review.**
   `docs/agent-handoff.md` §1; the two round lessons are in §5.
 - Landed-docs follow-up merged as **#156** (`main` @ `d152120`,
   2026-07-25).
-- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 5**
-  is commit `56301ed` on branch `githubsucks/bottom-panel-stage2b`,
+- **Stage 2 framing: `docs/bottom-panel-stage2-framing.md` revision 6**
+  is on branch `githubsucks/bottom-panel-stage2b` (revision 5 is commit
+  `56301ed` there),
   worktree `../pmacs-bp-stage2b`. Revisions 1–4 remain on
   `githubsucks/bottom-panel-stage2-framing` (head `4fbd47f`, four
   framing commits, revision 4 at `49757e5`). Round 1 closed 2 blocking +
@@ -447,7 +463,9 @@ dependency. PR #184 is open and must not merge before user review.**
   round 2 closed 1 blocking + 2 high + 1 medium and decided both open
   items; round 3 closed 1 blocking + 1 high + 1 medium. No open items
   remain. Revision 5 adds no decision; it records the approved
-  2B-1/2B-2/2B-3 implementation split. The
+  2B-1/2B-2/2B-3 implementation split. Revision 6 corrects the
+  server-first compatibility contract, durable protocol claims, exact
+  acceptance-suite names, and `limit + 1` fixture. The
   parent framing `docs/bottom-panel-framing.md` (rev 4) remains
   authoritative, **including its acceptance criteria 37–55**.
 - Retained, carrying nothing unmerged: branch `bottom-panel` and worktree
@@ -456,12 +474,14 @@ dependency. PR #184 is open and must not merge before user review.**
   before the next branches:
   **2A** = classified §1.3 census routing + `paint_frame` per-window
   painter extraction (with the active-window auto-scroll preparation), no
-  protocol change; **2B-1** = protocol **v21**
+  protocol change; **2B-1** = reserved protocol schema **v21**, with
+  production advertisement held at v20,
   (`InstanceMessage::PanelFrame` plus
   `FrontendEvent::{FrontendCellGeometry, PanelResizeRows, PanelPointer}`,
   gated both directions, each extended enum byte-pinned on its own
   previous final variant); **2B-2** = daemon panel projection and epoch
-  machine; **2B-3** = the GPU band and negotiated `panel_capable` flip.
+  machine; **2B-3** = compatible v21 activation, the GPU band, and the
+  negotiated `panel_capable` flip.
   Stage 3 is the adopter default flip.
 - **Correction — this entry previously mis-stated the census contract.**
   It is **not** "route every consumer through `primary_document_window`".

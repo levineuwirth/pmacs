@@ -843,14 +843,14 @@ mod tests {
         let mut over = exact.clone();
         // One more byte of glyph, nothing else changed.
         let last = over.cells.len() - 1;
-        over.cells[last] = cell_with(Glyph::Cluster(cluster_of_len(3).into_boxed_slice()));
+        over.cells[last] = cell_with(Glyph::Cluster(cluster_of_len(2).into_boxed_slice()));
 
         (exact, over)
     }
 
     #[test]
     fn maximum_legal_terminal_frame_encodes_below_the_transport_cap() {
-        let (exact, _) = budget_boundary_frames();
+        let (exact, over) = budget_boundary_frames();
         assert_eq!(exact.validate(), Ok(()));
 
         let mut glyph_bytes = 0usize;
@@ -864,6 +864,20 @@ mod tests {
         assert_eq!(
             glyph_bytes, MAX_TERMINAL_FRAME_GLYPH_BYTES,
             "the measured fixture must spend the whole aggregate budget"
+        );
+        let over_glyph_bytes = over
+            .cells
+            .iter()
+            .map(|cell| match &cell.glyph {
+                Glyph::Char(ch) => ch.len_utf8(),
+                Glyph::Cluster(bytes) => bytes.len(),
+                Glyph::Continuation => 0,
+            })
+            .sum::<usize>();
+        assert_eq!(
+            over_glyph_bytes,
+            MAX_TERMINAL_FRAME_GLYPH_BYTES + 1,
+            "the rejecting twin must be exactly one byte over the aggregate budget"
         );
 
         let msg = InstanceMessage::TerminalFrame(exact);

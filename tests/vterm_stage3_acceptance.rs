@@ -716,8 +716,8 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
 
     assert_eq!(
         facts.get("server_protocol_version").copied(),
-        Some("21"),
-        "the real daemon negotiated v21 with the real client: {text}"
+        Some("20"),
+        "the dark v21 wire slice must keep the real client on v20: {text}"
     );
     assert_eq!(
         facts.get("entered_terminal_mode").copied(),
