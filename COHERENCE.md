@@ -95,7 +95,7 @@ remain open to them.
 
 | § | Concern | Grade | One-line state |
 |---|---|---|---|
-| 2 | Golden product journey | **Broken at entry** | `pmacs .` exits 1; only "launch" and "edit" pass cleanly zero-config |
+| 2 | Golden product journey | **Runs to step 5** | `pmacs .` opens the directory (Journey Stage 1a); thin from step 6 on |
 | 3 | Zero-configuration state | **Partial** | Defaults genuinely strong; missing-tool failure is silent, not graceful |
 | 4 | Progressive disclosure | **Inverted** | The advanced level is real; the beginner level is the missing one |
 | 5 | Unified discoverability | **Substrate without surface** | Best-in-class registration metadata; almost no way for a user to reach it |
@@ -109,10 +109,10 @@ remain open to them.
 | 13 | Package lifecycle UX | **Resolution without lifecycle** | Mature resolver/lockfile; init-only install; no uninstall/disable/search |
 | 14 | Workbench primitives | **Partial (best trajectory)** | Listview is a real shared primitive; bottom panel landed (#155) |
 | 15 | Contextual affordances | **Weak** | Right-click menu only; code actions apply first-blindly; no git integration at all |
-| 16 | Semantic frontend | **Strong** | v6..=v20 negotiated protocol; degradation practiced; TUI/GPU share the model |
+| 16 | Semantic frontend | **Strong** | v6..=v21 schema support; production attach remains v20 during the dark panel slice; degradation practiced |
 | 17 | Distribution | **Missing** | CI is test-only; no binaries, channels, checksums, or update path |
 | 18 | Onboarding | **Missing** | No welcome, no tutorial; `C-h` deletes a word; `M-x` is the only door in |
-| 19 | Coherence acceptance tests | **Missing (culture ready)** | Superb per-arc acceptance discipline; zero cross-subsystem journey tests |
+| 19 | Coherence acceptance tests | **Started** | `tests/journey_acceptance.rs` exists (steps 2, 3, 5); the other five scenarios are still unwritten |
 
 Three cross-cutting patterns explain most of the table; they are
 detailed in §1.1–§1.3: **substrate without surface**, **the silence
@@ -120,7 +120,7 @@ asymmetry**, and **per-arc coherence debt**.
 
 Coherence-shaped work already in flight at audit time: find-file /
 dired Stage 0 (`C-x C-f`, merged #162, `docs/dired-framing.md`) and its
-Stage 1 directory view (PR #165), bottom panel Stage 1 (merged #155),
+Stage 1 directory view (merged #165), bottom panel Stage 1 (merged #155),
 multi-root LSP affinity (merged #161), the config registry foundation
 (merged #127).
 
@@ -195,7 +195,7 @@ working, unreachable capability:
   time; a complete 1,384-line dired existed only as a frozen test
   fixture (`tests/fixtures/pmacs-dired/init.lua`). **Fixed:** dired
   Stage 0 opens a path (`C-x C-f`, merged #162) and Stage 1 ships the
-  browsing view as a builtin (`C-x d` / `C-x C-j`, PR #165). The fixture
+  browsing view as a builtin (`C-x d` / `C-x C-j`, merged #165). The fixture
   stays frozen — its `install_local` + `require` routing *is* the M8
   package-universality proof (Q#DR1) — and shrinking it is scheduled
   after Stage 3.
@@ -339,7 +339,8 @@ the journey.
 
 ### Ground truth: the journey today
 
-**Grade: broken at step 3.** Verified empirically at audit time:
+**Grade: reaches step 5; thin from step 6 on.** Was **broken at step 3**
+at audit time:
 
 ```
 $ ./target/release/pmacs .
@@ -347,15 +348,23 @@ pmacs: Is a directory (os error 21)
 EXIT=1
 ```
 
-The literal first arrow of the diagram above fails. `load_file`
+The literal first arrow of the diagram above failed. `load_file`
 (`src/file_io.rs:81-87`) does `File::open` (succeeds on a directory)
 then `read_to_end` → EISDIR, which is not `NotFound`, so
-`EditorState::open` returns `Err` and `main` prints and exits
-(`src/main.rs:411-414`). Multiple file arguments are also rejected
-(`"multiple files not yet supported"`, `src/main.rs:227`). Everything
-from step 6 onward is gated on a file being open, and the only
-zero-config way to open one is naming it on the command line — which
-requires already knowing the path.
+`EditorState::open` returned `Err` and `main` printed and exited.
+
+**Journey Stage 1a fixed that arrow** (`docs/journey-stage1a-framing.md`).
+`resolve_target_buffer` now answers `ResolvedTarget::Directory` *ahead*
+of the load, `pmacs .` lists the directory in dired, `RET` visits a
+file, and a self-insert lands in it — steps 3 and 5 run end to end,
+pinned by `tests/journey_acceptance.rs`. Which surface opens a directory
+is a `path.open-directory` chain with dired as a replaceable fallback,
+so this did not grow a second directory surface.
+
+Still true: multiple file arguments are rejected (`"multiple files not
+yet supported"`, `src/main.rs:227`), and everything from step 6 onward
+is gated on a file being open — but the zero-config way to open one is
+no longer "already know the path".
 
 Full verdict table:
 
@@ -363,12 +372,12 @@ Full verdict table:
 |---|---|---|---|
 | 1 | Install | **Partial** | Source build only: `cargo build --release --workspace --features pmacs/crdt` (`README.md`). No binaries, no packaging. Runtime deps (`/bin/sh`, git, tar, coreutils) documented, never checked at runtime |
 | 2 | Launch unconfigured | **Works** | `EditorState::new()` → empty `*scratch*`; missing config is not an error (`src/config.rs:7-9`); recentf/saveplace/autosave default-on |
-| 3 | Open real project | **Missing at the CLI** | `pmacs .` still exits 1 (above): `load_file` does `File::open` (which succeeds on a directory) then `read_to_end` → EISDIR, which is not `NotFound`, so `resolve_target_buffer`'s create-a-`[new file]` arm never fires. Dired Stage 1 (PR #165) supplies the buffer a directory should resolve *to*; routing `pmacs .` into it is Journey Stage 1's work, which must not invent a second directory surface |
+| 3 | Open real project | **Works at the CLI** | Journey Stage 1a: `resolve_target_buffer` answers `ResolvedTarget::Directory` before the EISDIR-producing load, and `EditorState::open` / the daemon bootstrap dispatch the `path.open-directory` chain, whose fallback is dired (#165's buffer, reached rather than duplicated). Startup no longer fails: an unreadable directory, a crashed resolver, and a cleared handler all report on the status line and leave the session running. Because the listing is async and the bootstrap is synchronous, the commit runs against a destination captured at request time (`pmacs.window.commit_to`) rather than against the ambient frontend |
 | 4 | Understand interface | **Partial** | Mode line gives name/modified/L:C/scroll + mode/LSP/terminal segments; but no welcome text (`EditorCore::new` sets `status: String::new()`), no cheat sheet, and `C-h` deletes a word (§18) |
 | 5 | Edit | **Works** | Full CUA + Emacs keymap in 161 lines (`builtin/keymaps/default.lua`); isearch, query-replace, kill ring, undo/redo, auto-indent/pair/comment, atomic save. Genuinely excellent zero-config |
 | 6 | Language intelligence | **Partial** | Rust grammar bundled and auto-attaches; rust-analyzer preconfigured (`builtin/runtime/lsp.lua:44-52`) — but a missing binary fails silently (§1.2) and highlighting masks it. No LSP status command exists to diagnose |
-| 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing PR #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
-| 8 | Open terminal | **Works but undiscoverable** | Full PTY with scrollback + modeline segment — reachable only as `M-x terminal`, no keybinding. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
+| 7 | Find symbol / file | **File: fixed (open by path merged #162; browsing #165). Symbol: works but undiscoverable** | No find-file/dired/picker existed at audit. Now `C-x C-f` opens a known path and `C-x d` / `C-x C-j` browse (flat listing, `dired` mode keymap); `M-.`/`M-?`/`C-c o` still bound but advertised nowhere and server-gated; no workspace-symbol command; `pmacs.index.*` has no UI |
+| 8 | Open terminal | **Works** | Full PTY with scrollback + modeline segment, bound to `C-c t` and configurable through three registered settings (`terminal.default-profile`, `terminal.scrollback-rows`, `terminal.escape-key`) plus named `pmacs.terminal.profiles` (PR #173), and searchable through `M-x terminal.copy-mode` / `C-c C-t`, which materializes the retained scrollback into an ordinary read-only buffer (Stage 2). Named limitations: `C-c t` is unreachable from *inside* a terminal window, where `C-c` is consumed as the escape — `M-x terminal` still works there; and there is still **no close/kill command**, which is the remaining half of this step's discoverability gap. *Was broken outright on the GPU frontend until the double terminal-layout sync was fixed: the child took a `SIGWINCH` storm at tick cadence, so typing into it was impossible while output still flowed.* |
 | 9 | Build / test | **Partial** | `M-x compile.run` works, defaults cwd to detected project root, parses Rust `-->` errors — but no keybinding, an **empty first prompt** (`initial = last and last.cmdline or ""`, `builtin/runtime/compile.lua:1134-1138`), and no `cargo build`/`cargo test` suggestion despite `ProjectKind::Cargo` existing (`src/project.rs:77`) |
 | 10 | Inspect error | **Partial (good once reached)** | `E:n W:n` modeline counts, underlines, `M-g n/p` + ``C-x ` `` walking a unified compile/grep/diag source, message echo, `RET` visits. Gated entirely on step 6 or 9 succeeding first |
 | 11 | See background work | **Works but undiscoverable** | `*workers*` view via `M-x editor.list-workers`; `C-c C-k` cancel-at-point. No keybinding, no statusline spinner/progress indicator anywhere (§9) |
@@ -378,6 +387,13 @@ A journey observation worth keeping verbatim from the audit:
 **keybinding coverage is inverted relative to frequency** — `C-c @
 C-M-s` opens all folds, while opening a file, opening a terminal, and
 running a build have no bindings at all.
+
+Two of that observation's three examples have since been answered —
+opening a file by `C-x C-f` (#162) and opening a terminal by `C-c t`
+(#173). **Running a build still has no binding**, and the underlying
+inversion is a standing bias in how new work gets bound, not three
+isolated omissions: the quote stays as written because it names the
+pattern, and the pattern is not retired until step 9 is.
 
 ---
 
@@ -460,7 +476,7 @@ level is the one missing. Audited level-by-level:
 **Beginner** (should see: files, buffers, search, diagnostics, terminal,
 build actions, menus, missing-tool guidance):
 
-- files ✓ since #162 / PR #165 (`C-x C-f` opens a path, `C-x d` browses;
+- files ✓ since #162 / #165 (`C-x C-f` opens a path, `C-x d` browses;
   neither is advertised anywhere but the keymap) · buffers ✓ (`C-x
   b`, `*buffer-list*`) · search ✓ (`C-s`/`C-r`/`C-M-s`; project.search
   is M-x-only) · diagnostics ✓ once a server runs · terminal ✓ but
@@ -639,7 +655,7 @@ Everything funnels through one function: `EditorInstance::dispatch_key`
 | 3 | query-replace | `editor.rs:945` | `QueryReplaceKey::from_chord` (`editor.rs:2967`) | **full shadow** |
 | 4 | Minibuffer | `editor.rs:951` | `MinibufferAction::from_chord` (`src/minibuffer.rs:468`) | **full shadow** |
 | 5 | Completion popup | `editor.rs:958-971` | `CompletionPopupKey::from_chord` (`editor.rs:3056`) | **partial shadow** (control chords only; skipped while a multi-key prefix is pending) |
-| 6 | Terminal transport + `C-c` escape | `editor.rs:973-1010` | `is_terminal_escape_chord` (`editor.rs:4355`) | **partial, transport-level** |
+| 6 | Terminal transport + configurable escape | `editor.rs:973-1010` | `EditorState::terminal_escape_chord` → `TerminalManager::escape_chord` (`src/terminal/session.rs`) | **partial, transport-level** |
 | 7 | Ordinary dispatch | `editor.rs:1018-1032` | `KeymapStack::resolve` | the only inspectable layer |
 
 Facts that define the gap:
@@ -647,8 +663,29 @@ Facts that define the gap:
 - **Full shadows eat every key**, including unrecognized ones (each
   decoder has an `Ignore`/`Dismiss` fallback arm). While a terminal
   buffer is focused and unescaped, *all* keys encode to the child —
-  `C-c`-leading user bindings are **structurally unreachable** in a
-  terminal buffer.
+  bindings led by the escape chord are **structurally unreachable** in
+  a terminal buffer. Since #173 that chord is `terminal.escape-key`
+  rather than a hardcoded `C-c`, so a user can *move* which prefix is
+  eaten; they cannot make the shadow stop eating one.
+- **A worked example that a modal-*looking* feature need not become a
+  shadow.** Terminal copy mode (Stage 2 of the terminal-config arc) is
+  the case that most invited a seventh rung: it wants motion, search and
+  its own `g`/`q` inside a surface where every unescaped key otherwise
+  goes to a child process. It resolves to the buffer-local keymap idiom
+  instead, by **materializing** the retained scrollback into an ordinary
+  read-only document buffer. The keys-must-not-reach-the-child problem
+  then dissolves structurally rather than being guarded: the transport
+  arm keys on `is_terminal(buffer_id)`, and a snapshot buffer is not a
+  terminal, so the arm never fires. No new precedence rung, no new
+  hand-synced guard-list entry, and `describe-key` keeps reporting the
+  truth — pinned by asserting exactly that for the snapshot's `g` and
+  `q`, which is the observable difference between the idiom and a
+  shadow. **The count stays at six.**
+
+  The transferable rule: when a feature wants a keymap over *content*,
+  ask whether the content can become a buffer. The shadows that exist
+  are the cases where it genuinely cannot (a minibuffer prompt, a
+  live search prompt) — not the cases where nobody tried.
 - **No transient-keymap mechanism exists to migrate to.** `KeymapStack`
   has exactly three fixed scopes — `Buffer(BufferId)`, `Mode(String)`,
   `Global` (`src/keymap_stack.rs:37-44`); resolution order buffer →
@@ -1013,20 +1050,45 @@ layering, provenance, and adoption have not followed.**
   `ConfigValue`s; `describe-setting`'s "Source:" names where `define()`
   ran. The inspection view sketched above is currently impossible to
   render.
-- **Adoption is five settings**: `editing.auto-pair` (pair.lua),
+- **Adoption is nine settings**: `editing.auto-pair` (pair.lua),
   `editing.trim-on-save` (editops.lua), `autosave.interval-ms`
   (autosave.lua), `window.panel-height` + `window.min-height`
-  (window.lua). Everything else a user might set — theme, fonts, LSP
+  (window.lua), `terminal.default-profile` +
+  `terminal.scrollback-rows` + `terminal.escape-key` (terminal.lua,
+  #173), and `lean.abbrev` (lean_input.lua, Arc 8 Stage 4b) — a
+  `live` boolean read against the typed edit's SOURCE buffer, the
+  `editing.auto-pair` shape including its correction to resolve
+  `rec.buffer` rather than the active buffer. Everything else a user might set — theme, fonts, LSP
   server config, killring size, recentf/saveplace/desktop enables,
   pair sets, comment strings, `pmacs.parse.*` — lives in raw Lua
   outside the registry and is therefore invisible to `describe-setting`
   and any future settings UI. The migration list is already written:
   `docs/config-registry-framing.md` "named deferrals" (table-valued
   settings are the hard prerequisite for LSP/pair/comment tables).
+- **The table-valued gap now has a named, shipped instance.**
+  `pmacs.terminal.profiles` (#173) is a raw Lua table sitting beside
+  three registered scalars *for the same feature*, because a profile is
+  inherently `{ command, args, cwd, env }` and the registry stores four
+  scalars. It is the clearest evidence yet that table-valued settings
+  are the blocking prerequisite: the terminal is now half-registered,
+  and no settings UI can render the half that matters most.
+- **The missing `scope = "global"` flag has its second live case.** After
+  `autosave.interval-ms`, the terminal's two *open-time* settings —
+  `terminal.default-profile` and `terminal.scrollback-rows` — are read
+  before their terminal's identity buffer exists, so a buffer-local
+  override can never be consulted. The registry accepts `set_local` on
+  them anyway, because `Live` mutability is all it can express. Nothing
+  breaks; the setting simply has no effect, which is the worst shape a
+  configuration surface can take. `terminal.escape-key` is the contrast
+  that shows this is a real distinction rather than a blanket wish: it
+  *deliberately* supports buffer-locals, and per-terminal escapes are a
+  feature. So the argument for both deferrals is now **cumulative and
+  concrete** rather than hypothetical — two adopters, two distinct
+  missing primitives, one feature.
 - **No persistence**: settings changed at runtime do not survive
   restart (the `custom-file` split-brain question is a named deferral).
 - The three-level separation holds in principle today (registry /
-  hooks+keymaps / packages), but with five settings registered, level 1
+  hooks+keymaps / packages), but with nine settings registered, level 1
   is effectively empty — users need executable Lua for nearly every
   ordinary preference, which is the exact failure the section warns
   about.
@@ -1164,7 +1226,31 @@ Primitive-by-primitive against the list above:
   rebindable (§6's counter-example).
 - **Output channel** ✓ — the compile-mode `*compilation*` model
   (streamed, intercept-read-only, error-rule parsing), reused by grep
-  and shell-command.
+  and shell-command. **Caveat found in terminal copy mode's review
+  (Stage 2): "intercept-read-only" is not read-only.** `Buffer::undo`
+  reaches the rope through `ensure_writable` without consulting the
+  intercept chain, so `M-x buffer.undo` empties such a buffer — and
+  rebinding the undo *chords* buffer-locally does not close it, as
+  `compile.lua`'s own comment admits ("command/menu undo stays
+  dispatchable"). `Buffer::set_generated_contents` (write + discard
+  history + assert `read_only`, in one authorized call) now fixes this
+  for the terminal snapshot; **four writer mechanisms have not yet adopted
+  it and remain emptiable** — listview panels; `compile.lua`'s
+  `ensure_slot`, which serves `*compilation*` **and** `*shell-command*`;
+  the independent `*search-results*` panel in
+  `builtin/commands/default.lua`; and dired buffers. All pair an erroring
+  intercept with `bypass_intercept` writes over a still-writable rope.
+  (`*workers*`, `*help*` and `*buffer-list*` are generated but do not use
+  this idiom.) **A second half of the same
+  caveat, found in round 3: a rope write is only half of an edit.** The
+  owner-authorized write must be fanned out to the windows showing the
+  buffer and queued for replica mirrors, or the displaying window keeps
+  a line index describing the previous contents and the next paint
+  indexes the new rope with stale ranges. Adoption is therefore not a
+  one-line swap — and the three appending buffers (`*compilation*`,
+  `*shell-command*`, `*search-results*`) need a streaming variant of the
+  primitive that does not exist yet. Listview and dired already write
+  whole-buffer replaces and are the cheap half.
 - **Diagnostics collection** ✓ — `DiagnosticStore` + signs + unified
   `error.next` source.
 - **Transient selector** ✓ — the minibuffer (though its `source`
@@ -1183,7 +1269,7 @@ Primitive-by-primitive against the list above:
   hierarchy, package dependency graph, worker trees, git status) will
   each need it; building it once *before* dired's directory view and
   the workers tree harden their own conventions is exactly this
-  section's point. Dired Stage 1 (PR #165) landed **without** inventing
+  section's point. Dired Stage 1 (merged #165) landed **without** inventing
   one: its listing is flat (Emacs parity), and the recursive
   in-buffer case — `i` insert-subdirectory — is a named deferral in
   `docs/dired-framing.md` §13, which is where a shared tree primitive
@@ -1254,9 +1340,13 @@ facto privileged implementation.
 **Grade: strong — the healthiest concern in this document, and most of
 its asks are already practiced.**
 
-- Versioned, negotiated protocol `SUPPORTED=[6..=20]` with deliberate
+- Versioned protocol schema `SUPPORTED=[6..=21]` with deliberate
   encoding-breaking bumps, both-frontends support required per bump,
-  and byte-pin discipline for appended variants (handoff §4).
+  and byte-pin discipline for appended variants (handoff §4). The v21
+  bottom-panel family is reserved but dark in Stage 2B-1: because
+  `Hello` is server-first, the production daemon still advertises v20
+  so shipped v20 clients remain attachable; compatible v21 activation
+  belongs to Stage 2B-3.
 - Two genuine frontends share the conceptual model; CRDT concurrent
   editing with presence across them; remote attach + reconnect.
 - **Graceful per-frontend degradation is practiced, not aspirational**:
@@ -1347,7 +1437,8 @@ greets a new user says nothing (`EditorCore::new` sets an empty
 status).
 
 Note the dependency: five of the ten onboarding steps above currently
-lead somewhere broken or invisible (find a file — in flight; inspect a
+lead somewhere broken or invisible (find a file — the mechanism is fixed
+since #162/#165 but is advertised nowhere except the keymap; inspect a
 diagnostic — silent-failure risk; view workers — undiscoverable;
 setting provenance — unanswerable). Onboarding is correctly sequenced
 *after* the P1/P4 fixes, but the cheap floor — a welcome buffer in
@@ -1377,20 +1468,24 @@ subsystems, complementing (not replacing) subsystem tests:
 
 ### Ground truth
 
-**Grade: missing — but the culture that would make them excellent is the
-project's strongest process asset.**
+**Grade: started — the first suite exists; five of the six scenarios
+above do not.**
 
-Zero cross-subsystem journey tests exist. Every acceptance suite in the
-tree pins one subsystem's contract (superbly — bite-verified,
-falsified-by-revert, vacuity-checked). Several of the scenarios above
-are currently *untestable* because the behavior doesn't exist (install
-in-session, disable, open a directory); the ones that are testable
-(first launch, command discovery, worker cancellation, remote
-attach/reconnect) could be written today and would immediately pin the
-journey against regression. The first coherence acceptance suite should
-be the §2 journey itself, growing a step at a time as steps become
-real — that is how "the journey is a release gate" stops being
-aspirational.
+At audit time zero cross-subsystem journey tests existed. **Journey
+Stage 1a created `tests/journey_acceptance.rs`**, the §2 journey itself,
+seeded with steps 2 (launch unconfigured), 3 (open a real project), and
+5 (edit immediately), and declared a ratchet: stages add rows, none
+removes them. That is the "first launch" scenario, partially — missing
+tools still have no actionable guidance to assert.
+
+The rest is unchanged. Every other acceptance suite in the tree pins one
+subsystem's contract (superbly — bite-verified, falsified-by-revert,
+vacuity-checked). Command discovery, workspace lifecycle, worker
+ownership, package lifecycle, and remote execution have no
+cross-subsystem suite; several remain *untestable* because the behavior
+doesn't exist (install in-session, disable). Steps 6–12 join
+`journey_acceptance.rs` as later stages make them real — that is how
+"the journey is a release gate" stops being aspirational.
 
 (Related lesson already in the handoff: `compile_mode_acceptance`
 accidentally reads the real user config — an *unintentional*
@@ -1408,14 +1503,18 @@ missing runtime entity — a real arc).
 ### Priority 1: Protect the golden product journey
 
 Establish the end-to-end workflow; treat regressions as release
-blockers. **State: broken at step 3 (§2). Mostly wiring, and unusually
-cheap:** directory-argument handling (the remaining half of step 3 —
-dired Stage 1 landed the buffer it should resolve to); a find-file
-surface (**done**: #162 open-by-path, PR #165 browsing); surfacing the
-LSP spawn failure with guidance (§1.2); a
+blockers. **State: runs to step 5; thin from step 6 (§2). Mostly wiring,
+and unusually cheap:** directory-argument handling (**done**: Journey
+Stage 1a); a find-file surface (**done**: #162 open-by-path, #165
+browsing); surfacing the LSP spawn failure with guidance (§1.2); a
 compile keybinding + `cargo build`/`test` default from the existing
-`ProjectKind::Cargo`; a terminal keybinding; a welcome buffer. The
-journey acceptance suite (§19) is the ratchet that keeps it fixed.
+`ProjectKind::Cargo`; a terminal keybinding (**done**: `C-c t`, #173); a
+welcome buffer. The journey acceptance suite (§19) is the ratchet that
+keeps it fixed — it **exists now** (`tests/journey_acceptance.rs`,
+Stage 1a), seeded with steps 2, 3, and 5.
+
+Journey Stage 1b is the named remainder: the compile binding + Cargo
+defaults, LSP spawn guidance, and the welcome buffer.
 
 ### Priority 2: Make workspace and location explicit
 
@@ -1479,9 +1578,13 @@ Candidate arc cuts, honoring one-feature-one-branch-one-PR and the
 framing workflow (each needs its own scout + framing before any
 implementation — this list is direction, not commitment):
 
-1. **Journey Stage 1** (P1): directory open + compile defaults +
-   LSP-failure surfacing + bindings + welcome buffer + the first
-   journey acceptance suite. Rides alongside the in-flight dired arc.
+1. **Journey Stage 1** (P1): split at the new-Rust-primitive line.
+   **Stage 1a — landed**: directory open, the `EditorState::open` →
+   `resolve_target_buffer` unification, the destination-scope substrate,
+   and the first journey acceptance suite. It routes `pmacs .` into
+   #165's dired buffer rather than growing a second directory surface.
+   **Stage 1b — remaining**: compile defaults, LSP-failure surfacing,
+   bindings, welcome buffer.
 2. **Discovery surface** (P4): the describe/list/where-is command
    family, M-x rich rows, help unification, help prefix.
 3. **Transient keymap layer** (§6): the overlay scope + lifetime

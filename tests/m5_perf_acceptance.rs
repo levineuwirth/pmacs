@@ -72,8 +72,8 @@ use tempfile::TempDir;
 
 use pmacs::cell::CellSize;
 use pmacs::protocol::{
-    AttachRequest, FrontendCapabilities, FrontendEvent, Hello, InstanceMessage, Key, KeyEvent,
-    Modifiers, PROTOCOL_VERSION,
+    ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendCapabilities, FrontendEvent, Hello,
+    InstanceMessage, Key, KeyEvent, Modifiers,
 };
 use pmacs::transport::{TransportError, read_message, write_message};
 
@@ -158,9 +158,9 @@ fn build_default_caps() -> FrontendCapabilities {
 
 fn do_handshake(stream: &mut UnixStream) -> Hello {
     let hello: Hello = read_message(stream).expect("read Hello");
-    assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
     let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello.protocol_version,
         frontend_capabilities: build_default_caps(),
         initial_size: CellSize::new(24, 80),
     };

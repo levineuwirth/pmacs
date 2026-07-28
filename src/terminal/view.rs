@@ -329,6 +329,29 @@ impl TerminalManager {
         copy_selection_bytes(&rows, selection)
     }
 
+    /// Serialize a session's ENTIRE retained range — scrollback plus the
+    /// visible screen — through the same path [`copy_selection`] uses.
+    ///
+    /// Q#TC7. This deliberately builds a whole-range *selection* and hands
+    /// it to the existing serializer rather than walking the rows itself.
+    /// Soft-wrap joining, wide-glyph continuation, cluster bytes, and
+    /// per-row trailing-blank trimming are Vterm Stage 2 criterion 21's
+    /// pinned behavior; a second walk would re-derive all four and the two
+    /// would drift. That inheritance is what acceptance 13 asserts, by
+    /// comparing this against a full-range `copy_selection` rather than
+    /// against a literal.
+    ///
+    /// Returns `None` for a non-terminal buffer and for a session whose
+    /// retained rows are all empty — there is no cell to anchor to.
+    /// Unlike `copy_selection` this needs no registered view, so copy mode
+    /// does not depend on the terminal being currently displayed.
+    #[must_use]
+    pub fn copy_retained(&self, buffer_id: BufferId) -> Option<Vec<u8>> {
+        let session = self.sessions.get(&buffer_id)?;
+        let projection = session.screen.projection_ref();
+        retained_bytes(&retained_rows(projection))
+    }
+
     /// Start an editor-owned primary selection at a viewport coordinate.
     pub fn begin_selection(
         &mut self,
@@ -538,6 +561,40 @@ fn valid_viewport(size: CellSize) -> bool {
 
 fn retained_rows(projection: BorrowedScreenProjection<'_>) -> RetainedRows<'_> {
     RetainedRows { projection }
+}
+
+/// Serialize every retained cell, through the selection-copy serializer.
+///
+/// Split out from [`TerminalManager::copy_retained`] so the fidelity
+/// claims — soft-wrap joining, per-row trailing-blank trimming, wide-glyph
+/// continuation, cluster bytes — are testable against the same projection
+/// fixtures that pin `copy_selection_bytes` itself. Those four are exactly
+/// what a second, independently written walk would get wrong.
+fn retained_bytes(rows: &RetainedRows<'_>) -> Option<Vec<u8>> {
+    copy_selection_bytes(rows, full_retained_selection(rows)?)
+}
+
+/// The selection spanning every retained cell.
+///
+/// Rows with no cells are skipped at both ends rather than clamped: an
+/// anchor into a zero-width row cannot resolve (`resolve_anchor` requires
+/// `cell_offset` to fall inside `cell_offset .. cell_offset + len`), so
+/// including one would make the whole range unresolvable and silently
+/// yield nothing. Interior empty rows are untouched, because trailing- and
+/// interior-blank handling belongs to the serializer.
+fn full_retained_selection(rows: &RetainedRows<'_>) -> Option<TerminalSelection> {
+    let mut occupied = rows.iter().filter(|row| !row.cells.is_empty());
+    let first = occupied.next()?;
+    // `RetainedRows::iter` is a chain of slice iterators exposed as
+    // `impl Iterator`, so it is not double-ended; scan forward.
+    let last = occupied.last().unwrap_or(first);
+    Some(TerminalSelection {
+        anchor: row_lead(first),
+        head: LogicalCellAnchor {
+            logical_line_id: last.logical_line_id,
+            cell_offset: last.cell_offset.saturating_add(last.cells.len() as u32 - 1),
+        },
+    })
 }
 
 fn row_lead(row: &TerminalRow) -> LogicalCellAnchor {
@@ -999,6 +1056,92 @@ mod tests {
         )
         .expect("selection resolves");
         assert_eq!(bytes, b"abcd\ne");
+    }
+
+    /// Stage 2 criteria 13 and 14. Every property here is one a second,
+    /// independently written whole-range walk would get wrong: a naive
+    /// walk emits a newline per physical row (breaking the soft wrap),
+    /// keeps trailing default blanks, and has to rediscover that history
+    /// precedes the visible screen. Asserting exact bytes is what makes
+    /// "it reuses the serializer" falsifiable.
+    #[test]
+    fn retained_copy_spans_history_joins_soft_wraps_and_trims_blanks() {
+        let source = projection(
+            vec![row(1, 0, "ab ", true), row(1, 3, "cd ", false)],
+            vec![row(2, 0, "e  ", false), row(3, 0, "   ", false)],
+        );
+        let retained = retained_rows(source.as_borrowed());
+        let bytes = retained_bytes(&retained).expect("whole range resolves");
+        // `ab`+`cd` joined across the soft wrap; `e` on its own hard row;
+        // the all-blank final row trimmed to nothing but still separated.
+        assert_eq!(bytes, b"abcd\ne\n");
+    }
+
+    /// The whole-range selection must not depend on a view existing, and
+    /// must agree with an explicit full-span selection through the public
+    /// serializer — the anti-drift half of criterion 13.
+    #[test]
+    fn retained_copy_agrees_with_an_explicit_full_span_selection() {
+        let source = projection(
+            vec![row(1, 0, "aaa", false)],
+            vec![row(2, 0, "bbb", false), row(3, 0, "ccc", false)],
+        );
+        let retained = retained_rows(source.as_borrowed());
+        let explicit = copy_selection_bytes(
+            &retained,
+            TerminalSelection {
+                anchor: LogicalCellAnchor {
+                    logical_line_id: 1,
+                    cell_offset: 0,
+                },
+                head: LogicalCellAnchor {
+                    logical_line_id: 3,
+                    cell_offset: 2,
+                },
+            },
+        )
+        .expect("explicit selection resolves");
+        assert_eq!(retained_bytes(&retained).expect("whole range"), explicit);
+        assert_eq!(explicit, b"aaa\nbbb\nccc");
+    }
+
+    /// A wide glyph must be copied once across the whole range too, not
+    /// once per cell it occupies.
+    #[test]
+    fn retained_copy_emits_a_wide_glyph_once() {
+        let wide = TerminalRow {
+            cells: vec![
+                Cell {
+                    glyph: Glyph::Char('界'),
+                    style: Style::default(),
+                    attachment: None,
+                },
+                Cell {
+                    glyph: Glyph::Continuation,
+                    style: Style::default(),
+                    attachment: None,
+                },
+                Cell::default(),
+            ],
+            logical_line_id: 9,
+            cell_offset: 0,
+            soft_wrapped: false,
+        };
+        let source = projection(Vec::new(), vec![wide]);
+        let retained = retained_rows(source.as_borrowed());
+        assert_eq!(
+            retained_bytes(&retained).expect("whole range"),
+            "界".as_bytes()
+        );
+    }
+
+    /// A session with nothing retained yields `None` rather than an empty
+    /// string, so the caller can tell "no terminal" from "empty terminal".
+    #[test]
+    fn retained_copy_of_zero_width_rows_is_none() {
+        let source = projection(Vec::new(), vec![row(1, 0, "", false)]);
+        let retained = retained_rows(source.as_borrowed());
+        assert!(retained_bytes(&retained).is_none());
     }
 
     #[test]

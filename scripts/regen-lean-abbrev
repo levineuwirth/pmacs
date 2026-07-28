@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Regenerate builtin/runtime/lean_abbrev.lua from vscode-lean4.
+
+Usage: scripts/regen-lean-abbrev <vscode-lean4-commit>
+
+Fetches `lean4-unicode-input/src/abbreviations.json` at the given commit
+and rewrites the vendored Lua table, including the provenance header, so
+the artifact is self-describing to whoever next touches it. A refresh is
+an ordinary PR with a visible diff — the diff is the review.
+
+There is no automatic sync and none is wanted: an editor that silently
+re-downloads its input method has a supply-chain problem, not a feature
+(docs/lean4-mode-framing.md Q#LN11).
+
+The emit is an ORDERED SEQUENCE, not a map. Upstream resolves
+equal-length abbreviation ties by source declaration order — 101
+prefixes depend on it — and a Lua `{ [key] = symbol }` table iterated
+with `pairs` cannot carry that. A map-shaped emit would also be
+nondeterministic across builds and, once a hash order happened to be
+stable, stably wrong.
+
+This script ABORTS rather than emitting something plausible when the
+source is corrupt: a duplicate key after decoding (JSON permits them,
+the table must not), a key or symbol that is not well-formed UTF-8, or a
+round-trip mismatch. That last check re-parses the script's own output
+with an independent unescaper and compares the full ordered sequence to
+the source, entry for entry. It is what makes the vendored file
+trustworthy, and it belongs here rather than in the acceptance suite:
+the suite cannot see `abbreviations.json`, which is not shipped.
+"""
+
+import json
+import pathlib
+import sys
+import urllib.request
+
+REPO = "leanprover/vscode-lean4"
+PATH = "lean4-unicode-input/src/abbreviations.json"
+LICENSE = "Apache-2.0"
+OUT = pathlib.Path(__file__).resolve().parent.parent / "builtin/runtime/lean_abbrev.lua"
+
+# Canonical, lossless, byte-deterministic. Rev 6 of the framing said the
+# generator should abort on "a key containing a character the emitted Lua
+# would have to escape"; that rule rejects the real table, where `\` is a
+# key and `"` begins eleven of them.
+SHORT = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def die(msg):
+    print(f"regen-lean-abbrev: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def lua_escape(s):
+    """Escape one string for a Lua double-quoted literal.
+
+    Operates on CHARACTERS, not bytes. Decomposing to UTF-8 bytes and
+    emitting each as `chr(byte)` produces a latin-1-shaped string that
+    `write_text(..., encoding="utf-8")` then re-encodes — every
+    non-ASCII symbol lands in the file double-encoded, and a round-trip
+    check that compares in-memory strings agrees with itself and misses
+    it entirely. Only control bytes, which are single-byte by
+    definition, become `\\ddd`.
+    """
+    out = []
+    for ch in s:
+        if ch in SHORT:
+            out.append(SHORT[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\{ord(ch):03d}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def lua_unescape(s):
+    """Independent reader for the round-trip check.
+
+    Deliberately not the inverse of `lua_escape` sharing its table: a
+    check that reuses the encoder's own assumptions cannot detect that
+    those assumptions are wrong.
+    """
+    out = bytearray()
+    i = 0
+    raw = s.encode("utf-8")
+    while i < len(raw):
+        b = raw[i]
+        if b != ord("\\"):
+            out.append(b)
+            i += 1
+            continue
+        i += 1
+        if i >= len(raw):
+            die("round-trip: trailing backslash in emitted string")
+        nxt = chr(raw[i])
+        if nxt in ("\\", '"'):
+            out.append(ord(nxt))
+            i += 1
+        elif nxt in ("n", "r", "t"):
+            out.append({"n": 10, "r": 13, "t": 9}[nxt])
+            i += 1
+        elif nxt.isdigit():
+            digits = ""
+            while i < len(raw) and chr(raw[i]).isdigit() and len(digits) < 3:
+                digits += chr(raw[i])
+                i += 1
+            out.append(int(digits))
+        else:
+            die(f"round-trip: unknown escape \\{nxt} in emitted string")
+    return out.decode("utf-8")
+
+
+def main():
+    if len(sys.argv) != 2:
+        die(f"usage: {sys.argv[0]} <vscode-lean4-commit>")
+    commit = sys.argv[1]
+    url = f"https://raw.githubusercontent.com/{REPO}/{commit}/{PATH}"
+
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        raw = resp.read()
+
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        die(f"source is not well-formed UTF-8: {e}")
+
+    # `object_pairs_hook` keeps declaration order AND exposes duplicate
+    # keys, which a plain dict would silently collapse.
+    pairs = json.loads(raw, object_pairs_hook=lambda kv: kv)
+
+    seen = {}
+    for i, (key, symbol) in enumerate(pairs):
+        if key in seen:
+            die(f"duplicate key {key!r} at entries {seen[key]} and {i}")
+        seen[key] = i
+        for label, s in (("key", key), ("symbol", symbol)):
+            if not isinstance(s, str):
+                die(f"{label} at entry {i} is not a string: {s!r}")
+            try:
+                s.encode("utf-8")
+            except UnicodeEncodeError as e:
+                die(f"{label} at entry {i} is not well-formed UTF-8: {e}")
+
+    cursor = sum(1 for _, v in pairs if "$CURSOR" in v)
+    for i, (key, symbol) in enumerate(pairs):
+        if symbol.count("$CURSOR") > 1:
+            die(f"symbol for {key!r} at entry {i} has more than one $CURSOR")
+
+    body = "".join(
+        f'  {{ "{lua_escape(k)}", "{lua_escape(v)}" }},\n' for k, v in pairs
+    )
+    text = HEADER.format(
+        repo=REPO,
+        path=PATH,
+        commit=commit,
+        license=LICENSE,
+        count=len(pairs),
+        cursor=cursor,
+        bytes=len(raw),
+        script=pathlib.Path(sys.argv[0]).name,
+    ) + "pmacs.lean_abbrev = {\n" + body + "}\n"
+
+    # Round-trip against the BYTES ON DISK, not the string in memory.
+    # The file is staged beside its destination, re-read, parsed, and
+    # only renamed into place once it compares equal entry for entry. A
+    # check that compares in-memory strings cannot see an encoding
+    # applied by the write itself, which is exactly how a
+    # double-encoding bug survived the first version of this script.
+    staged = OUT.with_suffix(".lua.staged")
+    staged.write_text(text, encoding="utf-8")
+    on_disk = staged.read_bytes().decode("utf-8")
+
+    got = []
+    # `str.splitlines()` is WRONG here: it also splits on U+2028, U+2029,
+    # U+0085 and the vertical-tab family, and 53 symbols in the real
+    # table contain one of those literally. It silently loses entries and
+    # the round-trip then reports a count mismatch that is the checker's
+    # bug, not the emit's. The emitted file's line structure is defined
+    # by the LF we write, and nothing else.
+    for line in on_disk.split("\n"):
+        line = line.strip()
+        if not line.startswith('{ "') or not line.endswith("},"):
+            continue
+        inner = line[1:-2].strip()
+        if not (inner.startswith('"') and inner.endswith('"')):
+            die(f"round-trip: unparsable emitted line: {line!r}")
+        fields, buf, esc, depth = [], [], False, 0
+        for ch in inner:
+            if esc:
+                buf.append(ch)
+                esc = False
+            elif ch == "\\":
+                buf.append(ch)
+                esc = True
+            elif ch == '"':
+                depth += 1
+                if depth % 2 == 0:
+                    fields.append("".join(buf))
+                    buf = []
+            elif depth % 2 == 1:
+                buf.append(ch)
+        if len(fields) != 2:
+            die(f"round-trip: expected 2 fields, got {len(fields)}: {line!r}")
+        got.append((lua_unescape(fields[0]), lua_unescape(fields[1])))
+
+    def fail(msg):
+        staged.unlink(missing_ok=True)
+        die(msg)
+
+    if len(got) != len(pairs):
+        fail(f"round-trip: emitted {len(got)} entries, source has {len(pairs)}")
+    for i, (want, have) in enumerate(zip(pairs, got)):
+        if tuple(want) != have:
+            fail(f"round-trip: entry {i} differs: source {want!r} vs emitted {have!r}")
+
+    staged.replace(OUT)
+    print(
+        f"wrote {OUT} — {len(pairs)} entries from {REPO}@{commit} "
+        f"({len(raw)} source bytes, {OUT.stat().st_size} emitted bytes), "
+        "round-trip verified against the bytes on disk"
+    )
+
+
+HEADER = """\
+-- lean_abbrev.lua --- VENDORED DATA. Do not edit by hand.
+--
+-- The Lean 4 abbreviation table, generated from:
+--
+--   repo:    https://github.com/{repo}
+--   path:    {path}
+--   commit:  {commit}
+--   license: {license}
+--   entries: {count} ({cursor} carry $CURSOR)
+--   source:  {bytes} bytes
+--
+-- Regenerate with:
+--
+--   scripts/{script} {commit}
+--
+-- An ORDERED SEQUENCE, not a map: upstream resolves equal-length ties
+-- by source declaration order (101 prefixes depend on it), and a
+-- `pairs`-iterated Lua map cannot express that. The file's own line
+-- order is the audit trail. Consumers must not reorder it.
+--
+-- Not fetched at runtime and not a package dependency: the input method
+-- has to work offline and on first launch. Upkeep is a documented
+-- manual process — see docs/lean4-mode-framing.md Q#LN11.
+
+pmacs = pmacs or {{}}
+
+"""
+
+if __name__ == "__main__":
+    main()

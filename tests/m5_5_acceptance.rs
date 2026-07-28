@@ -37,8 +37,8 @@ use pmacs::cell::Color;
 #[cfg(feature = "crdt")]
 use pmacs::overlay_color::color_for_slot;
 use pmacs::protocol::{
-    AttachRequest, FrontendCapabilities, FrontendEvent, GoodbyeReason, Hello, InstanceMessage, Key,
-    KeyEvent, Modifiers, PROTOCOL_VERSION,
+    ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendCapabilities, FrontendEvent, GoodbyeReason,
+    Hello, InstanceMessage, Key, KeyEvent, Modifiers, PROTOCOL_VERSION,
 };
 use pmacs::transport::{read_message, write_message};
 
@@ -52,9 +52,9 @@ use common::daemon::{
 /// Read the daemon's `Hello`, send our `AttachRequest`, return the Hello.
 fn do_handshake(stream: &mut UnixStream) -> Hello {
     let hello: Hello = read_message(stream).expect("read Hello");
-    assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
     let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello.protocol_version,
         frontend_capabilities: build_default_caps(),
         initial_size: CellSize::new(24, 80),
     };
@@ -418,7 +418,7 @@ fn version_mismatch_clean_disconnect() {
 
     // Read Hello.
     let hello: Hello = read_message(&mut stream).expect("Hello");
-    assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
 
     // Send AttachRequest with wrong protocol version.
     let req = AttachRequest {
@@ -431,7 +431,7 @@ fn version_mismatch_clean_disconnect() {
     // Expect Goodbye(VersionMismatch).
     match read_message::<InstanceMessage>(&mut stream) {
         Ok(InstanceMessage::Goodbye(GoodbyeReason::VersionMismatch { server, client })) => {
-            assert_eq!(server, PROTOCOL_VERSION);
+            assert_eq!(server, ADVERTISED_PROTOCOL_VERSION);
             assert_eq!(client, 999);
         }
         other => panic!("expected VersionMismatch Goodbye, got {other:?}"),
@@ -1145,9 +1145,9 @@ fn m10_10_production_attach_negotiates_crdt_replica() {
 
     // Production handshake — NOT the test `attach_multi()` path.
     let hello: Hello = read_message(&mut stream).expect("read Hello");
-    assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
     let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello.protocol_version,
         frontend_capabilities: pmacs::attach::build_capabilities(),
         initial_size: CellSize::new(24, 80),
     };
@@ -1183,9 +1183,9 @@ fn m10_10_production_attach_non_crdt_build_does_not_negotiate_crdt_replica() {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let _hello: Hello = read_message(&mut stream).expect("read Hello");
+    let hello: Hello = read_message(&mut stream).expect("read Hello");
     let req = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello.protocol_version,
         frontend_capabilities: pmacs::attach::build_capabilities(),
         initial_size: CellSize::new(24, 80),
     };
@@ -2171,7 +2171,7 @@ fn m10_10_f14_production_path_keystroke_flows_to_broadcast() {
         .unwrap();
     let hello_a: Hello = read_message(&mut stream_a).expect("A Hello");
     let req_a = AttachRequest {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: hello_a.protocol_version,
         frontend_capabilities: pmacs::attach::build_capabilities(),
         initial_size: CellSize::new(24, 80),
     };

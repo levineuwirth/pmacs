@@ -691,6 +691,9 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
         .arg(&report)
         // The chord the probe presses to run `vterm-probe.open`.
         .env("PMACS_GPU_PROBE_OPEN_KEY", "t")
+        // This producer fixture does not consume the probe's input; wait
+        // instead for its own live cursor-addressed breadcrumb.
+        .env("PMACS_GPU_PROBE_EXPECT_TEXT", "VTERMROW")
         .output()
         .expect("run the headless GPU probe");
 
@@ -717,7 +720,7 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
     assert_eq!(
         facts.get("server_protocol_version").copied(),
         Some("20"),
-        "the real daemon negotiated v20 with the real client: {text}"
+        "the dark v21 wire slice must keep the real client on v20: {text}"
     );
     assert_eq!(
         facts.get("entered_terminal_mode").copied(),
@@ -745,6 +748,11 @@ fn a37_real_daemon_real_pty_and_headless_gpu_render_one_terminal_session() {
             .get("last_frame_text")
             .is_some_and(|t| t.contains("VTERMROW")),
         "the child's cursor-addressed output must reach the rendered frame: {text}"
+    );
+    assert_eq!(
+        facts.get("completion_observed").copied(),
+        Some("true"),
+        "the probe must finish on the fixture's PTY evidence, not its deadline: {text}"
     );
     let declarations: u32 = facts
         .get("declarations")
@@ -846,7 +854,7 @@ fn terminal_mode_keeps_reporting_presence_so_peers_drop_the_stale_caret() {
         panic!("timed out waiting for {what}");
     }
 
-    assert_eq!(PROTOCOL_VERSION, 20);
+    assert_eq!(PROTOCOL_VERSION, 21);
     let daemon = common::daemon::TestDaemon::spawn_with_env_and_init(
         &[
             ("PMACS_INSTANCE_SEMANTIC_RENDER", "1"),
@@ -1309,6 +1317,12 @@ fn gpu_terminal_input_reaches_the_child_and_returns_in_a_frame() {
         facts.get("input_echo_observed").map(String::as_str),
         Some("true"),
         "the typed character must reach the child and return: {}",
+        report()
+    );
+    assert_eq!(
+        facts.get("completion_observed").map(String::as_str),
+        Some("true"),
+        "the probe must finish on the latched input echo, not its deadline: {}",
         report()
     );
 }

@@ -779,11 +779,20 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(std::time::Duration::from_millis);
+    // Normal probes stop only after their fixture-specific evidence arrives.
+    // A producer fixture names the text it must paint; an input fixture uses
+    // the latched echo observation. Keeping that choice outside this generic
+    // runner prevents one fixture's breadcrumb from forcing another fixture
+    // to sit on the 20-second safety deadline.
+    let expected_frame_text = std::env::var("PMACS_GPU_PROBE_EXPECT_TEXT")
+        .ok()
+        .filter(|value| !value.is_empty());
     let quiet = observe_window.is_some();
     let deadline = std::time::Instant::now()
         + observe_window.unwrap_or_else(|| std::time::Duration::from_secs(20));
     let mut sent_input = false;
     let mut sent_resize = false;
+    let mut completion_observed = false;
     while std::time::Instant::now() < deadline {
         let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(200)) else {
             continue;
@@ -857,7 +866,20 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                         facts.observed_resized_frame = true;
                     }
                 }
-                if !quiet && facts.observed_resized_frame && facts.rendered_nonuniform_frames >= 2 {
+                let fixture_evidence_observed = expected_frame_text.as_deref().map_or_else(
+                    || facts.input_echo_observed,
+                    |expected| facts.last_frame_text.contains(expected),
+                );
+                // Do not exit merely because resize/composition happened
+                // first: that races the fixture's required PTY evidence and
+                // produces a self-contradictory "successful" probe report
+                // whose later acceptance assertion must reject it.
+                if !quiet
+                    && facts.observed_resized_frame
+                    && facts.rendered_nonuniform_frames >= 2
+                    && fixture_evidence_observed
+                {
+                    completion_observed = true;
                     break;
                 }
             }
@@ -890,6 +912,7 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
     let _ = writeln!(out, "last_title={}", facts.last_title.unwrap_or_default());
     let _ = writeln!(out, "last_frame_text={}", facts.last_frame_text);
     let _ = writeln!(out, "input_echo_observed={}", facts.input_echo_observed);
+    let _ = writeln!(out, "completion_observed={completion_observed}");
     let _ = writeln!(out, "disconnect={}", facts.disconnect.unwrap_or_default());
     if let Err(error) = std::fs::write(report, out) {
         eprintln!(
@@ -936,10 +959,20 @@ fn run_headless_managed_probe(
         }
     };
     let mut client = managed.client;
+    let initial_message = client.take_initial_message();
     let initial_target_ready = matches!(
-        client.take_initial_message(),
+        initial_message.as_ref(),
         Some(InstanceMessage::BufferSnapshot { .. })
     );
+    let mut buffer_facts = ManagedProbeBufferFacts::default();
+    if let Some(message) = initial_message.as_ref()
+        && let Err(error) = buffer_facts.observe(message)
+    {
+        let contents = format!("phase=error\nerror={error}\n");
+        let _ = write_probe_report(report, &contents);
+        eprintln!("pmacs-gpu managed probe: {error}");
+        return 7;
+    }
     let daemon = managed.daemon;
     let protocol = client.server_protocol_version();
 
@@ -961,8 +994,14 @@ fn run_headless_managed_probe(
     let mut last_wait_result = None;
     let mut last_disconnect = String::new();
     if ready
-        && let Err(error) =
-            write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
+        && let Err(error) = write_managed_probe_report(
+            report,
+            "ready",
+            protocol,
+            &daemon,
+            &buffer_facts,
+            &disconnect,
+        )
     {
         eprintln!(
             "pmacs-gpu managed probe: writing {} failed: {error}",
@@ -976,11 +1015,23 @@ fn run_headless_managed_probe(
         }
         match event_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(AttachEvent::Message(message)) => {
-                if matches!(*message, InstanceMessage::BufferSnapshot { .. }) && !ready {
+                let is_snapshot = matches!(*message, InstanceMessage::BufferSnapshot { .. });
+                if let Err(error) = buffer_facts.observe(&message) {
+                    let contents = format!("phase=error\nerror={error}\n");
+                    let _ = write_probe_report(report, &contents);
+                    eprintln!("pmacs-gpu managed probe: {error}");
+                    return 7;
+                }
+                if is_snapshot {
                     ready = true;
-                    if let Err(error) =
-                        write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
-                    {
+                    if let Err(error) = write_managed_probe_report(
+                        report,
+                        "ready",
+                        protocol,
+                        &daemon,
+                        &buffer_facts,
+                        &disconnect,
+                    ) {
                         eprintln!(
                             "pmacs-gpu managed probe: writing {} failed: {error}",
                             report.display()
@@ -1006,9 +1057,14 @@ fn run_headless_managed_probe(
                 || wait_result != last_wait_result
                 || disconnect != last_disconnect)
         {
-            if let Err(error) =
-                write_managed_probe_report(report, "ready", protocol, &daemon, &disconnect)
-            {
+            if let Err(error) = write_managed_probe_report(
+                report,
+                "ready",
+                protocol,
+                &daemon,
+                &buffer_facts,
+                &disconnect,
+            ) {
                 eprintln!(
                     "pmacs-gpu managed probe: writing {} failed: {error}",
                     report.display()
@@ -1021,9 +1077,14 @@ fn run_headless_managed_probe(
         }
 
         if ready && stdin_closed {
-            if let Err(error) =
-                write_managed_probe_report(report, "complete", protocol, &daemon, &disconnect)
-            {
+            if let Err(error) = write_managed_probe_report(
+                report,
+                "complete",
+                protocol,
+                &daemon,
+                &buffer_facts,
+                &disconnect,
+            ) {
                 eprintln!(
                     "pmacs-gpu managed probe: writing {} failed: {error}",
                     report.display()
@@ -1043,11 +1104,42 @@ fn run_headless_managed_probe(
     }
 }
 
+#[derive(Default)]
+struct ManagedProbeBufferFacts {
+    snapshots: u32,
+    last_snapshot_text: String,
+}
+
+impl ManagedProbeBufferFacts {
+    fn observe(&mut self, message: &InstanceMessage) -> Result<(), String> {
+        let InstanceMessage::BufferSnapshot { crdt_snapshot, .. } = message else {
+            return Ok(());
+        };
+        let doc = loro::LoroDoc::new();
+        doc.import(crdt_snapshot)
+            .map_err(|error| format!("BufferSnapshot import failed: {error:?}"))?;
+        self.snapshots += 1;
+        self.last_snapshot_text = doc.get_text(LORO_TEXT_CONTAINER).to_string();
+        Ok(())
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
 fn write_managed_probe_report(
     report: &Path,
     phase: &str,
     protocol: u32,
     daemon: &attach::ManagedDaemonFacts,
+    buffer_facts: &ManagedProbeBufferFacts,
     disconnect: &str,
 ) -> std::io::Result<()> {
     use std::fmt::Write as _;
@@ -1056,6 +1148,12 @@ fn write_managed_probe_report(
     let _ = writeln!(out, "phase={phase}");
     let _ = writeln!(out, "server_protocol_version={protocol}");
     let _ = writeln!(out, "buffer_snapshot=true");
+    let _ = writeln!(out, "buffer_snapshots={}", buffer_facts.snapshots);
+    let _ = writeln!(
+        out,
+        "last_snapshot_hex={}",
+        hex_bytes(buffer_facts.last_snapshot_text.as_bytes())
+    );
     let _ = writeln!(out, "spawned_daemon={}", daemon.spawned_daemon());
     let _ = writeln!(
         out,
@@ -8904,6 +9002,7 @@ fn instance_message_label(msg: &InstanceMessage) -> &'static str {
         InstanceMessage::StatuslineSegments { .. } => "StatuslineSegments",
         InstanceMessage::TerminalFrame(_) => "TerminalFrame",
         InstanceMessage::InitialTargetResult(_) => "InitialTargetResult",
+        InstanceMessage::PanelFrame(_) => "PanelFrame",
     }
 }
 

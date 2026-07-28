@@ -93,9 +93,9 @@ mod crdt {
     use pmacs::cell::CellSize;
     use pmacs::crdt::CrdtState;
     use pmacs::protocol::{
-        AttachRequest, FrontendCapabilities, FrontendEvent, FrontendId, Hello, InitialTarget,
-        InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
-        PROTOCOL_VERSION, SessionBootstrapRequest,
+        ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendCapabilities, FrontendEvent,
+        FrontendId, Hello, InitialTarget, InitialTargetResult, InstanceCapabilities,
+        InstanceIdentity, InstanceMessage, PROTOCOL_VERSION, SessionBootstrapRequest,
     };
     use pmacs::transport::{read_message, write_message};
 
@@ -119,6 +119,19 @@ mod crdt {
             .filter_map(|line| line.split_once('='))
             .map(|(key, value)| (key.to_owned(), value.to_owned()))
             .collect()
+    }
+
+    fn decode_hex(encoded: &str) -> String {
+        assert_eq!(encoded.len() % 2, 0, "hex payload must have even length");
+        let bytes = encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = std::str::from_utf8(pair).expect("hex pair is UTF-8");
+                u8::from_str_radix(pair, 16).expect("decode hex pair")
+            })
+            .collect::<Vec<_>>();
+        String::from_utf8(bytes).expect("snapshot text is UTF-8")
     }
 
     fn wait_for_fact(
@@ -231,11 +244,11 @@ mod crdt {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set target frontend timeout");
         let hello: Hello = read_message(&mut stream).expect("target frontend Hello");
-        assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(hello.protocol_version, ADVERTISED_PROTOCOL_VERSION);
         write_message(
             &mut stream,
             &AttachRequest {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version: hello.protocol_version,
                 frontend_capabilities: FrontendCapabilities {
                     multi_frontend: true,
                     crdt_replica: true,
@@ -356,6 +369,16 @@ mod crdt {
     }
 
     impl ManagedProbe {
+        fn from_child(mut child: Child, report: &Path) -> Self {
+            let stdin = child.stdin.take().expect("probe stdin");
+            Self {
+                child,
+                stdin: Some(stdin),
+                report: report.to_owned(),
+                daemon_pid: None,
+            }
+        }
+
         fn spawn(socket: &Path, report: &Path, daemon_executable: &Path, home: &Path) -> Self {
             Self::spawn_with_env(socket, report, daemon_executable, home, &[])
         }
@@ -418,18 +441,11 @@ mod crdt {
             for (key, value) in envs {
                 command.env(key, value);
             }
-            let mut child = command.spawn().expect("spawn managed probe");
-            let stdin = child.stdin.take().expect("probe stdin");
-            Self {
-                child,
-                stdin: Some(stdin),
-                report: report.to_owned(),
-                daemon_pid: None,
-            }
+            Self::from_child(command.spawn().expect("spawn managed probe"), report)
         }
 
-        fn wait_ready(&mut self) -> HashMap<String, String> {
-            let facts = wait_for_fact(&self.report, "phase", "ready", Duration::from_secs(10));
+        fn wait_for(&mut self, key: &str, expected: &str) -> HashMap<String, String> {
+            let facts = wait_for_fact(&self.report, key, expected, Duration::from_secs(10));
             if facts
                 .get("spawned_daemon")
                 .is_some_and(|value| value == "true")
@@ -437,6 +453,10 @@ mod crdt {
                 self.daemon_pid = facts.get("daemon_pid").and_then(|value| value.parse().ok());
             }
             facts
+        }
+
+        fn wait_ready(&mut self) -> HashMap<String, String> {
+            self.wait_for("phase", "ready")
         }
 
         fn close(mut self) -> std::process::ExitStatus {
@@ -563,7 +583,7 @@ mod crdt {
             facts
                 .get("server_protocol_version")
                 .and_then(|value| value.parse::<u32>().ok()),
-            Some(PROTOCOL_VERSION)
+            Some(ADVERTISED_PROTOCOL_VERSION)
         );
         assert_eq!(
             facts.get("spawned_daemon").map(String::as_str),
@@ -663,6 +683,75 @@ mod crdt {
     }
 
     #[test]
+    fn public_gpu_directory_target_reaches_dired_and_leaves_the_daemon_usable() {
+        let temp = secure_tempdir();
+        let socket = temp.path().join("directory-target.sock");
+        let report = temp.path().join("directory-target-report");
+        let wrapper = temp.path().join("headless-gpu");
+        let listed_name = "listed-before-bootstrap.txt";
+        fs::write(temp.path().join(listed_name), "listed\n").expect("write listed file");
+        write_script(
+            &wrapper,
+            "test \"$1\" = \"--managed-attach\"\n\
+             socket=$2\n\
+             daemon=$3\n\
+             shift 3\n\
+             exec \"$PMACS_REAL_GPU\" --headless-managed-probe \
+             \"$socket\" \"$PMACS_TEST_REPORT\" \"$daemon\" \"$@\"",
+        );
+
+        let mut command = Command::new(pmacs_binary());
+        command
+            .args(["--gpu", "--socket"])
+            .arg(&socket)
+            .arg(".")
+            .current_dir(temp.path())
+            .env(TEST_GPU_OVERRIDE, &wrapper)
+            .env("PMACS_REAL_GPU", gpu_binary())
+            .env("PMACS_TEST_REPORT", &report)
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut directory =
+            ManagedProbe::from_child(command.spawn().expect("spawn public GPU command"), &report);
+
+        // The public root broker and real managed GPU connector must stay
+        // alive through Journey N2's asynchronous dired commit. Snapshot
+        // one is the deliberately pre-existing bootstrap document; snapshot
+        // two is the post-quiescence directory surface.
+        // Capture the spawned daemon's PID from the ready report first so
+        // ManagedProbe::drop can terminate it if snapshot two never arrives.
+        let ready = directory.wait_ready();
+        assert_eq!(
+            ready.get("spawned_daemon").map(String::as_str),
+            Some("true")
+        );
+        let facts = directory.wait_for("buffer_snapshots", "2");
+        let listing = decode_hex(&facts["last_snapshot_hex"]);
+        let canonical = fs::canonicalize(temp.path()).expect("canonical directory");
+        let mut lines = listing.lines();
+        let expected_header = format!("{}:", canonical.display());
+        assert_eq!(
+            lines.next(),
+            Some(expected_header.as_str()),
+            "the replacement snapshot must be dired's directory surface:\n{listing}"
+        );
+        assert!(
+            lines.any(|line| line.trim_end().ends_with(listed_name)),
+            "dired must list the file that existed before bootstrap:\n{listing}"
+        );
+
+        fs::write(temp.path().join("still-alive.txt"), "alive\n").expect("write survivor");
+        let survivor = attach_target(&socket, temp.path(), Path::new("still-alive.txt"));
+        assert_eq!(survivor.replica.materialize_string(), "alive\n");
+
+        drop(survivor);
+        assert!(directory.close().success());
+    }
+
+    #[test]
     fn malformed_or_unloadable_targets_fail_closed_without_poisoning_the_daemon() {
         let temp = secure_tempdir();
         let socket = temp.path().join("target-failure.sock");
@@ -673,7 +762,6 @@ mod crdt {
             (cwd.clone(), Vec::new()),
             (cwd.clone(), b"bad\0name".to_vec()),
             (cwd.clone(), vec![b'x'; 32 * 1024 + 1]),
-            (cwd.clone(), b".".to_vec()),
         ];
         for (index, (bad_cwd, bad_path)) in invalid.into_iter().enumerate() {
             let (frontend_id, mut stream, messages) = open_raw_target(&socket, bad_cwd, bad_path);
