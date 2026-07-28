@@ -305,15 +305,16 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 REVIEW FIX IN PROGRESS; PR #184 OPEN
+## Bottom-panel lane (Arc 7) — 2B-1 REGATED; PR #184 OPEN FOR REVIEW
 
 Stage 1, the Stage 2 framing, and Stage 2A are on `main`. Framing
 revision 5's three-way split of 2B was explicitly approved on
 2026-07-27; revision 6 records PR #184's review correction. **Stage
 2B-1 is implemented and integrated with canonical `main` @ `7fd646d`.
-The previous head was fully gated at `c8895a8`, but review round 2 found
-four issues and the corrected head must run the full gate again. PR
-#184 is open and must not merge before user review.**
+Review round 2's four findings are corrected at `ab7c207`; the
+gate-found GPU/PTY probe barrier is corrected and the complete suite is
+green at `9e20175`. PR #184 is open and must not merge before user
+review.**
 
 - **Stage 2B-1 branch:** `bottom-panel-stage2b`, based on
   `githubsucks/main` @ `7fd646d` by merge because review had begun.
@@ -333,7 +334,7 @@ four issues and the corrected head must run the full gate again. PR
   `9b364ad`: `PanelFrame` now identifies its buffer, the transport
   ratchet covers the actual attach path rather than a detached codec
   assertion, and shared grid bounds have one validator.
-- **Review round 2 found four issues; fixes are in progress:** the
+- **Review round 2 found four issues, corrected at `ab7c207`:** the
   server-first `Hello` made the advertised v20↔v21 compatibility
   one-way; `COHERENCE.md` and `docs/agent-handoff.md` still named only
   v20 schema support; framing §9 named a nonexistent aggregate 2B
@@ -343,6 +344,15 @@ four issues and the corrected head must run the full gate again. PR
   real-daemon existing-v20-client acceptance, updates all three durable
   records, names the exact slice suites, and asserts both rejecting
   fixtures are exactly `limit + 1`.
+- **The full gate exposed and corrected a contradiction in Vterm Stage
+  3's headless probe at `9e20175`.** Its loop exited as soon as resize
+  plus two nonuniform composites were observed, while its acceptance
+  later required the PTY child's `VTERMROW` output in the final frame.
+  The v20-compatible handshake made that scheduling race deterministic:
+  terminal mode, five frames, and resize all succeeded, but the report
+  sampled a blank frame. The probe now waits for the exact child-output
+  observation its acceptance asserts. The formerly failing exact
+  GPU/PTY test passes, and the full nine-test Stage 3 target passes.
 - **The full gate found and corrected two 2B-1 omissions:** the
   statusline version ladder still pinned v20/rejected v21, and Vterm
   Stage 3 pinned v20 both structurally and in its real headless probe.
@@ -381,6 +391,24 @@ four issues and the corrected head must run the full gate again. PR
     exact test passed immediately in isolation with one test thread, and
     the mandatory complete rerun passed **202/202**. This is retained as
     classified gate evidence, not erased as a clean first pass.
+- **The corrected review-round-2 head is fully green at `9e20175`:**
+  formatting; strict workspace Clippy; library **1,849 passed + 3
+  ignored default** and **2,034 passed + 4 ignored CRDT**; bottom-panel
+  Stage 1 / 2A / 2B-1 **46 / 17 / 16**; folding Stage 2 **48**; GPU
+  font **11**; statusline **8 CRDT**; m11_5 semantic **2 CRDT**; GPU
+  initial target and invocation **15 / 15 CRDT**; the handshake
+  consumers m5_5 / m5_7 / mode-system wiring **36 / 7 / 1 CRDT**
+  (the release-only m5 perf test remains ignored by its standing
+  contract); Vterm Stages 1 / 2 / 3 **10 / 6 / 9 CRDT**, including the
+  required real daemon + PTY + wgpu probe; M4 **121 passed + 3 ignored
+  + 1 filtered**; required GPU **202/202**; the isolated-config,
+  one-invocation full workspace sweep; and `git diff --check`.
+  - An initial default-library attempt inside the restricted tool
+    sandbox produced three `Operation not permitted` failures in
+    socket-based attach tests. The authoritative outside-sandbox rerun
+    passed all **1,849 + 3 ignored**, and the matching CRDT run passed.
+    This is retained as environment classification, not presented as a
+    clean first attempt.
 - **Next ordering is fixed:** 2B-2 branches from `main` only after 2B-1
   lands; 2B-3 branches only after 2B-2 lands. The daemon epoch machine
   belongs to 2B-2; the GPU band and negotiated capability flip belong
