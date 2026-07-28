@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-28, during bottom-panel Stage 2B-1 PR #184
-review; the canonical landed base remains the Journey/GPU
+**Last updated: 2026-07-28, after bottom-panel Stage 2B-1 (#184) merged;
+the canonical landed base is that merge — the reserved protocol-v21
+bottom-panel wire family, dark by construction, with the production
+handshake deliberately still advertising v20 — following the Journey/GPU
 directory-target ratchet (#183), following Journey Stage 1a (#182),
 which made directory
 startup one coherent local/daemon/GPU path and incorporated the terminal
@@ -47,8 +49,9 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-28)
 
-- `main` @ `7fd646d` (Journey/GPU directory-target ratchet #183, atop
-  Journey Stage 1a #182, incorporating terminal configuration + copy
+- `main` @ `6bee09d` (bottom-panel Stage 2B-1 #184, atop the Journey/GPU
+  directory-target ratchet #183, Journey Stage 1a #182, incorporating
+  terminal configuration + copy
   mode landed docs #180, Lean 4 Stage 4b #181, the dired Stage 1 landed
   docs #169 and the PTY-terminate diagnostic #176, terminal copy mode
   #178, the GPU-terminal-input landed docs #168, Lean 4 Stage 4a
@@ -59,12 +62,15 @@ commands, read `docs/active-work.md` immediately after this file.
   landed-doc refresh #156, the inline-math slice #158, dired Stage 1
   #165, the GPU terminal input fix #166, Lean 4 Stage 2 #161, the dired
   framing #164, COHERENCE.md #163, find-file #162, Lean 4 Stage 1 #160,
-  minimap blank-slab #159, bottom-panel Stage 1 #155). Protocol unchanged
-  at **v20** — bottom-panel Stage 2A deliberately carries no wire change.
-  The in-review Stage 2B-1 reserves the v21 schema but keeps the
-  server-first production `Hello` at v20; compatible activation belongs
-  to Stage 2B-3. The bullets below describe the arcs in their own terms;
-  this line is the head-of-`main` anchor.
+  minimap blank-slab #159, bottom-panel Stage 1 #155).
+  **Protocol schema support is now `v6..=v21`, while the production
+  server-first `Hello` still advertises v20.** Those are two different
+  facts and #184 landed only the first: the v21 bottom-panel wire family
+  exists, is gated in both directions, and has no producer, no consumer,
+  and no capability behind it. Compatible v21 activation and the
+  production advertisement move belong to Stage 2B-3. The bullets below
+  describe the arcs in their own terms; this line is the head-of-`main`
+  anchor.
 - **`COHERENCE.md` is now required reading and a required framing input
   — #163.** It carries the product-coherence thesis, an audited
   scorecard, per-concern gaps, and §20's priority order, and it is the
@@ -163,6 +169,44 @@ commands, read `docs/active-work.md` immediately after this file.
     raw echoed `Ctrl-X` is invisible; and such probes must **count
     occurrences rather than test presence**, because a single-character
     probe collides with the child's own banner text.
+- **PTY terminate diagnostic LANDED — #176** (merge `bf8878f`,
+  2026-07-26, one review round; `docs/process-signal-tolerance-framing.md`
+  rev 4, after three framing rounds). **Diagnostic only — no disposition
+  changed.** Every call that failed before still fails, with no state
+  transition and no reap-ledger arming; `src/process.rs` is the only
+  source file touched. It exists because the `terminate` EPERM flake is
+  real and nothing yet knows *why*.
+  - **Why three tolerance rules were all rejected: each concluded
+    something about a process from something that was not about that
+    process.** Rev 1 reasoned from an errno alone (EPERM means the caller
+    lacks permission, not that the id was recycled); rev 2 from
+    `try_wait`, which observes the spawned **leader** while a PTY signal
+    targets `-tcgetpgrp(...)` — entities that diverge exactly when job
+    control has moved the terminal; rev 3 from group-directed **ESRCH**,
+    which proves only that the selected foreground group vanished. This
+    is the reusable shape, not a Unix trivium.
+  - **Two facts that killed the original argument.** `group = true` is
+    *rejected* for PTY mode at spawn, so the reap ledger never applies to
+    the PTY path at all; and the ledger's own comment saying EPERM
+    "cannot happen for our own children" drops the entry for **bounded
+    growth**, not as a ruling that EPERM means dead. A comment stating a
+    belief is not the same as code enforcing it.
+  - What ships: a failing `kill` now reports five separate facts —
+    target source, target kind/value, spawn-time group, errno, and the
+    leader's real `try_wait` state. The test seam injects the **kill
+    result only**, never the observation, so the real
+    `ChildHandle::try_wait` runs against the real child.
+  - **It is not "strictly additive".** `try_wait` reaps and caches, so an
+    exited child may be reaped earlier than before. That is safe only
+    because `portable-pty` 0.9.0 returns a `std::process::Child` on Unix
+    and delegates `try_wait` to it, so `poll_one` still sees the cached
+    status — pinned by an exactly-one-terminal-event test rather than
+    assumed.
+  - **Still open, and still the most likely real fix site:**
+    `signal_target`'s read-then-kill of `tcgetpgrp`. All tolerance rules
+    remain parked pending the evidence this diagnostic produces, as does
+    `terminate` idempotence for an already-reaped process (a different
+    failure, so a different PR).
 - **Lean 4 arc (Arc 8) — stages 1, 2, 3a, 3b, 4a, 4b ALL LANDED**
   (`docs/lean4-mode-framing.md`; #160, #161, #167, #170, #179, #181). pmacs edits Lean 4: `arborium-lean` highlighting, a
   `lean4` major mode, `⟨⟩ ⦃⦄ ⟮⟯` pairs, and a `lake serve` language
@@ -471,19 +515,20 @@ commands, read `docs/active-work.md` immediately after this file.
     `bottom_panel_stage1_acceptance` 46; kill ring 30; compile 67; M4 121;
     required GPU 152; initial-target 14 CRDT; all three vterm suites; folding
     Stage 2 48. All 12 CI checks green at merge.
-  - **Stage 2 (the GPU panel band) is FRAMED** —
-    `docs/bottom-panel-stage2-framing.md` rev 6, four framing review
-    rounds, no open framing items; the rev-5 implementation split was
-    explicitly approved 2026-07-27 and rev 6 records PR #184's
-    server-first compatibility and gate correction. It reserves
-    protocol **v21** and ships as four serial
+  - **Stage 2 (the GPU panel band) is FRAMED, and its first two slices
+    have LANDED** — `docs/bottom-panel-stage2-framing.md` rev 6, four
+    framing review rounds, no open framing items; the rev-5
+    implementation split was explicitly approved 2026-07-27 and rev 6
+    records PR #184's server-first compatibility and gate correction.
+    It reserves protocol **v21** and ships as four serial
     implementation slices: **2A** classified census routing +
-    per-window painter extraction (no wire change), **2B-1** the wire,
-    **2B-2** the daemon projection and epoch machine, then **2B-3** the
-    GPU band, compatible v21 activation, and negotiated
-    `panel_capable` flip. Production attachment remains v20 through
-    2B-1 and 2B-2. Parent acceptance 37–55 remains authoritative.
-    Stage 3 is the adopter default flip.
+    per-window painter extraction (no wire change, #177), **2B-1** the
+    wire (#184), **2B-2** the daemon projection and epoch machine,
+    then **2B-3** the GPU band, compatible v21 activation, and the
+    negotiated `panel_capable` flip. Production attachment remains v20
+    through 2B-2. Parent acceptance 37–55 remains authoritative.
+    Stage 3 is the adopter default flip. **2B-2 is the next slice, and
+    it branches from `6bee09d` or newer.**
   - **The §1.3 census is CLASSIFIED, not uniformly redirected.** Only the
     Projection class (#1–#12, #21–#22) routes through
     `primary_document_window`; focus/input (#13–#15, #23), focus chrome
@@ -491,6 +536,64 @@ commands, read `docs/active-work.md` immediately after this file.
     authorities. Rerouting them breaks remote-op validation and
     application, `DispatchIdle`, presence, focused
     search/menu/completion routing, and terminal bell ownership.
+- **Bottom panel Stage 2B-1 (the reserved v21 wire) LANDED — #184**
+  (merge `6bee09d`, 2026-07-28, two review rounds plus a gate-found
+  follow-up; all 12 checks green on reviewed head `5539b6e`). It adds
+  no producer, no consumer, and no capability: `panel_capable` is still
+  `false` for every semantic session, so nothing about it is
+  user-visible. What it establishes is durable:
+  - **Schema support and production advertisement are separate facts.**
+    `SUPPORTED` is now `6..=21`; the daemon's unsolicited `Hello` still
+    says 20. This is not a hedge — **the handshake is server-first**, so
+    a shipped v20 frontend rejects a `Hello { protocol_version: 21 }`
+    *before* it can send an `AttachRequest`. Bumping the advertised
+    version is therefore an incompatible act on its own, independent of
+    whether any new message is ever sent. A real-daemon acceptance
+    emulates that exact rejection point and then requires the
+    attachment to reach its initial grid. **2B-3 must ship a
+    compatibility-preserving activation mechanism; it may not simply
+    change the unsolicited `Hello` to 21.**
+  - **One shared grid validator, split along a stated boundary**
+    (`pmacs-protocol/src/wire_grid.rs`). Shared: checked area, the
+    visible-cell bound (262,144), cell count, cursor bounds, glyph
+    legality, wide-continuation topology, the 8 MiB aggregate
+    glyph-byte budget, and the attachment rejection. Terminal-only: the
+    512 per-axis PTY caps, title/process metadata, selection spans, and
+    the `at_bottom == (scroll_offset == 0)` coupling. Per-axis caps are
+    a `WireGridLimits` **parameter**, not a constant, because a panel
+    does not inherit them — a 4K surface at a small font is
+    legitimately wider than 512 columns, and the *area* bound is what
+    keeps the encoding inside the transport budget. The attachment
+    rejection is deliberately shared: panels render no attachments
+    either, so classifying it terminal-only would let a panel ship a
+    cell no frontend can paint.
+  - **`PanelFramePayload::Absent` is authoritative, and silence is
+    not.** The receiver retains its last valid frame, so a close *or* a
+    hide must send `Absent` explicitly or a stale band stays on screen
+    indefinitely. Validation is likewise atomic — a bad frame is
+    rejected whole and the previous valid frame is retained.
+  - **Two epochs, answering two different questions.** `panel_epoch` is
+    opaque and monotonic per frontend: stable across ordinary frames of
+    one continuously present window/buffer, and moved on buffer
+    replacement, new side-window creation, and every `Absent` →
+    `Present` transition — which is what stops a stale `PanelPointer`
+    from addressing a reopened panel as if it were the old one (Q#BP16).
+    `geometry_epoch` answers a *frontend* declaration and moves whenever
+    the frontend declares new effective cell geometry, **including a
+    font or scale change that leaves `CellSize` identical** — exactly
+    the case daemon-side value dedup cannot see (Q#BP2S1).
+  - `PanelFrame` carries an explicit `buffer_id` (review round 1) and
+    its `focused` bit is presentation and focus-chrome routing only
+    (Q#BP14b) — the *keys* decision remains `DispatchIdle` (Q#BP14a).
+  - The frontend half is `FrontendEvent::{FrontendCellGeometry,
+    PanelResizeRows, PanelPointer}`, gated in both directions, with each
+    extended enum byte-pinned on its own previous final variant so the
+    v6–v20 encodings are provably unchanged.
+  - **A version bump is not done until every ratchet that pins the old
+    version moves.** The full gate — not review — found that the
+    statusline and Vterm Stage 3 ladders still pinned v20 and rejected
+    v21, in both structural and real-headless-probe form. Grep for the
+    outgoing version across `tests/` before calling a bump complete.
 - **GPU initial target LANDED — #148**
   (`docs/gpu-initial-target-framing.md` rev 3; merge `0dd16a5`; two review
   rounds). `pmacs --gpu [--socket NAME|PATH] FILE` transports exact Unix path
@@ -1295,6 +1398,29 @@ round-trip cannot detect a discriminant shift.
   echo instrument for the opposite reason people assume: termios `ECHO` is
   *off* in raw mode, so nothing double-echoes and one keystroke yields exactly
   one cell.
+- **Draining the event stream to learn a pid also TICKS, and a tick
+  reaps.** #176's
+  `observing_the_leader_does_not_consume_the_exit_event` failed under
+  load with "process ProcessId(26) is not running": its helper drained
+  for `Started` to read the pid, `drain_until` ticks while it drains, and
+  a tick can observe an immediately-exiting child and move the record out
+  of `Running` — after which `signal` never reaches the code under test
+  at all. It passed standalone only because the drain returned on
+  `Started` before `poll_one` saw the exit. Read the pid **straight from
+  the supervisor record**, which does not tick, and fail fast if the
+  record has left `Running`. **Verified load-bearing under matched load:
+  0/15 failures with all 16 cores saturated versus 1/10 for the ticking
+  helper.** The general rule: an observation helper that advances the
+  system is not an observation.
+- **Proving a child has exited is harder than it looks on this
+  codebase.** A fixed sleep is not proof; nix's `waitid` is unavailable
+  on macOS; and `libc::waitid` needs `unsafe`, which
+  `#![forbid(unsafe_code)]` rules out. What works is driving the
+  production diagnostic in a **bounded loop until it observes the
+  exit**. Relatedly, #176's round-1 review replaced every substring
+  assertion with exact message equality built from the kernel-assigned
+  pid — the substring forms would have accepted a hardcoded target or a
+  wrong exit code.
 
 - **The checkout may be shared with the user.** Check `git status` for
   foreign uncommitted work before any stash/checkout/branch surgery;
