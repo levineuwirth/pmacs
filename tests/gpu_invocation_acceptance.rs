@@ -663,6 +663,27 @@ mod crdt {
     }
 
     #[test]
+    fn directory_target_reaches_ready_and_leaves_the_daemon_usable() {
+        let temp = secure_tempdir();
+        let socket = temp.path().join("directory-target.sock");
+        let mut daemon = spawn_daemon(&socket, &[]);
+
+        // Journey Stage 1a superseded the old IsADirectory failure:
+        // `attach_target` requires the production snapshot-first sequence
+        // followed by `InitialTargetResult::Opened`.
+        let directory = attach_target(&socket, temp.path(), Path::new("."));
+
+        fs::write(temp.path().join("still-alive.txt"), "alive\n").expect("write survivor");
+        let survivor = attach_target(&socket, temp.path(), Path::new("still-alive.txt"));
+        assert_eq!(survivor.replica.materialize_string(), "alive\n");
+
+        drop(directory);
+        drop(survivor);
+        signal_pid(daemon.id(), Signal::SIGTERM);
+        assert!(wait_for_exit(&mut daemon, Duration::from_secs(5)).success());
+    }
+
+    #[test]
     fn malformed_or_unloadable_targets_fail_closed_without_poisoning_the_daemon() {
         let temp = secure_tempdir();
         let socket = temp.path().join("target-failure.sock");
@@ -673,7 +694,6 @@ mod crdt {
             (cwd.clone(), Vec::new()),
             (cwd.clone(), b"bad\0name".to_vec()),
             (cwd.clone(), vec![b'x'; 32 * 1024 + 1]),
-            (cwd.clone(), b".".to_vec()),
         ];
         for (index, (bad_cwd, bad_path)) in invalid.into_iter().enumerate() {
             let (frontend_id, mut stream, messages) = open_raw_target(&socket, bad_cwd, bad_path);
