@@ -171,7 +171,7 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Journey/GPU directory-target ratchet — GATED, PR PENDING
+## Journey/GPU directory-target ratchet — PR #183 OPEN, GATED
 
 - **Approved correction, not new product behavior.** GPU initial-target
   framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
@@ -182,6 +182,9 @@ If it does not, stop and repair the remote/fetch configuration.
   `main` @ `c2d56ff`. Recovery: `git fetch githubsucks && git checkout
   journey-gpu-directory-ratchet`. Everything described here is
   committed and pushed; nothing depends on the `/tmp` worktree.
+- PR #183:
+  <https://github.com/levineuwirth/pmacs/pull/183>. It is intentionally
+  open and unmerged pending user review.
 - **Scope is one acceptance ratchet:** remove `"."` from the four
   genuinely invalid cases and add a transport-level positive which
   requires snapshot-first + `InitialTargetResult::Opened` for `"."`,
