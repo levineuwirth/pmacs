@@ -1,7 +1,9 @@
 # Agent handoff — cross-machine continuity
 
-**Last updated: 2026-07-28, after bottom-panel Stage 2B-1 (#184) merged;
-the canonical landed base is that merge — the reserved protocol-v21
+**Last updated: 2026-07-28, after the M4 config-sink race fix (#174) and
+bottom-panel Stage 2B-1 (#184) merged; the canonical landed base is
+`0442d78`. #174 is test-only. #184 is the substantive one — the reserved
+protocol-v21
 bottom-panel wire family, dark by construction, with the production
 handshake deliberately still advertising v20 — following the Journey/GPU
 directory-target ratchet (#183), following Journey Stage 1a (#182),
@@ -49,7 +51,8 @@ commands, read `docs/active-work.md` immediately after this file.
 
 ## 1. Where the project stands (2026-07-28)
 
-- `main` @ `6bee09d` (bottom-panel Stage 2B-1 #184, atop the Journey/GPU
+- `main` @ `0442d78` (the M4 config-sink race fix #174 — test-only —
+  atop bottom-panel Stage 2B-1 #184, the Journey/GPU
   directory-target ratchet #183, Journey Stage 1a #182, incorporating
   terminal configuration + copy
   mode landed docs #180, Lean 4 Stage 4b #181, the dired Stage 1 landed
@@ -528,7 +531,7 @@ commands, read `docs/active-work.md` immediately after this file.
     negotiated `panel_capable` flip. Production attachment remains v20
     through 2B-2. Parent acceptance 37–55 remains authoritative.
     Stage 3 is the adopter default flip. **2B-2 is the next slice, and
-    it branches from `6bee09d` or newer.**
+    it branches from `0442d78` or newer.**
   - **The §1.3 census is CLASSIFIED, not uniformly redirected.** Only the
     Projection class (#1–#12, #21–#22) routes through
     `primary_document_window`; focus/input (#13–#15, #23), focus chrome
@@ -1412,6 +1415,33 @@ round-trip cannot detect a discriminant shift.
   0/15 failures with all 16 cores saturated versus 1/10 for the ticking
   helper.** The general rule: an observation helper that advances the
   system is not an observation.
+- **A wait predicate that is WEAKER than the assertion it guards is a
+  race, on every platform that happens to lose it.** #174: the m4 config
+  sink test waited for `contains("probe")` and then asserted
+  `"probe":true` — six bytes further on. The sink is JSONL written by a
+  *separate process*, so the test could read a half-written line; Linux
+  won that race reliably and macOS/lua54 did not, reporting the
+  truncated `{"rust":{"probe":`. **Any "wait until the file mentions X,
+  then assert Y about the file" shape races whenever Y is stricter than
+  X.** The fix is to wait for the exact unit the assertion reads — here
+  a trailing newline, true only once a whole `writeln!` record has
+  landed, and still correct if the payload's field order or spelling
+  changes. Two things generalize beyond the fix:
+  - **A race you cannot reproduce can still be bitten at one remove.**
+    The failure needs a scheduler outcome Linux does not produce, so no
+    local run falsifies it. But `pump_async` *asserts* on its deadline,
+    so replacing the predicate with an unsatisfiable one proves the wait
+    is load-bearing rather than decorative — and restoring the *old*
+    predicate, which still passes locally, proves a green local run
+    cannot distinguish the two. Bite what you can reach and say plainly
+    which claim rests on structure instead of evidence.
+  - **The obvious fix is sometimes worse.** The sibling `m4_26` has the
+    same weak shape and was deliberately left alone: waiting for the
+    expected value would convert a genuine `rootUri` regression — what
+    its `assert_ne!`s exist to catch — into a five-second timeout with a
+    misleading "server didn't initialize?" message, trading a precise
+    assertion diff for a vague hang. Closing it properly needs a record
+    terminator in the fake server first.
 - **Proving a child has exited is harder than it looks on this
   codebase.** A fixed sleep is not proof; nix's `waitid` is unavailable
   on macOS; and `libc::waitid` needs `unsafe`, which

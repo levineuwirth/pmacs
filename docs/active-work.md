@@ -21,11 +21,13 @@ number appears in `git log --first-parent githubsucks/main`, it has
 landed regardless of what a lane says.
 
 **Two open PRs had no lane here at all before this snapshot** — #174 and
-#171 — and both now have one. An open PR is exactly the volatile work
-this file exists to record, so its absence is a ledger defect rather
-than a tidy omission: #171 drifted **153 commits** while invisible here,
-and its still-green old CI run describes a tree nobody has looked at
-since. When a PR is opened, give it a lane.
+#171. An open PR is exactly the volatile work this file exists to
+record, so its absence is a ledger defect rather than a tidy omission:
+#171 drifted **153 commits** while invisible here, and its still-green
+old CI run describes a tree nobody has looked at since. **When a PR is
+opened, give it a lane.** #174 has since merged, so per rule 4 its lane
+is gone again and its durable lesson is in `docs/agent-handoff.md` §5;
+#171's lane is below.
 
 ## Repository authority
 
@@ -36,14 +38,16 @@ since. When a PR is opened, give it a lane.
   machine-local: `origin` may name this canonical URL, a release mirror,
   or something else, and therefore has no authority by name alone.
 - Canonical base at this snapshot:
-  `githubsucks/main` @ `6bee09d` (bottom-panel Stage 2B-1 #184, atop the
-  Journey/GPU directory-target ratchet #183, Journey Stage 1a #182 and
-  the previously recorded landed work). **Protocol schema support is
+  `githubsucks/main` @ `0442d78` (the M4 config-sink race fix #174, atop
+  bottom-panel Stage 2B-1 #184, the Journey/GPU directory-target ratchet
+  #183, Journey Stage 1a #182 and the previously recorded landed work).
+  **Protocol schema support is
   `v6..=v21`; the production server-first `Hello` still advertises
   v20** — two different facts, and #184 landed only the first. The
   previous snapshot named `7fd646d`, and **the
   recovery floor advances with it**: the check below now requires
-  `6bee09d` or newer, so a tree at `7fd646d` no longer passes. That is
+  `0442d78` or newer, so a tree at `7fd646d` — or at `6bee09d` — no
+  longer passes. That is
   deliberate — the floor moves with the base, because a check that
   accepts an older commit than the declared base passes on a tree the
   rest of this file does not describe.
@@ -82,7 +86,7 @@ git worktree list
 git status --short --branch
 ```
 
-The `git log` command must expose `6bee09d` — the base named above — or a
+The `git log` command must expose `0442d78` — the base named above — or a
 newer intentional main. Keep this threshold and the canonical-base line in
 step: a recovery check that accepts an older commit than the base it
 declares canonical will pass on a tree the rest of this file does not
@@ -224,15 +228,24 @@ If it does not, stop and repair the remote/fetch configuration.
   never been enforced. Any CI job that compiles the `crdt` targets has to
   fix them first or it will be red on arrival.
 
-## Bottom-panel lane (Arc 7) — 2B-1 MERGED; 2B-2 IS THE NEXT SLICE
+## Bottom-panel lane (Arc 7) — 2B-1 MERGED; 2B-2 IN FLIGHT
 
 Stage 1, the Stage 2 framing, Stage 2A, and **Stage 2B-1 are all on
 `main`**. Framing revision 5's three-way split of 2B was explicitly
 approved on 2026-07-27; revision 6 records PR #184's review correction.
-Nothing in this arc is in flight. **2B-2 — the daemon panel projection
-and epoch machine — is the next slice, and it branches fresh from
-`githubsucks/main` @ `6bee09d` or newer. Do not stack it on the 2B-1
-branch.**
+**2B-2 — the daemon panel projection and epoch machine — is under way**
+on branch `bottom-panel-stage2b2`, worktree `../pmacs-bp-stage2b2`,
+branched fresh from `githubsucks/main` @ `6bee09d`. It is *not* stacked
+on the 2B-1 branch, which is the rule for every slice in this arc. Note
+that `main` has since advanced to `0442d78`; the only difference is the
+test-only #174, so the slice's integration surface is unchanged.
+
+**2B-2's boundaries, restated because they are easy to overrun:** the
+production `Hello` stays at v20 and `panel_capable` stays `false`. The
+slice is dark/test-only capability exactly as 2B-1 was. Compatible v21
+activation, the GPU band, and the negotiated capability flip are all
+2B-3's, and 2B-3 may **not** simply change the unsolicited `Hello` to
+21.
 
 - **Stage 2B-1 MERGED as #184** (`main` @ `6bee09d`, 2026-07-28; all
   twelve checks green on the reviewed head `5539b6e`; two review rounds
@@ -446,64 +459,6 @@ has **no branch and no framing yet**.
   `FrontendView.fold_projection` to `true` for semantic frontends, which
   Stage 2 deliberately left `false` (Q#FD21).
 
-## M4 config-sink race lane — PR #174 OPEN, REVIVED AND REGATED
-
-> **This ledger had no lane for #174 at all until this snapshot, and
-> that is the defect worth naming.** An open PR is precisely the
-> volatile work this file exists to record; two of them were invisible
-> here (see the dired framing lane below), which is how one of them
-> drifted 153 commits without anyone noticing.
-
-- Portable branch: `githubsucks/fix-m4-sink-races`; worktree
-  `../pmacs-m4-sink-race`. **PR #174**, base `main`.
-- **Revived 2026-07-28**: it was 130 commits behind, so canonical `main`
-  @ `6bee09d` was merged in at `302c21c` and the whole gate suite rerun.
-  The diff against `main` is unchanged at **25 lines in one file**
-  (`tests/m4_acceptance.rs`).
-- **The fix is one predicate.**
-  `m4_5_initial_config_pushed_via_did_change_configuration` waited for
-  `contains("probe")` and then asserted `"probe":true` — six bytes
-  further on. The sink is JSONL written by a *separate process*, so the
-  test could read a half-written line; Linux wins that race reliably and
-  macOS/lua54 did not, reporting `{"rust":{"probe":`. It now waits for a
-  trailing newline, which is true only once a whole record has landed.
-  **Any "wait until the file mentions X, then assert Y about the file"
-  shape races whenever Y is stricter than X.**
-- **The structural claim was re-verified against current `main`, not
-  inherited from the original scout.** `src/bin/pmacs_fake_lsp.rs` *did*
-  change upstream (Lean 4 stages 3b, `1e1be67` / `cdaea66`), so the "one
-  `writeln!` is the only writer" argument could have rotted. It has not:
-  the config sink is still a single `writeln!` at `:433` on a
-  `create+append` handle. `tests/m4_acceptance.rs` itself has **zero**
-  upstream commits since the merge base `ccf29e3`, which is why the
-  merge was clean.
-- **The race cannot be falsified locally, but the wait can be — and was,
-  two ways.** Replacing the predicate with an unsatisfiable one fails
-  the test at `m4_acceptance.rs:317` with "async pump deadline
-  exceeded", proving `pump_async` asserts rather than falling through
-  and that the new predicate genuinely has to become true. Restoring the
-  *old* predicate leaves the test passing locally, which confirms rather
-  than assumes that a green local run cannot tell the two apart. Treat
-  the local suite as a regression check and the structural argument as
-  the reason.
-- **The sibling weak predicate is deliberately left alone.** `m4_26`
-  (`:5487`) has the same shape, and the obvious fix makes it *worse* —
-  waiting for the expected value turns a genuine `rootUri` regression
-  into a five-second timeout with a misleading message, trading a
-  precise diff for a vague hang. Closing it properly means giving that
-  sink a record terminator in the fake server, and it has never been
-  observed failing. The reasoning is a comment at the call site so the
-  next person does not repeat the first instinct.
-- Gates on `302c21c`: fmt; strict workspace Clippy; library **1,849 + 3
-  ignored** default and **2,034 + 4 ignored** CRDT; m4 **121 passed + 3
-  ignored + 1 filtered** with basedpyright skipped; the two touched
-  tests run explicitly **2/2**; required GPU **202/202**;
-  `git diff --check`.
-- **No ledger entry was added on the PR branch itself** — this file was
-  owned by the landed-state sync while #174 was revived, and a
-  drive-by lane there would have re-conflicted it for no benefit. This
-  is that entry.
-
 ## dired Stage 2 framing lane — PR #171 OPEN, STALE, DO NOT MERGE AS-IS
 
 - Portable branch: `githubsucks/dired-stage2-framing` (head `ab42a79`,
@@ -536,7 +491,11 @@ has **no branch and no framing yet**.
     fan-out a rename transaction has to survive.
 
   Re-scout against `6bee09d`, publish a new revision, and get explicit
-  framing approval before any implementation.
+  framing approval before any implementation. **The re-scout is under
+  way** on the existing branch, so PR #171 keeps its three-round
+  history; the product is a revision 5, not a new document. (`main` has
+  since advanced to `0442d78`, but the only difference is the test-only
+  #174, so no re-scout conclusion turns on it.)
 - **The rename problem the framing must still answer**, restated because
   it is the hard part: a rename is a transaction across **five** path
   owners — the buffer path, the buffer name, the URI-keyed LSP stores
