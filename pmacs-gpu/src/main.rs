@@ -857,7 +857,15 @@ fn run_headless_probe(socket: &Path, report: &Path) -> i32 {
                         facts.observed_resized_frame = true;
                     }
                 }
-                if !quiet && facts.observed_resized_frame && facts.rendered_nonuniform_frames >= 2 {
+                // Do not exit merely because resize/composition happened
+                // first: that races the PTY child's initial output and
+                // produces a self-contradictory "successful" probe report
+                // whose later acceptance assertion must reject it.
+                if !quiet
+                    && facts.observed_resized_frame
+                    && facts.rendered_nonuniform_frames >= 2
+                    && facts.last_frame_text.contains("VTERMROW")
+                {
                     break;
                 }
             }
