@@ -1932,6 +1932,10 @@ impl EditorState {
     /// the *active* frontend — is the wrong source and is deliberately
     /// not called.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one panel paint transaction: derive the grid, paint the window, resolve the caret"
+    )]
     pub fn prepare_panel_projection(
         &self,
         frontend_id: FrontendId,
@@ -4256,9 +4260,10 @@ fn window_cursor_cell(
 ) -> Option<CellCoord> {
     let inner_rows = inner_rows(&rect);
     let cursor = match folds {
-        Some(map) => {
-            map.visible_position(window.text_view.line_at_offset(window.cursor), window.cursor)
-        }
+        Some(map) => map.visible_position(
+            window.text_view.line_at_offset(window.cursor),
+            window.cursor,
+        ),
         None => window.cursor,
     };
     let disp = window.text_view.pos_to_display(buf, cursor)?;

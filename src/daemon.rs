@@ -69,8 +69,8 @@ use crate::protocol::crossterm_translate::{key_to_crossterm, mouse_to_crossterm}
 use crate::protocol::{
     ADVERTISED_PROTOCOL_VERSION, AttachRequest, FrontendEvent, FrontendId, GoodbyeReason, Hello,
     InitialTarget, InitialTargetResult, InstanceCapabilities, InstanceIdentity, InstanceMessage,
-    InstanceSignal, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES, PointerKind,
-    SelectionSnapshot, SessionBootstrapRequest,
+    InstanceSignal, MAX_INITIAL_TARGET_ERROR_BYTES, MAX_INITIAL_TARGET_PATH_BYTES,
+    PANEL_MIN_VERSION, PointerKind, SelectionSnapshot, SessionBootstrapRequest,
 };
 use crate::socket_path::{SocketPathError, ensure_runtime_subdir};
 use crate::transport::{read_message, write_message};
@@ -898,13 +898,22 @@ fn peer_declared_terminal_support(
 /// Q#BP13).
 ///
 /// Grid sessions paint the whole cell grid the daemon composes, so a side
-/// window is just another leaf for them. A semantic session needs the
-/// Stage 2 `PanelFrame` band, which does not exist yet — so Stage 1
-/// answers `false` for every semantic peer, whatever it declares. No
-/// client-asserted standalone boolean is trusted: the answer is derived
-/// from the daemon's own negotiated state, and Stage 2 turns the version
-/// arm on (`semantic_render && negotiated_protocol_version >=
-/// PANEL_MIN_VERSION`).
+/// window is just another leaf for them. A semantic session needs the GPU
+/// band, which does not exist yet — so this still answers `false` for
+/// every semantic peer, whatever it declares. No client-asserted
+/// standalone boolean is trusted: the answer is derived from the daemon's
+/// own negotiated state.
+///
+/// **Stage 2B-2 deliberately does not turn the version arm on.** The
+/// daemon-side projection and epoch machine below are complete and
+/// exercised through a test-only panel-capable view, but the production
+/// flip (`semantic_render && negotiated_protocol_version >=
+/// PANEL_MIN_VERSION`) belongs to Stage 2B-3, together with the
+/// compatibility-preserving activation the server-first `Hello` requires:
+/// [`ADVERTISED_PROTOCOL_VERSION`](pmacs_protocol::ADVERTISED_PROTOCOL_VERSION)
+/// is still 20, so no session can negotiate 21 yet, and denying only the
+/// events while still *placing* such a peer in a side window would leave
+/// its window invisible.
 fn peer_declared_panel_support(session_state: crate::presence::SessionState) -> bool {
     !session_state.negotiated_capabilities.semantic_render
 }
@@ -915,6 +924,73 @@ fn peer_declared_panel_support(session_state: crate::presence::SessionState) -> 
 /// discriminant reaching one, so neither gate alone is load-bearing.
 fn peer_accepts_terminal_message(protocol_version: u32, message: &InstanceMessage) -> bool {
     protocol_version >= 19 || !matches!(message, InstanceMessage::TerminalFrame(_))
+}
+
+/// The same belt-and-braces write-loop gate for the additive
+/// protocol-v21 panel frame (Q#BP9).
+///
+/// The producer already skips construction for a peer below
+/// [`PANEL_MIN_VERSION`]; this filter independently prevents an unknown
+/// discriminant reaching one, so neither gate alone is load-bearing.
+fn peer_accepts_panel_message(protocol_version: u32, message: &InstanceMessage) -> bool {
+    protocol_version >= PANEL_MIN_VERSION || !matches!(message, InstanceMessage::PanelFrame(_))
+}
+
+/// Whether an authenticated source may send the v21 panel event family
+/// (Q#BP9's "every gate keys on the daemon's own state").
+///
+/// All three inbound events require the same four facts, and they are
+/// checked together so no arm can satisfy three and forget the fourth:
+/// an installed **semantic** projection, a negotiated version that
+/// carries the variants, and a `FrontendView` this daemon itself marked
+/// panel-capable. A grid session, a pre-panel semantic peer, or a
+/// non-panel-capable view is rejected before any payload state is
+/// trusted.
+///
+/// The claimed `frontend_id` in the payload is never consulted anywhere:
+/// routing is by the authenticated transport `source`, so a forged id
+/// addresses nothing.
+/// Q#BP16 steps 2–4: the event addresses the panel declaration this
+/// session most recently shipped, under the geometry it most recently
+/// accepted.
+///
+/// Three facts, one predicate, because they close three different holes
+/// and no two of them subsume the third:
+///
+/// * the latest declaration is a `Present` (an `Absent` cleared input
+///   authority, so nothing is addressable),
+/// * its echoed `geometry_epoch` equals both the payload's **and** the
+///   daemon's latest accepted declaration — the font/scale/resize race,
+/// * its `panel_epoch` equals the payload's — close/hide/reopen of the
+///   same persistent buffer, which a `buffer_id` alone cannot see.
+fn panel_event_epochs_are_current(
+    editor: &EditorState,
+    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+    geometry_epoch: u64,
+    panel_epoch: u64,
+) -> bool {
+    semantic_states
+        .get(&source)
+        .is_some_and(|sem| sem.panel_declaration_matches(geometry_epoch, panel_epoch))
+        && editor
+            .core
+            .borrow()
+            .frame_geometry_for(source)
+            .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
+}
+
+fn peer_may_send_panel_events(
+    editor: &EditorState,
+    session_registry: &SessionRegistry,
+    semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    source: FrontendId,
+) -> bool {
+    semantic_states.contains_key(&source)
+        && session_registry
+            .session_state(source)
+            .is_some_and(|state| state.negotiated_protocol_version >= PANEL_MIN_VERSION)
+        && editor.core.borrow().panel_capable_for(source)
 }
 
 /// T M10.8 — dispatcher loop. The single thread that owns the editor.
@@ -1374,6 +1450,12 @@ fn dispatcher_loop(
                         continue;
                     }
                     if !peer_accepts_statusline_message(negotiated_protocol_version, msg) {
+                        continue;
+                    }
+                    // Bottom panel Q#BP9 — PanelFrame gated at v21. A v20
+                    // peer receives no band and, per Q#BP13, is never
+                    // placed in a side window either.
+                    if !peer_accepts_panel_message(negotiated_protocol_version, msg) {
                         continue;
                     }
                     // T M10.10 Day 4 / M10.11 F2 — the criterion-1
@@ -1950,10 +2032,17 @@ fn handle_session_established(
     term_sizes.insert(frontend_id, initial_size);
     // Bottom-panel arc (Q#BP2b): a grid session's real attach size IS its
     // authoritative geometry declaration, cached BEFORE any input can
-    // reach it. A semantic session deliberately stays UNKNOWN — Stage 2's
+    // reach it. A semantic session deliberately stays UNKNOWN — its
     // authenticated `FrontendCellGeometry` fills it, and the permanent
     // 24x80 attach placeholder is never consulted for panel layout.
-    if editor.core.borrow().panel_capable_for(frontend_id) {
+    //
+    // Stage 2B-2: the gate is `!semantic_render`, NOT `panel_capable`.
+    // Stage 1 could conflate them because panel capability implied grid;
+    // once a semantic session can be panel-capable, a capability-keyed
+    // gate would feed it exactly the placeholder Q#BP15a forbids, and
+    // parent acceptance 40 would fail through this line rather than
+    // through the projection.
+    if !semantic_render && editor.core.borrow().panel_capable_for(frontend_id) {
         editor.sync_frame_geometry(frontend_id, initial_size);
     }
 
@@ -2043,7 +2132,17 @@ fn handle_dispatcher_event(
                     // longer satisfy the panel hides it, moves focus out,
                     // and releases its terminal controller here — before
                     // the next drained event dispatches.
-                    if editor.core.borrow().panel_capable_for(source) {
+                    //
+                    // Stage 2B-2: gated on the absence of a semantic
+                    // projection as well as on capability. A semantic
+                    // frontend's `Resize` describes its own surface in
+                    // whatever units it chose; only `FrontendCellGeometry`
+                    // is its authoritative cell-equivalent declaration
+                    // (Q#BP15a), and letting `Resize` mint an epoch here
+                    // would let the two allocators interleave.
+                    if !semantic_states.contains_key(&source)
+                        && editor.core.borrow().panel_capable_for(source)
+                    {
                         editor.sync_frame_geometry(source, size);
                     }
                 }
@@ -2187,6 +2286,80 @@ fn handle_dispatcher_event(
                         editor.dispatch_semantic_terminal_pointer(
                             source, buffer_id, coord, kind, mods,
                         );
+                    }
+                }
+                FrontendEvent::FrontendCellGeometry {
+                    geometry_epoch,
+                    total,
+                    ..
+                } => {
+                    // Bottom panel Q#BP15a — the frontend's authoritative
+                    // cell-equivalent layout capacity. Routed by the
+                    // authenticated `source`; the payload's `frontend_id`
+                    // is never read.
+                    //
+                    // Deliberately does NOT require a side window: the
+                    // daemon needs columns before it can paint a first
+                    // panel frame, so gating this on panel presence would
+                    // deadlock the first open. "Without a side window"
+                    // refers to side-window presence only — the protocol,
+                    // session, and capability gates all still apply.
+                    if peer_may_send_panel_events(editor, session_registry, semantic_states, source)
+                    {
+                        editor.accept_semantic_frame_geometry(source, geometry_epoch, total);
+                    }
+                }
+                FrontendEvent::PanelResizeRows {
+                    geometry_epoch,
+                    panel_epoch,
+                    rows,
+                    ..
+                } => {
+                    // Bottom panel Q#BP15a / Q#BP16 — a divider drag's
+                    // requested rows. Accepted only against the currently
+                    // visible `Present` declaration, matching BOTH the
+                    // latest accepted frontend geometry and that
+                    // declaration's presentation epoch, so a drag racing a
+                    // font change or a panel reopen cannot resize its
+                    // successor.
+                    if peer_may_send_panel_events(editor, session_registry, semantic_states, source)
+                        && panel_event_epochs_are_current(
+                            editor,
+                            semantic_states,
+                            source,
+                            geometry_epoch,
+                            panel_epoch,
+                        )
+                    {
+                        editor.apply_panel_resize_rows(source, rows);
+                    }
+                }
+                FrontendEvent::PanelPointer {
+                    geometry_epoch,
+                    panel_epoch,
+                    buffer_id,
+                    coord,
+                    kind,
+                    ..
+                } => {
+                    // Bottom panel Q#BP16 — a gesture the frontend
+                    // hit-tested to a panel CELL. Steps 1, 3, and 4 of the
+                    // ladder are checked here (authenticated source, both
+                    // epochs against the declaration the frontend was
+                    // looking at); steps 2, 5, and 6 are re-derived from
+                    // the daemon's own state inside the dispatcher. Any
+                    // failure drops the event before any view, controller,
+                    // selection, menu, or PTY mutation.
+                    if peer_may_send_panel_events(editor, session_registry, semantic_states, source)
+                        && panel_event_epochs_are_current(
+                            editor,
+                            semantic_states,
+                            source,
+                            geometry_epoch,
+                            panel_epoch,
+                        )
+                    {
+                        editor.dispatch_semantic_panel_pointer(source, buffer_id, coord, kind);
                     }
                 }
                 FrontendEvent::Pointer {
@@ -3401,6 +3574,11 @@ fn apply_event(
             // A grid session has no panel band at all, so one arriving
             // here is a protocol violation; drop it rather than letting
             // a payload-trusted id reach a view.
+            //
+            // Stage 2B-2 added the real routing arms, which `peer_may_
+            // send_panel_events` already refuses for a grid session, so
+            // this is now the belt-and-braces half of the same gate —
+            // exactly like the `Pointer` and `TerminalResize` arms above.
             eprintln!(
                 "pmacs daemon: panel declaration from a grid session; dropping \
                  (grid sessions negotiate no panel band)"
@@ -5535,6 +5713,493 @@ mod tests {
             editor.core.borrow().windows[&document].buffer_id,
             other,
             "#9: a focused TERMINAL panel must not suppress the document viewport —              the document window should still have aligned to the declared buffer"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Bottom-panel Stage 2B-2 — inbound panel-event routing, driven
+    // through `handle_dispatcher_event` (the real dispatcher seam).
+    //
+    // Deliberately NOT `crdt`-gated: CI never enables that feature, so a
+    // gated pin is dark exactly where it needs to run.
+    // -----------------------------------------------------------------
+
+    /// A semantic, panel-capable frontend. `with_panel` decides whether
+    /// it also owns a side window — `FrontendCellGeometry` must be
+    /// accepted **without** one (Q#BP15a breaks the first-open cycle),
+    /// while the two gesture events must not be.
+    fn semantic_panel_view(
+        editor: &crate::editor::EditorState,
+        fid: FrontendId,
+        with_panel: bool,
+    ) -> (crate::window::WindowId, Option<crate::window::WindowId>) {
+        use crate::window::{FrontendView, Layout, LayoutNode, Orientation, Window, WindowParams};
+
+        let mut core = editor.core.borrow_mut();
+        let doc_buf = core.active_window().buffer_id;
+        let document = crate::window::WindowId::next();
+        let doc_view = {
+            let reg = core.registry.borrow();
+            crate::text_view::TextView::new(reg.get(doc_buf).expect("doc"))
+        };
+        core.windows
+            .insert(document, Window::new(document, doc_buf, doc_view));
+        let panel = with_panel.then(|| {
+            let panel_buf = core.registry.borrow_mut().create("*panel*");
+            let panel_id = crate::window::WindowId::next();
+            let panel_view = {
+                let reg = core.registry.borrow();
+                crate::text_view::TextView::new(reg.get(panel_buf).expect("panel"))
+            };
+            let mut window = Window::new(panel_id, panel_buf, panel_view);
+            let mut params = WindowParams::default();
+            params.side = Some(crate::window::Side::Bottom);
+            params.fixed_rows = Some(4);
+            window.params = params;
+            core.windows.insert(panel_id, window);
+            panel_id
+        });
+        let layout = match panel {
+            Some(panel) => Layout {
+                root: LayoutNode::Split {
+                    orientation: Orientation::Horizontal,
+                    children: vec![LayoutNode::Leaf(document), LayoutNode::Leaf(panel)],
+                    weights: vec![1, 1],
+                },
+            },
+            None => Layout::single(document),
+        };
+        core.register_frontend_view(
+            fid,
+            FrontendView {
+                layout,
+                active: document,
+                fold_projection: false,
+                // Stage 2B-2 is dark: production negotiation still sets
+                // this `false` for every semantic session, so the
+                // projection is exercised through a test-only view (the
+                // framing's §7.2.2 posture).
+                panel_capable: true,
+                frame_geometry: None,
+                panel_hidden: false,
+            },
+        );
+        (document, panel)
+    }
+
+    fn session(version: u32, semantic: bool) -> crate::presence::SessionState {
+        crate::presence::SessionState {
+            negotiated_protocol_version: version,
+            negotiated_capabilities: crate::protocol::NegotiatedCapabilities {
+                semantic_render: semantic,
+                crdt_replica: true,
+                ..Default::default()
+            },
+            color_slot: 0,
+        }
+    }
+
+    /// Drive one authenticated event through the real dispatcher while
+    /// keeping the caller's projection state, so a test can ship a
+    /// `PanelFrame` first and then send an event addressing it.
+    ///
+    /// The session is registered because the dispatcher drops any event
+    /// from an uninstalled session before it reaches a handler.
+    fn dispatch_panel_event(
+        editor: &mut crate::editor::EditorState,
+        fid: FrontendId,
+        version: u32,
+        semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+        render_states: &mut HashMap<FrontendId, RenderState>,
+        event: FrontendEvent,
+    ) {
+        let mut streams = HashMap::new();
+        let mut term_sizes = HashMap::new();
+        term_sizes.insert(fid, CellSize::new(24, 80));
+        let mut last_idle = HashMap::new();
+        let mut last_active = HashMap::new();
+        let mut bells = HashMap::new();
+        let mut registry = SessionRegistry::new();
+        registry.register_session(fid, session(version, !render_states.contains_key(&fid)));
+        handle_dispatcher_event(
+            DispatcherEvent::FrontendEvent { source: fid, event },
+            editor,
+            render_states,
+            semantic_states,
+            &mut streams,
+            &mut term_sizes,
+            &mut last_idle,
+            &mut last_active,
+            &mut bells,
+            &mut registry,
+        );
+    }
+
+    fn geometry_event(claimed: FrontendId, epoch: u64, rows: u32, cols: u32) -> FrontendEvent {
+        FrontendEvent::FrontendCellGeometry {
+            frontend_id: claimed,
+            geometry_epoch: epoch,
+            total: CellSize::new(rows, cols),
+        }
+    }
+
+    /// Criterion 50 (accept half) + Q#BP15a: the declaration is valid
+    /// with no side window at all. Gating it on panel presence would
+    /// deadlock the first open, because the daemon needs columns before
+    /// it can paint a first frame.
+    #[test]
+    fn frontend_cell_geometry_is_accepted_without_a_side_window() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(701);
+        semantic_panel_view(&editor, fid, false);
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            geometry_event(fid, 1, 40, 100),
+        );
+
+        let stored = editor.core.borrow().frame_geometry_for(fid);
+        assert_eq!(
+            stored.map(|geometry| (geometry.geometry_epoch, geometry.total)),
+            Some((1, CellSize::new(40, 100))),
+            "a panel-capable semantic source declares geometry with no side window"
+        );
+    }
+
+    /// Criterion 50 (reject half): a GRID session has no panel band, so
+    /// its declaration is dropped before it can reach a view.
+    #[test]
+    fn frontend_cell_geometry_from_a_grid_session_is_dropped() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(702);
+        semantic_panel_view(&editor, fid, false);
+        // A grid session: a `RenderState`, no semantic projection.
+        let mut render_states = HashMap::new();
+        render_states.insert(fid, RenderState::new(CellSize::new(24, 80)));
+        // The grid arm would otherwise mint an epoch from its own attach
+        // size, so start from a known state and assert the epoch never
+        // answers the wire declaration.
+        let before = editor.core.borrow().frame_geometry_for(fid);
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut HashMap::new(),
+            &mut render_states,
+            geometry_event(fid, 9, 40, 100),
+        );
+
+        let after = editor.core.borrow().frame_geometry_for(fid);
+        assert_eq!(
+            before, after,
+            "a grid session's panel declaration is dropped"
+        );
+        assert_eq!(after, None, "…and nothing was stored at all");
+    }
+
+    /// Criterion 50 (reject half): a peer that negotiated v20 never
+    /// negotiated these variants, so its declaration is not trusted even
+    /// though its view is panel-capable.
+    #[test]
+    fn frontend_cell_geometry_below_the_panel_version_is_dropped() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(703);
+        semantic_panel_view(&editor, fid, false);
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PANEL_MIN_VERSION - 1),
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PANEL_MIN_VERSION - 1,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            geometry_event(fid, 1, 40, 100),
+        );
+
+        assert_eq!(
+            editor.core.borrow().frame_geometry_for(fid),
+            None,
+            "a pre-panel semantic peer's declaration is dropped"
+        );
+    }
+
+    /// Criterion 50 (reject half) + Q#BP13: capability is the gate, not
+    /// only the wire version. A semantic view this daemon did not mark
+    /// panel-capable declares nothing.
+    #[test]
+    fn frontend_cell_geometry_from_a_non_panel_capable_view_is_dropped() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(704);
+        let view = build_fresh_frontend_view(&mut editor, false, false);
+        editor.core.borrow_mut().register_frontend_view(fid, view);
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            geometry_event(fid, 1, 40, 100),
+        );
+
+        assert_eq!(
+            editor.core.borrow().frame_geometry_for(fid),
+            None,
+            "a non-panel-capable semantic view declares no panel geometry"
+        );
+    }
+
+    /// Criterion 50 (forged-source half): routing is by the
+    /// authenticated transport source, never the payload's claimed id, so
+    /// a forged id reaches no other frontend's view.
+    #[test]
+    fn a_forged_frontend_id_in_a_geometry_payload_addresses_nothing() {
+        let mut editor = crate::editor::EditorState::new();
+        let source = FrontendId(705);
+        let victim = FrontendId(706);
+        semantic_panel_view(&editor, source, false);
+        semantic_panel_view(&editor, victim, false);
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            source,
+            crate::semantic_render::SemanticRenderState::for_peer(source, PROTOCOL_VERSION),
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            source,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            geometry_event(victim, 1, 40, 100),
+        );
+
+        let core = editor.core.borrow();
+        assert_eq!(
+            core.frame_geometry_for(victim),
+            None,
+            "the claimed id must not be able to declare another frontend's geometry"
+        );
+        assert!(
+            core.frame_geometry_for(source).is_some(),
+            "…while the authenticated source's own declaration still lands"
+        );
+    }
+
+    /// Ship one real `PanelFrame` so the session holds a live `Present`
+    /// declaration, and return its two epochs.
+    fn shipped_declaration(
+        editor: &crate::editor::EditorState,
+        fid: FrontendId,
+        semantic_states: &mut HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
+    ) -> (u64, u64) {
+        let sem = semantic_states.get_mut(&fid).expect("semantic projection");
+        let messages = sem.render_frame(editor);
+        assert!(
+            messages
+                .iter()
+                .any(|msg| matches!(msg, InstanceMessage::PanelFrame(_))),
+            "fixture precondition: the frame must actually ship a panel declaration"
+        );
+        let frame = sem.panel_declaration().expect("a Present declaration");
+        (frame.geometry_epoch, frame.panel_epoch)
+    }
+
+    /// Criterion 50: a gesture from a source whose latest declaration is
+    /// not a visible `Present` is dropped.
+    #[test]
+    fn a_panel_pointer_without_a_present_declaration_is_dropped() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(707);
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        // No geometry declared yet, so nothing has been shipped and the
+        // seeded baseline is `Absent`.
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch: 1,
+                panel_epoch: 1,
+                buffer_id,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+        );
+
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "a gesture with no live Present declaration must not focus the panel"
+        );
+    }
+
+    /// Criterion 49: the accepted case, and the two epoch races beside
+    /// it. Without the accepted arm the drops above would pass for a
+    /// dispatcher that ignores the event family entirely.
+    #[test]
+    fn panel_pointer_epochs_decide_focus() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(708);
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let down = |geometry_epoch, panel_epoch| FrontendEvent::PanelPointer {
+            frontend_id: fid,
+            geometry_epoch,
+            panel_epoch,
+            buffer_id,
+            coord: pmacs_protocol::CellCoord::new(0, 0),
+            kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+            mods: pmacs_protocol::Modifiers::default(),
+        };
+
+        for (label, event) in [
+            (
+                "stale geometry epoch",
+                down(geometry_epoch + 1, panel_epoch),
+            ),
+            (
+                "stale presentation epoch",
+                down(geometry_epoch, panel_epoch + 1),
+            ),
+        ] {
+            dispatch_panel_event(
+                &mut editor,
+                fid,
+                PROTOCOL_VERSION,
+                &mut semantic_states,
+                &mut HashMap::new(),
+                event,
+            );
+            assert_eq!(
+                editor.core.borrow().views[&fid].active,
+                document,
+                "{label}: the gesture must drop before it can move focus"
+            );
+        }
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            down(geometry_epoch, panel_epoch),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "a gesture matching BOTH epochs activates the panel (click-to-focus)"
+        );
+    }
+
+    /// Criteria 49/50 for the resize event: matching epochs move the
+    /// stored request, a stale presentation epoch does not.
+    #[test]
+    fn panel_resize_rows_honors_both_epochs() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(709);
+        let (_document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
+        let before = editor.core.borrow().windows[&panel].params.fixed_rows;
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelResizeRows {
+                frontend_id: fid,
+                geometry_epoch,
+                panel_epoch: panel_epoch + 1,
+                rows: 9,
+            },
+        );
+        assert_eq!(
+            editor.core.borrow().windows[&panel].params.fixed_rows,
+            before,
+            "a stale presentation epoch must not resize the panel"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelResizeRows {
+                frontend_id: fid,
+                geometry_epoch,
+                panel_epoch,
+                rows: 9,
+            },
+        );
+        assert_eq!(
+            editor.core.borrow().windows[&panel].params.fixed_rows,
+            Some(9),
+            "matching epochs move the stored request"
+        );
+    }
+
+    /// Q#BP9's write-loop gate, independent of the producer's own flag.
+    #[test]
+    fn the_panel_frame_write_gate_rejects_v20_independently() {
+        let frame = InstanceMessage::PanelFrame(pmacs_protocol::panel::PanelFramePayload::Absent);
+        assert!(!peer_accepts_panel_message(PANEL_MIN_VERSION - 1, &frame));
+        assert!(peer_accepts_panel_message(PANEL_MIN_VERSION, &frame));
+        assert!(
+            peer_accepts_panel_message(
+                PANEL_MIN_VERSION - 1,
+                &InstanceMessage::DispatchIdle { idle: true }
+            ),
+            "the filter must be scoped to the panel variant"
         );
     }
 }

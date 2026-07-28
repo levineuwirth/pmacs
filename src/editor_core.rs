@@ -3413,10 +3413,9 @@ impl EditorCore {
         // The wire's area bound is a transport-safety limit, not a
         // policy: clamp rows against it rather than shipping a frame the
         // shared validator would reject whole.
-        let budget_rows = u32::try_from(
-            pmacs_protocol::panel::MAX_PANEL_VISIBLE_CELLS / (cols as usize).max(1),
-        )
-        .unwrap_or(u32::MAX);
+        let budget_rows =
+            u32::try_from(pmacs_protocol::panel::MAX_PANEL_VISIBLE_CELLS / (cols as usize).max(1))
+                .unwrap_or(u32::MAX);
         let rows = rows.min(budget_rows);
         (rows >= MIN_WINDOW_OUTER_ROWS).then(|| crate::cell::CellSize::new(rows, cols))
     }

@@ -38,14 +38,16 @@ use crate::cell::{CellSize, Style};
 use crate::editor::EditorState;
 use crate::protocol::{
     AdornmentContent, AdornmentPlacement, ByteRange, Decoration, DecorationKind, DecorationSegment,
-    FrontendId, InlineAdornment, InstanceMessage, MenuPromptRow, StatuslineSegment, StyleSegment,
-    StyleSpan,
+    FrontendId, InlineAdornment, InstanceMessage, MenuPromptRow, PANEL_MIN_VERSION,
+    StatuslineSegment, StyleSegment, StyleSpan,
 };
 use crate::statusline::{
     StatuslineEvaluation, StatuslineEvaluationOutcome, StatuslineEvaluationTarget,
-    evaluate_statusline,
+    StatuslineWindowSegments, evaluate_statusline,
 };
 use crate::terminal::TerminalFrame;
+use crate::window::WindowId;
+use pmacs_protocol::panel::{PanelFrame, PanelFramePayload};
 
 /// The viewport a `semantic_render` frontend last declared.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -317,6 +319,54 @@ pub struct SemanticRenderState {
     terminal_error_latched: bool,
     /// Whether the most recent render pass projected a terminal.
     terminal_active: bool,
+    /// Whether the peer negotiated protocol v21, which is where
+    /// [`InstanceMessage::PanelFrame`] was appended (Q#BP9). A v20 peer
+    /// receives no band at all — and, per Q#BP13, is never *placed* in a
+    /// side window either, because denying only the message would leave
+    /// its window invisible.
+    peer_knows_panel_frames: bool,
+    /// The panel payload this peer last received, compared in FULL.
+    ///
+    /// Seeded to `Absent` rather than `None`: a fresh session starts with
+    /// no band, so the opening state is a fact rather than an absence,
+    /// and seeding it keeps every session from paying one redundant
+    /// `Absent` before it ever shows a panel.
+    ///
+    /// `Absent` is authoritative and duplicate-suppressed like any other
+    /// payload — hide and close must both send it, because the receiver
+    /// retains its last valid frame and silence would leave a stale band
+    /// on screen indefinitely (Q#BP15).
+    last_panel_payload: Option<PanelFramePayload>,
+    /// Highest presentation epoch allocated for this session; `0` means
+    /// none has been. Advanced only when a frame is actually shipped, so
+    /// a frame that fails validation does not burn an identity the peer
+    /// never saw.
+    panel_epoch_used: u64,
+    /// Identity behind the `Present` in `last_panel_payload`, or `None`
+    /// when the last payload was `Absent`.
+    ///
+    /// Cleared by every `Absent`, which is what makes hide/reopen and
+    /// close/reopen of the **same** persistent buffer allocate a fresh
+    /// epoch — the hole a `buffer_id` alone cannot close (Q#BP16).
+    panel_presentation: Option<PanelPresentation>,
+    /// Whether an invalid panel frame was already reported since the last
+    /// valid one. Bounds the log exactly like `terminal_error_latched`.
+    panel_error_latched: bool,
+}
+
+/// The presentation identity a shipped [`PanelFrame`] carries.
+///
+/// `window_id` moves when a new side window is created and `buffer_id`
+/// when the panel's buffer is replaced; either one changing allocates a
+/// new `panel_epoch`, and that is what stops a stale `PanelPointer` from
+/// addressing a reopened panel as if it were the old one (Q#BP16).
+/// `WindowId` deliberately stays off the wire — the epoch is the opaque
+/// stand-in for it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct PanelPresentation {
+    window_id: WindowId,
+    buffer_id: BufferId,
+    panel_epoch: u64,
 }
 
 /// One [`SemanticRenderState::diag_line_cache`] entry: the line-start
@@ -413,6 +463,7 @@ impl SemanticRenderState {
         s.peer_knows_font_facts = negotiated_protocol_version >= 17;
         s.peer_knows_statusline_segments = negotiated_protocol_version >= 18;
         s.peer_knows_terminal_frames = negotiated_protocol_version >= 19;
+        s.peer_knows_panel_frames = negotiated_protocol_version >= PANEL_MIN_VERSION;
         s
     }
 
@@ -464,7 +515,43 @@ impl SemanticRenderState {
             last_terminal_frame: None,
             terminal_error_latched: false,
             terminal_active: false,
+            peer_knows_panel_frames: true,
+            // Q#BP15: a fresh session has no band, and that is a fact the
+            // peer already holds. Seeding the baseline keeps the first
+            // frame from shipping a redundant authoritative `Absent`.
+            last_panel_payload: Some(PanelFramePayload::Absent),
+            panel_epoch_used: 0,
+            panel_presentation: None,
+            panel_error_latched: false,
         }
+    }
+
+    /// The `Present` panel declaration this session last shipped.
+    ///
+    /// The daemon reads it to run steps 3 and 4 of Q#BP16's validation
+    /// ladder: an inbound `PanelPointer` or `PanelResizeRows` must name
+    /// the geometry and presentation epochs of the frame the frontend was
+    /// actually looking at. `None` after an `Absent` — which is precisely
+    /// how `Absent` "clears input authority".
+    #[must_use]
+    pub fn panel_declaration(&self) -> Option<&PanelFrame> {
+        match self.last_panel_payload.as_ref()? {
+            PanelFramePayload::Present(frame) => Some(frame),
+            PanelFramePayload::Absent => None,
+        }
+    }
+
+    /// Whether the last shipped declaration is a `Present` whose epochs
+    /// both match an inbound panel event (Q#BP16 steps 2–4).
+    ///
+    /// Rolled into one predicate so no caller can check the geometry
+    /// epoch and forget the presentation epoch: they close different
+    /// holes and neither subsumes the other.
+    #[must_use]
+    pub fn panel_declaration_matches(&self, geometry_epoch: u64, panel_epoch: u64) -> bool {
+        self.panel_declaration().is_some_and(|frame| {
+            frame.geometry_epoch == geometry_epoch && frame.panel_epoch == panel_epoch
+        })
     }
 
     /// Record the frontend's declared on-screen byte range. Called by
@@ -616,8 +703,15 @@ impl SemanticRenderState {
             return messages;
         }
         let Some(vp) = self.viewport.clone() else {
-            // Emit nothing before the frontend declares a viewport.
-            return Vec::new();
+            // Emit nothing document-scoped before the frontend declares a
+            // viewport — but the band is a SEPARATE surface (Q#BP15a),
+            // and gating it on the document declaration would make the
+            // first panel unpaintable on a frontend that has not declared
+            // one yet. Its statusline is `None` here for the same reason:
+            // the semantic fan-out is keyed on the declared buffer.
+            let mut out = Vec::new();
+            self.emit_panel_frame(state, None, &mut out);
+            return out;
         };
 
         // Evaluate callbacks before any long-lived core borrow and before
@@ -825,9 +919,19 @@ impl SemanticRenderState {
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
+        // Parent acceptance 45: ONE provider invocation supplies both the
+        // primary-document wire segments and the panel mode line, so the
+        // side half is taken from this same evaluation before it is
+        // consumed.
+        let side_window = state.core.borrow().side_window_for(self.frontend_id);
+        let panel_statusline = statusline_evaluation
+            .as_ref()
+            .and_then(|evaluation| self.panel_statusline(evaluation, side_window))
+            .cloned();
         if let Some(evaluation) = statusline_evaluation {
             self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
+        self.emit_panel_frame(state, panel_statusline.as_ref(), &mut out);
         out
     }
 
@@ -965,9 +1069,19 @@ impl SemanticRenderState {
         out.extend(self.theme_facts_msg(state));
         out.extend(self.font_facts_msg(state));
         // Q#SL6/Q#SL8: face inventory must precede segment text.
+        // The band rides the terminal path too: a frontend whose DOCUMENT
+        // surface is a full-window terminal can still hold a side window,
+        // and suppressing the panel here would leave the peer's retained
+        // band on screen with no way to clear it.
+        let side_window = state.core.borrow().side_window_for(self.frontend_id);
+        let panel_statusline = statusline_evaluation
+            .as_ref()
+            .and_then(|evaluation| self.panel_statusline(evaluation, side_window))
+            .cloned();
         if let Some(evaluation) = statusline_evaluation {
             self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
+        self.emit_panel_frame(state, panel_statusline.as_ref(), &mut out);
         out
     }
 
@@ -1031,6 +1145,158 @@ impl SemanticRenderState {
             }
             StatuslineEvaluationOutcome::NoMessage(_) => {}
         }
+    }
+
+    /// The side window's evaluated segments from **this frame's** single
+    /// provider invocation (parent acceptance 45).
+    ///
+    /// Selected by window identity, exactly like the document half: the
+    /// fan-out yields the primary document *and* the visible side window,
+    /// and taking "some context for my frontend" would depend on capture
+    /// order and could paint the document's status text into the panel's
+    /// mode line.
+    ///
+    /// An `Invalidated` evaluation yields `None`, which is the panel's
+    /// authoritative-empty: a callback that mutated layout or focus
+    /// invalidates the whole evaluation, so the band paints its plain
+    /// mode line rather than stale provider text.
+    fn panel_statusline<'a>(
+        &self,
+        evaluation: &'a StatuslineEvaluation,
+        side_window: Option<WindowId>,
+    ) -> Option<&'a StatuslineWindowSegments> {
+        let side_window = side_window?;
+        match &evaluation.outcome {
+            StatuslineEvaluationOutcome::Ready(windows) => windows.iter().find(|window| {
+                window.context.frontend_id == self.frontend_id
+                    && window.context.window_id == side_window
+            }),
+            StatuslineEvaluationOutcome::Invalidated { .. }
+            | StatuslineEvaluationOutcome::NoMessage(_) => None,
+        }
+    }
+
+    /// Project this frontend's side window as an
+    /// [`InstanceMessage::PanelFrame`] (Q#BP15).
+    ///
+    /// Runs on every frame of a panel-capable v21 semantic session,
+    /// independently of the document byte viewport: the band is a
+    /// separate surface, and gating it on a declared viewport would leave
+    /// the first panel unpaintable on a frontend that has not yet
+    /// declared one.
+    ///
+    /// Not reset by [`Self::on_buffer_snapshot_sent`]: a `BufferSnapshot`
+    /// resets *document* mirror state, and the band is neither
+    /// buffer-scoped to the document nor rebuilt from it.
+    fn emit_panel_frame(
+        &mut self,
+        state: &EditorState,
+        statusline: Option<&StatuslineWindowSegments>,
+        out: &mut Vec<InstanceMessage>,
+    ) {
+        // Q#BP13: capability, not merely wire version. A session that
+        // cannot render a band must not be shipped one — and, on the
+        // production path, is never placed in a side window either.
+        if !self.peer_knows_panel_frames || !state.core.borrow().panel_capable_for(self.frontend_id)
+        {
+            return;
+        }
+        // Q#BP15a: `Present` echoes the daemon's latest ACCEPTED geometry
+        // declaration. Read before painting so the frame cannot answer a
+        // declaration that arrived mid-projection.
+        let geometry = state.core.borrow().frame_geometry_for(self.frontend_id);
+        let projection =
+            geometry.and_then(|_| state.prepare_panel_projection(self.frontend_id, statusline));
+        let (Some(geometry), Some(projection)) = (geometry, projection) else {
+            self.publish_absent_panel(out);
+            return;
+        };
+        let identity = (projection.window_id, projection.buffer_id);
+        let panel_epoch = match self.panel_presentation {
+            Some(presentation) if (presentation.window_id, presentation.buffer_id) == identity => {
+                Some(presentation.panel_epoch)
+            }
+            // A new side window, a replaced buffer, or any `Absent` →
+            // `Present` transition (which cleared `panel_presentation`)
+            // takes a fresh identity.
+            _ => self.panel_epoch_used.checked_add(1),
+        };
+        let Some(panel_epoch) = panel_epoch else {
+            // Q#BP15: allocation is checked and exhaustion fails closed
+            // to `Absent`. Wrapping would let a new panel inherit a live
+            // identity and accept gestures aimed at its predecessor.
+            self.publish_absent_panel(out);
+            return;
+        };
+        let payload = PanelFramePayload::Present(PanelFrame {
+            buffer_id: projection.buffer_id,
+            panel_epoch,
+            geometry_epoch: geometry.geometry_epoch,
+            size: projection.size,
+            cells: projection.cells,
+            cursor: projection.cursor,
+            focused: projection.focused,
+        });
+        // Complete-payload comparison FIRST, like the terminal pass: only
+        // validated payloads are ever stored, so a payload equal to the
+        // baseline has already passed and re-running the per-cell width
+        // and topology checks would recompute a verdict we hold.
+        if self.last_panel_payload.as_ref() == Some(&payload) {
+            self.panel_error_latched = false;
+            return;
+        }
+        let PanelFramePayload::Present(frame) = &payload else {
+            unreachable!("the Present payload was constructed immediately above");
+        };
+        match frame.validate() {
+            Ok(()) => {
+                self.panel_error_latched = false;
+                self.panel_epoch_used = self.panel_epoch_used.max(panel_epoch);
+                self.panel_presentation = Some(PanelPresentation {
+                    window_id: projection.window_id,
+                    buffer_id: projection.buffer_id,
+                    panel_epoch,
+                });
+                self.last_panel_payload = Some(payload.clone());
+                out.push(InstanceMessage::PanelFrame(payload));
+            }
+            Err(error) => {
+                // Atomic rejection: the peer keeps its last valid frame,
+                // this session keeps the presentation identity behind it,
+                // and one bounded log line marks the condition. Advancing
+                // `panel_epoch_used` here would burn an identity the peer
+                // never saw.
+                if !self.panel_error_latched {
+                    self.panel_error_latched = true;
+                    eprintln!(
+                        "pmacs: panel frame for {:?} on {:?} failed validation, \
+                         retaining the last valid frame: {error}",
+                        projection.buffer_id, self.frontend_id
+                    );
+                }
+            }
+        }
+    }
+
+    /// Publish the authoritative `Absent` for every non-presentable state
+    /// (Q#BP15, Q#BP2b).
+    ///
+    /// Clears the declared presentation on this side before any later
+    /// event can validate against it — that is what "`Absent` clears
+    /// input authority" means. The whole-frame geometry declaration
+    /// deliberately survives: it is answered by the frontend, not by the
+    /// panel's presence.
+    fn publish_absent_panel(&mut self, out: &mut Vec<InstanceMessage>) {
+        self.panel_presentation = None;
+        if self.last_panel_payload.as_ref() == Some(&PanelFramePayload::Absent) {
+            // A duplicate `Absent` does no work — but the clear above
+            // still runs, so the state stays idempotent rather than
+            // depending on which duplicate arrived first.
+            return;
+        }
+        self.panel_error_latched = false;
+        self.last_panel_payload = Some(PanelFramePayload::Absent);
+        out.push(InstanceMessage::PanelFrame(PanelFramePayload::Absent));
     }
 
     fn emit_statusline_payload(
