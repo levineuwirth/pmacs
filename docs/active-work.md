@@ -171,7 +171,7 @@ If it does not, stop and repair the remote/fetch configuration.
   to recur; the next occurrence carries its own evidence under whoever's
   PR, and a Stage B framing follows then.
 
-## Journey/GPU directory-target ratchet — PR #183 REGATING PUBLIC PATH
+## Journey/GPU directory-target ratchet — PR #183 GATED ON PUBLIC PATH
 
 - **Approved correction, not new product behavior.** GPU initial-target
   framing Q#GT6 / acceptance 10 and Journey Stage 1a N2/N5 already make
@@ -210,8 +210,8 @@ If it does not, stop and repair the remote/fetch configuration.
   exposed that the corrected acceptance still attached a raw protocol
   client rather than invoking the public root broker and real GPU
   connector. The test now covers those surfaces and passes **15/15**;
-  its full matrix is being rerun before this revision is pushed.
-- **Post-review full gate matrix is green at `ec4191f`:**
+  its full matrix is green at `34b8f28`.
+- **Full gate matrix is green on the public-path revision at `34b8f28`:**
   - `cargo fmt --check`;
   - strict workspace clippy;
   - library **1,849 passed / 3 ignored**;
