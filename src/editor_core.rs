@@ -3398,10 +3398,33 @@ impl EditorCore {
     /// the area budget.
     #[must_use]
     pub fn panel_grid_size(&self, fid: FrontendId) -> Option<crate::cell::CellSize> {
-        let view = self.views.get(&fid)?;
-        if view.panel_hidden {
+        if self.views.get(&fid)?.panel_hidden {
             return None;
         }
+        self.presentable_panel_grid(fid)
+    }
+
+    /// The panel grid this frontend's layout and geometry **could**
+    /// present, ignoring the cached `panel_hidden` bit.
+    ///
+    /// This is the single derivation behind both [`Self::panel_grid_size`]
+    /// and [`Self::reconcile_panel_layout_core`]'s satisfiability test,
+    /// and it is one function on purpose (review round 1, R1-1). When the
+    /// wire-area clamp lived only in the renderer, the daemon shipped an
+    /// authoritative `Absent` while `panel_hidden` stayed `false` — so
+    /// keys still reached the invisible window and a panel terminal kept
+    /// its controller. Q#BP2b is explicit that hiding is a **durable
+    /// state transition**, never a per-frame effect, and two derivations
+    /// of "can this panel be shown" is exactly how it became one.
+    ///
+    /// The area bound is a transport-safety limit rather than a frontend
+    /// policy, so it is applied uniformly rather than only on the
+    /// semantic path. It cannot bind for a grid frontend at any physically
+    /// reachable width — two rows fit until roughly 131,000 columns — so
+    /// one shared rule costs nothing and removes the drift.
+    #[must_use]
+    fn presentable_panel_grid(&self, fid: FrontendId) -> Option<crate::cell::CellSize> {
+        let view = self.views.get(&fid)?;
         self.side_window_for(fid)?;
         let geometry = view.frame_geometry?;
         let cols = geometry.total.cols;
@@ -3410,9 +3433,6 @@ impl EditorCore {
         }
         let area_rows = self.frontend_area_rows(fid)?;
         let rows = self.panel_allocation(fid, area_rows)?;
-        // The wire's area bound is a transport-safety limit, not a
-        // policy: clamp rows against it rather than shipping a frame the
-        // shared validator would reject whole.
         let budget_rows =
             u32::try_from(pmacs_protocol::panel::MAX_PANEL_VISIBLE_CELLS / (cols as usize).max(1))
                 .unwrap_or(u32::MAX);
@@ -3440,13 +3460,14 @@ impl EditorCore {
             return result;
         };
         let was_hidden = self.views.get(&fid).is_some_and(|view| view.panel_hidden);
-        // Unknown geometry (a semantic view before Stage 2's declaration)
-        // and a zero-column frame are both non-presentable, and follow the
-        // hidden arm rather than being sized against a placeholder.
-        let satisfiable = self
-            .frontend_area_rows(fid)
-            .and_then(|rows| self.panel_allocation(fid, rows))
-            .is_some();
+        // Unknown geometry (a semantic view before Stage 2's declaration),
+        // a zero-column frame, a layout that cannot spare the rows, and a
+        // grid the shared wire budget cannot carry are ALL non-presentable
+        // and all follow the hidden arm. One derivation, shared with the
+        // renderer (R1-1): a condition that only the renderer knew about
+        // produced a blank band with the durable state still saying
+        // "visible".
+        let satisfiable = self.presentable_panel_grid(fid).is_some();
         let Some(view) = self.views.get_mut(&fid) else {
             return result;
         };

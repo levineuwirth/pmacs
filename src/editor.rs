@@ -1870,6 +1870,91 @@ impl EditorState {
         }
     }
 
+    /// Sync a semantic frontend's **panel** terminal to the
+    /// daemon-derived content grid (Q#BP7 / Q#BP15a).
+    ///
+    /// The sibling of [`Self::sync_semantic_terminal_layout`], and the
+    /// case review round 1 (R1-3) found missing. The two arms are
+    /// disjoint by construction rather than by discipline:
+    /// `sync_semantic_terminal_layout` resolves its window through
+    /// `primary_document_window`, so it can never reach a side window,
+    /// and this one resolves through `side_window_for`, so it can never
+    /// reach the document. Nothing is ever resized twice per tick — the
+    /// failure mode the extraction of `sync_terminal_layouts_for_tick`
+    /// exists to prevent.
+    ///
+    /// A panel terminal has **no** `FrontendEvent::TerminalResize`
+    /// declaration to consult: the daemon derives its geometry, the
+    /// frontend never asserts it (Q#BP15a). So the size comes from
+    /// `panel_grid_size` minus the panel's one mode line, and it must be
+    /// applied at the tick's layout step — before `tick_processes`
+    /// drains the child — or the program formats its output against a
+    /// geometry the band is not showing.
+    ///
+    /// Recording the view size is unconditional for a resolvable panel
+    /// (that is what gives a passive view its own clipped projection);
+    /// only the durable controller resizes the shared PTY.
+    ///
+    /// Returns whether the shared screen geometry actually changed.
+    pub fn sync_semantic_panel_terminal_layout(&mut self, frontend_id: FrontendId) -> bool {
+        let Some((window_id, buffer_id, content)) = ({
+            let core = self.core.borrow();
+            core.panel_grid_size(frontend_id).and_then(|size| {
+                let window_id = core.side_window_for(frontend_id)?;
+                let buffer_id = core.windows.get(&window_id)?.buffer_id;
+                Some((
+                    window_id,
+                    buffer_id,
+                    CellSize::new(size.rows.saturating_sub(1), size.cols),
+                ))
+            })
+        }) else {
+            return false;
+        };
+        if content.rows == 0 || content.cols == 0 {
+            return false;
+        }
+        if !self.terminal_manager.borrow().is_terminal(buffer_id) {
+            return false;
+        }
+        let key = TerminalViewKey::new(frontend_id, window_id, buffer_id);
+        let content = terminal_projection_size(content);
+        if !self
+            .terminal_manager
+            .borrow_mut()
+            .record_view_size(key, content)
+        {
+            return false;
+        }
+        let controls = self
+            .terminal_manager
+            .borrow()
+            .controller(buffer_id)
+            .is_some_and(|controller| controller.matches(key));
+        if !controls {
+            return false;
+        }
+        if self.terminal_manager.borrow().screen_size(buffer_id) == Some(content) {
+            return false;
+        }
+        let (Ok(rows), Ok(cols)) = (u16::try_from(content.rows), u16::try_from(content.cols))
+        else {
+            return false;
+        };
+        let result = self.terminal_manager.borrow_mut().resize(
+            buffer_id,
+            rows,
+            cols,
+            &mut self.process_supervisor.borrow_mut(),
+        );
+        if let Err(error) = result {
+            self.core.borrow_mut().status = error.to_string();
+            false
+        } else {
+            true
+        }
+    }
+
     /// Apply a semantic frontend's terminal-cell pointer gesture.
     ///
     /// The gesture must name the authenticated frontend's active
@@ -1980,7 +2065,7 @@ impl EditorState {
             let snapshot = self
                 .terminal_manager
                 .borrow_mut()
-                .snapshot_for_view(key, content.size)?;
+                .snapshot_for_view(key, terminal_projection_size(content.size))?;
             paint_terminal_snapshot(&mut grid, content, &snapshot, &theme);
             let registry = self.core.borrow().registry.clone();
             let reg = registry.borrow();
@@ -2106,11 +2191,27 @@ impl EditorState {
     /// epochs) belong to the caller, because only the session holds the
     /// declaration the frontend was actually looking at.
     ///
-    /// **Click-to-focus only in Stage 2B-2.** A `Down`/`Up`/wheel/context
-    /// gesture activates the panel; replaying it into selection, listview
-    /// rows, or child SGR reporting is parent acceptance 48, which needs
-    /// the GPU band and lands in Stage 2B-3. Bare hover neither focuses
-    /// nor claims anything, exactly as on the document terminal path.
+    /// **Activation is not uniform, and Q#BP16 says so explicitly.** A
+    /// **press** focuses any panel — that is click-to-focus, and
+    /// `Down(Right)` is the context-menu gesture, so both buttons count.
+    /// Everything else depends on what the panel holds:
+    ///
+    /// * a **terminal** panel activates on *every* non-`Move` gesture,
+    ///   because the shared terminal adapter claims the controller for
+    ///   wheel, press, drag, and release alike — leaving a wheel step
+    ///   unactivated would hand the child to a window that does not own
+    ///   focus;
+    /// * a **document** panel keeps today's **scroll-without-focus**
+    ///   behaviour, matching `dispatch_mouse`, where a wheel notch moves
+    ///   a viewport without selecting the window (and preserves a kill
+    ///   chain for the same reason).
+    ///
+    /// Review round 1 (R2-5) found the terminal clause applied to both.
+    /// Bare hover neither focuses nor claims, on either kind.
+    ///
+    /// **Replay is out of scope in Stage 2B-2.** Driving selection,
+    /// listview rows, or child SGR reporting is parent acceptance 48,
+    /// which needs the GPU band and lands in Stage 2B-3.
     ///
     /// Returns whether the gesture was accepted.
     pub fn dispatch_semantic_panel_pointer(
@@ -2126,6 +2227,7 @@ impl EditorState {
         if coord.row >= size.rows || coord.col >= size.cols {
             return false;
         }
+        let is_terminal = self.terminal_manager.borrow().is_terminal(buffer_id);
         let mut core = self.core.borrow_mut();
         let Some(side) = core.side_window_for(frontend_id) else {
             return false;
@@ -2133,7 +2235,12 @@ impl EditorState {
         if core.windows.get(&side).map(|window| window.buffer_id) != Some(buffer_id) {
             return false;
         }
-        if !matches!(kind, pmacs_protocol::MouseKind::Move) {
+        let activates = if is_terminal {
+            !matches!(kind, pmacs_protocol::MouseKind::Move)
+        } else {
+            matches!(kind, pmacs_protocol::MouseKind::Down(_))
+        };
+        if activates {
             core.focus_window(frontend_id, side);
             core.active_frontend = frontend_id;
         }
@@ -3349,6 +3456,36 @@ const SCROLL_LINES: i32 = 3;
 /// diagnostic sign uses — so it adds no column and changes no width; it
 /// therefore only appears when a line-number mode reserves a gutter.
 const FOLD_GUTTER_GLYPH: char = '▸';
+
+/// The largest viewport the terminal subsystem will actually project,
+/// for a window content rect that may legitimately be larger.
+///
+/// A panel deliberately does **not** inherit the terminal's per-axis PTY
+/// caps (Bet B5'): a 4K surface at a small font is legitimately wider
+/// than 512 columns, and `PanelFrame` answers only to the shared area
+/// bound. The terminal *screen* keeps its own policy, so without this
+/// clamp `snapshot_for_view` refused the panel's content rect, the whole
+/// projection collapsed to `None`, and the band went per-frame `Absent`
+/// while `panel_hidden` still said "visible" — review round 1's R1-1
+/// shape, found again by its own sweep.
+///
+/// Clamping rather than hiding is the right answer because the band is
+/// legitimately that wide: the child occupies the columns a PTY can
+/// have, and the remainder paints as band background exactly as a
+/// snapshot narrower than its window already does. Rows are shed for the
+/// area bound rather than columns, so a wide band keeps its full width.
+fn terminal_projection_size(content: CellSize) -> CellSize {
+    let cols = content
+        .cols
+        .min(u32::from(crate::terminal::MAX_TERMINAL_COLS));
+    let rows = content
+        .rows
+        .min(u32::from(crate::terminal::MAX_TERMINAL_ROWS));
+    let rows_within_area =
+        u32::try_from(crate::terminal::MAX_TERMINAL_VISIBLE_CELLS / (cols as usize).max(1))
+            .unwrap_or(u32::MAX);
+    CellSize::new(rows.min(rows_within_area), cols)
+}
 
 /// One painted side window, ready to become a
 /// [`pmacs_protocol::panel::PanelFrame`] (bottom-panel Stage 2B-2).

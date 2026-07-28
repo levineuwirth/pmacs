@@ -983,3 +983,238 @@ fn the_projection_paints_the_side_windows_own_buffer() {
     frame.validate().expect("a produced frame is a valid frame");
     let _ = HashMap::<u32, u32>::new();
 }
+
+// ---------------------------------------------------------------------------
+// Review round 1 — R1-1 and R2-4
+// ---------------------------------------------------------------------------
+
+/// R1-1: exhausting the wire-area budget must be a **durable** hide, not
+/// a per-frame one.
+///
+/// Q#BP2b is explicit that hiding is a durable state transition: a
+/// render-time dodge still routes keys to an invisible window and leaves
+/// the terminal controller claimed. `panel_grid_size` gained a budget
+/// clamp that `reconcile_panel_layout_core` did not share, so the band
+/// went `Absent` on the wire while `panel_hidden` stayed false — the
+/// exact per-frame-effect shape the Stage 1 record warns about.
+#[test]
+fn r1_1_wire_area_exhaustion_is_a_durable_hide_not_a_blank_frame() {
+    let mut session = Session::new();
+    session.declare(1, ROWS, COLS);
+    open_panel(&session, "*panel*", 4);
+    let panel = session.side_window().expect("side window");
+    session.state.core.borrow_mut().focus_window(FID, panel);
+    assert!(
+        session.present().focused,
+        "fixture precondition: the panel owns focus while it is presentable"
+    );
+
+    // Wide enough that not even the structural two-row floor fits inside
+    // the shared area bound.
+    let max_cells = u32::try_from(pmacs_protocol::panel::MAX_PANEL_VISIBLE_CELLS).expect("bound");
+    session.declare(2, ROWS, max_cells);
+
+    assert_eq!(
+        session.frame(),
+        Some(PanelFramePayload::Absent),
+        "the band is cleared authoritatively"
+    );
+    let core = session.state.core.borrow();
+    assert!(
+        core.panel_hidden_for(FID),
+        "R1-1: …and the DURABLE hidden state must move with it, or keys \
+         keep reaching an invisible window"
+    );
+    assert_ne!(
+        core.views[&FID].active, panel,
+        "R1-1: focus must leave a panel that can no longer be presented"
+    );
+}
+
+/// R1-1's controller half: a panel terminal that stops being presentable
+/// must have its child released, because the resize path merely returns
+/// on zero content without releasing anything.
+#[test]
+fn r1_1_wire_area_exhaustion_releases_a_panel_terminals_controller() {
+    let mut session = Session::new();
+    session.declare(1, ROWS, COLS);
+    exec(
+        &session.state,
+        "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
+           args = { \"-c\", \"sleep 30\" }, display = \"panel\" }",
+    );
+    let panel = session.side_window().expect("terminal panel");
+    let buffer: pmacs::lua_bindings::BufferIdLua = session
+        .state
+        .lua_host
+        .lua()
+        .load("return TERM_BUF")
+        .eval()
+        .unwrap();
+    session.state.core.borrow_mut().focus_window(FID, panel);
+    let _ = session.present();
+    let key = pmacs::terminal::TerminalViewKey::new(FID, panel, buffer.0);
+    assert!(
+        session
+            .state
+            .terminal_manager
+            .borrow_mut()
+            .claim_controller(key),
+        "fixture precondition: the panel view controls the child"
+    );
+
+    let max_cells = u32::try_from(pmacs_protocol::panel::MAX_PANEL_VISIBLE_CELLS).expect("bound");
+    session.declare(2, ROWS, max_cells);
+    assert_eq!(session.frame(), Some(PanelFramePayload::Absent));
+
+    assert!(
+        session
+            .state
+            .terminal_manager
+            .borrow()
+            .controller(buffer.0)
+            .is_none(),
+        "R1-1: the child's controller is released with the durable hide"
+    );
+    exec(&session.state, "pmacs.terminal.terminate(TERM_BUF)");
+}
+
+/// R2-4: `NoMessage` means publish **nothing**, so the band keeps the
+/// text it last published. Treating it like `Invalidated` *removes*
+/// provider text on a transient buffer-follow mismatch.
+#[test]
+fn r2_4_nomessage_retains_the_bands_published_segments() {
+    let mut session = Session::new();
+    session.declare(1, ROWS, COLS);
+    open_panel(&session, "*panel*", 4);
+    let panel = session.side_window().expect("side window");
+    let document_buffer = session.state.core.borrow().windows[&session.document].buffer_id;
+    session.render.set_viewport(
+        document_buffer,
+        pmacs::protocol::ByteRange { start: 0, end: 0 },
+        0,
+    );
+    exec(
+        &session.state,
+        "pmacs.statusline.register {
+           name = 'probe', side = 'left',
+           fn = function(ctx) return 'W' .. tostring(ctx.window) end,
+         }",
+    );
+
+    let marker = format!("W{}", panel.raw());
+    let mode_line = |session: &mut Session| {
+        rows_of(&session.present())
+            .last()
+            .expect("mode line")
+            .clone()
+    };
+    assert!(
+        mode_line(&mut session).contains(&marker),
+        "fixture precondition: a Ready evaluation paints the band's own \
+         provider text"
+    );
+
+    // A buffer-follow mismatch: the primary document window moves off the
+    // buffer the frontend declared, so phase 1 is already stale and the
+    // evaluator returns NoMessage.
+    exec(
+        &session.state,
+        "pmacs.window.switch_buffer(pmacs.buffer.create(\"*elsewhere*\"))",
+    );
+    // Force a repaint: without a content change the payload would be
+    // duplicate-suppressed and this would assert nothing.
+    set_panel_text(&session, "changed");
+    assert!(
+        mode_line(&mut session).contains(&marker),
+        "R2-4: NoMessage publishes nothing, so the band keeps its last \
+         published segments"
+    );
+
+    // The discriminating half: `Invalidated` DOES clear them, because a
+    // callback that mutated the registry invalidates all evaluated text.
+    // The evaluation has to reach the callback phase first, so re-declare
+    // the viewport onto the buffer the document window now shows —
+    // otherwise phase 1 stays stale and this would still be NoMessage.
+    let elsewhere = session.state.core.borrow().windows[&session.document].buffer_id;
+    session.render.set_viewport(
+        elsewhere,
+        pmacs::protocol::ByteRange { start: 0, end: 0 },
+        0,
+    );
+    exec(
+        &session.state,
+        "SELF = pmacs.statusline.register {
+           name = 'self-unregistering', side = 'right',
+           fn = function() pmacs.statusline.unregister(SELF); return 'STALE' end,
+         }",
+    );
+    set_panel_text(&session, "changed again");
+    let after = mode_line(&mut session);
+    assert!(
+        !after.contains(&marker) && !after.contains("STALE"),
+        "an Invalidated evaluation discards ALL callback text, got {after:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review round 1 sweep — the same defect shape, found elsewhere
+// ---------------------------------------------------------------------------
+
+/// Sweep result: a panel **wider than the terminal subsystem's per-axis
+/// cap** hosting a terminal reproduced R1-1's shape all over again.
+///
+/// Bet B5' makes a panel wider than 512 columns legal on the wire — a 4K
+/// surface at a small font is ordinary, and the frontend declares that
+/// width itself. But the terminal screen keeps its own PTY policy
+/// (`MAX_TERMINAL_COLS`), so `snapshot_for_view` refused the panel's
+/// content rect, the projection returned `None`, and the band went
+/// **per-frame `Absent` while `panel_hidden` stayed false** — keys still
+/// reaching an invisible window, controller still claimed.
+///
+/// The band is legitimately that wide, so hiding it would be the wrong
+/// answer: the terminal projects into the columns it can occupy and the
+/// remainder is band background, exactly as a snapshot narrower than its
+/// window already paints.
+#[test]
+fn sweep_a_panel_wider_than_the_terminal_cap_still_presents_its_terminal() {
+    let wide = u32::from(pmacs::terminal::MAX_TERMINAL_COLS) + 88;
+    let mut session = Session::new();
+    session.declare(1, ROWS, wide);
+    exec(
+        &session.state,
+        "TERM_BUF = pmacs.terminal.open { command = \"/bin/sh\", \
+           args = { \"-c\", \"sleep 30\" }, display = \"panel\" }",
+    );
+    let panel = session.side_window().expect("terminal panel");
+    session.state.core.borrow_mut().focus_window(FID, panel);
+
+    let frame = match session.frame() {
+        Some(PanelFramePayload::Present(frame)) => frame,
+        other => panic!(
+            "a legally wide panel must still present its terminal; got {other:?} \
+             — and the durable state says hidden={}",
+            session.state.core.borrow().panel_hidden_for(FID)
+        ),
+    };
+    assert_eq!(
+        frame.size.cols, wide,
+        "the band keeps the width the frontend declared (Bet B5')"
+    );
+    frame
+        .validate()
+        .expect("and it is a frame the shared validator accepts");
+
+    // The durable state and the wire agree — which is the property R1-1
+    // was really about.
+    assert!(
+        !session.state.core.borrow().panel_hidden_for(FID),
+        "a presented band is not durably hidden"
+    );
+    assert_eq!(
+        session.state.core.borrow().views[&FID].active,
+        panel,
+        "…and focus is still legitimately in it"
+    );
+    exec(&session.state, "pmacs.terminal.terminate(TERM_BUF)");
+}

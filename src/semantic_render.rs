@@ -352,6 +352,15 @@ pub struct SemanticRenderState {
     /// Whether an invalid panel frame was already reported since the last
     /// valid one. Bounds the log exactly like `terminal_error_latched`.
     panel_error_latched: bool,
+    /// The band's last PUBLISHED statusline segments and the side window
+    /// they belong to (review round 1, R2-4).
+    ///
+    /// The band repaints its whole mode line every frame, so
+    /// "publish nothing" has to be expressed as "paint what was published
+    /// last" — there is no wire-level suppression to fall back on the way
+    /// `StatuslineSegments` has. Keyed by window id so a replaced panel
+    /// never inherits its predecessor's provider text.
+    last_panel_statusline: Option<(WindowId, StatuslineWindowSegments)>,
 }
 
 /// The presentation identity a shipped [`PanelFrame`] carries.
@@ -523,6 +532,7 @@ impl SemanticRenderState {
             panel_epoch_used: 0,
             panel_presentation: None,
             panel_error_latched: false,
+            last_panel_statusline: None,
         }
     }
 
@@ -542,14 +552,37 @@ impl SemanticRenderState {
     }
 
     /// Whether the last shipped declaration is a `Present` whose epochs
-    /// both match an inbound panel event (Q#BP16 steps 2–4).
+    /// both match an inbound panel event **and** which still describes
+    /// the side window that is live now (Q#BP16 steps 2–4).
     ///
     /// Rolled into one predicate so no caller can check the geometry
     /// epoch and forget the presentation epoch: they close different
     /// holes and neither subsumes the other.
+    ///
+    /// `live_presentation` is the frontend's **current** side window and
+    /// its buffer. Comparing it is what closes review round 1's R1-2:
+    /// closing and reopening the same *persistent* buffer inside one
+    /// dispatcher burst leaves the shipped declaration intact while the
+    /// window it describes is already dead, and same-buffer/same-size
+    /// makes the successor indistinguishable by every other field. A
+    /// presentation epoch only identifies a presentation if something
+    /// checks that the presentation it names is still the one on screen.
+    ///
+    /// `None` means "no side window right now", which never matches — an
+    /// event cannot address a panel that does not exist.
     #[must_use]
-    pub fn panel_declaration_matches(&self, geometry_epoch: u64, panel_epoch: u64) -> bool {
-        self.panel_declaration().is_some_and(|frame| {
+    pub fn panel_declaration_matches(
+        &self,
+        geometry_epoch: u64,
+        panel_epoch: u64,
+        live_presentation: Option<(WindowId, BufferId)>,
+    ) -> bool {
+        let Some((window_id, buffer_id)) = live_presentation else {
+            return false;
+        };
+        self.panel_presentation.is_some_and(|presentation| {
+            presentation.window_id == window_id && presentation.buffer_id == buffer_id
+        }) && self.panel_declaration().is_some_and(|frame| {
             frame.geometry_epoch == geometry_epoch && frame.panel_epoch == panel_epoch
         })
     }
@@ -924,10 +957,7 @@ impl SemanticRenderState {
         // side half is taken from this same evaluation before it is
         // consumed.
         let side_window = state.core.borrow().side_window_for(self.frontend_id);
-        let panel_statusline = statusline_evaluation
-            .as_ref()
-            .and_then(|evaluation| self.panel_statusline(evaluation, side_window))
-            .cloned();
+        let panel_statusline = self.panel_statusline(statusline_evaluation.as_ref(), side_window);
         if let Some(evaluation) = statusline_evaluation {
             self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
@@ -1074,10 +1104,7 @@ impl SemanticRenderState {
         // and suppressing the panel here would leave the peer's retained
         // band on screen with no way to clear it.
         let side_window = state.core.borrow().side_window_for(self.frontend_id);
-        let panel_statusline = statusline_evaluation
-            .as_ref()
-            .and_then(|evaluation| self.panel_statusline(evaluation, side_window))
-            .cloned();
+        let panel_statusline = self.panel_statusline(statusline_evaluation.as_ref(), side_window);
         if let Some(evaluation) = statusline_evaluation {
             self.emit_statusline_segments(evaluation, statusline_document_window, &mut out);
         }
@@ -1156,23 +1183,64 @@ impl SemanticRenderState {
     /// order and could paint the document's status text into the panel's
     /// mode line.
     ///
-    /// An `Invalidated` evaluation yields `None`, which is the panel's
-    /// authoritative-empty: a callback that mutated layout or focus
-    /// invalidates the whole evaluation, so the band paints its plain
-    /// mode line rather than stale provider text.
-    fn panel_statusline<'a>(
-        &self,
-        evaluation: &'a StatuslineEvaluation,
+    /// The three outcomes are **not** interchangeable, and review round 1
+    /// (R2-4) found two of them collapsed:
+    ///
+    /// * `Ready` is authoritative — including an empty result. It
+    ///   replaces the retained baseline.
+    /// * `Invalidated` discards all evaluated text: a callback mutated
+    ///   registry, layout, or focus mid-evaluation, so the band clears to
+    ///   its plain mode line and the baseline dies with it.
+    /// * `NoMessage` means **publish nothing**. Phase 1 was already stale
+    ///   — most reachably a buffer-follow mismatch, where the primary
+    ///   document window has moved off the buffer the frontend declared.
+    ///   The band therefore keeps what it last published. Treating this
+    ///   like `Invalidated` *removes* provider text on a transient
+    ///   condition that said nothing about it.
+    ///
+    /// The baseline is keyed by window id so it can never leak across a
+    /// panel replacement: a new side window starts with no retained text.
+    fn panel_statusline(
+        &mut self,
+        evaluation: Option<&StatuslineEvaluation>,
         side_window: Option<WindowId>,
-    ) -> Option<&'a StatuslineWindowSegments> {
-        let side_window = side_window?;
+    ) -> Option<StatuslineWindowSegments> {
+        let Some(side_window) = side_window else {
+            // No band to publish for; drop any baseline so a later panel
+            // cannot inherit a dead window's text.
+            self.last_panel_statusline = None;
+            return None;
+        };
+        let retained = |state: &Self| {
+            state
+                .last_panel_statusline
+                .as_ref()
+                .filter(|(window_id, _)| *window_id == side_window)
+                .map(|(_, segments)| segments.clone())
+        };
+        let Some(evaluation) = evaluation else {
+            // No evaluation ran at all (an unsupported peer, or a frame
+            // before the document viewport exists). Nothing was
+            // published, so nothing is retracted.
+            return retained(self);
+        };
         match &evaluation.outcome {
-            StatuslineEvaluationOutcome::Ready(windows) => windows.iter().find(|window| {
-                window.context.frontend_id == self.frontend_id
-                    && window.context.window_id == side_window
-            }),
-            StatuslineEvaluationOutcome::Invalidated { .. }
-            | StatuslineEvaluationOutcome::NoMessage(_) => None,
+            StatuslineEvaluationOutcome::Ready(windows) => {
+                let found = windows
+                    .iter()
+                    .find(|window| {
+                        window.context.frontend_id == self.frontend_id
+                            && window.context.window_id == side_window
+                    })
+                    .cloned();
+                self.last_panel_statusline = found.clone().map(|segments| (side_window, segments));
+                found
+            }
+            StatuslineEvaluationOutcome::Invalidated { .. } => {
+                self.last_panel_statusline = None;
+                None
+            }
+            StatuslineEvaluationOutcome::NoMessage(_) => retained(self),
         }
     }
 
@@ -1225,6 +1293,22 @@ impl SemanticRenderState {
             // Q#BP15: allocation is checked and exhaustion fails closed
             // to `Absent`. Wrapping would let a new panel inherit a live
             // identity and accept gestures aimed at its predecessor.
+            //
+            // **The one knowingly per-frame `Absent` left in this file**,
+            // and it is recorded rather than fixed. Review round 1's R1-1
+            // established that a band cleared on the wire must also move
+            // the durable `panel_hidden` state, or keys keep reaching an
+            // invisible window; this arm cannot, because the producer
+            // holds session state and `panel_hidden` is recomputed by
+            // core reconciliation from geometry alone. Making it durable
+            // needs a new "presentation permanently unavailable" reason
+            // in `FrontendView`, which is machinery for a state that
+            // takes 2^64 shipped presentation changes in ONE session to
+            // reach — unlike the wire-area exhaustion in
+            // `presentable_panel_grid`, which any frontend can trigger
+            // with one declaration. If the epoch ever becomes
+            // frontend-supplied, this stops being unreachable and needs
+            // the durable arm.
             self.publish_absent_panel(out);
             return;
         };

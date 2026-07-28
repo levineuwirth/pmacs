@@ -947,22 +947,23 @@ fn peer_accepts_panel_message(protocol_version: u32, message: &InstanceMessage) 
 /// non-panel-capable view is rejected before any payload state is
 /// trusted.
 ///
-/// The claimed `frontend_id` in the payload is never consulted anywhere:
-/// routing is by the authenticated transport `source`, so a forged id
-/// addresses nothing.
 /// Q#BP16 steps 2–4: the event addresses the panel declaration this
 /// session most recently shipped, under the geometry it most recently
-/// accepted.
+/// accepted, and that declaration still describes the panel on screen.
 ///
-/// Three facts, one predicate, because they close three different holes
-/// and no two of them subsume the third:
+/// Four facts, one predicate, because they close four different holes
+/// and no three of them subsume the fourth:
 ///
 /// * the latest declaration is a `Present` (an `Absent` cleared input
 ///   authority, so nothing is addressable),
 /// * its echoed `geometry_epoch` equals both the payload's **and** the
 ///   daemon's latest accepted declaration — the font/scale/resize race,
 /// * its `panel_epoch` equals the payload's — close/hide/reopen of the
-///   same persistent buffer, which a `buffer_id` alone cannot see.
+///   same persistent buffer, which a `buffer_id` alone cannot see,
+/// * and the presentation behind it is the side window that is live
+///   **now** — because a close/reopen inside one dispatcher burst does
+///   not invalidate the shipped declaration, only the window it named
+///   (review round 1, R1-2).
 fn panel_event_epochs_are_current(
     editor: &EditorState,
     semantic_states: &HashMap<FrontendId, crate::semantic_render::SemanticRenderState>,
@@ -970,16 +971,33 @@ fn panel_event_epochs_are_current(
     geometry_epoch: u64,
     panel_epoch: u64,
 ) -> bool {
-    semantic_states
-        .get(&source)
-        .is_some_and(|sem| sem.panel_declaration_matches(geometry_epoch, panel_epoch))
-        && editor
-            .core
-            .borrow()
-            .frame_geometry_for(source)
-            .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
+    let core = editor.core.borrow();
+    let live_presentation = core.side_window_for(source).and_then(|window_id| {
+        core.windows
+            .get(&window_id)
+            .map(|window| (window_id, window.buffer_id))
+    });
+    semantic_states.get(&source).is_some_and(|sem| {
+        sem.panel_declaration_matches(geometry_epoch, panel_epoch, live_presentation)
+    }) && core
+        .frame_geometry_for(source)
+        .is_some_and(|geometry| geometry.geometry_epoch == geometry_epoch)
 }
 
+/// Whether an authenticated source may send the v21 panel event family
+/// (Q#BP9's "every gate keys on the daemon's own state").
+///
+/// All three inbound events require the same three facts, and they are
+/// checked together so no arm can satisfy two and forget the third: an
+/// installed **semantic** projection, a negotiated version that carries
+/// the variants, and a `FrontendView` this daemon itself marked
+/// panel-capable. A grid session, a pre-panel semantic peer, or a
+/// non-panel-capable view is rejected before any payload state is
+/// trusted.
+///
+/// The claimed `frontend_id` in the payload is never consulted anywhere:
+/// routing is by the authenticated transport `source`, so a forged id
+/// addresses nothing.
 fn peer_may_send_panel_events(
     editor: &EditorState,
     session_registry: &SessionRegistry,
@@ -3428,6 +3446,16 @@ fn sync_terminal_layouts_for_tick(
             if let Some((buffer_id, size)) = state.terminal_viewport() {
                 editor.sync_semantic_terminal_layout(*frontend_id, buffer_id, size);
             }
+            // Bottom-panel R1-3: the band is the semantic frontend's
+            // OTHER terminal surface, and it has no declaration to
+            // consult — the daemon derives its geometry (Q#BP15a). The
+            // grid arm below gets this for free because it resolves
+            // through `controller_view_for_frontend`, which is
+            // window-agnostic; the semantic arm above is keyed to the
+            // document declaration and structurally cannot see a side
+            // window. Both calls target disjoint windows, so this is a
+            // second CASE, not a second resize of the same child.
+            editor.sync_semantic_panel_terminal_layout(*frontend_id);
         } else if let Some(size) = term_sizes.get(frontend_id).copied() {
             editor.sync_terminal_grid_geometry(*frontend_id, size);
         }
@@ -6344,6 +6372,388 @@ mod tests {
                 .map(|geometry| geometry.total),
             Some(CellSize::new(30, 90)),
             "a grid frontend's real frame size IS its declaration"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Review round 1 — three findings the mutation pass could not reach,
+    // because each is a behaviour that was never modelled rather than a
+    // line that was written wrong.
+    // -----------------------------------------------------------------
+
+    /// R1-2: closing and reopening the SAME persistent buffer inside one
+    /// dispatcher burst — before the next render can ship a new
+    /// declaration — must not let a stale gesture address the successor.
+    ///
+    /// Same buffer, same size, same geometry: `buffer_id` and the grid
+    /// bounds are identical on both sides, so the only thing that can
+    /// tell the two presentations apart is the presentation identity
+    /// itself (Q#BP16). Validating the last SHIPPED declaration alone is
+    /// not enough — it still describes the dead window.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one close/reopen transaction plus both event kinds and the accepted counterpart"
+    )]
+    fn a_stale_panel_epoch_cannot_address_a_reopened_same_buffer_panel() {
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(713);
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let first_panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
+        let buffer_id = editor.core.borrow().windows[&first_panel].buffer_id;
+
+        // Close and reopen the SAME buffer, with no render in between.
+        {
+            let mut core = editor.core.borrow_mut();
+            core.active_frontend = fid;
+            core.focus_window(fid, first_panel);
+            assert!(
+                core.close_active(),
+                "closing a side window is legal even as the only other window"
+            );
+        }
+        editor.reconcile_panel_layout(fid);
+        {
+            let mut core = editor.core.borrow_mut();
+            let mut request = crate::editor_core::DisplayRequest::new(buffer_id);
+            request.side = Some(crate::window::Side::Bottom);
+            request.height = Some(4);
+            core.display_buffer(fid, &request)
+                .expect("reopen the panel");
+        }
+        editor.reconcile_panel_layout(fid);
+        let second_panel = editor.core.borrow().side_window_for(fid).expect("reopened");
+        assert_ne!(
+            second_panel, first_panel,
+            "fixture precondition: the successor is a different window"
+        );
+        assert_eq!(
+            editor.core.borrow().windows[&second_panel].buffer_id,
+            buffer_id,
+            "…showing the SAME persistent buffer, which is what makes it \
+             indistinguishable by buffer id"
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "fixture precondition: focus is on the document after the reopen"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch,
+                panel_epoch,
+                buffer_id,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "R1-2: a gesture aimed at the CLOSED presentation must not \
+             activate its successor"
+        );
+
+        // …and the resize event follows the same ladder.
+        let before = editor.core.borrow().windows[&second_panel]
+            .params
+            .fixed_rows;
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelResizeRows {
+                frontend_id: fid,
+                geometry_epoch,
+                panel_epoch,
+                rows: 9,
+            },
+        );
+        assert_eq!(
+            editor.core.borrow().windows[&second_panel]
+                .params
+                .fixed_rows,
+            before,
+            "R1-2: nor resize it"
+        );
+
+        // The accepted counterpart: once a frame describing the successor
+        // ships, the same gesture shape is honored.
+        let (fresh_geometry, fresh_panel_epoch) =
+            shipped_declaration(&editor, fid, &mut semantic_states);
+        assert_ne!(
+            fresh_panel_epoch, panel_epoch,
+            "the successor took a fresh presentation identity"
+        );
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch: fresh_geometry,
+                panel_epoch: fresh_panel_epoch,
+                buffer_id,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            second_panel,
+            "…and the CURRENT presentation is addressable"
+        );
+    }
+
+    /// R2-5: Q#BP16 keeps scroll-without-focus for a NON-terminal panel.
+    /// Non-`Move` activation is the terminal-specific clause, because the
+    /// shared terminal adapter claims the controller for wheel steps too.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the two panel kinds are the discriminating pair and must share one fixture shape"
+    )]
+    fn a_wheel_step_focuses_a_terminal_panel_but_not_a_document_panel() {
+        use crate::terminal::TerminalSpec;
+
+        // --- non-terminal panel: the wheel must NOT focus -------------
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(714);
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
+        let buffer_id = editor.core.borrow().windows[&panel].buffer_id;
+        let wheel = |buffer_id, geometry_epoch, panel_epoch| FrontendEvent::PanelPointer {
+            frontend_id: fid,
+            geometry_epoch,
+            panel_epoch,
+            buffer_id,
+            coord: pmacs_protocol::CellCoord::new(0, 0),
+            kind: pmacs_protocol::MouseKind::ScrollUp,
+            mods: pmacs_protocol::Modifiers::default(),
+        };
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            wheel(buffer_id, geometry_epoch, panel_epoch),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "R2-5: wheel motion over a document panel scrolls without focus"
+        );
+
+        // …while a press still focuses it, so the assertion above is not
+        // "panel pointers do nothing".
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            FrontendEvent::PanelPointer {
+                frontend_id: fid,
+                geometry_epoch,
+                panel_epoch,
+                buffer_id,
+                coord: pmacs_protocol::CellCoord::new(0, 0),
+                kind: pmacs_protocol::MouseKind::Down(pmacs_protocol::MouseButton::Left),
+                mods: pmacs_protocol::Modifiers::default(),
+            },
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "click-to-focus is unchanged"
+        );
+
+        // --- terminal panel: every non-Move gesture DOES focus --------
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(715);
+        let (document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut spec = TerminalSpec::new("/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        spec.rows = 4;
+        spec.cols = 20;
+        let terminal_buffer = editor
+            .terminal_manager
+            .borrow_mut()
+            .open(
+                spec,
+                &mut editor.core.borrow_mut(),
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("open panel terminal");
+        {
+            let mut core = editor.core.borrow_mut();
+            let text_view = {
+                let registry = core.registry.clone();
+                let registry = registry.borrow();
+                crate::text_view::TextView::new(
+                    registry.get(terminal_buffer).expect("terminal buffer"),
+                )
+            };
+            let window = core.windows.get_mut(&panel).expect("panel window");
+            window.buffer_id = terminal_buffer;
+            window.text_view = text_view;
+        }
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 80));
+        let (geometry_epoch, panel_epoch) = shipped_declaration(&editor, fid, &mut semantic_states);
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            document,
+            "fixture precondition: the terminal panel starts passive"
+        );
+
+        dispatch_panel_event(
+            &mut editor,
+            fid,
+            PROTOCOL_VERSION,
+            &mut semantic_states,
+            &mut HashMap::new(),
+            wheel(terminal_buffer, geometry_epoch, panel_epoch),
+        );
+        assert_eq!(
+            editor.core.borrow().views[&fid].active,
+            panel,
+            "R2-5: a TERMINAL panel activates on every non-Move gesture, \
+             because the shared adapter claims the controller for wheel \
+             steps too"
+        );
+    }
+
+    /// R1-3: a semantic frontend's PANEL terminal must be resized to the
+    /// daemon-derived content grid before the child's output is drained.
+    ///
+    /// The two terminal-layout syncs are twins and must stay alternatives
+    /// (that is why `sync_terminal_layouts_for_tick` exists), but the grid
+    /// twin resolves through `controller_view_for_frontend` and therefore
+    /// covers a side window for free, while the semantic twin consulted
+    /// only the full-document declaration — which a panel terminal
+    /// deliberately does not have.
+    #[test]
+    fn a_semantic_panel_terminal_is_resized_before_the_child_drain() {
+        use crate::terminal::{TerminalSpec, view::TerminalViewKey};
+
+        let mut editor = crate::editor::EditorState::new();
+        let fid = FrontendId(716);
+        let (_document, panel) = semantic_panel_view(&editor, fid, true);
+        let panel = panel.expect("panel window");
+        let mut spec = TerminalSpec::new("/bin/sh");
+        spec.args = vec!["-c".into(), "sleep 30".into()];
+        spec.rows = 4;
+        spec.cols = 20;
+        let terminal_buffer = editor
+            .terminal_manager
+            .borrow_mut()
+            .open(
+                spec,
+                &mut editor.core.borrow_mut(),
+                &mut editor.process_supervisor.borrow_mut(),
+            )
+            .expect("open panel terminal");
+        {
+            let mut core = editor.core.borrow_mut();
+            let text_view = {
+                let registry = core.registry.clone();
+                let registry = registry.borrow();
+                crate::text_view::TextView::new(
+                    registry.get(terminal_buffer).expect("terminal buffer"),
+                )
+            };
+            let window = core.windows.get_mut(&panel).expect("panel window");
+            window.buffer_id = terminal_buffer;
+            window.text_view = text_view;
+        }
+        // The panel view owns the child: only the durable controller's
+        // declaration reaches the PTY, and the per-tick liveness pass
+        // releases a controller whose window is not focused, so the panel
+        // has to actually own focus. Registering the view first mirrors
+        // what the first projection does.
+        let key = TerminalViewKey::new(fid, panel, terminal_buffer);
+        editor.core.borrow_mut().focus_window(fid, panel);
+        {
+            let mut manager = editor.terminal_manager.borrow_mut();
+            manager.record_view_size(key, CellSize::new(4, 20));
+            assert!(
+                manager.claim_controller(key),
+                "fixture precondition: the panel view controls the child"
+            );
+        }
+
+        let mut semantic_states = HashMap::new();
+        semantic_states.insert(
+            fid,
+            crate::semantic_render::SemanticRenderState::for_peer(fid, PROTOCOL_VERSION),
+        );
+        editor.accept_semantic_frame_geometry(fid, 1, CellSize::new(24, 120));
+        assert_eq!(
+            editor.core.borrow().panel_grid_size(fid),
+            Some(CellSize::new(4, 120)),
+            "fixture precondition: the daemon derives a 4x120 band, so its \
+             CONTENT grid is 3x120"
+        );
+        assert_eq!(
+            editor
+                .terminal_manager
+                .borrow()
+                .screen_size(terminal_buffer),
+            Some(CellSize::new(4, 20)),
+            "fixture precondition: the child still has its opening size"
+        );
+
+        sync_terminal_layouts_for_tick(
+            &mut editor,
+            &[fid],
+            &HashMap::from([(fid, CellSize::new(24, 120))]),
+            &semantic_states,
+        );
+
+        assert_eq!(
+            editor
+                .terminal_manager
+                .borrow()
+                .screen_size(terminal_buffer),
+            Some(CellSize::new(3, 120)),
+            "R1-3: the panel terminal adopts the daemon-derived content \
+             grid at the tick's layout step, BEFORE tick_processes drains \
+             the child"
         );
     }
 
